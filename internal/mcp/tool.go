@@ -50,7 +50,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		if sc.Command == "" || sc.Name == "" {
 			continue
 		}
-		client, err := NewStdio(ctx, sc.Name, sc.Command, sc.Args, flattenEnv(sc.Env))
+		client, err := NewHTTPOrStdio(ctx, sc)
 		if err != nil {
 			logger.Warn("mcp server connect failed", "server", sc.Name, "err", err)
 			continue
