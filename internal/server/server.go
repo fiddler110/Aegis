@@ -12,12 +12,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/scottymacleod/agentharness/internal/api"
 	"github.com/scottymacleod/agentharness/internal/compaction"
+	"github.com/scottymacleod/agentharness/internal/cron"
 	"github.com/scottymacleod/agentharness/internal/config"
 	"github.com/scottymacleod/agentharness/internal/cost"
 	"github.com/scottymacleod/agentharness/internal/engine"
@@ -48,6 +51,8 @@ type Server struct {
 	swarm      swarm.Backend
 	swarmReg   *swarm.Registry
 	tasks      *task.Manager
+	cronSched  *cron.Scheduler
+	cronCancel context.CancelFunc
 	audit      *hooks.Audit
 	workspace  string
 	logger     *slog.Logger
@@ -81,15 +86,33 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	taskMgr := task.NewManager(taskStore, logger)
 
+	// Cron scheduler: fires due jobs as background tasks.
+	cronStore, err := cron.NewStore(store.DB())
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+	cronRun := func(j cron.Job) {
+		title := j.Title
+		if title == "" {
+			title = "cron: " + j.Command
+		}
+		_, _ = taskMgr.Start(task.Spec{Kind: "cron", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
+			return "", runCronShell(ctx, j.Command, emit)
+		})
+	}
+	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
+
 	cwd, _ := os.Getwd()
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched}); err != nil {
 		store.Close()
 		return nil, err
 	}
 
 	s := newWithDeps(cfg, logger, store, adapter, reg)
 	s.tasks = taskMgr
+	s.cronSched = cronSched
 	s.workspace = cwd
 	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
@@ -227,6 +250,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			_ = c.Close()
 		}
 	}()
+	// Start the cron scheduler in the background.
+	if s.cronSched != nil {
+		cronCtx, cronCancel := context.WithCancel(context.Background())
+		s.cronCancel = cronCancel
+		go s.cronSched.Run(cronCtx)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		s.logger.Info("daemon listening", "addr", s.cfg.Server.Addr)
@@ -237,6 +267,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if s.cronCancel != nil {
+			s.cronCancel()
+		}
 		if s.swarm != nil {
 			s.swarm.Shutdown(shutdownCtx)
 		}
@@ -484,4 +517,31 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, api.ErrorResponse{Error: msg})
+}
+
+// runCronShell runs a cron job's command in the daemon's working directory,
+// streaming output to the task buffer via emit.
+func runCronShell(ctx context.Context, command string, emit func(string)) error {
+	cwd, _ := os.Getwd()
+	name, args := cronShellCommand(command)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = cwd
+	w := cronEmitWriter{emit: emit}
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd.Run()
+}
+
+type cronEmitWriter struct{ emit func(string) }
+
+func (w cronEmitWriter) Write(p []byte) (int, error) {
+	w.emit(string(p))
+	return len(p), nil
+}
+
+func cronShellCommand(command string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", command}
+	}
+	return "/bin/sh", []string{"-c", command}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scottymacleod/agentharness/internal/cron"
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/task"
 	"github.com/scottymacleod/agentharness/internal/tool"
@@ -30,6 +31,8 @@ type Options struct {
 	// Tasks, when set, enables background jobs: the shell tool's background
 	// option and the task_* management tools.
 	Tasks *task.Manager
+	// Cron, when set, enables recurring-job tools (cron_create, etc.).
+	Cron *cron.Scheduler
 }
 
 // Register adds all built-in tools to the registry.
@@ -66,6 +69,9 @@ func Register(reg *tool.Registry, opts Options) error {
 	}
 	if opts.Tasks != nil {
 		tools = append(tools, TaskTools(opts.Tasks, root, opts.ShellTimeoutSec)...)
+	}
+	if opts.Cron != nil {
+		tools = append(tools, CronTools(opts.Cron)...)
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {
