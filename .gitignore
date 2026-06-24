@@ -1,0 +1,14 @@
+# Build output
+/harness
+/harness.exe
+/dist/
+
+# Local config & data
+/.agentharness/
+*.db
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
