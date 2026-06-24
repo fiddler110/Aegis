@@ -30,7 +30,8 @@ func (f *fakeBackend) Spawn(ctx context.Context, cfg swarm.SpawnConfig) (*swarm.
 	}, swarm.NewRegistry(), swarm.MailboxRoot(f.root))
 	return b.Spawn(ctx, cfg)
 }
-func (f *fakeBackend) Shutdown(context.Context) {}
+func (f *fakeBackend) Shutdown(context.Context)                  {}
+func (f *fakeBackend) OnStop(func(swarm.Identity, swarm.Result)) {}
 
 type stubErr struct{ s string }
 

@@ -55,6 +55,22 @@ type auditRecord struct {
 	Tool    string          `json:"tool"`
 	Input   json.RawMessage `json:"input,omitempty"`
 	IsError bool            `json:"is_error,omitempty"`
+	// Sub-agent lifecycle fields (phase "subagent_stop").
+	AgentID string `json:"agent_id,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Summary string `json:"summary,omitempty"`
+}
+
+// SubagentStop records the SUBAGENT_STOP lifecycle event for a finished teammate.
+func (a *Audit) SubagentStop(agentID, status, summary string, isErr bool) {
+	a.write(auditRecord{
+		Time:    time.Now(),
+		Phase:   "subagent_stop",
+		AgentID: agentID,
+		Status:  status,
+		Summary: summary,
+		IsError: isErr,
+	})
 }
 
 func (a *Audit) PreToolUse(_ context.Context, name string, input json.RawMessage) error {

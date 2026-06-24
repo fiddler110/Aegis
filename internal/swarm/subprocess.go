@@ -29,8 +29,12 @@ type SubprocessBackend struct {
 	workerArgs  []string
 	registry    *Registry
 	mailboxRoot string
+	onStop      func(Identity, Result)
 	wg          sync.WaitGroup
 }
+
+// OnStop registers a teammate-completion listener (SUBAGENT_STOP).
+func (b *SubprocessBackend) OnStop(fn func(Identity, Result)) { b.onStop = fn }
 
 // NewSubprocessBackend builds a subprocess backend. exePath is the harness
 // executable; workerCmd is the hidden worker subcommand (e.g. "__worker").
@@ -63,6 +67,9 @@ func (b *SubprocessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle
 			status = StatusFailed
 		}
 		b.registry.Update(id.AgentID, status, summarize(res.Output, res.Err))
+		if b.onStop != nil {
+			b.onStop(id, res)
+		}
 		h.done <- res
 	})
 	return h, nil

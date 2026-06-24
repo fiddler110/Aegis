@@ -45,6 +45,8 @@ type Server struct {
 	hooks      engine.Hooks
 	mcpClients []*mcp.Client
 	swarm      swarm.Backend
+	swarmReg   *swarm.Registry
+	audit      *hooks.Audit
 	workspace  string
 	logger     *slog.Logger
 	http       *http.Server
@@ -79,7 +81,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s := newWithDeps(cfg, logger, store, adapter, reg)
 	s.workspace = cwd
 	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
-	s.hooks = hooks.NewMulti(hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl")))
+	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
+	s.hooks = hooks.NewMulti(s.audit)
 	if adapter != nil {
 		s.compactor = compaction.New(compaction.Options{Adapter: adapter, Model: cfg.Provider.Model})
 	}
@@ -92,13 +95,36 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)
 
 	// Multi-agent: choose a sub-agent backend and register the `agent` tool.
+	s.swarmReg = swarm.NewRegistry()
 	s.swarm = s.buildSwarmBackend(swarm.MailboxRoot(cfg.DataDir))
+	s.swarm.OnStop(s.onSubagentStop)
 	if err := reg.Register(builtin.NewAgentTool(s.swarm)); err != nil {
 		store.Close()
 		return nil, err
 	}
 
 	return s, nil
+}
+
+// onSubagentStop records the SUBAGENT_STOP lifecycle event in the audit trail.
+func (s *Server) onSubagentStop(id swarm.Identity, res swarm.Result) {
+	status := "done"
+	summary := res.Output
+	if res.Failed() {
+		status, summary = "failed", res.Err
+	}
+	if s.audit != nil {
+		s.audit.SubagentStop(id.AgentID, status, truncateSummary(summary, 200), res.Failed())
+	}
+	s.logger.Info("subagent stopped", "agent", id.AgentID, "status", status)
+}
+
+func truncateSummary(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 // buildSwarmBackend selects the sub-agent backend from config. The subprocess
@@ -108,11 +134,11 @@ func (s *Server) buildSwarmBackend(mailboxRoot string) swarm.Backend {
 	if s.cfg.Swarm.Backend == "subprocess" {
 		if exe, err := os.Executable(); err == nil {
 			s.logger.Info("swarm backend: subprocess", "exe", exe)
-			return swarm.NewSubprocessBackend(exe, "__worker", swarm.NewRegistry(), mailboxRoot)
+			return swarm.NewSubprocessBackend(exe, "__worker", s.swarmReg, mailboxRoot)
 		}
 		s.logger.Warn("cannot resolve executable path; falling back to in-process swarm backend")
 	}
-	return swarm.NewInProcessBackend(s.subAgentRunner(), swarm.NewRegistry(), mailboxRoot)
+	return swarm.NewInProcessBackend(s.subAgentRunner(), s.swarmReg, mailboxRoot)
 }
 
 // subAgentRunner returns a swarm.RunFunc that executes a teammate by building a
@@ -178,6 +204,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
+	mux.HandleFunc("GET /teammates", s.handleListTeammates)
 	return mux
 }
 
@@ -265,6 +292,24 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, toMeta(sess.ID, sess.Title, sess.Mode, sess.CreatedAt, sess.UpdatedAt))
+}
+
+func (s *Server) handleListTeammates(w http.ResponseWriter, _ *http.Request) {
+	out := []api.Teammate{}
+	if s.swarmReg != nil {
+		for _, m := range s.swarmReg.List() {
+			out = append(out, api.Teammate{
+				AgentID:   m.Identity.AgentID,
+				Name:      m.Identity.Name,
+				Team:      m.Identity.Team,
+				Status:    string(m.Status),
+				Summary:   m.Summary,
+				StartedAt: m.StartedAt,
+				EndedAt:   m.EndedAt,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {

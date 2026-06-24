@@ -77,6 +77,15 @@ func (c *Client) DeleteSession(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/sessions/"+id, nil, nil)
 }
 
+// Teammates returns the sub-agents tracked by the daemon's swarm registry.
+func (c *Client) Teammates(ctx context.Context) ([]api.Teammate, error) {
+	var out []api.Teammate
+	if err := c.do(ctx, http.MethodGet, "/teammates", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PostMessage streams engine events for a user turn. Events are delivered on
 // the returned channel, which is closed when the run finishes or ctx is done.
 func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.Event, error) {

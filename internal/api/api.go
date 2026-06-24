@@ -55,6 +55,17 @@ type Event struct {
 	Error        string          `json:"error,omitempty"`
 }
 
+// Teammate describes a sub-agent tracked by the swarm registry.
+type Teammate struct {
+	AgentID   string    `json:"agent_id"`
+	Name      string    `json:"name"`
+	Team      string    `json:"team"`
+	Status    string    `json:"status"`
+	Summary   string    `json:"summary,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at,omitzero"`
+}
+
 // ErrorResponse is the body returned for non-2xx responses.
 type ErrorResponse struct {
 	Error string `json:"error"`

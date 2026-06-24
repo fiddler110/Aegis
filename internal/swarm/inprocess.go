@@ -14,8 +14,12 @@ type InProcessBackend struct {
 	run         RunFunc
 	registry    *Registry
 	mailboxRoot string
+	onStop      func(Identity, Result)
 	wg          sync.WaitGroup
 }
+
+// OnStop registers a teammate-completion listener (SUBAGENT_STOP).
+func (b *InProcessBackend) OnStop(fn func(Identity, Result)) { b.onStop = fn }
 
 // NewInProcessBackend builds an in-process backend. run executes a teammate to
 // completion; registry tracks lifecycle; mailboxRoot is MailboxRoot(dataDir).
@@ -53,6 +57,9 @@ func (b *InProcessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle,
 			})
 		}
 
+		if b.onStop != nil {
+			b.onStop(id, res)
+		}
 		h.done <- res
 	})
 	return h, nil

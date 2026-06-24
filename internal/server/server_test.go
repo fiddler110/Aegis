@@ -14,6 +14,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/config"
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/session"
+	"github.com/scottymacleod/agentharness/internal/swarm"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
 
@@ -70,6 +71,48 @@ func TestServerSessionLifecycle(t *testing.T) {
 	list, _ = cl.ListSessions(ctx)
 	if len(list) != 0 {
 		t.Errorf("expected 0 sessions after delete, got %d", len(list))
+	}
+}
+
+func TestServerListTeammates(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Provider: config.ProviderConfig{Model: "test"}, Permission: config.PermissionConfig{Mode: "plan"}}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+
+	reg := swarm.NewRegistry()
+	id := swarm.NewIdentity("explore-1", "default", "sess")
+	reg.Add(id)
+	reg.Update(id.AgentID, swarm.StatusDone, "found it")
+	srv.swarmReg = reg
+
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL)
+
+	tms, err := cl.Teammates(context.Background())
+	if err != nil {
+		t.Fatalf("Teammates: %v", err)
+	}
+	if len(tms) != 1 {
+		t.Fatalf("got %d teammates, want 1", len(tms))
+	}
+	if tms[0].AgentID != id.AgentID || tms[0].Status != "done" || tms[0].Summary != "found it" {
+		t.Errorf("teammate = %+v", tms[0])
+	}
+}
+
+func TestServerListTeammatesEmpty(t *testing.T) {
+	cl, cleanup := newTestServer(t)
+	defer cleanup()
+	tms, err := cl.Teammates(context.Background())
+	if err != nil {
+		t.Fatalf("Teammates: %v", err)
+	}
+	if len(tms) != 0 {
+		t.Errorf("expected no teammates, got %d", len(tms))
 	}
 }
 

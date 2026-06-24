@@ -42,6 +42,28 @@ func TestInProcessSpawnReturnsResult(t *testing.T) {
 	}
 }
 
+func TestInProcessOnStopFires(t *testing.T) {
+	reg := NewRegistry()
+	run := func(context.Context, SpawnConfig) (string, error) { return "out", nil }
+	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()))
+
+	stopped := make(chan Result, 1)
+	b.OnStop(func(_ Identity, res Result) { stopped <- res })
+
+	h, _ := b.Spawn(context.Background(), SpawnConfig{Name: "w", Prompt: "x"})
+	if _, err := h.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-stopped:
+		if res.Output != "out" {
+			t.Errorf("OnStop result = %+v", res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnStop was not called")
+	}
+}
+
 func TestInProcessSpawnPropagatesDepth(t *testing.T) {
 	reg := NewRegistry()
 	run := func(ctx context.Context, cfg SpawnConfig) (string, error) {

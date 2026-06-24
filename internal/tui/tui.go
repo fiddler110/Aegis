@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -69,7 +70,7 @@ func newStyles() styles {
 
 func newModel(cfg Config) model {
 	ta := textarea.New()
-	ta.Placeholder = "Send a message (Enter to send, Ctrl+J for newline, Ctrl+C to quit)…"
+	ta.Placeholder = "Send a message (Enter to send, Ctrl+J newline, Ctrl+T teammates, Ctrl+C quit)…"
 	ta.Prompt = "│ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
@@ -90,6 +91,21 @@ type streamStartedMsg struct {
 type eventMsg api.Event
 type streamClosedMsg struct{}
 type errMsg struct{ err error }
+type teammatesMsg struct {
+	items []api.Teammate
+	err   error
+}
+
+// fetchTeammates asks the daemon for the current swarm registry.
+func (m model) fetchTeammates() tea.Cmd {
+	cl := m.cfg.Client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		items, err := cl.Teammates(ctx)
+		return teammatesMsg{items: items, err: err}
+	}
+}
 
 func (m model) Init() tea.Cmd { return textarea.Blink }
 
@@ -135,6 +151,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, tea.Quit
+		case tea.KeyCtrlT:
+			return m, m.fetchTeammates() // show the swarm panel
 		case tea.KeyEnter:
 			if m.streaming {
 				return m, nil // ignore input mid-run
@@ -174,6 +192,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.transcript.WriteString(m.st.errLine.Render("error: "+msg.err.Error()) + "\n\n")
 		m.status = "ready"
+		m.refresh()
+		return m, nil
+
+	case teammatesMsg:
+		m.renderTeammates(msg)
 		m.refresh()
 		return m, nil
 	}
@@ -239,6 +262,35 @@ func (m *model) applyEvent(ev api.Event) {
 	case api.KindError:
 		m.transcript.WriteString("\n" + m.st.errLine.Render("error: "+ev.Error) + "\n")
 	}
+}
+
+// renderTeammates appends a swarm panel (the current sub-agents) to the
+// transcript on demand (Ctrl+T).
+func (m *model) renderTeammates(msg teammatesMsg) {
+	if msg.err != nil {
+		m.transcript.WriteString("\n" + m.st.errLine.Render("teammates: "+msg.err.Error()) + "\n\n")
+		return
+	}
+	if len(msg.items) == 0 {
+		m.transcript.WriteString("\n" + m.st.status.Render("⚇ no sub-agents spawned yet") + "\n\n")
+		return
+	}
+	var b strings.Builder
+	b.WriteString("\n" + m.st.assistant.Render(fmt.Sprintf("⚇ Teammates (%d)", len(msg.items))) + "\n")
+	for _, tm := range msg.items {
+		tag := "•"
+		style := m.st.tool
+		switch tm.Status {
+		case "failed":
+			tag, style = "✗", m.st.toolErr
+		case "done":
+			tag = "✓"
+		}
+		line := fmt.Sprintf("  %s %s [%s] %s", tag, tm.AgentID, tm.Status, oneLine(tm.Summary))
+		b.WriteString(style.Render(truncate(line, m.width-1)) + "\n")
+	}
+	b.WriteString("\n")
+	m.transcript.WriteString(b.String())
 }
 
 func (m model) View() string {

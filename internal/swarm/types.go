@@ -66,6 +66,9 @@ type Backend interface {
 	Spawn(ctx context.Context, cfg SpawnConfig) (*Handle, error)
 	// Shutdown waits for in-flight teammates to finish (or ctx to cancel).
 	Shutdown(ctx context.Context)
+	// OnStop registers a listener invoked when a teammate finishes (the
+	// SUBAGENT_STOP lifecycle event). It must be set before any Spawn call.
+	OnStop(fn func(id Identity, res Result))
 }
 
 // RunFunc executes a teammate to completion and returns its final text output.
