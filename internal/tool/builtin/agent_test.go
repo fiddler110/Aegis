@@ -39,7 +39,7 @@ func (e *stubErr) Error() string { return e.s }
 
 func runAgent(t *testing.T, ctx context.Context, b swarm.Backend, input string) string {
 	t.Helper()
-	at := NewAgentTool(b)
+	at := NewAgentTool(b, nil)
 	res, err := at.Execute(ctx, json.RawMessage(input))
 	if err != nil {
 		t.Fatalf("Execute returned err: %v", err)
@@ -84,7 +84,7 @@ func TestAgentToolBuildParentKeepsBuild(t *testing.T) {
 func TestAgentToolDepthGuard(t *testing.T) {
 	b := &fakeBackend{root: t.TempDir(), output: "ok"}
 	ctx := swarm.WithDepth(context.Background(), maxSpawnDepth)
-	at := NewAgentTool(b)
+	at := NewAgentTool(b, nil)
 	res, _ := at.Execute(ctx, json.RawMessage(`{"prompt":"x"}`))
 	if !res.IsError || !strings.Contains(res.Content, "depth") {
 		t.Errorf("expected depth-guard error, got %+v", res)
@@ -96,7 +96,7 @@ func TestAgentToolDepthGuard(t *testing.T) {
 
 func TestAgentToolRequiresPrompt(t *testing.T) {
 	b := &fakeBackend{root: t.TempDir()}
-	at := NewAgentTool(b)
+	at := NewAgentTool(b, nil)
 	res, _ := at.Execute(context.Background(), json.RawMessage(`{"subagent_type":"general"}`))
 	if !res.IsError {
 		t.Error("expected error when prompt is missing")
@@ -105,7 +105,7 @@ func TestAgentToolRequiresPrompt(t *testing.T) {
 
 func TestAgentToolPropagatesFailure(t *testing.T) {
 	b := &fakeBackend{root: t.TempDir(), errStr: "sub failed"}
-	at := NewAgentTool(b)
+	at := NewAgentTool(b, nil)
 	res, _ := at.Execute(context.Background(), json.RawMessage(`{"prompt":"x","subagent_type":"general"}`))
 	if !res.IsError || !strings.Contains(res.Content, "sub failed") {
 		t.Errorf("expected propagated failure, got %+v", res)

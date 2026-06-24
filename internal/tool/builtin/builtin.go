@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/scottymacleod/agentharness/internal/memory"
+	"github.com/scottymacleod/agentharness/internal/task"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
 
@@ -26,6 +27,9 @@ type Options struct {
 	HTTPUserAgent string
 	// KrokiURL is the diagram rendering endpoint.
 	KrokiURL string
+	// Tasks, when set, enables background jobs: the shell tool's background
+	// option and the task_* management tools.
+	Tasks *task.Manager
 }
 
 // Register adds all built-in tools to the registry.
@@ -50,7 +54,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&editTool{root: root},
 		&globTool{root: root},
 		&grepTool{root: root},
-		newShellTool(root, opts.ShellTimeoutSec),
+		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks),
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent},
 		&securityScanTool{root: root},
@@ -59,6 +63,9 @@ func Register(reg *tool.Registry, opts Options) error {
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}
 		tools = append(tools, &rememberTool{src: src}, &saveSkillTool{src: src})
+	}
+	if opts.Tasks != nil {
+		tools = append(tools, TaskTools(opts.Tasks, root, opts.ShellTimeoutSec)...)
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {

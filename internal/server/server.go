@@ -30,22 +30,24 @@ import (
 	"github.com/scottymacleod/agentharness/internal/providerfactory"
 	"github.com/scottymacleod/agentharness/internal/session"
 	"github.com/scottymacleod/agentharness/internal/swarm"
+	"github.com/scottymacleod/agentharness/internal/task"
 	"github.com/scottymacleod/agentharness/internal/tool"
 	"github.com/scottymacleod/agentharness/internal/tool/builtin"
 )
 
 // Server holds the daemon's shared state.
 type Server struct {
-	cfg       *config.Config
-	store     *session.Store
-	adapter   provider.Adapter
-	tools     *tool.Registry
+	cfg        *config.Config
+	store      *session.Store
+	adapter    provider.Adapter
+	tools      *tool.Registry
 	memory     memory.Sources
 	compactor  engine.Compactor
 	hooks      engine.Hooks
 	mcpClients []*mcp.Client
 	swarm      swarm.Backend
 	swarmReg   *swarm.Registry
+	tasks      *task.Manager
 	audit      *hooks.Audit
 	workspace  string
 	logger     *slog.Logger
@@ -71,14 +73,23 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		adapter = nil
 	}
 
+	// Background-task manager shares the session database's single connection.
+	taskStore, err := task.NewStore(store.DB())
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+	taskMgr := task.NewManager(taskStore, logger)
+
 	cwd, _ := os.Getwd()
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr}); err != nil {
 		store.Close()
 		return nil, err
 	}
 
 	s := newWithDeps(cfg, logger, store, adapter, reg)
+	s.tasks = taskMgr
 	s.workspace = cwd
 	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
@@ -98,7 +109,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.swarmReg = swarm.NewRegistry()
 	s.swarm = s.buildSwarmBackend(swarm.MailboxRoot(cfg.DataDir))
 	s.swarm.OnStop(s.onSubagentStop)
-	if err := reg.Register(builtin.NewAgentTool(s.swarm)); err != nil {
+	if err := reg.Register(builtin.NewAgentTool(s.swarm, s.tasks)); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -228,6 +239,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		defer cancel()
 		if s.swarm != nil {
 			s.swarm.Shutdown(shutdownCtx)
+		}
+		if s.tasks != nil {
+			s.tasks.Shutdown(shutdownCtx)
 		}
 		return s.http.Shutdown(shutdownCtx)
 	case err := <-errCh:
