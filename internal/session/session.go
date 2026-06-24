@@ -61,6 +61,11 @@ func Open(path string) (*Store, error) {
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB exposes the underlying database handle so sibling subsystems (background
+// tasks, cron) can persist their own tables on the same single SQLite
+// connection, preserving the serialized-writes guarantee.
+func (s *Store) DB() *sql.DB { return s.db }
+
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS sessions (
@@ -100,9 +105,9 @@ func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, title, system, mode, messages, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
-		sess           Session
-		msgBlob        []byte
-		created, upd   int64
+		sess         Session
+		msgBlob      []byte
+		created, upd int64
 	)
 	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &msgBlob, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
