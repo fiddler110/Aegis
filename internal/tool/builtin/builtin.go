@@ -24,6 +24,8 @@ type Options struct {
 	ShellTimeoutSec int
 	// HTTPUserAgent is sent by the web tools.
 	HTTPUserAgent string
+	// KrokiURL is the diagram rendering endpoint.
+	KrokiURL string
 }
 
 // Register adds all built-in tools to the registry.
@@ -38,6 +40,9 @@ func Register(reg *tool.Registry, opts Options) error {
 	if opts.HTTPUserAgent == "" {
 		opts.HTTPUserAgent = "agentharness/0.1"
 	}
+	if opts.KrokiURL == "" {
+		opts.KrokiURL = "https://kroki.io"
+	}
 
 	tools := []tool.Tool{
 		&readTool{root: root},
@@ -49,6 +54,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent},
 		&securityScanTool{root: root},
+		&diagramTool{root: root, krokiURL: opts.KrokiURL},
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}
