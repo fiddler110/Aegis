@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/scottymacleod/agentharness/internal/cost"
 	"github.com/scottymacleod/agentharness/internal/provider"
@@ -87,6 +88,7 @@ type Options struct {
 	MaxTokens     int
 	Temperature   *float64
 	MaxIterations int // safety cap on tool-call rounds; 0 -> default
+	LoopThreshold int // identical tool-call turns before aborting; 0 -> default, <0 disables
 	Logger        *slog.Logger
 }
 
@@ -103,6 +105,7 @@ type Engine struct {
 	maxTokens     int
 	temperature   *float64
 	maxIterations int
+	loopThreshold int
 	logger        *slog.Logger
 }
 
@@ -125,6 +128,10 @@ func New(opts Options) (*Engine, error) {
 	if maxTok <= 0 {
 		maxTok = 8192
 	}
+	loopThreshold := opts.LoopThreshold
+	if loopThreshold == 0 {
+		loopThreshold = 3
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -141,6 +148,7 @@ func New(opts Options) (*Engine, error) {
 		maxTokens:     maxTok,
 		temperature:   opts.Temperature,
 		maxIterations: maxIter,
+		loopThreshold: loopThreshold,
 		logger:        logger,
 	}, nil
 }
@@ -160,6 +168,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			e.logger.Info("compacted conversation", "before", len(conv.Messages), "after", len(out))
 			conv.Messages = out
 		}
+	}
+
+	var loop *loopDetector
+	if e.loopThreshold > 0 {
+		loop = newLoopDetector(e.loopThreshold)
 	}
 
 	for iter := 0; iter < e.maxIterations; iter++ {
@@ -185,6 +198,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		if len(toolUses) == 0 {
 			emit(Event{Kind: KindDone})
 			return nil
+		}
+
+		// Loop guard: stop if the model keeps requesting the same tool calls.
+		if loop != nil && loop.record(turnSignature(toolUses)) {
+			err := fmt.Errorf("engine: aborting suspected loop: identical tool calls repeated %d turns", e.loopThreshold)
+			emit(Event{Kind: KindError, Err: err})
+			return err
 		}
 
 		// Budget gate: stop before launching another (paid) tool round.
@@ -259,8 +279,68 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 	return provider.Message{Role: provider.RoleAssistant, Content: content}, toolUses, usage, nil
 }
 
-// runTools executes each requested tool and returns tool-result blocks in order.
+// maxParallelTools bounds how many tool calls run concurrently in one round.
+const maxParallelTools = 8
+
+// runTools executes the requested tools and returns tool-result blocks in the
+// same order they were requested (as required for tool-use/result pairing).
+//
+// When the model requests several tools, read/network calls run concurrently
+// while write/execute calls are serialized (an exclusive lock) so side effects
+// never race. Event emission is serialized so streamed output is never
+// interleaved mid-write. A single tool call takes the simple sequential path.
 func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, error) {
+	if len(toolUses) <= 1 {
+		return e.runToolsSequential(ctx, toolUses, emit)
+	}
+
+	results := make([]provider.Block, len(toolUses))
+	var (
+		emitMu   sync.Mutex   // serializes emit across goroutines
+		execLock sync.RWMutex // shared for read/net, exclusive for write/exec
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, maxParallelTools)
+	)
+	safeEmit := func(ev Event) {
+		emitMu.Lock()
+		emit(ev)
+		emitMu.Unlock()
+	}
+
+	for i, tu := range toolUses {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, tu provider.ToolUseBlock) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if e.serializeTool(tu.Name) {
+				execLock.Lock()
+				defer execLock.Unlock()
+			} else {
+				execLock.RLock()
+				defer execLock.RUnlock()
+			}
+
+			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+			content, isErr := e.executeTool(ctx, tu)
+			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
+			results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: isErr}
+		}(i, tu)
+	}
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		return nil, ErrInterrupted
+	}
+	return results, nil
+}
+
+// runToolsSequential is the simple in-order path used for a single tool call.
+func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, error) {
 	results := make([]provider.Block, 0, len(toolUses))
 	for _, tu := range toolUses {
 		select {
@@ -280,6 +360,25 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 		})
 	}
 	return results, nil
+}
+
+// serializeTool reports whether a tool must run exclusively (write/execute
+// capabilities), preventing it from racing other tool calls in the same round.
+// Unknown tools are treated as serial out of caution.
+func (e *Engine) serializeTool(name string) bool {
+	if e.tools == nil {
+		return true
+	}
+	t, ok := e.tools.Get(name)
+	if !ok {
+		return true
+	}
+	switch t.Capability() {
+	case tool.CapWrite, tool.CapExecute:
+		return true
+	default:
+		return false
+	}
 }
 
 // executeTool looks up and runs a single tool, converting failures into
