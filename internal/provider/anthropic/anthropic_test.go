@@ -2,6 +2,8 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -122,6 +124,129 @@ func TestStreamErrorStatus(t *testing.T) {
 	_, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 1})
 	if err == nil {
 		t.Fatal("expected error for 401 status")
+	}
+	var apiErr *provider.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *provider.APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", apiErr.StatusCode)
+	}
+	if apiErr.Retryable() {
+		t.Error("401 should not be retryable")
+	}
+}
+
+// captureBody decodes the JSON request body the adapter sends.
+func captureBody(t *testing.T, opts ...Option) map[string]any {
+	t.Helper()
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	a := New("k", append([]Option{WithBaseURL(srv.URL)}, opts...)...)
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:     "m",
+		MaxTokens: 10,
+		System:    "you are a test",
+		Tools: []provider.ToolSchema{
+			{Name: "a", Description: "tool a", InputSchema: json.RawMessage(`{}`)},
+			{Name: "b", Description: "tool b", InputSchema: json.RawMessage(`{}`)},
+		},
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream { //nolint:revive // drain
+	}
+	return captured
+}
+
+func TestPromptCachingBreakpoints(t *testing.T) {
+	body := captureBody(t)
+
+	// system is an array whose block carries cache_control.
+	sys, ok := body["system"].([]any)
+	if !ok || len(sys) != 1 {
+		t.Fatalf("system not a single-block array: %#v", body["system"])
+	}
+	if _, has := sys[0].(map[string]any)["cache_control"]; !has {
+		t.Error("system block missing cache_control")
+	}
+
+	// last tool carries cache_control; first does not.
+	tools, ok := body["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %#v", body["tools"])
+	}
+	if _, has := tools[0].(map[string]any)["cache_control"]; has {
+		t.Error("first tool should not have cache_control")
+	}
+	if _, has := tools[1].(map[string]any)["cache_control"]; !has {
+		t.Error("last tool missing cache_control")
+	}
+
+	// last message's last content block carries cache_control.
+	msgs := body["messages"].([]any)
+	lastMsg := msgs[len(msgs)-1].(map[string]any)
+	content := lastMsg["content"].([]any)
+	lastBlock := content[len(content)-1].(map[string]any)
+	if _, has := lastBlock["cache_control"]; !has {
+		t.Error("last message block missing cache_control")
+	}
+}
+
+func TestPromptCachingDisabled(t *testing.T) {
+	body := captureBody(t, WithPromptCaching(false))
+	sys := body["system"].([]any)
+	if _, has := sys[0].(map[string]any)["cache_control"]; has {
+		t.Error("caching disabled but system has cache_control")
+	}
+}
+
+func TestCacheUsageParsing(t *testing.T) {
+	const s = `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(s))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithBaseURL(srv.URL))
+	stream, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 1})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var done *provider.Event
+	for ev := range stream {
+		if ev.Type == provider.EventDone {
+			e := ev
+			done = &e
+		}
+	}
+	if done == nil || done.Usage == nil {
+		t.Fatal("no usage")
+	}
+	if done.Usage.CacheCreationTokens != 100 || done.Usage.CacheReadTokens != 200 {
+		t.Errorf("cache usage = %+v, want creation=100 read=200", done.Usage)
 	}
 }
 

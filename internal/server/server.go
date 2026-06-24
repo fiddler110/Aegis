@@ -19,6 +19,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/api"
 	"github.com/scottymacleod/agentharness/internal/compaction"
 	"github.com/scottymacleod/agentharness/internal/config"
+	"github.com/scottymacleod/agentharness/internal/cost"
 	"github.com/scottymacleod/agentharness/internal/engine"
 	"github.com/scottymacleod/agentharness/internal/hooks"
 	"github.com/scottymacleod/agentharness/internal/mcp"
@@ -159,6 +160,8 @@ func (s *Server) newEngine(mode string) (*engine.Engine, error) {
 		Gate:      gate,
 		Compactor: s.compactor,
 		Hooks:     s.hooks,
+		Cost:      cost.NewTracker(),
+		BudgetUSD: s.cfg.Cost.BudgetUSD,
 		Model:     s.cfg.Provider.Model,
 		MaxTokens: s.cfg.Provider.MaxTokens,
 		Logger:    s.logger,
@@ -325,6 +328,7 @@ func toAPIEvent(ev engine.Event) api.Event {
 		out.InputTokens = ev.Usage.InputTokens
 		out.OutputTokens = ev.Usage.OutputTokens
 	}
+	out.CostUSD = ev.CostUSD
 	return out
 }
 

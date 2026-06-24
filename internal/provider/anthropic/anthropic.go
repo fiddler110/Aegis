@@ -27,10 +27,16 @@ type Adapter struct {
 	apiKey  string
 	baseURL string
 	client  *http.Client
+	cache   bool // emit prompt-cache breakpoints
 }
 
 // Option configures the adapter.
 type Option func(*Adapter)
+
+// WithPromptCaching toggles emission of cache_control breakpoints (default on).
+func WithPromptCaching(enabled bool) Option {
+	return func(a *Adapter) { a.cache = enabled }
+}
 
 // WithBaseURL overrides the API base URL.
 func WithBaseURL(u string) Option {
@@ -52,6 +58,7 @@ func New(apiKey string, opts ...Option) *Adapter {
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
 		client:  &http.Client{Timeout: 10 * time.Minute},
+		cache:   true,
 	}
 	for _, o := range opts {
 		o(a)
@@ -65,13 +72,34 @@ func (a *Adapter) Name() string { return "anthropic" }
 // --- wire types ---
 
 type wireRequest struct {
-	Model       string          `json:"model"`
-	MaxTokens   int             `json:"max_tokens"`
-	System      string          `json:"system,omitempty"`
-	Messages    []wireMessage   `json:"messages"`
-	Tools       []provider.ToolSchema `json:"tools,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	Stream      bool            `json:"stream"`
+	Model       string            `json:"model"`
+	MaxTokens   int               `json:"max_tokens"`
+	System      []wireSystemBlock `json:"system,omitempty"`
+	Messages    []wireMessage     `json:"messages"`
+	Tools       []wireTool        `json:"tools,omitempty"`
+	Temperature *float64          `json:"temperature,omitempty"`
+	Stream      bool              `json:"stream"`
+}
+
+// cacheControl marks a content block as a prompt-cache breakpoint. Anthropic
+// caches the longest matching prefix ending at a breakpoint.
+type cacheControl struct {
+	Type string `json:"type"` // always "ephemeral"
+}
+
+var ephemeral = &cacheControl{Type: "ephemeral"}
+
+type wireSystemBlock struct {
+	Type         string        `json:"type"` // "text"
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+type wireTool struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
 type wireMessage struct {
@@ -91,6 +119,8 @@ type wireBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+	// caching
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
 }
 
 func toWireMessages(msgs []provider.Message) ([]wireMessage, error) {
@@ -118,6 +148,48 @@ func toWireMessages(msgs []provider.Message) ([]wireMessage, error) {
 	return out, nil
 }
 
+// buildSystem wraps the system prompt as a content-block array so a cache
+// breakpoint can be attached to it.
+func buildSystem(system string, cache bool) []wireSystemBlock {
+	if system == "" {
+		return nil
+	}
+	b := wireSystemBlock{Type: "text", Text: system}
+	if cache {
+		b.CacheControl = ephemeral
+	}
+	return []wireSystemBlock{b}
+}
+
+// buildTools converts tool schemas, placing a cache breakpoint on the final
+// tool so the whole (stable) tool list is cached as one prefix segment.
+func buildTools(tools []provider.ToolSchema, cache bool) []wireTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]wireTool, len(tools))
+	for i, t := range tools {
+		out[i] = wireTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
+	}
+	if cache {
+		out[len(out)-1].CacheControl = ephemeral
+	}
+	return out
+}
+
+// cacheLastMessage marks the final block of the conversation as a breakpoint so
+// the growing message prefix is cached and reused on the next turn.
+func cacheLastMessage(msgs []wireMessage) {
+	if len(msgs) == 0 {
+		return
+	}
+	last := &msgs[len(msgs)-1]
+	if len(last.Content) == 0 {
+		return
+	}
+	last.Content[len(last.Content)-1].CacheControl = ephemeral
+}
+
 // Stream implements provider.Adapter.
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
 	if a.apiKey == "" {
@@ -128,12 +200,15 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if err != nil {
 		return nil, err
 	}
+	if a.cache {
+		cacheLastMessage(wmsgs)
+	}
 	body, err := json.Marshal(wireRequest{
 		Model:       req.Model,
 		MaxTokens:   req.MaxTokens,
-		System:      req.System,
+		System:      buildSystem(req.System, a.cache),
 		Messages:    wmsgs,
-		Tools:       req.Tools,
+		Tools:       buildTools(req.Tools, a.cache),
 		Temperature: req.Temperature,
 		Stream:      true,
 	})
@@ -152,12 +227,13 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic: request failed: %w", err)
+		return nil, provider.NewTransportError(a.Name(), err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return nil, fmt.Errorf("anthropic: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+		return nil, provider.NewHTTPError(a.Name(), resp.StatusCode,
+			resp.Header.Get("Retry-After"), strings.TrimSpace(string(msg)))
 	}
 
 	out := make(chan provider.Event)
@@ -245,8 +321,10 @@ type sseEvent struct {
 	} `json:"delta"`
 	Message struct {
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 	Usage struct {
@@ -268,6 +346,8 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 	switch ev.Type {
 	case "message_start":
 		usage.InputTokens = ev.Message.Usage.InputTokens
+		usage.CacheCreationTokens = ev.Message.Usage.CacheCreationInputTokens
+		usage.CacheReadTokens = ev.Message.Usage.CacheReadInputTokens
 	case "content_block_start":
 		blocks[ev.Index] = &blockState{
 			typ:      ev.ContentBlock.Type,

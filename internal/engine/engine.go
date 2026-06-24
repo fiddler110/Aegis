@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/scottymacleod/agentharness/internal/cost"
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
@@ -44,6 +45,7 @@ type Event struct {
 	ToolResult  string          // KindToolResult
 	ToolIsError bool            // KindToolResult
 	Usage       *provider.Usage // KindTurnDone
+	CostUSD     float64         // KindTurnDone: cumulative run cost (0 if untracked)
 	Err         error           // KindError
 }
 
@@ -76,9 +78,11 @@ type Hooks interface {
 type Options struct {
 	Adapter       provider.Adapter
 	Tools         *tool.Registry
-	Gate          Gate      // optional; nil means all tool calls are allowed
-	Compactor     Compactor // optional; nil disables context compaction
-	Hooks         Hooks     // optional; nil disables hooks
+	Gate          Gate          // optional; nil means all tool calls are allowed
+	Compactor     Compactor     // optional; nil disables context compaction
+	Hooks         Hooks         // optional; nil disables hooks
+	Cost          *cost.Tracker // optional; nil disables cost tracking
+	BudgetUSD     float64       // optional; >0 aborts the run past this cost
 	Model         string
 	MaxTokens     int
 	Temperature   *float64
@@ -93,6 +97,8 @@ type Engine struct {
 	gate          Gate
 	compactor     Compactor
 	hooks         Hooks
+	cost          *cost.Tracker
+	budgetUSD     float64
 	model         string
 	maxTokens     int
 	temperature   *float64
@@ -129,6 +135,8 @@ func New(opts Options) (*Engine, error) {
 		gate:          opts.Gate,
 		compactor:     opts.Compactor,
 		hooks:         opts.Hooks,
+		cost:          opts.Cost,
+		budgetUSD:     opts.BudgetUSD,
 		model:         opts.Model,
 		maxTokens:     maxTok,
 		temperature:   opts.Temperature,
@@ -167,11 +175,23 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return err
 		}
 		conv.Append(assistant)
-		emit(Event{Kind: KindTurnDone, Usage: usage})
+
+		var runCost float64
+		if e.cost != nil && usage != nil {
+			runCost = e.cost.Add(e.model, *usage)
+		}
+		emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
 
 		if len(toolUses) == 0 {
 			emit(Event{Kind: KindDone})
 			return nil
+		}
+
+		// Budget gate: stop before launching another (paid) tool round.
+		if e.budgetUSD > 0 && e.cost != nil && e.cost.TotalUSD() >= e.budgetUSD {
+			err := fmt.Errorf("engine: cost budget reached: spent $%.4f of $%.2f limit", e.cost.TotalUSD(), e.budgetUSD)
+			emit(Event{Kind: KindError, Err: err})
+			return err
 		}
 
 		results, err := e.runTools(ctx, toolUses, emit)

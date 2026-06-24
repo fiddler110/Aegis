@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/scottymacleod/agentharness/internal/config"
+	"github.com/scottymacleod/agentharness/internal/cost"
 	"github.com/scottymacleod/agentharness/internal/engine"
 	"github.com/scottymacleod/agentharness/internal/permission"
 	"github.com/scottymacleod/agentharness/internal/provider"
@@ -68,10 +69,13 @@ func newChatCmd() *cobra.Command {
 			}
 			gate := permission.New(permission.ParseMode(resolvedMode), approver)
 
+			tracker := cost.NewTracker()
 			eng, err := engine.New(engine.Options{
 				Adapter:   adapter,
 				Tools:     reg,
 				Gate:      gate,
+				Cost:      tracker,
+				BudgetUSD: cfg.Cost.BudgetUSD,
 				Model:     cfg.Provider.Model,
 				MaxTokens: cfg.Provider.MaxTokens,
 			})
@@ -105,6 +109,10 @@ func newChatCmd() *cobra.Command {
 					fmt.Fprintln(out)
 				}
 			})
+			if snap := tracker.Snapshot(); snap.TotalUSD > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n[cost: $%.4f over %d turn(s), %d in / %d out tokens]\n",
+					snap.TotalUSD, snap.Turns, snap.Usage.InputTokens, snap.Usage.OutputTokens)
+			}
 			return runErr
 		},
 	}

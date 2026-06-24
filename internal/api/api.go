@@ -49,9 +49,10 @@ type Event struct {
 	ToolInput   json.RawMessage `json:"tool_input,omitempty"`
 	ToolResult  string          `json:"tool_result,omitempty"`
 	ToolIsError bool            `json:"tool_is_error,omitempty"`
-	InputTokens int             `json:"input_tokens,omitempty"`
-	OutputTokens int            `json:"output_tokens,omitempty"`
-	Error       string          `json:"error,omitempty"`
+	InputTokens  int             `json:"input_tokens,omitempty"`
+	OutputTokens int             `json:"output_tokens,omitempty"`
+	CostUSD      float64         `json:"cost_usd,omitempty"`
+	Error        string          `json:"error,omitempty"`
 }
 
 // ErrorResponse is the body returned for non-2xx responses.

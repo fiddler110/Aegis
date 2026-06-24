@@ -26,7 +26,13 @@ type Config struct {
 	Server     ServerConfig      `koanf:"server"`
 	Permission PermissionConfig  `koanf:"permission"`
 	Diagram    DiagramConfig     `koanf:"diagram"`
+	Cost       CostConfig        `koanf:"cost"`
 	MCP        []MCPServerConfig `koanf:"mcp"`
+}
+
+// CostConfig configures spend tracking.
+type CostConfig struct {
+	BudgetUSD float64 `koanf:"budget_usd"` // abort a run past this estimated cost; 0 = unlimited
 }
 
 // MCPServerConfig configures one external MCP server to connect over stdio.
@@ -39,10 +45,11 @@ type MCPServerConfig struct {
 
 // ProviderConfig selects and configures the model provider.
 type ProviderConfig struct {
-	Default   string `koanf:"default"`    // adapter name, e.g. "anthropic"
-	Model     string `koanf:"model"`      // model id
-	MaxTokens int    `koanf:"max_tokens"` // response token cap
-	BaseURL   string `koanf:"base_url"`   // optional API base override
+	Default    string `koanf:"default"`     // adapter name, e.g. "anthropic"
+	Model      string `koanf:"model"`       // model id
+	MaxTokens  int    `koanf:"max_tokens"`  // response token cap
+	BaseURL    string `koanf:"base_url"`    // optional API base override
+	MaxRetries int    `koanf:"max_retries"` // transient-failure retries; 0 disables
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
 }
@@ -73,13 +80,15 @@ func defaults() map[string]any {
 	return map[string]any{
 		"data_dir":          defaultDataDir(),
 		"log_level":         "info",
-		"provider.default":  "anthropic",
-		"provider.model":    "claude-opus-4-8",
-		"provider.max_tokens": 8192,
+		"provider.default":     "anthropic",
+		"provider.model":       "claude-opus-4-8",
+		"provider.max_tokens":  8192,
+		"provider.max_retries": 4,
 		"server.addr":       "127.0.0.1:4127",
 		"permission.mode":              "plan",
 		"permission.auto_approve_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
+		"cost.budget_usd":              0.0,
 	}
 }
 

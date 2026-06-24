@@ -232,6 +232,9 @@ func (m *model) applyEvent(ev api.Event) {
 	case api.KindTurnDone:
 		if ev.OutputTokens > 0 {
 			m.status = fmt.Sprintf("thinking… (in %d / out %d tokens)", ev.InputTokens, ev.OutputTokens)
+			if ev.CostUSD > 0 {
+				m.status += fmt.Sprintf(" · $%.4f", ev.CostUSD)
+			}
 		}
 	case api.KindError:
 		m.transcript.WriteString("\n" + m.st.errLine.Render("error: "+ev.Error) + "\n")

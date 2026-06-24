@@ -178,12 +178,13 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("openai: request failed: %w", err)
+		return nil, provider.NewTransportError(a.Name(), err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return nil, fmt.Errorf("openai: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+		return nil, provider.NewHTTPError(a.Name(), resp.StatusCode,
+			resp.Header.Get("Retry-After"), strings.TrimSpace(string(msg)))
 	}
 
 	out := make(chan provider.Event)

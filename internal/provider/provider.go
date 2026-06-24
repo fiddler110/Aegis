@@ -82,10 +82,15 @@ const (
 	StopOther   StopReason = "other"
 )
 
-// Usage reports token consumption for a request.
+// Usage reports token consumption for a request. The cache fields are populated
+// by providers that support prompt caching (e.g. Anthropic) and are zero
+// otherwise. CacheReadTokens are billed at a steep discount; CacheCreationTokens
+// at a small premium over InputTokens.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
 }
 
 // EventType enumerates streaming events emitted by an adapter.
