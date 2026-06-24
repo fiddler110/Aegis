@@ -10,6 +10,7 @@ import (
 
 	"github.com/scottymacleod/agentharness/internal/cron"
 	"github.com/scottymacleod/agentharness/internal/filetracker"
+	"github.com/scottymacleod/agentharness/internal/lsp"
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/sandbox"
 	"github.com/scottymacleod/agentharness/internal/task"
@@ -40,6 +41,8 @@ type Options struct {
 	// FileTracker, when set, enables file staleness detection. Write/edit
 	// tools reject edits to files modified externally since last read.
 	FileTracker *filetracker.Tracker
+	// LSP, when set, enables code intelligence tools (diagnostics, references).
+	LSP *lsp.Manager
 }
 
 // Register adds all built-in tools to the registry.
@@ -81,6 +84,9 @@ func Register(reg *tool.Registry, opts Options) error {
 	}
 	if opts.Cron != nil {
 		tools = append(tools, CronTools(opts.Cron)...)
+	}
+	if opts.LSP != nil {
+		tools = append(tools, LSPTools(opts.LSP, root)...)
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {

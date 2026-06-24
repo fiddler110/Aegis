@@ -24,6 +24,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/engine"
 	"github.com/scottymacleod/agentharness/internal/filetracker"
 	"github.com/scottymacleod/agentharness/internal/hooks"
+	"github.com/scottymacleod/agentharness/internal/lsp"
 	"github.com/scottymacleod/agentharness/internal/mcp"
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/permission"
@@ -54,6 +55,7 @@ type Server struct {
 	cronSched  *cron.Scheduler
 	cronCancel context.CancelFunc
 	sandbox    sandbox.Backend
+	lspMgr     *lsp.Manager
 	audit      *hooks.Audit
 	workspace  string
 	logger     *slog.Logger
@@ -126,9 +128,22 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
 
+	// LSP manager: start configured language servers.
+	var lspMgr *lsp.Manager
+	if len(cfg.LSP) > 0 {
+		lspMgr = lsp.NewManager(cwd, logger)
+		for _, lc := range cfg.LSP {
+			if err := lspMgr.Start(context.Background(), lsp.ServerConfig{
+				Name: lc.Name, Command: lc.Command, Args: lc.Args, Extensions: lc.Extensions,
+			}); err != nil {
+				logger.Warn("lsp server start failed", "name", lc.Name, "err", err)
+			}
+		}
+	}
+
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -137,6 +152,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.tasks = taskMgr
 	s.cronSched = cronSched
 	s.sandbox = sb
+	s.lspMgr = lspMgr
 	s.workspace = cwd
 	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
@@ -302,6 +318,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		if s.sandbox != nil {
 			s.sandbox.Close()
+		}
+		if s.lspMgr != nil {
+			s.lspMgr.Close()
 		}
 		return s.http.Shutdown(shutdownCtx)
 	case err := <-errCh:

@@ -30,6 +30,7 @@ type Config struct {
 	Swarm      SwarmConfig       `koanf:"swarm"`
 	Sandbox    SandboxConfig     `koanf:"sandbox"`
 	Security   SecurityConfig    `koanf:"security"`
+	LSP        []LSPServerConfig `koanf:"lsp"`
 	MCP        []MCPServerConfig `koanf:"mcp"`
 }
 
@@ -49,6 +50,14 @@ type SandboxConfig struct {
 // CostConfig configures spend tracking.
 type CostConfig struct {
 	BudgetUSD float64 `koanf:"budget_usd"` // abort a run past this estimated cost; 0 = unlimited
+}
+
+// LSPServerConfig configures one LSP language server.
+type LSPServerConfig struct {
+	Name       string   `koanf:"name"`       // e.g. "gopls"
+	Command    string   `koanf:"command"`     // executable
+	Args       []string `koanf:"args"`        // CLI arguments
+	Extensions []string `koanf:"extensions"`  // file extensions (e.g. [".go"])
 }
 
 // MCPServerConfig configures one external MCP server to connect over stdio.
