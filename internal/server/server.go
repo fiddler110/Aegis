@@ -29,6 +29,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/providerfactory"
 	"github.com/scottymacleod/agentharness/internal/session"
+	"github.com/scottymacleod/agentharness/internal/swarm"
 	"github.com/scottymacleod/agentharness/internal/tool"
 	"github.com/scottymacleod/agentharness/internal/tool/builtin"
 )
@@ -43,6 +44,7 @@ type Server struct {
 	compactor  engine.Compactor
 	hooks      engine.Hooks
 	mcpClients []*mcp.Client
+	swarm      *swarm.InProcessBackend
 	workspace  string
 	logger     *slog.Logger
 	http       *http.Server
@@ -89,7 +91,59 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)
 
+	// Multi-agent: an in-process backend runs sub-agents as goroutines sharing
+	// this daemon's adapter and tools. Register the `agent` delegation tool.
+	s.swarm = swarm.NewInProcessBackend(s.subAgentRunner(), swarm.NewRegistry(), swarm.MailboxRoot(cfg.DataDir))
+	if err := reg.Register(builtin.NewAgentTool(s.swarm)); err != nil {
+		store.Close()
+		return nil, err
+	}
+
 	return s, nil
+}
+
+// subAgentRunner returns a swarm.RunFunc that executes a teammate by building a
+// sub-engine over the daemon's shared adapter and tools. The child runs with its
+// own (clamped) permission mode and a fresh cost tracker.
+func (s *Server) subAgentRunner() swarm.RunFunc {
+	return func(ctx context.Context, cfg swarm.SpawnConfig) (string, error) {
+		if s.adapter == nil {
+			return "", fmt.Errorf("no model provider configured")
+		}
+		model := cfg.Model
+		if model == "" {
+			model = s.cfg.Provider.Model
+		}
+		gate := permission.New(permission.ParseMode(cfg.Mode), s.approver())
+		eng, err := engine.New(engine.Options{
+			Adapter:   s.adapter,
+			Tools:     s.tools,
+			Gate:      gate,
+			Compactor: s.compactor,
+			Hooks:     s.hooks,
+			Cost:      cost.NewTracker(),
+			BudgetUSD: s.cfg.Cost.BudgetUSD,
+			Model:     model,
+			MaxTokens: s.cfg.Provider.MaxTokens,
+			Logger:    s.logger,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		// Grandchildren clamp against this child's mode.
+		ctx = swarm.WithParentMode(ctx, cfg.Mode)
+		conv := &engine.Conversation{System: cfg.SystemPrompt}
+		conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: cfg.Prompt}}})
+
+		var sb strings.Builder
+		runErr := eng.Run(ctx, conv, func(ev engine.Event) {
+			if ev.Kind == engine.KindText {
+				sb.WriteString(ev.Text)
+			}
+		})
+		return strings.TrimSpace(sb.String()), runErr
+	}
 }
 
 // newWithDeps assembles a Server from explicit dependencies. It is the seam
@@ -132,6 +186,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if s.swarm != nil {
+			s.swarm.Shutdown(shutdownCtx)
+		}
 		return s.http.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -270,7 +327,10 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	conv := &engine.Conversation{System: s.effectiveSystem(sess.System), Messages: sess.Messages}
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: req.Text}}})
 
-	runErr := eng.Run(r.Context(), conv, func(ev engine.Event) {
+	// Carry the session's permission mode so the `agent` tool can clamp any
+	// sub-agents it spawns to no more than this posture.
+	runCtx := swarm.WithParentMode(r.Context(), sess.Mode)
+	runErr := eng.Run(runCtx, conv, func(ev engine.Event) {
 		send(toAPIEvent(ev))
 	})
 

@@ -52,12 +52,14 @@ func (p Policy) Decide(cap tool.Capability) Decision {
 		switch cap {
 		case tool.CapExecute:
 			return Ask
-		default: // read, write, network
+		default: // read, write, network, spawn
 			return Allow
 		}
 	default: // plan
 		switch cap {
-		case tool.CapRead, tool.CapNetwork:
+		// Spawning is allowed in plan mode: a child inherits the parent's
+		// (read-only) posture via permission sync, so it cannot mutate.
+		case tool.CapRead, tool.CapNetwork, tool.CapSpawn:
 			return Allow
 		default: // write, execute
 			return Deny

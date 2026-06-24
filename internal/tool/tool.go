@@ -30,6 +30,7 @@ const (
 	CapWrite   Capability = "write"   // mutates local files/state
 	CapExecute Capability = "execute" // runs arbitrary commands
 	CapNetwork Capability = "network" // makes outbound network requests
+	CapSpawn   Capability = "spawn"   // launches a sub-agent (delegation)
 )
 
 // Tool is a capability the model can invoke.
