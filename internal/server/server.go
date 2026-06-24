@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scottymacleod/agentharness/internal/agentdef"
 	"github.com/scottymacleod/agentharness/internal/api"
 	"github.com/scottymacleod/agentharness/internal/compaction"
 	"github.com/scottymacleod/agentharness/internal/config"
@@ -156,6 +157,12 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.lspMgr = lspMgr
 	s.workspace = cwd
 	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
+
+	// Load custom agent definitions from user/project directories.
+	if n := agentdef.LoadFromDirs(agentdef.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
+		logger.Info("loaded custom agent definitions", "count", n)
+	}
+
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
 	s.hooks = hooks.NewMulti(s.audit)
 	if adapter != nil {
