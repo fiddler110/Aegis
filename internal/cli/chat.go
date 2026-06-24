@@ -10,14 +10,20 @@ import (
 
 	"github.com/scottymacleod/agentharness/internal/config"
 	"github.com/scottymacleod/agentharness/internal/engine"
+	"github.com/scottymacleod/agentharness/internal/permission"
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/provider/anthropic"
 	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/agentharness/internal/tool/builtin"
 	"github.com/spf13/cobra"
 )
 
 func newChatCmd() *cobra.Command {
-	var system string
+	var (
+		system      string
+		mode        string
+		autoApprove bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "chat [prompt]",
@@ -43,9 +49,29 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			reg := tool.NewRegistry()
+			if err := builtin.Register(reg, builtin.Options{Root: cwd}); err != nil {
+				return err
+			}
+
+			resolvedMode := cfg.Permission.Mode
+			if mode != "" {
+				resolvedMode = mode
+			}
+			var approver permission.Approver = permission.AutoDeny{}
+			if autoApprove {
+				approver = permission.AutoApprove{}
+			}
+			gate := permission.New(permission.ParseMode(resolvedMode), approver)
+
 			eng, err := engine.New(engine.Options{
 				Adapter:   adapter,
-				Tools:     tool.NewRegistry(), // builtins land in Phase 3
+				Tools:     reg,
+				Gate:      gate,
 				Model:     cfg.Provider.Model,
 				MaxTokens: cfg.Provider.MaxTokens,
 			})
@@ -84,6 +110,8 @@ func newChatCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&system, "system", "", "system prompt")
+	cmd.Flags().StringVar(&mode, "mode", "", "permission mode: plan (read-only) or build (default from config)")
+	cmd.Flags().BoolVar(&autoApprove, "yes", false, "auto-approve tool calls that would otherwise require confirmation")
 	return cmd
 }
 

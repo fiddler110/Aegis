@@ -21,6 +21,17 @@ type Result struct {
 	IsError bool   // true if the tool failed in a way the model should see
 }
 
+// Capability classifies the kind of access a tool needs, so permission modes
+// can gate tools by risk without knowing each tool individually.
+type Capability string
+
+const (
+	CapRead    Capability = "read"    // reads local files/state, no mutation
+	CapWrite   Capability = "write"   // mutates local files/state
+	CapExecute Capability = "execute" // runs arbitrary commands
+	CapNetwork Capability = "network" // makes outbound network requests
+)
+
 // Tool is a capability the model can invoke.
 type Tool interface {
 	// Name is the unique tool identifier exposed to the model.
@@ -29,6 +40,8 @@ type Tool interface {
 	Description() string
 	// InputSchema is the JSON Schema for the tool's arguments.
 	InputSchema() json.RawMessage
+	// Capability reports the access class of the tool, used for gating.
+	Capability() Capability
 	// Execute runs the tool with the given JSON arguments.
 	Execute(ctx context.Context, input json.RawMessage) (Result, error)
 }

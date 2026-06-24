@@ -1,6 +1,6 @@
 module github.com/scottymacleod/agentharness
 
-go 1.23.2
+go 1.25.0
 
 require (
 	github.com/knadh/koanf/parsers/yaml v1.1.0
@@ -9,6 +9,7 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/net v0.56.0
 )
 
 require (
@@ -20,5 +21,5 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/sys v0.32.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )

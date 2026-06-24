@@ -50,10 +50,17 @@ type Event struct {
 // EmitFunc receives engine events. It must not block for long.
 type EmitFunc func(Event)
 
+// Gate decides whether a tool call may proceed. A denied call is reported to
+// the model as an error result rather than aborting the run.
+type Gate interface {
+	Check(ctx context.Context, t tool.Tool, input json.RawMessage) (allowed bool, reason string)
+}
+
 // Options configures an Engine.
 type Options struct {
 	Adapter       provider.Adapter
 	Tools         *tool.Registry
+	Gate          Gate // optional; nil means all tool calls are allowed
 	Model         string
 	MaxTokens     int
 	Temperature   *float64
@@ -65,6 +72,7 @@ type Options struct {
 type Engine struct {
 	adapter       provider.Adapter
 	tools         *tool.Registry
+	gate          Gate
 	model         string
 	maxTokens     int
 	temperature   *float64
@@ -98,6 +106,7 @@ func New(opts Options) (*Engine, error) {
 	return &Engine{
 		adapter:       opts.Adapter,
 		tools:         opts.Tools,
+		gate:          opts.Gate,
 		model:         opts.Model,
 		maxTokens:     maxTok,
 		temperature:   opts.Temperature,
@@ -231,6 +240,12 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
 		return fmt.Sprintf("unknown tool %q", tu.Name), true
+	}
+	if e.gate != nil {
+		if allowed, reason := e.gate.Check(ctx, t, tu.Input); !allowed {
+			e.logger.Info("tool call blocked by gate", "tool", tu.Name, "reason", reason)
+			return reason, true
+		}
 	}
 	res, err := t.Execute(ctx, tu.Input)
 	if err != nil {
