@@ -59,6 +59,11 @@ type auditRecord struct {
 	AgentID string `json:"agent_id,omitempty"`
 	Status  string `json:"status,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	// Security policy fields (phase "policy_decision").
+	Rule     string `json:"rule,omitempty"`
+	Decision string `json:"decision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Cap      string `json:"cap,omitempty"`
 }
 
 // SubagentStop records the SUBAGENT_STOP lifecycle event for a finished teammate.
@@ -70,6 +75,19 @@ func (a *Audit) SubagentStop(agentID, status, summary string, isErr bool) {
 		Status:  status,
 		Summary: summary,
 		IsError: isErr,
+	})
+}
+
+// PolicyDecision records a contextual security policy decision.
+func (a *Audit) PolicyDecision(toolName, cap, rule, decision, reason string) {
+	a.write(auditRecord{
+		Time:     time.Now(),
+		Phase:    "policy_decision",
+		Tool:     toolName,
+		Cap:      cap,
+		Rule:     rule,
+		Decision: decision,
+		Reason:   reason,
 	})
 }
 

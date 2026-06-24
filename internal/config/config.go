@@ -29,6 +29,7 @@ type Config struct {
 	Cost       CostConfig        `koanf:"cost"`
 	Swarm      SwarmConfig       `koanf:"swarm"`
 	Sandbox    SandboxConfig     `koanf:"sandbox"`
+	Security   SecurityConfig    `koanf:"security"`
 	MCP        []MCPServerConfig `koanf:"mcp"`
 }
 
@@ -80,6 +81,12 @@ type PermissionConfig struct {
 	AutoApproveExec bool   `koanf:"auto_approve_exec"` // auto-approve shell/execute tool calls
 }
 
+// SecurityConfig configures contextual security policies.
+type SecurityConfig struct {
+	EgressThenWrite  bool     `koanf:"egress_then_write"`  // require approval for writes after network egress
+	NetworkAllowList []string `koanf:"network_allowlist"`  // restrict network calls to these domains (empty = no restriction)
+}
+
 // DiagramConfig configures diagram rendering.
 type DiagramConfig struct {
 	KrokiURL string `koanf:"kroki_url"` // Kroki endpoint for multi-format rendering
@@ -108,6 +115,7 @@ func defaults() map[string]any {
 		"sandbox.backend":              "local",
 		"sandbox.image":                "ubuntu:22.04",
 		"sandbox.network":              false,
+		"security.egress_then_write":   false,
 	}
 }
 

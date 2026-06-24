@@ -15,7 +15,8 @@ and **opencode** (anomalyco), plus LangGraph/Omnigent/CrewAI/AG2 ideas.
 - **Phase 9 (Resilience & Cost): ✅ COMPLETE**
 - **Phase 10 (Multi-agent orchestration): ✅ COMPLETE** (in-process + subprocess + polish)
 - **Phase 11 (Background tasks & scheduling): ✅ COMPLETE** (task manager + tools + cron)
-- Phases 12–15: ⬜ not started
+- **Phase 12 (Sandboxing & contextual security): ✅ COMPLETE** (sandbox + policies + audit)
+- Phases 13–15: ⬜ not started
 
 ## Git state (IMPORTANT)
 
@@ -24,8 +25,9 @@ and **opencode** (anomalyco), plus LangGraph/Omnigent/CrewAI/AG2 ideas.
 - Branches (each stacks on the previous):
   - `phase-9-resilience-cost` — commits `7c2fca5`, `575a9e6` (off `4b58a7f` Phase 8)
   - `phase-10-multi-agent` — commits `2fbfc84`, `9b0d81d`, `61df5c8` (stacked on Phase 9)
-  - `phase-11-tasks` — commits `ba36fef`, `cb7cb2f`, + 11.3 cron (stacked on Phase 10)
-- **Currently checked out: `phase-11-tasks`**.
+  - `phase-11-tasks` — commits `ba36fef`, `cb7cb2f`, `8158b21` (stacked on Phase 10)
+  - `phase-12-sandbox` — commits 12.1, 12.2, 12.3 (stacked on Phase 11)
+- **Currently checked out: `phase-12-sandbox`**.
 - Working tree is clean except this `HANDOFF.md` (untracked).
 
 To verify everything: `go build ./... && go test ./... -race` (all green).
@@ -36,127 +38,103 @@ were already not gofmt-formatted in the baseline — do NOT mass-reformat them.
 
 ### Phase 9 — Resilience & Cost (branch `phase-9-resilience-cost`)
 
-- **9.1 Retry/backoff** — `internal/provider/errors.go` (`APIError` w/ `Retryable()`,
-  `Retry-After` parsing), `internal/provider/retry.go` (`WithRetry` decorator, exp
-  backoff + jitter, retries only pre-stream failures). Adapters return typed errors;
-  wired in `providerfactory` via `provider.max_retries` (default 4).
-- **9.2 Prompt caching** — `internal/provider/anthropic/anthropic.go` emits
-  `cache_control` breakpoints on system prompt, tool list, and message prefix;
-  cache tokens surfaced into `provider.Usage` (`CacheCreationTokens`/`CacheReadTokens`).
-  Toggle via `anthropic.WithPromptCaching`.
-- **9.3 Cost tracking** — `internal/cost/cost.go` (pricing catalog longest-prefix
-  match, `Tracker`, `Snapshot`). Engine accumulates per-turn cost, aborts past
-  `cost.budget_usd`. TUI shows running `$`; `chat` prints a cost summary.
-- **9.4 Parallel tools** — `internal/engine/engine.go` `runTools`: reads/network run
-  concurrently (bounded `maxParallelTools=8`), writes/execute serialized via RWMutex,
-  emits serialized, results position-indexed to preserve order. Single tool = sequential.
-- **9.5 Loop detection** — `internal/engine/loopdetect.go`: aborts when identical
-  tool-call turns repeat `LoopThreshold` times (default 3).
+- **9.1 Retry/backoff** — `internal/provider/errors.go` + `retry.go`
+- **9.2 Prompt caching** — `internal/provider/anthropic/anthropic.go`
+- **9.3 Cost tracking** — `internal/cost/cost.go`
+- **9.4 Parallel tools** — `internal/engine/engine.go`
+- **9.5 Loop detection** — `internal/engine/loopdetect.go`
 
 ### Phase 10 — Multi-agent orchestration (branch `phase-10-multi-agent`)
 
-- **`internal/swarm/`** — pure coordination layer (no engine import):
-  - `types.go` — `Identity`, `SpawnConfig`, `Backend` interface (`Spawn`/`Shutdown`/
-    `OnStop`), `Handle.Wait`, `RunFunc`, spawn-depth + parent-mode context helpers.
-  - `mailbox.go` — durable file mailbox (atomic temp+rename, chronological order,
-    unread filter, corrupt-skip). `MailboxRoot(dataDir)` = `<dataDir>/teams`.
-  - `registry.go` — thread-safe team registry (`Member` w/ status/summary/timestamps).
-  - `inprocess.go` — `InProcessBackend`: teammates as goroutines via `RunFunc`.
-  - `subprocess.go` — `SubprocessBackend`: relaunches the harness as `__worker`,
-    reads result from mailbox after exit, synthesizes failure (w/ stderr) on crash.
-    `WorkerSpec` is the JSON contract.
-- **`internal/agentdef/agentdef.go`** — built-in agent definitions: `general`,
-  `explore` (read-only search), `plan`, `build`. Resolved by `subagent_type`.
-- **`internal/tool/builtin/agent.go`** — the `agent` tool (`CapSpawn`). Resolves
-  subagent_type, **clamps child mode to ≤ parent** (`plan` parent forces `plan`
-  child), recursion depth guard (`maxSpawnDepth=3`), spawns + waits, returns output.
-  `background:true` flag launches the teammate as a detached background task.
-- **`internal/cli/worker.go`** — hidden `__worker` command for the subprocess backend
-  (loads own config, builtin tools only = leaf node, records result in mailbox).
-- **permission** — added `tool.CapSpawn`; allowed in both plan/build modes.
-- **server** — `buildSwarmBackend` selects backend from `swarm.backend` config
-  (`in_process` default | `subprocess`); injects session mode into run ctx;
-  `subAgentRunner()` builds sub-engines for in-process; shutdown waits for teammates.
-- **Polish** — `OnStop` lifecycle callback → `SUBAGENT_STOP` audit record
-  (`hooks.Audit.SubagentStop`); `GET /teammates` route + `api.Teammate` +
-  `client.Teammates`; TUI `Ctrl+T` swarm panel.
+- **Swarm core** — `internal/swarm/` (types, mailbox, registry, inprocess, subprocess)
+- **Agent definitions** — `internal/agentdef/agentdef.go`
+- **`agent` tool** — `internal/tool/builtin/agent.go` (sync + background delegation)
+- **Worker CLI** — `internal/cli/worker.go`
+- **Polish** — audit, `/teammates`, TUI swarm panel
 
 ### Phase 11 — Background tasks & scheduling (branch `phase-11-tasks`)
 
-#### 11.1 — Background task manager + SQLite persistence
+- **11.1** — `internal/task/` (Manager, Store, SQLite persistence)
+- **11.2** — `internal/tool/builtin/task.go` (6 task tools), background shell + agent
+- **11.3** — `internal/cron/` (5-field parser, scheduler, 4 cron tools)
 
-- **`internal/task/task.go`** — core task manager: `State` enum (running/done/failed/
-  stopped), `Task` struct, `Spec`, `RunFunc` type, `Manager` with `Start`/`Get`/
-  `List`/`SetTitle`/`Stop`/`Wait`/`Shutdown`. `outputBuffer` accumulates streamed
-  output. `safeRun` recovers panics. Detached contexts (background-derived) so jobs
-  survive the HTTP request that spawned them.
-- **`internal/task/store.go`** — SQLite persistence: `tasks` table, `Save` (upsert),
-  `Get`, `List` (by session or all), `scanTask` helper. Shares the session DB via
-  `session.Store.DB()`.
-- **`internal/task/task_test.go`** — tests: TaskCompletes, TaskFailure,
-  TaskPanicRecovered, TaskStop, StopUnknown, StopFinishedIsNoop, LivePollAndList,
-  SetTitle, ShutdownCancelsLive, PersistenceSurvivesNewManager.
+### Phase 12 — Sandboxing & contextual security (branch `phase-12-sandbox`)
 
-#### 11.2 — task_* tools, killable background shell, async sub-agents
+#### 12.1 — Sandbox backend + hardened path validator
 
-- **`internal/tool/builtin/task.go`** — six task tools: `task_create` (launches
-  background shell via `runShellStreaming`), `task_list`, `task_get` (tail output),
-  `task_output` (full output), `task_update` (rename), `task_stop` (cancel).
-- **`internal/tool/builtin/shell.go`** — `background:true` flag added. When set
-  and task manager is available, launches command as a detached background job.
-  `runShellStreaming` streams combined stdout/stderr to the task buffer via
-  `emitWriter`. Process is killable via `task_stop`.
-- **`internal/tool/builtin/agent.go`** — `background:true` flag added.
-  `spawnBackground` wraps spawn+wait inside a `task.Manager.Start` so the teammate
-  runs detached. Returns task id for polling.
-- **Server wiring** — `server.go` creates `task.NewStore(store.DB())` and
-  `task.NewManager`, passes to `builtin.Options.Tasks` and `NewAgentTool`.
-  Shutdown drains `tasks.Shutdown(shutdownCtx)`.
-- **`internal/tool/builtin/task_test.go`** — tests: TaskCreateAndPoll,
-  TaskUpdateAndStopErrors, BackgroundShellTool, BackgroundShellWithoutManager,
-  BackgroundAgentTool, BackgroundAgentWithoutManager.
+- **`internal/sandbox/sandbox.go`** — `Backend` interface (`Exec`, `ExecStreaming`,
+  `Close`). Shared helpers: `shellCommand`, `execWithTimeout`.
+- **`internal/sandbox/local.go`** — `LocalBackend`: runs commands directly on the
+  host OS (default, preserves existing behavior).
+- **`internal/sandbox/docker.go`** — `ContainerBackend`: auto-detects available
+  container runtime (Docker → Podman → Apple Containers on macOS). Falls back to
+  local if none found. Each command runs via `docker/podman run --rm` with workspace
+  bind-mounted and optional network isolation (`--network none`).
+  `ContainerRuntime` enum: `docker`, `podman`, `container` (Apple).
+- **`internal/sandbox/pathvalidator.go`** — `ValidatePath`: resolves symlinks
+  via `filepath.EvalSymlinks` before checking workspace containment. Handles
+  non-existent paths by resolving the nearest existing ancestor. Replaces the
+  basic `filepath.Rel` check in builtin tools.
+- **Shell tool refactored** — `shell.go` now delegates to `sandbox.Backend` instead
+  of creating `exec.Command` directly. `task_create` also uses the backend.
+- **Config** — `sandbox.backend` (local | container), `sandbox.runtime` (docker |
+  podman | container | empty=auto), `sandbox.image`, `sandbox.network`.
+- **Tests** — path validator (basic, absolute, dot-dot escape, new file, symlink
+  escape, symlink inside), local backend (exec, timeout, streaming, failure).
 
-#### 11.3 — Cron scheduler
+#### 12.2 — Contextual security policies
 
-- **`internal/cron/schedule.go`** — 5-field cron parser: `Parse()`, `parseField()`,
-  `Schedule.Matches()`. Supports macros (`@hourly`, `@daily`, `@weekly`, `@monthly`).
-  Standard cron OR-rule for dom/dow.
-- **`internal/cron/cron.go`** — `Job` struct, `Store` (SQLite `cron_jobs` table),
-  `Scheduler` with `Create`/`List`/`Delete`/`Toggle`/`tick`/`Run`. `tick()` fires
-  enabled jobs matching current minute (idempotent within a minute). `Run()` loops
-  aligned to minute boundaries. Injectable clock for tests.
-- **`internal/tool/builtin/cron.go`** — four cron tools: `cron_create` (validates
-  schedule, persists job), `cron_list`, `cron_delete`, `cron_toggle`.
-- **Server wiring** — `server.go` creates `cron.NewStore(store.DB())` and
-  `cron.NewScheduler` with a `RunFunc` that launches cron job commands as background
-  tasks via the task manager. Scheduler goroutine starts in `ListenAndServe`,
-  cancelled on shutdown.
-- **`internal/cron/cron_test.go`** — tests: ParseAndMatches, ParseMacros,
-  ParseErrors, DomDowOrRule, StoreRoundTrip, SchedulerCreateAndToggle,
-  SchedulerCreateBadSchedule, TickFiresAndIdempotent, TickSkipsDisabled.
-- **`internal/tool/builtin/cron_test.go`** — tests: CronCreateAndList,
-  CronCreateBadSchedule, CronToggleAndDelete, CronDeleteNotFound,
-  CronCreateMissingFields.
+- **`internal/permission/contextual.go`** — `ContextualGate` wrapping the base
+  `Gate`. Implements both `engine.Gate` and `hooks.Hook` interfaces. Stateful
+  tracking of session events with two rules:
+  - **EgressThenWrite**: after any successful `CapNetwork` tool call, subsequent
+    `CapWrite` calls require `Ask` (approval). Protects against read→exfil→write
+    data exfiltration patterns.
+  - **NetworkAllowList**: `CapNetwork` calls checked against a configurable domain
+    allowlist with subdomain matching (leading dot). Calls to unlisted domains
+    denied. Search tools get a synthetic `search.api` passthrough.
+- **`OnDecision` callback** for audit observability.
+- **`Reset()`** clears state between sessions.
+- **Tests** — 10 tests: egress-then-write (block, approve, ignore errors, disabled),
+  network allowlist (allowed, subdomain, blocked, disabled, search passthrough),
+  reset, base-denial precedence, OnDecision callback.
+
+#### 12.3 — Server wiring + audit integration
+
+- **Config** — `security.egress_then_write` (bool), `security.network_allowlist`
+  (string list).
+- **Server wiring** — `newEngine()` wraps the base gate with `ContextualGate` when
+  any security policy is enabled. Gate's `OnDecision` feeds into audit trail.
+  Contextual gate composed into hooks chain so `PostToolUse` updates state.
+- **Audit** — `hooks.Audit.PolicyDecision()` records contextual policy decisions
+  as `phase: "policy_decision"` JSONL records with rule, decision, reason, cap.
 
 ### New config knobs (all in `internal/config/config.go`, with defaults)
 
 - `provider.max_retries` (4)
 - `cost.budget_usd` (0 = unlimited)
 - `swarm.backend` ("in_process" | "subprocess")
+- `sandbox.backend` ("local" | "container")
+- `sandbox.runtime` ("" = auto-detect | "docker" | "podman" | "container")
+- `sandbox.image` ("ubuntu:22.04")
+- `sandbox.network` (false)
+- `security.egress_then_write` (false)
+- `security.network_allowlist` (empty = no restriction)
 
 ## Deferred / explicitly NOT done
 
 - Agent definitions from files/plugins (markdown discovery) — slated for **Phase 15**.
 - The `agent` tool is registered only in the **daemon/server** path, not the `chat`
   one-shot CLI path.
+- Docker backend uses per-command `docker run --rm`; a persistent container
+  optimization could be added later.
 
-## NEXT: Phase 12 — Docker sandbox & contextual security policies
+## NEXT: Phase 13 — Coding intelligence (Crush-inspired)
 
-Goal: container-isolated command execution and richer security policies.
-Full detail in the roadmap file at the path above.
+Goal: LSP integration, file staleness tracking, MCP HTTP/SSE transports,
+local-model discovery. Full detail in the roadmap file.
 
-After Phase 12: Phase 13 (LSP, file staleness, MCP HTTP/SSE, local-model discovery),
-Phase 14 (relevance-scored memory, TODO tool, dry-run, config schema),
+After Phase 13: Phase 14 (relevance-scored memory, TODO tool, dry-run, config schema),
 Phase 15 (custom tools/agents/commands + plugin loader).
 
 ## Working conventions used so far
@@ -175,7 +153,7 @@ Phase 15 (custom tools/agents/commands + plugin loader).
 
 ## How to resume
 
-1. `git checkout phase-11-tasks` (or create `phase-12-docker` off it).
+1. `git checkout phase-12-sandbox` (or create `phase-13-coding` off it).
 2. Re-read the roadmap: `C:\Users\scott\.claude\plans\i-want-to-further-sorted-milner.md`.
 3. `go build ./... && go test ./... -race` to confirm a green baseline.
-4. Start Phase 12 per the roadmap.
+4. Start Phase 13 per the roadmap.

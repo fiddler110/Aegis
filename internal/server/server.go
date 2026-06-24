@@ -322,13 +322,32 @@ func (s *Server) newEngine(mode string) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, fmt.Errorf("no model provider configured (set ANTHROPIC_API_KEY and restart the daemon)")
 	}
-	gate := permission.New(permission.ParseMode(mode), s.approver())
+	baseGate := permission.New(permission.ParseMode(mode), s.approver())
+
+	var gate engine.Gate = baseGate
+	engineHooks := s.hooks
+
+	// Wrap with contextual security policies if any are enabled.
+	if s.cfg.Security.EgressThenWrite || len(s.cfg.Security.NetworkAllowList) > 0 {
+		ctxGate := permission.NewContextualGate(baseGate, permission.ContextualOpts{
+			EgressThenWrite:  s.cfg.Security.EgressThenWrite,
+			NetworkAllowList: s.cfg.Security.NetworkAllowList,
+			OnDecision: func(d permission.ContextualDecision) {
+				if s.audit != nil {
+					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
+				}
+			},
+		})
+		gate = ctxGate
+		engineHooks = hooks.NewMulti(s.audit, ctxGate)
+	}
+
 	return engine.New(engine.Options{
 		Adapter:   s.adapter,
 		Tools:     s.tools,
 		Gate:      gate,
 		Compactor: s.compactor,
-		Hooks:     s.hooks,
+		Hooks:     engineHooks,
 		Cost:      cost.NewTracker(),
 		BudgetUSD: s.cfg.Cost.BudgetUSD,
 		Model:     s.cfg.Provider.Model,
