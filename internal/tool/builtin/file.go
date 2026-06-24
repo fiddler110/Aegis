@@ -8,12 +8,16 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scottymacleod/agentharness/internal/filetracker"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
 
 // --- read ---
 
-type readTool struct{ root string }
+type readTool struct {
+	root    string
+	tracker *filetracker.Tracker
+}
 
 func (t *readTool) Name() string               { return "read_file" }
 func (t *readTool) Capability() tool.Capability { return tool.CapRead }
@@ -40,6 +44,9 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
 	}
+	if t.tracker != nil {
+		t.tracker.RecordRead(abs)
+	}
 	lines := strings.Split(string(data), "\n")
 	start := 1
 	if args.Offset > 0 {
@@ -59,7 +66,10 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 
 // --- write ---
 
-type writeTool struct{ root string }
+type writeTool struct {
+	root    string
+	tracker *filetracker.Tracker
+}
 
 func (t *writeTool) Name() string                { return "write_file" }
 func (t *writeTool) Capability() tool.Capability { return tool.CapWrite }
@@ -81,18 +91,29 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if err != nil {
 		return tool.Result{}, err
 	}
+	if t.tracker != nil {
+		if err := t.tracker.CheckWrite(abs); err != nil {
+			return tool.Result{Content: err.Error(), IsError: true}, nil
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return tool.Result{Content: fmt.Sprintf("mkdir failed: %v", err), IsError: true}, nil
 	}
 	if err := os.WriteFile(abs, []byte(args.Content), 0o644); err != nil {
 		return tool.Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}, nil
 	}
+	if t.tracker != nil {
+		t.tracker.RecordWrite(abs)
+	}
 	return tool.Result{Content: fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)}, nil
 }
 
 // --- edit ---
 
-type editTool struct{ root string }
+type editTool struct {
+	root    string
+	tracker *filetracker.Tracker
+}
 
 func (t *editTool) Name() string                { return "edit_file" }
 func (t *editTool) Capability() tool.Capability { return tool.CapWrite }
@@ -116,6 +137,11 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err != nil {
 		return tool.Result{}, err
 	}
+	if t.tracker != nil {
+		if err := t.tracker.CheckWrite(abs); err != nil {
+			return tool.Result{Content: err.Error(), IsError: true}, nil
+		}
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
@@ -136,6 +162,9 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
 		return tool.Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}, nil
+	}
+	if t.tracker != nil {
+		t.tracker.RecordWrite(abs)
 	}
 	return tool.Result{Content: fmt.Sprintf("edited %s (%d replacement(s))", args.Path, n)}, nil
 }

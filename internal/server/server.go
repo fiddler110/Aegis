@@ -22,6 +22,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/cron"
 	"github.com/scottymacleod/agentharness/internal/cost"
 	"github.com/scottymacleod/agentharness/internal/engine"
+	"github.com/scottymacleod/agentharness/internal/filetracker"
 	"github.com/scottymacleod/agentharness/internal/hooks"
 	"github.com/scottymacleod/agentharness/internal/mcp"
 	"github.com/scottymacleod/agentharness/internal/memory"
@@ -126,7 +127,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
 
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb}); err != nil {
+	ft := filetracker.New()
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft}); err != nil {
 		store.Close()
 		return nil, err
 	}

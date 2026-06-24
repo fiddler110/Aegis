@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/scottymacleod/agentharness/internal/cron"
+	"github.com/scottymacleod/agentharness/internal/filetracker"
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/sandbox"
 	"github.com/scottymacleod/agentharness/internal/task"
@@ -36,6 +37,9 @@ type Options struct {
 	// Sandbox, when set, routes shell execution through a sandbox backend
 	// (local, Docker, Podman, etc.). Nil = direct local execution.
 	Sandbox sandbox.Backend
+	// FileTracker, when set, enables file staleness detection. Write/edit
+	// tools reject edits to files modified externally since last read.
+	FileTracker *filetracker.Tracker
 }
 
 // Register adds all built-in tools to the registry.
@@ -54,10 +58,12 @@ func Register(reg *tool.Registry, opts Options) error {
 		opts.KrokiURL = "https://kroki.io"
 	}
 
+	ft := opts.FileTracker
 	tools := []tool.Tool{
-		&readTool{root: root},
-		&writeTool{root: root},
-		&editTool{root: root},
+		&readTool{root: root, tracker: ft},
+		&writeTool{root: root, tracker: ft},
+		&editTool{root: root, tracker: ft},
+		&multieditTool{root: root, tracker: ft},
 		&globTool{root: root},
 		&grepTool{root: root},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
