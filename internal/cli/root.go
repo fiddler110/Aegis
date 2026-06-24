@@ -85,6 +85,7 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(newServeCmd())
 	cmd.AddCommand(newConfigCmd())
+	cmd.AddCommand(newDryRunCmd())
 	cmd.AddCommand(newChatCmd())
 	cmd.AddCommand(newSessionsCmd())
 	cmd.AddCommand(newScanCmd())
