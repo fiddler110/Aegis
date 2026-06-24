@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
 
@@ -16,6 +17,9 @@ import (
 type Options struct {
 	// Root is the workspace directory file/search/shell tools are confined to.
 	Root string
+	// DataDir is the per-user data directory; when set, memory/skill tools are
+	// registered.
+	DataDir string
 	// ShellTimeoutSec bounds how long a shell command may run (0 -> default).
 	ShellTimeoutSec int
 	// HTTPUserAgent is sent by the web tools.
@@ -44,6 +48,10 @@ func Register(reg *tool.Registry, opts Options) error {
 		newShellTool(root, opts.ShellTimeoutSec),
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent},
+	}
+	if opts.DataDir != "" {
+		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}
+		tools = append(tools, &rememberTool{src: src}, &saveSkillTool{src: src})
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {

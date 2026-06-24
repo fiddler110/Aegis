@@ -54,7 +54,7 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd}); err != nil {
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir}); err != nil {
 				return err
 			}
 

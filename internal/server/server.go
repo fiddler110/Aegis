@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/scottymacleod/agentharness/internal/api"
+	"github.com/scottymacleod/agentharness/internal/compaction"
 	"github.com/scottymacleod/agentharness/internal/config"
 	"github.com/scottymacleod/agentharness/internal/engine"
+	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/permission"
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/provider/anthropic"
@@ -28,12 +30,15 @@ import (
 
 // Server holds the daemon's shared state.
 type Server struct {
-	cfg     *config.Config
-	store   *session.Store
-	adapter provider.Adapter
-	tools   *tool.Registry
-	logger  *slog.Logger
-	http    *http.Server
+	cfg       *config.Config
+	store     *session.Store
+	adapter   provider.Adapter
+	tools     *tool.Registry
+	memory    memory.Sources
+	compactor engine.Compactor
+	workspace string
+	logger    *slog.Logger
+	http      *http.Server
 }
 
 // New constructs a daemon from config. The workspace root for tools is the
@@ -57,12 +62,18 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	cwd, _ := os.Getwd()
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir}); err != nil {
 		store.Close()
 		return nil, err
 	}
 
-	return newWithDeps(cfg, logger, store, adapter, reg), nil
+	s := newWithDeps(cfg, logger, store, adapter, reg)
+	s.workspace = cwd
+	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
+	if adapter != nil {
+		s.compactor = compaction.New(compaction.Options{Adapter: adapter, Model: cfg.Provider.Model})
+	}
+	return s, nil
 }
 
 // newWithDeps assembles a Server from explicit dependencies. It is the seam
@@ -138,6 +149,7 @@ func (s *Server) newEngine(mode string) (*engine.Engine, error) {
 		Adapter:   s.adapter,
 		Tools:     s.tools,
 		Gate:      gate,
+		Compactor: s.compactor,
 		Model:     s.cfg.Provider.Model,
 		MaxTokens: s.cfg.Provider.MaxTokens,
 		Logger:    s.logger,
@@ -238,7 +250,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conv := &engine.Conversation{System: sess.System, Messages: sess.Messages}
+	conv := &engine.Conversation{System: s.effectiveSystem(sess.System), Messages: sess.Messages}
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: req.Text}}})
 
 	runErr := eng.Run(r.Context(), conv, func(ev engine.Event) {
@@ -254,6 +266,22 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if runErr != nil {
 		s.logger.Warn("run ended with error", "session", id, "err", runErr)
+	}
+}
+
+// effectiveSystem combines the session's base system prompt with loaded
+// project/user memory and skills.
+func (s *Server) effectiveSystem(base string) string {
+	mem := s.memory.Load()
+	switch {
+	case base == "" && mem == "":
+		return ""
+	case mem == "":
+		return base
+	case base == "":
+		return mem
+	default:
+		return base + "\n\n" + mem
 	}
 }
 

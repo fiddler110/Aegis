@@ -56,11 +56,19 @@ type Gate interface {
 	Check(ctx context.Context, t tool.Tool, input json.RawMessage) (allowed bool, reason string)
 }
 
+// Compactor optionally shortens a conversation (e.g. by summarizing old turns)
+// when it grows too large. It returns the possibly-rewritten message list and
+// whether a change was made.
+type Compactor interface {
+	Compact(ctx context.Context, system string, msgs []provider.Message) (out []provider.Message, changed bool, err error)
+}
+
 // Options configures an Engine.
 type Options struct {
 	Adapter       provider.Adapter
 	Tools         *tool.Registry
-	Gate          Gate // optional; nil means all tool calls are allowed
+	Gate          Gate       // optional; nil means all tool calls are allowed
+	Compactor     Compactor  // optional; nil disables context compaction
 	Model         string
 	MaxTokens     int
 	Temperature   *float64
@@ -73,6 +81,7 @@ type Engine struct {
 	adapter       provider.Adapter
 	tools         *tool.Registry
 	gate          Gate
+	compactor     Compactor
 	model         string
 	maxTokens     int
 	temperature   *float64
@@ -107,6 +116,7 @@ func New(opts Options) (*Engine, error) {
 		adapter:       opts.Adapter,
 		tools:         opts.Tools,
 		gate:          opts.Gate,
+		compactor:     opts.Compactor,
 		model:         opts.Model,
 		maxTokens:     maxTok,
 		temperature:   opts.Temperature,
@@ -121,6 +131,15 @@ func New(opts Options) (*Engine, error) {
 func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) error {
 	if emit == nil {
 		emit = func(Event) {}
+	}
+
+	if e.compactor != nil {
+		if out, changed, err := e.compactor.Compact(ctx, conv.System, conv.Messages); err != nil {
+			e.logger.Warn("context compaction failed", "err", err)
+		} else if changed {
+			e.logger.Info("compacted conversation", "before", len(conv.Messages), "after", len(out))
+			conv.Messages = out
+		}
 	}
 
 	for iter := 0; iter < e.maxIterations; iter++ {
