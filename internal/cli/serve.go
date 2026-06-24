@@ -1,10 +1,13 @@
 package cli
 
 import (
-	"fmt"
+	"context"
+	"os"
+	"os/signal"
 
 	"github.com/scottymacleod/agentharness/internal/config"
 	"github.com/scottymacleod/agentharness/internal/logging"
+	"github.com/scottymacleod/agentharness/internal/server"
 	"github.com/spf13/cobra"
 )
 
@@ -34,9 +37,15 @@ func newServeCmd() *cobra.Command {
 			defer closer.Close()
 
 			logger.Info("daemon starting", "addr", cfg.Server.Addr, "data_dir", cfg.DataDir)
-			fmt.Fprintf(cmd.OutOrStdout(), "daemon configured to listen on %s (server impl arrives in Phase 4)\n", cfg.Server.Addr)
-			// The HTTP server and agent engine are wired up in later phases.
-			return nil
+
+			srv, err := server.New(cfg, logger)
+			if err != nil {
+				return err
+			}
+
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer stop()
+			return srv.ListenAndServe(ctx)
 		},
 	}
 

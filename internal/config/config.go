@@ -45,7 +45,8 @@ type ServerConfig struct {
 
 // PermissionConfig sets the default agent permission posture.
 type PermissionConfig struct {
-	Mode string `koanf:"mode"` // "plan" or "build"
+	Mode            string `koanf:"mode"`              // "plan" or "build"
+	AutoApproveExec bool   `koanf:"auto_approve_exec"` // auto-approve shell/execute tool calls
 }
 
 // DiagramConfig configures diagram rendering.
@@ -67,8 +68,9 @@ func defaults() map[string]any {
 		"provider.model":    "claude-opus-4-8",
 		"provider.max_tokens": 8192,
 		"server.addr":       "127.0.0.1:4127",
-		"permission.mode":   "plan",
-		"diagram.kroki_url": "https://kroki.io",
+		"permission.mode":              "plan",
+		"permission.auto_approve_exec": false,
+		"diagram.kroki_url":            "https://kroki.io",
 	}
 }
 
