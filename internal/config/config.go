@@ -28,12 +28,21 @@ type Config struct {
 	Diagram    DiagramConfig     `koanf:"diagram"`
 	Cost       CostConfig        `koanf:"cost"`
 	Swarm      SwarmConfig       `koanf:"swarm"`
+	Sandbox    SandboxConfig     `koanf:"sandbox"`
 	MCP        []MCPServerConfig `koanf:"mcp"`
 }
 
 // SwarmConfig configures multi-agent sub-agent execution.
 type SwarmConfig struct {
 	Backend string `koanf:"backend"` // "in_process" (default) or "subprocess"
+}
+
+// SandboxConfig configures command execution isolation.
+type SandboxConfig struct {
+	Backend string `koanf:"backend"` // "local" (default) or "container"
+	Runtime string `koanf:"runtime"` // container runtime preference: "docker", "podman", "container" (Apple); empty = auto-detect
+	Image   string `koanf:"image"`   // container image (default "ubuntu:22.04")
+	Network bool   `koanf:"network"` // allow network access inside containers (default false)
 }
 
 // CostConfig configures spend tracking.
@@ -96,6 +105,9 @@ func defaults() map[string]any {
 		"diagram.kroki_url":            "https://kroki.io",
 		"cost.budget_usd":              0.0,
 		"swarm.backend":                "in_process",
+		"sandbox.backend":              "local",
+		"sandbox.image":                "ubuntu:22.04",
+		"sandbox.network":              false,
 	}
 }
 

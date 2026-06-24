@@ -4,11 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/scottymacleod/agentharness/internal/sandbox"
 	"github.com/scottymacleod/agentharness/internal/task"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
@@ -16,14 +15,15 @@ import (
 type shellTool struct {
 	root       string
 	timeoutSec int
-	mgr        *task.Manager // optional; enables background:true
+	mgr        *task.Manager    // optional; enables background:true
+	sb         sandbox.Backend  // optional; nil = inline local exec (legacy path)
 }
 
-func newShellTool(root string, timeoutSec int, mgr *task.Manager) *shellTool {
+func newShellTool(root string, timeoutSec int, mgr *task.Manager, sb sandbox.Backend) *shellTool {
 	if timeoutSec <= 0 {
 		timeoutSec = 120
 	}
-	return &shellTool{root: root, timeoutSec: timeoutSec, mgr: mgr}
+	return &shellTool{root: root, timeoutSec: timeoutSec, mgr: mgr, sb: sb}
 }
 
 func (t *shellTool) Name() string                { return "shell" }
@@ -58,7 +58,7 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 			return tool.Result{Content: "background jobs are not available in this context", IsError: true}, nil
 		}
 		tk, err := t.mgr.Start(task.Spec{Kind: "shell", Title: truncateTitle(args.Command)}, func(jobCtx context.Context, emit func(string)) (string, error) {
-			return "", runShellStreaming(jobCtx, t.root, args.Command, timeout, emit)
+			return "", t.execStreaming(jobCtx, args.Command, timeout, emit)
 		})
 		if err != nil {
 			return tool.Result{Content: "shell: " + err.Error(), IsError: true}, nil
@@ -66,69 +66,26 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return tool.Result{Content: fmt.Sprintf("Started background shell job (task id %s). Poll with task_get; read output with task_output; cancel with task_stop.", tk.ID)}, nil
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	name, shellArgs := shellCommand(args.Command)
-	cmd := exec.CommandContext(runCtx, name, shellArgs...)
-	cmd.Dir = t.root
-
-	out, err := cmd.CombinedOutput()
-	text := string(out)
-	if runCtx.Err() == context.DeadlineExceeded {
-		return tool.Result{Content: fmt.Sprintf("command timed out after %s\n%s", timeout, text), IsError: true}, nil
-	}
+	// Foreground execution.
+	text, err := t.exec(ctx, args.Command, timeout)
 	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("exit error: %v\n%s", err, text), IsError: true}, nil
-	}
-	if strings.TrimSpace(text) == "" {
-		text = "(no output)"
+		return tool.Result{Content: fmt.Sprintf("%v\n%s", err, text), IsError: true}, nil
 	}
 	return tool.Result{Content: text}, nil
 }
 
-// runShellStreaming runs command in root, streaming combined stdout/stderr to
-// emit as it arrives, and kills the process if ctx is cancelled (the "killable
-// background job" path). It returns a timeout/exit error for the task layer.
-func runShellStreaming(ctx context.Context, root, command string, timeout time.Duration, emit func(string)) error {
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	name, shellArgs := shellCommand(command)
-	cmd := exec.CommandContext(runCtx, name, shellArgs...)
-	cmd.Dir = root
-	w := emitWriter{emit: emit}
-	cmd.Stdout = w
-	cmd.Stderr = w
-
-	err := cmd.Run()
-	if runCtx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("command timed out after %s", timeout)
+// exec runs a command synchronously, delegating to the sandbox backend if set.
+func (t *shellTool) exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
+	if t.sb != nil {
+		return t.sb.Exec(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout})
 	}
-	if ctx.Err() != nil {
-		return ctx.Err() // cancelled via task_stop / shutdown
-	}
-	if err != nil {
-		return fmt.Errorf("exit error: %w", err)
-	}
-	return nil
+	return sandbox.NewLocalBackend().Exec(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout})
 }
 
-// emitWriter adapts a streaming emit callback to io.Writer. exec may call Write
-// from separate stdout/stderr copier goroutines, so emit must be concurrency
-// safe (the task buffer is).
-type emitWriter struct{ emit func(string) }
-
-func (w emitWriter) Write(p []byte) (int, error) {
-	w.emit(string(p))
-	return len(p), nil
-}
-
-// shellCommand returns the platform shell binary and the argument list needed
-// to execute command.
-func shellCommand(command string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", command}
+// execStreaming runs a command with streaming output.
+func (t *shellTool) execStreaming(ctx context.Context, command string, timeout time.Duration, emit func(string)) error {
+	if t.sb != nil {
+		return t.sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout}, emit)
 	}
-	return "/bin/sh", []string{"-c", command}
+	return sandbox.NewLocalBackend().ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout}, emit)
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scottymacleod/agentharness/internal/sandbox"
 	"github.com/scottymacleod/agentharness/internal/task"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
@@ -16,12 +17,12 @@ import (
 // `shell` with background:true, or the `agent` tool in background mode), keep
 // going, and poll for results later. shellTimeoutSec bounds a task_create job
 // (0 -> default).
-func TaskTools(mgr *task.Manager, root string, shellTimeoutSec int) []tool.Tool {
+func TaskTools(mgr *task.Manager, root string, shellTimeoutSec int, sb sandbox.Backend) []tool.Tool {
 	if shellTimeoutSec <= 0 {
 		shellTimeoutSec = 120
 	}
 	return []tool.Tool{
-		&taskCreateTool{mgr: mgr, root: root, timeoutSec: shellTimeoutSec},
+		&taskCreateTool{mgr: mgr, root: root, timeoutSec: shellTimeoutSec, sb: sb},
 		&taskListTool{mgr: mgr},
 		&taskGetTool{mgr: mgr},
 		&taskOutputTool{mgr: mgr},
@@ -36,6 +37,7 @@ type taskCreateTool struct {
 	mgr        *task.Manager
 	root       string
 	timeoutSec int
+	sb         sandbox.Backend
 }
 
 func (t *taskCreateTool) Name() string                { return "task_create" }
@@ -68,8 +70,12 @@ func (t *taskCreateTool) Execute(_ context.Context, input json.RawMessage) (tool
 	if args.TimeoutSec > 0 {
 		timeout = time.Duration(args.TimeoutSec) * time.Second
 	}
+	sb := t.sb
+	if sb == nil {
+		sb = sandbox.NewLocalBackend()
+	}
 	tk, err := t.mgr.Start(task.Spec{Kind: "shell", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
-		return "", runShellStreaming(ctx, t.root, args.Command, timeout, emit)
+		return "", sb.ExecStreaming(ctx, args.Command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout}, emit)
 	})
 	if err != nil {
 		return tool.Result{Content: "task_create: " + err.Error(), IsError: true}, nil

@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/scottymacleod/agentharness/internal/cron"
 	"github.com/scottymacleod/agentharness/internal/memory"
+	"github.com/scottymacleod/agentharness/internal/sandbox"
 	"github.com/scottymacleod/agentharness/internal/task"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
@@ -33,6 +33,9 @@ type Options struct {
 	Tasks *task.Manager
 	// Cron, when set, enables recurring-job tools (cron_create, etc.).
 	Cron *cron.Scheduler
+	// Sandbox, when set, routes shell execution through a sandbox backend
+	// (local, Docker, Podman, etc.). Nil = direct local execution.
+	Sandbox sandbox.Backend
 }
 
 // Register adds all built-in tools to the registry.
@@ -57,7 +60,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&editTool{root: root},
 		&globTool{root: root},
 		&grepTool{root: root},
-		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks),
+		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent},
 		&securityScanTool{root: root},
@@ -68,7 +71,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		tools = append(tools, &rememberTool{src: src}, &saveSkillTool{src: src})
 	}
 	if opts.Tasks != nil {
-		tools = append(tools, TaskTools(opts.Tasks, root, opts.ShellTimeoutSec)...)
+		tools = append(tools, TaskTools(opts.Tasks, root, opts.ShellTimeoutSec, opts.Sandbox)...)
 	}
 	if opts.Cron != nil {
 		tools = append(tools, CronTools(opts.Cron)...)
@@ -81,21 +84,11 @@ func Register(reg *tool.Registry, opts Options) error {
 	return nil
 }
 
-// resolvePath joins p against root and rejects paths that escape it.
+// resolvePath joins p against root and rejects paths that escape it. It
+// delegates to the sandbox path validator which resolves symlinks to prevent
+// symlink-based workspace escapes.
 func resolvePath(root, p string) (string, error) {
-	if strings.TrimSpace(p) == "" {
-		return "", fmt.Errorf("path is required")
-	}
-	abs := p
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(root, abs)
-	}
-	abs = filepath.Clean(abs)
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q escapes the workspace", p)
-	}
-	return abs, nil
+	return sandbox.ValidatePath(root, p)
 }
 
 // parseArgs unmarshals tool input into v, returning a friendly error.

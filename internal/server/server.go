@@ -12,16 +12,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/scottymacleod/agentharness/internal/api"
 	"github.com/scottymacleod/agentharness/internal/compaction"
-	"github.com/scottymacleod/agentharness/internal/cron"
 	"github.com/scottymacleod/agentharness/internal/config"
+	"github.com/scottymacleod/agentharness/internal/cron"
 	"github.com/scottymacleod/agentharness/internal/cost"
 	"github.com/scottymacleod/agentharness/internal/engine"
 	"github.com/scottymacleod/agentharness/internal/hooks"
@@ -29,6 +27,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/permission"
 	"github.com/scottymacleod/agentharness/internal/persona"
+	"github.com/scottymacleod/agentharness/internal/sandbox"
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/providerfactory"
 	"github.com/scottymacleod/agentharness/internal/session"
@@ -53,6 +52,7 @@ type Server struct {
 	tasks      *task.Manager
 	cronSched  *cron.Scheduler
 	cronCancel context.CancelFunc
+	sandbox    sandbox.Backend
 	audit      *hooks.Audit
 	workspace  string
 	logger     *slog.Logger
@@ -86,26 +86,47 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	taskMgr := task.NewManager(taskStore, logger)
 
+	cwd, _ := os.Getwd()
+
+	// Sandbox backend: try container runtime if configured, else local.
+	var sb sandbox.Backend
+	if cfg.Sandbox.Backend == "container" {
+		csb, err := sandbox.NewContainerBackend(sandbox.ContainerOpts{
+			Image:   cfg.Sandbox.Image,
+			Network: cfg.Sandbox.Network,
+			Prefer:  sandbox.ContainerRuntime(cfg.Sandbox.Runtime),
+		})
+		if err != nil {
+			logger.Warn("container sandbox unavailable, falling back to local", "err", err)
+			sb = sandbox.NewLocalBackend()
+		} else {
+			logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Sandbox.Image)
+			sb = csb
+		}
+	} else {
+		sb = sandbox.NewLocalBackend()
+	}
+
 	// Cron scheduler: fires due jobs as background tasks.
 	cronStore, err := cron.NewStore(store.DB())
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
+	runCronCmd := cronShellRunner(sb, cwd)
 	cronRun := func(j cron.Job) {
 		title := j.Title
 		if title == "" {
 			title = "cron: " + j.Command
 		}
 		_, _ = taskMgr.Start(task.Spec{Kind: "cron", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
-			return "", runCronShell(ctx, j.Command, emit)
+			return "", runCronCmd(ctx, j.Command, emit)
 		})
 	}
 	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
 
-	cwd, _ := os.Getwd()
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -113,6 +134,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s := newWithDeps(cfg, logger, store, adapter, reg)
 	s.tasks = taskMgr
 	s.cronSched = cronSched
+	s.sandbox = sb
 	s.workspace = cwd
 	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
@@ -275,6 +297,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		if s.tasks != nil {
 			s.tasks.Shutdown(shutdownCtx)
+		}
+		if s.sandbox != nil {
+			s.sandbox.Close()
 		}
 		return s.http.Shutdown(shutdownCtx)
 	case err := <-errCh:
@@ -519,29 +544,10 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, api.ErrorResponse{Error: msg})
 }
 
-// runCronShell runs a cron job's command in the daemon's working directory,
-// streaming output to the task buffer via emit.
-func runCronShell(ctx context.Context, command string, emit func(string)) error {
-	cwd, _ := os.Getwd()
-	name, args := cronShellCommand(command)
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = cwd
-	w := cronEmitWriter{emit: emit}
-	cmd.Stdout = w
-	cmd.Stderr = w
-	return cmd.Run()
-}
-
-type cronEmitWriter struct{ emit func(string) }
-
-func (w cronEmitWriter) Write(p []byte) (int, error) {
-	w.emit(string(p))
-	return len(p), nil
-}
-
-func cronShellCommand(command string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", command}
+// cronShellRunner returns a function that runs a cron job's command using the
+// given sandbox backend, streaming output to the task buffer via emit.
+func cronShellRunner(sb sandbox.Backend, cwd string) func(ctx context.Context, command string, emit func(string)) error {
+	return func(ctx context.Context, command string, emit func(string)) error {
+		return sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: cwd}, emit)
 	}
-	return "/bin/sh", []string{"-c", command}
 }

@@ -69,7 +69,7 @@ func extractID(t *testing.T, s string) string {
 
 func TestTaskCreateAndPoll(t *testing.T) {
 	mgr := newTaskMgr(t)
-	tools := TaskTools(mgr, t.TempDir(), 30)
+	tools := TaskTools(mgr, t.TempDir(), 30, nil)
 
 	create := findTool(t, tools, "task_create")
 	res := runTool(t, create, map[string]any{"command": "echo task-tool-ok", "title": "greet"})
@@ -102,7 +102,7 @@ func TestTaskCreateAndPoll(t *testing.T) {
 
 func TestTaskUpdateAndStopErrors(t *testing.T) {
 	mgr := newTaskMgr(t)
-	tools := TaskTools(mgr, t.TempDir(), 30)
+	tools := TaskTools(mgr, t.TempDir(), 30, nil)
 
 	get := findTool(t, tools, "task_get")
 	if res := runTool(t, get, map[string]any{"id": "missing"}); !res.IsError {
@@ -122,7 +122,7 @@ func TestTaskUpdateAndStopErrors(t *testing.T) {
 
 func TestBackgroundShellTool(t *testing.T) {
 	mgr := newTaskMgr(t)
-	sh := newShellTool(t.TempDir(), 30, mgr)
+	sh := newShellTool(t.TempDir(), 30, mgr, nil)
 	res := runTool(t, sh, map[string]any{"command": "echo bg-shell", "background": true})
 	if res.IsError {
 		t.Fatalf("background shell: %s", res.Content)
@@ -138,7 +138,7 @@ func TestBackgroundShellTool(t *testing.T) {
 }
 
 func TestBackgroundShellWithoutManager(t *testing.T) {
-	sh := newShellTool(t.TempDir(), 30, nil)
+	sh := newShellTool(t.TempDir(), 30, nil, nil)
 	res := runTool(t, sh, map[string]any{"command": "echo x", "background": true})
 	if !res.IsError {
 		t.Error("background shell without a manager should error")

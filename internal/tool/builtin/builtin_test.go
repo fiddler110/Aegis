@@ -94,7 +94,7 @@ func TestGlobAndGrep(t *testing.T) {
 
 func TestShellEcho(t *testing.T) {
 	root := t.TempDir()
-	sh := newShellTool(root, 30, nil)
+	sh := newShellTool(root, 30, nil, nil)
 	res, err := sh.Execute(context.Background(), mustJSON(t, map[string]any{"command": "echo harness-ok"}))
 	if err != nil || res.IsError {
 		t.Fatalf("shell: %v %+v", err, res)
