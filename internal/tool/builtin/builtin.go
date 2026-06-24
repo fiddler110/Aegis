@@ -43,6 +43,10 @@ type Options struct {
 	FileTracker *filetracker.Tracker
 	// LSP, when set, enables code intelligence tools (diagnostics, references).
 	LSP *lsp.Manager
+	// TodoList, when set, enables planning tools (todo_add, todo_update, todo_list).
+	TodoList *TodoList
+	// Questioner, when set, enables the ask_user tool for structured questions.
+	Questioner Questioner
 }
 
 // Register adds all built-in tools to the registry.
@@ -88,6 +92,12 @@ func Register(reg *tool.Registry, opts Options) error {
 	}
 	if opts.LSP != nil {
 		tools = append(tools, LSPTools(opts.LSP, root)...)
+	}
+	if opts.TodoList != nil {
+		tools = append(tools, TodoTools(opts.TodoList)...)
+	}
+	if opts.Questioner != nil {
+		tools = append(tools, &askTool{questioner: opts.Questioner})
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {

@@ -143,7 +143,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr}); err != nil {
+	todoList := builtin.NewTodoList()
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -517,19 +518,19 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // effectiveSystem combines the session's base system prompt with loaded
-// project/user memory and skills.
+// project/user memory, skills, and context files (AGENTS.md, CLAUDE.md).
 func (s *Server) effectiveSystem(base string) string {
-	mem := s.memory.Load()
-	switch {
-	case base == "" && mem == "":
-		return ""
-	case mem == "":
-		return base
-	case base == "":
-		return mem
-	default:
-		return base + "\n\n" + mem
+	var parts []string
+	if base != "" {
+		parts = append(parts, base)
 	}
+	if ctx := s.memory.LoadContext(); ctx != "" {
+		parts = append(parts, ctx)
+	}
+	if mem := s.memory.Load(); mem != "" {
+		parts = append(parts, mem)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
