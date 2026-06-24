@@ -1,0 +1,133 @@
+package swarm
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+)
+
+// WorkerSpec is the JSON contract between the SubprocessBackend and the headless
+// worker process it launches. The parent writes it to a temp file; the worker
+// reads it, runs the teammate to completion, and records the result in the
+// mailbox under MailboxRoot.
+type WorkerSpec struct {
+	Identity    Identity    `json:"identity"`
+	Config      SpawnConfig `json:"config"`
+	MailboxRoot string      `json:"mailbox_root"`
+}
+
+// SubprocessBackend runs each teammate as a separate headless process (the
+// harness binary invoked with WorkerArgs), giving real OS-level isolation.
+// Results are read back from the teammate's mailbox after the process exits.
+type SubprocessBackend struct {
+	exePath     string
+	workerArgs  []string
+	registry    *Registry
+	mailboxRoot string
+	wg          sync.WaitGroup
+}
+
+// NewSubprocessBackend builds a subprocess backend. exePath is the harness
+// executable; workerCmd is the hidden worker subcommand (e.g. "__worker").
+func NewSubprocessBackend(exePath, workerCmd string, registry *Registry, mailboxRoot string) *SubprocessBackend {
+	return &SubprocessBackend{
+		exePath:     exePath,
+		workerArgs:  []string{workerCmd},
+		registry:    registry,
+		mailboxRoot: mailboxRoot,
+	}
+}
+
+// Spawn launches a worker process for the teammate and returns a handle.
+func (b *SubprocessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle, error) {
+	id := NewIdentity(cfg.Name, cfg.Team, cfg.ParentSessionID)
+	b.registry.Add(id)
+
+	specPath, err := writeSpec(WorkerSpec{Identity: id, Config: cfg, MailboxRoot: b.mailboxRoot})
+	if err != nil {
+		b.registry.Update(id.AgentID, StatusFailed, "spec write failed")
+		return nil, err
+	}
+
+	h := &Handle{Identity: id, done: make(chan Result, 1)}
+	b.wg.Go(func() {
+		defer os.Remove(specPath)
+		res := b.runWorker(ctx, id, specPath)
+		status := StatusDone
+		if res.Failed() {
+			status = StatusFailed
+		}
+		b.registry.Update(id.AgentID, status, summarize(res.Output, res.Err))
+		h.done <- res
+	})
+	return h, nil
+}
+
+// runWorker executes the worker process and reads its result from the mailbox.
+func (b *SubprocessBackend) runWorker(ctx context.Context, id Identity, specPath string) Result {
+	args := append(append([]string{}, b.workerArgs...), "--spec", specPath)
+	cmd := exec.CommandContext(ctx, b.exePath, args...)
+	cmd.Env = os.Environ() // inherit API keys etc.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	res := Result{AgentID: id.AgentID}
+	if mb, e := OpenMailbox(b.mailboxRoot, id); e == nil {
+		if msgs, _ := mb.ReadAll(false); len(msgs) > 0 {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Type != MsgResult {
+					continue
+				}
+				res.Output = msgs[i].Text
+				if errStr, ok := msgs[i].Payload["error"].(string); ok {
+					res.Err = errStr
+				}
+				break
+			}
+		}
+	}
+
+	// If the process died without recording a result, synthesize a failure.
+	if runErr != nil && res.Output == "" && res.Err == "" {
+		res.Err = fmt.Sprintf("worker process failed: %v: %s", runErr, strings.TrimSpace(stderr.String()))
+	}
+	return res
+}
+
+// Shutdown waits for all worker processes to finish or ctx to cancel.
+func (b *SubprocessBackend) Shutdown(ctx context.Context) {
+	done := make(chan struct{})
+	go func() { b.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// writeSpec serializes a WorkerSpec to a temp file and returns its path.
+func writeSpec(spec WorkerSpec) (string, error) {
+	data, err := json.Marshal(spec)
+	if err != nil {
+		return "", fmt.Errorf("swarm: marshal worker spec: %w", err)
+	}
+	f, err := os.CreateTemp("", "harness-worker-*.json")
+	if err != nil {
+		return "", fmt.Errorf("swarm: create spec file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("swarm: write spec: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}

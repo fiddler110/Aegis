@@ -89,5 +89,6 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newSessionsCmd())
 	cmd.AddCommand(newScanCmd())
 	cmd.AddCommand(newDiagramCmd())
+	cmd.AddCommand(newWorkerCmd())
 	return cmd
 }

@@ -27,7 +27,13 @@ type Config struct {
 	Permission PermissionConfig  `koanf:"permission"`
 	Diagram    DiagramConfig     `koanf:"diagram"`
 	Cost       CostConfig        `koanf:"cost"`
+	Swarm      SwarmConfig       `koanf:"swarm"`
 	MCP        []MCPServerConfig `koanf:"mcp"`
+}
+
+// SwarmConfig configures multi-agent sub-agent execution.
+type SwarmConfig struct {
+	Backend string `koanf:"backend"` // "in_process" (default) or "subprocess"
 }
 
 // CostConfig configures spend tracking.
@@ -89,6 +95,7 @@ func defaults() map[string]any {
 		"permission.auto_approve_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
 		"cost.budget_usd":              0.0,
+		"swarm.backend":                "in_process",
 	}
 }
 

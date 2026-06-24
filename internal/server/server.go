@@ -44,7 +44,7 @@ type Server struct {
 	compactor  engine.Compactor
 	hooks      engine.Hooks
 	mcpClients []*mcp.Client
-	swarm      *swarm.InProcessBackend
+	swarm      swarm.Backend
 	workspace  string
 	logger     *slog.Logger
 	http       *http.Server
@@ -91,15 +91,28 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)
 
-	// Multi-agent: an in-process backend runs sub-agents as goroutines sharing
-	// this daemon's adapter and tools. Register the `agent` delegation tool.
-	s.swarm = swarm.NewInProcessBackend(s.subAgentRunner(), swarm.NewRegistry(), swarm.MailboxRoot(cfg.DataDir))
+	// Multi-agent: choose a sub-agent backend and register the `agent` tool.
+	s.swarm = s.buildSwarmBackend(swarm.MailboxRoot(cfg.DataDir))
 	if err := reg.Register(builtin.NewAgentTool(s.swarm)); err != nil {
 		store.Close()
 		return nil, err
 	}
 
 	return s, nil
+}
+
+// buildSwarmBackend selects the sub-agent backend from config. The subprocess
+// backend gives OS-level isolation by launching the harness binary in a headless
+// worker mode; the default in-process backend runs teammates as goroutines.
+func (s *Server) buildSwarmBackend(mailboxRoot string) swarm.Backend {
+	if s.cfg.Swarm.Backend == "subprocess" {
+		if exe, err := os.Executable(); err == nil {
+			s.logger.Info("swarm backend: subprocess", "exe", exe)
+			return swarm.NewSubprocessBackend(exe, "__worker", swarm.NewRegistry(), mailboxRoot)
+		}
+		s.logger.Warn("cannot resolve executable path; falling back to in-process swarm backend")
+	}
+	return swarm.NewInProcessBackend(s.subAgentRunner(), swarm.NewRegistry(), mailboxRoot)
 }
 
 // subAgentRunner returns a swarm.RunFunc that executes a teammate by building a
