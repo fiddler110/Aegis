@@ -136,6 +136,67 @@ func TestRunUnknownTool(t *testing.T) {
 	}
 }
 
+// recordingHook vetoes a named tool and counts post-call invocations.
+type recordingHook struct {
+	veto      string
+	postCalls int
+}
+
+func (h *recordingHook) PreToolUse(_ context.Context, name string, _ json.RawMessage) error {
+	if name == h.veto {
+		return errInterruptHook
+	}
+	return nil
+}
+func (h *recordingHook) PostToolUse(context.Context, string, json.RawMessage, string, bool) {
+	h.postCalls++
+}
+
+var errInterruptHook = &hookErr{}
+
+type hookErr struct{}
+
+func (*hookErr) Error() string { return "blocked" }
+
+func TestRunHookVeto(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "t1", Name: "echo", Input: json.RawMessage(`{"msg":"x"}`)}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse},
+		},
+		{
+			{Type: provider.EventTextDelta, Text: "ok"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn},
+		},
+	}}
+	reg := tool.NewRegistry()
+	et := &echoTool{}
+	_ = reg.Register(et)
+	hook := &recordingHook{veto: "echo"}
+	eng, _ := New(Options{Adapter: adapter, Tools: reg, Hooks: hook, Model: "test"})
+
+	var blocked bool
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+	err := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindToolResult && ev.ToolIsError {
+			blocked = true
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !blocked {
+		t.Error("expected vetoed tool to return an error result")
+	}
+	if et.called != 0 {
+		t.Errorf("vetoed tool should not execute, called %d", et.called)
+	}
+	if hook.postCalls != 0 {
+		t.Errorf("PostToolUse should not run for a vetoed call, got %d", hook.postCalls)
+	}
+}
+
 func TestRunInterrupt(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
 		{{Type: provider.EventTextDelta, Text: "x"}, {Type: provider.EventDone, Stop: provider.StopEndTurn}},

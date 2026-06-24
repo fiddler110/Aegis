@@ -12,7 +12,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/engine"
 	"github.com/scottymacleod/agentharness/internal/permission"
 	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/provider/anthropic"
+	"github.com/scottymacleod/agentharness/internal/providerfactory"
 	"github.com/scottymacleod/agentharness/internal/tool"
 	"github.com/scottymacleod/agentharness/internal/tool/builtin"
 	"github.com/spf13/cobra"
@@ -44,7 +44,7 @@ func newChatCmd() *cobra.Command {
 				return fmt.Errorf("no prompt provided (pass as arguments or via stdin)")
 			}
 
-			adapter, err := buildAdapter(cfg)
+			adapter, err := providerfactory.Build(cfg)
 			if err != nil {
 				return err
 			}
@@ -113,19 +113,6 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", "", "permission mode: plan (read-only) or build (default from config)")
 	cmd.Flags().BoolVar(&autoApprove, "yes", false, "auto-approve tool calls that would otherwise require confirmation")
 	return cmd
-}
-
-// buildAdapter constructs the provider adapter selected by config.
-func buildAdapter(cfg *config.Config) (provider.Adapter, error) {
-	switch cfg.Provider.Default {
-	case "anthropic":
-		if cfg.Provider.APIKey == "" {
-			return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set")
-		}
-		return anthropic.New(cfg.Provider.APIKey, anthropic.WithBaseURL(cfg.Provider.BaseURL)), nil
-	default:
-		return nil, fmt.Errorf("unsupported provider %q (only \"anthropic\" is implemented)", cfg.Provider.Default)
-	}
 }
 
 func truncate(s string, n int) string {

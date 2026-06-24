@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,11 +20,13 @@ import (
 	"github.com/scottymacleod/agentharness/internal/compaction"
 	"github.com/scottymacleod/agentharness/internal/config"
 	"github.com/scottymacleod/agentharness/internal/engine"
+	"github.com/scottymacleod/agentharness/internal/hooks"
+	"github.com/scottymacleod/agentharness/internal/mcp"
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/permission"
 	"github.com/scottymacleod/agentharness/internal/persona"
 	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/provider/anthropic"
+	"github.com/scottymacleod/agentharness/internal/providerfactory"
 	"github.com/scottymacleod/agentharness/internal/session"
 	"github.com/scottymacleod/agentharness/internal/tool"
 	"github.com/scottymacleod/agentharness/internal/tool/builtin"
@@ -35,11 +38,13 @@ type Server struct {
 	store     *session.Store
 	adapter   provider.Adapter
 	tools     *tool.Registry
-	memory    memory.Sources
-	compactor engine.Compactor
-	workspace string
-	logger    *slog.Logger
-	http      *http.Server
+	memory     memory.Sources
+	compactor  engine.Compactor
+	hooks      engine.Hooks
+	mcpClients []*mcp.Client
+	workspace  string
+	logger     *slog.Logger
+	http       *http.Server
 }
 
 // New constructs a daemon from config. The workspace root for tools is the
@@ -55,7 +60,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	// A missing API key is not fatal: the daemon still serves session
 	// management and reports the error only when a turn is actually run.
-	adapter, err := buildAdapter(cfg)
+	adapter, err := providerfactory.Build(cfg)
 	if err != nil {
 		logger.Warn("provider not ready; message runs will fail until configured", "err", err)
 		adapter = nil
@@ -71,9 +76,18 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s := newWithDeps(cfg, logger, store, adapter, reg)
 	s.workspace = cwd
 	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
+	s.hooks = hooks.NewMulti(hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl")))
 	if adapter != nil {
 		s.compactor = compaction.New(compaction.Options{Adapter: adapter, Model: cfg.Provider.Model})
 	}
+
+	// Connect configured MCP servers and register their tools.
+	mcpServers := make([]mcp.ServerConfig, 0, len(cfg.MCP))
+	for _, m := range cfg.MCP {
+		mcpServers = append(mcpServers, mcp.ServerConfig{Name: m.Name, Command: m.Command, Args: m.Args, Env: m.Env})
+	}
+	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)
+
 	return s, nil
 }
 
@@ -87,18 +101,6 @@ func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, 
 
 // Handler exposes the HTTP routes for testing with httptest.
 func (s *Server) Handler() http.Handler { return s.routes() }
-
-func buildAdapter(cfg *config.Config) (provider.Adapter, error) {
-	switch cfg.Provider.Default {
-	case "anthropic":
-		if cfg.Provider.APIKey == "" {
-			return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set")
-		}
-		return anthropic.New(cfg.Provider.APIKey, anthropic.WithBaseURL(cfg.Provider.BaseURL)), nil
-	default:
-		return nil, fmt.Errorf("unsupported provider %q", cfg.Provider.Default)
-	}
-}
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
@@ -114,6 +116,11 @@ func (s *Server) routes() http.Handler {
 // ListenAndServe runs the daemon until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	defer s.store.Close()
+	defer func() {
+		for _, c := range s.mcpClients {
+			_ = c.Close()
+		}
+	}()
 	errCh := make(chan error, 1)
 	go func() {
 		s.logger.Info("daemon listening", "addr", s.cfg.Server.Addr)
@@ -151,6 +158,7 @@ func (s *Server) newEngine(mode string) (*engine.Engine, error) {
 		Tools:     s.tools,
 		Gate:      gate,
 		Compactor: s.compactor,
+		Hooks:     s.hooks,
 		Model:     s.cfg.Provider.Model,
 		MaxTokens: s.cfg.Provider.MaxTokens,
 		Logger:    s.logger,

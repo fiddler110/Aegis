@@ -20,12 +20,21 @@ import (
 
 // Config is the fully resolved harness configuration.
 type Config struct {
-	DataDir    string           `koanf:"data_dir"`
-	LogLevel   string           `koanf:"log_level"`
-	Provider   ProviderConfig   `koanf:"provider"`
-	Server     ServerConfig     `koanf:"server"`
-	Permission PermissionConfig `koanf:"permission"`
-	Diagram    DiagramConfig    `koanf:"diagram"`
+	DataDir    string            `koanf:"data_dir"`
+	LogLevel   string            `koanf:"log_level"`
+	Provider   ProviderConfig    `koanf:"provider"`
+	Server     ServerConfig      `koanf:"server"`
+	Permission PermissionConfig  `koanf:"permission"`
+	Diagram    DiagramConfig     `koanf:"diagram"`
+	MCP        []MCPServerConfig `koanf:"mcp"`
+}
+
+// MCPServerConfig configures one external MCP server to connect over stdio.
+type MCPServerConfig struct {
+	Name    string            `koanf:"name"`
+	Command string            `koanf:"command"`
+	Args    []string          `koanf:"args"`
+	Env     map[string]string `koanf:"env"`
 }
 
 // ProviderConfig selects and configures the model provider.

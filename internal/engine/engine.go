@@ -63,12 +63,22 @@ type Compactor interface {
 	Compact(ctx context.Context, system string, msgs []provider.Message) (out []provider.Message, changed bool, err error)
 }
 
+// Hooks observe and can veto tool calls. PreToolUse runs after the permission
+// gate but before execution; returning an error blocks the call (the error is
+// reported to the model). PostToolUse runs after execution. This is the
+// in-process hook surface (cf. Hermes/opencode plugin lifecycle hooks).
+type Hooks interface {
+	PreToolUse(ctx context.Context, toolName string, input json.RawMessage) error
+	PostToolUse(ctx context.Context, toolName string, input json.RawMessage, result string, isError bool)
+}
+
 // Options configures an Engine.
 type Options struct {
 	Adapter       provider.Adapter
 	Tools         *tool.Registry
-	Gate          Gate       // optional; nil means all tool calls are allowed
-	Compactor     Compactor  // optional; nil disables context compaction
+	Gate          Gate      // optional; nil means all tool calls are allowed
+	Compactor     Compactor // optional; nil disables context compaction
+	Hooks         Hooks     // optional; nil disables hooks
 	Model         string
 	MaxTokens     int
 	Temperature   *float64
@@ -82,6 +92,7 @@ type Engine struct {
 	tools         *tool.Registry
 	gate          Gate
 	compactor     Compactor
+	hooks         Hooks
 	model         string
 	maxTokens     int
 	temperature   *float64
@@ -117,6 +128,7 @@ func New(opts Options) (*Engine, error) {
 		tools:         opts.Tools,
 		gate:          opts.Gate,
 		compactor:     opts.Compactor,
+		hooks:         opts.Hooks,
 		model:         opts.Model,
 		maxTokens:     maxTok,
 		temperature:   opts.Temperature,
@@ -266,10 +278,20 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 			return reason, true
 		}
 	}
+	if e.hooks != nil {
+		if err := e.hooks.PreToolUse(ctx, tu.Name, tu.Input); err != nil {
+			e.logger.Info("tool call blocked by hook", "tool", tu.Name, "err", err)
+			return fmt.Sprintf("blocked by hook: %v", err), true
+		}
+	}
 	res, err := t.Execute(ctx, tu.Input)
+	content, isErr := res.Content, res.IsError
 	if err != nil {
 		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
-		return fmt.Sprintf("tool error: %v", err), true
+		content, isErr = fmt.Sprintf("tool error: %v", err), true
 	}
-	return res.Content, res.IsError
+	if e.hooks != nil {
+		e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)
+	}
+	return content, isErr
 }
