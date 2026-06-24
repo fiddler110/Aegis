@@ -1,0 +1,241 @@
+// Package engine implements the core agent loop: call the model, dispatch any
+// tool calls it requests, append the results, and repeat until the model
+// produces a final answer or the run is interrupted.
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/agentharness/internal/tool"
+)
+
+// Conversation is the mutable transcript the engine drives.
+type Conversation struct {
+	System   string
+	Messages []provider.Message
+}
+
+// Append adds a message to the conversation.
+func (c *Conversation) Append(m provider.Message) { c.Messages = append(c.Messages, m) }
+
+// EventKind classifies engine events delivered to consumers (TUI, CLI, logs).
+type EventKind string
+
+const (
+	KindText       EventKind = "text"        // incremental assistant text
+	KindToolCall   EventKind = "tool_call"   // a tool is about to run
+	KindToolResult EventKind = "tool_result" // a tool finished
+	KindTurnDone   EventKind = "turn_done"   // one model turn completed
+	KindDone       EventKind = "done"        // the run finished (final answer)
+	KindError      EventKind = "error"       // the run failed
+)
+
+// Event is emitted to the consumer-provided sink as the run progresses.
+type Event struct {
+	Kind        EventKind
+	Text        string          // KindText
+	ToolName    string          // KindToolCall / KindToolResult
+	ToolInput   json.RawMessage // KindToolCall
+	ToolResult  string          // KindToolResult
+	ToolIsError bool            // KindToolResult
+	Usage       *provider.Usage // KindTurnDone
+	Err         error           // KindError
+}
+
+// EmitFunc receives engine events. It must not block for long.
+type EmitFunc func(Event)
+
+// Options configures an Engine.
+type Options struct {
+	Adapter       provider.Adapter
+	Tools         *tool.Registry
+	Model         string
+	MaxTokens     int
+	Temperature   *float64
+	MaxIterations int // safety cap on tool-call rounds; 0 -> default
+	Logger        *slog.Logger
+}
+
+// Engine runs the agent loop.
+type Engine struct {
+	adapter       provider.Adapter
+	tools         *tool.Registry
+	model         string
+	maxTokens     int
+	temperature   *float64
+	maxIterations int
+	logger        *slog.Logger
+}
+
+// ErrInterrupted is returned when the run is cancelled via context.
+var ErrInterrupted = errors.New("engine: interrupted")
+
+// New constructs an Engine.
+func New(opts Options) (*Engine, error) {
+	if opts.Adapter == nil {
+		return nil, errors.New("engine: nil adapter")
+	}
+	if opts.Model == "" {
+		return nil, errors.New("engine: empty model")
+	}
+	maxIter := opts.MaxIterations
+	if maxIter <= 0 {
+		maxIter = 25
+	}
+	maxTok := opts.MaxTokens
+	if maxTok <= 0 {
+		maxTok = 8192
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Engine{
+		adapter:       opts.Adapter,
+		tools:         opts.Tools,
+		model:         opts.Model,
+		maxTokens:     maxTok,
+		temperature:   opts.Temperature,
+		maxIterations: maxIter,
+		logger:        logger,
+	}, nil
+}
+
+// Run drives the conversation to a final answer, executing tools as requested.
+// It mutates conv in place (appending assistant and tool-result messages) and
+// streams progress to emit. Cancelling ctx interrupts the run.
+func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) error {
+	if emit == nil {
+		emit = func(Event) {}
+	}
+
+	for iter := 0; iter < e.maxIterations; iter++ {
+		select {
+		case <-ctx.Done():
+			return ErrInterrupted
+		default:
+		}
+
+		assistant, toolUses, usage, err := e.turn(ctx, conv, emit)
+		if err != nil {
+			emit(Event{Kind: KindError, Err: err})
+			return err
+		}
+		conv.Append(assistant)
+		emit(Event{Kind: KindTurnDone, Usage: usage})
+
+		if len(toolUses) == 0 {
+			emit(Event{Kind: KindDone})
+			return nil
+		}
+
+		results, err := e.runTools(ctx, toolUses, emit)
+		if err != nil {
+			emit(Event{Kind: KindError, Err: err})
+			return err
+		}
+		conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
+	}
+
+	err := fmt.Errorf("engine: exceeded max iterations (%d)", e.maxIterations)
+	emit(Event{Kind: KindError, Err: err})
+	return err
+}
+
+// turn performs a single model call, accumulating the assistant message and any
+// tool-use blocks from the stream.
+func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (provider.Message, []provider.ToolUseBlock, *provider.Usage, error) {
+	req := provider.Request{
+		Model:       e.model,
+		System:      conv.System,
+		Messages:    conv.Messages,
+		MaxTokens:   e.maxTokens,
+		Temperature: e.temperature,
+	}
+	if e.tools != nil {
+		req.Tools = e.tools.Schemas()
+	}
+
+	stream, err := e.adapter.Stream(ctx, req)
+	if err != nil {
+		return provider.Message{}, nil, nil, err
+	}
+
+	var (
+		text     []byte
+		toolUses []provider.ToolUseBlock
+		usage    *provider.Usage
+	)
+	for ev := range stream {
+		switch ev.Type {
+		case provider.EventTextDelta:
+			text = append(text, ev.Text...)
+			emit(Event{Kind: KindText, Text: ev.Text})
+		case provider.EventToolUse:
+			if ev.ToolUse != nil {
+				toolUses = append(toolUses, *ev.ToolUse)
+			}
+		case provider.EventDone:
+			usage = ev.Usage
+		case provider.EventError:
+			return provider.Message{}, nil, nil, ev.Err
+		}
+	}
+
+	// The conversation must record exactly what the model produced, in order:
+	// text first, then tool-use blocks.
+	var content []provider.Block
+	if len(text) > 0 {
+		content = append(content, provider.TextBlock{Text: string(text)})
+	}
+	for _, tu := range toolUses {
+		content = append(content, tu)
+	}
+	return provider.Message{Role: provider.RoleAssistant, Content: content}, toolUses, usage, nil
+}
+
+// runTools executes each requested tool and returns tool-result blocks in order.
+func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, error) {
+	results := make([]provider.Block, 0, len(toolUses))
+	for _, tu := range toolUses {
+		select {
+		case <-ctx.Done():
+			return nil, ErrInterrupted
+		default:
+		}
+
+		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+		content, isErr := e.executeTool(ctx, tu)
+		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
+
+		results = append(results, provider.ToolResultBlock{
+			ToolUseID: tu.ID,
+			Content:   content,
+			IsError:   isErr,
+		})
+	}
+	return results, nil
+}
+
+// executeTool looks up and runs a single tool, converting failures into
+// model-visible error results rather than aborting the whole run.
+func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (string, bool) {
+	if e.tools == nil {
+		return fmt.Sprintf("no tools available (requested %q)", tu.Name), true
+	}
+	t, ok := e.tools.Get(tu.Name)
+	if !ok {
+		return fmt.Sprintf("unknown tool %q", tu.Name), true
+	}
+	res, err := t.Execute(ctx, tu.Input)
+	if err != nil {
+		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
+		return fmt.Sprintf("tool error: %v", err), true
+	}
+	return res.Content, res.IsError
+}

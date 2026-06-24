@@ -39,5 +39,6 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(newServeCmd())
 	cmd.AddCommand(newConfigCmd())
+	cmd.AddCommand(newChatCmd())
 	return cmd
 }
