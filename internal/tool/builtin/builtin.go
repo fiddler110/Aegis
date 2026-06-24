@@ -72,6 +72,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent},
+		&modelsTool{},
 		&securityScanTool{root: root},
 		&diagramTool{root: root, krokiURL: opts.KrokiURL},
 	}
