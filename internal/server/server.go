@@ -30,6 +30,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/permission"
 	"github.com/scottymacleod/agentharness/internal/persona"
+	"github.com/scottymacleod/agentharness/internal/plugins"
 	"github.com/scottymacleod/agentharness/internal/sandbox"
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/providerfactory"
@@ -148,6 +149,23 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList}); err != nil {
 		store.Close()
 		return nil, err
+	}
+
+	// Register external process tools (plugins).
+	if len(cfg.Plugins) > 0 {
+		var pluginConfigs []plugins.ProcessToolConfig
+		for _, pc := range cfg.Plugins {
+			pluginConfigs = append(pluginConfigs, plugins.ProcessToolConfig{
+				Name:        pc.Name,
+				Description: pc.Description,
+				Command:     pc.Command,
+				Args:        pc.Args,
+				InputSchema: json.RawMessage(pc.InputSchema),
+				Capability:  pc.Capability,
+				TimeoutSec:  pc.TimeoutSec,
+			})
+		}
+		plugins.RegisterProcessTools(reg, pluginConfigs, logger)
 	}
 
 	s := newWithDeps(cfg, logger, store, adapter, reg)

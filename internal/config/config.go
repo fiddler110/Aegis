@@ -30,8 +30,9 @@ type Config struct {
 	Swarm      SwarmConfig       `koanf:"swarm"`
 	Sandbox    SandboxConfig     `koanf:"sandbox"`
 	Security   SecurityConfig    `koanf:"security"`
-	LSP        []LSPServerConfig `koanf:"lsp"`
-	MCP        []MCPServerConfig `koanf:"mcp"`
+	LSP        []LSPServerConfig     `koanf:"lsp"`
+	Plugins    []ProcessToolConfig   `koanf:"plugins"`
+	MCP        []MCPServerConfig     `koanf:"mcp"`
 }
 
 // SwarmConfig configures multi-agent sub-agent execution.
@@ -58,6 +59,17 @@ type LSPServerConfig struct {
 	Command    string   `koanf:"command"`     // executable
 	Args       []string `koanf:"args"`        // CLI arguments
 	Extensions []string `koanf:"extensions"`  // file extensions (e.g. [".go"])
+}
+
+// ProcessToolConfig declares one external process tool (plugin).
+type ProcessToolConfig struct {
+	Name        string `koanf:"name"`
+	Description string `koanf:"description"`
+	Command     string `koanf:"command"`
+	Args        []string `koanf:"args"`
+	InputSchema string `koanf:"input_schema"` // JSON Schema as a string
+	Capability  string `koanf:"capability"`    // "read", "write", "execute", "network"
+	TimeoutSec  int    `koanf:"timeout_sec"`
 }
 
 // MCPServerConfig configures one external MCP server to connect over stdio.
