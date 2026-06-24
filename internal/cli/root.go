@@ -24,8 +24,9 @@ func Execute() error {
 
 func newRootCmd() *cobra.Command {
 	var (
-		mode   string
-		resume string
+		mode    string
+		resume  string
+		persona string
 	)
 
 	cmd := &cobra.Command{
@@ -55,7 +56,7 @@ func newRootCmd() *cobra.Command {
 
 			sessionID := resume
 			if sessionID == "" {
-				meta, err := cl.CreateSession(context.Background(), api.CreateSessionRequest{Mode: resolvedMode})
+				meta, err := cl.CreateSession(context.Background(), api.CreateSessionRequest{Mode: resolvedMode, Persona: persona})
 				if err != nil {
 					return err
 				}
@@ -80,10 +81,12 @@ func newRootCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&mode, "mode", "", "permission mode: plan (read-only) or build")
 	cmd.Flags().StringVar(&resume, "resume", "", "resume an existing session by id")
+	cmd.Flags().StringVar(&persona, "persona", "", "persona for new sessions: general or security")
 
 	cmd.AddCommand(newServeCmd())
 	cmd.AddCommand(newConfigCmd())
 	cmd.AddCommand(newChatCmd())
 	cmd.AddCommand(newSessionsCmd())
+	cmd.AddCommand(newScanCmd())
 	return cmd
 }

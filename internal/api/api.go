@@ -9,9 +9,10 @@ import (
 
 // CreateSessionRequest creates a new session.
 type CreateSessionRequest struct {
-	Title  string `json:"title"`
-	System string `json:"system"`
-	Mode   string `json:"mode"`
+	Title   string `json:"title"`
+	System  string `json:"system"`
+	Mode    string `json:"mode"`
+	Persona string `json:"persona"` // named persona; sets the system prompt when System is empty
 }
 
 // SessionMeta describes a session without its messages.

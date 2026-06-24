@@ -48,6 +48,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		newShellTool(root, opts.ShellTimeoutSec),
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent},
+		&securityScanTool{root: root},
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}

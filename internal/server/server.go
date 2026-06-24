@@ -21,6 +21,7 @@ import (
 	"github.com/scottymacleod/agentharness/internal/engine"
 	"github.com/scottymacleod/agentharness/internal/memory"
 	"github.com/scottymacleod/agentharness/internal/permission"
+	"github.com/scottymacleod/agentharness/internal/persona"
 	"github.com/scottymacleod/agentharness/internal/provider"
 	"github.com/scottymacleod/agentharness/internal/provider/anthropic"
 	"github.com/scottymacleod/agentharness/internal/session"
@@ -172,7 +173,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = s.cfg.Permission.Mode
 	}
-	sess, err := s.store.Create(r.Context(), req.Title, req.System, mode)
+	system := req.System
+	if system == "" {
+		p, _ := persona.Get(req.Persona)
+		system = p.System
+	}
+	sess, err := s.store.Create(r.Context(), req.Title, system, mode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
