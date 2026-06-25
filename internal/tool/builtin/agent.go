@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/scottymacleod/agentharness/internal/agentdef"
@@ -12,6 +13,8 @@ import (
 	"github.com/scottymacleod/agentharness/internal/task"
 	"github.com/scottymacleod/agentharness/internal/tool"
 )
+
+const maxAgentDuration = 10 * time.Minute
 
 // maxSpawnDepth bounds sub-agent recursion (an agent spawning an agent ...).
 const maxSpawnDepth = 3
@@ -98,11 +101,13 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return a.spawnBackground(cfg, args.Description, def.Name)
 	}
 
-	h, err := a.backend.Spawn(ctx, cfg)
+	agentCtx, agentCancel := context.WithTimeout(ctx, maxAgentDuration)
+	defer agentCancel()
+	h, err := a.backend.Spawn(agentCtx, cfg)
 	if err != nil {
 		return tool.Result{Content: "agent: spawn failed: " + err.Error(), IsError: true}, nil
 	}
-	res, err := h.Wait(ctx)
+	res, err := h.Wait(agentCtx)
 	if err != nil {
 		return tool.Result{Content: "agent: " + err.Error(), IsError: true}, nil
 	}
@@ -129,6 +134,8 @@ func (a *agentTool) spawnBackground(cfg swarm.SpawnConfig, description, agentNam
 		title = "sub-agent " + agentName
 	}
 	tk, err := a.mgr.Start(task.Spec{Kind: "subagent", Title: title}, func(jobCtx context.Context, emit func(string)) (string, error) {
+		jobCtx, jobCancel := context.WithTimeout(jobCtx, maxAgentDuration)
+		defer jobCancel()
 		h, err := a.backend.Spawn(jobCtx, cfg)
 		if err != nil {
 			return "", err

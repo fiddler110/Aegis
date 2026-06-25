@@ -54,7 +54,7 @@ func inboxDir(root string, id Identity) string {
 // OpenMailbox opens (creating if needed) the inbox for id under root.
 func OpenMailbox(root string, id Identity) (*Mailbox, error) {
 	dir := inboxDir(root, id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("swarm: create mailbox %s: %w", dir, err)
 	}
 	return &Mailbox{dir: dir}, nil
@@ -76,7 +76,7 @@ func (m *Mailbox) Send(msg Message) error {
 	name := fmt.Sprintf("%020d_%s.json", msg.Timestamp.UnixNano(), msg.ID)
 	final := filepath.Join(m.dir, name)
 	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("swarm: write message: %w", err)
 	}
 	if err := os.Rename(tmp, final); err != nil {

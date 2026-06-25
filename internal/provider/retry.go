@@ -78,6 +78,9 @@ func (r *retryAdapter) Stream(ctx context.Context, req Request) (<-chan Event, e
 func (r *retryAdapter) backoff(attempt int, err error) time.Duration {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
+		if apiErr.RetryAfter > r.policy.MaxDelay {
+			return r.policy.MaxDelay
+		}
 		return apiErr.RetryAfter
 	}
 	d := r.policy.BaseDelay << attempt // BaseDelay * 2^attempt

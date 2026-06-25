@@ -46,9 +46,21 @@ func (tl *TodoList) Items() []TodoItem {
 	return out
 }
 
+const maxTodoItems = 500
+
 func (tl *TodoList) add(text string) int {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
+	if len(tl.items) >= maxTodoItems {
+		// Prune oldest completed items to make room.
+		pruned := tl.items[:0]
+		for _, item := range tl.items {
+			if item.Status != "done" || len(pruned) < maxTodoItems-1 {
+				pruned = append(pruned, item)
+			}
+		}
+		tl.items = pruned
+	}
 	tl.next++
 	tl.items = append(tl.items, TodoItem{ID: tl.next, Text: text, Status: "pending"})
 	return tl.next

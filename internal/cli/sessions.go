@@ -24,7 +24,7 @@ func dialClient() (*client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	cl := client.New(cfg.Server.Addr)
+	cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
 	if err := cl.Health(context.Background()); err != nil {
 		return nil, fmt.Errorf("cannot reach daemon at %s: %w (start it with: harness serve)", cfg.Server.Addr, err)
 	}

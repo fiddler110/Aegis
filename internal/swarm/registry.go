@@ -35,11 +35,36 @@ func NewRegistry() *Registry {
 	return &Registry{members: map[string]*Member{}}
 }
 
+const maxRegistryMembers = 500
+
 // Add records a newly spawned teammate as running.
 func (r *Registry) Add(id Identity) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.members[id.AgentID] = &Member{Identity: id, Status: StatusRunning, StartedAt: time.Now()}
+	r.pruneOldest()
+}
+
+// pruneOldest removes the oldest finished members when the registry exceeds
+// maxRegistryMembers, preventing unbounded growth over long daemon sessions.
+// Must be called with r.mu held.
+func (r *Registry) pruneOldest() {
+	if len(r.members) <= maxRegistryMembers {
+		return
+	}
+	var oldest []string
+	for id, m := range r.members {
+		if m.Status != StatusRunning {
+			oldest = append(oldest, id)
+		}
+	}
+	sort.Slice(oldest, func(i, j int) bool {
+		return r.members[oldest[i]].EndedAt.Before(r.members[oldest[j]].EndedAt)
+	})
+	for len(r.members) > maxRegistryMembers && len(oldest) > 0 {
+		delete(r.members, oldest[0])
+		oldest = oldest[1:]
+	}
 }
 
 // Update sets a teammate's terminal status and summary.

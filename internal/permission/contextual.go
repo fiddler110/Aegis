@@ -25,11 +25,18 @@ import (
 //     domains. Calls to unlisted domains are denied.
 type ContextualGate struct {
 	base            Gate
+	registry        ToolRegistry      // look up tool capability by name
 	mu              sync.Mutex
 	networkUsed     bool              // true after any CapNetwork call succeeds
 	egressThenWrite bool              // enable the egress→write rule
 	allowList       map[string]bool   // normalized domain allowlist; nil = no restriction
 	onDecision      func(ContextualDecision) // optional observer (for audit)
+}
+
+// ToolRegistry resolves a tool's capability by name, avoiding hardcoded
+// name-based heuristics for network tool detection.
+type ToolRegistry interface {
+	Get(name string) (tool.Tool, bool)
 }
 
 // ContextualDecision records a policy decision for audit/observability.
@@ -53,6 +60,9 @@ type ContextualOpts struct {
 	NetworkAllowList []string
 	// OnDecision is called for each contextual rule evaluation (for audit).
 	OnDecision func(ContextualDecision)
+	// Registry resolves tool capabilities by name. When set, PostToolUse uses
+	// the actual tool capability instead of a hardcoded name heuristic.
+	Registry ToolRegistry
 }
 
 // NewContextualGate wraps base with stateful security rules.
@@ -66,6 +76,7 @@ func NewContextualGate(base Gate, opts ContextualOpts) *ContextualGate {
 	}
 	return &ContextualGate{
 		base:            base,
+		registry:        opts.Registry,
 		egressThenWrite: opts.EgressThenWrite,
 		allowList:       allowList,
 		onDecision:      opts.OnDecision,
@@ -131,15 +142,23 @@ func (g *ContextualGate) PostToolUse(_ context.Context, toolName string, input j
 	if isError {
 		return
 	}
-	// Determine the capability from the tool name. We don't have a direct
-	// reference to the tool here, so we use a heuristic based on known
-	// network tools. The engine calls PostToolUse after execution, so we
-	// can track state changes.
-	if isNetworkTool(toolName) {
+	if g.isNetworkCapable(toolName) {
 		g.mu.Lock()
 		g.networkUsed = true
 		g.mu.Unlock()
 	}
+}
+
+// isNetworkCapable checks whether a tool has CapNetwork. When a registry is
+// available, it looks up the actual capability; otherwise falls back to the
+// hardcoded name list for backward compatibility.
+func (g *ContextualGate) isNetworkCapable(name string) bool {
+	if g.registry != nil {
+		if t, ok := g.registry.Get(name); ok {
+			return t.Capability() == tool.CapNetwork
+		}
+	}
+	return isNetworkTool(name)
 }
 
 // Reset clears the contextual state (e.g. between sessions).

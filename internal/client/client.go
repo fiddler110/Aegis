@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -18,8 +19,10 @@ import (
 
 // Client talks to a running harness daemon.
 type Client struct {
-	base string
-	http *http.Client
+	base      string
+	http      *http.Client // no timeout — used for SSE streaming
+	httpShort *http.Client // 30s timeout — used for non-streaming RPCs
+	authToken string
 }
 
 // New returns a client for the daemon at addr (host:port).
@@ -28,13 +31,43 @@ func New(addr string) *Client {
 	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
 		base = "http://" + base
 	}
-	return &Client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 0}}
+	return &Client{
+		base:      strings.TrimRight(base, "/"),
+		http:      &http.Client{Timeout: 0},
+		httpShort: &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+// WithToken returns a copy of c that authenticates with the given token.
+// The returned copy shares the underlying HTTP transports.
+func (c *Client) WithToken(token string) *Client {
+	c2 := *c
+	c2.authToken = token
+	return &c2
+}
+
+// WithTokenFile reads the auth token from path and returns an authenticated
+// copy of c. If the file cannot be read, c is returned unchanged.
+func (c *Client) WithTokenFile(path string) *Client {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return c
+	}
+	return c.WithToken(strings.TrimSpace(string(data)))
+}
+
+func (c *Client) setAuth(req *http.Request) {
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 }
 
 // Health checks daemon reachability.
 func (c *Client) Health(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/healthz", nil)
-	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	resp, err := c.httpShort.Do(req)
 	if err != nil {
 		return err
 	}
@@ -96,6 +129,7 @@ func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.E
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	c.setAuth(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -148,7 +182,8 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	c.setAuth(req)
+	resp, err := c.httpShort.Do(req)
 	if err != nil {
 		return err
 	}

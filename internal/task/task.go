@@ -263,16 +263,27 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	}
 }
 
-// outputBuffer is a goroutine-safe append-only text buffer.
+const maxOutputBuffer = 10 << 20 // 10 MiB
+
+// outputBuffer is a goroutine-safe append-only text buffer with a size cap.
 type outputBuffer struct {
-	mu  sync.Mutex
-	buf []byte
+	mu        sync.Mutex
+	buf       []byte
+	truncated bool
 }
 
 func (b *outputBuffer) append(s string) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.truncated {
+		return
+	}
 	b.buf = append(b.buf, s...)
-	b.mu.Unlock()
+	if len(b.buf) > maxOutputBuffer {
+		b.buf = b.buf[:maxOutputBuffer]
+		b.buf = append(b.buf, "\n…[output truncated at 10 MiB]"...)
+		b.truncated = true
+	}
 }
 
 func (b *outputBuffer) string() string {

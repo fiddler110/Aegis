@@ -5,11 +5,15 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -41,6 +45,8 @@ import (
 	"github.com/scottymacleod/agentharness/internal/tool/builtin"
 )
 
+const maxRequestBody = 10 << 20 // 10 MiB
+
 // Server holds the daemon's shared state.
 type Server struct {
 	cfg        *config.Config
@@ -62,6 +68,7 @@ type Server struct {
 	workspace  string
 	logger     *slog.Logger
 	http       *http.Server
+	authToken  string // shared secret for API authentication
 }
 
 // New constructs a daemon from config. The workspace root for tools is the
@@ -181,6 +188,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		logger.Info("loaded custom agent definitions", "count", n)
 	}
 
+	token, err := generateAndWriteToken(cfg.AuthTokenPath())
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("auth token: %w", err)
+	}
+	s.authToken = token
+
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
 	s.hooks = hooks.NewMulti(s.audit)
 	if adapter != nil {
@@ -221,8 +235,9 @@ func (s *Server) onSubagentStop(id swarm.Identity, res swarm.Result) {
 
 func truncateSummary(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > n {
-		return s[:n] + "…"
+	runes := []rune(s)
+	if len(runes) > n {
+		return string(runes[:n]) + "…"
 	}
 	return s
 }
@@ -275,9 +290,10 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		conv := &engine.Conversation{System: cfg.SystemPrompt}
 		conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: cfg.Prompt}}})
 
+		const maxOutput = 1 << 20 // 1 MiB
 		var sb strings.Builder
 		runErr := eng.Run(ctx, conv, func(ev engine.Event) {
-			if ev.Kind == engine.KindText {
+			if ev.Kind == engine.KindText && sb.Len() < maxOutput {
 				sb.WriteString(ev.Text)
 			}
 		})
@@ -305,7 +321,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
 	mux.HandleFunc("GET /teammates", s.handleListTeammates)
-	return mux
+	return s.authMiddleware(s.originMiddleware(mux))
 }
 
 // ListenAndServe runs the daemon until ctx is cancelled.
@@ -379,6 +395,7 @@ func (s *Server) newEngine(mode string) (*engine.Engine, error) {
 		ctxGate := permission.NewContextualGate(baseGate, permission.ContextualOpts{
 			EgressThenWrite:  s.cfg.Security.EgressThenWrite,
 			NetworkAllowList: s.cfg.Security.NetworkAllowList,
+			Registry:         s.tools,
 			OnDecision: func(d permission.ContextualDecision) {
 				if s.audit != nil {
 					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
@@ -410,6 +427,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	var req api.CreateSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -426,7 +444,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.store.Create(r.Context(), req.Title, system, mode)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("create session", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusCreated, toMeta(sess.ID, sess.Title, sess.Mode, sess.CreatedAt, sess.UpdatedAt))
@@ -453,7 +472,8 @@ func (s *Server) handleListTeammates(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	metas, err := s.store.List(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("list sessions", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	out := make([]api.SessionMeta, 0, len(metas))
@@ -474,13 +494,15 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Delete(r.Context(), r.PathValue("id")); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("delete session", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	id := r.PathValue("id")
 	var req api.PostMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -563,7 +585,8 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeError(w, http.StatusInternalServerError, err.Error())
+	s.logger.Error("store error", "err", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
 // --- helpers ---
@@ -594,8 +617,9 @@ func toMeta(id, title, mode string, created, updated time.Time) api.SessionMeta 
 
 func deriveTitle(text string) string {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
-	if len(text) > 60 {
-		text = text[:60] + "…"
+	runes := []rune(text)
+	if len(runes) > 60 {
+		text = string(runes[:60]) + "…"
 	}
 	return text
 }
@@ -613,7 +637,81 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // cronShellRunner returns a function that runs a cron job's command using the
 // given sandbox backend, streaming output to the task buffer via emit.
 func cronShellRunner(sb sandbox.Backend, cwd string) func(ctx context.Context, command string, emit func(string)) error {
+	const cronJobTimeout = 10 * time.Minute
 	return func(ctx context.Context, command string, emit func(string)) error {
+		ctx, cancel := context.WithTimeout(ctx, cronJobTimeout)
+		defer cancel()
 		return sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: cwd}, emit)
 	}
+}
+
+// --- authentication & security middleware ---
+
+// generateAndWriteToken creates a cryptographic random token and writes it to
+// path with user-only permissions. The client reads this file to authenticate.
+func generateAndWriteToken(path string) (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(buf[:])
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// authMiddleware checks for a valid Bearer token on all requests except
+// /healthz. Requests without a valid token receive 401.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.authToken == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(auth, prefix) {
+			writeError(w, http.StatusUnauthorized, "missing authorization")
+			return
+		}
+		provided := auth[len(prefix):]
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(s.authToken)) != 1 {
+			writeError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originMiddleware blocks requests with a non-loopback Origin header to
+// mitigate DNS rebinding attacks against the local daemon.
+func (s *Server) originMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !isLoopbackOrigin(origin) {
+				writeError(w, http.StatusForbidden, "cross-origin request blocked")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLoopbackOrigin(origin string) bool {
+	host := origin
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	host = strings.TrimRight(host, "/")
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback() || h == "localhost"
 }

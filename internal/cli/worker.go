@@ -119,9 +119,10 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, error) {
 	conv := &engine.Conversation{System: spec.Config.SystemPrompt}
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: spec.Config.Prompt}}})
 
+	const maxOutput = 1 << 20 // 1 MiB
 	var sb strings.Builder
 	runErr := eng.Run(ctx, conv, func(ev engine.Event) {
-		if ev.Kind == engine.KindText {
+		if ev.Kind == engine.KindText && sb.Len() < maxOutput {
 			sb.WriteString(ev.Text)
 		}
 	})

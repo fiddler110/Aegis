@@ -68,7 +68,7 @@ func (t *taskCreateTool) Execute(_ context.Context, input json.RawMessage) (tool
 	}
 	timeout := time.Duration(t.timeoutSec) * time.Second
 	if args.TimeoutSec > 0 {
-		timeout = time.Duration(args.TimeoutSec) * time.Second
+		timeout = time.Duration(min(args.TimeoutSec, 600)) * time.Second
 	}
 	sb := t.sb
 	if sb == nil {

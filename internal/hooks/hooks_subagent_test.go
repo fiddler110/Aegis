@@ -11,6 +11,7 @@ import (
 func TestAuditSubagentStop(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	a := NewAudit(path)
+	defer a.Close()
 	a.SubagentStop("explore-1@default", "done", "found the bug", false)
 	a.SubagentStop("build-2@default", "failed", "timeout", true)
 

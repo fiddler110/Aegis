@@ -1,7 +1,6 @@
 package swarm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -79,8 +78,8 @@ func (b *SubprocessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle
 func (b *SubprocessBackend) runWorker(ctx context.Context, id Identity, specPath string) Result {
 	args := append(append([]string{}, b.workerArgs...), "--spec", specPath)
 	cmd := exec.CommandContext(ctx, b.exePath, args...)
-	cmd.Env = os.Environ() // inherit API keys etc.
-	var stderr bytes.Buffer
+	cmd.Env = filteredEnv() // inherit only required environment variables
+	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
 
@@ -127,6 +126,11 @@ func writeSpec(spec WorkerSpec) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("swarm: create spec file: %w", err)
 	}
+	if err := os.Chmod(f.Name(), 0o600); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("swarm: chmod spec file: %w", err)
+	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		os.Remove(f.Name())
@@ -137,4 +141,49 @@ func writeSpec(spec WorkerSpec) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// limitedBuffer collects up to 1 MiB, silently discarding the rest.
+type limitedBuffer struct {
+	buf [1 << 20]byte
+	n   int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	n := copy(b.buf[b.n:], p)
+	b.n += n
+	return len(p), nil // always report full write so exec doesn't error
+}
+
+func (b *limitedBuffer) String() string { return string(b.buf[:b.n]) }
+
+// filteredEnv returns the current environment with only the variables needed
+// by worker processes, avoiding leaking the full parent environment.
+func filteredEnv() []string {
+	allow := []string{
+		"PATH", "HOME", "USER", "SHELL", "TEMP", "TMP", "TMPDIR",
+		"ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+		"AGENTHARNESS_", // prefix match
+		"LANG", "LC_ALL", "TERM",
+		"SYSTEMROOT", "COMSPEC", "APPDATA", "LOCALAPPDATA", "USERPROFILE", // Windows
+	}
+	var out []string
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		for _, a := range allow {
+			if strings.HasSuffix(a, "_") {
+				if strings.HasPrefix(k, a) {
+					out = append(out, e)
+					break
+				}
+			} else if k == a {
+				out = append(out, e)
+				break
+			}
+		}
+	}
+	return out
 }

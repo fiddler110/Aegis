@@ -151,7 +151,7 @@ func (c *ContainerBackend) runArgs(command string, opts ExecOpts) []string {
 
 // ociRunArgs builds `docker run` / `podman run` arguments.
 func (c *ContainerBackend) ociRunArgs(command string, opts ExecOpts) []string {
-	args := []string{"run", "--rm"}
+	args := []string{"run", "--rm", "--cap-drop=ALL", "--security-opt=no-new-privileges"}
 	if !c.network {
 		args = append(args, "--network", "none")
 	}
@@ -166,6 +166,9 @@ func (c *ContainerBackend) ociRunArgs(command string, opts ExecOpts) []string {
 // Containers uses a different invocation model; adapt as the CLI evolves.
 func (c *ContainerBackend) appleContainerArgs(command string, opts ExecOpts) []string {
 	args := []string{"run", "--rm"}
+	if !c.network {
+		args = append(args, "--network", "none")
+	}
 	if opts.Dir != "" {
 		args = append(args, "-v", opts.Dir+":/workspace", "-w", "/workspace")
 	}

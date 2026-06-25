@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -11,7 +12,12 @@ import (
 // SubprocessBackend re-executes it. We detect the marker env var before the test
 // framework parses flags and act as the worker, then exit.
 func TestMain(m *testing.M) {
-	if os.Getenv("SWARM_TEST_WORKER") == "1" {
+	// Detect when the test binary is re-executed as a fake worker by the
+	// SubprocessBackend. We check os.Args for the "__worker" subcommand
+	// because filteredEnv() strips SWARM_TEST_WORKER from the child's
+	// environment — without this, the child falls through to m.Run() and
+	// recursively spawns more children (exponential fork bomb / OOM).
+	if slices.Contains(os.Args, "__worker") {
 		fakeWorkerMain()
 		return
 	}

@@ -33,11 +33,13 @@ func Run(cfg Config) error {
 	return err
 }
 
+const maxTranscriptBytes = 1 << 20 // 1 MiB
+
 type model struct {
 	cfg        Config
 	vp         viewport.Model
 	ta         textarea.Model
-	transcript strings.Builder
+	transcript cappedBuffer
 	streaming  bool
 	events     <-chan api.Event
 	cancel     context.CancelFunc
@@ -46,6 +48,39 @@ type model struct {
 	ready      bool
 	status     string
 	st         styles
+}
+
+// cappedBuffer is a strings.Builder-like buffer that trims old content when it
+// exceeds maxTranscriptBytes, preventing unbounded memory growth in long sessions.
+type cappedBuffer struct {
+	buf []byte
+}
+
+const trimPrefix = "[earlier output trimmed]\n\n"
+
+func (b *cappedBuffer) WriteString(s string) {
+	b.buf = append(b.buf, s...)
+	cap := maxTranscriptBytes - len(trimPrefix)
+	if len(b.buf) > maxTranscriptBytes {
+		trim := len(b.buf) - cap
+		for trim < len(b.buf) && b.buf[trim] != '\n' {
+			trim++
+		}
+		if trim < len(b.buf) {
+			trim++
+		}
+		copy(b.buf, b.buf[trim:])
+		b.buf = b.buf[:len(b.buf)-trim]
+		b.buf = append([]byte(trimPrefix), b.buf...)
+	}
+}
+
+func (b *cappedBuffer) String() string {
+	return string(b.buf)
+}
+
+func (b *cappedBuffer) Reset() {
+	b.buf = b.buf[:0]
 }
 
 type styles struct {
@@ -215,10 +250,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) layout() {
 	inputH := m.ta.Height() + 1
 	statusH := 1
-	vpH := m.height - inputH - statusH
-	if vpH < 3 {
-		vpH = 3
-	}
+	vpH := max(m.height-inputH-statusH, 3)
 	if !m.ready {
 		m.vp = viewport.New(m.width, vpH)
 	} else {

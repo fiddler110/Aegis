@@ -36,9 +36,10 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
+			const maxPromptSize = 1 << 20 // 1 MiB
 			prompt := strings.TrimSpace(strings.Join(args, " "))
 			if prompt == "" {
-				data, _ := io.ReadAll(cmd.InOrStdin())
+				data, _ := io.ReadAll(io.LimitReader(cmd.InOrStdin(), maxPromptSize))
 				prompt = strings.TrimSpace(string(data))
 			}
 			if prompt == "" {

@@ -209,7 +209,7 @@ func providerAPIKey(provider string) string {
 
 // EnsureDataDir creates the configured data directory if it does not exist.
 func (c *Config) EnsureDataDir() error {
-	if err := os.MkdirAll(c.DataDir, 0o755); err != nil {
+	if err := os.MkdirAll(c.DataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir %s: %w", c.DataDir, err)
 	}
 	return nil
@@ -223,4 +223,9 @@ func (c *Config) SessionDBPath() string {
 // LogPath returns the path to the harness log file.
 func (c *Config) LogPath() string {
 	return filepath.Join(c.DataDir, "harness.log")
+}
+
+// AuthTokenPath returns the path to the daemon auth token file.
+func (c *Config) AuthTokenPath() string {
+	return filepath.Join(c.DataDir, "daemon.token")
 }

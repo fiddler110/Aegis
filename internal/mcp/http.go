@@ -10,7 +10,10 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
+
+const maxMCPResponseBytes = 16 << 20 // 16 MiB
 
 // NewHTTP connects to an MCP server over HTTP+SSE. The endpoint is the base
 // URL (e.g. "http://localhost:8080"). Requests are POSTed as JSON-RPC;
@@ -18,7 +21,7 @@ import (
 func NewHTTP(ctx context.Context, server, endpoint string) (*Client, error) {
 	transport := &httpTransport{
 		endpoint: strings.TrimRight(endpoint, "/"),
-		client:   &http.Client{},
+		client:   &http.Client{Timeout: 30 * time.Second},
 	}
 	// SSE event stream for server→client messages.
 	sseReader, sseWriter := io.Pipe()
@@ -26,8 +29,10 @@ func NewHTTP(ctx context.Context, server, endpoint string) (*Client, error) {
 
 	c := newClient(server, sseReader, transport, transport)
 
-	// Start SSE listener.
-	go transport.listenSSE(ctx, sseWriter)
+	// Start SSE listener with a cancellable context so Close() can stop it.
+	sseCtx, sseCancel := context.WithCancel(ctx)
+	transport.sseCancel = sseCancel
+	go transport.listenSSE(sseCtx, sseWriter)
 
 	if err := c.initialize(ctx); err != nil {
 		_ = c.Close()
@@ -38,10 +43,11 @@ func NewHTTP(ctx context.Context, server, endpoint string) (*Client, error) {
 
 // httpTransport implements io.Writer (for sending requests) and io.Closer.
 type httpTransport struct {
-	endpoint  string
-	client    *http.Client
-	sseWriter *io.PipeWriter
-	mu        sync.Mutex
+	endpoint    string
+	client      *http.Client
+	sseWriter   *io.PipeWriter
+	sseCancel   context.CancelFunc // cancels the SSE listener's HTTP request
+	mu          sync.Mutex
 }
 
 // Write sends a JSON-RPC request to the HTTP endpoint via POST.
@@ -56,14 +62,14 @@ func (t *httpTransport) Write(p []byte) (int, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxMCPResponseBytes))
 		return 0, fmt.Errorf("mcp http: POST %d: %s", resp.StatusCode, string(body))
 	}
 
 	// If the response is JSON (direct response mode), pipe it to the reader.
 	ct := resp.Header.Get("Content-Type")
 	if strings.Contains(ct, "application/json") {
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxMCPResponseBytes))
 		if err == nil && len(body) > 0 {
 			t.sseWriter.Write(append(body, '\n'))
 		}
@@ -72,8 +78,11 @@ func (t *httpTransport) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Close terminates the transport.
+// Close terminates the transport, cancelling the SSE listener goroutine.
 func (t *httpTransport) Close() error {
+	if t.sseCancel != nil {
+		t.sseCancel()
+	}
 	t.sseWriter.Close()
 	return nil
 }

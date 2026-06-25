@@ -4,12 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/scottymacleod/agentharness/internal/filetracker"
 	"github.com/scottymacleod/agentharness/internal/tool"
+)
+
+const (
+	maxReadBytes    = 50 << 20 // 50 MiB
+	maxWriteContent = 10 << 20 // 10 MiB
 )
 
 // --- read ---
@@ -40,7 +46,12 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err != nil {
 		return tool.Result{}, err
 	}
-	data, err := os.ReadFile(abs)
+	f, err := os.Open(abs)
+	if err != nil {
+		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes))
+	f.Close()
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
 	}
@@ -87,6 +98,9 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
+	if len(args.Content) > maxWriteContent {
+		return tool.Result{Content: fmt.Sprintf("content too large (%d bytes, max %d)", len(args.Content), maxWriteContent), IsError: true}, nil
+	}
 	abs, err := resolvePath(t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
@@ -96,7 +110,7 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 			return tool.Result{Content: err.Error(), IsError: true}, nil
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
 		return tool.Result{Content: fmt.Sprintf("mkdir failed: %v", err), IsError: true}, nil
 	}
 	if err := os.WriteFile(abs, []byte(args.Content), 0o644); err != nil {
@@ -142,7 +156,12 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 			return tool.Result{Content: err.Error(), IsError: true}, nil
 		}
 	}
-	data, err := os.ReadFile(abs)
+	f, err := os.Open(abs)
+	if err != nil {
+		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes))
+	f.Close()
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
 	}

@@ -41,7 +41,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cl := client.New(cfg.Server.Addr)
+			cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()

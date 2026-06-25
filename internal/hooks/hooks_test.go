@@ -33,6 +33,7 @@ func TestMultiVeto(t *testing.T) {
 func TestAuditWritesJSONL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	a := NewAudit(path)
+	defer a.Close()
 	ctx := context.Background()
 	a.PreToolUse(ctx, "grep", json.RawMessage(`{"pattern":"x"}`))
 	a.PostToolUse(ctx, "grep", nil, "result", false)

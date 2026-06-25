@@ -56,7 +56,7 @@ func (t *diagramTool) Execute(ctx context.Context, input json.RawMessage) (tool.
 	if err != nil {
 		return tool.Result{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
 		return tool.Result{Content: fmt.Sprintf("mkdir failed: %v", err), IsError: true}, nil
 	}
 	if err := os.WriteFile(abs, data, 0o644); err != nil {

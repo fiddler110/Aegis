@@ -48,9 +48,10 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return tool.Result{Content: "command is required", IsError: true}, nil
 	}
 
+	const maxTimeoutSec = 600
 	timeout := time.Duration(t.timeoutSec) * time.Second
 	if args.TimeoutSec > 0 {
-		timeout = time.Duration(args.TimeoutSec) * time.Second
+		timeout = time.Duration(min(args.TimeoutSec, maxTimeoutSec)) * time.Second
 	}
 
 	if args.Background {

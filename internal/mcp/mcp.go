@@ -131,13 +131,18 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	ch := make(chan rpcResponse, 1)
 	c.pending[id] = ch
 	err := c.enc.Encode(rpcRequest{JSONRPC: "2.0", ID: &id, Method: method, Params: params})
-	c.mu.Unlock()
 	if err != nil {
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return nil, err
 	}
+	c.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return nil, ctx.Err()
 	case resp := <-ch:
 		if resp.Error != nil {

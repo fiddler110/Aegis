@@ -26,7 +26,7 @@ func CronTools(sched *cron.Scheduler) []tool.Tool {
 type cronCreateTool struct{ sched *cron.Scheduler }
 
 func (t *cronCreateTool) Name() string                { return "cron_create" }
-func (t *cronCreateTool) Capability() tool.Capability { return tool.CapWrite }
+func (t *cronCreateTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *cronCreateTool) Description() string {
 	return "Create a recurring cron job. The schedule is a standard 5-field cron expression " +
 		"(minute hour dom month dow) or a macro (@hourly, @daily, @weekly, @monthly). " +

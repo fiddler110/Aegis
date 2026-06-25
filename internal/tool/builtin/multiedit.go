@@ -45,6 +45,10 @@ func (t *multieditTool) Execute(_ context.Context, input json.RawMessage) (tool.
 	if len(args.Edits) == 0 {
 		return tool.Result{Content: "edits array is required and must not be empty", IsError: true}, nil
 	}
+	const maxEdits = 100
+	if len(args.Edits) > maxEdits {
+		return tool.Result{Content: fmt.Sprintf("too many edits (%d, max %d)", len(args.Edits), maxEdits), IsError: true}, nil
+	}
 
 	// Phase 1: validate all paths and load file contents.
 	type fileState struct {

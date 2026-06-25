@@ -26,7 +26,7 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 	var closer io.Closer = nopCloser{}
 
 	if opts.Path != "" && !opts.ToStderr {
-		f, err := os.OpenFile(opts.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		f, err := os.OpenFile(opts.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open log file %s: %w", opts.Path, err)
 		}

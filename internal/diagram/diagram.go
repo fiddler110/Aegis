@@ -109,7 +109,7 @@ func (k *Kroki) Render(ctx context.Context, dtype, source, format string) ([]byt
 		return nil, "", fmt.Errorf("kroki request: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("kroki error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}

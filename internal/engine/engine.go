@@ -200,6 +200,17 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return nil
 		}
 
+		// Mid-run compaction: re-check after every 5 tool rounds to prevent
+		// unbounded conversation growth during long multi-tool runs.
+		if e.compactor != nil && iter > 0 && iter%5 == 0 {
+			if out, changed, err := e.compactor.Compact(ctx, conv.System, conv.Messages); err != nil {
+				e.logger.Warn("mid-run compaction failed", "err", err)
+			} else if changed {
+				e.logger.Info("mid-run compaction", "before", len(conv.Messages), "after", len(out))
+				conv.Messages = out
+			}
+		}
+
 		// Loop guard: stop if the model keeps requesting the same tool calls.
 		if loop != nil && loop.record(turnSignature(toolUses)) {
 			err := fmt.Errorf("engine: aborting suspected loop: identical tool calls repeated %d turns", e.loopThreshold)

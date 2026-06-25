@@ -3,8 +3,10 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -59,7 +61,21 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 }
 
 func (t *fetchTool) get(ctx context.Context, rawURL string) ([]byte, string, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialContext: ssrfSafeDialer,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if err := validateNotPrivate(req.Context(), req.URL); err != nil {
+				return err
+			}
+			return nil
+		},
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, "", err
@@ -78,6 +94,69 @@ func (t *fetchTool) get(ctx context.Context, rawURL string) ([]byte, string, err
 		return nil, "", err
 	}
 	return data, resp.Header.Get("Content-Type"), nil
+}
+
+// ssrfSafeDialer resolves the target address and rejects connections to
+// private/loopback/link-local IPs, preventing SSRF attacks.
+func ssrfSafeDialer(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip.IP) {
+			return nil, fmt.Errorf("blocked: %s resolves to private/internal address %s", host, ip.IP)
+		}
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
+// validateNotPrivate checks a URL's hostname against private IP ranges.
+func validateNotPrivate(ctx context.Context, u *url.URL) error {
+	host := u.Hostname()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip.IP) {
+			return fmt.Errorf("blocked: redirect to private/internal address %s (%s)", host, ip.IP)
+		}
+	}
+	return nil
+}
+
+var privateRanges = []*net.IPNet{
+	mustParseCIDR("10.0.0.0/8"),
+	mustParseCIDR("172.16.0.0/12"),
+	mustParseCIDR("192.168.0.0/16"),
+	mustParseCIDR("127.0.0.0/8"),
+	mustParseCIDR("169.254.0.0/16"),
+	mustParseCIDR("::1/128"),
+	mustParseCIDR("fc00::/7"),
+	mustParseCIDR("fe80::/10"),
+}
+
+func isPrivateIP(ip net.IP) bool {
+	for _, r := range privateRanges {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
+func mustParseCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return n
 }
 
 // --- search (DuckDuckGo HTML endpoint, no API key required) ---

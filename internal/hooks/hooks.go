@@ -5,6 +5,7 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -44,10 +45,23 @@ func (m *Multi) PostToolUse(ctx context.Context, name string, input json.RawMess
 type Audit struct {
 	mu   sync.Mutex
 	path string
+	file *os.File
 }
 
 // NewAudit creates an audit hook writing to path.
 func NewAudit(path string) *Audit { return &Audit{path: path} }
+
+// Close flushes and closes the audit file.
+func (a *Audit) Close() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.file != nil {
+		err := a.file.Close()
+		a.file = nil
+		return err
+	}
+	return nil
+}
 
 type auditRecord struct {
 	Time    time.Time       `json:"time"`
@@ -103,11 +117,16 @@ func (a *Audit) PostToolUse(_ context.Context, name string, _ json.RawMessage, _
 func (a *Audit) write(rec auditRecord) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
+	if a.file == nil {
+		f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			slog.Error("audit: failed to open log", "path", a.path, "err", err)
+			return
+		}
+		a.file = f
 	}
-	defer f.Close()
 	line, _ := json.Marshal(rec)
-	f.Write(append(line, '\n'))
+	if _, err := a.file.Write(append(line, '\n')); err != nil {
+		slog.Error("audit: failed to write record", "path", a.path, "err", err)
+	}
 }

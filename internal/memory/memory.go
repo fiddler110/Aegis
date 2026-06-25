@@ -85,15 +85,20 @@ func (s Sources) loadSkills() string {
 
 // Append adds a timestamped entry to the given memory file, creating it (and
 // its parent directory) if needed.
+const maxMemoryEntry = 4096
+
 func Append(path, entry string) error {
 	entry = strings.TrimSpace(entry)
 	if entry == "" {
 		return fmt.Errorf("empty memory entry")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if len(entry) > maxMemoryEntry {
+		return fmt.Errorf("memory entry too large (%d bytes, max %d)", len(entry), maxMemoryEntry)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -110,11 +115,11 @@ func (s Sources) SaveSkill(name, content string) (string, error) {
 		return "", fmt.Errorf("invalid skill name")
 	}
 	dir := filepath.Join(s.ProjectRoot, ".agentharness", "skills")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, name+".md")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

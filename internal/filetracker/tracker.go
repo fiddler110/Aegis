@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const maxTrackedFiles = 10000
+
 // Tracker records read timestamps for workspace files. Thread-safe.
 type Tracker struct {
 	mu    sync.Mutex
@@ -32,7 +34,24 @@ func (t *Tracker) RecordRead(path string) {
 	}
 	t.mu.Lock()
 	t.reads[path] = info.ModTime()
+	if len(t.reads) > maxTrackedFiles {
+		t.pruneOldestLocked()
+	}
 	t.mu.Unlock()
+}
+
+func (t *Tracker) pruneOldestLocked() {
+	var oldestPath string
+	var oldestTime time.Time
+	for p, mt := range t.reads {
+		if oldestPath == "" || mt.Before(oldestTime) {
+			oldestPath = p
+			oldestTime = mt
+		}
+	}
+	if oldestPath != "" {
+		delete(t.reads, oldestPath)
+	}
 }
 
 // CheckWrite verifies that path has not been modified externally since the

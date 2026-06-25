@@ -121,11 +121,17 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	c.mu.Unlock()
 
 	if err := c.send(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return nil, err
 	}
 
 	select {
 	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return nil, ctx.Err()
 	case result := <-ch:
 		return result, nil
@@ -151,6 +157,10 @@ func (c *Client) readLoop() {
 		length, err := strconv.Atoi(strings.TrimSpace(lengthStr))
 		if err != nil || length <= 0 {
 			continue
+		}
+		const maxLSPBody = 32 << 20 // 32 MiB
+		if length > maxLSPBody {
+			return
 		}
 		body := make([]byte, length)
 		if _, err := io.ReadFull(reader, body); err != nil {

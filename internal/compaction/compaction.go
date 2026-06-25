@@ -153,8 +153,8 @@ func renderTranscript(msgs []provider.Message) string {
 				fmt.Fprintf(&b, "%s called tool %s(%s)\n", m.Role, v.Name, string(v.Input))
 			case provider.ToolResultBlock:
 				result := v.Content
-				if len(result) > 800 {
-					result = result[:800] + "…"
+				if len([]rune(result)) > 800 {
+					result = string([]rune(result)[:800]) + "…"
 				}
 				fmt.Fprintf(&b, "tool result: %s\n", result)
 			}
