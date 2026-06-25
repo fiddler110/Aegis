@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -81,6 +83,36 @@ func TestEnvBaseURL(t *testing.T) {
 	}
 	if cfg.Provider.BaseURL != "http://localhost:11434/v1" {
 		t.Errorf("base_url = %q, want http://localhost:11434/v1", cfg.Provider.BaseURL)
+	}
+}
+
+// TestDefaultDataDir asserts that the config directory path follows the
+// correct convention for each OS:
+//   - Windows → %AppData%\aegis  (via os.UserConfigDir)
+//   - macOS   → ~/.config/aegis  (XDG-compatible, NOT ~/Library/Application Support)
+//   - Linux   → ~/.config/aegis
+func TestDefaultDataDir(t *testing.T) {
+	got := defaultDataDir()
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir: %v", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		// Windows: should sit under %AppData%, not under the home/.config subtree.
+		dotConfig := filepath.Join(home, ".config")
+		if len(got) >= len(dotConfig) && got[:len(dotConfig)] == dotConfig {
+			t.Errorf("on Windows defaultDataDir() = %q; must NOT be under ~/.config", got)
+		}
+	} else {
+		// macOS (darwin) and Linux: must always be ~/.config/aegis.
+		want := filepath.Join(home, ".config", appDir)
+		if got != want {
+			t.Errorf("on %s defaultDataDir() = %q, want %q\n"+
+				"Hint: rebuild the binary — do not run an old binary compiled before the fix.",
+				runtime.GOOS, got, want)
+		}
 	}
 }
 
