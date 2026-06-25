@@ -16,12 +16,13 @@ import (
 const maxMCPResponseBytes = 16 << 20 // 16 MiB
 
 // NewHTTP connects to an MCP server over HTTP+SSE. The endpoint is the base
-// URL (e.g. "http://localhost:8080"). Requests are POSTed as JSON-RPC;
-// responses arrive as SSE events. This follows the MCP HTTP/SSE transport spec.
-func NewHTTP(ctx context.Context, server, endpoint string) (*Client, error) {
+// URL (e.g. "http://localhost:8080"). auth is an optional Bearer token sent
+// on every request; pass empty string to omit the Authorization header.
+func NewHTTP(ctx context.Context, server, endpoint, auth string) (*Client, error) {
 	transport := &httpTransport{
-		endpoint: strings.TrimRight(endpoint, "/"),
-		client:   &http.Client{Timeout: 30 * time.Second},
+		endpoint:  strings.TrimRight(endpoint, "/"),
+		client:    &http.Client{Timeout: 30 * time.Second},
+		auth:      auth,
 	}
 	// SSE event stream for server→client messages.
 	sseReader, sseWriter := io.Pipe()
@@ -43,11 +44,12 @@ func NewHTTP(ctx context.Context, server, endpoint string) (*Client, error) {
 
 // httpTransport implements io.Writer (for sending requests) and io.Closer.
 type httpTransport struct {
-	endpoint    string
-	client      *http.Client
-	sseWriter   *io.PipeWriter
-	sseCancel   context.CancelFunc // cancels the SSE listener's HTTP request
-	mu          sync.Mutex
+	endpoint  string
+	client    *http.Client
+	auth      string // Bearer token; empty means no Authorization header
+	sseWriter *io.PipeWriter
+	sseCancel context.CancelFunc // cancels the SSE listener's HTTP request
+	mu        sync.Mutex
 }
 
 // Write sends a JSON-RPC request to the HTTP endpoint via POST.
@@ -55,7 +57,16 @@ func (t *httpTransport) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	resp, err := t.client.Post(t.endpoint+"/message", "application/json", bytes.NewReader(p))
+	req, err := http.NewRequest("POST", t.endpoint+"/message", bytes.NewReader(p))
+	if err != nil {
+		return 0, fmt.Errorf("mcp http: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if t.auth != "" {
+		req.Header.Set("Authorization", "Bearer "+t.auth)
+	}
+
+	resp, err := t.client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("mcp http: POST failed: %w", err)
 	}
@@ -96,6 +107,9 @@ func (t *httpTransport) listenSSE(ctx context.Context, w *io.PipeWriter) {
 		return
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if t.auth != "" {
+		req.Header.Set("Authorization", "Bearer "+t.auth)
+	}
 
 	resp, err := t.client.Do(req)
 	if err != nil {
@@ -121,7 +135,7 @@ func (t *httpTransport) listenSSE(ctx context.Context, w *io.PipeWriter) {
 // falls back to stdio. This is a convenience constructor for RegisterServers.
 func NewHTTPOrStdio(ctx context.Context, sc ServerConfig) (*Client, error) {
 	if isHTTPEndpoint(sc.Command) {
-		return NewHTTP(ctx, sc.Name, sc.Command)
+		return NewHTTP(ctx, sc.Name, sc.Command, sc.Auth)
 	}
 	return NewStdio(ctx, sc.Name, sc.Command, sc.Args, flattenEnv(sc.Env))
 }

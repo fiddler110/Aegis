@@ -3,11 +3,15 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/scottymacleod/aegis/internal/memory"
 	"github.com/scottymacleod/aegis/internal/tool"
 )
 
@@ -112,6 +116,164 @@ func TestRegisterAll(t *testing.T) {
 	for _, name := range []string{"read_file", "write_file", "edit_file", "glob", "grep", "shell", "web_fetch", "web_search"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("tool %q not registered", name)
+		}
+	}
+}
+
+func TestMultiEdit(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	// Create a test file.
+	os.WriteFile(filepath.Join(root, "f.txt"), []byte("alpha\nbeta\ngamma\n"), 0o644)
+
+	me := &multieditTool{root: root}
+	res, err := me.Execute(ctx, mustJSON(t, map[string]any{
+		"edits": []map[string]any{
+			{"path": "f.txt", "old_string": "alpha", "new_string": "ALPHA"},
+			{"path": "f.txt", "old_string": "gamma", "new_string": "GAMMA"},
+		},
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("multi_edit: %v %+v", err, res)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(root, "f.txt"))
+	content := string(data)
+	if !strings.Contains(content, "ALPHA") || !strings.Contains(content, "GAMMA") || !strings.Contains(content, "beta") {
+		t.Errorf("multi_edit result = %q", content)
+	}
+}
+
+func TestRememberAndSkill(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	src := memory.Sources{ProjectRoot: root, DataDir: filepath.Join(root, "data")}
+
+	rem := &rememberTool{src: src}
+	res, err := rem.Execute(ctx, mustJSON(t, map[string]any{"note": "testing memory save"}))
+	if err != nil || res.IsError {
+		t.Fatalf("remember: %v %+v", err, res)
+	}
+	if !strings.Contains(res.Content, "saved") {
+		t.Errorf("remember result = %q", res.Content)
+	}
+
+	// Verify memory was saved.
+	loaded := src.Load()
+	if !strings.Contains(loaded, "testing memory save") {
+		t.Errorf("memory not loaded back: %q", loaded)
+	}
+
+	sk := &saveSkillTool{src: src}
+	res, err = sk.Execute(ctx, mustJSON(t, map[string]any{"name": "test-skill", "content": "step 1: do the thing"}))
+	if err != nil || res.IsError {
+		t.Fatalf("save_skill: %v %+v", err, res)
+	}
+	if !strings.Contains(res.Content, "test-skill") {
+		t.Errorf("save_skill result = %q", res.Content)
+	}
+}
+
+func TestDiagramToolInline(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	// Use a fake Kroki server.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write([]byte("<svg>test</svg>"))
+	}))
+	defer ts.Close()
+
+	dt := &diagramTool{root: root, krokiURL: ts.URL}
+	res, err := dt.Execute(ctx, mustJSON(t, map[string]any{"type": "mermaid", "source": "graph TD; A-->B"}))
+	if err != nil || res.IsError {
+		t.Fatalf("diagram: %v %+v", err, res)
+	}
+	if !strings.Contains(res.Content, "<svg>") {
+		t.Errorf("expected inline SVG, got %q", res.Content)
+	}
+}
+
+func TestDiagramToolToFile(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write([]byte("<svg>file-test</svg>"))
+	}))
+	defer ts.Close()
+
+	dt := &diagramTool{root: root, krokiURL: ts.URL}
+	res, err := dt.Execute(ctx, mustJSON(t, map[string]any{"type": "mermaid", "source": "graph TD; A-->B", "path": "out.svg"}))
+	if err != nil || res.IsError {
+		t.Fatalf("diagram to file: %v %+v", err, res)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "out.svg"))
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	if string(data) != "<svg>file-test</svg>" {
+		t.Errorf("output file content = %q", data)
+	}
+}
+
+func TestModelsToolRegistered(t *testing.T) {
+	m := &modelsTool{}
+	if m.Name() != "list_models" {
+		t.Errorf("name = %q", m.Name())
+	}
+	if m.Capability() != tool.CapNetwork {
+		t.Errorf("capability = %v", m.Capability())
+	}
+}
+
+func TestSecurityScanToolRegistered(t *testing.T) {
+	s := &securityScanTool{root: t.TempDir()}
+	if s.Name() != "security_scan" {
+		t.Errorf("name = %q", s.Name())
+	}
+}
+
+func TestWriteLargeContentRejected(t *testing.T) {
+	root := t.TempDir()
+	w := &writeTool{root: root}
+	bigContent := strings.Repeat("x", 11<<20) // 11 MiB
+	res, _ := w.Execute(context.Background(), mustJSON(t, map[string]any{"path": "big.txt", "content": bigContent}))
+	if !res.IsError {
+		t.Error("expected error for oversized content")
+	}
+}
+
+func TestReadWithLimitAndOffset(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "lines.txt"), []byte("line1\nline2\nline3\nline4\nline5\n"), 0o644)
+
+	r := &readTool{root: root}
+	// offset is 1-based: offset=3 starts at line 3.
+	res, _ := r.Execute(context.Background(), mustJSON(t, map[string]any{"path": "lines.txt", "offset": 3, "limit": 2}))
+	if !strings.Contains(res.Content, "line3") || !strings.Contains(res.Content, "line4") {
+		t.Errorf("read with offset/limit = %q", res.Content)
+	}
+	if strings.Contains(res.Content, "line1") || strings.Contains(res.Content, "line5") {
+		t.Errorf("read returned lines outside range: %q", res.Content)
+	}
+}
+
+func TestSSRFBlocksPrivateIPs(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1"} {
+		parsed := net.ParseIP(ip)
+		if !isPrivateIP(parsed) {
+			t.Errorf("isPrivateIP(%s) = false, want true", ip)
+		}
+	}
+	for _, ip := range []string{"8.8.8.8", "1.1.1.1"} {
+		parsed := net.ParseIP(ip)
+		if isPrivateIP(parsed) {
+			t.Errorf("isPrivateIP(%s) = true, want false", ip)
 		}
 	}
 }

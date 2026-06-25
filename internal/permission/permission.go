@@ -1,10 +1,12 @@
 // Package permission gates tool execution by mode and capability.
 //
-// It implements two postures borrowed from opencode/Claude Code:
+// Three permission postures are supported:
 //   - Plan mode: read-only. The agent may inspect files and the network but
 //     may not mutate the workspace or run commands.
-//   - Build mode: the agent may mutate the workspace; running commands still
-//     requires approval.
+//   - Build mode: the agent may mutate the workspace; shell execution still
+//     requires an approver (defaults to deny in non-interactive contexts).
+//   - Auto mode: all capabilities allowed without approval, including shell
+//     execution. Use only in trusted, sandboxed environments.
 package permission
 
 import (
@@ -21,14 +23,19 @@ type Mode string
 const (
 	ModePlan  Mode = "plan"
 	ModeBuild Mode = "build"
+	ModeAuto  Mode = "auto" // build + execute auto-approved
 )
 
-// ParseMode normalizes a mode string, defaulting to plan.
+// ParseMode normalizes a mode string, defaulting to plan for unknown values.
 func ParseMode(s string) Mode {
-	if Mode(s) == ModeBuild {
+	switch Mode(s) {
+	case ModeBuild:
 		return ModeBuild
+	case ModeAuto:
+		return ModeAuto
+	default:
+		return ModePlan
 	}
-	return ModePlan
 }
 
 // Decision is the outcome of a policy evaluation.
@@ -48,6 +55,8 @@ type Policy struct {
 // Decide returns the policy decision for a capability under the current mode.
 func (p Policy) Decide(cap tool.Capability) Decision {
 	switch p.Mode {
+	case ModeAuto:
+		return Allow // all capabilities permitted without prompting
 	case ModeBuild:
 		switch cap {
 		case tool.CapExecute:

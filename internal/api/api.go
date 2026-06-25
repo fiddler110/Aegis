@@ -66,6 +66,38 @@ type Teammate struct {
 	EndedAt   time.Time `json:"ended_at,omitzero"`
 }
 
+// UpdateSessionRequest patches a session's system prompt and/or mode.
+type UpdateSessionRequest struct {
+	System *string `json:"system,omitempty"`
+	Mode   *string `json:"mode,omitempty"`
+}
+
+// MemoryResponse describes the current memory and skills state.
+type MemoryResponse struct {
+	ProjectMemory string   `json:"project_memory"`
+	UserMemory    string   `json:"user_memory"`
+	Skills        []string `json:"skills"`
+}
+
+// AppendMemoryRequest adds a memory entry.
+type AppendMemoryRequest struct {
+	Entry string `json:"entry"`
+	Scope string `json:"scope"` // "project" (default) or "user"
+}
+
+// PersonaInfo describes an available persona.
+type PersonaInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// CommandInfo describes a custom slash command.
+type CommandInfo struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Args        []string `json:"args"`
+}
+
 // ErrorResponse is the body returned for non-2xx responses.
 type ErrorResponse struct {
 	Error string `json:"error"`

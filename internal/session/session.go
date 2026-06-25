@@ -50,6 +50,10 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	db.SetMaxOpenConns(1) // SQLite: serialize writes
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
@@ -170,6 +174,20 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// SetSystem updates a session's system prompt.
+func (s *Store) SetSystem(ctx context.Context, id, system string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET system = ?, updated_at = ? WHERE id = ?`,
+		system, time.Now().UnixMilli(), id)
+	return err
+}
+
+// SetMode updates a session's permission mode.
+func (s *Store) SetMode(ctx context.Context, id, mode string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET mode = ?, updated_at = ? WHERE id = ?`,
+		mode, time.Now().UnixMilli(), id)
+	return err
 }
 
 // Delete removes a session.

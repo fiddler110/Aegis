@@ -75,6 +75,16 @@ func (r *Registry) Register(t Tool) error {
 	return nil
 }
 
+// Upsert adds or replaces a tool and ensures it is exposed. Unlike Register it
+// never returns an error and is safe to call for tools that already exist.
+func (r *Registry) Upsert(t Tool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name := t.Name()
+	r.tools[name] = t
+	r.exposed[name] = true
+}
+
 // SetExposed toggles whether a registered tool is offered to the model.
 func (r *Registry) SetExposed(name string, exposed bool) {
 	r.mu.Lock()

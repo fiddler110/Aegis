@@ -119,6 +119,47 @@ func (c *Client) Teammates(ctx context.Context) ([]api.Teammate, error) {
 	return out, nil
 }
 
+// UpdateSession patches a session's system prompt and/or mode.
+func (c *Client) UpdateSession(ctx context.Context, id string, req api.UpdateSessionRequest) (*api.SessionMeta, error) {
+	var out api.SessionMeta
+	if err := c.do(ctx, http.MethodPatch, "/sessions/"+id, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListCommands returns custom slash commands from the daemon.
+func (c *Client) ListCommands(ctx context.Context) ([]api.CommandInfo, error) {
+	var out []api.CommandInfo
+	if err := c.do(ctx, http.MethodGet, "/commands", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetMemory returns the current memory and skills state.
+func (c *Client) GetMemory(ctx context.Context) (*api.MemoryResponse, error) {
+	var out api.MemoryResponse
+	if err := c.do(ctx, http.MethodGet, "/memory", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// AppendMemory adds a memory entry via the daemon.
+func (c *Client) AppendMemory(ctx context.Context, req api.AppendMemoryRequest) error {
+	return c.do(ctx, http.MethodPost, "/memory", req, nil)
+}
+
+// ListPersonas returns available persona names and descriptions.
+func (c *Client) ListPersonas(ctx context.Context) ([]api.PersonaInfo, error) {
+	var out []api.PersonaInfo
+	if err := c.do(ctx, http.MethodGet, "/personas", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PostMessage streams engine events for a user turn. Events are delivered on
 // the returned channel, which is closed when the run finishes or ctx is done.
 func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.Event, error) {

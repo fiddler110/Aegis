@@ -6,6 +6,8 @@ It borrows proven patterns from existing agents — provider abstraction and con
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
+- [Supported Local LLM Backends](#supported-local-llm-backends)
 - [Architecture](#architecture)
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
@@ -28,6 +30,74 @@ It borrows proven patterns from existing agents — provider abstraction and con
   - [Process Plugins](#process-plugins)
 - [Project Structure](#project-structure)
 - [Testing](#testing)
+
+## Quick Start
+
+Already have a local LLM server running with models loaded? Here's how to go from zero to chatting in under two minutes.
+
+**1. Build Aegis**
+
+```bash
+git clone https://github.com/scottymacleod/aegis.git
+cd aegis
+go build -o aegis ./cmd/aegis          # Linux/macOS
+# or: go build -o aegis.exe ./cmd/aegis  # Windows
+```
+
+**2. Point Aegis at your local server**
+
+Aegis talks to any backend that exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Set three environment variables:
+
+```bash
+# Linux / macOS
+export OPENAI_API_KEY="not-needed"
+export AEGIS_PROVIDER_DEFAULT="openai"
+export AEGIS_PROVIDER_BASE_URL="http://localhost:11434/v1"   # ← your server's URL (this example is Ollama)
+export AEGIS_PROVIDER_MODEL="llama3.1"                       # ← model name as reported by your server
+```
+
+```powershell
+# Windows (PowerShell)
+$env:OPENAI_API_KEY = "not-needed"
+$env:AEGIS_PROVIDER_DEFAULT = "openai"
+$env:AEGIS_PROVIDER_BASE_URL = "http://localhost:11434/v1"
+$env:AEGIS_PROVIDER_MODEL = "llama3.1"
+```
+
+> Swap the URL and model name for whichever backend you're running — see the [Supported Local LLM Backends](#supported-local-llm-backends) table below.
+
+**3. Start the daemon**
+
+```bash
+aegis serve
+```
+
+**4. Launch the TUI (in a second terminal)**
+
+```bash
+aegis                        # plan mode (read-only, safe to explore)
+aegis --mode build           # build mode (can edit files, run commands)
+```
+
+That's it. Aegis will connect to your local server and you can start chatting. Use `/help` inside the TUI for available commands.
+
+## Supported Local LLM Backends
+
+Aegis works with any server that exposes an OpenAI-compatible API (`/v1/chat/completions`). The table below lists the most popular options. Servers marked with **Auto-discover** are probed automatically by the `list_models` tool; all others work by setting `base_url` manually.
+
+| Server | Default Base URL | Auto-discover | Install / Start |
+|--------|-----------------|---------------|-----------------|
+| [Ollama](https://ollama.com) | `http://localhost:11434/v1` | Yes | Install from [ollama.com](https://ollama.com). Pull a model: `ollama pull llama3.1`. Runs as a service automatically, or start with `ollama serve`. |
+| [LM Studio](https://lmstudio.ai) | `http://localhost:1234/v1` | Yes | Download from [lmstudio.ai](https://lmstudio.ai). Load a model from Discover, then start the server from the Local Server tab. |
+| [llama.cpp](https://github.com/ggerganov/llama.cpp) | `http://localhost:8080/v1` | No | Build from source or download a release. Start with: `llama-server -m model.gguf --port 8080`. Supports GGUF models from [Hugging Face](https://huggingface.co/models?library=gguf). |
+| [vLLM](https://github.com/vllm-project/vllm) | `http://localhost:8000/v1` | No | `pip install vllm`. Start with: `vllm serve meta-llama/Llama-3.1-8B-Instruct`. High-throughput serving with PagedAttention, best for GPU-rich setups. |
+| [LocalAI](https://github.com/mudler/LocalAI) | `http://localhost:8080/v1` | No | Run via Docker: `docker run -p 8080:8080 localai/localai`. Supports GGUF, transformers, and diffusion models. |
+| [Jan](https://jan.ai) | `http://localhost:1337/v1` | No | Download from [jan.ai](https://jan.ai). Enable the API server in Settings > Advanced. Desktop app with built-in model management. |
+| [LiteLLM](https://github.com/BerriAI/litellm) | `http://localhost:4000/v1` | Yes | `pip install litellm`. Start with: `litellm --model ollama/llama3.1`. Acts as a proxy that unifies 100+ providers behind one API. |
+| [KoboldCpp](https://github.com/LostRuins/koboldcpp) | `http://localhost:5001/v1` | No | Download a release from GitHub. Start with: `koboldcpp model.gguf --port 5001`. Optimized for CPU inference with GGUF models. |
+| [text-generation-webui](https://github.com/oobabooga/text-generation-webui) (oobabooga) | `http://localhost:5000/v1` | No | Clone the repo and run the installer. Enable the OpenAI-compatible API extension in the UI. Supports many model formats. |
+
+> **Tip**: For servers not auto-discovered, set `AEGIS_PROVIDER_BASE_URL` to the server's base URL and `AEGIS_PROVIDER_MODEL` to the model name as reported by the server's `/v1/models` endpoint.
 
 ## Architecture
 
@@ -108,13 +178,7 @@ sudo mv aegis /usr/local/bin/aegis
 
 ### Using a Local LLM
 
-Local LLM usage is the primary focus of this project. Aegis auto-discovers models running on your machine from three supported servers:
-
-| Server | Default Port | Install |
-|--------|-------------|---------|
-| [Ollama](https://ollama.com) | `localhost:11434` | `curl -fsSL https://ollama.com/install.sh \| sh` (Linux/macOS) or download from ollama.com (Windows) |
-| [LM Studio](https://lmstudio.ai) | `localhost:1234` | Download from lmstudio.ai |
-| [LiteLLM](https://github.com/BerriAI/litellm) | `localhost:4000` | `pip install litellm` |
+Local LLM usage is the primary focus of this project. Aegis works with any server that exposes an OpenAI-compatible API. See the full [Supported Local LLM Backends](#supported-local-llm-backends) table for all options, default ports, and install instructions. Ollama, LM Studio, and LiteLLM are auto-discovered; all others work by setting `base_url` manually.
 
 **Step 1 — Start your local model server**
 
@@ -181,11 +245,19 @@ aegis chat "list available local models" --mode plan
 
 **Base URLs for common local servers:**
 
+See the full [Supported Local LLM Backends](#supported-local-llm-backends) table for all options. The most common:
+
 | Server | Base URL |
 |--------|----------|
 | Ollama | `http://localhost:11434/v1` |
 | LM Studio | `http://localhost:1234/v1` |
+| llama.cpp | `http://localhost:8080/v1` |
+| vLLM | `http://localhost:8000/v1` |
+| LocalAI | `http://localhost:8080/v1` |
+| Jan | `http://localhost:1337/v1` |
 | LiteLLM | `http://localhost:4000/v1` |
+| KoboldCpp | `http://localhost:5001/v1` |
+| text-generation-webui | `http://localhost:5000/v1` |
 
 ### Using Cloud Providers
 

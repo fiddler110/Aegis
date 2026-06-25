@@ -1,8 +1,33 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+// clearEnv unsets the given env vars for the duration of the test.
+func clearEnv(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, k := range keys {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Cleanup(func() { os.Setenv(k, v) })
+		} else {
+			t.Cleanup(func() { os.Unsetenv(k) })
+		}
+		os.Unsetenv(k)
+	}
+}
 
 func TestLoadDefaults(t *testing.T) {
+	clearEnv(t,
+		"AEGIS_PROVIDER_DEFAULT", "AEGIS_PROVIDER_MODEL",
+		"AEGIS_PROVIDER_BASE_URL", "AEGIS_PROVIDER_MAX_TOKENS",
+		"AEGIS_PROVIDER_MAX_RETRIES",
+		"AEGIS_PERMISSION_MODE", "AEGIS_LOG_LEVEL",
+		"AEGIS_DATA_DIR", "AEGIS_SERVER_ADDR",
+		"OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+	)
+
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -45,8 +70,24 @@ func TestEnvOverride(t *testing.T) {
 	}
 }
 
+func TestEnvBaseURL(t *testing.T) {
+	t.Setenv("AEGIS_PROVIDER_DEFAULT", "openai")
+	t.Setenv("AEGIS_PROVIDER_BASE_URL", "http://localhost:11434/v1")
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.BaseURL != "http://localhost:11434/v1" {
+		t.Errorf("base_url = %q, want http://localhost:11434/v1", cfg.Provider.BaseURL)
+	}
+}
+
 func TestAPIKeyFromEnv(t *testing.T) {
+	clearEnv(t, "AEGIS_PROVIDER_DEFAULT", "OPENAI_API_KEY")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test-123")
+
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)

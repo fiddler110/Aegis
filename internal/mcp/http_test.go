@@ -61,3 +61,59 @@ func TestHTTPTransportPostsJSON(t *testing.T) {
 		t.Errorf("server did not receive expected data: %s", received)
 	}
 }
+
+func TestHTTPTransportSetsAuthHeader(t *testing.T) {
+	var authHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/message" {
+			authHeader = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	_, pw := io.Pipe()
+	transport := &httpTransport{
+		endpoint:  srv.URL,
+		client:    srv.Client(),
+		sseWriter: pw,
+		auth:      "mysecrettoken",
+	}
+	defer pw.Close()
+
+	_, err := transport.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"test"}`))
+	if err != nil {
+		t.Fatalf("write error: %v", err)
+	}
+	if authHeader != "Bearer mysecrettoken" {
+		t.Errorf("expected Bearer mysecrettoken, got %q", authHeader)
+	}
+}
+
+func TestHTTPTransportNoAuthHeader(t *testing.T) {
+	var authHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/message" {
+			authHeader = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	_, pw := io.Pipe()
+	transport := &httpTransport{
+		endpoint:  srv.URL,
+		client:    srv.Client(),
+		sseWriter: pw,
+		// auth is empty — no Authorization header should be sent
+	}
+	defer pw.Close()
+
+	_, err := transport.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"test"}`))
+	if err != nil {
+		t.Fatalf("write error: %v", err)
+	}
+	if authHeader != "" {
+		t.Errorf("expected no Authorization header, got %q", authHeader)
+	}
+}

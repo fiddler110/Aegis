@@ -22,6 +22,7 @@ import (
 
 	"github.com/scottymacleod/aegis/internal/agentdef"
 	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/scottymacleod/aegis/internal/commands"
 	"github.com/scottymacleod/aegis/internal/compaction"
 	"github.com/scottymacleod/aegis/internal/config"
 	"github.com/scottymacleod/aegis/internal/cron"
@@ -65,6 +66,7 @@ type Server struct {
 	sandbox    sandbox.Backend
 	lspMgr     *lsp.Manager
 	audit      *hooks.Audit
+	cmdReg     *commands.Registry
 	workspace  string
 	logger     *slog.Logger
 	http       *http.Server
@@ -98,7 +100,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	taskMgr := task.NewManager(taskStore, logger)
 
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("getwd: %w", err)
+	}
 
 	// Sandbox backend: try container runtime if configured, else local.
 	var sb sandbox.Backend
@@ -188,6 +194,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		logger.Info("loaded custom agent definitions", "count", n)
 	}
 
+	s.cmdReg = commands.Discover(commands.CommandDirs(cfg.DataDir, cwd)...)
+
 	token, err := generateAndWriteToken(cfg.AuthTokenPath())
 	if err != nil {
 		store.Close()
@@ -204,9 +212,17 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// Connect configured MCP servers and register their tools.
 	mcpServers := make([]mcp.ServerConfig, 0, len(cfg.MCP))
 	for _, m := range cfg.MCP {
-		mcpServers = append(mcpServers, mcp.ServerConfig{Name: m.Name, Command: m.Command, Args: m.Args, Env: m.Env})
+		mcpServers = append(mcpServers, mcp.ServerConfig{Name: m.Name, Command: m.Command, Args: m.Args, Env: m.Env, Auth: m.Auth})
 	}
 	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)
+
+	// Wire sampling so MCP servers can request text generation from the model.
+	if adapter != nil {
+		samplingFn := buildSamplingHandler(adapter, cfg.Provider.Model, cfg.Provider.MaxTokens, logger)
+		for _, cl := range s.mcpClients {
+			cl.Sampling = samplingFn
+		}
+	}
 
 	// Multi-agent: choose a sub-agent backend and register the `agent` tool.
 	s.swarmReg = swarm.NewRegistry()
@@ -318,15 +334,25 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /sessions", s.handleListSessions)
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("PATCH /sessions/{id}", s.handleUpdateSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
 	mux.HandleFunc("GET /teammates", s.handleListTeammates)
+	mux.HandleFunc("GET /commands", s.handleListCommands)
+	mux.HandleFunc("GET /memory", s.handleGetMemory)
+	mux.HandleFunc("POST /memory", s.handleAppendMemory)
+	mux.HandleFunc("GET /personas", s.handleListPersonas)
 	return s.authMiddleware(s.originMiddleware(mux))
 }
 
 // ListenAndServe runs the daemon until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	defer s.store.Close()
+	defer func() {
+		if s.audit != nil {
+			_ = s.audit.Close()
+		}
+	}()
 	defer func() {
 		for _, c := range s.mcpClients {
 			_ = c.Close()
@@ -501,6 +527,132 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	id := r.PathValue("id")
+	var req api.UpdateSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.System == nil && req.Mode == nil {
+		writeError(w, http.StatusBadRequest, "nothing to update")
+		return
+	}
+	if req.System != nil {
+		system := *req.System
+		if name, ok := strings.CutPrefix(system, "persona:"); ok {
+			p, found := persona.Get(name)
+			if !found {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown persona %q", name))
+				return
+			}
+			system = p.System
+		}
+		if err := s.store.SetSystem(r.Context(), id, system); err != nil {
+			s.logger.Error("set system", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
+	if req.Mode != nil {
+		m := *req.Mode
+		if m != "plan" && m != "build" && m != "auto" {
+			writeError(w, http.StatusBadRequest, "mode must be plan, build, or auto")
+			return
+		}
+		if err := s.store.SetMode(r.Context(), id, m); err != nil {
+			s.logger.Error("set mode", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
+	sess, err := s.store.Get(r.Context(), id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toMeta(sess.ID, sess.Title, sess.Mode, sess.CreatedAt, sess.UpdatedAt))
+}
+
+func (s *Server) handleListCommands(w http.ResponseWriter, _ *http.Request) {
+	var out []api.CommandInfo
+	if s.cmdReg != nil {
+		for _, c := range s.cmdReg.List() {
+			out = append(out, api.CommandInfo{Name: c.Name, Description: c.Description, Args: c.Args})
+		}
+	}
+	if out == nil {
+		out = []api.CommandInfo{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGetMemory(w http.ResponseWriter, _ *http.Request) {
+	resp := api.MemoryResponse{
+		ProjectMemory: readIfExists(s.memory.ProjectMemoryPath()),
+		UserMemory:    readIfExists(s.memory.GlobalMemoryPath()),
+	}
+	for _, dir := range []string{
+		filepath.Join(s.cfg.DataDir, "skills"),
+		filepath.Join(s.workspace, ".aegis", "skills"),
+	} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+				resp.Skills = append(resp.Skills, strings.TrimSuffix(e.Name(), ".md"))
+			}
+		}
+	}
+	if resp.Skills == nil {
+		resp.Skills = []string{}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleAppendMemory(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	var req api.AppendMemoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if strings.TrimSpace(req.Entry) == "" {
+		writeError(w, http.StatusBadRequest, "entry is required")
+		return
+	}
+	path := s.memory.ProjectMemoryPath()
+	if req.Scope == "user" {
+		path = s.memory.GlobalMemoryPath()
+	}
+	if err := memory.Append(path, req.Entry); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("save failed: %v", err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListPersonas(w http.ResponseWriter, _ *http.Request) {
+	names := persona.Names()
+	out := make([]api.PersonaInfo, 0, len(names))
+	for _, name := range names {
+		p, _ := persona.Get(name)
+		out = append(out, api.PersonaInfo{Name: p.Name, Description: p.Description})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func readIfExists(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	id := r.PathValue("id")
@@ -632,6 +784,61 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, api.ErrorResponse{Error: msg})
+}
+
+// buildSamplingHandler returns a mcp.SamplingHandler that calls the provider
+// adapter to fulfil server-initiated sampling/createMessage requests. The
+// response is assembled by collecting all text deltas from the stream.
+func buildSamplingHandler(adapter provider.Adapter, model string, maxTokens int, logger *slog.Logger) mcp.SamplingHandler {
+	return func(ctx context.Context, req mcp.SamplingRequest) (mcp.SamplingResponse, error) {
+		var msgs []provider.Message
+		for _, m := range req.Messages {
+			role := provider.RoleUser
+			if m.Role == "assistant" {
+				role = provider.RoleAssistant
+			}
+			msgs = append(msgs, provider.Message{
+				Role:    role,
+				Content: []provider.Block{provider.TextBlock{Text: m.Content.Text}},
+			})
+		}
+
+		mt := maxTokens
+		if req.MaxTokens > 0 && req.MaxTokens < mt {
+			mt = req.MaxTokens
+		}
+
+		stream, err := adapter.Stream(ctx, provider.Request{
+			Model:     model,
+			System:    req.SystemPrompt,
+			Messages:  msgs,
+			MaxTokens: mt,
+		})
+		if err != nil {
+			return mcp.SamplingResponse{}, fmt.Errorf("mcp sampling: %w", err)
+		}
+
+		var sb strings.Builder
+		var stopReason string
+		for ev := range stream {
+			switch ev.Type {
+			case provider.EventTextDelta:
+				sb.WriteString(ev.Text)
+			case provider.EventDone:
+				stopReason = string(ev.Stop)
+			case provider.EventError:
+				logger.Warn("mcp sampling stream error", "err", ev.Err)
+				return mcp.SamplingResponse{}, ev.Err
+			}
+		}
+
+		return mcp.SamplingResponse{
+			Role:       "assistant",
+			Content:    mcp.SamplingContent{Type: "text", Text: sb.String()},
+			Model:      model,
+			StopReason: stopReason,
+		}, nil
+	}
 }
 
 // cronShellRunner returns a function that runs a cron job's command using the

@@ -1,6 +1,13 @@
 // Package mcp is a minimal client for the Model Context Protocol over stdio.
 // It speaks newline-delimited JSON-RPC 2.0 so the harness can consume external
 // MCP servers as tools without a third-party dependency.
+//
+// Supported MCP features:
+//   - tools/list, tools/call
+//   - resources/list, resources/read
+//   - prompts/list, prompts/get
+//   - notifications/tools/list_changed (dynamic tool refresh)
+//   - sampling/createMessage (server-initiated LLM calls)
 package mcp
 
 import (
@@ -23,6 +30,70 @@ type ToolInfo struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
+// ResourceInfo describes a resource exposed by an MCP server.
+type ResourceInfo struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MIMEType    string `json:"mimeType,omitempty"`
+}
+
+// PromptArgument describes one argument of a prompt template.
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// PromptInfo describes a prompt template exposed by an MCP server.
+type PromptInfo struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+
+// PromptMessage is one message returned by GetPrompt.
+type PromptMessage struct {
+	Role    string `json:"role"`
+	Content struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+// SamplingContent is the content block of a sampling message.
+type SamplingContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// SamplingMessage is one message in a server-initiated sampling request.
+type SamplingMessage struct {
+	Role    string          `json:"role"`
+	Content SamplingContent `json:"content"`
+}
+
+// SamplingRequest is sent by an MCP server to ask the client to generate text.
+type SamplingRequest struct {
+	Messages      []SamplingMessage `json:"messages"`
+	MaxTokens     int               `json:"maxTokens"`
+	SystemPrompt  string            `json:"systemPrompt,omitempty"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	StopSequences []string          `json:"stopSequences,omitempty"`
+}
+
+// SamplingResponse is the client's reply to a sampling request.
+type SamplingResponse struct {
+	Role       string          `json:"role"`
+	Content    SamplingContent `json:"content"`
+	Model      string          `json:"model,omitempty"`
+	StopReason string          `json:"stopReason,omitempty"`
+}
+
+// SamplingHandler is invoked when an MCP server issues a sampling/createMessage
+// request. If nil, the client rejects sampling with "not supported".
+type SamplingHandler func(ctx context.Context, req SamplingRequest) (SamplingResponse, error)
+
 // Client is a connected MCP server session.
 type Client struct {
 	server string
@@ -35,6 +106,31 @@ type Client struct {
 	pending map[int]chan rpcResponse
 
 	closeOnce sync.Once
+
+	// Sampling is called when the server requests text generation. May be nil.
+	Sampling SamplingHandler
+
+	// onToolsChanged is called when the server sends a tools/list_changed
+	// notification. RegisterServers sets this up to refresh the tool registry.
+	onToolsChanged func()
+}
+
+// rpcMessage is the unified shape for all incoming JSON-RPC 2.0 messages.
+// Responses have ID+Result/Error; notifications have Method only; server
+// requests have ID+Method+Params.
+type rpcMessage struct {
+	ID     *int            `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
+	Error  *rpcError       `json:"error"`
+}
+
+// rpcResponse carries the result or error of a response we were waiting for.
+type rpcResponse struct {
+	ID     *int
+	Result json.RawMessage
+	Error  *rpcError
 }
 
 type rpcRequest struct {
@@ -42,12 +138,6 @@ type rpcRequest struct {
 	ID      *int   `json:"id,omitempty"`
 	Method  string `json:"method"`
 	Params  any    `json:"params,omitempty"`
-}
-
-type rpcResponse struct {
-	ID     *int            `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
 }
 
 type rpcError struct {
@@ -107,21 +197,69 @@ func (c *Client) readLoop(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
-		var resp rpcResponse
-		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+		var msg rpcMessage
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			continue
 		}
-		if resp.ID == nil {
-			continue // server-initiated notification/request: ignored
+
+		if msg.ID == nil {
+			// Server notification — no response expected.
+			if msg.Method == "notifications/tools/list_changed" && c.onToolsChanged != nil {
+				go c.onToolsChanged()
+			}
+			continue
 		}
+
 		c.mu.Lock()
-		ch := c.pending[*resp.ID]
-		delete(c.pending, *resp.ID)
+		ch := c.pending[*msg.ID]
+		delete(c.pending, *msg.ID)
 		c.mu.Unlock()
+
 		if ch != nil {
-			ch <- resp
+			// Response to one of our pending requests.
+			ch <- rpcResponse{ID: msg.ID, Result: msg.Result, Error: msg.Error}
+			continue
+		}
+
+		// Server-initiated request (ID not in pending). Only sampling is handled.
+		if msg.Method == "sampling/createMessage" {
+			go c.handleSampling(msg)
 		}
 	}
+}
+
+func (c *Client) handleSampling(msg rpcMessage) {
+	if c.Sampling == nil {
+		c.sendRPCError(msg.ID, -32601, "sampling not supported by this client")
+		return
+	}
+	var req SamplingRequest
+	if err := json.Unmarshal(msg.Params, &req); err != nil {
+		c.sendRPCError(msg.ID, -32600, "invalid params: "+err.Error())
+		return
+	}
+	resp, err := c.Sampling(context.Background(), req)
+	if err != nil {
+		c.sendRPCError(msg.ID, -32000, err.Error())
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.enc.Encode(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      msg.ID,
+		"result":  resp,
+	})
+}
+
+func (c *Client) sendRPCError(id *int, code int, message string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.enc.Encode(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error":   map[string]any{"code": code, "message": message},
+	})
 }
 
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
@@ -161,8 +299,10 @@ func (c *Client) notify(method string, params any) error {
 func (c *Client) initialize(ctx context.Context) error {
 	_, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": protocolVersion,
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "aegis", "version": "0.1"},
+		"capabilities": map[string]any{
+			"sampling": map[string]any{},
+		},
+		"clientInfo": map[string]any{"name": "aegis", "version": "0.1"},
 	})
 	if err != nil {
 		return err
@@ -210,6 +350,82 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 		text.WriteString(block.Text)
 	}
 	return text.String(), out.IsError, nil
+}
+
+// ListResources returns the resources advertised by the server. Servers that
+// do not support resources return an MCP error, which is propagated as-is.
+func (c *Client) ListResources(ctx context.Context) ([]ResourceInfo, error) {
+	res, err := c.call(ctx, "resources/list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Resources []ResourceInfo `json:"resources"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Resources, nil
+}
+
+// ReadResource fetches a resource by URI and returns its text content and MIME
+// type. Binary resources (blob only) return empty text.
+func (c *Client) ReadResource(ctx context.Context, uri string) (string, string, error) {
+	res, err := c.call(ctx, "resources/read", map[string]any{"uri": uri})
+	if err != nil {
+		return "", "", err
+	}
+	var out struct {
+		Contents []struct {
+			URI      string `json:"uri"`
+			MIMEType string `json:"mimeType"`
+			Text     string `json:"text"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return "", "", err
+	}
+	if len(out.Contents) == 0 {
+		return "", "", nil
+	}
+	item := out.Contents[0]
+	return item.Text, item.MIMEType, nil
+}
+
+// ListPrompts returns the prompt templates advertised by the server.
+func (c *Client) ListPrompts(ctx context.Context) ([]PromptInfo, error) {
+	res, err := c.call(ctx, "prompts/list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Prompts []PromptInfo `json:"prompts"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, err
+	}
+	return out.Prompts, nil
+}
+
+// GetPrompt retrieves a named prompt template, expanding args into its messages.
+// Returns the description and the list of rendered messages.
+func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]string) (string, []PromptMessage, error) {
+	params := map[string]any{"name": name}
+	if len(args) > 0 {
+		params["arguments"] = args
+	}
+	res, err := c.call(ctx, "prompts/get", params)
+	if err != nil {
+		return "", nil, err
+	}
+	var out struct {
+		Description string          `json:"description"`
+		Messages    []PromptMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return "", nil, err
+	}
+	return out.Description, out.Messages, nil
 }
 
 // Close terminates the session.

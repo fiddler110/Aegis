@@ -15,6 +15,7 @@ import (
 
 	"github.com/scottymacleod/aegis/internal/api"
 	"github.com/scottymacleod/aegis/internal/client"
+	"github.com/scottymacleod/aegis/internal/commands"
 )
 
 // Config configures the TUI.
@@ -40,6 +41,7 @@ type model struct {
 	vp         viewport.Model
 	ta         textarea.Model
 	transcript cappedBuffer
+	slash      *SlashDispatcher
 	streaming  bool
 	events     <-chan api.Event
 	cancel     context.CancelFunc
@@ -49,6 +51,8 @@ type model struct {
 	status     string
 	st         styles
 }
+
+type slashResultMsg SlashResult
 
 // cappedBuffer is a strings.Builder-like buffer that trims old content when it
 // exceeds maxTranscriptBytes, preventing unbounded memory growth in long sessions.
@@ -90,6 +94,8 @@ type styles struct {
 	toolErr   lipgloss.Style
 	errLine   lipgloss.Style
 	status    lipgloss.Style
+	modeBuild lipgloss.Style // amber badge for build mode
+	modeAuto  lipgloss.Style // green badge for auto mode
 }
 
 func newStyles() styles {
@@ -100,19 +106,23 @@ func newStyles() styles {
 		toolErr:   lipgloss.NewStyle().Foreground(lipgloss.Color("203")),
 		errLine:   lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
 		status:    lipgloss.NewStyle().Foreground(lipgloss.Color("241")),
+		modeBuild: lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true),
+		modeAuto:  lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true),
 	}
 }
 
 func newModel(cfg Config) model {
 	ta := textarea.New()
-	ta.Placeholder = "Send a message (Enter to send, Ctrl+J newline, Ctrl+T teammates, Ctrl+C quit)…"
+	ta.Placeholder = "Send a message (Enter to send, Ctrl+J newline, Ctrl+T teammates, Shift+Tab mode, Ctrl+C quit)…"
 	ta.Prompt = "│ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(3)
 	ta.Focus()
 
-	m := model{cfg: cfg, ta: ta, st: newStyles(), status: "ready"}
+	m := model{cfg: cfg, ta: ta, st: newStyles(), status: "ready",
+		slash: NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
+	}
 	m.transcript.WriteString(m.st.status.Render(fmt.Sprintf("session %s · model %s · mode %s\n\n", short(cfg.SessionID), cfg.Model, cfg.Mode)))
 	return m
 }
@@ -158,6 +168,13 @@ func (m model) startStream(text string) tea.Cmd {
 	}
 }
 
+func (m model) handleSlashCommand(parsed *commands.ParsedCommand) tea.Cmd {
+	slash := m.slash
+	return func() tea.Msg {
+		return slashResultMsg(slash.Dispatch(parsed))
+	}
+}
+
 func waitForEvent(ch <-chan api.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
@@ -188,6 +205,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyCtrlT:
 			return m, m.fetchTeammates() // show the swarm panel
+		case tea.KeyShiftTab:
+			if !m.streaming {
+				return m, m.cycleModeCmd()
+			}
 		case tea.KeyEnter:
 			if m.streaming {
 				return m, nil // ignore input mid-run
@@ -195,6 +216,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.TrimSpace(m.ta.Value())
 			if text == "" {
 				return m, nil
+			}
+			if parsed := commands.Parse(text); parsed != nil {
+				m.ta.Reset()
+				return m, m.handleSlashCommand(parsed)
 			}
 			m.appendUser(text)
 			m.ta.Reset()
@@ -234,6 +259,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderTeammates(msg)
 		m.refresh()
 		return m, nil
+
+	case slashResultMsg:
+		if msg.Quit {
+			return m, tea.Quit
+		}
+		if msg.Output == "\x00clear" {
+			m.transcript.Reset()
+			m.transcript.WriteString(m.st.status.Render(fmt.Sprintf("session %s · model %s · mode %s\n\n", short(m.cfg.SessionID), m.cfg.Model, m.slash.mode)))
+			m.refresh()
+			return m, nil
+		}
+		if msg.Output != "" {
+			style := m.st.status
+			if msg.IsError {
+				style = m.st.errLine
+			}
+			m.transcript.WriteString(style.Render(msg.Output) + "\n\n")
+		}
+		if msg.Message != "" {
+			m.appendUser(msg.Message)
+			m.streaming = true
+			m.status = "thinking…"
+			m.refresh()
+			return m, m.startStream(msg.Message)
+		}
+		m.refresh()
+		return m, nil
 	}
 
 	if !m.streaming {
@@ -245,6 +297,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.vp, vpCmd = m.vp.Update(msg)
 	cmds = append(cmds, vpCmd)
 	return m, tea.Batch(cmds...)
+}
+
+// cycleModeCmd steps through plan → build → auto → plan via the slash dispatcher.
+func (m model) cycleModeCmd() tea.Cmd {
+	var next string
+	switch m.slash.mode {
+	case "plan":
+		next = "build"
+	case "build":
+		next = "auto"
+	default: // auto
+		next = "plan"
+	}
+	parsed := &commands.ParsedCommand{Name: "mode", Args: []string{next}, Raw: "/mode " + next}
+	return m.handleSlashCommand(parsed)
 }
 
 func (m *model) layout() {
@@ -329,8 +396,17 @@ func (m model) View() string {
 	if !m.ready {
 		return "starting…"
 	}
-	status := m.st.status.Render(m.status)
-	return lipgloss.JoinVertical(lipgloss.Left, m.vp.View(), status, m.ta.View())
+	var modeBadge string
+	switch m.slash.mode {
+	case "build":
+		modeBadge = m.st.modeBuild.Render("[build]")
+	case "auto":
+		modeBadge = m.st.modeAuto.Render("[auto]")
+	default:
+		modeBadge = m.st.status.Render("[plan]")
+	}
+	statusLine := m.st.status.Render(m.status) + "  " + modeBadge
+	return lipgloss.JoinVertical(lipgloss.Left, m.vp.View(), statusLine, m.ta.View())
 }
 
 // --- helpers ---

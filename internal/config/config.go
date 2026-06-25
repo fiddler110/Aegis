@@ -72,12 +72,13 @@ type ProcessToolConfig struct {
 	TimeoutSec  int    `koanf:"timeout_sec"`
 }
 
-// MCPServerConfig configures one external MCP server to connect over stdio.
+// MCPServerConfig configures one external MCP server to connect over stdio or HTTP.
 type MCPServerConfig struct {
 	Name    string            `koanf:"name"`
 	Command string            `koanf:"command"`
 	Args    []string          `koanf:"args"`
 	Env     map[string]string `koanf:"env"`
+	Auth    string            `koanf:"auth"` // Bearer token for HTTP servers
 }
 
 // ProviderConfig selects and configures the model provider.
@@ -129,7 +130,7 @@ func defaults() map[string]any {
 		"provider.max_tokens":  8192,
 		"provider.max_retries": 4,
 		"server.addr":       "127.0.0.1:4127",
-		"permission.mode":              "plan",
+		"permission.mode":              "build",
 		"permission.auto_approve_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
 		"cost.budget_usd":              0.0,
@@ -178,10 +179,23 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// Env: AEGIS_PROVIDER_MODEL -> provider.model
+	// Env: AEGIS_PROVIDER_MODEL -> provider.model, AEGIS_PROVIDER_BASE_URL -> provider.base_url
+	// Only the first underscore after a known section prefix becomes a dot;
+	// remaining underscores stay as-is so compound field names (base_url,
+	// max_tokens, etc.) are preserved.
+	sections := map[string]bool{
+		"provider": true, "server": true, "permission": true,
+		"diagram": true, "cost": true, "swarm": true,
+		"sandbox": true, "security": true,
+	}
 	envCb := func(s string) string {
-		s = strings.TrimPrefix(s, EnvPrefix)
-		return strings.ReplaceAll(strings.ToLower(s), "_", ".")
+		s = strings.ToLower(strings.TrimPrefix(s, EnvPrefix))
+		if idx := strings.Index(s, "_"); idx > 0 {
+			if sections[s[:idx]] {
+				return s[:idx] + "." + s[idx+1:]
+			}
+		}
+		return s
 	}
 	if err := k.Load(env.Provider(EnvPrefix, ".", envCb), nil); err != nil {
 		return nil, fmt.Errorf("load env: %w", err)
