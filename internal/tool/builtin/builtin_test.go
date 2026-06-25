@@ -113,7 +113,7 @@ func TestRegisterAll(t *testing.T) {
 	if err := Register(reg, Options{Root: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"read_file", "write_file", "edit_file", "glob", "grep", "shell", "web_fetch", "web_search"} {
+	for _, name := range []string{"read_file", "write_file", "edit_file", "glob", "grep", "shell", "web_fetch", "web_search", "latex_build", "latex_new_document"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("tool %q not registered", name)
 		}
@@ -260,6 +260,118 @@ func TestReadWithLimitAndOffset(t *testing.T) {
 	}
 	if strings.Contains(res.Content, "line1") || strings.Contains(res.Content, "line5") {
 		t.Errorf("read returned lines outside range: %q", res.Content)
+	}
+}
+
+func TestLatexNewDocument(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	lt := &latexNewDocumentTool{root: root}
+
+	tests := []struct {
+		name     string
+		args     map[string]any
+		wantLine string // snippet that must appear in the generated .tex
+	}{
+		{
+			name:     "report xelatex",
+			args:     map[string]any{"path": "report.tex", "title": "Test Report", "author": "Alice"},
+			wantLine: `\documentclass[11pt,a4paper]{report}`,
+		},
+		{
+			name:     "whitepaper pdflatex",
+			args:     map[string]any{"path": "wp.tex", "title": "White Paper", "style": "whitepaper", "compiler": "pdflatex"},
+			wantLine: `\usepackage[T1]{fontenc}`,
+		},
+		{
+			name:     "article with sections",
+			args:     map[string]any{"path": "art.tex", "title": "My Article", "style": "article", "sections": []string{"Intro", "Methods", "Results"}},
+			wantLine: `\section{Intro}`,
+		},
+		{
+			name:     "report with abstract",
+			args:     map[string]any{"path": "full.tex", "title": "Full Report", "abstract": "Key findings go here."},
+			wantLine: "Key findings go here.",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := lt.Execute(ctx, mustJSON(t, tc.args))
+			if err != nil || res.IsError {
+				t.Fatalf("latex_new_document: %v %+v", err, res)
+			}
+			path, _ := tc.args["path"].(string)
+			data, readErr := os.ReadFile(filepath.Join(root, path))
+			if readErr != nil {
+				t.Fatalf("generated file not found: %v", readErr)
+			}
+			if !strings.Contains(string(data), tc.wantLine) {
+				t.Errorf("generated .tex missing %q\nfirst 400 chars:\n%s", tc.wantLine, string(data[:min(400, len(data))]))
+			}
+		})
+	}
+}
+
+func TestLatexBuildMissingCompiler(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "doc.tex"), []byte(`\documentclass{article}\begin{document}hello\end{document}`), 0o644)
+
+	lt := &latexBuildTool{root: root}
+	res, err := lt.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path":     "doc.tex",
+		"compiler": "definitely-not-a-real-latex-compiler-xyz",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected IsError=true when compiler is missing")
+	}
+	if !strings.Contains(res.Content, "not found in PATH") {
+		t.Errorf("expected install hint, got: %q", res.Content)
+	}
+}
+
+func TestLatexBuildMissingFile(t *testing.T) {
+	root := t.TempDir()
+	lt := &latexBuildTool{root: root}
+	res, err := lt.Execute(context.Background(), mustJSON(t, map[string]any{"path": "nonexistent.tex"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, "file not found") {
+		t.Errorf("expected file-not-found error, got: %+v", res)
+	}
+}
+
+func TestParseLatexLog(t *testing.T) {
+	log := `
+This is xelatex
+! Undefined control sequence.
+\mycommand ->
+l.15 \mycommand
+
+! Missing $ inserted.
+<inserted text>
+
+LaTeX Warning: Reference 'sec:foo' on page 3 undefined.
+LaTeX Warning: Reference 'sec:foo' on page 3 undefined.
+Output written on doc.pdf (12 pages, 98304 bytes).
+`
+	s := parseLatexLog(log, "doc.pdf", false)
+	if !s.success {
+		t.Error("expected success=true (Output written on)")
+	}
+	if s.pages != 12 {
+		t.Errorf("pages = %d, want 12", s.pages)
+	}
+	if len(s.errors) != 2 {
+		t.Errorf("errors = %d, want 2: %v", len(s.errors), s.errors)
+	}
+	// Duplicate warning should be deduplicated to 1
+	if len(s.warnings) != 1 {
+		t.Errorf("warnings = %d, want 1 (deduplicated): %v", len(s.warnings), s.warnings)
 	}
 }
 

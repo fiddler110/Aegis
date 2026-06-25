@@ -88,7 +88,7 @@ func (t *writeTool) Description() string {
 	return "Create or overwrite a file in the workspace with the given content. Creates parent directories as needed."
 }
 func (t *writeTool) InputSchema() json.RawMessage {
-	return schema(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)
+	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative file path to write, e.g. \"report.md\" or \"docs/output.md\""},"content":{"type":"string","description":"full text content to write to the file"}},"required":["path","content"]}`)
 }
 func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {

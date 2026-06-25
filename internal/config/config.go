@@ -89,6 +89,7 @@ type ProviderConfig struct {
 	BaseURL    string            `koanf:"base_url"`    // optional API base override
 	MaxRetries int               `koanf:"max_retries"` // transient-failure retries; 0 disables
 	Headers    map[string]string `koanf:"headers"`     // extra HTTP headers sent with every request (e.g. gateway auth)
+	Think      *bool             `koanf:"think"`       // controls extended thinking for reasoning models (nil = provider default; false = disable)
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
 }
@@ -127,7 +128,7 @@ func defaults() map[string]any {
 		"log_level":         "info",
 		"provider.default":     "anthropic",
 		"provider.model":       "claude-opus-4-8",
-		"provider.max_tokens":  8192,
+		"provider.max_tokens":  16384,
 		"provider.max_retries": 4,
 		"server.addr":       "127.0.0.1:4127",
 		"permission.mode":              "build",

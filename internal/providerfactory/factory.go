@@ -31,6 +31,7 @@ func Build(cfg *config.Config) (provider.Adapter, error) {
 		base = openai.New(cfg.Provider.APIKey,
 			openai.WithBaseURL(cfg.Provider.BaseURL),
 			openai.WithHeaders(cfg.Provider.Headers),
+			openai.WithThink(cfg.Provider.Think),
 		)
 	default:
 		return nil, fmt.Errorf("unsupported provider %q (supported: anthropic, openai)", cfg.Provider.Default)

@@ -26,6 +26,7 @@ type Adapter struct {
 	baseURL string
 	client  *http.Client
 	headers map[string]string
+	think   *bool // nil = omit (provider default); false = disable extended thinking (e.g. Ollama qwen/deepseek)
 }
 
 // Option configures the adapter.
@@ -43,6 +44,14 @@ func WithBaseURL(u string) Option {
 // WithHeaders adds extra HTTP headers to every request (e.g. gateway auth).
 func WithHeaders(h map[string]string) Option {
 	return func(a *Adapter) { a.headers = h }
+}
+
+// WithThink controls the extended-thinking parameter for models that support it
+// (e.g. Ollama-served reasoning models like Qwen3 or DeepSeek-R1). Pass false
+// to disable thinking mode and get plain content-only responses. Nil (the
+// default) omits the parameter, letting the provider use its own default.
+func WithThink(v *bool) Option {
+	return func(a *Adapter) { a.think = v }
 }
 
 // New constructs an OpenAI adapter.
@@ -92,6 +101,7 @@ type wireRequest struct {
 	Temperature   *float64               `json:"temperature,omitempty"`
 	Stream        bool                   `json:"stream"`
 	StreamOptions map[string]any         `json:"stream_options,omitempty"`
+	Think         *bool                  `json:"think,omitempty"` // Ollama extended-thinking control
 }
 
 // translate converts harness messages to chat-completions messages.
@@ -169,6 +179,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		Temperature:   req.Temperature,
 		Stream:        true,
 		StreamOptions: map[string]any{"include_usage": true},
+		Think:         a.think,
 	})
 	if err != nil {
 		return nil, err

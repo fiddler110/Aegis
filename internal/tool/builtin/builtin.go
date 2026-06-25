@@ -79,6 +79,8 @@ func Register(reg *tool.Registry, opts Options) error {
 		&modelsTool{},
 		&securityScanTool{root: root},
 		&diagramTool{root: root, krokiURL: opts.KrokiURL},
+		&latexBuildTool{root: root},
+		&latexNewDocumentTool{root: root},
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}

@@ -3,6 +3,9 @@
 /aegis.exe
 /dist/
 
+# Local test runs and scratch output
+/testrun/
+
 # Local config & data
 /.aegis/
 *.db
