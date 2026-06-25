@@ -26,9 +26,11 @@ func Execute() error {
 
 func newRootCmd() *cobra.Command {
 	var (
-		mode    string
-		resume  string
-		persona string
+		mode       string
+		resume     string
+		persona    string
+		firstInit  bool
+		initProject bool
 	)
 
 	cmd := &cobra.Command{
@@ -38,6 +40,13 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if firstInit {
+				return runFirstInit()
+			}
+			if initProject {
+				return runProjectInit()
+			}
+
 			cfg, err := config.Load()
 			if err != nil {
 				return err
@@ -99,6 +108,8 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", "", "permission mode: plan (read-only) or build")
 	cmd.Flags().StringVar(&resume, "resume", "", "resume an existing session by id")
 	cmd.Flags().StringVar(&persona, "persona", "", "persona for new sessions (e.g. general, security, developer, security-architect, sre, cloud-architect; see README for full list)")
+	cmd.Flags().BoolVar(&firstInit, "first-init", false, "create the global config file with a full provider template (Ollama active by default)")
+	cmd.Flags().BoolVar(&initProject, "init", false, "create a project-level .aegis/config.yaml override in the current directory")
 
 	cmd.AddCommand(newServeCmd())
 	cmd.AddCommand(newConfigCmd())
