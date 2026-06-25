@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // ProcessToolConfig declares one external process tool.

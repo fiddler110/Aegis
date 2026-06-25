@@ -12,7 +12,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 // Result is the outcome of executing a tool.

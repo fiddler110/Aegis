@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 const sampleStream = `data: {"choices":[{"delta":{"content":"Hello "}}]}
@@ -75,6 +75,36 @@ func TestStreamParsing(t *testing.T) {
 	}
 	if done.Usage == nil || done.Usage.InputTokens != 11 || done.Usage.OutputTokens != 7 {
 		t.Errorf("usage = %+v", done.Usage)
+	}
+}
+
+func TestCustomHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Gateway-Token") != "gw-secret" {
+			t.Errorf("X-Gateway-Token = %q, want %q", r.Header.Get("X-Gateway-Token"), "gw-secret")
+		}
+		if r.Header.Get("X-Tenant-ID") != "tenant-42" {
+			t.Errorf("X-Tenant-ID = %q, want %q", r.Header.Get("X-Tenant-ID"), "tenant-42")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithBaseURL(srv.URL), WithHeaders(map[string]string{
+		"X-Gateway-Token": "gw-secret",
+		"X-Tenant-ID":     "tenant-42",
+	}))
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model: "m", MaxTokens: 1,
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
 	}
 }
 

@@ -11,11 +11,11 @@ import (
 var contextFiles = []string{
 	"AGENTS.md",
 	"CLAUDE.md",
-	".agentharness/context.md",
+	".aegis/context.md",
 }
 
 // LoadContext reads well-known context files (AGENTS.md, CLAUDE.md,
-// .agentharness/context.md) from the project root and returns their combined
+// .aegis/context.md) from the project root and returns their combined
 // content. Files that don't exist are silently skipped.
 func (s Sources) LoadContext() string {
 	var sections []string
@@ -32,11 +32,11 @@ func (s Sources) LoadContext() string {
 	return strings.Join(sections, "\n\n")
 }
 
-// LoadIgnorePatterns reads a .agentharnessignore file from the project root
+// LoadIgnorePatterns reads a .aegisignore file from the project root
 // and returns the patterns (one per line, # comments stripped). These patterns
 // can be used to exclude files from agent operations.
 func (s Sources) LoadIgnorePatterns() []string {
-	path := filepath.Join(s.ProjectRoot, ".agentharnessignore")
+	path := filepath.Join(s.ProjectRoot, ".aegisignore")
 	f, err := os.Open(path)
 	if err != nil {
 		return nil

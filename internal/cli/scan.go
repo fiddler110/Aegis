@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/scottymacleod/agentharness/internal/security"
+	"github.com/scottymacleod/aegis/internal/security"
 	"github.com/spf13/cobra"
 )
 

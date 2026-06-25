@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/task"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/task"
+	"github.com/scottymacleod/aegis/internal/tool"
 
 	_ "modernc.org/sqlite"
 )

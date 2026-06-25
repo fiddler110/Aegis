@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/discover"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/discover"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // modelsTool lets the model discover locally available models.

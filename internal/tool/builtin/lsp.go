@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/lsp"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/lsp"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // LSPTools returns the LSP-powered code intelligence tools.

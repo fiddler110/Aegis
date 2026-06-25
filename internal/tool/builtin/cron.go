@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/cron"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/cron"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // CronTools returns the cron-job management tools, all backed by the same

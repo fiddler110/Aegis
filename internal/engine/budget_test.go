@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/cost"
-	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/cost"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // TestBudgetGateStopsRun verifies the run aborts before the next tool round once

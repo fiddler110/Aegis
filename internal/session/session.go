@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 
 	_ "modernc.org/sqlite"
 )

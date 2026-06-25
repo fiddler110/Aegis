@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 func TestPricingForLongestPrefix(t *testing.T) {

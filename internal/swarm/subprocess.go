@@ -122,7 +122,7 @@ func writeSpec(spec WorkerSpec) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("swarm: marshal worker spec: %w", err)
 	}
-	f, err := os.CreateTemp("", "harness-worker-*.json")
+	f, err := os.CreateTemp("", "aegis-worker-*.json")
 	if err != nil {
 		return "", fmt.Errorf("swarm: create spec file: %w", err)
 	}
@@ -163,7 +163,7 @@ func filteredEnv() []string {
 	allow := []string{
 		"PATH", "HOME", "USER", "SHELL", "TEMP", "TMP", "TMPDIR",
 		"ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-		"AGENTHARNESS_", // prefix match
+		"AEGIS_", // prefix match
 		"LANG", "LC_ALL", "TERM",
 		"SYSTEMROOT", "COMSPEC", "APPDATA", "LOCALAPPDATA", "USERPROFILE", // Windows
 	}

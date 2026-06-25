@@ -1,4 +1,4 @@
-// Package cli wires the harness command-line interface.
+// Package cli wires the Aegis command-line interface.
 package cli
 
 import (
@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/api"
-	"github.com/scottymacleod/agentharness/internal/client"
-	"github.com/scottymacleod/agentharness/internal/config"
-	"github.com/scottymacleod/agentharness/internal/tui"
+	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/scottymacleod/aegis/internal/client"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/tui"
 	"github.com/spf13/cobra"
 )
 
-// Version is the harness version, overridable at build time via -ldflags.
+// Version is the Aegis version, overridable at build time via -ldflags.
 var Version = "0.0.1-dev"
 
 // Execute builds the root command tree and runs it.
@@ -30,8 +30,8 @@ func newRootCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:           "harness",
-		Short:         "A personal agent harness for research, documentation, coding, and security architecture",
+		Use:           "aegis",
+		Short:         "Aegis — AI agent harness for security, architecture, research, and development",
 		Version:       Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -46,7 +46,7 @@ func newRootCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
 			if err := cl.Health(ctx); err != nil {
-				return fmt.Errorf("cannot reach daemon at %s: %w\nStart it first with: harness serve", cfg.Server.Addr, err)
+				return fmt.Errorf("cannot reach daemon at %s: %w\nStart it first with: aegis serve", cfg.Server.Addr, err)
 			}
 
 			resolvedMode := cfg.Permission.Mode
@@ -81,7 +81,7 @@ func newRootCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&mode, "mode", "", "permission mode: plan (read-only) or build")
 	cmd.Flags().StringVar(&resume, "resume", "", "resume an existing session by id")
-	cmd.Flags().StringVar(&persona, "persona", "", "persona for new sessions: general or security")
+	cmd.Flags().StringVar(&persona, "persona", "", "persona for new sessions (e.g. general, security, developer, security-architect, sre, cloud-architect; see README for full list)")
 
 	cmd.AddCommand(newServeCmd())
 	cmd.AddCommand(newConfigCmd())

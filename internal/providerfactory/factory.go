@@ -5,10 +5,10 @@ package providerfactory
 import (
 	"fmt"
 
-	"github.com/scottymacleod/agentharness/internal/config"
-	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/provider/anthropic"
-	"github.com/scottymacleod/agentharness/internal/provider/openai"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider/anthropic"
+	"github.com/scottymacleod/aegis/internal/provider/openai"
 )
 
 // Build constructs the adapter selected by cfg.Provider.Default, wrapped with
@@ -20,12 +20,18 @@ func Build(cfg *config.Config) (provider.Adapter, error) {
 		if cfg.Provider.APIKey == "" {
 			return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set")
 		}
-		base = anthropic.New(cfg.Provider.APIKey, anthropic.WithBaseURL(cfg.Provider.BaseURL))
+		base = anthropic.New(cfg.Provider.APIKey,
+			anthropic.WithBaseURL(cfg.Provider.BaseURL),
+			anthropic.WithHeaders(cfg.Provider.Headers),
+		)
 	case "openai":
 		if cfg.Provider.APIKey == "" {
 			return nil, fmt.Errorf("OPENAI_API_KEY is not set")
 		}
-		base = openai.New(cfg.Provider.APIKey, openai.WithBaseURL(cfg.Provider.BaseURL))
+		base = openai.New(cfg.Provider.APIKey,
+			openai.WithBaseURL(cfg.Provider.BaseURL),
+			openai.WithHeaders(cfg.Provider.Headers),
+		)
 	default:
 		return nil, fmt.Errorf("unsupported provider %q (supported: anthropic, openai)", cfg.Provider.Default)
 	}

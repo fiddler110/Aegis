@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // barrierTool signals on each Execute start and blocks until released, letting a

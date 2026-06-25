@@ -23,7 +23,7 @@ type Sources struct {
 
 // ProjectMemoryPath returns the project-scoped memory file path.
 func (s Sources) ProjectMemoryPath() string {
-	return filepath.Join(s.ProjectRoot, ".agentharness", "memory.md")
+	return filepath.Join(s.ProjectRoot, ".aegis", "memory.md")
 }
 
 // GlobalMemoryPath returns the user-scoped memory file path.
@@ -34,7 +34,7 @@ func (s Sources) GlobalMemoryPath() string {
 func (s Sources) skillDirs() []string {
 	return []string{
 		filepath.Join(s.DataDir, "skills"),
-		filepath.Join(s.ProjectRoot, ".agentharness", "skills"),
+		filepath.Join(s.ProjectRoot, ".aegis", "skills"),
 	}
 }
 
@@ -114,7 +114,7 @@ func (s Sources) SaveSkill(name, content string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("invalid skill name")
 	}
-	dir := filepath.Join(s.ProjectRoot, ".agentharness", "skills")
+	dir := filepath.Join(s.ProjectRoot, ".aegis", "skills")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

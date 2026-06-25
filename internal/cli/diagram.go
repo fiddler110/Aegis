@@ -5,8 +5,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/scottymacleod/agentharness/internal/config"
-	"github.com/scottymacleod/agentharness/internal/diagram"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/diagram"
 	"github.com/spf13/cobra"
 )
 

@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/config"
-	"github.com/scottymacleod/agentharness/internal/memory"
-	"github.com/scottymacleod/agentharness/internal/tool"
-	"github.com/scottymacleod/agentharness/internal/tool/builtin"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/memory"
+	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
 )
 

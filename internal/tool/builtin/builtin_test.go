@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 func mustJSON(t *testing.T, v any) json.RawMessage {

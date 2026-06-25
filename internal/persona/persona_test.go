@@ -14,11 +14,78 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestAllRegisteredPersonasResolvable(t *testing.T) {
+	for _, name := range Names() {
+		p, ok := Get(name)
+		if !ok {
+			t.Errorf("persona %q listed in Names() but not found in registry", name)
+		}
+		if p.Name != name {
+			t.Errorf("persona %q has mismatched Name field: %q", name, p.Name)
+		}
+		if p.Description == "" {
+			t.Errorf("persona %q has empty Description", name)
+		}
+		if p.System == "" {
+			t.Errorf("persona %q has empty System prompt", name)
+		}
+	}
+}
+
+func TestNamesMatchesRegistry(t *testing.T) {
+	names := Names()
+	if len(names) != len(registry) {
+		t.Errorf("Names() has %d entries but registry has %d", len(names), len(registry))
+	}
+	seen := make(map[string]bool)
+	for _, n := range names {
+		if seen[n] {
+			t.Errorf("duplicate name in Names(): %q", n)
+		}
+		seen[n] = true
+	}
+}
+
 func TestSecurityPromptCoversModes(t *testing.T) {
 	p, _ := Get("security")
 	for _, want := range []string{"STRIDE", "THREAT MODELING", "ISSUE IDENTIFICATION", "security_scan", "Mermaid"} {
 		if !contains(p.System, want) {
 			t.Errorf("security prompt missing %q", want)
+		}
+	}
+}
+
+func TestPersonaPromptKeywords(t *testing.T) {
+	tests := []struct {
+		name     string
+		keywords []string
+	}{
+		{"platform-architect", []string{"PLATFORM ARCHITECT", "ARCHITECTURE DESIGN", "CAPACITY"}},
+		{"security-architect", []string{"SECURITY ARCHITECT", "STRIDE", "THREAT MODELING"}},
+		{"security-engineer", []string{"SECURITY ENGINEER", "VULNERABILITY MANAGEMENT", "INCIDENT RESPONSE"}},
+		{"appsec-engineer", []string{"APPLICATION SECURITY", "OWASP", "SECURE CODE REVIEW"}},
+		{"developer", []string{"SOFTWARE DEVELOPER", "DEBUGGING", "TESTING"}},
+		{"security-researcher", []string{"SECURITY RESEARCHER", "MITRE ATT&CK", "VULNERABILITY RESEARCH"}},
+		{"risk-assessor", []string{"RISK ASSESSOR", "RISK IDENTIFICATION", "RISK TREATMENT"}},
+		{"business-analyst", []string{"BUSINESS ANALYST", "REQUIREMENTS", "STAKEHOLDER"}},
+		{"data-analyst", []string{"DATA ANALYST", "STATISTICAL", "VISUALIZATION"}},
+		{"network-security-architect", []string{"NETWORK SECURITY ARCHITECT", "micro-segmentation", "zero-trust"}},
+		{"report-writer", []string{"REPORT WRITER", "executive summary", "TECHNICAL WRITING"}},
+		{"sre", []string{"SITE RELIABILITY ENGINEER", "SLO", "OBSERVABILITY", "INCIDENT"}},
+		{"infrastructure-architect", []string{"INFRASTRUCTURE ARCHITECT", "INFRASTRUCTURE AS CODE", "Terraform"}},
+		{"cloud-architect", []string{"CLOUD ARCHITECT", "well-architected", "CLOUD MIGRATION"}},
+		{"cloud-security-engineer", []string{"CLOUD SECURITY ENGINEER", "IAM", "CIS Benchmarks", "GuardDuty"}},
+	}
+	for _, tt := range tests {
+		p, ok := Get(tt.name)
+		if !ok {
+			t.Errorf("persona %q not found", tt.name)
+			continue
+		}
+		for _, kw := range tt.keywords {
+			if !contains(p.System, kw) {
+				t.Errorf("persona %q prompt missing keyword %q", tt.name, kw)
+			}
 		}
 	}
 }

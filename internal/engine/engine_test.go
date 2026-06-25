@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // scriptedAdapter returns a predefined event sequence for each successive call.

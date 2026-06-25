@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/filetracker"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/filetracker"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 const (

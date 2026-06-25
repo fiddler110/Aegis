@@ -225,8 +225,8 @@ func mimeFor(format string) string {
 // image cell. The diagram remains viewable and movable in diagrams.net.
 func wrapDrawIO(svg []byte) []byte {
 	dataURI := "data:image/svg+xml," + url.PathEscape(string(svg))
-	const tmpl = `<mxfile host="agentharness" type="device">
-  <diagram id="agentharness-diagram" name="Diagram">
+	const tmpl = `<mxfile host="aegis" type="device">
+  <diagram id="aegis-diagram" name="Diagram">
     <mxGraphModel dx="800" dy="600" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
       <root>
         <mxCell id="0" />

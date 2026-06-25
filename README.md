@@ -1,6 +1,6 @@
-# Agent Harness
+# Aegis
 
-A personal AI agent harness for **research, documentation, coding, and security-platform architecture**, built from scratch in Go with a terminal-first interface. Designed to work with **local LLMs** (Ollama, LM Studio, LiteLLM) as the primary workflow, with the ability to connect to cloud providers (Anthropic, OpenAI) when needed.
+An AI agent harness for **security, architecture, research, and development**, built from scratch in Go with a terminal-first interface. Designed to work with **local LLMs** (Ollama, LM Studio, LiteLLM) as the primary workflow, with the ability to connect to cloud providers (Anthropic, OpenAI) when needed.
 
 It borrows proven patterns from existing agents — provider abstraction and context compression (Hermes), a persistent daemon + client sessions and Plan/Build modes (opencode), slash-command skills, subagents, permission modes and file-based memory (Claude Code), and sandboxed local tooling (OpenClaw) — while staying a clean, single codebase you own.
 
@@ -18,7 +18,9 @@ It borrows proven patterns from existing agents — provider abstraction and con
   - [Non-Interactive CLI](#non-interactive-cli)
   - [Other Commands](#other-commands)
 - [Capabilities](#capabilities)
+- [Personas](#personas)
 - [Configuration](#configuration)
+  - [AI Gateway / Proxy Support](#ai-gateway--proxy-support)
 - [Extensibility](#extensibility)
   - [MCP Servers](#mcp-servers)
   - [Custom Commands](#custom-commands)
@@ -29,11 +31,11 @@ It borrows proven patterns from existing agents — provider abstraction and con
 
 ## Architecture
 
-Agent Harness uses a **daemon + client** architecture. A background daemon (`harness serve`) owns sessions, the agent engine, tool registry, and model adapter. Clients (the interactive TUI and the `chat` CLI command) connect to it over a local HTTP API with server-sent events (SSE), so sessions survive client restarts and can be resumed.
+Aegis uses a **daemon + client** architecture. A background daemon (`aegis serve`) owns sessions, the agent engine, tool registry, and model adapter. Clients (the interactive TUI and the `chat` CLI command) connect to it over a local HTTP API with server-sent events (SSE), so sessions survive client restarts and can be resumed.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                        Daemon (harness serve)                      │
+│                        Daemon (aegis serve)                        │
 │                                                                    │
 │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────────┐  │
 │  │  Session  │  │   Agent   │  │   Tool   │  │    Provider      │  │
@@ -75,38 +77,38 @@ Agent Harness uses a **daemon + client** architecture. A background daemon (`har
 
 ### Installation
 
-Clone and build the harness:
+Clone and build Aegis:
 
 **Windows (PowerShell)**
 ```powershell
-git clone https://github.com/scottymacleod/agentharness.git
-cd agentharness
-go build -o harness.exe ./cmd/harness
+git clone https://github.com/scottymacleod/aegis.git
+cd aegis
+go build -o aegis.exe ./cmd/aegis
 ```
 
 **Linux / macOS**
 ```bash
-git clone https://github.com/scottymacleod/agentharness.git
-cd agentharness
-go build -o harness ./cmd/harness
+git clone https://github.com/scottymacleod/aegis.git
+cd aegis
+go build -o aegis ./cmd/aegis
 ```
 
 Optionally move the binary onto your PATH:
 
 **Windows (PowerShell)**
 ```powershell
-Copy-Item harness.exe "$env:USERPROFILE\go\bin\harness.exe"
+Copy-Item aegis.exe "$env:USERPROFILE\go\bin\aegis.exe"
 ```
 
 **Linux / macOS**
 ```bash
-sudo mv harness /usr/local/bin/harness
-# or: mv harness ~/go/bin/harness
+sudo mv aegis /usr/local/bin/aegis
+# or: mv aegis ~/go/bin/aegis
 ```
 
 ### Using a Local LLM
 
-Local LLM usage is the primary focus of this project. The harness auto-discovers models running on your machine from three supported servers:
+Local LLM usage is the primary focus of this project. Aegis auto-discovers models running on your machine from three supported servers:
 
 | Server | Default Port | Install |
 |--------|-------------|---------|
@@ -133,32 +135,32 @@ Example with LM Studio:
 2. Load a model from the Discover tab
 3. Start the local server from the Local Server tab (runs on port 1234)
 
-**Step 2 — Configure the harness to use the local model**
+**Step 2 — Configure Aegis to use the local model**
 
-The harness uses the OpenAI-compatible API that local servers expose. Set the provider to `openai`, point `base_url` at your local server, and set the model name:
+Aegis uses the OpenAI-compatible API that local servers expose. Set the provider to `openai`, point `base_url` at your local server, and set the model name:
 
 **Windows (PowerShell)**
 ```powershell
 # Set environment variables for the session
 $env:OPENAI_API_KEY = "not-needed"
-$env:AGENTHARNESS_PROVIDER_DEFAULT = "openai"
-$env:AGENTHARNESS_PROVIDER_BASE_URL = "http://localhost:11434/v1"   # Ollama
-$env:AGENTHARNESS_PROVIDER_MODEL = "llama3.1"
+$env:AEGIS_PROVIDER_DEFAULT = "openai"
+$env:AEGIS_PROVIDER_BASE_URL = "http://localhost:11434/v1"   # Ollama
+$env:AEGIS_PROVIDER_MODEL = "llama3.1"
 ```
 
 **Linux / macOS**
 ```bash
 export OPENAI_API_KEY="not-needed"           # required by the adapter but not checked by local servers
-export AGENTHARNESS_PROVIDER_DEFAULT="openai"
-export AGENTHARNESS_PROVIDER_BASE_URL="http://localhost:11434/v1"   # Ollama
-export AGENTHARNESS_PROVIDER_MODEL="llama3.1"
+export AEGIS_PROVIDER_DEFAULT="openai"
+export AEGIS_PROVIDER_BASE_URL="http://localhost:11434/v1"   # Ollama
+export AEGIS_PROVIDER_MODEL="llama3.1"
 ```
 
 Or configure it permanently in the config file:
 
-**Windows**: `%AppData%\agentharness\config.yaml`
-**Linux**: `~/.config/agentharness/config.yaml`
-**macOS**: `~/Library/Application Support/agentharness/config.yaml`
+**Windows**: `%AppData%\aegis\config.yaml`
+**Linux**: `~/.config/aegis/config.yaml`
+**macOS**: `~/Library/Application Support/aegis/config.yaml`
 
 ```yaml
 provider:
@@ -171,10 +173,10 @@ provider:
 
 **Step 3 — Discover available models**
 
-The harness can probe for all locally running model servers and list available models:
+Aegis can probe for all locally running model servers and list available models:
 ```bash
 # In a running session, the agent has a list_models tool, or from the CLI:
-harness chat "list available local models" --mode plan
+aegis chat "list available local models" --mode plan
 ```
 
 **Base URLs for common local servers:**
@@ -202,11 +204,11 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."
 ```bash
 # Linux / macOS
 export OPENAI_API_KEY="sk-..."
-export AGENTHARNESS_PROVIDER_DEFAULT="openai"
+export AEGIS_PROVIDER_DEFAULT="openai"
 
 # Windows (PowerShell)
 $env:OPENAI_API_KEY = "sk-..."
-$env:AGENTHARNESS_PROVIDER_DEFAULT = "openai"
+$env:AEGIS_PROVIDER_DEFAULT = "openai"
 ```
 
 The default provider is `anthropic` with model `claude-opus-4-8`. Override via config or environment variables.
@@ -219,10 +221,10 @@ The daemon must be running before launching the TUI or sending chat commands. It
 
 ```bash
 # Start in a separate terminal (logs to data dir by default)
-harness serve
+aegis serve
 
 # Or with log output to stderr for debugging
-harness serve --foreground
+aegis serve --foreground
 ```
 
 The daemon listens on `127.0.0.1:4127` by default and generates an auth token stored in the data directory.
@@ -231,16 +233,21 @@ The daemon listens on `127.0.0.1:4127` by default and generates an auth token st
 
 ```bash
 # Default: plan mode (read-only), general persona
-harness
+aegis
 
 # Build mode (can create/edit/delete files, run shell commands)
-harness --mode build
+aegis --mode build
 
 # Security architect persona
-harness --persona security --mode build
+aegis --persona security --mode build
+
+# Other personas (see Personas section for full list)
+aegis --persona developer --mode build
+aegis --persona sre --mode plan
+aegis --persona cloud-architect --mode plan
 
 # Resume an existing session
-harness --resume <session-id>
+aegis --resume <session-id>
 ```
 
 The TUI is built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and renders a scrollable conversation with a text input area. It streams model responses in real time and shows tool call status inline.
@@ -250,30 +257,30 @@ The TUI is built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) a
 For scripting or single-shot queries without the TUI:
 
 ```bash
-harness chat "summarize main.go" --mode build
-harness chat "what security issues exist in this repo?" --mode plan
+aegis chat "summarize main.go" --mode build
+aegis chat "what security issues exist in this repo?" --mode plan
 
 # Auto-approve all tool calls (unattended)
-harness chat "refactor the config package" --mode build --yes
+aegis chat "refactor the config package" --mode build --yes
 ```
 
 ### Other Commands
 
 ```bash
 # Preview resolved config, tools, memory, and context without calling the model
-harness dry-run
+aegis dry-run
 
 # Run security scanners (semgrep, trivy, gitleaks)
-harness scan ./path
+aegis scan ./path
 
 # Render a diagram
-harness diagram --type mermaid --out architecture.svg < diagram.mmd
+aegis diagram --type mermaid --out architecture.svg < diagram.mmd
 
 # List and manage sessions
-harness sessions list
+aegis sessions list
 
 # Show current configuration
-harness config
+aegis config
 ```
 
 ## Capabilities
@@ -301,11 +308,14 @@ Shell commands and agent tasks can run in the background via the task manager (S
 ### Planning Tools
 `todo_add`, `todo_update`, `todo_list` — a lightweight in-session planning surface for tracking multi-step work. `ask_user` collects structured input (free text, single-choice, multi-choice).
 
-### Security Architect
-With `--persona security`, the system prompt drives capability research, STRIDE/LINDDUN threat modeling, and C4/Mermaid architecture diagramming. The `security_scan` tool runs semgrep, trivy, and gitleaks and produces a unified findings report.
+### Personas
+With `--persona <name>`, the system prompt is tailored to a specific role. Each persona shapes the agent's behavior, expertise, and focus areas. See the [Personas](#personas) section for the full list and descriptions.
+
+### Security Scanning
+The `security_scan` tool runs semgrep, trivy, and gitleaks and produces a unified findings report. Works with any persona but is especially useful with security-focused ones (`security`, `security-architect`, `security-engineer`, `appsec-engineer`).
 
 ### Diagrams
-`render_diagram` and `harness diagram` render Mermaid, PlantUML, C4, Graphviz, and more to SVG/PNG via [Kroki](https://kroki.io) (with local CLI fallback). Draw.io export is also supported.
+`render_diagram` and `aegis diagram` render Mermaid, PlantUML, C4, Graphviz, and more to SVG/PNG via [Kroki](https://kroki.io) (with local CLI fallback). Draw.io export is also supported.
 
 ### Code Intelligence (LSP)
 When LSP servers are configured, tools like `lsp_diagnostics`, `lsp_references`, and `lsp_definition` give the agent IDE-level code understanding.
@@ -327,14 +337,40 @@ Shell commands can run in a local sandbox (default) or inside containers:
 ### Cost Tracking
 Token usage (including cache hits for Anthropic) is tracked per turn. A configurable `budget_usd` limit halts a run when estimated spend exceeds the threshold.
 
+## Personas
+
+Personas control the agent's system prompt, shaping its expertise and behavior for different roles. Select one with `--persona <name>` on the CLI or TUI.
+
+| Persona | `--persona` value | Focus |
+|---------|-------------------|-------|
+| General | `general` (default) | Research, documentation, and coding assistant |
+| Security | `security` | Security platform architect: capability research, STRIDE/LINDDUN threat modeling, C4/Mermaid architecture, issue identification |
+| Platform Architect | `platform-architect` | System design, technology evaluation, capacity planning, platform standards |
+| Security Architect | `security-architect` | Security architecture, threat modeling, security requirements, design review |
+| Security Engineer | `security-engineer` | Security tooling, vulnerability management, automation, incident response |
+| AppSec Engineer | `appsec-engineer` | Secure code review, application testing, OWASP, CI/CD security integration |
+| Developer | `developer` | Implementation, debugging, code review, testing |
+| Security Researcher | `security-researcher` | Vulnerability research, attack analysis, MITRE ATT&CK, defensive research |
+| Risk Assessor | `risk-assessor` | Risk identification, analysis, evaluation, treatment (NIST RMF, ISO 27005, FAIR) |
+| Business Analyst | `business-analyst` | Requirements analysis, process mapping, stakeholder communication |
+| Data Analyst | `data-analyst` | Data exploration, statistical analysis, visualization, reporting |
+| Network Security Architect | `network-security-architect` | Network design, segmentation, cloud networking, zero-trust, threat analysis |
+| Report Writer | `report-writer` | Structured reports, technical writing, findings documentation |
+| SRE | `sre` | Reliability engineering, SLOs/SLIs, observability, incident management, capacity planning |
+| Infrastructure Architect | `infrastructure-architect` | Infrastructure design, IaC (Terraform/Pulumi), container orchestration, day-2 operations |
+| Cloud Architect | `cloud-architect` | Cloud-native design, migration strategies, multi-cloud/hybrid, cost optimization |
+| Cloud Security Engineer | `cloud-security-engineer` | Cloud security posture (CIS Benchmarks), IAM, cloud-native security, threat detection |
+
+Custom agent definitions (see [Custom Agent Definitions](#custom-agent-definitions)) can also be used for project-specific roles beyond the built-in personas.
+
 ## Configuration
 
 Configuration is resolved with precedence (lowest to highest):
 
 1. **Built-in defaults**
-2. **Global config** — `<user-config-dir>/agentharness/config.yaml`
-3. **Project config** — `./.agentharness/config.yaml`
-4. **Environment variables** — `AGENTHARNESS_*` (underscores map to dots: `AGENTHARNESS_PROVIDER_MODEL` → `provider.model`)
+2. **Global config** — `<user-config-dir>/aegis/config.yaml`
+3. **Project config** — `./.aegis/config.yaml`
+4. **Environment variables** — `AEGIS_*` (underscores map to dots: `AEGIS_PROVIDER_MODEL` → `provider.model`)
 
 API keys are read from the environment only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) and never written to config files.
 
@@ -342,9 +378,9 @@ API keys are read from the environment only (`ANTHROPIC_API_KEY`, `OPENAI_API_KE
 
 | Platform | Global Config Path |
 |----------|-------------------|
-| Windows | `%AppData%\agentharness\config.yaml` |
-| Linux | `~/.config/agentharness/config.yaml` |
-| macOS | `~/Library/Application Support/agentharness/config.yaml` |
+| Windows | `%AppData%\aegis\config.yaml` |
+| Linux | `~/.config/aegis/config.yaml` |
+| macOS | `~/Library/Application Support/aegis/config.yaml` |
 
 ### Full Config Reference
 
@@ -356,6 +392,9 @@ provider:
   base_url: "http://localhost:11434/v1"  # API base URL (required for local LLMs)
   max_tokens: 8192             # response token cap
   max_retries: 4               # transient failure retries (0 = disabled)
+  headers:                     # extra HTTP headers on every request (e.g. gateway auth)
+    X-Gateway-Token: "your-token"
+    X-Tenant-ID: "your-tenant"
 
 # Permission defaults
 permission:
@@ -414,11 +453,31 @@ plugins:
     timeout_sec: 30
 ```
 
+### AI Gateway / Proxy Support
+
+Aegis can route all LLM traffic through an AI gateway or reverse proxy for security controls, audit logging, rate limiting, or policy enforcement. Set `base_url` to your gateway endpoint and use `headers` for any gateway-specific authentication.
+
+```yaml
+provider:
+  default: anthropic
+  model: claude-sonnet-4-6
+  base_url: "https://ai-gateway.internal.example.com"
+  headers:
+    X-Gateway-Token: "your-gateway-auth-token"
+    X-Tenant-ID: "your-tenant-id"
+```
+
+The gateway must proxy requests to the upstream provider at the same API paths:
+- **Anthropic**: `POST /v1/messages` (SSE streaming)
+- **OpenAI / local LLMs**: `POST /v1/chat/completions` (SSE streaming)
+
+Custom headers are sent on every request alongside the standard provider headers (`x-api-key` for Anthropic, `Authorization: Bearer` for OpenAI). The base URL can also be set via the `AEGIS_PROVIDER_BASE_URL` environment variable.
+
 ## Extensibility
 
 ### MCP Servers
 
-The harness consumes external [Model Context Protocol](https://modelcontextprotocol.io/) servers as additional tools. Servers can connect via stdio (launched as child processes) or HTTP/SSE. Configure them in the `mcp[]` array.
+Aegis consumes external [Model Context Protocol](https://modelcontextprotocol.io/) servers as additional tools. Servers can connect via stdio (launched as child processes) or HTTP/SSE. Configure them in the `mcp[]` array.
 
 ```yaml
 mcp:
@@ -438,7 +497,7 @@ Drop markdown files into the commands directory to create custom slash commands.
 
 **Locations** (project overrides global):
 - Global: `<data-dir>/commands/*.md`
-- Project: `.agentharness/commands/*.md`
+- Project: `.aegis/commands/*.md`
 
 ```markdown
 ---
@@ -456,7 +515,7 @@ Drop markdown files into the agents directory to define reusable agent personas.
 
 **Locations** (project overrides global):
 - Global: `<data-dir>/agents/*.md`
-- Project: `.agentharness/agents/*.md`
+- Project: `.aegis/agents/*.md`
 
 ```markdown
 ---
@@ -471,7 +530,7 @@ performance, and maintainability. Cite specific line numbers.
 
 ### Process Plugins
 
-External commands can be registered as tools via the `plugins[]` config. The harness pipes tool input as JSON to stdin and captures stdout as the result.
+External commands can be registered as tools via the `plugins[]` config. Aegis pipes tool input as JSON to stdin and captures stdout as the result.
 
 ```yaml
 plugins:
@@ -487,7 +546,7 @@ plugins:
 ## Project Structure
 
 ```
-cmd/harness/               CLI entry point
+cmd/aegis/                 CLI entry point
 internal/
   engine/                  Agent loop: model → tools → repeat, with gating, hooks, compaction
   provider/                Normalized model interface (Adapter)
@@ -513,7 +572,7 @@ internal/
   memory/                  File-based memory + skills, relevance scoring, context discovery
   security/                Semgrep, Trivy, Gitleaks runners + normalized findings
   diagram/                 Kroki + local CLI renderers (Mermaid, PlantUML, C4, Graphviz, draw.io)
-  persona/                 System prompts: general + security-architect
+  persona/                 System prompts: 17 built-in personas (general, security, developer, SRE, etc.)
   hooks/                   Pre/post tool-call hooks + JSONL audit trail
   mcp/                     MCP client (JSON-RPC/stdio + HTTP/SSE transports)
   session/                 SQLite session store

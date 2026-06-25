@@ -11,9 +11,9 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/scottymacleod/agentharness/internal/cost"
-	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/cost"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // Conversation is the mutable transcript the engine drives.

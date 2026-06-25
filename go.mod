@@ -1,4 +1,4 @@
-module github.com/scottymacleod/agentharness
+module github.com/scottymacleod/aegis
 
 go 1.25.0
 

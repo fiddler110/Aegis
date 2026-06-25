@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/scottymacleod/agentharness/internal/agentdef"
-	"github.com/scottymacleod/agentharness/internal/swarm"
-	"github.com/scottymacleod/agentharness/internal/task"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/agentdef"
+	"github.com/scottymacleod/aegis/internal/swarm"
+	"github.com/scottymacleod/aegis/internal/task"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 const maxAgentDuration = 10 * time.Minute

@@ -1,8 +1,8 @@
-// Package config loads layered harness configuration.
+// Package config loads layered Aegis configuration.
 //
 // Precedence (lowest to highest): built-in defaults -> global config file ->
-// per-project config file (./.agentharness/config.yaml) -> environment
-// variables (AGENTHARNESS_*). API keys are always read from the environment.
+// per-project config file (./.aegis/config.yaml) -> environment
+// variables (AEGIS_*). API keys are always read from the environment.
 package config
 
 import (
@@ -82,11 +82,12 @@ type MCPServerConfig struct {
 
 // ProviderConfig selects and configures the model provider.
 type ProviderConfig struct {
-	Default    string `koanf:"default"`     // adapter name, e.g. "anthropic"
-	Model      string `koanf:"model"`       // model id
-	MaxTokens  int    `koanf:"max_tokens"`  // response token cap
-	BaseURL    string `koanf:"base_url"`    // optional API base override
-	MaxRetries int    `koanf:"max_retries"` // transient-failure retries; 0 disables
+	Default    string            `koanf:"default"`     // adapter name, e.g. "anthropic"
+	Model      string            `koanf:"model"`       // model id
+	MaxTokens  int               `koanf:"max_tokens"`  // response token cap
+	BaseURL    string            `koanf:"base_url"`    // optional API base override
+	MaxRetries int               `koanf:"max_retries"` // transient-failure retries; 0 disables
+	Headers    map[string]string `koanf:"headers"`     // extra HTTP headers sent with every request (e.g. gateway auth)
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
 }
@@ -115,8 +116,8 @@ type DiagramConfig struct {
 
 const (
 	// EnvPrefix is the environment-variable prefix for overrides.
-	EnvPrefix = "AGENTHARNESS_"
-	appDir    = "agentharness"
+	EnvPrefix = "AEGIS_"
+	appDir    = "aegis"
 )
 
 func defaults() map[string]any {
@@ -157,7 +158,7 @@ func GlobalConfigPath() string {
 
 // ProjectConfigPath returns the path to the project-level config file.
 func ProjectConfigPath() string {
-	return filepath.Join(".agentharness", "config.yaml")
+	return filepath.Join(".aegis", "config.yaml")
 }
 
 // Load resolves configuration from all layers and returns the result.
@@ -177,7 +178,7 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// Env: AGENTHARNESS_PROVIDER_MODEL -> provider.model
+	// Env: AEGIS_PROVIDER_MODEL -> provider.model
 	envCb := func(s string) string {
 		s = strings.TrimPrefix(s, EnvPrefix)
 		return strings.ReplaceAll(strings.ToLower(s), "_", ".")
@@ -222,7 +223,7 @@ func (c *Config) SessionDBPath() string {
 
 // LogPath returns the path to the harness log file.
 func (c *Config) LogPath() string {
-	return filepath.Join(c.DataDir, "harness.log")
+	return filepath.Join(c.DataDir, "aegis.log")
 }
 
 // AuthTokenPath returns the path to the daemon auth token file.

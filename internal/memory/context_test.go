@@ -34,7 +34,7 @@ func TestLoadContextNoFiles(t *testing.T) {
 
 func TestLoadIgnorePatterns(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, ".agentharnessignore"), []byte(
+	os.WriteFile(filepath.Join(root, ".aegisignore"), []byte(
 		"# comment\n*.log\nnode_modules\n\n*.tmp\n",
 	), 0o644)
 

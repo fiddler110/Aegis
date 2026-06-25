@@ -13,8 +13,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/scottymacleod/agentharness/internal/api"
-	"github.com/scottymacleod/agentharness/internal/client"
+	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/scottymacleod/aegis/internal/client"
 )
 
 // Config configures the TUI.

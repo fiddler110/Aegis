@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // mcpTool adapts an MCP server tool to the harness tool.Tool interface.

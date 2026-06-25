@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 // sampleStream is a minimal but representative Anthropic SSE response that
@@ -247,6 +247,36 @@ data: {"type":"message_stop"}
 	}
 	if done.Usage.CacheCreationTokens != 100 || done.Usage.CacheReadTokens != 200 {
 		t.Errorf("cache usage = %+v, want creation=100 read=200", done.Usage)
+	}
+}
+
+func TestCustomHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Gateway-Token") != "gw-secret" {
+			t.Errorf("X-Gateway-Token = %q, want %q", r.Header.Get("X-Gateway-Token"), "gw-secret")
+		}
+		if r.Header.Get("X-Tenant-ID") != "tenant-42" {
+			t.Errorf("X-Tenant-ID = %q, want %q", r.Header.Get("X-Tenant-ID"), "tenant-42")
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithBaseURL(srv.URL), WithHeaders(map[string]string{
+		"X-Gateway-Token": "gw-secret",
+		"X-Tenant-ID":     "tenant-42",
+	}))
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model: "m", MaxTokens: 1,
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
 	}
 }
 

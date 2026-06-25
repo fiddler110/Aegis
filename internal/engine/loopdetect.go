@@ -3,7 +3,7 @@ package engine
 import (
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 // loopDetector spots a stuck agent that issues the same tool calls turn after

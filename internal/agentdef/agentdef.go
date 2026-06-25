@@ -112,7 +112,7 @@ func Names() []string {
 func DiscoverDirs(dataDir, projectRoot string) []string {
 	return []string{
 		filepath.Join(dataDir, "agents"),
-		filepath.Join(projectRoot, ".agentharness", "agents"),
+		filepath.Join(projectRoot, ".aegis", "agents"),
 	}
 }
 

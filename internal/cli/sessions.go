@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/scottymacleod/agentharness/internal/client"
-	"github.com/scottymacleod/agentharness/internal/config"
+	"github.com/scottymacleod/aegis/internal/client"
+	"github.com/scottymacleod/aegis/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +26,7 @@ func dialClient() (*client.Client, error) {
 	}
 	cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
 	if err := cl.Health(context.Background()); err != nil {
-		return nil, fmt.Errorf("cannot reach daemon at %s: %w (start it with: harness serve)", cfg.Server.Addr, err)
+		return nil, fmt.Errorf("cannot reach daemon at %s: %w (start it with: aegis serve)", cfg.Server.Addr, err)
 	}
 	return cl, nil
 }

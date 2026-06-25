@@ -1,4 +1,4 @@
-// Package server is the harness daemon. It owns the session store, the model
+// Package server is the Aegis daemon. It owns the session store, the model
 // adapter, the tool registry, and runs the agent engine, exposing everything
 // over a local HTTP API (with server-sent events for streaming runs).
 package server
@@ -20,29 +20,29 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/agentdef"
-	"github.com/scottymacleod/agentharness/internal/api"
-	"github.com/scottymacleod/agentharness/internal/compaction"
-	"github.com/scottymacleod/agentharness/internal/config"
-	"github.com/scottymacleod/agentharness/internal/cron"
-	"github.com/scottymacleod/agentharness/internal/cost"
-	"github.com/scottymacleod/agentharness/internal/engine"
-	"github.com/scottymacleod/agentharness/internal/filetracker"
-	"github.com/scottymacleod/agentharness/internal/hooks"
-	"github.com/scottymacleod/agentharness/internal/lsp"
-	"github.com/scottymacleod/agentharness/internal/mcp"
-	"github.com/scottymacleod/agentharness/internal/memory"
-	"github.com/scottymacleod/agentharness/internal/permission"
-	"github.com/scottymacleod/agentharness/internal/persona"
-	"github.com/scottymacleod/agentharness/internal/plugins"
-	"github.com/scottymacleod/agentharness/internal/sandbox"
-	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/providerfactory"
-	"github.com/scottymacleod/agentharness/internal/session"
-	"github.com/scottymacleod/agentharness/internal/swarm"
-	"github.com/scottymacleod/agentharness/internal/task"
-	"github.com/scottymacleod/agentharness/internal/tool"
-	"github.com/scottymacleod/agentharness/internal/tool/builtin"
+	"github.com/scottymacleod/aegis/internal/agentdef"
+	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/scottymacleod/aegis/internal/compaction"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/cron"
+	"github.com/scottymacleod/aegis/internal/cost"
+	"github.com/scottymacleod/aegis/internal/engine"
+	"github.com/scottymacleod/aegis/internal/filetracker"
+	"github.com/scottymacleod/aegis/internal/hooks"
+	"github.com/scottymacleod/aegis/internal/lsp"
+	"github.com/scottymacleod/aegis/internal/mcp"
+	"github.com/scottymacleod/aegis/internal/memory"
+	"github.com/scottymacleod/aegis/internal/permission"
+	"github.com/scottymacleod/aegis/internal/persona"
+	"github.com/scottymacleod/aegis/internal/plugins"
+	"github.com/scottymacleod/aegis/internal/sandbox"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/providerfactory"
+	"github.com/scottymacleod/aegis/internal/session"
+	"github.com/scottymacleod/aegis/internal/swarm"
+	"github.com/scottymacleod/aegis/internal/task"
+	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool/builtin"
 )
 
 const maxRequestBody = 10 << 20 // 10 MiB

@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/scottymacleod/agentharness/internal/cron"
-	"github.com/scottymacleod/agentharness/internal/filetracker"
-	"github.com/scottymacleod/agentharness/internal/lsp"
-	"github.com/scottymacleod/agentharness/internal/memory"
-	"github.com/scottymacleod/agentharness/internal/sandbox"
-	"github.com/scottymacleod/agentharness/internal/task"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/cron"
+	"github.com/scottymacleod/aegis/internal/filetracker"
+	"github.com/scottymacleod/aegis/internal/lsp"
+	"github.com/scottymacleod/aegis/internal/memory"
+	"github.com/scottymacleod/aegis/internal/sandbox"
+	"github.com/scottymacleod/aegis/internal/task"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // Options configures the built-in tool set.
@@ -59,7 +59,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		return fmt.Errorf("resolve root: %w", err)
 	}
 	if opts.HTTPUserAgent == "" {
-		opts.HTTPUserAgent = "agentharness/0.1"
+		opts.HTTPUserAgent = "aegis/0.1"
 	}
 	if opts.KrokiURL == "" {
 		opts.KrokiURL = "https://kroki.io"

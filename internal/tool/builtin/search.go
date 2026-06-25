@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // --- glob ---
@@ -193,7 +193,7 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 
 func skipDir(name string) bool {
 	switch name {
-	case ".git", "node_modules", "vendor", ".idea", ".vscode", "dist", "build", ".agentharness":
+	case ".git", "node_modules", "vendor", ".idea", ".vscode", "dist", "build", ".aegis":
 		return true
 	}
 	return false

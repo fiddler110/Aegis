@@ -3,7 +3,7 @@ package cli
 import (
 	"encoding/json"
 
-	"github.com/scottymacleod/agentharness/internal/config"
+	"github.com/scottymacleod/aegis/internal/config"
 	"github.com/spf13/cobra"
 )
 

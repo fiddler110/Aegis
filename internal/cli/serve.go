@@ -5,9 +5,9 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/scottymacleod/agentharness/internal/config"
-	"github.com/scottymacleod/agentharness/internal/logging"
-	"github.com/scottymacleod/agentharness/internal/server"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/logging"
+	"github.com/scottymacleod/aegis/internal/server"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +16,7 @@ func newServeCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run the harness daemon (owns sessions, the agent loop, and tools)",
+		Short: "Run the Aegis daemon (owns sessions, the agent loop, and tools)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {

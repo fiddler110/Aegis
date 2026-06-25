@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/swarm"
+	"github.com/scottymacleod/aegis/internal/swarm"
 )
 
 // fakeBackend records the SpawnConfig it receives and returns a scripted result.

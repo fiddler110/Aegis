@@ -1,7 +1,7 @@
 // Package commands loads user-defined slash commands from markdown files. Each
 // file is a command template with YAML frontmatter (name, description, args)
 // and a body that becomes the prompt. Commands are discovered from
-// $DataDir/commands/*.md and .agentharness/commands/*.md.
+// $DataDir/commands/*.md and .aegis/commands/*.md.
 package commands
 
 import (
@@ -92,7 +92,7 @@ func Discover(dirs ...string) *Registry {
 func CommandDirs(dataDir, projectRoot string) []string {
 	return []string{
 		filepath.Join(dataDir, "commands"),
-		filepath.Join(projectRoot, ".agentharness", "commands"),
+		filepath.Join(projectRoot, ".aegis", "commands"),
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 const (
@@ -28,6 +28,7 @@ type Adapter struct {
 	baseURL string
 	client  *http.Client
 	cache   bool // emit prompt-cache breakpoints
+	headers map[string]string
 }
 
 // Option configures the adapter.
@@ -50,6 +51,11 @@ func WithBaseURL(u string) Option {
 // WithHTTPClient overrides the HTTP client.
 func WithHTTPClient(c *http.Client) Option {
 	return func(a *Adapter) { a.client = c }
+}
+
+// WithHeaders adds extra HTTP headers to every request (e.g. gateway auth).
+func WithHeaders(h map[string]string) Option {
+	return func(a *Adapter) { a.headers = h }
 }
 
 // New constructs an Anthropic adapter.
@@ -224,6 +230,9 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	httpReq.Header.Set("x-api-key", a.apiKey)
 	httpReq.Header.Set("anthropic-version", apiVersion)
 	httpReq.Header.Set("accept", "text/event-stream")
+	for k, v := range a.headers {
+		httpReq.Header.Set(k, v)
+	}
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {

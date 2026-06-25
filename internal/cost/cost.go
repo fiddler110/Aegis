@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 // Pricing holds per-million-token USD rates for one model.

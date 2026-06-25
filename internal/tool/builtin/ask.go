@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // Questioner resolves structured questions to the user. In a TUI context this

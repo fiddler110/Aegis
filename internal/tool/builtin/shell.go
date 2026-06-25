@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/sandbox"
-	"github.com/scottymacleod/agentharness/internal/task"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/sandbox"
+	"github.com/scottymacleod/aegis/internal/task"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 type shellTool struct {

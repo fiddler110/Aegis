@@ -9,13 +9,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/scottymacleod/agentharness/internal/api"
-	"github.com/scottymacleod/agentharness/internal/client"
-	"github.com/scottymacleod/agentharness/internal/config"
-	"github.com/scottymacleod/agentharness/internal/provider"
-	"github.com/scottymacleod/agentharness/internal/session"
-	"github.com/scottymacleod/agentharness/internal/swarm"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/scottymacleod/aegis/internal/client"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/session"
+	"github.com/scottymacleod/aegis/internal/swarm"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // fixedAdapter returns a single text response regardless of input.

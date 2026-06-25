@@ -1,10 +1,10 @@
 # Build output
-/harness
-/harness.exe
+/aegis
+/aegis.exe
 /dist/
 
 # Local config & data
-/.agentharness/
+/.aegis/
 *.db
 *.log
 

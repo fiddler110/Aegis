@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 const defaultBaseURL = "https://api.openai.com/v1"
@@ -25,6 +25,7 @@ type Adapter struct {
 	apiKey  string
 	baseURL string
 	client  *http.Client
+	headers map[string]string
 }
 
 // Option configures the adapter.
@@ -37,6 +38,11 @@ func WithBaseURL(u string) Option {
 			a.baseURL = strings.TrimRight(u, "/")
 		}
 	}
+}
+
+// WithHeaders adds extra HTTP headers to every request (e.g. gateway auth).
+func WithHeaders(h map[string]string) Option {
+	return func(a *Adapter) { a.headers = h }
 }
 
 // New constructs an OpenAI adapter.
@@ -175,6 +181,9 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
+	for k, v := range a.headers {
+		httpReq.Header.Set(k, v)
+	}
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {

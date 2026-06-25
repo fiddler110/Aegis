@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // ContextualGate wraps a base Gate and applies stateful security rules that

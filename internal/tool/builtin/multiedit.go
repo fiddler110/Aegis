@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/filetracker"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/filetracker"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // multieditTool applies multiple edits to one or more files in a single call,

@@ -10,7 +10,7 @@ func TestLoadRelevantScoresHigherForMatching(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	memDir := filepath.Join(root, ".agentharness")
+	memDir := filepath.Join(root, ".aegis")
 	os.MkdirAll(memDir, 0o755)
 	os.WriteFile(filepath.Join(memDir, "memory.md"), []byte(
 		"- The database uses PostgreSQL for persistence\n"+
@@ -38,7 +38,7 @@ func TestLoadRelevantRespectsMaxEntries(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	memDir := filepath.Join(root, ".agentharness")
+	memDir := filepath.Join(root, ".aegis")
 	os.MkdirAll(memDir, 0o755)
 	os.WriteFile(filepath.Join(memDir, "memory.md"), []byte(
 		"- entry one\n- entry two\n- entry three\n- entry four\n",
@@ -55,7 +55,7 @@ func TestLoadRelevantMaxTokens(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	memDir := filepath.Join(root, ".agentharness")
+	memDir := filepath.Join(root, ".aegis")
 	os.MkdirAll(memDir, 0o755)
 
 	// Each entry is ~20 chars = ~5 tokens. With maxTokens=8, should get ~1-2.
@@ -74,7 +74,7 @@ func TestLoadRelevantEmptyQuery(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	memDir := filepath.Join(root, ".agentharness")
+	memDir := filepath.Join(root, ".aegis")
 	os.MkdirAll(memDir, 0o755)
 	os.WriteFile(filepath.Join(memDir, "memory.md"), []byte("- one\n- two\n"), 0o644)
 

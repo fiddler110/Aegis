@@ -30,8 +30,8 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestEnvOverride(t *testing.T) {
-	t.Setenv("AGENTHARNESS_PROVIDER_MODEL", "claude-sonnet-4-6")
-	t.Setenv("AGENTHARNESS_PERMISSION_MODE", "build")
+	t.Setenv("AEGIS_PROVIDER_MODEL", "claude-sonnet-4-6")
+	t.Setenv("AEGIS_PERMISSION_MODE", "build")
 
 	cfg, err := Load()
 	if err != nil {

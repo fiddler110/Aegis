@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/agentharness/internal/provider"
+	"github.com/scottymacleod/aegis/internal/provider"
 )
 
 // Summarizer implements engine.Compactor.

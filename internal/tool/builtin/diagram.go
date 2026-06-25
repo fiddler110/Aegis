@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/scottymacleod/agentharness/internal/diagram"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/diagram"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 type diagramTool struct {

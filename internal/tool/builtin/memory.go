@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/scottymacleod/agentharness/internal/memory"
-	"github.com/scottymacleod/agentharness/internal/tool"
+	"github.com/scottymacleod/aegis/internal/memory"
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 // --- remember ---
