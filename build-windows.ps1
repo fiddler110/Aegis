@@ -40,6 +40,14 @@ $InstallDir = if ($env:GOPATH) { Join-Path $env:GOPATH "bin" }
 $BinDest = Join-Path $InstallDir "aegis.exe"
 $BinExists = Test-Path $BinDest
 
+# ─── Detect stale binary at a different location ──────────────────────────────
+# If aegis.exe is already on PATH but NOT at our install destination, we'll
+# remove that old copy during action [1] so there is no ambiguity about which
+# binary runs after installation.
+$ExistingCmd = Get-Command aegis -ErrorAction SilentlyContinue
+$ExistingBin = if ($ExistingCmd) { $ExistingCmd.Source } else { $null }
+if ($ExistingBin -and ($ExistingBin -ieq $BinDest)) { $ExistingBin = $null }
+
 # ─── Resolve git version ───────────────────────────────────────────────────────
 $Version = git describe --tags --always --dirty 2>$null
 if (-not $Version) { $Version = "dev" }
@@ -68,6 +76,7 @@ Write-Item "[1] Build aegis $Version and install binary"
 Write-Detail "From : ./cmd/aegis"
 Write-Detail "To   : $BinDest  $BinStatus"
 Write-Detail "Go   : $GoVer"
+if ($ExistingBin) { Write-Detail "Old  : $ExistingBin  (will be removed)" }
 Write-Host ""
 
 # Action 2
@@ -109,6 +118,18 @@ if ($RunBuild) {
     $ldf = "-s -w -X github.com/scottymacleod/aegis/internal/cli.Version=$Version"
     go build -ldflags $ldf -o $BinDest ./cmd/aegis
     if ($LASTEXITCODE -ne 0) { Write-Error "Build failed."; exit 1 }
+
+    # Remove any stale binary found at a different PATH location.
+    if ($ExistingBin) {
+        Write-Host "  Removing old binary: $ExistingBin" -ForegroundColor DarkGray
+        Remove-Item $ExistingBin -Force -ErrorAction SilentlyContinue
+        if (Test-Path $ExistingBin) {
+            Write-Warn "Could not remove $ExistingBin — try running as Administrator"
+        } else {
+            Write-Ok "Removed:   $ExistingBin"
+        }
+    }
+
     Write-Ok "Installed: $BinDest"
 
     # PATH check

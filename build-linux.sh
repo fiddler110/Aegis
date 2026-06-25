@@ -58,6 +58,13 @@ fi
 BIN_DEST="${INSTALL_DIR}/aegis"
 [ -f "${BIN_DEST}" ] && BIN_EXISTS=true
 
+# ─── Detect stale binary at a different location ───────────────────────────────
+# If aegis is already on PATH but NOT at our install destination, we'll remove
+# that old copy during action [1] so there is no ambiguity about which binary
+# runs after installation.
+EXISTING_BIN=$(command -v aegis 2>/dev/null || true)
+[ "${EXISTING_BIN}" = "${BIN_DEST}" ] && EXISTING_BIN=""
+
 # ─── Resolve git version ───────────────────────────────────────────────────────
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
@@ -117,6 +124,7 @@ detail "From : ./cmd/aegis"
 detail "To   : ${BIN_DEST}  ${BIN_STATUS}"
 detail "Go   : ${GO_VER}"
 [ "${USE_SUDO}" = true ] && detail "Note : requires sudo to write to ${SYSTEM_BIN}"
+[ -n "${EXISTING_BIN}" ] && detail "Old  : ${EXISTING_BIN}  (will be removed)"
 echo ""
 
 # Action 2
@@ -175,6 +183,23 @@ if [ "${RUN_BUILD}" = true ]; then
             INSTALL_DIR="${USER_BIN}"
             BIN_DEST="${INSTALL_DIR}/aegis"
             USE_SUDO=false
+        fi
+    fi
+
+    # Remove any stale binary found at a different PATH location.
+    if [ -n "${EXISTING_BIN}" ]; then
+        detail "Removing old binary: ${EXISTING_BIN}"
+        if [ -w "${EXISTING_BIN}" ]; then
+            rm -f "${EXISTING_BIN}"
+            ok "Removed:   ${EXISTING_BIN}"
+        elif command -v sudo &>/dev/null; then
+            if sudo rm -f "${EXISTING_BIN}"; then
+                ok "Removed:   ${EXISTING_BIN}"
+            else
+                warn "Could not remove ${EXISTING_BIN} — continuing anyway"
+            fi
+        else
+            warn "Could not remove ${EXISTING_BIN} (no permission, no sudo) — continuing anyway"
         fi
     fi
 
