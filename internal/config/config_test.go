@@ -20,7 +20,22 @@ func clearEnv(t *testing.T, keys ...string) {
 	}
 }
 
+// redirectConfigDir makes GlobalConfigPath() resolve to an empty temp directory
+// so that any real config file the current user may have on disk is not loaded
+// during the test.  Cleanup restores the original env vars automatically.
+func redirectConfigDir(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	// Unix (Linux + macOS): defaultDataDir uses os.UserHomeDir() → $HOME
+	t.Setenv("HOME", tmp)
+	// Windows: defaultDataDir uses os.UserConfigDir() → $APPDATA
+	t.Setenv("APPDATA", filepath.Join(tmp, "AppData", "Roaming"))
+	// Prevent XDG_CONFIG_HOME from pointing somewhere real on Linux
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, ".config"))
+}
+
 func TestLoadDefaults(t *testing.T) {
+	redirectConfigDir(t) // prevent real ~/.config/aegis/config.yaml from loading
 	clearEnv(t,
 		"AEGIS_PROVIDER_DEFAULT", "AEGIS_PROVIDER_MODEL",
 		"AEGIS_PROVIDER_BASE_URL", "AEGIS_PROVIDER_MAX_TOKENS",
@@ -43,7 +58,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"provider default", cfg.Provider.Default, "anthropic"},
 		{"provider model", cfg.Provider.Model, "claude-opus-4-8"},
 		{"server addr", cfg.Server.Addr, "127.0.0.1:4127"},
-		{"permission mode", cfg.Permission.Mode, "plan"},
+		{"permission mode", cfg.Permission.Mode, "build"},
 		{"log level", cfg.LogLevel, "info"},
 	}
 	for _, tt := range tests {
@@ -51,8 +66,8 @@ func TestLoadDefaults(t *testing.T) {
 			t.Errorf("%s = %q, want %q", tt.name, tt.got, tt.want)
 		}
 	}
-	if cfg.Provider.MaxTokens != 8192 {
-		t.Errorf("max tokens = %d, want 8192", cfg.Provider.MaxTokens)
+	if cfg.Provider.MaxTokens != 16384 {
+		t.Errorf("max_tokens = %d, want 16384", cfg.Provider.MaxTokens)
 	}
 }
 
@@ -117,6 +132,7 @@ func TestDefaultDataDir(t *testing.T) {
 }
 
 func TestAPIKeyFromEnv(t *testing.T) {
+	redirectConfigDir(t) // prevent real config file from overriding provider.default
 	clearEnv(t, "AEGIS_PROVIDER_DEFAULT", "OPENAI_API_KEY")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test-123")
 
