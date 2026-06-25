@@ -2,7 +2,7 @@
 
 An AI agent harness for **security, architecture, research, and development**, built from scratch in Go with a terminal-first interface. Designed to work with **local LLMs** (Ollama, LM Studio, LiteLLM) as the primary workflow, with the ability to connect to cloud providers (Anthropic, OpenAI) when needed.
 
-It borrows proven patterns from existing agents — provider abstraction and context compression (Hermes), a persistent daemon + client sessions and Plan/Build modes (opencode), slash-command skills, subagents, permission modes and file-based memory (Claude Code), and sandboxed local tooling (OpenClaw) — while staying a clean, single codebase you own.
+It borrows proven patterns from existing agents — provider abstraction and context compression (Hermes), persistent daemon + client sessions and Plan/Build modes (opencode), slash-command skills, subagents, permission modes, and file-based memory (Claude Code) — while staying a clean, single codebase you own.
 
 ## Table of Contents
 
@@ -12,12 +12,13 @@ It borrows proven patterns from existing agents — provider abstraction and con
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
+  - [First-Time Setup](#first-time-setup)
   - [Using a Local LLM](#using-a-local-llm)
   - [Using Cloud Providers](#using-cloud-providers)
 - [Usage](#usage)
-  - [Starting the Daemon](#starting-the-daemon)
   - [Launching the TUI](#launching-the-tui)
   - [Non-Interactive CLI](#non-interactive-cli)
+  - [Running the Daemon Separately](#running-the-daemon-separately)
   - [Other Commands](#other-commands)
 - [Capabilities](#capabilities)
 - [Personas](#personas)
@@ -31,81 +32,83 @@ It borrows proven patterns from existing agents — provider abstraction and con
 - [Project Structure](#project-structure)
 - [Testing](#testing)
 
+---
+
 ## Quick Start
 
-Already have a local LLM server running with models loaded? Here's how to go from zero to chatting in under two minutes.
+Already have a local LLM server running? Here's how to go from zero to chatting in under two minutes.
 
 **1. Build Aegis**
 
 ```bash
-git clone https://github.com/scottymacleod/aegis.git
-cd aegis
-go build -o aegis ./cmd/aegis          # Linux/macOS
-# or: go build -o aegis.exe ./cmd/aegis  # Windows
+git clone https://github.com/fiddler110/Aegis.git
+cd Aegis
+go build -o aegis ./cmd/aegis          # Linux / macOS
+go build -o aegis.exe ./cmd/aegis      # Windows
 ```
 
-**2. Point Aegis at your local server**
+**2. Generate your config file**
 
-Aegis talks to any backend that exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Set three environment variables:
+```bash
+aegis --first-init
+```
+
+This writes a full configuration template to your OS config directory with **Ollama active by default** and all other providers (Anthropic, OpenAI, Azure, Groq, OpenRouter, LM Studio, Vertex AI) in commented-out blocks ready to activate. Edit the file it prints to switch providers or change the model.
+
+**3. Set the environment variable Ollama needs**
+
+Ollama accepts any non-empty API key. Set a dummy value so the harness doesn't refuse to start:
 
 ```bash
 # Linux / macOS
-export OPENAI_API_KEY="not-needed"
-export AEGIS_PROVIDER_DEFAULT="openai"
-export AEGIS_PROVIDER_BASE_URL="http://localhost:11434/v1"   # ← your server's URL (this example is Ollama)
-export AEGIS_PROVIDER_MODEL="llama3.1"                       # ← model name as reported by your server
-```
+export OPENAI_API_KEY="ollama"
 
-```powershell
 # Windows (PowerShell)
-$env:OPENAI_API_KEY = "not-needed"
-$env:AEGIS_PROVIDER_DEFAULT = "openai"
-$env:AEGIS_PROVIDER_BASE_URL = "http://localhost:11434/v1"
-$env:AEGIS_PROVIDER_MODEL = "llama3.1"
+$env:OPENAI_API_KEY = "ollama"
 ```
 
-> Swap the URL and model name for whichever backend you're running — see the [Supported Local LLM Backends](#supported-local-llm-backends) table below.
+Make it permanent: add the export line to `~/.zshrc` / `~/.bashrc` on Linux/macOS, or add it to System → Advanced → Environment Variables on Windows.
 
-**3. Start the daemon**
+**4. Pull a model and launch**
 
 ```bash
-aegis serve
+ollama pull llama3.2
+aegis
 ```
 
-**4. Launch the TUI (in a second terminal)**
+That's it. The daemon starts automatically in the same process, no second terminal needed. Use `/help` inside the TUI for available commands.
 
-```bash
-aegis                        # plan mode (read-only, safe to explore)
-aegis --mode build           # build mode (can edit files, run commands)
-```
-
-That's it. Aegis will connect to your local server and you can start chatting. Use `/help` inside the TUI for available commands.
+---
 
 ## Supported Local LLM Backends
 
-Aegis works with any server that exposes an OpenAI-compatible API (`/v1/chat/completions`). The table below lists the most popular options. Servers marked with **Auto-discover** are probed automatically by the `list_models` tool; all others work by setting `base_url` manually.
+Aegis works with any server that exposes an OpenAI-compatible API (`/v1/chat/completions`). The table below lists the most popular options.
 
-| Server | Default Base URL | Auto-discover | Install / Start |
-|--------|-----------------|---------------|-----------------|
-| [Ollama](https://ollama.com) | `http://localhost:11434/v1` | Yes | Install from [ollama.com](https://ollama.com). Pull a model: `ollama pull llama3.1`. Runs as a service automatically, or start with `ollama serve`. |
-| [LM Studio](https://lmstudio.ai) | `http://localhost:1234/v1` | Yes | Download from [lmstudio.ai](https://lmstudio.ai). Load a model from Discover, then start the server from the Local Server tab. |
-| [llama.cpp](https://github.com/ggerganov/llama.cpp) | `http://localhost:8080/v1` | No | Build from source or download a release. Start with: `llama-server -m model.gguf --port 8080`. Supports GGUF models from [Hugging Face](https://huggingface.co/models?library=gguf). |
-| [vLLM](https://github.com/vllm-project/vllm) | `http://localhost:8000/v1` | No | `pip install vllm`. Start with: `vllm serve meta-llama/Llama-3.1-8B-Instruct`. High-throughput serving with PagedAttention, best for GPU-rich setups. |
-| [LocalAI](https://github.com/mudler/LocalAI) | `http://localhost:8080/v1` | No | Run via Docker: `docker run -p 8080:8080 localai/localai`. Supports GGUF, transformers, and diffusion models. |
-| [Jan](https://jan.ai) | `http://localhost:1337/v1` | No | Download from [jan.ai](https://jan.ai). Enable the API server in Settings > Advanced. Desktop app with built-in model management. |
-| [LiteLLM](https://github.com/BerriAI/litellm) | `http://localhost:4000/v1` | Yes | `pip install litellm`. Start with: `litellm --model ollama/llama3.1`. Acts as a proxy that unifies 100+ providers behind one API. |
-| [KoboldCpp](https://github.com/LostRuins/koboldcpp) | `http://localhost:5001/v1` | No | Download a release from GitHub. Start with: `koboldcpp model.gguf --port 5001`. Optimized for CPU inference with GGUF models. |
-| [text-generation-webui](https://github.com/oobabooga/text-generation-webui) (oobabooga) | `http://localhost:5000/v1` | No | Clone the repo and run the installer. Enable the OpenAI-compatible API extension in the UI. Supports many model formats. |
+| Server | Default Base URL | Install / Start |
+|--------|-----------------|-----------------|
+| [Ollama](https://ollama.com) | `http://localhost:11434/v1` | Install from [ollama.com](https://ollama.com). Pull a model: `ollama pull llama3.2`. Runs as a service automatically. |
+| [LM Studio](https://lmstudio.ai) | `http://localhost:1234/v1` | Download from [lmstudio.ai](https://lmstudio.ai). Load a model, then start the server from the Local Server tab. |
+| [llama.cpp](https://github.com/ggerganov/llama.cpp) | `http://localhost:8080/v1` | Build or download a release. Start: `llama-server -m model.gguf --port 8080`. |
+| [vLLM](https://github.com/vllm-project/vllm) | `http://localhost:8000/v1` | `pip install vllm`. Start: `vllm serve meta-llama/Llama-3.1-8B-Instruct`. |
+| [LocalAI](https://github.com/mudler/LocalAI) | `http://localhost:8080/v1` | `docker run -p 8080:8080 localai/localai`. |
+| [Jan](https://jan.ai) | `http://localhost:1337/v1` | Download from [jan.ai](https://jan.ai). Enable API server in Settings → Advanced. |
+| [LiteLLM](https://github.com/BerriAI/litellm) | `http://localhost:4000/v1` | `pip install litellm && litellm --model ollama/llama3.2`. |
+| [KoboldCpp](https://github.com/LostRuins/koboldcpp) | `http://localhost:5001/v1` | Download from GitHub. Start: `koboldcpp model.gguf --port 5001`. |
+| [text-generation-webui](https://github.com/oobabooga/text-generation-webui) | `http://localhost:5000/v1` | Clone repo and run installer. Enable the OpenAI-compatible API extension. |
 
-> **Tip**: For servers not auto-discovered, set `AEGIS_PROVIDER_BASE_URL` to the server's base URL and `AEGIS_PROVIDER_MODEL` to the model name as reported by the server's `/v1/models` endpoint.
+> **Tip**: Set `AEGIS_PROVIDER_BASE_URL` to any server's base URL and `AEGIS_PROVIDER_MODEL` to the model name to use a backend not in the `--first-init` template.
+
+---
 
 ## Architecture
 
-Aegis uses a **daemon + client** architecture. A background daemon (`aegis serve`) owns sessions, the agent engine, tool registry, and model adapter. Clients (the interactive TUI and the `chat` CLI command) connect to it over a local HTTP API with server-sent events (SSE), so sessions survive client restarts and can be resumed.
+Aegis uses a **daemon + client** architecture. The daemon owns sessions, the agent engine, tool registry, and the model adapter. The TUI and CLI connect to it over a local HTTP API with server-sent events (SSE).
+
+**By default, `aegis` auto-starts the daemon in the same process** so no second terminal is needed. If you want the daemon to persist across TUI restarts (e.g. for long-running background jobs or shared sessions), run `aegis serve` explicitly in the background.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                        Daemon (aegis serve)                        │
+│                        Daemon (auto-start or aegis serve)          │
 │                                                                    │
 │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────────┐  │
 │  │  Session  │  │   Agent   │  │   Tool   │  │    Provider      │  │
@@ -130,247 +133,298 @@ Aegis uses a **daemon + client** architecture. A background daemon (`aegis serve
         ▼            ▼            ▼
    ┌─────────┐  ┌─────────┐  ┌──────────┐
    │   TUI   │  │  chat   │  │ dry-run  │
-   │ (Bubble │  │  (CLI)  │  │  (debug) │
-   │   Tea)  │  │         │  │          │
+   │(dashboard│  │  (CLI)  │  │  (debug) │
+   │ + spinner│  │         │  │          │
    └─────────┘  └─────────┘  └──────────┘
 ```
 
 **Core agent loop**: The engine sends the conversation to the model, receives streamed events (text deltas, tool-use requests), dispatches tool calls through the permission gate, appends results, and repeats until the model produces a final answer or the run is interrupted. Context compaction automatically summarizes old turns when the conversation grows large.
+
+---
 
 ## Getting Started
 
 ### Prerequisites
 
 - **Go 1.25+** — [Install Go](https://go.dev/dl/)
-- **Git** — for cloning the repository
-- A local LLM server **or** a cloud API key (see below)
+- **Git** — for cloning
+- A local LLM server **or** a cloud API key
 
 ### Installation
 
-Clone and build Aegis:
-
 **Windows (PowerShell)**
 ```powershell
-git clone https://github.com/scottymacleod/aegis.git
-cd aegis
+git clone https://github.com/fiddler110/Aegis.git
+cd Aegis
 go build -o aegis.exe ./cmd/aegis
-```
-
-**Linux / macOS**
-```bash
-git clone https://github.com/scottymacleod/aegis.git
-cd aegis
-go build -o aegis ./cmd/aegis
-```
-
-Optionally move the binary onto your PATH:
-
-**Windows (PowerShell)**
-```powershell
 Copy-Item aegis.exe "$env:USERPROFILE\go\bin\aegis.exe"
 ```
 
 **Linux / macOS**
 ```bash
-sudo mv aegis /usr/local/bin/aegis
-# or: mv aegis ~/go/bin/aegis
+git clone https://github.com/fiddler110/Aegis.git
+cd Aegis
+go build -o aegis ./cmd/aegis
+sudo mv aegis /usr/local/bin/aegis    # or: mv aegis ~/go/bin/aegis
 ```
+
+### First-Time Setup
+
+Run `--first-init` to generate your global config with a complete commented template:
+
+```bash
+aegis --first-init
+```
+
+**Config file location by platform:**
+
+| Platform | Path |
+|----------|------|
+| Windows | `%AppData%\aegis\config.yaml` |
+| macOS | `~/Library/Application Support/aegis/config.yaml` |
+| Linux | `~/.config/aegis/config.yaml` |
+
+To create a project-level override in the current directory (safe to commit — no secrets):
+
+```bash
+aegis --init
+```
+
+This writes `.aegis/config.yaml` with commented examples for overriding the model, permission mode, cost budget, and network allowlist on a per-project basis.
 
 ### Using a Local LLM
 
-Local LLM usage is the primary focus of this project. Aegis works with any server that exposes an OpenAI-compatible API. See the full [Supported Local LLM Backends](#supported-local-llm-backends) table for all options, default ports, and install instructions. Ollama, LM Studio, and LiteLLM are auto-discovered; all others work by setting `base_url` manually.
+Local LLM usage is the primary focus of this project. The `--first-init` template has Ollama active by default.
 
 **Step 1 — Start your local model server**
 
-Example with Ollama:
 ```bash
-# Pull a model (do this once)
-ollama pull llama3.1
-# or a larger model for better tool-use support:
+# Ollama — pull once, then it runs as a service
+ollama pull llama3.2
+# or a larger model for better tool-use:
 ollama pull qwen2.5:32b
 
-# Ollama runs automatically as a service after install,
-# or start it manually:
+# Start manually if needed:
 ollama serve
 ```
 
-Example with LM Studio:
-1. Download and install LM Studio
-2. Load a model from the Discover tab
-3. Start the local server from the Local Server tab (runs on port 1234)
-
-**Step 2 — Configure Aegis to use the local model**
-
-Aegis uses the OpenAI-compatible API that local servers expose. Set the provider to `openai`, point `base_url` at your local server, and set the model name:
-
-**Windows (PowerShell)**
-```powershell
-# Set environment variables for the session
-$env:OPENAI_API_KEY = "not-needed"
-$env:AEGIS_PROVIDER_DEFAULT = "openai"
-$env:AEGIS_PROVIDER_BASE_URL = "http://localhost:11434/v1"   # Ollama
-$env:AEGIS_PROVIDER_MODEL = "llama3.1"
+```
+# LM Studio — download the app, load a model, start the local server from the UI
 ```
 
-**Linux / macOS**
+**Step 2 — Set the API key environment variable**
+
+Local servers don't validate the API key, but the harness requires it to be non-empty:
+
 ```bash
-export OPENAI_API_KEY="not-needed"           # required by the adapter but not checked by local servers
-export AEGIS_PROVIDER_DEFAULT="openai"
-export AEGIS_PROVIDER_BASE_URL="http://localhost:11434/v1"   # Ollama
-export AEGIS_PROVIDER_MODEL="llama3.1"
+# Linux / macOS — add to ~/.zshrc or ~/.bash_profile for permanence
+export OPENAI_API_KEY="ollama"
+
+# Windows PowerShell — add to System Environment Variables for permanence
+$env:OPENAI_API_KEY = "ollama"
 ```
 
-Or configure it permanently in the config file:
+**Step 3 — Edit the config if needed**
 
-**Windows**: `%AppData%\aegis\config.yaml`
-**Linux**: `~/.config/aegis/config.yaml`
-**macOS**: `~/Library/Application Support/aegis/config.yaml`
+Open the file printed by `--first-init` and confirm the `model` matches a model you have pulled:
 
 ```yaml
 provider:
   default: openai
-  base_url: "http://localhost:11434/v1"   # Ollama endpoint
-  model: llama3.1                          # model name as reported by the server
+  base_url: "http://localhost:11434/v1"
+  model: "llama3.2"    # ← change to any model you have pulled
 ```
-
-> **Note**: Set `OPENAI_API_KEY` to any non-empty string (e.g. `"not-needed"`) — the adapter requires it to be set, but local servers do not validate it.
-
-**Step 3 — Discover available models**
-
-Aegis can probe for all locally running model servers and list available models:
-```bash
-# In a running session, the agent has a list_models tool, or from the CLI:
-aegis chat "list available local models" --mode plan
-```
-
-**Base URLs for common local servers:**
-
-See the full [Supported Local LLM Backends](#supported-local-llm-backends) table for all options. The most common:
-
-| Server | Base URL |
-|--------|----------|
-| Ollama | `http://localhost:11434/v1` |
-| LM Studio | `http://localhost:1234/v1` |
-| llama.cpp | `http://localhost:8080/v1` |
-| vLLM | `http://localhost:8000/v1` |
-| LocalAI | `http://localhost:8080/v1` |
-| Jan | `http://localhost:1337/v1` |
-| LiteLLM | `http://localhost:4000/v1` |
-| KoboldCpp | `http://localhost:5001/v1` |
-| text-generation-webui | `http://localhost:5000/v1` |
 
 ### Using Cloud Providers
 
-Cloud providers can be used alongside or instead of local models.
+Open the global config and uncomment the relevant provider block. Then set the API key in your environment.
 
 **Anthropic (Claude)**
 ```bash
-# Linux / macOS
-export ANTHROPIC_API_KEY="sk-ant-..."
+export ANTHROPIC_API_KEY="sk-ant-..."   # Linux / macOS
+$env:ANTHROPIC_API_KEY = "sk-ant-..."   # Windows PowerShell
+```
 
-# Windows (PowerShell)
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
+Uncomment in config:
+```yaml
+provider:
+  default: anthropic
+  model: "claude-opus-4-8"
+  max_tokens: 16384
 ```
 
 **OpenAI**
 ```bash
-# Linux / macOS
-export OPENAI_API_KEY="sk-..."
-export AEGIS_PROVIDER_DEFAULT="openai"
-
-# Windows (PowerShell)
-$env:OPENAI_API_KEY = "sk-..."
-$env:AEGIS_PROVIDER_DEFAULT = "openai"
+export OPENAI_API_KEY="sk-..."          # Linux / macOS
+$env:OPENAI_API_KEY = "sk-..."          # Windows PowerShell
 ```
 
-The default provider is `anthropic` with model `claude-opus-4-8`. Override via config or environment variables.
+Uncomment in config:
+```yaml
+provider:
+  default: openai
+  model: "gpt-4o"
+  max_tokens: 16384
+```
+
+All other providers (Azure OpenAI, Groq, OpenRouter, LM Studio, Vertex AI) have ready-to-uncomment blocks in the file generated by `--first-init`.
+
+---
 
 ## Usage
 
-### Starting the Daemon
-
-The daemon must be running before launching the TUI or sending chat commands. It manages sessions, the agent engine, tool registry, and all integrations.
-
-```bash
-# Start in a separate terminal (logs to data dir by default)
-aegis serve
-
-# Or with log output to stderr for debugging
-aegis serve --foreground
-```
-
-The daemon listens on `127.0.0.1:4127` by default and generates an auth token stored in the data directory.
-
 ### Launching the TUI
 
+`aegis` starts the daemon automatically in the same process — no second terminal needed.
+
 ```bash
-# Default: plan mode (read-only), general persona
-aegis
-
-# Build mode (can create/edit/delete files, run shell commands)
-aegis --mode build
-
-# Security architect persona
-aegis --persona security --mode build
-
-# Other personas (see Personas section for full list)
+aegis                                # build mode (default), general persona
+aegis --mode plan                    # read-only / safe exploration
+aegis --mode build                   # file edits + shell commands
+aegis --persona security             # security architect persona
 aegis --persona developer --mode build
 aegis --persona sre --mode plan
-aegis --persona cloud-architect --mode plan
-
-# Resume an existing session
-aegis --resume <session-id>
+aegis --resume <session-id>          # resume an existing session
 ```
 
-The TUI is built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and renders a scrollable conversation with a text input area. It streams model responses in real time and shows tool call status inline.
+**TUI layout:**
+
+```
+⬡ AEGIS                                          abc12345  llama3.2
+─────────────────────────────────────────────────────────────────────
+ SESSION      │  You
+ abc12345      │  analyse this repo for security issues
+               │
+ MODE          │  Assistant
+ build         │  I'll start by reading the project structure…
+               │
+ TOOLS         │  ⚙ glob  {"pattern":"**/*.go"}
+ ✓ glob        │  ✓ glob → 42 files matched
+ ⚙ read_file   │  ⚙ read_file  {"path":"main.go"}
+               │
+ COST          │
+ $0.0012       │
+ in  1234      │
+ out 456       │
+─────────────────────────────────────────────────────────────────────
+ ◐ thinking…                               build   in:1234  out:456
+─────────────────────────────────────────────────────────────────────
+ │ Send a message…
+```
+
+**Keyboard shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `Ctrl+J` | Insert newline in input |
+| `Shift+Tab` | Cycle permission mode (plan → build → auto) |
+| `Ctrl+T` | Show active sub-agents |
+| `Ctrl+C` | Interrupt streaming run / quit |
+| Mouse wheel | Scroll conversation |
+
+**Slash commands** (type inside the TUI):
+
+| Command | Action |
+|---------|--------|
+| `/help` | Show all commands |
+| `/mode <plan\|build\|auto>` | Switch permission mode |
+| `/persona <name>` | Switch persona |
+| `/clear` | Clear the transcript |
+| `/memory` | Show saved memories |
+| `/remember <text>` | Save a memory entry |
+| `/skills` | List saved skills |
+| `/commands` | List custom commands |
+| `/models` | Show current model |
+| `/session [list]` | Session info or list all sessions |
+| `/quit` | Exit |
 
 ### Non-Interactive CLI
 
 For scripting or single-shot queries without the TUI:
 
 ```bash
-aegis chat "summarize main.go" --mode build
+aegis chat "summarise main.go" --mode build
 aegis chat "what security issues exist in this repo?" --mode plan
 
 # Auto-approve all tool calls (unattended)
 aegis chat "refactor the config package" --mode build --yes
 ```
 
+### Running the Daemon Separately
+
+If you want the daemon to persist across multiple TUI sessions (e.g. for long-running background jobs that survive a TUI restart), run it explicitly:
+
+```bash
+# Background — logs written to the data directory
+aegis serve
+
+# Foreground — mirror logs to stderr for debugging
+aegis serve --foreground
+```
+
+The daemon listens on `127.0.0.1:4127` by default. When a separately started daemon is already running, `aegis` detects it and connects without starting a second one.
+
 ### Other Commands
 
 ```bash
-# Preview resolved config, tools, memory, and context without calling the model
+# Preview resolved config, tools, memory, and context — no model call
 aegis dry-run
 
 # Run security scanners (semgrep, trivy, gitleaks)
 aegis scan ./path
 
-# Render a diagram
+# Render a diagram from stdin
 aegis diagram --type mermaid --out architecture.svg < diagram.mmd
 
 # List and manage sessions
 aegis sessions list
 
-# Show current configuration
+# Show resolved configuration
 aegis config
+
+# Generate global config template (Ollama default, all providers documented)
+aegis --first-init
+
+# Generate project-level config override
+aegis --init
 ```
+
+---
 
 ## Capabilities
 
-### Coding and Research
-File read/write/edit/multi-edit, glob, grep, sandboxed shell execution, web fetch/search — all confined to the workspace root. File staleness tracking prevents edits to files modified externally since they were last read.
+### File Operations
+`read_file`, `write_file`, `edit_file`, `multi_edit`, `glob`, `grep` — all confined to the workspace root. A file staleness tracker rejects edits to files modified externally since they were last read, preventing accidental overwrites.
+
+### Shell Execution
+`shell` — runs commands in the workspace directory with a configurable timeout. Supports background jobs (returns a task ID immediately) and optional container sandboxing. Every invocation is gated by the permission mode.
 
 ### Permission Modes
-- **Plan** (default) — read-only; the agent can search, read files, and answer questions but cannot modify anything.
-- **Build** — the agent can create, edit, and delete files, execute shell commands, and perform write operations.
+- **Plan** — read-only; the agent can search, read, and answer but cannot modify anything.
+- **Build** — full access: create, edit, delete files, run shell commands. Shell and execute calls prompt for approval unless `auto_approve_exec` is enabled.
+- **Auto** — all capabilities without prompting (use in trusted, unattended contexts).
 
-Shell and execute commands are gated by an approval prompt unless `auto_approve_exec` is enabled. Every tool call is recorded to an audit trail (`audit.jsonl`) with timestamps and inputs.
+Every tool call is recorded to an audit trail (`audit.jsonl`) with timestamps and inputs.
+
+### LaTeX Documents
+- **`latex_build`** — Compiles a `.tex` file to PDF using xelatex, pdflatex, or lualatex. Runs 1–3 passes to resolve cross-references and table of contents. Returns a structured report: errors with context lines, deduplicated warnings, page count, and the output PDF path. Supports `check_only` mode for fast syntax validation without writing a PDF.
+- **`latex_new_document`** — Creates a new `.tex` file with a production-quality preamble ready for enterprise reports, white papers, and technical documents. Includes professional typography, semantic heading colours, `booktabs` tables, `listings` code blocks, `tcolorbox` callout boxes (`notebox` / `warnbox` / `keybox`), figure captions, `hyperref` PDF metadata, and a scaffolded section structure with `%%TODO` markers. Supports styles: `report`, `whitepaper`, `article`, `book`. Works with xelatex (default) and pdflatex.
+
+**Typical notes-to-report workflow:**
+1. `glob` + `read_file` — collect your markdown notes
+2. `latex_new_document` — create a template with section titles matching the notes
+3. `edit_file` — fill each `%%TODO` with synthesised content
+4. `latex_build {"path":"report.tex","runs":2}` — compile to PDF
+
+### Web
+`web_fetch` — fetches a URL and returns readable text (HTML converted). `web_search` — performs a web search.
 
 ### Multi-Agent Orchestration (Swarm)
-The `agent` tool lets the model spawn sub-agents ("teammates") that run independently. Sub-agents can execute in-process (goroutines) or as separate headless processes. Each sub-agent has its own permission scope (cannot exceed the parent's), and a file-based mailbox enables inter-agent communication. A recursion-depth guard prevents runaway spawning.
+The `agent` tool lets the model spawn sub-agents ("teammates") that run independently. Sub-agents execute in-process (goroutines) or as separate headless processes. Each sub-agent has its own permission scope (cannot exceed the parent's), and a file-based mailbox enables inter-agent communication. A recursion-depth guard prevents runaway spawning. Active agents are visible in the TUI sidebar (Ctrl+T for a full list).
 
 ### Background Tasks and Scheduling
-Shell commands and agent tasks can run in the background via the task manager (SQLite-backed). A built-in cron scheduler supports recurring jobs with standard cron expressions. Task tools: `task_create`, `task_status`, `task_list`, `task_cancel`, `task_output`, `task_wait`.
+Shell commands and agent tasks can run in the background via the task manager (SQLite-backed). A built-in cron scheduler supports recurring jobs with standard cron expressions. Task tools: `task_create`, `task_get`, `task_list`, `task_stop`, `task_output`.
 
 ### Memory and Skills
 - `remember` — persists facts into user-scoped or project-scoped memory files, loaded into the system prompt on every turn.
@@ -380,141 +434,152 @@ Shell commands and agent tasks can run in the background via the task manager (S
 ### Planning Tools
 `todo_add`, `todo_update`, `todo_list` — a lightweight in-session planning surface for tracking multi-step work. `ask_user` collects structured input (free text, single-choice, multi-choice).
 
-### Personas
-With `--persona <name>`, the system prompt is tailored to a specific role. Each persona shapes the agent's behavior, expertise, and focus areas. See the [Personas](#personas) section for the full list and descriptions.
-
 ### Security Scanning
 The `security_scan` tool runs semgrep, trivy, and gitleaks and produces a unified findings report. Works with any persona but is especially useful with security-focused ones (`security`, `security-architect`, `security-engineer`, `appsec-engineer`).
 
 ### Diagrams
-`render_diagram` and `aegis diagram` render Mermaid, PlantUML, C4, Graphviz, and more to SVG/PNG via [Kroki](https://kroki.io) (with local CLI fallback). Draw.io export is also supported.
+`render_diagram` and `aegis diagram` render Mermaid, PlantUML, C4, Graphviz, and more to SVG/PNG/PDF via [Kroki](https://kroki.io) (with local CLI fallback). Draw.io export is also supported.
 
 ### Code Intelligence (LSP)
-When LSP servers are configured, tools like `lsp_diagnostics`, `lsp_references`, and `lsp_definition` give the agent IDE-level code understanding.
+When LSP servers are configured, `lsp_diagnostics`, `lsp_references`, and `lsp_definition` give the agent IDE-level code understanding.
 
 ### Model Discovery
-The `list_models` tool probes `localhost` for Ollama (`:11434`), LM Studio (`:1234`), and LiteLLM (`:4000`) and reports every model available — useful for switching models mid-session or verifying your local setup.
+The `list_models` tool probes `localhost` for Ollama (`:11434`), LM Studio (`:1234`), and LiteLLM (`:4000`) and reports every available model — useful for switching models mid-session or verifying your local setup.
 
 ### Contextual Security Policies
-- `egress_then_write` — requires explicit approval for write operations that follow network access (prevents exfiltrate-then-modify patterns).
-- `network_allowlist` — restricts outbound network calls to listed domains.
+- `egress_then_write` — requires explicit approval for write operations that follow any network access in the same session (prevents exfiltrate-then-modify patterns).
+- `network_allowlist` — restricts outbound calls to listed domains.
 - All policy decisions are recorded to the audit trail.
 
 ### Sandboxed Execution
-Shell commands can run in a local sandbox (default) or inside containers:
-- **Docker** and **Podman** on Linux/macOS/Windows
-- **Apple Containers** on macOS
-- Network isolation, configurable image, and path validation prevent workspace escapes.
+Shell commands can run locally (default) or inside containers: Docker, Podman (Linux/macOS/Windows), and Apple Containers (macOS). Network isolation and path validation prevent workspace escapes.
 
 ### Cost Tracking
-Token usage (including cache hits for Anthropic) is tracked per turn. A configurable `budget_usd` limit halts a run when estimated spend exceeds the threshold.
+Token usage (including cache hits for Anthropic) is tracked per turn and displayed live in the TUI status bar. A configurable `budget_usd` limit halts a run when estimated spend exceeds the threshold.
+
+---
 
 ## Personas
 
-Personas control the agent's system prompt, shaping its expertise and behavior for different roles. Select one with `--persona <name>` on the CLI or TUI.
+Select a persona with `--persona <name>` or `/persona <name>` inside the TUI.
 
 | Persona | `--persona` value | Focus |
 |---------|-------------------|-------|
 | General | `general` (default) | Research, documentation, and coding assistant |
-| Security | `security` | Security platform architect: capability research, STRIDE/LINDDUN threat modeling, C4/Mermaid architecture, issue identification |
-| Platform Architect | `platform-architect` | System design, technology evaluation, capacity planning, platform standards |
-| Security Architect | `security-architect` | Security architecture, threat modeling, security requirements, design review |
+| Security | `security` | Security platform architect: capability research, STRIDE/LINDDUN threat modeling, C4/Mermaid architecture |
+| Platform Architect | `platform-architect` | System design, technology evaluation, capacity planning |
+| Security Architect | `security-architect` | Security architecture, threat modeling, design review |
 | Security Engineer | `security-engineer` | Security tooling, vulnerability management, automation, incident response |
-| AppSec Engineer | `appsec-engineer` | Secure code review, application testing, OWASP, CI/CD security integration |
+| AppSec Engineer | `appsec-engineer` | Secure code review, OWASP, CI/CD security integration |
 | Developer | `developer` | Implementation, debugging, code review, testing |
-| Security Researcher | `security-researcher` | Vulnerability research, attack analysis, MITRE ATT&CK, defensive research |
-| Risk Assessor | `risk-assessor` | Risk identification, analysis, evaluation, treatment (NIST RMF, ISO 27005, FAIR) |
+| Security Researcher | `security-researcher` | Vulnerability research, attack analysis, MITRE ATT&CK |
+| Risk Assessor | `risk-assessor` | Risk identification and treatment (NIST RMF, ISO 27005, FAIR) |
 | Business Analyst | `business-analyst` | Requirements analysis, process mapping, stakeholder communication |
 | Data Analyst | `data-analyst` | Data exploration, statistical analysis, visualization, reporting |
-| Network Security Architect | `network-security-architect` | Network design, segmentation, cloud networking, zero-trust, threat analysis |
+| Network Security Architect | `network-security-architect` | Network design, segmentation, zero-trust, threat analysis |
 | Report Writer | `report-writer` | Structured reports, technical writing, findings documentation |
-| SRE | `sre` | Reliability engineering, SLOs/SLIs, observability, incident management, capacity planning |
-| Infrastructure Architect | `infrastructure-architect` | Infrastructure design, IaC (Terraform/Pulumi), container orchestration, day-2 operations |
+| SRE | `sre` | Reliability engineering, SLOs/SLIs, observability, incident management |
+| Infrastructure Architect | `infrastructure-architect` | IaC (Terraform/Pulumi), container orchestration, day-2 operations |
 | Cloud Architect | `cloud-architect` | Cloud-native design, migration strategies, multi-cloud/hybrid, cost optimization |
-| Cloud Security Engineer | `cloud-security-engineer` | Cloud security posture (CIS Benchmarks), IAM, cloud-native security, threat detection |
+| Cloud Security Engineer | `cloud-security-engineer` | Cloud security posture (CIS Benchmarks), IAM, cloud-native security |
 
-Custom agent definitions (see [Custom Agent Definitions](#custom-agent-definitions)) can also be used for project-specific roles beyond the built-in personas.
+Custom agent definitions (see [Custom Agent Definitions](#custom-agent-definitions)) can define project-specific roles beyond the built-ins.
+
+---
 
 ## Configuration
 
-Configuration is resolved with precedence (lowest to highest):
+Configuration is resolved with the following precedence (highest wins):
 
-1. **Built-in defaults**
-2. **Global config** — `<user-config-dir>/aegis/config.yaml`
-3. **Project config** — `./.aegis/config.yaml`
-4. **Environment variables** — `AEGIS_*` (underscores map to dots: `AEGIS_PROVIDER_MODEL` → `provider.model`)
+```
+environment variables  >  project config (.aegis/config.yaml)  >  global config  >  built-in defaults
+```
 
-API keys are read from the environment only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) and never written to config files.
+API keys are **always** read from environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) and are never written to config files.
 
-**Config file locations by platform:**
+**Config file locations:**
 
-| Platform | Global Config Path |
-|----------|-------------------|
+| Platform | Global config path |
+|----------|--------------------|
 | Windows | `%AppData%\aegis\config.yaml` |
-| Linux | `~/.config/aegis/config.yaml` |
 | macOS | `~/Library/Application Support/aegis/config.yaml` |
+| Linux | `~/.config/aegis/config.yaml` |
+
+**Generate config files:**
+
+```bash
+aegis --first-init   # global config — all providers documented, Ollama active
+aegis --init         # project config — .aegis/config.yaml in current directory
+```
 
 ### Full Config Reference
 
 ```yaml
-# Provider settings
+# ── Provider ──────────────────────────────────────────────────────────────────
 provider:
-  default: openai              # "anthropic" or "openai" (use "openai" for local LLMs)
-  model: llama3.1              # model ID as known by the provider/server
-  base_url: "http://localhost:11434/v1"  # API base URL (required for local LLMs)
+  default: openai              # "anthropic" or "openai" (use "openai" for all
+                               # local LLMs and OpenAI-compatible cloud providers)
+  model: "llama3.2"            # model ID as known to the provider or server
+  base_url: "http://localhost:11434/v1"  # required for local LLMs and proxies
   max_tokens: 8192             # response token cap
-  max_retries: 4               # transient failure retries (0 = disabled)
-  headers:                     # extra HTTP headers on every request (e.g. gateway auth)
-    X-Gateway-Token: "your-token"
-    X-Tenant-ID: "your-tenant"
+  max_retries: 4               # transient-failure retries (0 = disabled)
+  think: ~                     # null = provider default; false = disable extended
+                               # thinking for reasoning models (qwen3, deepseek-r1)
+  headers:                     # extra HTTP headers on every request (gateway auth)
+    X-Gateway-Token: "token"
 
-# Permission defaults
+# ── Permission ────────────────────────────────────────────────────────────────
 permission:
-  mode: plan                   # "plan" (read-only) or "build" (can mutate)
-  auto_approve_exec: false     # skip approval for shell commands in build mode
+  mode: build                  # "plan" (read-only) | "build" | "auto"
+  auto_approve_exec: false     # skip approval prompts for shell/execute calls
 
-# Cost tracking
+# ── Cost guard ────────────────────────────────────────────────────────────────
 cost:
-  budget_usd: 0                # abort when estimated cost exceeds this (0 = unlimited)
+  budget_usd: 0.0              # 0 = unlimited; set e.g. 5.0 to abort past $5
 
-# Daemon
+# ── Daemon ────────────────────────────────────────────────────────────────────
 server:
-  addr: "127.0.0.1:4127"      # listen address
+  addr: "127.0.0.1:4127"
 
-# Multi-agent
-swarm:
-  backend: in_process          # "in_process" or "subprocess"
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_level: info                # debug | info | warn | error
 
-# Command sandbox
-sandbox:
-  backend: local               # "local" or "container"
-  runtime: ""                  # "docker", "podman", "container" (Apple); empty = auto-detect
-  image: "ubuntu:22.04"        # container image for sandbox
-  network: false               # allow network inside containers
-
-# Contextual security policies
-security:
-  egress_then_write: false     # require approval for writes after network access
-  network_allowlist: []        # restrict network to these domains (empty = unrestricted)
-
-# Diagram rendering
+# ── Diagrams ──────────────────────────────────────────────────────────────────
 diagram:
   kroki_url: "https://kroki.io"
 
-# LSP servers for code intelligence
+# ── Multi-agent ───────────────────────────────────────────────────────────────
+swarm:
+  backend: in_process          # "in_process" (goroutines) | "subprocess" (isolated)
+
+# ── Shell sandbox ─────────────────────────────────────────────────────────────
+sandbox:
+  backend: local               # "local" | "container"
+  runtime: ""                  # "docker" | "podman" | "container" (Apple); empty = auto
+  image: "ubuntu:22.04"        # container image when backend=container
+  network: false               # allow network inside containers
+
+# ── Security policies ─────────────────────────────────────────────────────────
+security:
+  egress_then_write: false     # require approval for writes after network access
+  network_allowlist: []        # restrict to these domains (empty = unrestricted)
+
+# ── LSP servers ───────────────────────────────────────────────────────────────
 lsp:
   - name: gopls
     command: gopls
-    args: ["-remote=auto"]
+    args: []
     extensions: [".go"]
 
-# MCP servers (stdio or HTTP)
+# ── MCP servers ───────────────────────────────────────────────────────────────
 mcp:
   - name: filesystem
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    env:
+      SOME_TOKEN: "value"
 
-# External process tool plugins
+# ── Process plugins ───────────────────────────────────────────────────────────
 plugins:
   - name: my-linter
     description: "Run custom linting"
@@ -527,29 +592,29 @@ plugins:
 
 ### AI Gateway / Proxy Support
 
-Aegis can route all LLM traffic through an AI gateway or reverse proxy for security controls, audit logging, rate limiting, or policy enforcement. Set `base_url` to your gateway endpoint and use `headers` for any gateway-specific authentication.
+Route all LLM traffic through an AI gateway for audit logging, rate limiting, or policy enforcement:
 
 ```yaml
 provider:
   default: anthropic
-  model: claude-sonnet-4-6
+  model: "claude-opus-4-8"
   base_url: "https://ai-gateway.internal.example.com"
   headers:
     X-Gateway-Token: "your-gateway-auth-token"
     X-Tenant-ID: "your-tenant-id"
 ```
 
-The gateway must proxy requests to the upstream provider at the same API paths:
+The gateway must proxy to the upstream provider at the same API paths:
 - **Anthropic**: `POST /v1/messages` (SSE streaming)
 - **OpenAI / local LLMs**: `POST /v1/chat/completions` (SSE streaming)
 
-Custom headers are sent on every request alongside the standard provider headers (`x-api-key` for Anthropic, `Authorization: Bearer` for OpenAI). The base URL can also be set via the `AEGIS_PROVIDER_BASE_URL` environment variable.
+---
 
 ## Extensibility
 
 ### MCP Servers
 
-Aegis consumes external [Model Context Protocol](https://modelcontextprotocol.io/) servers as additional tools. Servers can connect via stdio (launched as child processes) or HTTP/SSE. Configure them in the `mcp[]` array.
+Aegis consumes external [Model Context Protocol](https://modelcontextprotocol.io/) servers as additional tools. Servers connect via stdio (launched as child processes) or HTTP/SSE. Configure them in the `mcp[]` array.
 
 ```yaml
 mcp:
@@ -583,7 +648,7 @@ Provide specific line-number references for each finding.
 
 ### Custom Agent Definitions
 
-Drop markdown files into the agents directory to define reusable agent personas. The YAML frontmatter specifies the name, mode, and allowed tools; the body becomes the system prompt.
+Drop markdown files into the agents directory to define reusable agent personas with specific system prompts and tool restrictions.
 
 **Locations** (project overrides global):
 - Global: `<data-dir>/agents/*.md`
@@ -594,15 +659,15 @@ Drop markdown files into the agents directory to define reusable agent personas.
 name: reviewer
 description: Code review specialist
 mode: plan
-tools: [read, glob, grep]
+tools: [read_file, glob, grep]
 ---
-You are a code review specialist. Analyze code for correctness, security,
+You are a code review specialist. Analyse code for correctness, security,
 performance, and maintainability. Cite specific line numbers.
 ```
 
 ### Process Plugins
 
-External commands can be registered as tools via the `plugins[]` config. Aegis pipes tool input as JSON to stdin and captures stdout as the result.
+External commands can be registered as tools via the `plugins[]` config array. Aegis pipes tool input as JSON to stdin and captures stdout as the result.
 
 ```yaml
 plugins:
@@ -615,62 +680,65 @@ plugins:
     timeout_sec: 60
 ```
 
+---
+
 ## Project Structure
 
 ```
 cmd/aegis/                 CLI entry point
 internal/
   engine/                  Agent loop: model → tools → repeat, with gating, hooks, compaction
-  provider/                Normalized model interface (Adapter)
+  provider/                Normalised model interface (Adapter)
     anthropic/             Anthropic Messages API adapter (SSE streaming)
-    openai/                OpenAI chat-completions adapter (SSE streaming, also for local LLMs)
-  providerfactory/         Build an adapter from config (single code path for daemon + CLI)
+    openai/                OpenAI chat-completions adapter (SSE streaming; also for local LLMs)
+  providerfactory/         Build an adapter from config (shared by daemon and CLI)
   tool/                    Tool registry (registration, exposure, capability tagging)
     builtin/               All built-in tools:
-                             File: read, write, edit, multi_edit, glob, grep
-                             Shell: shell (with background + sandbox support)
-                             Web: fetch, search
-                             Code: lsp_diagnostics, lsp_references, lsp_definition
+                             File:     read_file, write_file, edit_file, multi_edit, glob, grep
+                             Shell:    shell (background jobs + sandbox support)
+                             Web:      web_fetch, web_search
+                             LaTeX:    latex_build, latex_new_document
+                             Code:     lsp_diagnostics, lsp_references, lsp_definition
                              Security: security_scan
                              Diagrams: render_diagram
-                             Memory: remember, save_skill
-                             Tasks: task_create/status/list/cancel/output/wait
-                             Cron: cron_create/list/delete
+                             Memory:   remember, save_skill
+                             Tasks:    task_create/get/list/stop/output
+                             Cron:     cron_create/list/delete
                              Planning: todo_add/update/list, ask_user
-                             Models: list_models
-                             Agents: agent (spawn sub-agents)
-  permission/              Plan/Build policies + approval gate + contextual security rules
-  compaction/              Token-budget summarization of old conversation turns
+                             Models:   list_models
+                             Agents:   agent (spawn sub-agents)
+  permission/              Plan/Build/Auto policies + approval gate + contextual security rules
+  compaction/              Token-budget summarisation of old conversation turns
   memory/                  File-based memory + skills, relevance scoring, context discovery
-  security/                Semgrep, Trivy, Gitleaks runners + normalized findings
+  security/                Semgrep, Trivy, Gitleaks runners + normalised findings
   diagram/                 Kroki + local CLI renderers (Mermaid, PlantUML, C4, Graphviz, draw.io)
-  persona/                 System prompts: 17 built-in personas (general, security, developer, SRE, etc.)
+  persona/                 System prompts: 17 built-in personas
   hooks/                   Pre/post tool-call hooks + JSONL audit trail
   mcp/                     MCP client (JSON-RPC/stdio + HTTP/SSE transports)
   session/                 SQLite session store
   server/                  Daemon: HTTP + SSE API
   client/                  HTTP client for the daemon API
-  tui/                     Bubble Tea terminal UI (streaming, scrollable conversation)
-  api/                     Shared API types (request/response structs)
+  tui/                     Bubble Tea terminal dashboard (sidebar, spinner, status bar, mouse scroll)
+  api/                     Shared API types (request/response structs, event kinds)
   config/                  Layered config loading (defaults → global → project → env)
   cost/                    Token-based cost tracking + budget enforcement
   swarm/                   Multi-agent coordination: identities, mailbox, registry, backends
   sandbox/                 Pluggable sandbox: local, Docker, Podman, Apple Containers
-  filetracker/             File staleness detection (reject edits to externally modified files)
+  filetracker/             File staleness detection
   lsp/                     LSP client manager (lifecycle, diagnostics, references)
   discover/                Auto-discovery of local model servers (Ollama, LM Studio, LiteLLM)
   task/                    Background task manager (SQLite-backed)
   cron/                    Recurring job scheduler (cron expressions)
-  commands/                Custom slash command loader (markdown with YAML frontmatter)
-  agentdef/                Custom agent definition loader (markdown with YAML frontmatter)
+  commands/                Custom slash command loader (markdown + YAML frontmatter)
+  agentdef/                Custom agent definition loader (markdown + YAML frontmatter)
   plugins/                 External process tool plugin loader
   logging/                 Structured logging setup (slog)
-  cli/                     Cobra command tree (root, serve, chat, scan, diagram, sessions, etc.)
+  cli/                     Cobra command tree (root, serve, chat, scan, diagram, sessions, init, …)
 ```
 
-## Testing
+---
 
-Every package has unit tests. Provider adapters are tested against the real SSE wire format via `httptest`, the daemon end-to-end with a mock adapter, and the MCP client against an in-memory fake server.
+## Testing
 
 ```bash
 # Run all tests
@@ -678,14 +746,16 @@ go test ./...
 
 # Run tests for a specific package
 go test ./internal/engine/...
-go test ./internal/provider/anthropic/...
+go test ./internal/tool/builtin/...
 
-# With verbose output
-go test -v ./...
+# Verbose output
+go test -v ./internal/provider/anthropic/...
 
 # Live model calls (requires an API key or local server running)
-OPENAI_API_KEY="not-needed" go test -run TestLive ./internal/provider/openai/...
+OPENAI_API_KEY="ollama" go test -run TestLive ./internal/provider/openai/...
 ```
+
+---
 
 ## License
 
