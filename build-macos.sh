@@ -111,8 +111,7 @@ elif [ -f "${ALIAS_FILE}" ] && grep -q 'aegis-config' "${ALIAS_FILE}" 2>/dev/nul
     ALIAS_EXISTS=true
 fi
 
-# macOS config path includes a space — must be quoted carefully everywhere.
-AEGIS_CONFIG_PATH="${HOME}/Library/Application Support/aegis/config.yaml"
+AEGIS_CONFIG_PATH="${HOME}/.config/aegis/config.yaml"
 
 # ─── Show plan ─────────────────────────────────────────────────────────────────
 echo ""
@@ -227,7 +226,7 @@ if [ "${RUN_ALIAS}" = true ]; then
 # aegis-config: open the Aegis global configuration file in your editor.
 # Run 'aegis --first-init' first if the file does not yet exist.
 function aegis-config --description 'Open the Aegis configuration file'
-    set cfg "$HOME/Library/Application Support/aegis/config.yaml"
+    set cfg "$HOME/.config/aegis/config.yaml"
     if not test -f $cfg
         echo "Config not found at $cfg — run: aegis --first-init" >&2
         return 1
@@ -251,7 +250,7 @@ FISHEOF
 # Opens the Aegis global configuration file in your preferred editor.
 # Run 'aegis --first-init' first if the file does not yet exist.
 aegis-config() {
-    local cfg="${HOME}/Library/Application Support/aegis/config.yaml"
+    local cfg="${HOME}/.config/aegis/config.yaml"
     if [ ! -f "$cfg" ]; then
         echo "Config not found at $cfg — run: aegis --first-init" >&2
         return 1

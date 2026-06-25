@@ -181,7 +181,7 @@ aegis --first-init
 | Platform | Path |
 |----------|------|
 | Windows | `%AppData%\aegis\config.yaml` |
-| macOS | `~/Library/Application Support/aegis/config.yaml` |
+| macOS | `~/.config/aegis/config.yaml` |
 | Linux | `~/.config/aegis/config.yaml` |
 
 To create a project-level override in the current directory (safe to commit — no secrets):
@@ -502,7 +502,7 @@ API keys are **always** read from environment variables (`ANTHROPIC_API_KEY`, `O
 | Platform | Global config path |
 |----------|--------------------|
 | Windows | `%AppData%\aegis\config.yaml` |
-| macOS | `~/Library/Application Support/aegis/config.yaml` |
+| macOS | `~/.config/aegis/config.yaml` |
 | Linux | `~/.config/aegis/config.yaml` |
 
 **Generate config files:**

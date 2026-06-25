@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -144,7 +145,15 @@ func defaults() map[string]any {
 }
 
 // defaultDataDir returns the per-user data directory for the harness.
+// Windows : %AppData%\aegis   (e.g. C:\Users\scott\AppData\Roaming\aegis)
+// macOS   : ~/.config/aegis   (XDG-compatible; avoids ~/Library/Application Support)
+// Linux   : ~/.config/aegis   (XDG default)
 func defaultDataDir() string {
+	if runtime.GOOS != "windows" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, ".config", appDir)
+		}
+	}
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
 		home, _ := os.UserHomeDir()
