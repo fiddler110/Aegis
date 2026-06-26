@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -10,7 +11,9 @@ import (
 
 const (
 	completionVisibleRows = 6
-	completionBoxH        = completionVisibleRows + 2 // inner rows + top/bottom border
+	// One separator line only — no border chars. The removed top+bottom
+	// border chars (was +2) become +1 so the viewport height is reclaimed.
+	completionBoxH = completionVisibleRows + 1
 )
 
 // cmdEntry is one selectable command in the completion popup / palette.
@@ -103,52 +106,67 @@ func (c completionState) current() (cmdEntry, bool) {
 	return c.items[c.selected], true
 }
 
-// view renders the fixed-height popup box (completionBoxH lines tall).
+// view renders the borderless completion list (completionBoxH lines tall).
+//
+// Scroll strategy: page-based. The visible window only changes when the
+// selected item crosses a page boundary — so within a page only the
+// highlight moves; the list text stays completely fixed. This avoids the
+// "everything drifts by one row" feel of per-item scrolling.
 func (c completionState) view(width int) string {
-	innerW := max(width-4, 20) // border (2) + horizontal padding (2)
+	const nameCol = 14
 
-	// Scroll window so the selected item stays visible.
-	start := 0
-	if c.selected >= completionVisibleRows {
-		start = c.selected - completionVisibleRows + 1
-	}
+	// Determine which page the selected item is on.
+	page := c.selected / completionVisibleRows
+	start := page * completionVisibleRows
 	end := min(start+completionVisibleRows, len(c.items))
 
-	nameStyleSel := lipgloss.NewStyle().Foreground(colAccent).Bold(true)
-	nameStyle := lipgloss.NewStyle().Foreground(colTextDim)
-	descStyleSel := lipgloss.NewStyle().Foreground(colTextDim)
-	descStyle := lipgloss.NewStyle().Foreground(colTextMuted)
+	// Separator line. When there are multiple pages, append a compact
+	// page indicator so the user can see there are more items.
+	totalPages := (len(c.items) + completionVisibleRows - 1) / completionVisibleRows
+	pageCtx := ""
+	if totalPages > 1 {
+		pageCtx = lipgloss.NewStyle().
+			Foreground(colTextMuted).
+			Render(fmt.Sprintf(" %d/%d ", page+1, totalPages))
+	}
+	sepW := max(width-lipgloss.Width(pageCtx), 0)
+	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", sepW)) + pageCtx
 
-	const nameCol = 14
+	// Build rows. Selected item gets a brand-coloured background spanning the
+	// full width so the highlight is instantly obvious without any extra
+	// marker character. Unselected items are plain text.
 	lines := make([]string, 0, completionVisibleRows)
 	for i := start; i < end; i++ {
 		e := c.items[i]
 		name := "/" + e.name
-		pad := ""
-		if n := nameCol - len(name); n > 0 {
-			pad = strings.Repeat(" ", n)
-		}
-		descBudget := max(innerW-nameCol-2, 4)
-		desc := truncate(e.desc, descBudget)
+		namePad := strings.Repeat(" ", max(nameCol-len(name), 1))
+		desc := truncate(e.desc, max(width-nameCol-2, 4))
 
 		var row string
 		if i == c.selected {
-			row = nameStyleSel.Render("▌ "+name) + pad + " " + descStyleSel.Render(desc)
+			row = lipgloss.NewStyle().
+				Background(colBrandBg).
+				Foreground(colBrandFg).
+				Bold(true).
+				Width(nameCol).
+				Render(name) +
+				lipgloss.NewStyle().
+				Background(colBrandBg).
+				Foreground(colTextDim).
+				Width(width - nameCol).
+				Render(" " + desc)
 		} else {
-			row = nameStyle.Render("  "+name) + pad + " " + descStyle.Render(desc)
+			row = lipgloss.NewStyle().Foreground(colTextDim).Render("  "+name) +
+				namePad +
+				lipgloss.NewStyle().Foreground(colTextMuted).Render(desc)
 		}
 		lines = append(lines, row)
 	}
+	// Pad to fixed height so the layout never shifts when the last page is
+	// shorter than completionVisibleRows.
 	for len(lines) < completionVisibleRows {
 		lines = append(lines, "")
 	}
 
-	body := strings.Join(lines, "\n")
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colAccent).
-		Background(colSurface).
-		Padding(0, 1).
-		Width(innerW).
-		Render(body)
+	return sep + "\n" + strings.Join(lines, "\n")
 }

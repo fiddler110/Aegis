@@ -13,7 +13,10 @@
 #   other: ~/.aliases                                    → ~/.profile
 #
 # Usage:
-#   chmod +x build-linux.sh && ./build-linux.sh
+#   chmod +x build-linux.sh && ./build-linux.sh        # interactive
+#   ./build-linux.sh 1                                  # build only
+#   ./build-linux.sh 2                                  # shell config only
+#   ./build-linux.sh all                                # both actions
 
 set -uo pipefail
 
@@ -147,11 +150,15 @@ echo ""
 divider
 echo ""
 
-# ─── Prompt ────────────────────────────────────────────────────────────────────
-printf "  Run which actions? [all / 1 2 / none]  (default: all): "
-read -r SELECTION || SELECTION="all"
-SELECTION="${SELECTION:-all}"
-SELECTION=$(echo "${SELECTION}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${SELECTION}")
+# ─── Prompt (or use supplied argument) ────────────────────────────────────────
+if [ -n "${1:-}" ]; then
+    SELECTION=$(echo "${1}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${1}")
+else
+    printf "  Run which actions? [all / 1 2 / none]  (default: all): "
+    read -r SELECTION || SELECTION="all"
+    SELECTION="${SELECTION:-all}"
+    SELECTION=$(echo "${SELECTION}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${SELECTION}")
+fi
 
 RUN_BUILD=false
 RUN_ALIAS=false

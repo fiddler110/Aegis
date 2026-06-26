@@ -5,9 +5,9 @@ import "github.com/charmbracelet/lipgloss"
 // Semantic True Color palette. Lipgloss / muesli/termenv degrades gracefully
 // to 256-color and 16-color terminals automatically.
 var (
-	colSurface  = lipgloss.Color("#0F1117")
-	colBorder   = lipgloss.Color("#2D3148")
-	colTextDim  = lipgloss.Color("#CBD5E1")
+	colSurface   = lipgloss.Color("#0F1117")
+	colBorder    = lipgloss.Color("#2D3148")
+	colTextDim   = lipgloss.Color("#CBD5E1")
 	colTextMuted = lipgloss.Color("#64748B")
 
 	colAccent  = lipgloss.Color("#7C3AED")
@@ -25,6 +25,14 @@ var (
 	colShield   = lipgloss.Color("#818CF8") // medium indigo for shield art
 	colCwd      = lipgloss.Color("#38BDF8") // sky blue for working directory
 	colInputSep = lipgloss.Color("#374151") // slightly brighter separator for input borders
+
+	// Mode badge backgrounds — each mode gets a coloured pill for at-a-glance status.
+	colPlanBg  = lipgloss.Color("#0C2440") // deep navy  → safe/read-only
+	colPlanFg  = lipgloss.Color("#60A5FA") // sky blue
+	colBuildBg = lipgloss.Color("#431407") // deep amber → file writes active
+	colBuildFg = lipgloss.Color("#FCD34D") // warm amber
+	colAutoBg  = lipgloss.Color("#052E16") // deep green → full capability
+	colAutoFg  = lipgloss.Color("#4ADE80") // mint green
 )
 
 // theme holds all pre-built styles. lipgloss.Style is a value type so every
@@ -50,7 +58,7 @@ type theme struct {
 	costText   lipgloss.Style
 
 	titleMeta  lipgloss.Style
-	brandLabel lipgloss.Style // brand box with background
+	brandLabel lipgloss.Style
 
 	shieldArt   lipgloss.Style
 	cwdStyle    lipgloss.Style
@@ -58,6 +66,9 @@ type theme struct {
 	welcomeVal  lipgloss.Style
 	welcomeName lipgloss.Style
 	inputSep    lipgloss.Style
+
+	turnSep    lipgloss.Style // subtle horizontal rule between conversation turns
+	elapsedDim lipgloss.Style // muted elapsed-time counter shown during streaming
 }
 
 func newTheme() theme {
@@ -73,9 +84,10 @@ func newTheme() theme {
 		sideValue:   lipgloss.NewStyle().Foreground(colTextDim),
 		sideMuted:   lipgloss.NewStyle().Foreground(colTextMuted),
 
-		modePlan:  lipgloss.NewStyle().Foreground(colTextMuted).Bold(true),
-		modeBuild: lipgloss.NewStyle().Foreground(colWarning).Bold(true),
-		modeAuto:  lipgloss.NewStyle().Foreground(colSuccess).Bold(true),
+		// Mode pills: coloured background so status is readable at a glance.
+		modePlan:  lipgloss.NewStyle().Background(colPlanBg).Foreground(colPlanFg).Bold(true).Padding(0, 1),
+		modeBuild: lipgloss.NewStyle().Background(colBuildBg).Foreground(colBuildFg).Bold(true).Padding(0, 1),
+		modeAuto:  lipgloss.NewStyle().Background(colAutoBg).Foreground(colAutoFg).Bold(true).Padding(0, 1),
 
 		statusText: lipgloss.NewStyle().Foreground(colTextDim),
 		statusDim:  lipgloss.NewStyle().Foreground(colTextMuted),
@@ -90,5 +102,8 @@ func newTheme() theme {
 		welcomeVal:  lipgloss.NewStyle().Foreground(colTextDim),
 		welcomeName: lipgloss.NewStyle().Foreground(colAccent).Bold(true),
 		inputSep:    lipgloss.NewStyle().Foreground(colInputSep),
+
+		turnSep:    lipgloss.NewStyle().Foreground(colBorder),
+		elapsedDim: lipgloss.NewStyle().Foreground(colTextMuted),
 	}
 }

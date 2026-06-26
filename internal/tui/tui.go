@@ -65,7 +65,7 @@ type model struct {
 	ta         textarea.Model
 	sp         spinner.Model
 	transcript cappedBuffer
-	liveText   strings.Builder // streaming assistant text, flushed via glamour at turn end
+	liveText   *strings.Builder // pointer: strings.Builder panics if copied by value after first write
 	renderer   *glamour.TermRenderer
 	rendererW  int // tracks viewport width to know when to recreate renderer
 	slash      *SlashDispatcher
@@ -84,6 +84,9 @@ type model struct {
 	inputTokens  int
 	outputTokens int
 	costUSD      float64
+
+	streamStart time.Time // when the current stream began; zero when idle
+	turnCount   int       // conversation turns sent; guards turn separator logic
 
 	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
 	history    []string
@@ -156,6 +159,7 @@ func newModel(cfg Config) model {
 	focusedStyle.Base = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colAccent)
+	focusedStyle.CursorLine = lipgloss.NewStyle() // clear Bubbles default ANSI-black bg
 	focusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
 	ta.FocusedStyle = focusedStyle
 
@@ -163,6 +167,7 @@ func newModel(cfg Config) model {
 	blurredStyle.Base = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colBorder)
+	blurredStyle.CursorLine = lipgloss.NewStyle() // same
 	blurredStyle.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
 	ta.BlurredStyle = blurredStyle
 
@@ -188,6 +193,7 @@ func newModel(cfg Config) model {
 		slash:    NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
 		histIdx:  -1,
 		workDir:  workDir,
+		liveText: &strings.Builder{},
 		renderer: newGlamourRenderer(80), // initial width; recreated on first resize
 		keys:     defaultKeyMap(),
 	}
@@ -447,6 +453,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamStartedMsg:
 		m.events = msg.ch
 		m.cancel = msg.cancel
+		m.streamStart = time.Now()
 		return m, tea.Batch(waitForEvent(m.events), m.sp.Tick)
 
 	case eventMsg:
@@ -489,6 +496,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript.Reset()
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
+			m.turnCount = 0
 			m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
 			m.refresh()
 			return m, nil
@@ -648,6 +656,14 @@ func (m *model) flushLiveText() {
 }
 
 func (m *model) appendUser(text string) {
+	if m.turnCount > 0 {
+		sepW := m.vp.Width - 2
+		if sepW < 10 {
+			sepW = 60
+		}
+		m.transcript.WriteString(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
+	}
+	m.turnCount++
 	m.transcript.WriteString(m.th.user.Render("You") + "\n" + text + "\n\n")
 	m.transcript.WriteString(m.th.assistant.Render("Assistant") + "\n")
 }
@@ -768,16 +784,23 @@ func (m model) renderTitleBar() string {
 	brand := m.th.brandLabel.Render(" ⬡ AEGIS ")
 	brandW := lipgloss.Width(brand)
 
-	metaContent := " " + m.cfg.Model + " "
-	metaW := len(metaContent)
+	// Scroll indicator: shown whenever transcript content overflows the viewport.
+	scroll := ""
+	if m.vp.TotalLineCount() > m.vp.Height {
+		if m.vp.AtBottom() {
+			scroll = "end · "
+		} else {
+			scroll = fmt.Sprintf("%d%% · ", int(m.vp.ScrollPercent()*100))
+		}
+	}
 
 	rightW := max(m.width-brandW, 0)
-
-	padCount := max(rightW-metaW, 0)
 	right := lipgloss.NewStyle().
 		Background(colSurface).
 		Foreground(colTextMuted).
-		Render(strings.Repeat(" ", padCount) + metaContent)
+		Width(rightW).
+		Align(lipgloss.Right).
+		Render(scroll + m.cfg.Model + " ")
 
 	return brand + right
 }
@@ -797,6 +820,17 @@ func (m model) renderSidebar(h int) string {
 	section("MODE")
 	add(m.renderModeBadge())
 	add("")
+
+	section("MODEL")
+	add(m.th.sideMuted.Render(truncate(m.cfg.Model, w)))
+	add("")
+
+	if m.streaming && !m.streamStart.IsZero() {
+		section("GENERATING")
+		secs := int(time.Since(m.streamStart).Seconds())
+		add(m.th.elapsedDim.Render(fmt.Sprintf("%ds elapsed", secs)))
+		add("")
+	}
 
 	if len(m.tools) > 0 {
 		section("TOOLS")
@@ -835,34 +869,55 @@ func (m model) renderSidebar(h int) string {
 }
 
 func (m model) renderInputArea() string {
-	// Left side: streaming state, active toast, or ready indicator
+	// Left side: streaming indicator with elapsed time, toast, or ready dot.
 	var statusLeft string
 	if m.streaming {
-		statusLeft = m.sp.View() + " " + m.th.statusText.Render(m.status)
+		elapsed := ""
+		if !m.streamStart.IsZero() {
+			elapsed = m.th.elapsedDim.Render(fmt.Sprintf(" %ds", int(time.Since(m.streamStart).Seconds())))
+		}
+		statusLeft = m.sp.View() + " " + m.th.statusText.Render(m.status) + elapsed
 	} else if m.activeToast != nil {
 		statusLeft = m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
 	} else {
 		statusLeft = m.th.statusDim.Render("● ready")
 	}
-
-	// Right side: hints, mode badge, stats, cwd
-	badge := m.renderModeBadge()
-	stats := m.renderStats()
-	cwd := m.th.cwdStyle.Render(shortenPath(m.workDir))
-	hint := m.th.statusDim.Render("ctrl+k cmds  f1 help  ctrl+e editor")
-
-	rightParts := hint + "  " + badge
-	if stats != "" {
-		rightParts += "  " + m.th.statusDim.Render(stats)
-	}
-	rightParts += "  " + cwd
-
 	leftW := lipgloss.Width(statusLeft)
-	rightW := lipgloss.Width(rightParts)
-	pad := max(m.width-leftW-rightW-2, 0)
-	belowBar := " " + statusLeft + strings.Repeat(" ", pad) + rightParts + " "
+
+	// Right side segments, highest → lowest priority. The loop drops from the
+	// tail so lower-value segments disappear first on narrow terminals.
+	//   badge (always)  →  hints  →  stats  →  cwd
+	// Hints are more useful than cwd (cwd is also in the sidebar).
+	segs := []string{m.renderModeBadge()}
+	segs = append(segs, m.th.statusDim.Render("ctrl+k · f1 · ctrl+e"))
+	if stats := m.renderStats(); stats != "" {
+		segs = append(segs, m.th.statusDim.Render(stats))
+	}
+	segs = append(segs, m.th.cwdStyle.Render(shortenPath(m.workDir)))
+
+	budget := m.width - leftW - 3 // 2 outer spaces + 1 minimum gap
+	for len(segs) > 1 && joinedWidth(segs) > budget {
+		segs = segs[:len(segs)-1]
+	}
+	right := strings.Join(segs, "  ")
+
+	pad := max(m.width-leftW-lipgloss.Width(right)-2, 0)
+	belowBar := " " + statusLeft + strings.Repeat(" ", pad) + right + " "
 
 	return m.ta.View() + "\n" + belowBar
+}
+
+// joinedWidth returns the rendered width of segments joined by a two-space
+// separator, used to decide how many status segments fit on one line.
+func joinedWidth(segs []string) int {
+	if len(segs) == 0 {
+		return 0
+	}
+	w := 2 * (len(segs) - 1)
+	for _, s := range segs {
+		w += lipgloss.Width(s)
+	}
+	return w
 }
 
 func (m model) toastStyle(level toastLevel) lipgloss.Style {
@@ -998,7 +1053,7 @@ func buildWelcomeContent(cfg Config, workDir string, th theme) string {
 
 	info := []string{
 		"",
-		th.brandLabel.Render(" ⬡ AEGIS "),
+		th.titleMeta.Render("AI agent harness"),
 		"",
 		"Welcome back, " + th.welcomeName.Render(username) + "!",
 		"",
@@ -1019,6 +1074,11 @@ func buildWelcomeContent(cfg Config, workDir string, th theme) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+	b.WriteString(th.welcomeKey.Render("  ") +
+		th.welcomeName.Render("/help") + th.welcomeKey.Render(" commands · ") +
+		th.welcomeName.Render("ctrl+k") + th.welcomeKey.Render(" palette · ") +
+		th.welcomeName.Render("shift+tab") + th.welcomeKey.Render(" mode"))
+	b.WriteString("\n\n")
 	return b.String()
 }
 
