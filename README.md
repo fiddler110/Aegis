@@ -38,45 +38,59 @@ It borrows proven patterns from existing agents — provider abstraction and con
 
 Already have a local LLM server running? Here's how to go from zero to chatting in under two minutes.
 
-**1. Build Aegis**
+**1. Clone and build**
 
-```bash
+Run the build script for your platform. Each script shows a plan, asks which actions to run, compiles the binary with version info embedded, installs it to your Go bin directory, and optionally adds an `aegis-config` shell helper to open the config file in your editor.
+
+```powershell
+# Windows (PowerShell)
 git clone https://github.com/fiddler110/Aegis.git
 cd Aegis
-go build -o aegis ./cmd/aegis          # Linux / macOS
-go build -o aegis.exe ./cmd/aegis      # Windows
+.\build-windows.ps1
 ```
 
-**2. Generate your config file**
+```bash
+# Linux
+git clone https://github.com/fiddler110/Aegis.git
+cd Aegis
+chmod +x build-linux.sh && ./build-linux.sh
+
+# macOS
+git clone https://github.com/fiddler110/Aegis.git
+cd Aegis
+chmod +x build-macos.sh && ./build-macos.sh
+```
+
+The script prompts you to choose which of two actions to run:
+- **[1]** Compile and install `aegis` / `aegis.exe` to your Go bin directory
+- **[2]** Add an `aegis-config` shell function to your profile (opens the config file in your editor)
+
+**2. Generate your config and set the environment variable**
 
 ```bash
 aegis --first-init
 ```
 
-This writes a full configuration template to your OS config directory with **Ollama active by default** and all other providers (Anthropic, OpenAI, Azure, Groq, OpenRouter, LM Studio, Vertex AI) in commented-out blocks ready to activate. Edit the file it prints to switch providers or change the model.
+This writes a full configuration template to your OS config directory with **Ollama active by default** and all other providers (Anthropic, OpenAI, Azure, Groq, OpenRouter, LM Studio, Vertex AI) in commented-out blocks ready to activate.
 
-**3. Set the environment variable Ollama needs**
-
-Ollama accepts any non-empty API key. Set a dummy value so the harness doesn't refuse to start:
+Local LLM servers don't validate API keys, but the harness requires a non-empty value:
 
 ```bash
-# Linux / macOS
+# Linux / macOS — add to ~/.zshrc or ~/.bashrc for permanence
 export OPENAI_API_KEY="ollama"
 
-# Windows (PowerShell)
+# Windows PowerShell — add to System Environment Variables for permanence
 $env:OPENAI_API_KEY = "ollama"
 ```
 
-Make it permanent: add the export line to `~/.zshrc` / `~/.bashrc` on Linux/macOS, or add it to System → Advanced → Environment Variables on Windows.
-
-**4. Pull a model and launch**
+**3. Pull a model and launch**
 
 ```bash
 ollama pull llama3.2
 aegis
 ```
 
-That's it. The daemon starts automatically in the same process, no second terminal needed. Use `/help` inside the TUI for available commands.
+That's it. The daemon starts automatically in the same process, no second terminal needed. Use `/help` inside the TUI for available commands, or `/config` to open the interactive configuration wizard.
 
 ---
 
@@ -152,21 +166,47 @@ Aegis uses a **daemon + client** architecture. The daemon owns sessions, the age
 
 ### Installation
 
+The preferred way to build and install Aegis is with the platform-specific build scripts. They show a plan before acting, embed the git version into the binary, install to your Go bin directory, optionally add an `aegis-config` shell helper, and detect and remove any stale binary at a different PATH location.
+
 **Windows (PowerShell)**
 ```powershell
 git clone https://github.com/fiddler110/Aegis.git
 cd Aegis
-go build -o aegis.exe ./cmd/aegis
-Copy-Item aegis.exe "$env:USERPROFILE\go\bin\aegis.exe"
+.\build-windows.ps1
 ```
 
-**Linux / macOS**
+The script presents two optional actions:
+1. Build and install `aegis.exe` to `%GOPATH%\bin` (default: `%USERPROFILE%\go\bin`)
+2. Add an `aegis-config` function to your PowerShell profile that opens the config file in your editor
+
+**Linux**
 ```bash
 git clone https://github.com/fiddler110/Aegis.git
 cd Aegis
-go build -o aegis ./cmd/aegis
-sudo mv aegis /usr/local/bin/aegis    # or: mv aegis ~/go/bin/aegis
+chmod +x build-linux.sh && ./build-linux.sh
 ```
+
+The script installs to `/usr/local/bin` (with `sudo` if needed) or falls back to `~/go/bin`. It detects your shell (bash, zsh, fish) and adds the `aegis-config` function to the appropriate aliases file.
+
+**macOS**
+```bash
+git clone https://github.com/fiddler110/Aegis.git
+cd Aegis
+chmod +x build-macos.sh && ./build-macos.sh
+```
+
+Same as Linux, but defaults to `/usr/local/bin` and targets `~/.zshrc` for zsh (macOS default since Catalina) or `~/.bash_profile` for bash.
+
+#### Manual build (without the scripts)
+
+If you prefer to build manually:
+
+```bash
+go build -o aegis ./cmd/aegis          # Linux / macOS
+go build -o aegis.exe ./cmd/aegis      # Windows
+```
+
+Then copy the binary to a directory on your `PATH`.
 
 ### First-Time Setup
 
@@ -191,6 +231,17 @@ aegis --init
 ```
 
 This writes `.aegis/config.yaml` with commented examples for overriding the model, permission mode, cost budget, and network allowlist on a per-project basis.
+
+#### aegis-config helper
+
+If you ran action [2] during the build script, you can open your config file at any time with:
+
+```bash
+aegis-config      # opens config.yaml in your chosen editor
+```
+
+On Windows: reload your profile first with `. $PROFILE`.
+On Linux/macOS: reload with `source ~/.zshrc` (or the file the script reports).
 
 ### Using a Local LLM
 
@@ -226,7 +277,7 @@ $env:OPENAI_API_KEY = "ollama"
 
 **Step 3 — Edit the config if needed**
 
-Open the file printed by `--first-init` and confirm the `model` matches a model you have pulled:
+Open the file printed by `--first-init` (or use `aegis-config`) and confirm the `model` matches a model you have pulled:
 
 ```yaml
 provider:
@@ -234,6 +285,8 @@ provider:
   base_url: "http://localhost:11434/v1"
   model: "llama3.2"    # ← change to any model you have pulled
 ```
+
+Alternatively, use `/config` inside the TUI to change the provider and model interactively without editing the file manually.
 
 ### Using Cloud Providers
 
@@ -256,7 +309,7 @@ provider:
 **OpenAI**
 ```bash
 export OPENAI_API_KEY="sk-..."          # Linux / macOS
-$env:OPENAI_API_KEY = "sk-..."          # Windows PowerShell
+$env:OPENAI_API_KEY = "sk-..."         # Windows PowerShell
 ```
 
 Uncomment in config:
@@ -328,6 +381,7 @@ aegis --resume <session-id>          # resume an existing session
 | Command | Action |
 |---------|--------|
 | `/help` | Show all commands |
+| `/config` | Open the interactive configuration wizard |
 | `/mode <plan\|build\|auto>` | Switch permission mode |
 | `/persona <name>` | Switch persona |
 | `/clear` | Clear the transcript |
@@ -338,6 +392,18 @@ aegis --resume <session-id>          # resume an existing session
 | `/models` | Show current model |
 | `/session [list]` | Session info or list all sessions |
 | `/quit` | Exit |
+
+#### Configuration Wizard (`/config`)
+
+The `/config` command opens a 5-step interactive wizard inside the TUI for changing provider, model, and settings without leaving the terminal or editing files manually:
+
+1. **Provider** — select from Anthropic, Ollama, OpenAI, LM Studio, Groq, OpenRouter, or Custom
+2. **Base URL** — pre-filled for local servers; leave empty for cloud providers that use the default
+3. **Model** — shows discovered local models (Ollama/LM Studio) or a curated list for cloud providers; manual entry always available
+4. **Max tokens** — response token cap
+5. **Thinking mode** — Auto / Enabled / Disabled (for reasoning models like qwen3, deepseek-r1)
+
+Changes are written directly to your global `config.yaml` and take effect the next time you start `aegis`.
 
 ### Non-Interactive CLI
 
@@ -444,7 +510,7 @@ The `security_scan` tool runs semgrep, trivy, and gitleaks and produces a unifie
 When LSP servers are configured, `lsp_diagnostics`, `lsp_references`, and `lsp_definition` give the agent IDE-level code understanding.
 
 ### Model Discovery
-The `list_models` tool probes `localhost` for Ollama (`:11434`), LM Studio (`:1234`), and LiteLLM (`:4000`) and reports every available model — useful for switching models mid-session or verifying your local setup.
+The `list_models` tool probes `localhost` for Ollama (`:11434`), LM Studio (`:1234`), and LiteLLM (`:4000`) and reports every available model — useful for switching models mid-session or verifying your local setup. The configuration wizard also uses discovery to populate the model list automatically.
 
 ### Contextual Security Policies
 - `egress_then_write` — requires explicit approval for write operations that follow any network access in the same session (prevents exfiltrate-then-modify patterns).
@@ -511,6 +577,14 @@ API keys are **always** read from environment variables (`ANTHROPIC_API_KEY`, `O
 aegis --first-init   # global config — all providers documented, Ollama active
 aegis --init         # project config — .aegis/config.yaml in current directory
 ```
+
+**Edit config files:**
+
+```bash
+aegis-config         # open global config in your editor (if set up by build script)
+```
+
+Or use `/config` inside the TUI to update provider settings interactively.
 
 ### Full Config Reference
 
@@ -720,7 +794,7 @@ internal/
   client/                  HTTP client for the daemon API
   tui/                     Bubble Tea terminal dashboard (sidebar, spinner, status bar, mouse scroll)
   api/                     Shared API types (request/response structs, event kinds)
-  config/                  Layered config loading (defaults → global → project → env)
+  config/                  Layered config loading (defaults → global → project → env) + config writer
   cost/                    Token-based cost tracking + budget enforcement
   swarm/                   Multi-agent coordination: identities, mailbox, registry, backends
   sandbox/                 Pluggable sandbox: local, Docker, Podman, Apple Containers
