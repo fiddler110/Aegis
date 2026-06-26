@@ -66,7 +66,7 @@ func newPalette(termW, termH int, entries []cmdEntry) paletteModel {
 		Padding(0, 1)
 	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 1, 0)
 	l.SetFilteringEnabled(true)
-	l.SetFilterState(list.Filtering)
+	// Start in browse mode; typing any character activates filtering naturally.
 	l.SetShowStatusBar(false)
 	l.SetShowPagination(false)
 	l.SetShowHelp(false)

@@ -12,9 +12,19 @@
     The script shows exactly what it will do and asks you to confirm before
     taking any action.
 
+.PARAMETER Action
+    Which actions to run without prompting: 1, 2, all, or none.
+    When omitted the script prompts interactively.
+
 .EXAMPLE
-    .\build-windows.ps1
+    .\build-windows.ps1          # interactive
+    .\build-windows.ps1 1        # build only
+    .\build-windows.ps1 2        # profile only
+    .\build-windows.ps1 all      # both actions
 #>
+param(
+    [string]$Action = ""
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -94,9 +104,11 @@ Write-Host ""
 Write-Divider
 Write-Host ""
 
-# ─── Prompt ────────────────────────────────────────────────────────────────────
-$raw = Read-Host "  Run which actions? [all / 1 2 / none]  (default: all)"
-$raw = $raw.Trim().ToLower()
+# ─── Prompt (or use supplied argument) ────────────────────────────────────────
+$raw = $Action.Trim().ToLower()
+if ($raw -eq "") {
+    $raw = (Read-Host "  Run which actions? [all / 1 2 / none]  (default: all)").Trim().ToLower()
+}
 if ($raw -eq "" -or $raw -eq "all") {
     $RunBuild = $true; $RunAlias = $true
 } elseif ($raw -eq "none") {
