@@ -227,6 +227,11 @@ func providerAPIKey(provider string) string {
 		return os.Getenv("ANTHROPIC_API_KEY")
 	case "openai":
 		return os.Getenv("OPENAI_API_KEY")
+	case "ollama":
+		if k := os.Getenv("OPENAI_API_KEY"); k != "" {
+			return k
+		}
+		return "ollama"
 	default:
 		return ""
 	}

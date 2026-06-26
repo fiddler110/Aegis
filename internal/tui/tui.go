@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -63,9 +65,9 @@ type model struct {
 	ta         textarea.Model
 	sp         spinner.Model
 	transcript cappedBuffer
-	liveText   strings.Builder    // streaming assistant text, flushed via glamour at turn end
+	liveText   strings.Builder // streaming assistant text, flushed via glamour at turn end
 	renderer   *glamour.TermRenderer
-	rendererW  int                // tracks viewport width to know when to recreate renderer
+	rendererW  int // tracks viewport width to know when to recreate renderer
 	slash      *SlashDispatcher
 	streaming  bool
 	events     <-chan api.Event
@@ -87,9 +89,20 @@ type model struct {
 	history    []string
 	histIdx    int
 	draftInput string
+
+	// overlay / modals
+	keys        keyMap
+	palette     *paletteModel
+	helpOpen    bool
+	activeToast *toast
+	completion  completionState
 }
 
 type slashResultMsg SlashResult
+type editorDoneMsg struct {
+	content string
+	err     error
+}
 
 // cappedBuffer is a []byte-backed writer that trims old content when it
 // exceeds maxTranscriptBytes, preventing unbounded memory growth.
@@ -133,11 +146,26 @@ type teammatesMsg struct {
 
 func newModel(cfg Config) model {
 	ta := textarea.New()
-	ta.Placeholder = "Send a message  (Enter send · ↑↓ history · Ctrl+J newline · Shift+Tab mode · Ctrl+L clear · Ctrl+C quit)"
-	ta.Prompt = "│ "
+	ta.Placeholder = "Message Aegis…"
+	ta.Prompt = " "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(3)
+
+	focusedStyle := ta.FocusedStyle
+	focusedStyle.Base = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colAccent)
+	focusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
+	ta.FocusedStyle = focusedStyle
+
+	blurredStyle := ta.BlurredStyle
+	blurredStyle.Base = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colBorder)
+	blurredStyle.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
+	ta.BlurredStyle = blurredStyle
+
 	ta.Focus()
 
 	sp := spinner.New()
@@ -161,6 +189,7 @@ func newModel(cfg Config) model {
 		histIdx:  -1,
 		workDir:  workDir,
 		renderer: newGlamourRenderer(80), // initial width; recreated on first resize
+		keys:     defaultKeyMap(),
 	}
 	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
 	return m
@@ -237,6 +266,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Command palette overlay: route all input to the palette.
+	if m.palette != nil {
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = ws.Width, ws.Height
+			m.layout()
+			return m, nil
+		}
+		updated, cmd := m.palette.Update(msg)
+		m.palette = &updated
+		return m, cmd
+	}
+
+	// Help overlay: only Escape or F1 closes it.
+	if m.helpOpen {
+		if k, ok := msg.(tea.KeyMsg); ok {
+			if k.Type == tea.KeyEsc || k.String() == "f1" {
+				m.helpOpen = false
+			}
+		}
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = ws.Width, ws.Height
+		}
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -251,25 +305,96 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case toastExpiredMsg:
+		m.activeToast = nil
+
+	case paletteSelectedMsg:
+		m.palette = nil
+		m.ta.Focus()
+		// Commands that need arguments get pre-filled in the textarea so the
+		// user can add args before pressing Enter.
+		needsArgs := map[string]bool{"persona": true, "mode": true, "remember": true}
+		if needsArgs[msg.name] {
+			m.ta.SetValue("/" + msg.name + " ")
+		} else {
+			parsed := &commands.ParsedCommand{Name: msg.name, Raw: "/" + msg.name}
+			return m, m.handleSlashCommand(parsed)
+		}
+
+	case paletteCancelMsg:
+		m.palette = nil
+		m.ta.Focus()
+
+	case editorDoneMsg:
+		m.ta.Focus()
+		if msg.err != nil {
+			t, cmd := newToastCmd("editor: "+msg.err.Error(), toastError)
+			m.activeToast = t
+			return m, cmd
+		}
+		if strings.TrimSpace(msg.content) != "" {
+			m.ta.SetValue(msg.content)
+		}
+
 	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyCtrlC:
+		// Inline completion popup intercepts navigation/accept keys first.
+		// Other keys fall through to the textarea and trigger a recompute.
+		if m.completion.active {
+			switch msg.String() {
+			case "up":
+				m.completion.move(-1)
+				return m, nil
+			case "down", "ctrl+n":
+				m.completion.move(1)
+				return m, nil
+			case "ctrl+p":
+				m.completion.move(-1)
+				return m, nil
+			case "esc":
+				m.completion = completionState{}
+				m.applyViewportHeight()
+				m.refresh()
+				return m, nil
+			case "tab":
+				return m, m.acceptCompletion(false)
+			case "enter":
+				return m, m.acceptCompletion(true)
+			}
+		}
+
+		switch msg.String() {
+		case "ctrl+c":
 			if m.streaming && m.cancel != nil {
 				m.cancel()
 				return m, nil
 			}
 			return m, tea.Quit
-		case tea.KeyCtrlT:
+		case "ctrl+t":
 			return m, m.fetchTeammates()
-		case tea.KeyCtrlL:
+		case "ctrl+l":
 			if !m.streaming {
 				return m, m.handleSlashCommand(&commands.ParsedCommand{Name: "clear", Raw: "/clear"})
 			}
-		case tea.KeyShiftTab:
+		case "ctrl+k":
+			if !m.streaming {
+				m.completion = completionState{}
+				m.applyViewportHeight()
+				pal := newPalette(m.width, m.height, allCommandEntries(m.slash.Customs()))
+				m.palette = &pal
+				return m, nil
+			}
+		case "f1":
+			m.helpOpen = !m.helpOpen
+			return m, nil
+		case "ctrl+e":
+			if !m.streaming {
+				return m, m.openEditorCmd()
+			}
+		case "shift+tab":
 			if !m.streaming {
 				return m, m.cycleModeCmd()
 			}
-		case tea.KeyUp:
+		case "up":
 			// Intercept only when input is single-line (no newlines) so that
 			// multi-line editing keeps normal cursor-up behaviour.
 			if !m.streaming && !strings.Contains(m.ta.Value(), "\n") && len(m.history) > 0 {
@@ -282,7 +407,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ta.SetValue(m.history[m.histIdx])
 				return m, nil
 			}
-		case tea.KeyDown:
+		case "down":
 			if !m.streaming && m.histIdx != -1 {
 				if m.histIdx == len(m.history)-1 {
 					m.histIdx = -1
@@ -294,7 +419,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-		case tea.KeyEnter:
+		case "enter":
 			if m.streaming {
 				return m, nil
 			}
@@ -390,6 +515,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
+		// Recompute inline completion after the textarea consumes the key.
+		if _, isKey := msg.(tea.KeyMsg); isKey {
+			m.syncCompletion()
+		}
 	}
 	var vpCmd tea.Cmd
 	m.vp, vpCmd = m.vp.Update(msg)
@@ -414,11 +543,9 @@ func (m model) cycleModeCmd() tea.Cmd {
 // --- layout ---
 
 // layout recalculates pane dimensions after a terminal resize.
-// Height budget: title(1) + content(vpH) + topSep(1) + textarea(3) + botSep(1) + belowBar(1) = vpH+7
+// Height budget: title(1) + content(vpH) + textarea+border(ta.Height()+2) + belowBar(1)
+// plus the completion popup box (completionBoxH) when the popup is active.
 func (m *model) layout() {
-	fixedH := 1 + 1 + m.ta.Height() + 1 + 1 // title + topSep + textarea + botSep + belowBar
-	vpH := max(m.height-fixedH, 3)
-
 	vpW := m.width - 1 // -1 for PaddingLeft on the main panel
 	if m.width >= sidebarMinTermW {
 		// sidebar consumes sidebarTotalW; main panel gets the rest minus left pad
@@ -427,17 +554,70 @@ func (m *model) layout() {
 	vpW = max(vpW, 10)
 
 	if !m.ready {
-		m.vp = viewport.New(vpW, vpH)
+		m.vp = viewport.New(vpW, max(m.height-m.fixedH(), 3))
 	} else {
 		m.vp.Width = vpW
-		m.vp.Height = vpH
 	}
-	m.ta.SetWidth(m.width)
+	m.applyViewportHeight()
+	m.ta.SetWidth(m.width - 2) // -2 for left+right border chars
 
 	if vpW != m.rendererW {
 		m.rendererW = vpW
 		m.renderer = newGlamourRenderer(vpW)
 	}
+}
+
+// fixedH is the non-viewport vertical budget: title + textarea(+border) +
+// belowBar, plus the completion popup when it is open.
+func (m *model) fixedH() int {
+	h := 1 + m.ta.Height() + 2 + 1
+	if m.completion.active {
+		h += completionBoxH
+	}
+	return h
+}
+
+// applyViewportHeight resizes the viewport to fit the current fixed budget.
+func (m *model) applyViewportHeight() {
+	m.vp.Height = max(m.height-m.fixedH(), 3)
+}
+
+// syncCompletion recomputes the inline completion popup from the textarea
+// value, resizing the viewport when the popup opens or closes.
+func (m *model) syncCompletion() {
+	prev := m.completion.active
+	m.completion = computeCompletion(m.ta.Value(), allCommandEntries(m.slash.Customs()))
+	if m.completion.active != prev {
+		m.applyViewportHeight()
+		m.refresh()
+	}
+}
+
+// acceptCompletion fills the highlighted command into the textarea. When run
+// is true and the typed name already equals the highlighted command, it runs
+// the command immediately (Enter behaviour); otherwise it completes the name.
+func (m *model) acceptCompletion(run bool) tea.Cmd {
+	e, ok := m.completion.current()
+	if !ok {
+		return nil
+	}
+	typed := strings.ToLower(strings.TrimPrefix(m.ta.Value(), "/"))
+	if run && typed == e.name {
+		m.ta.Reset()
+		m.completion = completionState{}
+		m.histIdx = -1
+		m.draftInput = ""
+		m.applyViewportHeight()
+		m.refresh()
+		return m.handleSlashCommand(&commands.ParsedCommand{Name: e.name, Raw: "/" + e.name})
+	}
+	if commandsNeedingArgs[e.name] {
+		m.ta.SetValue("/" + e.name + " ")
+	} else {
+		m.ta.SetValue("/" + e.name)
+	}
+	m.syncCompletion()
+	return nil
 }
 
 func (m *model) refresh() {
@@ -551,9 +731,14 @@ func (m model) View() string {
 	if !m.ready {
 		return "initializing…"
 	}
-
 	if m.wizard != nil {
 		return m.wizard.view()
+	}
+	if m.helpOpen {
+		return m.renderHelpOverlay()
+	}
+	if m.palette != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.palette.View())
 	}
 
 	titleBar := m.renderTitleBar()
@@ -568,11 +753,15 @@ func (m model) View() string {
 		content = lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		titleBar,
-		content,
-		inputArea,
-	)
+	parts := []string{titleBar, content}
+	if m.completion.active {
+		popupW := min(m.width-2, 72)
+		popup := lipgloss.NewStyle().PaddingLeft(1).Render(m.completion.view(popupW))
+		parts = append(parts, popup)
+	}
+	parts = append(parts, inputArea)
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m model) renderTitleBar() string {
@@ -582,10 +771,7 @@ func (m model) renderTitleBar() string {
 	metaContent := " " + m.cfg.Model + " "
 	metaW := len(metaContent)
 
-	rightW := m.width - brandW
-	if rightW < 0 {
-		rightW = 0
-	}
+	rightW := max(m.width-brandW, 0)
 
 	padCount := max(rightW-metaW, 0)
 	right := lipgloss.NewStyle().
@@ -649,23 +835,23 @@ func (m model) renderSidebar(h int) string {
 }
 
 func (m model) renderInputArea() string {
-	topSep := m.th.inputSep.Render(strings.Repeat("─", m.width))
-	botSep := m.th.inputSep.Render(strings.Repeat("─", m.width))
-
-	// Status on the left of the below-bar
+	// Left side: streaming state, active toast, or ready indicator
 	var statusLeft string
 	if m.streaming {
 		statusLeft = m.sp.View() + " " + m.th.statusText.Render(m.status)
+	} else if m.activeToast != nil {
+		statusLeft = m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
 	} else {
 		statusLeft = m.th.statusDim.Render("● ready")
 	}
 
-	// Mode badge and cwd on the right
+	// Right side: hints, mode badge, stats, cwd
 	badge := m.renderModeBadge()
 	stats := m.renderStats()
 	cwd := m.th.cwdStyle.Render(shortenPath(m.workDir))
+	hint := m.th.statusDim.Render("ctrl+k cmds  f1 help  ctrl+e editor")
 
-	rightParts := badge
+	rightParts := hint + "  " + badge
 	if stats != "" {
 		rightParts += "  " + m.th.statusDim.Render(stats)
 	}
@@ -676,7 +862,18 @@ func (m model) renderInputArea() string {
 	pad := max(m.width-leftW-rightW-2, 0)
 	belowBar := " " + statusLeft + strings.Repeat(" ", pad) + rightParts + " "
 
-	return topSep + "\n" + m.ta.View() + "\n" + botSep + "\n" + belowBar
+	return m.ta.View() + "\n" + belowBar
+}
+
+func (m model) toastStyle(level toastLevel) lipgloss.Style {
+	switch level {
+	case toastWarn:
+		return lipgloss.NewStyle().Foreground(colWarning)
+	case toastError:
+		return m.th.errLine
+	default:
+		return m.th.statusText
+	}
 }
 
 func (m model) renderModeBadge() string {
@@ -699,6 +896,85 @@ func (m model) renderStats() string {
 		s += fmt.Sprintf("  $%.4f", m.costUSD)
 	}
 	return s
+}
+
+// --- help overlay ---
+
+func (m model) renderHelpOverlay() string {
+	km := m.keys
+	entries := []struct{ k, d string }{
+		{km.Send.Help().Key, km.Send.Help().Desc},
+		{km.Newline.Help().Key, km.Newline.Help().Desc},
+		{km.Complete.Help().Key, km.Complete.Help().Desc},
+		{km.Palette.Help().Key, km.Palette.Help().Desc},
+		{km.Cancel.Help().Key, km.Cancel.Help().Desc},
+		{km.Help.Help().Key, km.Help.Help().Desc},
+		{km.Clear.Help().Key, km.Clear.Help().Desc},
+		{km.Editor.Help().Key, km.Editor.Help().Desc},
+		{km.CycleMode.Help().Key, km.CycleMode.Help().Desc},
+		{km.Teammates.Help().Key, km.Teammates.Help().Desc},
+		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
+		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
+	}
+
+	keyStyle := lipgloss.NewStyle().Foreground(colAccent).Bold(true).Width(14)
+	descStyle := lipgloss.NewStyle().Foreground(colTextDim)
+
+	var rows strings.Builder
+	for _, e := range entries {
+		rows.WriteString(keyStyle.Render(e.k) + "  " + descStyle.Render(e.d) + "\n")
+	}
+
+	heading := lipgloss.NewStyle().Foreground(colBrandFg).Bold(true).Render("Keyboard Shortcuts")
+	footer := lipgloss.NewStyle().Foreground(colTextMuted).Render("press f1 or esc to close")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colAccent).
+		Background(colSurface).
+		Padding(1, 3).
+		Width(50).
+		Render(heading + "\n\n" + rows.String() + "\n" + footer)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// --- external editor ---
+
+func (m model) openEditorCmd() tea.Cmd {
+	current := m.ta.Value()
+	f, err := os.CreateTemp("", "aegis-*.md")
+	if err != nil {
+		return func() tea.Msg { return editorDoneMsg{err: err} }
+	}
+	tmpPath := f.Name()
+	if current != "" {
+		_, _ = f.WriteString(current)
+	}
+	f.Close()
+
+	editor := defaultEditor()
+	c := exec.Command(editor, tmpPath) //nolint:gosec
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(tmpPath)
+		if err != nil {
+			return editorDoneMsg{err: err}
+		}
+		raw, readErr := os.ReadFile(tmpPath)
+		return editorDoneMsg{content: strings.TrimRight(string(raw), "\n"), err: readErr}
+	})
+}
+
+func defaultEditor() string {
+	for _, env := range []string{"EDITOR", "VISUAL"} {
+		if e := os.Getenv(env); e != "" {
+			return e
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return "notepad"
+	}
+	return "vi"
 }
 
 // --- welcome content ---

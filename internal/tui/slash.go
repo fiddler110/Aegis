@@ -88,6 +88,15 @@ func (d *SlashDispatcher) tryCustom(parsed *commands.ParsedCommand) SlashResult 
 	}
 }
 
+// Customs returns the cached custom command list, refreshing it once if it
+// has not yet been loaded. Used by the inline completion popup and palette.
+func (d *SlashDispatcher) Customs() []api.CommandInfo {
+	if d.customs == nil {
+		d.refreshCustoms()
+	}
+	return d.customs
+}
+
 func (d *SlashDispatcher) refreshCustoms() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
