@@ -70,6 +70,9 @@ func newRootCmd() *cobra.Command {
 				if !waitForDaemon(cl, 10*time.Second) {
 					return fmt.Errorf("daemon at %s did not become ready within 10 s", cfg.Server.Addr)
 				}
+				// The embedded daemon wrote a fresh token to disk; re-read it
+				// so subsequent authenticated requests use the correct value.
+				cl = client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
 			}
 
 			resolvedMode := cfg.Permission.Mode
