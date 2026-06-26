@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/scottymacleod/aegis/internal/api"
@@ -99,11 +100,13 @@ func newRootCmd() *cobra.Command {
 				resolvedMode = sess.Mode
 			}
 
+			cwd, _ := os.Getwd()
 			return tui.Run(tui.Config{
 				Client:    cl,
 				SessionID: sessionID,
 				Mode:      resolvedMode,
 				Model:     cfg.Provider.Model,
+				WorkDir:   cwd,
 			})
 		},
 	}

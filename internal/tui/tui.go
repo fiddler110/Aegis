@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/scottymacleod/aegis/internal/api"
@@ -26,6 +28,7 @@ type Config struct {
 	SessionID string
 	Mode      string
 	Model     string
+	WorkDir   string
 }
 
 // Run starts the TUI event loop and blocks until the user quits.
@@ -41,8 +44,8 @@ const (
 
 	// Sidebar geometry. sidebarInnerW is the content width passed to lipgloss
 	// Width(); the rendered block is sidebarInnerW+1 wide (right border char).
-	sidebarInnerW  = 21
-	sidebarTotalW  = 22 // sidebarInnerW + 1 border
+	sidebarInnerW   = 21
+	sidebarTotalW   = 22 // sidebarInnerW + 1 border
 	sidebarMinTermW = 88 // terminal width below which sidebar collapses
 
 	maxToolHistory = 8
@@ -60,6 +63,9 @@ type model struct {
 	ta         textarea.Model
 	sp         spinner.Model
 	transcript cappedBuffer
+	liveText   strings.Builder    // streaming assistant text, flushed via glamour at turn end
+	renderer   *glamour.TermRenderer
+	rendererW  int                // tracks viewport width to know when to recreate renderer
 	slash      *SlashDispatcher
 	streaming  bool
 	events     <-chan api.Event
@@ -70,6 +76,7 @@ type model struct {
 	status     string
 	th         theme
 	wizard     *wizardModel
+	workDir    string
 
 	tools        []toolEntry
 	inputTokens  int
@@ -139,21 +146,23 @@ func newModel(cfg Config) model {
 
 	th := newTheme()
 
-	m := model{
-		cfg:     cfg,
-		ta:      ta,
-		sp:      sp,
-		th:      th,
-		status:  "ready",
-		slash:   NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
-		histIdx: -1,
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		workDir, _ = os.Getwd()
 	}
-	m.transcript.WriteString(
-		th.statusDim.Render(fmt.Sprintf(
-			"session %s  ·  %s  ·  mode %s\n\n",
-			short(cfg.SessionID), cfg.Model, cfg.Mode,
-		)),
-	)
+
+	m := model{
+		cfg:      cfg,
+		ta:       ta,
+		sp:       sp,
+		th:       th,
+		status:   "ready",
+		slash:    NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
+		histIdx:  -1,
+		workDir:  workDir,
+		renderer: newGlamourRenderer(80), // initial width; recreated on first resize
+	}
+	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
 	return m
 }
 
@@ -321,6 +330,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.events)
 
 	case streamClosedMsg:
+		m.flushLiveText() // safety: in case KindTurnDone wasn't the last event
 		m.streaming = false
 		m.events = nil
 		m.cancel = nil
@@ -346,19 +356,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		if msg.Output == "\x00wizard" {
-			m.wizard = newWizard(m.width, m.height, m.th)
-			return m, nil
+			wiz := newWizard(m.width, m.height, m.th)
+			m.wizard = wiz
+			return m, wiz.init()
 		}
 		if msg.Output == "\x00clear" {
 			m.transcript.Reset()
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
-			m.transcript.WriteString(
-				m.th.statusDim.Render(fmt.Sprintf(
-					"session %s  ·  %s  ·  mode %s\n\n",
-					short(m.cfg.SessionID), m.cfg.Model, m.slash.mode,
-				)),
-			)
+			m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
 			m.refresh()
 			return m, nil
 		}
@@ -408,9 +414,9 @@ func (m model) cycleModeCmd() tea.Cmd {
 // --- layout ---
 
 // layout recalculates pane dimensions after a terminal resize.
-// Height budget: title(1) + content(vpH) + status(1) + sep(1) + textarea(3) = vpH+6
+// Height budget: title(1) + content(vpH) + topSep(1) + textarea(3) + botSep(1) + belowBar(1) = vpH+7
 func (m *model) layout() {
-	fixedH := 1 + 1 + 1 + m.ta.Height() // title + status + sep + textarea
+	fixedH := 1 + 1 + m.ta.Height() + 1 + 1 // title + topSep + textarea + botSep + belowBar
 	vpH := max(m.height-fixedH, 3)
 
 	vpW := m.width - 1 // -1 for PaddingLeft on the main panel
@@ -427,11 +433,38 @@ func (m *model) layout() {
 		m.vp.Height = vpH
 	}
 	m.ta.SetWidth(m.width)
+
+	if vpW != m.rendererW {
+		m.rendererW = vpW
+		m.renderer = newGlamourRenderer(vpW)
+	}
 }
 
 func (m *model) refresh() {
-	m.vp.SetContent(wrap(m.transcript.String(), m.vp.Width))
+	content := m.transcript.String()
+	if live := m.liveText.String(); live != "" {
+		content += live
+	}
+	m.vp.SetContent(wrap(content, m.vp.Width))
 	m.vp.GotoBottom()
+}
+
+// flushLiveText renders accumulated assistant text through glamour and appends
+// it to the transcript. Called at KindTurnDone, KindToolCall, and KindError.
+func (m *model) flushLiveText() {
+	if m.liveText.Len() == 0 {
+		return
+	}
+	raw := m.liveText.String()
+	m.liveText.Reset()
+	if m.renderer != nil {
+		if rendered, err := m.renderer.Render(raw); err == nil {
+			rendered = strings.TrimRight(rendered, "\n")
+			m.transcript.WriteString(rendered + "\n")
+			return
+		}
+	}
+	m.transcript.WriteString(raw)
 }
 
 func (m *model) appendUser(text string) {
@@ -442,9 +475,11 @@ func (m *model) appendUser(text string) {
 func (m *model) applyEvent(ev api.Event) {
 	switch ev.Kind {
 	case api.KindText:
-		m.transcript.WriteString(ev.Text)
+		// Buffer text in liveText; flushed through glamour at turn end.
+		m.liveText.WriteString(ev.Text)
 
 	case api.KindToolCall:
+		m.flushLiveText() // render any preceding prose before the tool line
 		m.transcript.WriteString("\n" + m.th.tool.Render(
 			fmt.Sprintf("⚙ %s  %s", ev.Tool, truncate(string(ev.ToolInput), 120))) + "\n")
 		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
@@ -471,6 +506,7 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindTurnDone:
+		m.flushLiveText() // render final prose through glamour
 		if ev.OutputTokens > 0 {
 			m.inputTokens = ev.InputTokens
 			m.outputTokens = ev.OutputTokens
@@ -478,6 +514,7 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindError:
+		m.flushLiveText()
 		m.transcript.WriteString("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
 	}
 }
@@ -519,16 +556,12 @@ func (m model) View() string {
 		return m.wizard.view()
 	}
 
-	fixedH := 1 + 1 + 1 + m.ta.Height()
-	vpH := max(m.height-fixedH, 3)
-
 	titleBar := m.renderTitleBar()
-	statusBar := m.renderStatusBar()
 	inputArea := m.renderInputArea()
 
 	var content string
 	if m.width >= sidebarMinTermW {
-		sidebar := m.renderSidebar(vpH)
+		sidebar := m.renderSidebar(m.vp.Height)
 		main := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
 		content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
 	} else {
@@ -538,18 +571,29 @@ func (m model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		titleBar,
 		content,
-		statusBar,
 		inputArea,
 	)
 }
 
 func (m model) renderTitleBar() string {
-	brand := m.th.titleBrand.Render("⬡ AEGIS")
-	meta := m.th.titleMeta.Render(short(m.cfg.SessionID) + "  " + m.cfg.Model)
+	brand := m.th.brandLabel.Render(" ⬡ AEGIS ")
+	brandW := lipgloss.Width(brand)
 
-	pad := max(m.width-lipgloss.Width(brand)-lipgloss.Width(meta)-2, 1)
-	line := " " + brand + strings.Repeat(" ", pad) + meta + " "
-	return lipgloss.NewStyle().Background(colSurface).Render(line)
+	metaContent := " " + m.cfg.Model + " "
+	metaW := len(metaContent)
+
+	rightW := m.width - brandW
+	if rightW < 0 {
+		rightW = 0
+	}
+
+	padCount := max(rightW-metaW, 0)
+	right := lipgloss.NewStyle().
+		Background(colSurface).
+		Foreground(colTextMuted).
+		Render(strings.Repeat(" ", padCount) + metaContent)
+
+	return brand + right
 }
 
 func (m model) renderSidebar(h int) string {
@@ -604,40 +648,45 @@ func (m model) renderSidebar(h int) string {
 		Render(b.String())
 }
 
-func (m model) renderStatusBar() string {
-	var left string
+func (m model) renderInputArea() string {
+	topSep := m.th.inputSep.Render(strings.Repeat("─", m.width))
+	botSep := m.th.inputSep.Render(strings.Repeat("─", m.width))
+
+	// Status on the left of the below-bar
+	var statusLeft string
 	if m.streaming {
-		left = m.sp.View() + " " + m.th.statusText.Render(m.status)
+		statusLeft = m.sp.View() + " " + m.th.statusText.Render(m.status)
 	} else {
-		left = m.th.statusDim.Render(m.status)
+		statusLeft = m.th.statusDim.Render("● ready")
 	}
 
+	// Mode badge and cwd on the right
 	badge := m.renderModeBadge()
 	stats := m.renderStats()
+	cwd := m.th.cwdStyle.Render(shortenPath(m.workDir))
 
-	right := badge
+	rightParts := badge
 	if stats != "" {
-		right += "  " + m.th.statusDim.Render(stats)
+		rightParts += "  " + m.th.statusDim.Render(stats)
 	}
+	rightParts += "  " + cwd
 
-	pad := max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 0)
-	line := " " + left + strings.Repeat(" ", pad) + right + " "
-	return lipgloss.NewStyle().Background(colSurface).Render(line)
-}
+	leftW := lipgloss.Width(statusLeft)
+	rightW := lipgloss.Width(rightParts)
+	pad := max(m.width-leftW-rightW-2, 0)
+	belowBar := " " + statusLeft + strings.Repeat(" ", pad) + rightParts + " "
 
-func (m model) renderInputArea() string {
-	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", m.width))
-	return sep + "\n" + m.ta.View()
+	return topSep + "\n" + m.ta.View() + "\n" + botSep + "\n" + belowBar
 }
 
 func (m model) renderModeBadge() string {
 	switch m.slash.mode {
 	case "build":
-		return m.th.modeBuild.Render("build")
+		return m.th.modeBuild.Render(" build ")
 	case "auto":
-		return m.th.modeAuto.Render("auto")
+		return m.th.modeAuto.Render(" auto ")
 	default:
-		return m.th.modePlan.Render("plan")
+		return m.th.modePlan.Render(" plan ")
 	}
 }
 
@@ -645,14 +694,85 @@ func (m model) renderStats() string {
 	if m.inputTokens == 0 && m.outputTokens == 0 {
 		return ""
 	}
-	s := fmt.Sprintf("in:%d  out:%d", m.inputTokens, m.outputTokens)
+	s := fmt.Sprintf("in:%d out:%d", m.inputTokens, m.outputTokens)
 	if m.costUSD > 0 {
 		s += fmt.Sprintf("  $%.4f", m.costUSD)
 	}
 	return s
 }
 
+// --- welcome content ---
+
+// welcomeShield is the ASCII art shield shown on startup, each line exactly 14 chars.
+var welcomeShield = []string{
+	`  ╔══════════╗`,
+	`  ║  AEGIS   ║`,
+	`  ╠══════════╣`,
+	`  ║    /\    ║`,
+	`  ║   /  \   ║`,
+	`  ║  / ◆  \  ║`,
+	`  ║ /      \ ║`,
+	`  ╚══╗    ╔══╝`,
+	`     ╚════╝   `,
+}
+
+func buildWelcomeContent(cfg Config, workDir string, th theme) string {
+	username := getUsername()
+	shortCWD := shortenPath(workDir)
+
+	info := []string{
+		"",
+		th.brandLabel.Render(" ⬡ AEGIS "),
+		"",
+		"Welcome back, " + th.welcomeName.Render(username) + "!",
+		"",
+		th.welcomeKey.Render("Model  ") + th.welcomeVal.Render(cfg.Model),
+		th.welcomeKey.Render("Mode   ") + th.welcomeVal.Render(cfg.Mode),
+		th.welcomeKey.Render("Dir    ") + th.cwdStyle.Render(shortCWD),
+		"",
+	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	for i, shieldLine := range welcomeShield {
+		b.WriteString(th.shieldArt.Render(shieldLine))
+		b.WriteString("  ")
+		if i < len(info) {
+			b.WriteString(info[i])
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func getUsername() string {
+	if u := os.Getenv("USERNAME"); u != "" {
+		return u
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return "there"
+}
+
+func shortenPath(path string) string {
+	home, err := os.UserHomeDir()
+	if err == nil && strings.HasPrefix(path, home) {
+		return "~" + path[len(home):]
+	}
+	return path
+}
+
 // --- helpers ---
+
+func newGlamourRenderer(width int) *glamour.TermRenderer {
+	r, _ := glamour.NewTermRenderer(
+		glamour.WithStylePath("dark"),
+		glamour.WithWordWrap(width),
+	)
+	return r
+}
 
 func wrap(s string, width int) string {
 	if width <= 0 {

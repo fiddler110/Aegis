@@ -5,20 +5,26 @@ import "github.com/charmbracelet/lipgloss"
 // Semantic True Color palette. Lipgloss / muesli/termenv degrades gracefully
 // to 256-color and 16-color terminals automatically.
 var (
-	colSurface   = lipgloss.Color("#13161E")
-	colBorder    = lipgloss.Color("#2D3148")
-	colTextDim   = lipgloss.Color("#94A3B8")
-	colTextMuted = lipgloss.Color("#475569")
+	colSurface  = lipgloss.Color("#0F1117")
+	colBorder   = lipgloss.Color("#2D3148")
+	colTextDim  = lipgloss.Color("#CBD5E1")
+	colTextMuted = lipgloss.Color("#64748B")
 
-	colAccent   = lipgloss.Color("#7C3AED")
-	colSuccess  = lipgloss.Color("#10B981")
-	colWarning  = lipgloss.Color("#F59E0B")
-	colDanger   = lipgloss.Color("#EF4444")
+	colAccent  = lipgloss.Color("#7C3AED")
+	colSuccess = lipgloss.Color("#10B981")
+	colWarning = lipgloss.Color("#F59E0B")
+	colDanger  = lipgloss.Color("#EF4444")
 
 	colUserFg    = lipgloss.Color("#38BDF8")
 	colAssistFg  = lipgloss.Color("#A78BFA")
-	colToolFg    = lipgloss.Color("#64748B")
+	colToolFg    = lipgloss.Color("#94A3B8")
 	colToolErrFg = lipgloss.Color("#F87171")
+
+	colBrandBg  = lipgloss.Color("#2E1065") // deep purple brand box
+	colBrandFg  = lipgloss.Color("#DDD6FE") // light lavender brand text
+	colShield   = lipgloss.Color("#818CF8") // medium indigo for shield art
+	colCwd      = lipgloss.Color("#38BDF8") // sky blue for working directory
+	colInputSep = lipgloss.Color("#374151") // slightly brighter separator for input borders
 )
 
 // theme holds all pre-built styles. lipgloss.Style is a value type so every
@@ -43,8 +49,15 @@ type theme struct {
 	statusDim  lipgloss.Style
 	costText   lipgloss.Style
 
-	titleBrand lipgloss.Style
 	titleMeta  lipgloss.Style
+	brandLabel lipgloss.Style // brand box with background
+
+	shieldArt   lipgloss.Style
+	cwdStyle    lipgloss.Style
+	welcomeKey  lipgloss.Style
+	welcomeVal  lipgloss.Style
+	welcomeName lipgloss.Style
+	inputSep    lipgloss.Style
 }
 
 func newTheme() theme {
@@ -60,7 +73,7 @@ func newTheme() theme {
 		sideValue:   lipgloss.NewStyle().Foreground(colTextDim),
 		sideMuted:   lipgloss.NewStyle().Foreground(colTextMuted),
 
-		modePlan:  lipgloss.NewStyle().Foreground(colTextMuted),
+		modePlan:  lipgloss.NewStyle().Foreground(colTextMuted).Bold(true),
 		modeBuild: lipgloss.NewStyle().Foreground(colWarning).Bold(true),
 		modeAuto:  lipgloss.NewStyle().Foreground(colSuccess).Bold(true),
 
@@ -68,7 +81,14 @@ func newTheme() theme {
 		statusDim:  lipgloss.NewStyle().Foreground(colTextMuted),
 		costText:   lipgloss.NewStyle().Foreground(colSuccess),
 
-		titleBrand: lipgloss.NewStyle().Foreground(colAccent).Bold(true),
 		titleMeta:  lipgloss.NewStyle().Foreground(colTextMuted),
+		brandLabel: lipgloss.NewStyle().Background(colBrandBg).Foreground(colBrandFg).Bold(true),
+
+		shieldArt:   lipgloss.NewStyle().Foreground(colShield),
+		cwdStyle:    lipgloss.NewStyle().Foreground(colCwd),
+		welcomeKey:  lipgloss.NewStyle().Foreground(colTextMuted),
+		welcomeVal:  lipgloss.NewStyle().Foreground(colTextDim),
+		welcomeName: lipgloss.NewStyle().Foreground(colAccent).Bold(true),
+		inputSep:    lipgloss.NewStyle().Foreground(colInputSep),
 	}
 }
