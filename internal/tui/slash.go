@@ -43,6 +43,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"persona":  d.cmdPersona,
 		"mode":     d.cmdMode,
 		"clear":    d.cmdClear,
+		"config":   d.cmdConfig,
 		"memory":   d.cmdMemory,
 		"remember": d.cmdRemember,
 		"skills":   d.cmdSkills,
@@ -116,6 +117,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"persona [name]", "List or switch persona"},
 		{"mode <plan|build|auto>", "Switch permission mode"},
 		{"clear", "Clear the transcript"},
+		{"config", "Interactive configuration wizard"},
 		{"memory", "Show saved memories"},
 		{"remember <text>", "Save a memory entry"},
 		{"skills", "List saved skills"},
@@ -153,6 +155,8 @@ func builtinHelp(name string) string {
 		return "/mode <plan|build|auto>\n  Switch the permission mode for the current session.\n  plan = read-only\n  build = file edits allowed, shell execution requires approval\n  auto  = all capabilities allowed without prompting"
 	case "clear":
 		return "/clear\n  Clear the conversation transcript (session history is preserved)."
+	case "config":
+		return "/config\n  Open the interactive configuration wizard to change provider, model, tokens, and think settings.\n  Changes are written to the global config file and take effect on next restart."
 	case "memory":
 		return "/memory\n  Display saved project and user memory entries."
 	case "remember":
@@ -362,6 +366,10 @@ func (d *SlashDispatcher) cmdSession(args []string) SlashResult {
 	}
 	return SlashResult{Output: fmt.Sprintf("Session: %s\nTitle: %s\nMode: %s\nMessages: %d\nCreated: %s",
 		sess.ID, sess.Title, sess.Mode, len(sess.Messages), sess.CreatedAt.Format(time.RFC3339))}
+}
+
+func (d *SlashDispatcher) cmdConfig(_ []string) SlashResult {
+	return SlashResult{Output: "\x00wizard"}
 }
 
 func (d *SlashDispatcher) cmdQuit(_ []string) SlashResult {

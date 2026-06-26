@@ -69,6 +69,7 @@ type model struct {
 	ready      bool
 	status     string
 	th         theme
+	wizard     *wizardModel
 
 	tools        []toolEntry
 	inputTokens  int
@@ -199,6 +200,28 @@ func waitForEvent(ch <-chan api.Event) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	// Wizard overlay: delegate all messages while the wizard is open.
+	if m.wizard != nil {
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = ws.Width, ws.Height
+			m.wizard.width = ws.Width
+			m.wizard.height = ws.Height
+			m.layout()
+			return m, nil
+		}
+		cmd := m.wizard.update(msg)
+		if m.wizard.done {
+			if m.wizard.saved {
+				m.transcript.WriteString(
+					m.th.statusText.Render("✓ Configuration saved — restart Aegis to apply changes.") + "\n\n",
+				)
+			}
+			m.wizard = nil
+			m.refresh()
+		}
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -281,6 +304,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case slashResultMsg:
 		if msg.Quit {
 			return m, tea.Quit
+		}
+		if msg.Output == "\x00wizard" {
+			m.wizard = newWizard(m.width, m.height, m.th)
+			return m, nil
 		}
 		if msg.Output == "\x00clear" {
 			m.transcript.Reset()
@@ -446,6 +473,10 @@ func (m *model) renderTeammates(msg teammatesMsg) {
 func (m model) View() string {
 	if !m.ready {
 		return "initializing…"
+	}
+
+	if m.wizard != nil {
+		return m.wizard.view()
 	}
 
 	fixedH := 1 + 1 + 1 + m.ta.Height()
