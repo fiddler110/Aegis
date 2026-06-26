@@ -87,7 +87,7 @@ if ($AliasExists) {
     $ProfileLabel = if ($ProfileExists) { "exists" } else { "will be created" }
     Write-Detail "Profile: $ProfilePath  ($ProfileLabel)"
     Write-Detail "Config : $ConfigPath"
-    Write-Detail "Usage  : aegis-config  →  opens config in VS Code / `$EDITOR / Notepad"
+    Write-Detail "Usage  : aegis-config  →  opens config in your preferred editor (prompted)"
 }
 
 Write-Host ""
@@ -150,12 +150,68 @@ if ($RunAlias) {
         Write-Skip "[2] aegis-config already in profile — nothing to do."
     } else {
         Write-Header "[2] Adding aegis-config to PowerShell profile..."
+        Write-Host ""
+
+        # ── Editor selection ───────────────────────────────────────────────────
+        Write-Host "    Choose your preferred editor for aegis-config:" -ForegroundColor White
+        Write-Host ""
+
+        $EditorChoices = @()
+        $edIdx = 1
+        $codeAvail = [bool](Get-Command code -ErrorAction SilentlyContinue)
+        if ($codeAvail) {
+            Write-Detail "[$edIdx] code     — Visual Studio Code"
+            $EditorChoices += "code"
+            $edIdx++
+        }
+        Write-Detail "[$edIdx] notepad  — Windows Notepad"
+        $EditorChoices += "notepad"
+        $edTotal = $edIdx
+
+        Write-Host ""
+        $rawSel = (Read-Host "        Select [1-$edTotal]  (default: 1)").Trim()
+        if ($rawSel -eq "" -or $rawSel -eq "1") {
+            $selIdx = 1
+        } elseif ($rawSel -match '^\d+$' -and [int]$rawSel -ge 1 -and [int]$rawSel -le $edTotal) {
+            $selIdx = [int]$rawSel
+        } else {
+            Write-Warn "Invalid selection — using option 1"; $selIdx = 1
+        }
+        $ChosenEditor = $EditorChoices[$selIdx - 1]
+
+        Write-Host ""
+        $alwaysRaw = (Read-Host "        Always use '$ChosenEditor' for aegis-config? [Y/n]").Trim().ToLower()
+        $EditorFixed = ($alwaysRaw -eq "" -or $alwaysRaw -eq "y")
+        Write-Host ""
+
+        # Build the editor-invocation block embedded in the profile function.
+        if ($EditorFixed) {
+            $editorBlock = "    $ChosenEditor `$cfg`n"
+        } elseif ($ChosenEditor -eq "notepad") {
+            $editorBlock = @"
+    if (`$env:EDITOR) {
+        & `$env:EDITOR `$cfg
+    } else {
+        notepad `$cfg
+    }
+"@
+        } else {
+            # code chosen but not pinned — prefer $env:EDITOR, fall back to code then notepad
+            $editorBlock = @"
+    if (`$env:EDITOR) {
+        & `$env:EDITOR `$cfg
+    } elseif (Get-Command code -ErrorAction SilentlyContinue) {
+        code `$cfg
+    } else {
+        notepad `$cfg
+    }
+"@
+        }
+
         if (-not (Test-Path $ProfileDir)) {
             New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
         }
 
-        # The function block written to the profile.
-        # Backtick-escapes below are PowerShell string escapes, not indent noise.
         $block = @"
 
 
@@ -168,14 +224,7 @@ function aegis-config {
         Write-Warning "Config not found at `$cfg — run: aegis --first-init"
         return
     }
-    if (`$env:EDITOR) {
-        & `$env:EDITOR `$cfg
-    } elseif (Get-Command code -ErrorAction SilentlyContinue) {
-        code `$cfg
-    } else {
-        notepad `$cfg
-    }
-}
+$editorBlock}
 "@
         Add-Content -Path $ProfilePath -Value $block -Encoding UTF8
         Write-Ok "Added to: $ProfilePath"

@@ -140,7 +140,7 @@ else
     detail "Shell  : ${SHELL_NAME}"
     detail "File   : ${ALIAS_FILE}  (${ALIAS_FILE_STATUS})"
     detail "Config : ${AEGIS_CONFIG_PATH}"
-    detail "Usage  : aegis-config  →  opens config in \$EDITOR / vi"
+    detail "Usage  : aegis-config  →  opens config in your preferred editor (prompted)"
 fi
 
 echo ""
@@ -229,11 +229,64 @@ if [ "${RUN_ALIAS}" = true ]; then
         skip "[2] aegis-config already defined — nothing to do."
     else
         header "[2] Adding aegis-config to ${ALIAS_FILE}..."
+        echo ""
+
+        # ── Editor selection ───────────────────────────────────────────────────
+        echo "    Choose your preferred editor for aegis-config:"
+        echo ""
+        _EDITORS=()
+        _IDX=1
+        if command -v code &>/dev/null; then
+            detail "[${_IDX}] code  — Visual Studio Code"
+            _EDITORS+=("code"); _IDX=$(( _IDX + 1 ))
+        fi
+        if command -v nano &>/dev/null; then
+            detail "[${_IDX}] nano  — nano"
+            _EDITORS+=("nano"); _IDX=$(( _IDX + 1 ))
+        fi
+        detail "[${_IDX}] vi    — vi / vim"
+        _EDITORS+=("vi"); _IDX=$(( _IDX + 1 ))
+        detail "[${_IDX}] \$EDITOR  — use \$EDITOR env var  (currently: ${EDITOR:-not set})"
+        _EDITORS+=("dynamic")
+        _TOTAL=${_IDX}
+        echo ""
+        printf "        Select [1-%d]  (default: 1): " "${_TOTAL}"
+        read -r _SEL || _SEL="1"
+        _SEL="${_SEL:-1}"
+        if ! echo "${_SEL}" | grep -qE '^[0-9]+$' || \
+            [ "${_SEL}" -lt 1 ] || [ "${_SEL}" -gt "${_TOTAL}" ]; then
+            warn "Invalid selection — using option 1"; _SEL=1
+        fi
+        _CHOSEN="${_EDITORS[$(( _SEL - 1 ))]}"
+
+        _EDITOR_FIXED=false
+        if [ "${_CHOSEN}" != "dynamic" ]; then
+            echo ""
+            printf "        Always use '%s' for aegis-config? [Y/n]: " "${_CHOSEN}"
+            read -r _ALWAYS || _ALWAYS="y"
+            _ALWAYS="${_ALWAYS:-y}"
+            _ALWAYS=$(echo "${_ALWAYS}" | tr '[:upper:]' '[:lower:]')
+            [ "${_ALWAYS}" != "n" ] && _EDITOR_FIXED=true
+        fi
+        echo ""
 
         if [ "${ALIAS_METHOD}" = "fish" ]; then
-            # Fish uses per-function files rather than a sourced aliases file.
             mkdir -p "$(dirname "${ALIAS_FILE}")"
-            cat > "${ALIAS_FILE}" <<'FISHEOF'
+            if [ "${_EDITOR_FIXED}" = true ]; then
+                cat > "${ALIAS_FILE}" <<FISHEOF
+# aegis-config: open the Aegis global configuration file in your editor.
+# Run 'aegis --first-init' first if the file does not yet exist.
+function aegis-config --description 'Open the Aegis configuration file'
+    set cfg "\$HOME/.config/aegis/config.yaml"
+    if not test -f \$cfg
+        echo "Config not found at \$cfg — run: aegis --first-init" >&2
+        return 1
+    end
+    ${_CHOSEN} \$cfg
+end
+FISHEOF
+            elif [ "${_CHOSEN}" = "dynamic" ]; then
+                cat > "${ALIAS_FILE}" <<'FISHEOF'
 # aegis-config: open the Aegis global configuration file in your editor.
 # Run 'aegis --first-init' first if the file does not yet exist.
 function aegis-config --description 'Open the Aegis configuration file'
@@ -249,11 +302,29 @@ function aegis-config --description 'Open the Aegis configuration file'
     end
 end
 FISHEOF
+            else
+                cat > "${ALIAS_FILE}" <<FISHEOF
+# aegis-config: open the Aegis global configuration file in your editor.
+# Run 'aegis --first-init' first if the file does not yet exist.
+function aegis-config --description 'Open the Aegis configuration file'
+    set cfg "\$HOME/.config/aegis/config.yaml"
+    if not test -f \$cfg
+        echo "Config not found at \$cfg — run: aegis --first-init" >&2
+        return 1
+    end
+    if set -q EDITOR
+        \$EDITOR \$cfg
+    else
+        ${_CHOSEN} \$cfg
+    end
+end
+FISHEOF
+            fi
             ok "Created: ${ALIAS_FILE}"
             detail "Reload: source ${ALIAS_FILE}  (or restart fish)"
         else
-            # bash / zsh / sh — append a shell function.
-            cat >> "${ALIAS_FILE}" <<SHEOF
+            if [ "${_EDITOR_FIXED}" = true ]; then
+                cat >> "${ALIAS_FILE}" <<SHEOF
 
 
 # ── aegis-config ────────────────────────────────────────────────────────────────
@@ -265,9 +336,42 @@ aegis-config() {
         echo "Config not found at \$cfg — run: aegis --first-init" >&2
         return 1
     fi
-    "\${EDITOR:-vi}" "\$cfg"
+    ${_CHOSEN} "\$cfg"
 }
 SHEOF
+            elif [ "${_CHOSEN}" = "dynamic" ]; then
+                cat >> "${ALIAS_FILE}" <<'SHEOF'
+
+
+# ── aegis-config ────────────────────────────────────────────────────────────────
+# Opens the Aegis global configuration file in your preferred editor.
+# Run 'aegis --first-init' first if the file does not yet exist.
+aegis-config() {
+    local cfg="${HOME}/.config/aegis/config.yaml"
+    if [ ! -f "$cfg" ]; then
+        echo "Config not found at $cfg — run: aegis --first-init" >&2
+        return 1
+    fi
+    "${EDITOR:-vi}" "$cfg"
+}
+SHEOF
+            else
+                cat >> "${ALIAS_FILE}" <<SHEOF
+
+
+# ── aegis-config ────────────────────────────────────────────────────────────────
+# Opens the Aegis global configuration file in your preferred editor.
+# Run 'aegis --first-init' first if the file does not yet exist.
+aegis-config() {
+    local cfg="\${HOME}/.config/aegis/config.yaml"
+    if [ ! -f "\$cfg" ]; then
+        echo "Config not found at \$cfg — run: aegis --first-init" >&2
+        return 1
+    fi
+    "\${EDITOR:-${_CHOSEN}}" "\$cfg"
+}
+SHEOF
+            fi
             ok "Added to: ${ALIAS_FILE}"
             detail "Reload: source ${ALIAS_FILE}"
         fi
