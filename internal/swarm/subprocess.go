@@ -143,19 +143,27 @@ func writeSpec(spec WorkerSpec) (string, error) {
 	return f.Name(), nil
 }
 
-// limitedBuffer collects up to 1 MiB, silently discarding the rest.
+// maxStderrBytes is the maximum number of bytes retained from a worker's stderr.
+const maxStderrBytes = 1 << 20 // 1 MiB
+
+// limitedBuffer collects up to maxStderrBytes, silently discarding the rest.
+// Using a slice instead of a fixed array avoids allocating 1 MiB upfront for
+// every spawned worker process.
 type limitedBuffer struct {
-	buf [1 << 20]byte
-	n   int
+	buf []byte
 }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {
-	n := copy(b.buf[b.n:], p)
-	b.n += n
+	if remaining := maxStderrBytes - len(b.buf); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		b.buf = append(b.buf, p...)
+	}
 	return len(p), nil // always report full write so exec doesn't error
 }
 
-func (b *limitedBuffer) String() string { return string(b.buf[:b.n]) }
+func (b *limitedBuffer) String() string { return string(b.buf) }
 
 // filteredEnv returns the current environment with only the variables needed
 // by worker processes, avoiding leaking the full parent environment.

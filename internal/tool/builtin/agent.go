@@ -156,14 +156,26 @@ func (a *agentTool) spawnBackground(cfg swarm.SpawnConfig, description, agentNam
 	return tool.Result{Content: fmt.Sprintf("Spawned background sub-agent %q (task id %s). Poll with task_get; read its result with task_output.", agentName, tk.ID)}, nil
 }
 
-// clampMode returns the more restrictive of the parent and requested modes. A
-// plan-mode (read-only) parent forces a plan-mode child.
-func clampMode(parent, requested string) string {
-	if parent == "plan" {
-		return "plan"
+// modeRank assigns an ordinal to each permission posture.
+func modeRank(m string) int {
+	switch m {
+	case "auto":
+		return 2
+	case "build":
+		return 1
+	default: // "plan" or unrecognised
+		return 0
 	}
+}
+
+// clampMode returns the more restrictive of the parent and requested modes. A
+// child may only restrict, never escalate, the caller's posture.
+func clampMode(parent, requested string) string {
 	if requested == "" {
-		return "build"
+		requested = "build"
+	}
+	if modeRank(requested) > modeRank(parent) {
+		return parent
 	}
 	return requested
 }

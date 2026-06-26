@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // contextFiles are well-known context files loaded into the system prompt.
@@ -16,8 +17,24 @@ var contextFiles = []string{
 
 // LoadContext reads well-known context files (AGENTS.md, CLAUDE.md,
 // .aegis/context.md) from the project root and returns their combined
-// content. Files that don't exist are silently skipped.
+// content. Files that don't exist are silently skipped. When the Sources was
+// created via NewSources, results are cached for cacheMaxAge.
 func (s Sources) LoadContext() string {
+	if s.cache != nil {
+		s.cache.mu.Lock()
+		defer s.cache.mu.Unlock()
+		if time.Now().Before(s.cache.ctxExpiry) {
+			return s.cache.ctxVal
+		}
+		v := s.loadContextDirect()
+		s.cache.ctxVal = v
+		s.cache.ctxExpiry = time.Now().Add(cacheMaxAge)
+		return v
+	}
+	return s.loadContextDirect()
+}
+
+func (s Sources) loadContextDirect() string {
 	var sections []string
 	for _, name := range contextFiles {
 		path := filepath.Join(s.ProjectRoot, name)

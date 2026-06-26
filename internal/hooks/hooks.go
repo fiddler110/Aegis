@@ -5,6 +5,7 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -105,8 +106,21 @@ func (a *Audit) PolicyDecision(toolName, cap, rule, decision, reason string) {
 	})
 }
 
+// maxAuditInput is the maximum number of bytes recorded for a tool input in
+// the audit log. Inputs larger than this are replaced with a size annotation
+// to avoid logging bulk data or credentials embedded in long commands.
+const maxAuditInput = 1024
+
+func auditInput(input json.RawMessage) json.RawMessage {
+	if len(input) <= maxAuditInput {
+		return input
+	}
+	b, _ := json.Marshal(fmt.Sprintf("[%d bytes, truncated]", len(input)))
+	return json.RawMessage(b)
+}
+
 func (a *Audit) PreToolUse(_ context.Context, name string, input json.RawMessage) error {
-	a.write(auditRecord{Time: time.Now(), Phase: "pre", Tool: name, Input: input})
+	a.write(auditRecord{Time: time.Now(), Phase: "pre", Tool: name, Input: auditInput(input)})
 	return nil
 }
 

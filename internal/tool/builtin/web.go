@@ -19,6 +19,22 @@ import (
 
 const maxWebBytes = 2 << 20 // 2 MiB cap on fetched bodies
 
+// ssrfClient is a shared HTTP client whose transport enforces SSRF protection
+// on every new connection. Reusing one client allows TCP/TLS connection pooling
+// across fetch and search calls.
+var ssrfClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: ssrfSafeDialer,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		return validateNotPrivate(req.Context(), req.URL)
+	},
+}
+
 // --- fetch ---
 
 type fetchTool struct{ userAgent string }
@@ -61,27 +77,12 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 }
 
 func (t *fetchTool) get(ctx context.Context, rawURL string) ([]byte, string, error) {
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialContext: ssrfSafeDialer,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("too many redirects")
-			}
-			if err := validateNotPrivate(req.Context(), req.URL); err != nil {
-				return err
-			}
-			return nil
-		},
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, "", err
 	}
 	req.Header.Set("User-Agent", t.userAgent)
-	resp, err := client.Do(req)
+	resp, err := ssrfClient.Do(req)
 	if err != nil {
 		return nil, "", err
 	}

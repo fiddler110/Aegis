@@ -10,8 +10,23 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
+
+const cacheMaxAge = 5 * time.Second
+
+// sourcesCache is a TTL cache for the content returned by Sources.Load and
+// Sources.LoadContext. A nil cache pointer means no caching (zero-value Sources).
+type sourcesCache struct {
+	mu sync.Mutex
+	// load caches Sources.Load output
+	loadVal    string
+	loadExpiry time.Time
+	// ctx caches Sources.LoadContext output
+	ctxVal    string
+	ctxExpiry time.Time
+}
 
 // Sources locates memory and skill files for a workspace and the user.
 type Sources struct {
@@ -19,6 +34,19 @@ type Sources struct {
 	ProjectRoot string
 	// DataDir is the per-user data directory (global memory/skills).
 	DataDir string
+	// cache is an optional TTL cache. Nil means always read from disk (test default).
+	cache *sourcesCache
+}
+
+// NewSources creates a Sources with a TTL cache to avoid re-reading files on
+// every request. Zero-value Sources literals (used in tests) have no cache and
+// always read fresh from disk.
+func NewSources(projectRoot, dataDir string) Sources {
+	return Sources{
+		ProjectRoot: projectRoot,
+		DataDir:     dataDir,
+		cache:       &sourcesCache{},
+	}
 }
 
 // ProjectMemoryPath returns the project-scoped memory file path.
@@ -39,8 +67,24 @@ func (s Sources) skillDirs() []string {
 }
 
 // Load assembles the memory/skills block for the system prompt. It returns an
-// empty string when no memory or skills exist.
+// empty string when no memory or skills exist. When the Sources was created via
+// NewSources, results are cached for cacheMaxAge.
 func (s Sources) Load() string {
+	if s.cache != nil {
+		s.cache.mu.Lock()
+		defer s.cache.mu.Unlock()
+		if time.Now().Before(s.cache.loadExpiry) {
+			return s.cache.loadVal
+		}
+		v := s.loadDirect()
+		s.cache.loadVal = v
+		s.cache.loadExpiry = time.Now().Add(cacheMaxAge)
+		return v
+	}
+	return s.loadDirect()
+}
+
+func (s Sources) loadDirect() string {
 	var sections []string
 
 	if txt := readIfExists(s.GlobalMemoryPath()); txt != "" {

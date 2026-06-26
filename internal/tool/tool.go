@@ -49,9 +49,10 @@ type Tool interface {
 
 // Registry holds registered tools and tracks which are exposed.
 type Registry struct {
-	mu       sync.RWMutex
-	tools    map[string]Tool
-	exposed  map[string]bool
+	mu          sync.RWMutex
+	tools       map[string]Tool
+	exposed     map[string]bool
+	schemaCache []provider.ToolSchema // nil means dirty; rebuilt on next Schemas call
 }
 
 // NewRegistry creates an empty registry.
@@ -72,6 +73,7 @@ func (r *Registry) Register(t Tool) error {
 	}
 	r.tools[name] = t
 	r.exposed[name] = true
+	r.schemaCache = nil
 	return nil
 }
 
@@ -83,6 +85,7 @@ func (r *Registry) Upsert(t Tool) {
 	name := t.Name()
 	r.tools[name] = t
 	r.exposed[name] = true
+	r.schemaCache = nil
 }
 
 // SetExposed toggles whether a registered tool is offered to the model.
@@ -91,6 +94,7 @@ func (r *Registry) SetExposed(name string, exposed bool) {
 	defer r.mu.Unlock()
 	if _, ok := r.tools[name]; ok {
 		r.exposed[name] = exposed
+		r.schemaCache = nil
 	}
 }
 
@@ -103,9 +107,21 @@ func (r *Registry) Get(name string) (Tool, bool) {
 }
 
 // Schemas returns provider tool schemas for all exposed tools, sorted by name.
+// Results are cached until the registry is mutated.
 func (r *Registry) Schemas() []provider.ToolSchema {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	if r.schemaCache != nil {
+		out := r.schemaCache
+		r.mu.RUnlock()
+		return out
+	}
+	r.mu.RUnlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.schemaCache != nil { // double-check after acquiring write lock
+		return r.schemaCache
+	}
 	out := make([]provider.ToolSchema, 0, len(r.tools))
 	for name, t := range r.tools {
 		if !r.exposed[name] {
@@ -118,5 +134,6 @@ func (r *Registry) Schemas() []provider.ToolSchema {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	r.schemaCache = out
 	return out
 }

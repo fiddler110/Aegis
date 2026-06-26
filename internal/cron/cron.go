@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -139,10 +140,11 @@ type RunFunc func(j Job)
 
 // Scheduler periodically checks persisted jobs and fires those that are due.
 type Scheduler struct {
-	store  *Store
-	run    RunFunc
-	logger *slog.Logger
-	now    func() time.Time // injectable clock for tests
+	store       *Store
+	run         RunFunc
+	logger      *slog.Logger
+	now         func() time.Time // injectable clock for tests
+	parsedSched sync.Map         // map[string]*Schedule — avoids re-parsing on every tick
 }
 
 // NewScheduler builds a scheduler over store; run fires a due job.
@@ -207,7 +209,7 @@ func (s *Scheduler) tick(now time.Time) {
 		if !j.Enabled {
 			continue
 		}
-		sched, err := Parse(j.Schedule)
+		sched, err := s.cachedParse(j.Schedule)
 		if err != nil {
 			s.logger.Warn("cron: bad schedule", "job", j.ID, "schedule", j.Schedule, "err", err)
 			continue
@@ -225,6 +227,20 @@ func (s *Scheduler) tick(now time.Time) {
 		s.logger.Info("cron: firing job", "job", j.ID, "title", j.Title)
 		s.run(*j)
 	}
+}
+
+// cachedParse returns a parsed Schedule for expr, caching the result so the
+// expression is only parsed once per distinct value.
+func (s *Scheduler) cachedParse(expr string) (*Schedule, error) {
+	if v, ok := s.parsedSched.Load(expr); ok {
+		return v.(*Schedule), nil
+	}
+	sched, err := Parse(expr)
+	if err != nil {
+		return nil, err
+	}
+	s.parsedSched.Store(expr, sched)
+	return sched, nil
 }
 
 // Run drives the scheduler until ctx is cancelled, checking due jobs once per

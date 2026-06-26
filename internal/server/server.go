@@ -187,7 +187,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.sandbox = sb
 	s.lspMgr = lspMgr
 	s.workspace = cwd
-	s.memory = memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
+	s.memory = memory.NewSources(cwd, cfg.DataDir)
 
 	// Load custom agent definitions from user/project directories.
 	if n := agentdef.LoadFromDirs(agentdef.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
@@ -347,6 +347,9 @@ func (s *Server) routes() http.Handler {
 
 // ListenAndServe runs the daemon until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	if s.authToken == "" {
+		return fmt.Errorf("server: refusing to start: auth token was not generated")
+	}
 	defer s.store.Close()
 	defer func() {
 		if s.audit != nil {
@@ -462,6 +465,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	mode := req.Mode
 	if mode == "" {
 		mode = s.cfg.Permission.Mode
+	}
+	if mode != "plan" && mode != "build" && mode != "auto" {
+		writeError(w, http.StatusBadRequest, "mode must be plan, build, or auto")
+		return
 	}
 	system := req.System
 	if system == "" {
@@ -919,6 +926,8 @@ func isLoopbackOrigin(origin string) bool {
 	if err != nil {
 		h = host
 	}
+	// Strip IPv6 brackets that remain when there is no port (e.g. "[::1]").
+	h = strings.Trim(h, "[]")
 	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback() || h == "localhost"
+	return (ip != nil && ip.IsLoopback()) || h == "localhost"
 }

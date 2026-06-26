@@ -461,6 +461,7 @@ func TestIsLoopbackOrigin(t *testing.T) {
 		{"http://127.0.0.1:4127", true},
 		{"http://localhost:4127", true},
 		{"http://[::1]:4127", true},
+		{"http://[::1]", true}, // IPv6 loopback without an explicit port
 		{"http://evil.com", false},
 		{"http://192.168.1.1:4127", false},
 	}

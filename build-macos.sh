@@ -47,20 +47,24 @@ GO_VER=$(go version)
 # /etc/paths. On Apple Silicon, /opt/homebrew/bin is Homebrew's home and not
 # the right place for user-compiled binaries.
 SYSTEM_BIN="/usr/local/bin"
-USER_BIN="${HOME}/go/bin"
+# Use go env GOPATH so we respect a non-default GOPATH instead of assuming ~/go.
+USER_BIN="$(go env GOPATH 2>/dev/null || echo "${HOME}/go")/bin"
 INSTALL_DIR=""
 USE_SUDO=false
 BIN_EXISTS=false
 
 # Ensure /usr/local/bin exists (macOS creates it, but guard anyway).
 if [ ! -d "${SYSTEM_BIN}" ]; then
-    sudo mkdir -p "${SYSTEM_BIN}"
+    mkdir -p "${SYSTEM_BIN}" 2>/dev/null || sudo mkdir -p "${SYSTEM_BIN}"
 fi
 
 if [ -w "${SYSTEM_BIN}" ]; then
     INSTALL_DIR="${SYSTEM_BIN}"
-elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
-    INSTALL_DIR="${SYSTEM_BIN}"; USE_SUDO=true
+elif command -v sudo &>/dev/null; then
+    # sudo is available; we'll prompt for a password at install time if needed,
+    # rather than requiring a cached credential right now (sudo -n).
+    INSTALL_DIR="${SYSTEM_BIN}"
+    USE_SUDO=true
 else
     INSTALL_DIR="${USER_BIN}"
 fi
@@ -186,18 +190,6 @@ if [ "${RUN_BUILD}" = true ]; then
     LDFLAGS="-s -w -X github.com/scottymacleod/aegis/internal/cli.Version=${VERSION}"
     go build -ldflags "${LDFLAGS}" -o ./aegis ./cmd/aegis
 
-    # If sudo is needed and we haven't authenticated yet, ask once now.
-    if [ "${USE_SUDO}" = true ] && ! sudo -n true 2>/dev/null; then
-        echo ""
-        warn "Installing to ${SYSTEM_BIN} requires your password (sudo)."
-        if ! sudo true; then
-            warn "sudo cancelled — falling back to ${USER_BIN}"
-            INSTALL_DIR="${USER_BIN}"
-            BIN_DEST="${INSTALL_DIR}/aegis"
-            USE_SUDO=false
-        fi
-    fi
-
     # Remove any stale binary found at a different PATH location.
     if [ -n "${EXISTING_BIN}" ]; then
         detail "Removing old binary: ${EXISTING_BIN}"
@@ -217,7 +209,14 @@ if [ "${RUN_BUILD}" = true ]; then
 
     mkdir -p "${INSTALL_DIR}"
     if [ "${USE_SUDO}" = true ]; then
-        sudo install -m 755 ./aegis "${BIN_DEST}"
+        # This will prompt for a password if sudo requires one.
+        if ! sudo install -m 755 ./aegis "${BIN_DEST}"; then
+            warn "sudo install failed — falling back to ${USER_BIN}"
+            INSTALL_DIR="${USER_BIN}"
+            BIN_DEST="${INSTALL_DIR}/aegis"
+            mkdir -p "${INSTALL_DIR}"
+            install -m 755 ./aegis "${BIN_DEST}"
+        fi
     else
         install -m 755 ./aegis "${BIN_DEST}"
     fi
