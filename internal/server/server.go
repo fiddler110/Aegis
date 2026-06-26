@@ -410,9 +410,24 @@ func (s *Server) approver() permission.Approver {
 	return permission.AutoDeny{}
 }
 
+// providerUnconfiguredErr returns a helpful error message that names the
+// specific environment variable the user needs to set for their configured
+// provider, rather than always blaming ANTHROPIC_API_KEY.
+func (s *Server) providerUnconfiguredErr() error {
+	switch s.cfg.Provider.Default {
+	case "openai":
+		if s.cfg.Provider.BaseURL != "" {
+			return fmt.Errorf("no model provider configured — run /config to reconfigure or restart the daemon after making changes")
+		}
+		return fmt.Errorf("no model provider configured (set OPENAI_API_KEY and restart the daemon)")
+	default:
+		return fmt.Errorf("no model provider configured (set ANTHROPIC_API_KEY and restart the daemon)")
+	}
+}
+
 func (s *Server) newEngine(mode string) (*engine.Engine, error) {
 	if s.adapter == nil {
-		return nil, fmt.Errorf("no model provider configured (set ANTHROPIC_API_KEY and restart the daemon)")
+		return nil, s.providerUnconfiguredErr()
 	}
 	baseGate := permission.New(permission.ParseMode(mode), s.approver())
 

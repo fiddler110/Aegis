@@ -75,6 +75,11 @@ type model struct {
 	inputTokens  int
 	outputTokens int
 	costUSD      float64
+
+	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
+	history    []string
+	histIdx    int
+	draftInput string
 }
 
 type slashResultMsg SlashResult
@@ -121,7 +126,7 @@ type teammatesMsg struct {
 
 func newModel(cfg Config) model {
 	ta := textarea.New()
-	ta.Placeholder = "Send a message  (Enter to send · Ctrl+J newline · Shift+Tab mode · Ctrl+T agents · Ctrl+C quit)"
+	ta.Placeholder = "Send a message  (Enter send · ↑↓ history · Ctrl+J newline · Shift+Tab mode · Ctrl+L clear · Ctrl+C quit)"
 	ta.Prompt = "│ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
@@ -135,12 +140,13 @@ func newModel(cfg Config) model {
 	th := newTheme()
 
 	m := model{
-		cfg:    cfg,
-		ta:     ta,
-		sp:     sp,
-		th:     th,
-		status: "ready",
-		slash:  NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
+		cfg:     cfg,
+		ta:      ta,
+		sp:      sp,
+		th:      th,
+		status:  "ready",
+		slash:   NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
+		histIdx: -1,
 	}
 	m.transcript.WriteString(
 		th.statusDim.Render(fmt.Sprintf(
@@ -246,9 +252,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyCtrlT:
 			return m, m.fetchTeammates()
+		case tea.KeyCtrlL:
+			if !m.streaming {
+				return m, m.handleSlashCommand(&commands.ParsedCommand{Name: "clear", Raw: "/clear"})
+			}
 		case tea.KeyShiftTab:
 			if !m.streaming {
 				return m, m.cycleModeCmd()
+			}
+		case tea.KeyUp:
+			// Intercept only when input is single-line (no newlines) so that
+			// multi-line editing keeps normal cursor-up behaviour.
+			if !m.streaming && !strings.Contains(m.ta.Value(), "\n") && len(m.history) > 0 {
+				if m.histIdx == -1 {
+					m.draftInput = m.ta.Value()
+					m.histIdx = len(m.history) - 1
+				} else if m.histIdx > 0 {
+					m.histIdx--
+				}
+				m.ta.SetValue(m.history[m.histIdx])
+				return m, nil
+			}
+		case tea.KeyDown:
+			if !m.streaming && m.histIdx != -1 {
+				if m.histIdx == len(m.history)-1 {
+					m.histIdx = -1
+					m.ta.SetValue(m.draftInput)
+					m.draftInput = ""
+				} else {
+					m.histIdx++
+					m.ta.SetValue(m.history[m.histIdx])
+				}
+				return m, nil
 			}
 		case tea.KeyEnter:
 			if m.streaming {
@@ -260,8 +295,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if parsed := commands.Parse(text); parsed != nil {
 				m.ta.Reset()
+				m.histIdx = -1
+				m.draftInput = ""
 				return m, m.handleSlashCommand(parsed)
 			}
+			m.history = append(m.history, text)
+			m.histIdx = -1
+			m.draftInput = ""
 			m.appendUser(text)
 			m.ta.Reset()
 			m.streaming = true

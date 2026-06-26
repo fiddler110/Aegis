@@ -673,6 +673,9 @@ func (w *wizardModel) renderConfirm() string {
 
 	b.WriteString("\n")
 	b.WriteString(w.th.statusDim.Render("  File: "+config.GlobalConfigPath()) + "\n")
+	if w.baseURL != "" && (strings.Contains(w.baseURL, "localhost") || strings.Contains(w.baseURL, "127.0.0.1")) {
+		b.WriteString(w.th.statusDim.Render("  No API key required for local provider.") + "\n")
+	}
 	b.WriteString(w.hint("Enter save", "Esc back", "Ctrl+C cancel"))
 	return b.String()
 }

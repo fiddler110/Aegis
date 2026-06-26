@@ -25,7 +25,10 @@ func Build(cfg *config.Config) (provider.Adapter, error) {
 			anthropic.WithHeaders(cfg.Provider.Headers),
 		)
 	case "openai":
-		if cfg.Provider.APIKey == "" {
+		// Require an API key only when using the real OpenAI endpoint. Local
+		// servers (Ollama, LM Studio) have no auth requirement, so we skip the
+		// check when a custom base_url is configured.
+		if cfg.Provider.APIKey == "" && cfg.Provider.BaseURL == "" {
 			return nil, fmt.Errorf("OPENAI_API_KEY is not set")
 		}
 		base = openai.New(cfg.Provider.APIKey,
