@@ -55,7 +55,7 @@ func newChatCmd() *cobra.Command {
 				return handleCLISlash(cmd, cfg, parsed)
 			}
 
-			adapter, err := providerfactory.Build(cfg)
+			adapter, err := providerfactory.Build(cfg, nil)
 			if err != nil {
 				return err
 			}

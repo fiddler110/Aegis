@@ -78,7 +78,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	adapter, err := providerfactory.Build(cfg)
+	adapter, err := providerfactory.Build(cfg, nil)
 	if err != nil {
 		return "", err
 	}

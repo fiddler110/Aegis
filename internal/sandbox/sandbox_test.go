@@ -58,6 +58,21 @@ func TestValidatePathEmpty(t *testing.T) {
 	}
 }
 
+func TestValidatePathWindowsCaseInsensitive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("case-insensitive root matching only applies on Windows")
+	}
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "src"), 0o755)
+
+	// A differently-cased root must still resolve a path inside it rather than
+	// being mistaken for an escape.
+	lowerRoot := strings.ToLower(root)
+	if _, err := ValidatePath(lowerRoot, "src/new.go"); err != nil {
+		t.Errorf("case-differing root rejected a valid path: %v", err)
+	}
+}
+
 func TestValidatePathNewFile(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "src"), 0o755)

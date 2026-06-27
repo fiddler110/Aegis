@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/scottymacleod/aegis/internal/checkpoint"
 	"github.com/scottymacleod/aegis/internal/filetracker"
 	"github.com/scottymacleod/aegis/internal/tool"
 )
@@ -35,7 +36,7 @@ type editSpec struct {
 	NewString string `json:"new_string"`
 }
 
-func (t *multieditTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Edits []editSpec `json:"edits"`
 	}
@@ -90,6 +91,7 @@ func (t *multieditTool) Execute(_ context.Context, input json.RawMessage) (tool.
 	// Phase 3: write all modified files.
 	var results []string
 	for _, fs := range files {
+		checkpoint.SnapshotterFrom(ctx).Capture(fs.abs)
 		if err := os.WriteFile(fs.abs, []byte(fs.content), 0o644); err != nil {
 			return tool.Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}, nil
 		}

@@ -8,7 +8,7 @@ import (
 
 func TestRemapANSI16(t *testing.T) {
 	pal := [16]color.Color{
-		3:  color.RGBA{R: 1, G: 2, B: 3, A: 255},   // yellow
+		3:  color.RGBA{R: 1, G: 2, B: 3, A: 255},    // yellow
 		9:  color.RGBA{R: 10, G: 20, B: 30, A: 255}, // bright red
 		12: color.RGBA{R: 40, G: 50, B: 60, A: 255}, // bright blue (bg)
 	}

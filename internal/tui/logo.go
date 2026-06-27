@@ -7,20 +7,20 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// aegisShieldLines is the Aegis emblem: the wordmark crowning a shield that
-// tapers to a protective point. Each line is 14 display cells wide so callers
-// can concatenate aligned content to the right of it. Diagonals use box-drawing
-// glyphs (╱╲) rather than ASCII slashes for crisper edges.
+// aegisShieldLines is the Aegis emblem: the wordmark crowning a round shield
+// with a Gorgon-eye pair (⊙ ⊙) and Omega (Ω) motif drawn from Greek mythology.
+// Each line is 14 display cells wide so callers can concatenate aligned content
+// to the right of it. Rounded corners (╭╮╯╰) replace the original squared box.
 var aegisShieldLines = []string{
-	`  ╔══════════╗`,
-	`  ║  AEGIS   ║`,
-	`  ╠══════════╣`,
-	`  ║    ╱╲    ║`,
-	`  ║   ╱  ╲   ║`,
-	`  ║  ╱ ◆  ╲  ║`,
-	`  ║ ╱      ╲ ║`,
-	`  ╚══╗    ╔══╝`,
-	`     ╚════╝   `,
+	`  ╭──────────╮`,
+	`  │  AEGIS   │`,
+	`  ├──────────┤`,
+	`  │  ⊙    ⊙  │`,
+	`  │   ──Ω──  │`,
+	`  │   ╲  ╱   │`,
+	`  │    ╲╱    │`,
+	`  ╰─╮      ╭─╯`,
+	`    ╰──────╯  `,
 }
 
 // aegisNameLine is the index of the line carrying the AEGIS wordmark.

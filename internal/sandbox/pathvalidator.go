@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -26,8 +27,7 @@ func ValidatePath(root, path string) (string, error) {
 	abs = filepath.Clean(abs)
 
 	// Fast check before symlink resolution: reject obvious escapes.
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if escapesRoot(root, abs) {
 		return "", fmt.Errorf("path %q escapes the workspace", path)
 	}
 
@@ -43,12 +43,27 @@ func ValidatePath(root, path string) (string, error) {
 	}
 
 	full := filepath.Join(resolved, tail)
-	rel, err = filepath.Rel(realRoot, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if escapesRoot(realRoot, full) {
 		return "", fmt.Errorf("path %q resolves outside the workspace (symlink escape)", path)
 	}
 
 	return full, nil
+}
+
+// escapesRoot reports whether target lies outside root. On Windows the
+// comparison is case-insensitive, since the filesystem treats "C:\Work" and
+// "c:\work" as the same directory and a case difference must not be mistaken
+// for (or used to disguise) a traversal escape.
+func escapesRoot(root, target string) bool {
+	base, tgt := root, target
+	if runtime.GOOS == "windows" {
+		base, tgt = strings.ToLower(root), strings.ToLower(target)
+	}
+	rel, err := filepath.Rel(base, tgt)
+	if err != nil {
+		return true
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolveExisting walks up from path until it finds an existing directory,

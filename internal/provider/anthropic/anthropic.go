@@ -24,11 +24,12 @@ const (
 
 // Adapter talks to the Anthropic Messages API.
 type Adapter struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
-	cache   bool // emit prompt-cache breakpoints
-	headers map[string]string
+	apiKey   string
+	baseURL  string
+	client   *http.Client
+	cache    bool // emit prompt-cache breakpoints
+	headers  map[string]string
+	thinking *provider.ThinkingConfig // non-nil enables extended thinking
 }
 
 // Option configures the adapter.
@@ -58,6 +59,16 @@ func WithHeaders(h map[string]string) Option {
 	return func(a *Adapter) { a.headers = h }
 }
 
+// WithThinking enables extended thinking with the given token budget. A budget
+// <1024 disables it (the API minimum).
+func WithThinking(budgetTokens int) Option {
+	return func(a *Adapter) {
+		if budgetTokens >= 1024 {
+			a.thinking = &provider.ThinkingConfig{BudgetTokens: budgetTokens}
+		}
+	}
+}
+
 // New constructs an Anthropic adapter.
 func New(apiKey string, opts ...Option) *Adapter {
 	a := &Adapter{
@@ -84,7 +95,13 @@ type wireRequest struct {
 	Messages    []wireMessage     `json:"messages"`
 	Tools       []wireTool        `json:"tools,omitempty"`
 	Temperature *float64          `json:"temperature,omitempty"`
+	Thinking    *wireThinking     `json:"thinking,omitempty"`
 	Stream      bool              `json:"stream"`
+}
+
+type wireThinking struct {
+	Type         string `json:"type"` // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 // cacheControl marks a content block as a prompt-cache breakpoint. Anthropic
@@ -125,8 +142,20 @@ type wireBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+	// thinking
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	// image
+	Source *wireImageSource `json:"source,omitempty"`
 	// caching
 	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+// wireImageSource is the Anthropic base64 image source descriptor.
+type wireImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // image/png, image/jpeg, …
+	Data      string `json:"data"`       // base64-encoded bytes
 }
 
 func toWireMessages(msgs []provider.Message) ([]wireMessage, error) {
@@ -135,6 +164,10 @@ func toWireMessages(msgs []provider.Message) ([]wireMessage, error) {
 		wm := wireMessage{Role: string(m.Role)}
 		for _, b := range m.Content {
 			switch v := b.(type) {
+			case provider.ThinkingBlock:
+				// Replayed verbatim with its signature so the API can validate
+				// tool use that followed the model's reasoning.
+				wm.Content = append(wm.Content, wireBlock{Type: "thinking", Thinking: v.Text, Signature: v.Signature})
 			case provider.TextBlock:
 				wm.Content = append(wm.Content, wireBlock{Type: "text", Text: v.Text})
 			case provider.ToolUseBlock:
@@ -145,6 +178,10 @@ func toWireMessages(msgs []provider.Message) ([]wireMessage, error) {
 				wm.Content = append(wm.Content, wireBlock{Type: "tool_use", ID: v.ID, Name: v.Name, Input: input})
 			case provider.ToolResultBlock:
 				wm.Content = append(wm.Content, wireBlock{Type: "tool_result", ToolUseID: v.ToolUseID, Content: v.Content, IsError: v.IsError})
+			case provider.ImageBlock:
+				wm.Content = append(wm.Content, wireBlock{Type: "image", Source: &wireImageSource{
+					Type: "base64", MediaType: v.MediaType, Data: v.Data,
+				}})
 			default:
 				return nil, fmt.Errorf("anthropic: unsupported block type %T", b)
 			}
@@ -209,13 +246,30 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if a.cache {
 		cacheLastMessage(wmsgs)
 	}
+
+	// Extended thinking: budget_tokens must be < max_tokens, and temperature
+	// must be omitted (the API only permits the default while thinking).
+	var thinking *wireThinking
+	temperature := req.Temperature
+	if a.thinking != nil {
+		budget := a.thinking.BudgetTokens
+		if budget >= req.MaxTokens {
+			budget = req.MaxTokens - 1
+		}
+		if budget >= 1024 {
+			thinking = &wireThinking{Type: "enabled", BudgetTokens: budget}
+			temperature = nil
+		}
+	}
+
 	body, err := json.Marshal(wireRequest{
 		Model:       req.Model,
 		MaxTokens:   req.MaxTokens,
 		System:      buildSystem(req.System, a.cache),
 		Messages:    wmsgs,
 		Tools:       buildTools(req.Tools, a.cache),
-		Temperature: req.Temperature,
+		Temperature: temperature,
+		Thinking:    thinking,
 		Stream:      true,
 	})
 	if err != nil {
@@ -252,10 +306,12 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 
 // blockState accumulates a streaming content block.
 type blockState struct {
-	typ      string
-	toolID   string
-	toolName string
-	json     strings.Builder
+	typ       string
+	toolID    string
+	toolName  string
+	json      strings.Builder
+	thinking  strings.Builder // accumulated thinking text
+	signature strings.Builder // accumulated thinking signature
 }
 
 func (a *Adapter) consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event) {
@@ -326,6 +382,8 @@ type sseEvent struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
 		PartialJSON string `json:"partial_json"`
+		Thinking    string `json:"thinking"`
+		Signature   string `json:"signature"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
 	Message struct {
@@ -376,10 +434,25 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 			if bs != nil {
 				bs.json.WriteString(ev.Delta.PartialJSON)
 			}
+		case "thinking_delta":
+			if bs != nil {
+				bs.thinking.WriteString(ev.Delta.Thinking)
+			}
+			if ev.Delta.Thinking != "" {
+				if !emit(provider.Event{Type: provider.EventThinkingDelta, Text: ev.Delta.Thinking}) {
+					return false
+				}
+			}
+		case "signature_delta":
+			if bs != nil {
+				bs.signature.WriteString(ev.Delta.Signature)
+			}
 		}
 	case "content_block_stop":
 		bs := blocks[ev.Index]
-		if bs != nil && bs.typ == "tool_use" {
+		switch {
+		case bs == nil:
+		case bs.typ == "tool_use":
 			input := strings.TrimSpace(bs.json.String())
 			if input == "" {
 				input = "{}"
@@ -388,6 +461,13 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 				ID:    bs.toolID,
 				Name:  bs.toolName,
 				Input: json.RawMessage(input),
+			}}) {
+				return false
+			}
+		case bs.typ == "thinking":
+			if !emit(provider.Event{Type: provider.EventThinking, Thinking: &provider.ThinkingBlock{
+				Text:      bs.thinking.String(),
+				Signature: bs.signature.String(),
 			}}) {
 				return false
 			}

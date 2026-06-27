@@ -36,6 +36,17 @@ type TextBlock struct {
 
 func (TextBlock) blockType() string { return "text" }
 
+// ImageBlock is image content attached to a user message, carried as
+// base64-encoded bytes with their media type (e.g. "image/png"). Vision-capable
+// providers map it to their native image content part; text-only providers
+// reject it. Data is never logged.
+type ImageBlock struct {
+	MediaType string `json:"media_type"` // image/png, image/jpeg, image/gif, image/webp
+	Data      string `json:"data"`       // base64-encoded image bytes (no data: prefix)
+}
+
+func (ImageBlock) blockType() string { return "image" }
+
 // ToolUseBlock is an assistant request to invoke a tool.
 type ToolUseBlock struct {
 	ID    string          `json:"id"`
@@ -55,11 +66,28 @@ type ToolResultBlock struct {
 
 func (ToolResultBlock) blockType() string { return "tool_result" }
 
+// ThinkingBlock is the model's extended reasoning. When a provider returns
+// thinking (Anthropic extended thinking), the block — including its Signature —
+// must be preserved in conversation history and replayed on the next request,
+// or the provider rejects subsequent tool use.
+type ThinkingBlock struct {
+	Text      string `json:"text"`
+	Signature string `json:"signature"`
+}
+
+func (ThinkingBlock) blockType() string { return "thinking" }
+
 // ToolSchema describes a tool exposed to the model.
 type ToolSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// ThinkingConfig requests extended thinking with a token budget for the model's
+// internal reasoning. Providers that don't support it ignore the field.
+type ThinkingConfig struct {
+	BudgetTokens int
 }
 
 // Request is a normalized model request.
@@ -70,6 +98,7 @@ type Request struct {
 	Tools       []ToolSchema
 	MaxTokens   int
 	Temperature *float64
+	Thinking    *ThinkingConfig // nil = disabled
 }
 
 // StopReason explains why the model stopped generating.
@@ -99,6 +128,10 @@ type EventType string
 const (
 	// EventTextDelta carries an incremental chunk of assistant text.
 	EventTextDelta EventType = "text_delta"
+	// EventThinkingDelta carries an incremental chunk of extended-thinking text.
+	EventThinkingDelta EventType = "thinking_delta"
+	// EventThinking carries one fully-assembled thinking block (with signature).
+	EventThinking EventType = "thinking"
 	// EventToolUse carries one fully-assembled tool-use block.
 	EventToolUse EventType = "tool_use"
 	// EventDone is the final event: the stream completed successfully.
@@ -109,12 +142,13 @@ const (
 
 // Event is a single item in an adapter's response stream.
 type Event struct {
-	Type    EventType
-	Text    string        // set for EventTextDelta
-	ToolUse *ToolUseBlock // set for EventToolUse
-	Stop    StopReason    // set for EventDone
-	Usage   *Usage        // set for EventDone (best effort)
-	Err     error         // set for EventError
+	Type     EventType
+	Text     string         // set for EventTextDelta / EventThinkingDelta
+	ToolUse  *ToolUseBlock  // set for EventToolUse
+	Thinking *ThinkingBlock // set for EventThinking
+	Stop     StopReason     // set for EventDone
+	Usage    *Usage         // set for EventDone (best effort)
+	Err      error          // set for EventError
 }
 
 // Adapter is implemented by each provider backend.
