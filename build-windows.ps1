@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Build Aegis and set up your shell for first-time use on Windows.
@@ -251,10 +251,12 @@ Write-Host ""
 Write-Ok "All done!"
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor White
-Write-Host "    aegis --first-init        generate global config (first run only)" -ForegroundColor DarkGray
-Write-Host "    `$env:OPENAI_API_KEY='ollama'  required for Ollama (see config for others)" -ForegroundColor DarkGray
-Write-Host "    aegis                     start the TUI" -ForegroundColor DarkGray
+Write-Host "    aegis --first-init           generate global config (first run only)" -ForegroundColor DarkGray
+Write-Host "    aegis --init                 create .aegis/config.yaml project override (optional)" -ForegroundColor DarkGray
+Write-Host "    `$env:OPENAI_API_KEY='ollama'   required for Ollama; set ANTHROPIC_API_KEY for Claude" -ForegroundColor DarkGray
+Write-Host "    aegis                        start the TUI" -ForegroundColor DarkGray
+Write-Host "    aegis ui                     open the web UI in your browser" -ForegroundColor DarkGray
 if ($RunAlias -and -not $AliasExists) {
-    Write-Host "    aegis-config              open the config file  (after '. `$PROFILE')" -ForegroundColor DarkGray
+    Write-Host "    aegis-config                 open the config file  (after '. `$PROFILE')" -ForegroundColor DarkGray
 }
 Write-Host ""

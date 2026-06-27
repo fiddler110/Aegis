@@ -73,6 +73,8 @@ func Register(reg *tool.Registry, opts Options) error {
 		&multieditTool{root: root, tracker: ft},
 		&globTool{root: root},
 		&grepTool{root: root},
+		&gitTool{root: root},
+		&gitCommitTool{root: root},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent},

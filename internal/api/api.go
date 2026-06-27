@@ -27,6 +27,18 @@ type SessionMeta struct {
 // PostMessageRequest sends a user turn into a session.
 type PostMessageRequest struct {
 	Text string `json:"text"`
+	// Images attaches images to the turn (vision-capable models only).
+	Images []ImageInput `json:"images,omitempty"`
+}
+
+// ImageInput attaches an image to a user turn. Provide either a Path (the daemon
+// reads and base64-encodes the file, detecting its media type) or inline base64
+// Data with an explicit MediaType. Path is convenient for the local TUI/CLI;
+// Data is for remote clients.
+type ImageInput struct {
+	Path      string `json:"path,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 // EventKind mirrors engine.EventKind on the wire.
@@ -34,6 +46,7 @@ type EventKind string
 
 const (
 	KindText            EventKind = "text"
+	KindThinking        EventKind = "thinking"
 	KindToolCall        EventKind = "tool_call"
 	KindToolResult      EventKind = "tool_result"
 	KindTurnDone        EventKind = "turn_done"
@@ -54,14 +67,20 @@ type Event struct {
 	OutputTokens int             `json:"output_tokens,omitempty"`
 	CostUSD      float64         `json:"cost_usd,omitempty"`
 	Error        string          `json:"error,omitempty"`
+	// Cache token usage (Anthropic prompt caching), surfaced for observability.
+	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 	// KindApprovalRequest fields
 	ApprovalReason string `json:"approval_reason,omitempty"`
+	ApprovalID     string `json:"approval_id,omitempty"` // run id to echo back when answering
 }
 
 // ApproveRequest is posted to /sessions/{id}/approve to answer a pending
-// approval request. Approved true lets the tool run; false denies it.
+// approval request. Approved true lets the tool run; false denies it. ID must
+// match the approval_id from the KindApprovalRequest event.
 type ApproveRequest struct {
-	Approved bool `json:"approved"`
+	Approved bool   `json:"approved"`
+	ID       string `json:"id,omitempty"`
 }
 
 // Teammate describes a sub-agent tracked by the swarm registry.
@@ -105,6 +124,41 @@ type CommandInfo struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Args        []string `json:"args"`
+}
+
+// CheckpointInfo describes a rewind point captured at the start of a turn.
+type CheckpointInfo struct {
+	ID        string    `json:"id"`
+	Seq       int       `json:"seq"`        // conversation message count at capture
+	Label     string    `json:"label"`      // the user prompt that began the turn
+	FileCount int       `json:"file_count"` // number of files snapshotted in the turn
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// RewindRequest restores a session to a checkpoint. Scope selects what to
+// restore: "code" (files only), "conversation" (messages only), or "both"
+// (default).
+type RewindRequest struct {
+	CheckpointID string `json:"checkpoint_id"`
+	Scope        string `json:"scope,omitempty"`
+}
+
+// RewindResponse reports the result of a rewind.
+type RewindResponse struct {
+	Scope         string `json:"scope"`
+	FilesRestored int    `json:"files_restored"`
+	MessagesKept  int    `json:"messages_kept"`
+}
+
+// RunInfo describes an in-flight message run, surfaced so concurrent parallel
+// sessions are observable.
+type RunInfo struct {
+	RunID     string    `json:"run_id"`
+	SessionID string    `json:"session_id"`
+	Title     string    `json:"title"`
+	StartedAt time.Time `json:"started_at"`
+	Tools     int       `json:"tools"`     // tool calls so far this run
+	LastKind  string    `json:"last_kind"` // most recent event kind
 }
 
 // ErrorResponse is the body returned for non-2xx responses.

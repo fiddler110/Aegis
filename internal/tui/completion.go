@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/scottymacleod/aegis/internal/api"
 )
@@ -38,6 +38,8 @@ var builtinCommands = []cmdEntry{
 	{"commands", "List custom commands"},
 	{"models", "Show current model info"},
 	{"session", "Show session info or list sessions"},
+	{"rewind", "List or restore checkpoints"},
+	{"share", "Export session to a shareable file"},
 	{"exit", "Exit Aegis"},
 }
 
@@ -50,6 +52,8 @@ var commandsNeedingArgs = map[string]bool{
 	"remember": true,
 	"help":     true,
 	"session":  true,
+	"rewind":   true,
+	"share":    true,
 }
 
 // allCommandEntries returns built-in commands followed by custom ones.
@@ -83,6 +87,28 @@ type completionState struct {
 
 const maxFileMatches = 50
 
+// refTypes are the non-file reference kinds offered in the @ popup. @image:
+// attaches an image (the daemon reads it); the others are textual references the
+// agent resolves with its tools (LSP diagnostics, web fetch, symbol search).
+var refTypes = []cmdEntry{
+	{name: "image:", desc: "Attach an image file (vision models)"},
+	{name: "diagnostics", desc: "Pull current LSP diagnostics"},
+	{name: "url:", desc: "Reference a URL to fetch"},
+	{name: "symbol:", desc: "Reference a code symbol to locate"},
+}
+
+// matchRefs returns ref-type entries whose keyword starts with query.
+func matchRefs(query string) []cmdEntry {
+	q := strings.ToLower(query)
+	var out []cmdEntry
+	for _, r := range refTypes {
+		if q == "" || strings.HasPrefix(r.name, q) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // computeCompletion derives popup state from the current textarea value.
 //
 //   - Slash command: active while the value is a single "/token" with no space.
@@ -94,8 +120,12 @@ func computeCompletion(value string, all []cmdEntry, files []string) completionS
 	}
 	if start := atTokenStart(value); start >= 0 {
 		query := value[start+1:]
-		if !strings.ContainsAny(query, " \t\n") {
-			if items := matchFiles(files, query); len(items) > 0 {
+		// Once the token carries a "ref:" value (e.g. @image:path), the user is
+		// typing the value freely — close the popup and don't suggest.
+		if !strings.ContainsAny(query, " \t\n") && !strings.Contains(query, ":") {
+			// Ref-type kinds (@image:, @diagnostics, …) lead, then file matches.
+			items := append(matchRefs(query), matchFiles(files, query)...)
+			if len(items) > 0 {
 				return completionState{active: true, kind: compFile, items: items, tokenStart: start}
 			}
 		}
@@ -236,7 +266,7 @@ func (c completionState) view(width int) string {
 			Render(fmt.Sprintf(" %d/%d ", page+1, totalPages))
 	}
 	sepW := max(width-lipgloss.Width(pageCtx), 0)
-	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", sepW)) + pageCtx
+	sep := lipgloss.NewStyle().Foreground(colSeparator).Render(strings.Repeat("─", sepW)) + pageCtx
 
 	// Build rows. Selected item gets a brand-coloured background spanning the
 	// full width so the highlight is instantly obvious without any extra

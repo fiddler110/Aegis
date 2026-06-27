@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Rendering budgets for tool activity in the transcript. These keep large
@@ -41,7 +41,7 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 	}
 	// Generic: tool name plus a compact one-line view of the input.
 	budget := max(width-len(name)-4, 20)
-	return th.tool.Render(fmt.Sprintf("⚙ %s  %s", name, truncate(oneLine(string(input)), budget)))
+	return th.tool.Render(fmt.Sprintf("● %s  %s", name, truncate(oneLine(string(input)), budget)))
 }
 
 // renderToolResult renders a finished tool call. Short, single-line results are
@@ -50,7 +50,7 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 func renderToolResult(th theme, name, result string, isErr bool, width int) string {
 	tag, style := "✓", th.tool
 	if isErr {
-		tag, style = "✗", th.toolErr
+		tag, style = "×", th.toolErr
 	}
 	result = strings.TrimRight(result, "\n")
 
@@ -68,6 +68,13 @@ func renderToolResult(th theme, name, result string, isErr bool, width int) stri
 // renderBlock renders text as an indented, gutter-marked block capped at max
 // lines, with a "… N more lines" footer when truncated.
 func renderBlock(th theme, text string, maxLines, width int) string {
+	// Raw terminal output (shell tools) may carry ANSI-16 colour codes. Remap
+	// them onto the on-brand palette and preserve them: in that case we skip the
+	// uniform toolBody foreground so the command's own colours show through.
+	colored := strings.IndexByte(text, 0x1b) >= 0
+	if colored {
+		text = remapANSI16(text, ansiPalette)
+	}
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	hidden := 0
 	if len(lines) > maxLines {
@@ -77,7 +84,11 @@ func renderBlock(th theme, text string, maxLines, width int) string {
 	gutter := th.toolGut.Render("│ ")
 	var b strings.Builder
 	for _, ln := range lines {
-		b.WriteString("  " + gutter + th.toolBody.Render(truncate(ln, max(width-6, 16))) + "\n")
+		body := truncate(ln, max(width-6, 16))
+		if !colored {
+			body = th.toolBody.Render(body)
+		}
+		b.WriteString("  " + gutter + body + "\n")
 	}
 	if hidden > 0 {
 		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("… %d more line(s)", hidden)) + "\n")
@@ -108,7 +119,7 @@ func diffLines(th theme, oldS, newS string, width, budget int) (lines []string, 
 // assembleDiff builds a tool header followed by an indented diff body.
 func assembleDiff(th theme, name, path string, lines []string, hidden int) string {
 	var b strings.Builder
-	b.WriteString(th.tool.Render("⚙ "+name+" ") + th.diffMeta.Render(path) + "\n")
+	b.WriteString(th.tool.Render("● "+name+" ") + th.diffMeta.Render(path) + "\n")
 	for _, ln := range lines {
 		b.WriteString("  " + ln + "\n")
 	}
@@ -152,7 +163,7 @@ func renderMultiEditDiff(th theme, name string, input json.RawMessage, width int
 		lines, hidden := diffLines(th, e.OldString, e.NewString, width, budget)
 		budget -= len(lines)
 		if i == 0 {
-			b.WriteString(th.tool.Render("⚙ "+name+" ") + th.diffMeta.Render(e.Path) + "\n")
+			b.WriteString(th.tool.Render("● "+name+" ") + th.diffMeta.Render(e.Path) + "\n")
 		} else {
 			b.WriteString("  " + th.diffMeta.Render(e.Path) + "\n")
 		}
@@ -186,7 +197,7 @@ func renderShellCall(th theme, name string, input json.RawMessage, width int) (s
 	if json.Unmarshal(input, &a) != nil || a.Command == "" {
 		return "", false
 	}
-	header := th.tool.Render("⚙ " + name)
+	header := th.tool.Render("● " + name)
 	if a.Background {
 		header += " " + th.diffMeta.Render("(background)")
 	}

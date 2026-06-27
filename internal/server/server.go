@@ -23,6 +23,7 @@ import (
 
 	"github.com/scottymacleod/aegis/internal/agentdef"
 	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/scottymacleod/aegis/internal/checkpoint"
 	"github.com/scottymacleod/aegis/internal/commands"
 	"github.com/scottymacleod/aegis/internal/compaction"
 	"github.com/scottymacleod/aegis/internal/config"
@@ -51,27 +52,30 @@ const maxRequestBody = 10 << 20 // 10 MiB
 
 // Server holds the daemon's shared state.
 type Server struct {
-	cfg        *config.Config
-	store      *session.Store
-	adapter    provider.Adapter
-	tools      *tool.Registry
-	memory     memory.Sources
-	compactor  engine.Compactor
-	hooks      engine.Hooks
-	mcpClients []*mcp.Client
-	swarm      swarm.Backend
-	swarmReg   *swarm.Registry
-	tasks      *task.Manager
-	cronSched  *cron.Scheduler
-	cronCancel context.CancelFunc
-	sandbox    sandbox.Backend
-	lspMgr     *lsp.Manager
-	audit      *hooks.Audit
-	cmdReg     *commands.Registry
-	workspace  string
-	logger     *slog.Logger
-	http       *http.Server
-	authToken  string // shared secret for API authentication
+	cfg         *config.Config
+	store       *session.Store
+	adapter     provider.Adapter
+	tools       *tool.Registry
+	memory      memory.Sources
+	compactor   engine.Compactor
+	hooks       engine.Hooks
+	mcpClients  []*mcp.Client
+	swarm       swarm.Backend
+	swarmReg    *swarm.Registry
+	tasks       *task.Manager
+	cronSched   *cron.Scheduler
+	cronCancel  context.CancelFunc
+	checkpoints *checkpoint.Store
+	fileTracker *filetracker.Tracker
+	runs        *runRegistry
+	sandbox     sandbox.Backend
+	lspMgr      *lsp.Manager
+	audit       *hooks.Audit
+	cmdReg      *commands.Registry
+	workspace   string
+	logger      *slog.Logger
+	http        *http.Server
+	authToken   string // shared secret for API authentication
 
 	// pendingApprovals maps session ID → chan bool for interactive approval.
 	// The channel is written by handleApprove and read by sseApprover.Approve.
@@ -80,9 +84,13 @@ type Server struct {
 
 // sseApprover implements permission.Approver by sending a KindApprovalRequest
 // SSE event and blocking until the client POSTs a /sessions/{id}/approve answer.
+// The runID is echoed to the client so the approval reply is matched to this
+// specific run, preventing a concurrent run on the same session from consuming
+// the answer.
 type sseApprover struct {
-	send func(api.Event)
-	ch   <-chan bool
+	send  func(api.Event)
+	ch    <-chan bool
+	runID string
 }
 
 func (a *sseApprover) Approve(ctx context.Context, toolName, reason string) bool {
@@ -90,6 +98,7 @@ func (a *sseApprover) Approve(ctx context.Context, toolName, reason string) bool
 		Kind:           api.KindApprovalRequest,
 		Tool:           toolName,
 		ApprovalReason: reason,
+		ApprovalID:     a.runID,
 	})
 	select {
 	case approved := <-a.ch:
@@ -112,7 +121,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	// A missing API key is not fatal: the daemon still serves session
 	// management and reports the error only when a turn is actually run.
-	adapter, err := providerfactory.Build(cfg)
+	adapter, err := providerfactory.Build(cfg, logger)
 	if err != nil {
 		logger.Warn("provider not ready; message runs will fail until configured", "err", err)
 		adapter = nil
@@ -125,6 +134,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 	taskMgr := task.NewManager(taskStore, logger)
+
+	// Checkpoint store shares the session database connection.
+	checkpointStore, err := checkpoint.NewStore(store.DB())
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -226,6 +242,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s := newWithDeps(cfg, logger, store, adapter, reg)
 	s.tasks = taskMgr
 	s.cronSched = cronSched
+	s.checkpoints = checkpointStore
+	s.fileTracker = ft
 	s.sandbox = sb
 	s.lspMgr = lspMgr
 	s.workspace = cwd
@@ -362,7 +380,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 // newWithDeps assembles a Server from explicit dependencies. It is the seam
 // used by tests to inject a mock adapter and an in-memory store.
 func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, adapter provider.Adapter, tools *tool.Registry) *Server {
-	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger}
+	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry()}
 	s.http = &http.Server{Addr: cfg.Server.Addr, Handler: s.routes()}
 	return s
 }
@@ -380,11 +398,16 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleApprove)
+	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
+	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
+	mux.HandleFunc("GET /runs", s.handleListRuns)
 	mux.HandleFunc("GET /teammates", s.handleListTeammates)
 	mux.HandleFunc("GET /commands", s.handleListCommands)
 	mux.HandleFunc("GET /memory", s.handleGetMemory)
 	mux.HandleFunc("POST /memory", s.handleAppendMemory)
 	mux.HandleFunc("GET /personas", s.handleListPersonas)
+	mux.HandleFunc("GET /ui", s.handleWebUI)
+	mux.HandleFunc("GET /ui/", s.handleWebUI)
 	return s.authMiddleware(s.originMiddleware(mux))
 }
 
@@ -563,6 +586,16 @@ func (s *Server) handleListTeammates(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleListRuns reports message runs currently in flight across all sessions,
+// so concurrent user-driven parallel sessions are observable.
+func (s *Server) handleListRuns(w http.ResponseWriter, _ *http.Request) {
+	out := []api.RunInfo{}
+	if s.runs != nil {
+		out = s.runs.list()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	metas, err := s.store.List(r.Context())
 	if err != nil {
@@ -587,10 +620,16 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Delete(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := s.store.Delete(r.Context(), id); err != nil {
 		s.logger.Error("delete session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	if s.checkpoints != nil {
+		if err := s.checkpoints.DeleteForSession(r.Context(), id); err != nil {
+			s.logger.Warn("delete session checkpoints", "session", id, "err", err)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -729,8 +768,14 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if strings.TrimSpace(req.Text) == "" {
-		writeError(w, http.StatusBadRequest, "text is required")
+	if strings.TrimSpace(req.Text) == "" && len(req.Images) == 0 {
+		writeError(w, http.StatusBadRequest, "text or images required")
+		return
+	}
+
+	imageBlocks, err := buildImageBlocks(req.Images)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -750,23 +795,67 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
+	// All writes to w (events + heartbeat) go through writeMu so the two
+	// goroutines never interleave a frame.
+	var writeMu sync.Mutex
 	send := func(ev api.Event) {
 		data, _ := json.Marshal(ev)
+		writeMu.Lock()
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, data)
 		flusher.Flush()
+		writeMu.Unlock()
 	}
 
-	// Register a per-run approval channel so handleApprove can unblock the
-	// engine when the TUI user answers a permission prompt.
+	// Heartbeat: emit an SSE comment periodically so idle long-running tool
+	// calls don't get dropped by intermediaries. The goroutine is joined before
+	// returning so it never writes to w after the handler exits.
+	hbCtx, hbCancel := context.WithCancel(r.Context())
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-t.C:
+				writeMu.Lock()
+				fmt.Fprint(w, ": ping\n\n")
+				flusher.Flush()
+				writeMu.Unlock()
+			}
+		}
+	}()
+	defer func() { hbCancel(); <-hbDone }()
+
+	// Register a per-run approval channel keyed by a unique run id so a
+	// concurrent run on the same session can't consume this run's answer.
+	runID := newRunID()
 	approvalCh := make(chan bool, 1)
-	s.pendingApprovals.Store(id, approvalCh)
-	defer s.pendingApprovals.Delete(id)
+	s.pendingApprovals.Store(runID, approvalCh)
+	defer s.pendingApprovals.Delete(runID)
+
+	// Track this run so concurrent parallel sessions are observable via /runs.
+	if s.runs != nil {
+		runTitle := sess.Title
+		if runTitle == "" {
+			runTitle = deriveTitle(req.Text)
+		}
+		s.runs.start(runID, id, runTitle)
+		defer s.runs.finish(runID)
+		baseSend := send
+		send = func(ev api.Event) {
+			s.runs.observe(runID, ev.Kind)
+			baseSend(ev)
+		}
+	}
 
 	var runApprover permission.Approver
 	if s.cfg.Permission.AutoApproveExec {
 		runApprover = permission.AutoApprove{}
 	} else {
-		runApprover = &sseApprover{send: send, ch: approvalCh}
+		runApprover = &sseApprover{send: send, ch: approvalCh, runID: runID}
 	}
 
 	eng, err := s.newEngine(sess.Mode, runApprover)
@@ -776,11 +865,32 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conv := &engine.Conversation{System: s.effectiveSystem(sess.System), Messages: sess.Messages}
-	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: req.Text}}})
+
+	// Create a checkpoint for this turn before appending the user message, so a
+	// rewind restores the conversation to just before this turn and undoes any
+	// file changes the turn makes. seq is the pre-turn message count.
+	var snap *checkpoint.Snapshotter
+	if s.checkpoints != nil {
+		if cp, err := s.checkpoints.Create(context.Background(), id, len(sess.Messages), req.Text); err != nil {
+			s.logger.Warn("create checkpoint", "session", id, "err", err)
+		} else {
+			snap = s.checkpoints.NewSnapshotter(cp.ID)
+		}
+	}
+
+	content := make([]provider.Block, 0, 1+len(imageBlocks))
+	if strings.TrimSpace(req.Text) != "" {
+		content = append(content, provider.TextBlock{Text: req.Text})
+	}
+	content = append(content, imageBlocks...)
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: content})
 
 	// Carry the session's permission mode so the `agent` tool can clamp any
 	// sub-agents it spawns to no more than this posture.
 	runCtx := swarm.WithParentMode(r.Context(), sess.Mode)
+	if snap != nil {
+		runCtx = checkpoint.WithSnapshotter(runCtx, snap)
+	}
 	runErr := eng.Run(runCtx, conv, func(ev engine.Event) {
 		send(toAPIEvent(ev))
 	})
@@ -797,20 +907,24 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleApprove answers a pending interactive approval request for a session.
-// The body must be {"approved": true|false}. Returns 204 on success, 404 if
-// no approval is pending, or 409 if the channel is already answered.
+// handleApprove answers a pending interactive approval request. The body must
+// be {"approved": bool, "id": "<run id from the approval event>"}. Returns 204
+// on success, 404 if no approval is pending for that run id, or 409 if it was
+// already answered.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	id := r.PathValue("id")
 	var req api.ApproveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	val, ok := s.pendingApprovals.Load(id)
+	if req.ID == "" {
+		writeError(w, http.StatusBadRequest, "approval id is required")
+		return
+	}
+	val, ok := s.pendingApprovals.Load(req.ID)
 	if !ok {
-		writeError(w, http.StatusNotFound, "no pending approval for session")
+		writeError(w, http.StatusNotFound, "no pending approval for run")
 		return
 	}
 	ch := val.(chan bool)
@@ -820,6 +934,125 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusConflict, "approval already answered or not yet requested")
 	}
+}
+
+// handleListCheckpoints returns the rewind points captured for a session, most
+// recent first.
+func (s *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
+	if s.checkpoints == nil {
+		writeJSON(w, http.StatusOK, []api.CheckpointInfo{})
+		return
+	}
+	cps, err := s.checkpoints.List(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.logger.Error("list checkpoints", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	out := make([]api.CheckpointInfo, 0, len(cps))
+	for _, cp := range cps {
+		out = append(out, api.CheckpointInfo{
+			ID:        cp.ID,
+			Seq:       cp.Seq,
+			Label:     cp.Label,
+			FileCount: cp.FileCount,
+			CreatedAt: cp.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRewind restores a session to a checkpoint. scope selects what to
+// restore: "code" (files only), "conversation" (messages only), or "both"
+// (default).
+func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	if s.checkpoints == nil {
+		writeError(w, http.StatusServiceUnavailable, "checkpointing not available")
+		return
+	}
+	id := r.PathValue("id")
+	var req api.RewindRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.CheckpointID == "" {
+		writeError(w, http.StatusBadRequest, "checkpoint_id is required")
+		return
+	}
+	scope := req.Scope
+	if scope == "" {
+		scope = "both"
+	}
+	if scope != "both" && scope != "code" && scope != "conversation" {
+		writeError(w, http.StatusBadRequest, "scope must be both, code, or conversation")
+		return
+	}
+
+	cp, err := s.checkpoints.Get(r.Context(), req.CheckpointID)
+	if err != nil {
+		if errors.Is(err, checkpoint.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "checkpoint not found")
+			return
+		}
+		s.logger.Error("get checkpoint", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if cp.SessionID != id {
+		writeError(w, http.StatusBadRequest, "checkpoint does not belong to this session")
+		return
+	}
+
+	resp := api.RewindResponse{Scope: scope}
+
+	if scope == "both" || scope == "code" {
+		n, err := s.checkpoints.RestoreFiles(r.Context(), cp.ID)
+		if err != nil {
+			s.logger.Warn("rewind: restore files", "checkpoint", cp.ID, "err", err)
+		}
+		resp.FilesRestored = n
+		// Clear file-staleness tracking: we rewrote files out of band, so the
+		// agent must re-read them rather than be blocked by a stale-mtime guard.
+		if s.fileTracker != nil {
+			s.fileTracker.Clear()
+		}
+	}
+
+	if scope == "both" || scope == "conversation" {
+		sess, err := s.store.Get(r.Context(), id)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		keep := cp.Seq
+		if keep < 0 {
+			keep = 0
+		}
+		if keep > len(sess.Messages) {
+			keep = len(sess.Messages)
+		}
+		if err := s.store.SaveMessages(r.Context(), id, sess.Messages[:keep]); err != nil {
+			s.logger.Error("rewind: save truncated messages", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		resp.MessagesKept = keep
+	} else if sess, err := s.store.Get(r.Context(), id); err == nil {
+		resp.MessagesKept = len(sess.Messages)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// newRunID returns a short random identifier for a single message run.
+func newRunID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("run-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // effectiveSystem combines the session's base system prompt with loaded
@@ -864,6 +1097,8 @@ func toAPIEvent(ev engine.Event) api.Event {
 	if ev.Usage != nil {
 		out.InputTokens = ev.Usage.InputTokens
 		out.OutputTokens = ev.Usage.OutputTokens
+		out.CacheReadTokens = ev.Usage.CacheReadTokens
+		out.CacheCreationTokens = ev.Usage.CacheCreationTokens
 	}
 	out.CostUSD = ev.CostUSD
 	return out
@@ -978,7 +1213,10 @@ func generateAndWriteToken(path string) (string, error) {
 // /healthz. Requests without a valid token receive 401.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		// /healthz is public; the web UI page itself is served without a token
+		// (a browser navigation can't send one) and injects the token for its
+		// own API calls, which remain authenticated.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") {
 			next.ServeHTTP(w, r)
 			return
 		}

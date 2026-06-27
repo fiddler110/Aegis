@@ -20,6 +20,18 @@ func TestPricingForLongestPrefix(t *testing.T) {
 	}
 }
 
+func TestPricingForVendorPrefixed(t *testing.T) {
+	// OpenRouter-style ids resolve via the segment after the final "/".
+	p, ok := PricingFor("openai/gpt-4o")
+	if !ok || p.Input != 2.50 {
+		t.Errorf("openai/gpt-4o pricing = %+v ok=%v", p, ok)
+	}
+	p, ok = PricingFor("meta-llama/llama-3.3-70b-instruct")
+	if !ok || p.Input != 0.59 {
+		t.Errorf("llama pricing = %+v ok=%v", p, ok)
+	}
+}
+
 func TestCostUSD(t *testing.T) {
 	p := Pricing{Input: 15, Output: 75, CacheWrite: 18.75, CacheRead: 1.50}
 	u := provider.Usage{

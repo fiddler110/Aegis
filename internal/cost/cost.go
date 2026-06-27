@@ -32,14 +32,44 @@ var catalog = map[string]Pricing{
 	"claude-3-opus": {Input: 15, Output: 75, CacheWrite: 18.75, CacheRead: 1.50},
 
 	// OpenAI (USD / Mtok); cache read where applicable, no separate write rate.
-	"gpt-4o-mini": {Input: 0.15, Output: 0.60, CacheRead: 0.075},
-	"gpt-4o":      {Input: 2.50, Output: 10, CacheRead: 1.25},
-	"gpt-4.1":     {Input: 2, Output: 8, CacheRead: 0.50},
-	"o3":          {Input: 2, Output: 8, CacheRead: 0.50},
+	"gpt-4o-mini":  {Input: 0.15, Output: 0.60, CacheRead: 0.075},
+	"gpt-4o":       {Input: 2.50, Output: 10, CacheRead: 1.25},
+	"gpt-4.1-nano": {Input: 0.10, Output: 0.40, CacheRead: 0.025},
+	"gpt-4.1-mini": {Input: 0.40, Output: 1.60, CacheRead: 0.10},
+	"gpt-4.1":      {Input: 2, Output: 8, CacheRead: 0.50},
+	"gpt-4-turbo":  {Input: 10, Output: 30},
+	"o3-mini":      {Input: 1.10, Output: 4.40, CacheRead: 0.55},
+	"o3":           {Input: 2, Output: 8, CacheRead: 0.50},
+	"o1-mini":      {Input: 1.10, Output: 4.40, CacheRead: 0.55},
+	"o1":           {Input: 15, Output: 60, CacheRead: 7.50},
+
+	// Google Gemini (USD / Mtok); approximate list prices.
+	"gemini-2.0-flash": {Input: 0.10, Output: 0.40},
+	"gemini-1.5-flash": {Input: 0.075, Output: 0.30},
+	"gemini-1.5-pro":   {Input: 1.25, Output: 5},
+
+	// Groq (USD / Mtok); open models served cheaply.
+	"llama-3.3-70b": {Input: 0.59, Output: 0.79},
+	"llama-3.1-8b":  {Input: 0.05, Output: 0.08},
+	"mixtral-8x7b":  {Input: 0.24, Output: 0.24},
+	"gemma2-9b":     {Input: 0.20, Output: 0.20},
 }
 
-// PricingFor returns the pricing for a model id and whether it was found.
+// PricingFor returns the pricing for a model id and whether it was found. It
+// uses longest-prefix matching, and for vendor-prefixed ids (e.g. OpenRouter's
+// "openai/gpt-4o" or "meta-llama/llama-3.3-70b-instruct") it retries against the
+// segment after the final "/".
 func PricingFor(model string) (Pricing, bool) {
+	if p, ok := matchPrefix(model); ok {
+		return p, true
+	}
+	if i := strings.LastIndex(model, "/"); i >= 0 && i+1 < len(model) {
+		return matchPrefix(model[i+1:])
+	}
+	return Pricing{}, false
+}
+
+func matchPrefix(model string) (Pricing, bool) {
 	var (
 		best    Pricing
 		bestLen int
