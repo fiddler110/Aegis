@@ -395,7 +395,7 @@ func (w *wizardModel) saveCmd() tea.Cmd {
 // ─── View ─────────────────────────────────────────────────────────────────────
 
 func (w *wizardModel) view() string {
-	header := w.th.brandLabel.Render(" ⬡ AEGIS ") + "  " +
+	header := renderBrandMark() + " " +
 		w.th.statusDim.Render("Configuration Wizard") + "\n\n"
 
 	var body string
