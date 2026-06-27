@@ -145,6 +145,9 @@ func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
 			if text != "" {
 				wm.Content = text
 			}
+			if wm.Content == nil && len(wm.ToolCalls) == 0 {
+				continue // skip empty assistant turns (e.g. model returned nothing)
+			}
 			out = append(out, wm)
 		case provider.RoleUser:
 			// Tool results become separate tool-role messages; text + images
