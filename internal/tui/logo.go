@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -47,6 +48,14 @@ func renderAegisLogo() []string {
 		out[i] = frame.Render(line)
 	}
 	return out
+}
+
+// barLabel renders a message role label (e.g. "You", "Assistant") preceded by a
+// coloured left bar — Aegis's adaptation of Crush's ▌ message accent. The bar
+// sits on the short, non-wrapping label line so it survives transcript re-wrap.
+func barLabel(label string, c color.Color) string {
+	st := lipgloss.NewStyle().Foreground(c).Bold(true)
+	return st.Render("▌ ") + st.Render(label)
 }
 
 // renderBrandMark returns the compact title-bar wordmark: an accent bar followed
