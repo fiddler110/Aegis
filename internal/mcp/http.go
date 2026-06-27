@@ -20,9 +20,9 @@ const maxMCPResponseBytes = 16 << 20 // 16 MiB
 // on every request; pass empty string to omit the Authorization header.
 func NewHTTP(ctx context.Context, server, endpoint, auth string) (*Client, error) {
 	transport := &httpTransport{
-		endpoint:  strings.TrimRight(endpoint, "/"),
-		client:    &http.Client{Timeout: 30 * time.Second},
-		auth:      auth,
+		endpoint: strings.TrimRight(endpoint, "/"),
+		client:   &http.Client{Timeout: 30 * time.Second},
+		auth:     auth,
 	}
 	// SSE event stream for server→client messages.
 	sseReader, sseWriter := io.Pipe()

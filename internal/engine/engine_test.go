@@ -32,7 +32,7 @@ func (s *scriptedAdapter) Stream(ctx context.Context, req provider.Request) (<-c
 // echoTool returns its "msg" argument back as text.
 type echoTool struct{ called int }
 
-func (e *echoTool) Name() string                { return "echo" }
+func (e *echoTool) Name() string                 { return "echo" }
 func (e *echoTool) Description() string          { return "echo the msg argument" }
 func (e *echoTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (e *echoTool) Capability() tool.Capability  { return tool.CapRead }
@@ -210,4 +210,3 @@ func TestRunInterrupt(t *testing.T) {
 		t.Errorf("err = %v, want ErrInterrupted", err)
 	}
 }
-

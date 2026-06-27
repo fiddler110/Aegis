@@ -338,8 +338,8 @@ func (t *latexNewDocumentTool) Execute(ctx context.Context, input json.RawMessag
 // docParams collects template generation arguments.
 type docParams struct {
 	title, author, date, abstract string
-	style, compiler, pageSize      string
-	sections                       []string
+	style, compiler, pageSize     string
+	sections                      []string
 }
 
 // buildLatexDocument generates the complete .tex source for the requested

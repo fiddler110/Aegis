@@ -123,7 +123,7 @@ func (w *wizardModel) buildProviderForm() *huh.Form {
 				Description("Choose your provider. Change any time with /config.").
 				Options(opts...).
 				Value(&w.presetLabel).
-				Height(len(wPresets)+2),
+				Height(len(wPresets) + 2),
 		),
 	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
 }

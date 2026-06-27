@@ -14,6 +14,9 @@
 #
 # Usage:
 #   chmod +x build-macos.sh && ./build-macos.sh
+#   ./build-macos.sh 1        # build only
+#   ./build-macos.sh 2        # shell config only
+#   ./build-macos.sh all      # both actions
 
 set -uo pipefail
 
@@ -159,11 +162,15 @@ echo ""
 divider
 echo ""
 
-# ─── Prompt ────────────────────────────────────────────────────────────────────
-printf "  Run which actions? [all / 1 2 / none]  (default: all): "
-read -r SELECTION || SELECTION="all"
-SELECTION="${SELECTION:-all}"
-SELECTION=$(echo "${SELECTION}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${SELECTION}")
+# ─── Prompt (or use supplied argument) ────────────────────────────────────────
+if [ -n "${1:-}" ]; then
+    SELECTION=$(echo "${1}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${1}")
+else
+    printf "  Run which actions? [all / 1 2 / none]  (default: all): "
+    read -r SELECTION || SELECTION="all"
+    SELECTION="${SELECTION:-all}"
+    SELECTION=$(echo "${SELECTION}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${SELECTION}")
+fi
 
 RUN_BUILD=false
 RUN_ALIAS=false
@@ -188,7 +195,9 @@ if [ "${RUN_BUILD}" = true ]; then
     header "[1] Building aegis ${VERSION}..."
 
     LDFLAGS="-s -w -X github.com/scottymacleod/aegis/internal/cli.Version=${VERSION}"
-    go build -ldflags "${LDFLAGS}" -o ./aegis ./cmd/aegis
+    if ! go build -ldflags "${LDFLAGS}" -o ./aegis ./cmd/aegis; then
+        echo "Build failed." >&2; exit 1
+    fi
 
     # Remove any stale binary found at a different PATH location.
     if [ -n "${EXISTING_BIN}" ]; then

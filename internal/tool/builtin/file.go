@@ -25,7 +25,7 @@ type readTool struct {
 	tracker *filetracker.Tracker
 }
 
-func (t *readTool) Name() string               { return "read_file" }
+func (t *readTool) Name() string                { return "read_file" }
 func (t *readTool) Capability() tool.Capability { return tool.CapRead }
 func (t *readTool) Description() string {
 	return "Read a UTF-8 text file from the workspace. Returns the file contents with 1-based line numbers."

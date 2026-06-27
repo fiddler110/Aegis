@@ -94,14 +94,14 @@ type wireTool struct {
 }
 
 type wireRequest struct {
-	Model         string                 `json:"model"`
-	Messages      []wireMessage          `json:"messages"`
-	Tools         []wireTool             `json:"tools,omitempty"`
-	MaxTokens     int                    `json:"max_tokens,omitempty"`
-	Temperature   *float64               `json:"temperature,omitempty"`
-	Stream        bool                   `json:"stream"`
-	StreamOptions map[string]any         `json:"stream_options,omitempty"`
-	Think         *bool                  `json:"think,omitempty"` // Ollama extended-thinking control
+	Model         string         `json:"model"`
+	Messages      []wireMessage  `json:"messages"`
+	Tools         []wireTool     `json:"tools,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	Stream        bool           `json:"stream"`
+	StreamOptions map[string]any `json:"stream_options,omitempty"`
+	Think         *bool          `json:"think,omitempty"` // Ollama extended-thinking control
 }
 
 // translate converts harness messages to chat-completions messages.

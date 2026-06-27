@@ -160,6 +160,12 @@ func (c *Client) ListPersonas(ctx context.Context) ([]api.PersonaInfo, error) {
 	return out, nil
 }
 
+// SendApproval answers a pending interactive approval request for the given
+// session. approved=true lets the tool run; false denies it.
+func (c *Client) SendApproval(ctx context.Context, sessionID string, approved bool) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve", api.ApproveRequest{Approved: approved}, nil)
+}
+
 // PostMessage streams engine events for a user turn. Events are delivered on
 // the returned channel, which is closed when the run finishes or ctx is done.
 func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.Event, error) {

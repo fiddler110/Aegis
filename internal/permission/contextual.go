@@ -23,13 +23,23 @@ import (
 //     write/encode).
 //   - NetworkAllowList: CapNetwork calls are checked against an allowlist of
 //     domains. Calls to unlisted domains are denied.
+//
+// IMPORTANT — scope and limits: these rules operate at the tool-capability
+// layer and only constrain tools the gate can classify, i.e. tools that declare
+// CapNetwork/CapWrite and expose a parseable URL. They do NOT constrain the
+// shell/exec tool (CapExecute): a command like `curl`, `wget`, or `nc` performs
+// its own egress and can read-network-then-write in a single invocation,
+// entirely bypassing both rules. NetworkAllowList and EgressThenWrite are
+// therefore fetch-layer controls, not a system-wide egress firewall. For a hard
+// guarantee, run the agent with the container sandbox backend and enforce
+// network policy there (e.g. `--network none` or an egress proxy).
 type ContextualGate struct {
 	base            Gate
-	registry        ToolRegistry      // look up tool capability by name
+	registry        ToolRegistry // look up tool capability by name
 	mu              sync.Mutex
-	networkUsed     bool              // true after any CapNetwork call succeeds
-	egressThenWrite bool              // enable the egress→write rule
-	allowList       map[string]bool   // normalized domain allowlist; nil = no restriction
+	networkUsed     bool                     // true after any CapNetwork call succeeds
+	egressThenWrite bool                     // enable the egress→write rule
+	allowList       map[string]bool          // normalized domain allowlist; nil = no restriction
 	onDecision      func(ContextualDecision) // optional observer (for audit)
 }
 

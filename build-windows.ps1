@@ -233,7 +233,7 @@ if ($RunAlias) {
 function aegis-config {
     `$cfg = "`$env:APPDATA\aegis\config.yaml"
     if (-not (Test-Path `$cfg)) {
-        Write-Warning "Config not found at `$cfg — run: aegis --first-init"
+        Write-Warning "Config not found at `$cfg - run: aegis --first-init"
         return
     }
 $editorBlock}

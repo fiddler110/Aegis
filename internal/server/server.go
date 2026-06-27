@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scottymacleod/aegis/internal/agentdef"
@@ -25,8 +26,8 @@ import (
 	"github.com/scottymacleod/aegis/internal/commands"
 	"github.com/scottymacleod/aegis/internal/compaction"
 	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/cron"
 	"github.com/scottymacleod/aegis/internal/cost"
+	"github.com/scottymacleod/aegis/internal/cron"
 	"github.com/scottymacleod/aegis/internal/engine"
 	"github.com/scottymacleod/aegis/internal/filetracker"
 	"github.com/scottymacleod/aegis/internal/hooks"
@@ -36,9 +37,9 @@ import (
 	"github.com/scottymacleod/aegis/internal/permission"
 	"github.com/scottymacleod/aegis/internal/persona"
 	"github.com/scottymacleod/aegis/internal/plugins"
-	"github.com/scottymacleod/aegis/internal/sandbox"
 	"github.com/scottymacleod/aegis/internal/provider"
 	"github.com/scottymacleod/aegis/internal/providerfactory"
+	"github.com/scottymacleod/aegis/internal/sandbox"
 	"github.com/scottymacleod/aegis/internal/session"
 	"github.com/scottymacleod/aegis/internal/swarm"
 	"github.com/scottymacleod/aegis/internal/task"
@@ -71,6 +72,31 @@ type Server struct {
 	logger     *slog.Logger
 	http       *http.Server
 	authToken  string // shared secret for API authentication
+
+	// pendingApprovals maps session ID → chan bool for interactive approval.
+	// The channel is written by handleApprove and read by sseApprover.Approve.
+	pendingApprovals sync.Map
+}
+
+// sseApprover implements permission.Approver by sending a KindApprovalRequest
+// SSE event and blocking until the client POSTs a /sessions/{id}/approve answer.
+type sseApprover struct {
+	send func(api.Event)
+	ch   <-chan bool
+}
+
+func (a *sseApprover) Approve(ctx context.Context, toolName, reason string) bool {
+	a.send(api.Event{
+		Kind:           api.KindApprovalRequest,
+		Tool:           toolName,
+		ApprovalReason: reason,
+	})
+	select {
+	case approved := <-a.ch:
+		return approved
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // New constructs a daemon from config. The workspace root for tools is the
@@ -179,6 +205,22 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			})
 		}
 		plugins.RegisterProcessTools(reg, pluginConfigs, logger)
+	}
+
+	// Security posture warnings. These are easy to misconfigure in ways that
+	// silently weaken isolation, so surface them loudly at startup.
+	if _, isLocal := sb.(*sandbox.LocalBackend); isLocal {
+		if cfg.Permission.Mode == string(permission.ModeAuto) && !cfg.Permission.AutoApproveExec {
+			logger.Warn("permission mode 'auto' with the local sandbox runs model-issued shell commands directly on the host with no approval; use the container sandbox backend or 'build' mode for untrusted work")
+		}
+		if cfg.Permission.AutoApproveExec {
+			logger.Warn("auto_approve_exec is enabled with the local sandbox: every shell command runs on the host without prompting")
+		}
+	}
+	if cfg.Security.EgressThenWrite || len(cfg.Security.NetworkAllowList) > 0 {
+		if _, ok := reg.Get("shell"); ok {
+			logger.Warn("network security policy (egress_then_write / network_allowlist) does not constrain the shell tool; commands such as curl/wget/nc bypass it — enforce egress with the container sandbox for a hard guarantee")
+		}
 	}
 
 	s := newWithDeps(cfg, logger, store, adapter, reg)
@@ -337,6 +379,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /sessions/{id}", s.handleUpdateSession)
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
+	mux.HandleFunc("POST /sessions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("GET /teammates", s.handleListTeammates)
 	mux.HandleFunc("GET /commands", s.handleListCommands)
 	mux.HandleFunc("GET /memory", s.handleGetMemory)
@@ -425,11 +468,14 @@ func (s *Server) providerUnconfiguredErr() error {
 	}
 }
 
-func (s *Server) newEngine(mode string) (*engine.Engine, error) {
+func (s *Server) newEngine(mode string, approver permission.Approver) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, s.providerUnconfiguredErr()
 	}
-	baseGate := permission.New(permission.ParseMode(mode), s.approver())
+	if approver == nil {
+		approver = s.approver()
+	}
+	baseGate := permission.New(permission.ParseMode(mode), approver)
 
 	var gate engine.Gate = baseGate
 	engineHooks := s.hooks
@@ -710,7 +756,20 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	eng, err := s.newEngine(sess.Mode)
+	// Register a per-run approval channel so handleApprove can unblock the
+	// engine when the TUI user answers a permission prompt.
+	approvalCh := make(chan bool, 1)
+	s.pendingApprovals.Store(id, approvalCh)
+	defer s.pendingApprovals.Delete(id)
+
+	var runApprover permission.Approver
+	if s.cfg.Permission.AutoApproveExec {
+		runApprover = permission.AutoApprove{}
+	} else {
+		runApprover = &sseApprover{send: send, ch: approvalCh}
+	}
+
+	eng, err := s.newEngine(sess.Mode, runApprover)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
@@ -735,6 +794,31 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if runErr != nil {
 		s.logger.Warn("run ended with error", "session", id, "err", runErr)
+	}
+}
+
+// handleApprove answers a pending interactive approval request for a session.
+// The body must be {"approved": true|false}. Returns 204 on success, 404 if
+// no approval is pending, or 409 if the channel is already answered.
+func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	id := r.PathValue("id")
+	var req api.ApproveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	val, ok := s.pendingApprovals.Load(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no pending approval for session")
+		return
+	}
+	ch := val.(chan bool)
+	select {
+	case ch <- req.Approved:
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusConflict, "approval already answered or not yet requested")
 	}
 }
 

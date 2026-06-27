@@ -15,8 +15,8 @@ import (
 type shellTool struct {
 	root       string
 	timeoutSec int
-	mgr        *task.Manager    // optional; enables background:true
-	sb         sandbox.Backend  // optional; nil = inline local exec (legacy path)
+	mgr        *task.Manager   // optional; enables background:true
+	sb         sandbox.Backend // optional; nil = inline local exec (legacy path)
 }
 
 func newShellTool(root string, timeoutSec int, mgr *task.Manager, sb sandbox.Backend) *shellTool {

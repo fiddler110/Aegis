@@ -117,8 +117,8 @@ func TestRegisterProcessTools(t *testing.T) {
 	reg := tool.NewRegistry()
 	configs := []ProcessToolConfig{
 		{Name: "tool-a", Command: "echo", Description: "test tool A"},
-		{Name: "", Command: "echo"}, // skipped: no name
-		{Name: "tool-b", Command: ""},  // skipped: no command
+		{Name: "", Command: "echo"},   // skipped: no name
+		{Name: "tool-b", Command: ""}, // skipped: no command
 		{Name: "tool-c", Command: "echo", Description: "test tool C"},
 	}
 	RegisterProcessTools(reg, configs, nil)

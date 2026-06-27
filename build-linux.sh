@@ -183,7 +183,9 @@ if [ "${RUN_BUILD}" = true ]; then
     header "[1] Building aegis ${VERSION}..."
 
     LDFLAGS="-s -w -X github.com/scottymacleod/aegis/internal/cli.Version=${VERSION}"
-    go build -ldflags "${LDFLAGS}" -o ./aegis ./cmd/aegis
+    if ! go build -ldflags "${LDFLAGS}" -o ./aegis ./cmd/aegis; then
+        echo "Build failed." >&2; exit 1
+    fi
 
     # Remove any stale binary found at a different PATH location.
     if [ -n "${EXISTING_BIN}" ]; then

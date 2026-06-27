@@ -32,7 +32,7 @@ func TestComputeCompletion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeCompletion(tt.value, all)
+			got := computeCompletion(tt.value, all, nil)
 			if got.active != tt.wantActive {
 				t.Fatalf("active = %v, want %v (items=%v)", got.active, tt.wantActive, names(got.items))
 			}
@@ -50,7 +50,7 @@ func TestComputeCompletion(t *testing.T) {
 
 func TestComputeCompletionDescSubstring(t *testing.T) {
 	// "transcript" appears in the description of /clear but not its name.
-	got := computeCompletion("/transcript", builtinCommands)
+	got := computeCompletion("/transcript", builtinCommands, nil)
 	if !got.active {
 		t.Fatalf("expected active for description substring match")
 	}
@@ -59,8 +59,50 @@ func TestComputeCompletionDescSubstring(t *testing.T) {
 	}
 }
 
+func TestFileCompletion(t *testing.T) {
+	files := []string{"internal/tui/tui.go", "internal/tui/theme.go", "README.md"}
+
+	tests := []struct {
+		name       string
+		value      string
+		wantActive bool
+		wantKind   completionKind
+		wantFirst  string
+		wantStart  int
+	}{
+		{"bare at lists files", "@", true, compFile, "internal/tui/tui.go", 0},
+		{"base-name prefix", "@theme", true, compFile, "internal/tui/theme.go", 0},
+		{"path prefix", "@internal/tui/tu", true, compFile, "internal/tui/tui.go", 0},
+		{"mid-sentence mention", "look at @README", true, compFile, "README.md", 8},
+		{"at without whitespace before is inactive", "foo@bar", false, compSlash, "", 0},
+		{"completed mention closes", "@README.md ", false, compSlash, "", 0},
+		{"no file match inactive", "@zzzz", false, compSlash, "", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeCompletion(tt.value, builtinCommands, files)
+			if got.active != tt.wantActive {
+				t.Fatalf("active = %v, want %v", got.active, tt.wantActive)
+			}
+			if !tt.wantActive {
+				return
+			}
+			if got.kind != tt.wantKind {
+				t.Errorf("kind = %v, want %v", got.kind, tt.wantKind)
+			}
+			if got.items[0].name != tt.wantFirst {
+				t.Errorf("first = %q, want %q (all=%v)", got.items[0].name, tt.wantFirst, names(got.items))
+			}
+			if got.tokenStart != tt.wantStart {
+				t.Errorf("tokenStart = %d, want %d", got.tokenStart, tt.wantStart)
+			}
+		})
+	}
+}
+
 func TestCompletionMoveWraps(t *testing.T) {
-	c := computeCompletion("/", builtinCommands)
+	c := computeCompletion("/", builtinCommands, nil)
 	n := len(c.items)
 	c.move(-1)
 	if c.selected != n-1 {

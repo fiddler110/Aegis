@@ -13,10 +13,10 @@ import (
 
 // Summarizer implements engine.Compactor.
 type Summarizer struct {
-	adapter      provider.Adapter
-	model        string
-	maxBudget    int // approximate token budget that triggers compaction
-	keepRecent   int // minimum number of trailing messages kept verbatim
+	adapter       provider.Adapter
+	model         string
+	maxBudget     int // approximate token budget that triggers compaction
+	keepRecent    int // minimum number of trailing messages kept verbatim
 	summaryTokens int
 }
 

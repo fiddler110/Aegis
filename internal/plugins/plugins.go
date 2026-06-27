@@ -24,8 +24,8 @@ type ProcessToolConfig struct {
 	Command     string          `koanf:"command"`
 	Args        []string        `koanf:"args"`
 	InputSchema json.RawMessage `koanf:"input_schema"` // JSON Schema for the tool's input
-	Capability  string          `koanf:"capability"`    // "read", "write", "execute", "network"; default "execute"
-	TimeoutSec  int             `koanf:"timeout_sec"`   // per-invocation timeout; default 30
+	Capability  string          `koanf:"capability"`   // "read", "write", "execute", "network"; default "execute"
+	TimeoutSec  int             `koanf:"timeout_sec"`  // per-invocation timeout; default 30
 }
 
 // processTool adapts an external command to the tool.Tool interface.

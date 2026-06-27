@@ -33,26 +33,35 @@ type PostMessageRequest struct {
 type EventKind string
 
 const (
-	KindText       EventKind = "text"
-	KindToolCall   EventKind = "tool_call"
-	KindToolResult EventKind = "tool_result"
-	KindTurnDone   EventKind = "turn_done"
-	KindDone       EventKind = "done"
-	KindError      EventKind = "error"
+	KindText            EventKind = "text"
+	KindToolCall        EventKind = "tool_call"
+	KindToolResult      EventKind = "tool_result"
+	KindTurnDone        EventKind = "turn_done"
+	KindDone            EventKind = "done"
+	KindError           EventKind = "error"
+	KindApprovalRequest EventKind = "approval_request" // engine awaiting user approval
 )
 
 // Event is one server-sent event during a message run.
 type Event struct {
-	Kind        EventKind       `json:"kind"`
-	Text        string          `json:"text,omitempty"`
-	Tool        string          `json:"tool,omitempty"`
-	ToolInput   json.RawMessage `json:"tool_input,omitempty"`
-	ToolResult  string          `json:"tool_result,omitempty"`
-	ToolIsError bool            `json:"tool_is_error,omitempty"`
+	Kind         EventKind       `json:"kind"`
+	Text         string          `json:"text,omitempty"`
+	Tool         string          `json:"tool,omitempty"`
+	ToolInput    json.RawMessage `json:"tool_input,omitempty"`
+	ToolResult   string          `json:"tool_result,omitempty"`
+	ToolIsError  bool            `json:"tool_is_error,omitempty"`
 	InputTokens  int             `json:"input_tokens,omitempty"`
 	OutputTokens int             `json:"output_tokens,omitempty"`
 	CostUSD      float64         `json:"cost_usd,omitempty"`
 	Error        string          `json:"error,omitempty"`
+	// KindApprovalRequest fields
+	ApprovalReason string `json:"approval_reason,omitempty"`
+}
+
+// ApproveRequest is posted to /sessions/{id}/approve to answer a pending
+// approval request. Approved true lets the tool run; false denies it.
+type ApproveRequest struct {
+	Approved bool `json:"approved"`
 }
 
 // Teammate describes a sub-agent tracked by the swarm registry.

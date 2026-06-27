@@ -14,17 +14,17 @@ import (
 // ServerConfig configures one LSP server.
 type ServerConfig struct {
 	Name       string   `koanf:"name"`       // e.g. "gopls", "pyright"
-	Command    string   `koanf:"command"`     // executable to launch
-	Args       []string `koanf:"args"`        // CLI arguments
-	Extensions []string `koanf:"extensions"`  // file extensions this server handles (e.g. [".go"])
+	Command    string   `koanf:"command"`    // executable to launch
+	Args       []string `koanf:"args"`       // CLI arguments
+	Extensions []string `koanf:"extensions"` // file extensions this server handles (e.g. [".go"])
 }
 
 // Manager owns LSP server lifecycles and routes requests to the right server
 // based on file extension.
 type Manager struct {
 	mu      sync.RWMutex
-	servers map[string]*Client           // name → client
-	extMap  map[string]*Client           // ".go" → client
+	servers map[string]*Client // name → client
+	extMap  map[string]*Client // ".go" → client
 	rootURI string
 	logger  *slog.Logger
 }

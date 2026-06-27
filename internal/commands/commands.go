@@ -16,9 +16,9 @@ import (
 type Command struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
-	Args        []string `json:"args"`        // named placeholders (e.g. ["file", "query"])
-	Body        string   `json:"body"`        // the prompt template
-	Source      string   `json:"source"`      // file path it was loaded from
+	Args        []string `json:"args"`   // named placeholders (e.g. ["file", "query"])
+	Body        string   `json:"body"`   // the prompt template
+	Source      string   `json:"source"` // file path it was loaded from
 }
 
 // Expand replaces {{arg}} placeholders in the body with the given values.
