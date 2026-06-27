@@ -14,9 +14,9 @@ import (
 
 // Options controls logger construction.
 type Options struct {
-	Level   string // "debug", "info", "warn", "error"
-	Path    string // log file path; empty means stderr
-	ToStderr bool  // also mirror logs to stderr (useful for `serve` in foreground)
+	Level    string // "debug", "info", "warn", "error"
+	Path     string // log file path; empty means stderr
+	ToStderr bool   // also mirror logs to stderr (useful for `serve` in foreground)
 }
 
 // New builds a *slog.Logger and returns it along with a closer for the

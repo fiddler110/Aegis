@@ -27,10 +27,10 @@ func Execute() error {
 
 func newRootCmd() *cobra.Command {
 	var (
-		mode       string
-		resume     string
-		persona    string
-		firstInit  bool
+		mode        string
+		resume      string
+		persona     string
+		firstInit   bool
 		initProject bool
 	)
 
@@ -101,13 +101,15 @@ func newRootCmd() *cobra.Command {
 			}
 
 			cwd, _ := os.Getwd()
-			return tui.Run(tui.Config{
+			runErr := tui.Run(tui.Config{
 				Client:    cl,
 				SessionID: sessionID,
 				Mode:      resolvedMode,
 				Model:     cfg.Provider.Model,
 				WorkDir:   cwd,
 			})
+			unloadOllamaModel(cfg)
+			return runErr
 		},
 	}
 

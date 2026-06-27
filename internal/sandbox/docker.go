@@ -156,10 +156,23 @@ func (c *ContainerBackend) ociRunArgs(command string, opts ExecOpts) []string {
 		args = append(args, "--network", "none")
 	}
 	if opts.Dir != "" {
-		args = append(args, "-v", opts.Dir+":/workspace", "-w", "/workspace")
+		args = append(args, "-v", hostPathForMount(opts.Dir)+":/workspace", "-w", "/workspace")
 	}
 	args = append(args, c.image, "/bin/sh", "-c", command)
 	return args
+}
+
+// hostPathForMount converts a host directory path to the format expected by
+// Docker/Podman's -v flag. On Windows, C:\foo\bar becomes /c/foo/bar.
+func hostPathForMount(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	if len(p) >= 2 && p[1] == ':' {
+		p = "/" + strings.ToLower(string(p[0])) + p[2:]
+	}
+	return p
 }
 
 // appleContainerArgs builds arguments for Apple Containers CLI. Apple

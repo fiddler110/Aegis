@@ -13,7 +13,7 @@ type fakeTool struct {
 	cap  tool.Capability
 }
 
-func (f fakeTool) Name() string                { return f.name }
+func (f fakeTool) Name() string                 { return f.name }
 func (f fakeTool) Description() string          { return "" }
 func (f fakeTool) InputSchema() json.RawMessage { return json.RawMessage(`{}`) }
 func (f fakeTool) Capability() tool.Capability  { return f.cap }

@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scottymacleod/aegis/internal/api"
 	"github.com/scottymacleod/aegis/internal/client"
@@ -88,18 +89,46 @@ type model struct {
 	streamStart time.Time // when the current stream began; zero when idle
 	turnCount   int       // conversation turns sent; guards turn separator logic
 
+	// Wrapped-transcript cache. Re-wrapping the whole (up to 1 MiB) transcript
+	// on every streamed token is O(n²) per turn; instead we wrap once and reuse
+	// until the transcript content length or viewport width changes. Only the
+	// small live tail is wrapped per refresh.
+	wrapCache    string
+	wrapCacheLen int
+	wrapCacheW   int
+
+	// followBottom tracks whether the viewport should auto-scroll to the newest
+	// content. It is true while the user is parked at the bottom and false once
+	// they scroll up, so streaming output never yanks them back down mid-read.
+	followBottom bool
+
 	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
 	history    []string
 	histIdx    int
 	draftInput string
 
+	// Lazily-built workspace file index for @file mention completion.
+	fileIndex      []string
+	fileIndexBuilt bool
+
 	// overlay / modals
-	keys        keyMap
-	palette     *paletteModel
-	helpOpen    bool
-	activeToast *toast
-	completion  completionState
+	keys          keyMap
+	palette       *paletteModel
+	personaPicker *personaPickerModel
+	helpOpen      bool
+	activeToast   *toast
+	completion    completionState
+	approval      *approvalState // non-nil while engine is blocked waiting for user approval
 }
+
+// approvalState holds the details of a pending tool-execution approval request.
+type approvalState struct {
+	toolName string
+	input    string
+	reason   string
+}
+
+const approvalBannerH = 4 // lines rendered by renderApprovalBanner(): separator + 3 content
 
 type slashResultMsg SlashResult
 type editorDoneMsg struct {
@@ -185,17 +214,18 @@ func newModel(cfg Config) model {
 	}
 
 	m := model{
-		cfg:      cfg,
-		ta:       ta,
-		sp:       sp,
-		th:       th,
-		status:   "ready",
-		slash:    NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
-		histIdx:  -1,
-		workDir:  workDir,
-		liveText: &strings.Builder{},
-		renderer: newGlamourRenderer(80), // initial width; recreated on first resize
-		keys:     defaultKeyMap(),
+		cfg:          cfg,
+		ta:           ta,
+		sp:           sp,
+		th:           th,
+		status:       "ready",
+		slash:        NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
+		histIdx:      -1,
+		workDir:      workDir,
+		liveText:     &strings.Builder{},
+		renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
+		keys:         defaultKeyMap(),
+		followBottom: true,
 	}
 	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
 	return m
@@ -273,14 +303,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Command palette overlay: route all input to the palette.
+	// Result messages are handled here so they are not re-intercepted by this
+	// same block on the next tick (the overlay would swallow them otherwise).
 	if m.palette != nil {
 		if ws, ok := msg.(tea.WindowSizeMsg); ok {
 			m.width, m.height = ws.Width, ws.Height
 			m.layout()
 			return m, nil
 		}
+		if _, ok := msg.(paletteCancelMsg); ok {
+			m.palette = nil
+			m.ta.Focus()
+			return m, nil
+		}
+		if sel, ok := msg.(paletteSelectedMsg); ok {
+			m.palette = nil
+			m.ta.Focus()
+			needsArgs := map[string]bool{"mode": true, "remember": true}
+			if needsArgs[sel.name] {
+				m.ta.SetValue("/" + sel.name + " ")
+				return m, nil
+			}
+			parsed := &commands.ParsedCommand{Name: sel.name, Raw: "/" + sel.name}
+			return m, m.handleSlashCommand(parsed)
+		}
 		updated, cmd := m.palette.Update(msg)
 		m.palette = &updated
+		return m, cmd
+	}
+
+	// Persona picker overlay: route all input to the picker.
+	// Result messages are handled here for the same reason as the palette above.
+	if m.personaPicker != nil {
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = ws.Width, ws.Height
+			m.layout()
+			return m, nil
+		}
+		if _, ok := msg.(personaPickerCancelMsg); ok {
+			m.personaPicker = nil
+			m.ta.Focus()
+			m.refresh()
+			return m, nil
+		}
+		if sel, ok := msg.(personaPickerSelectedMsg); ok {
+			m.personaPicker = nil
+			m.ta.Focus()
+			parsed := &commands.ParsedCommand{Name: "persona", Args: []string{sel.name}, Raw: "/persona " + sel.name}
+			return m, m.handleSlashCommand(parsed)
+		}
+		updated, cmd := m.personaPicker.Update(msg)
+		m.personaPicker = &updated
 		return m, cmd
 	}
 
@@ -309,27 +382,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sp, cmd = m.sp.Update(msg)
 		if m.streaming {
 			cmds = append(cmds, cmd)
+			m.refresh() // animate the in-transcript thinking indicator
 		}
 
 	case toastExpiredMsg:
 		m.activeToast = nil
-
-	case paletteSelectedMsg:
-		m.palette = nil
-		m.ta.Focus()
-		// Commands that need arguments get pre-filled in the textarea so the
-		// user can add args before pressing Enter.
-		needsArgs := map[string]bool{"persona": true, "mode": true, "remember": true}
-		if needsArgs[msg.name] {
-			m.ta.SetValue("/" + msg.name + " ")
-		} else {
-			parsed := &commands.ParsedCommand{Name: msg.name, Raw: "/" + msg.name}
-			return m, m.handleSlashCommand(parsed)
-		}
-
-	case paletteCancelMsg:
-		m.palette = nil
-		m.ta.Focus()
 
 	case editorDoneMsg:
 		m.ta.Focus()
@@ -343,6 +400,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Approval prompt intercepts all keys while the engine is waiting for
+		// user confirmation. Y/enter approves; N/esc denies; everything else
+		// is swallowed (except viewport scroll which is handled after the switch).
+		if m.approval != nil {
+			switch msg.String() {
+			case "y", "Y", "enter":
+				m.approval = nil
+				m.status = "thinking…"
+				m.applyViewportHeight()
+				return m, m.sendApprovalCmd(true)
+			case "n", "N", "esc":
+				m.approval = nil
+				m.status = "thinking…"
+				m.applyViewportHeight()
+				return m, m.sendApprovalCmd(false)
+			}
+			// Let viewport scroll keys fall through to the vp.Update below.
+			var vpCmd tea.Cmd
+			m.vp, vpCmd = m.vp.Update(msg)
+			m.followBottom = m.vp.AtBottom()
+			return m, vpCmd
+		}
+
 		// Inline completion popup intercepts navigation/accept keys first.
 		// Other keys fall through to the textarea and trigger a recompute.
 		if m.completion.active {
@@ -446,6 +526,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ta.Reset()
 			m.streaming = true
 			m.status = "thinking…"
+			m.followBottom = true // jump to the freshly sent message
 			m.refresh()
 			return m, m.startStream(text)
 		}
@@ -487,6 +568,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Quit {
 			return m, tea.Quit
 		}
+		if msg.Personas != nil {
+			picker := newPersonaPicker(m.width, m.height, msg.Personas)
+			m.personaPicker = &picker
+			return m, nil
+		}
 		if msg.Output == "\x00wizard" {
 			wiz := newWizard(m.width, m.height, m.th)
 			m.wizard = wiz
@@ -512,6 +598,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendUser(msg.Message)
 			m.streaming = true
 			m.status = "thinking…"
+			m.followBottom = true
 			m.refresh()
 			return m, tea.Batch(m.startStream(msg.Message), m.sp.Tick)
 		}
@@ -530,6 +617,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var vpCmd tea.Cmd
 	m.vp, vpCmd = m.vp.Update(msg)
+	// Re-derive scroll-follow state: auto-scroll resumes once the user returns
+	// to the bottom and pauses the moment they scroll up.
+	m.followBottom = m.vp.AtBottom()
 	cmds = append(cmds, vpCmd)
 	return m, tea.Batch(cmds...)
 }
@@ -582,6 +672,9 @@ func (m *model) fixedH() int {
 	if m.completion.active {
 		h += completionBoxH
 	}
+	if m.approval != nil {
+		h += approvalBannerH
+	}
 	return h
 }
 
@@ -594,7 +687,13 @@ func (m *model) applyViewportHeight() {
 // value, resizing the viewport when the popup opens or closes.
 func (m *model) syncCompletion() {
 	prev := m.completion.active
-	m.completion = computeCompletion(m.ta.Value(), allCommandEntries(m.slash.Customs()))
+	val := m.ta.Value()
+	// Build the workspace file index lazily the first time an @mention appears.
+	if !m.fileIndexBuilt && atTokenStart(val) >= 0 {
+		m.fileIndex = buildFileIndex(m.workDir)
+		m.fileIndexBuilt = true
+	}
+	m.completion = computeCompletion(val, allCommandEntries(m.slash.Customs()), m.fileIndex)
 	if m.completion.active != prev {
 		m.applyViewportHeight()
 		m.refresh()
@@ -609,6 +708,21 @@ func (m *model) acceptCompletion(run bool) tea.Cmd {
 	if !ok {
 		return nil
 	}
+
+	// @file mention: splice the chosen path in place of the typed @token.
+	if m.completion.kind == compFile {
+		val := m.ta.Value()
+		start := m.completion.tokenStart
+		if start < 0 || start > len(val) {
+			start = len(val)
+		}
+		m.ta.SetValue(val[:start] + "@" + e.name + " ")
+		m.completion = completionState{}
+		m.applyViewportHeight()
+		m.refresh()
+		return nil
+	}
+
 	typed := strings.ToLower(strings.TrimPrefix(m.ta.Value(), "/"))
 	if run && typed == e.name {
 		m.ta.Reset()
@@ -629,12 +743,37 @@ func (m *model) acceptCompletion(run bool) tea.Cmd {
 }
 
 func (m *model) refresh() {
-	content := m.transcript.String()
-	if live := m.liveText.String(); live != "" {
-		content += live
+	// Wrap the static transcript once and cache it; only re-wrap when its byte
+	// length or the viewport width changes. The transcript is append/reset/trim
+	// only, so length is a sufficient change signal.
+	base := m.transcript.String()
+	if base == "" {
+		m.wrapCache, m.wrapCacheLen, m.wrapCacheW = "", 0, m.vp.Width
+	} else if len(base) != m.wrapCacheLen || m.vp.Width != m.wrapCacheW {
+		m.wrapCache = wrap(base, m.vp.Width)
+		m.wrapCacheLen = len(base)
+		m.wrapCacheW = m.vp.Width
 	}
-	m.vp.SetContent(wrap(content, m.vp.Width))
-	m.vp.GotoBottom()
+	content := m.wrapCache
+
+	// The live tail (streaming prose or the thinking indicator) is small, so it
+	// is wrapped fresh every refresh and appended to the cached transcript.
+	if live := m.liveText.String(); live != "" {
+		content += wrap(live, m.vp.Width)
+	} else if m.streaming {
+		elapsed := ""
+		if !m.streamStart.IsZero() {
+			if secs := int(time.Since(m.streamStart).Seconds()); secs > 0 {
+				elapsed = fmt.Sprintf("  %ds", secs)
+			}
+		}
+		content += wrap(m.sp.View()+" "+m.th.statusText.Render("thinking…")+m.th.elapsedDim.Render(elapsed), m.vp.Width)
+	}
+
+	m.vp.SetContent(content)
+	if m.followBottom {
+		m.vp.GotoBottom()
+	}
 }
 
 // flushLiveText renders accumulated assistant text through glamour and appends
@@ -653,6 +792,47 @@ func (m *model) flushLiveText() {
 		}
 	}
 	m.transcript.WriteString(raw)
+}
+
+// sendApprovalCmd fires a POST to /sessions/{id}/approve with the user's
+// decision. It runs in a goroutine so the TUI stays responsive while the
+// request travels to the daemon.
+func (m model) sendApprovalCmd(approved bool) tea.Cmd {
+	cl := m.cfg.Client
+	sessionID := m.cfg.SessionID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := cl.SendApproval(ctx, sessionID, approved); err != nil {
+			return errMsg{err: fmt.Errorf("approval: %w", err)}
+		}
+		return nil // engine continues via the existing SSE stream
+	}
+}
+
+// renderApprovalBanner renders the 3-line prompt shown when the engine is
+// blocked waiting for the user to approve or deny a tool execution.
+func (m model) renderApprovalBanner() string {
+	a := m.approval
+	w := max(m.width-2, 20)
+
+	// Line 1: tool name + truncated input
+	header := lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚡ "+a.toolName) +
+		"  " + lipgloss.NewStyle().Foreground(colTextDim).Render(
+		truncate(a.input, max(w-len(a.toolName)-6, 12)))
+
+	// Line 2: permission reason
+	reason := "  " + lipgloss.NewStyle().Foreground(colTextMuted).Render(a.reason)
+
+	// Line 3: Y/N prompt
+	prompt := "  " +
+		lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("[y]") +
+		lipgloss.NewStyle().Foreground(colTextDim).Render(" approve  ") +
+		lipgloss.NewStyle().Foreground(colDanger).Bold(true).Render("[n]") +
+		lipgloss.NewStyle().Foreground(colTextDim).Render(" deny")
+
+	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", w))
+	return sep + "\n" + " " + header + "\n" + reason + "\n" + prompt
 }
 
 func (m *model) appendUser(text string) {
@@ -676,20 +856,14 @@ func (m *model) applyEvent(ev api.Event) {
 
 	case api.KindToolCall:
 		m.flushLiveText() // render any preceding prose before the tool line
-		m.transcript.WriteString("\n" + m.th.tool.Render(
-			fmt.Sprintf("⚙ %s  %s", ev.Tool, truncate(string(ev.ToolInput), 120))) + "\n")
+		m.transcript.WriteString("\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.vp.Width) + "\n")
 		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
 		if len(m.tools) > maxToolHistory {
 			m.tools = m.tools[1:]
 		}
 
 	case api.KindToolResult:
-		style, tag := m.th.tool, "✓"
-		if ev.ToolIsError {
-			style, tag = m.th.toolErr, "✗"
-		}
-		m.transcript.WriteString(style.Render(
-			fmt.Sprintf("%s %s → %s", tag, ev.Tool, truncate(oneLine(ev.ToolResult), 160))) + "\n")
+		m.transcript.WriteString(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width) + "\n")
 		for i := len(m.tools) - 1; i >= 0; i-- {
 			if m.tools[i].name == ev.Tool && m.tools[i].status == "pending" {
 				if ev.ToolIsError {
@@ -709,8 +883,17 @@ func (m *model) applyEvent(ev api.Event) {
 			m.costUSD += ev.CostUSD
 		}
 
+	case api.KindApprovalRequest:
+		m.approval = &approvalState{
+			toolName: ev.Tool,
+			input:    string(ev.ToolInput),
+			reason:   ev.ApprovalReason,
+		}
+		m.status = "approval required"
+
 	case api.KindError:
 		m.flushLiveText()
+		m.approval = nil // clear any pending approval if the run aborts
 		m.transcript.WriteString("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
 	}
 }
@@ -756,6 +939,9 @@ func (m model) View() string {
 	if m.palette != nil {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.palette.View())
 	}
+	if m.personaPicker != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.personaPicker.View())
+	}
 
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
@@ -774,6 +960,9 @@ func (m model) View() string {
 		popupW := min(m.width-2, 72)
 		popup := lipgloss.NewStyle().PaddingLeft(1).Render(m.completion.view(popupW))
 		parts = append(parts, popup)
+	}
+	if m.approval != nil {
+		parts = append(parts, m.renderApprovalBanner())
 	}
 	parts = append(parts, inputArea)
 
@@ -844,6 +1033,12 @@ func (m model) renderSidebar(h int) string {
 			}
 			add(style.Render(tag + " " + truncate(t.name, w-2)))
 		}
+		add("")
+	}
+
+	if m.inputTokens > 0 {
+		section("CONTEXT")
+		add(renderContextBar(m.inputTokens, contextWindowFor(m.cfg.Model), w))
 		add("")
 	}
 
@@ -1094,7 +1289,16 @@ func getUsername() string {
 
 func shortenPath(path string) string {
 	home, err := os.UserHomeDir()
-	if err == nil && strings.HasPrefix(path, home) {
+	if err != nil {
+		return path
+	}
+	// Windows paths are case-insensitive; compare lowercased to avoid misses.
+	homeCmp, pathCmp := home, path
+	if runtime.GOOS == "windows" {
+		homeCmp = strings.ToLower(home)
+		pathCmp = strings.ToLower(path)
+	}
+	if strings.HasPrefix(pathCmp, homeCmp) {
 		return "~" + path[len(home):]
 	}
 	return path
@@ -1117,6 +1321,51 @@ func wrap(s string, width int) string {
 	return lipgloss.NewStyle().Width(width).Render(s)
 }
 
+// contextWindowFor returns an approximate context-window size (in tokens) for a
+// model, used to render the usage indicator. Values are conservative defaults
+// matched on common model-name fragments; unknown models fall back to 128k.
+func contextWindowFor(model string) int {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "gemini"):
+		return 1_000_000
+	case strings.Contains(m, "claude"), strings.Contains(m, "o1"), strings.Contains(m, "o3"):
+		return 200_000
+	case strings.Contains(m, "gpt-4.1"):
+		return 1_000_000
+	case strings.Contains(m, "gpt-4o"), strings.Contains(m, "gpt-4"), strings.Contains(m, "llama"), strings.Contains(m, "qwen"):
+		return 128_000
+	default:
+		return 128_000
+	}
+}
+
+// renderContextBar renders a compact usage meter for the context window:
+// a filled/empty bar plus a percentage, coloured green→amber→red as it fills.
+func renderContextBar(used, total, width int) string {
+	if total <= 0 {
+		total = 128_000
+	}
+	frac := float64(used) / float64(total)
+	if frac > 1 {
+		frac = 1
+	}
+	barW := max(width-5, 4) // leave room for " 99%"
+	filled := int(frac*float64(barW) + 0.5)
+
+	col := colSuccess
+	switch {
+	case frac >= 0.9:
+		col = colDanger
+	case frac >= 0.7:
+		col = colWarning
+	}
+	bar := lipgloss.NewStyle().Foreground(col).Render(strings.Repeat("▰", filled)) +
+		lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("▱", barW-filled))
+	pct := lipgloss.NewStyle().Foreground(colTextMuted).Render(fmt.Sprintf(" %d%%", int(frac*100+0.5)))
+	return bar + pct
+}
+
 func short(id string) string {
 	if len(id) > 8 {
 		return id[:8]
@@ -1124,11 +1373,18 @@ func short(id string) string {
 	return id
 }
 
+// truncate shortens s to a display width of n cells, appending an ellipsis when
+// it overflows. It is width- and rune-aware (and ANSI-aware), so it never slices
+// a multi-byte rune in half or miscounts wide glyphs — important because these
+// strings feed straight into lipgloss layout.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	if ansi.StringWidth(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return ansi.Truncate(s, n, "…")
 }
 
 func oneLine(s string) string {

@@ -76,10 +76,10 @@ type Request struct {
 type StopReason string
 
 const (
-	StopEndTurn StopReason = "end_turn"
-	StopToolUse StopReason = "tool_use"
+	StopEndTurn   StopReason = "end_turn"
+	StopToolUse   StopReason = "tool_use"
 	StopMaxTokens StopReason = "max_tokens"
-	StopOther   StopReason = "other"
+	StopOther     StopReason = "other"
 )
 
 // Usage reports token consumption for a request. The cache fields are populated
@@ -109,12 +109,12 @@ const (
 
 // Event is a single item in an adapter's response stream.
 type Event struct {
-	Type     EventType
-	Text     string        // set for EventTextDelta
-	ToolUse  *ToolUseBlock // set for EventToolUse
-	Stop     StopReason    // set for EventDone
-	Usage    *Usage        // set for EventDone (best effort)
-	Err      error         // set for EventError
+	Type    EventType
+	Text    string        // set for EventTextDelta
+	ToolUse *ToolUseBlock // set for EventToolUse
+	Stop    StopReason    // set for EventDone
+	Usage   *Usage        // set for EventDone (best effort)
+	Err     error         // set for EventError
 }
 
 // Adapter is implemented by each provider backend.

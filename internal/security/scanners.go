@@ -38,8 +38,8 @@ func firstLine(s string) string {
 
 type semgrepScanner struct{}
 
-func (semgrepScanner) Name() string      { return "semgrep" }
-func (semgrepScanner) Available() bool   { return lookPath("semgrep") }
+func (semgrepScanner) Name() string    { return "semgrep" }
+func (semgrepScanner) Available() bool { return lookPath("semgrep") }
 func (semgrepScanner) Scan(ctx context.Context, dir string) ([]Finding, error) {
 	out, err := runJSON(ctx, dir, "semgrep", "--json", "--quiet", "--config", "auto", ".")
 	if err != nil {

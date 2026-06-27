@@ -97,8 +97,8 @@ type fakeScanner struct {
 	findings  []Finding
 }
 
-func (f fakeScanner) Name() string      { return f.name }
-func (f fakeScanner) Available() bool   { return f.available }
+func (f fakeScanner) Name() string    { return f.name }
+func (f fakeScanner) Available() bool { return f.available }
 func (f fakeScanner) Scan(context.Context, string) ([]Finding, error) {
 	return f.findings, nil
 }

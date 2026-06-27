@@ -69,6 +69,12 @@ type theme struct {
 
 	turnSep    lipgloss.Style // subtle horizontal rule between conversation turns
 	elapsedDim lipgloss.Style // muted elapsed-time counter shown during streaming
+
+	diffAdd  lipgloss.Style // added line in a tool diff (+)
+	diffDel  lipgloss.Style // removed line in a tool diff (-)
+	diffMeta lipgloss.Style // file path / "N more lines" footer
+	toolBody lipgloss.Style // multi-line tool output body
+	toolGut  lipgloss.Style // gutter rule beside tool output
 }
 
 func newTheme() theme {
@@ -105,5 +111,11 @@ func newTheme() theme {
 
 		turnSep:    lipgloss.NewStyle().Foreground(colBorder),
 		elapsedDim: lipgloss.NewStyle().Foreground(colTextMuted),
+
+		diffAdd:  lipgloss.NewStyle().Foreground(colSuccess),
+		diffDel:  lipgloss.NewStyle().Foreground(colDanger),
+		diffMeta: lipgloss.NewStyle().Foreground(colTextMuted),
+		toolBody: lipgloss.NewStyle().Foreground(colTextDim),
+		toolGut:  lipgloss.NewStyle().Foreground(colBorder),
 	}
 }

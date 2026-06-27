@@ -17,8 +17,8 @@ type mcpTool struct {
 	exposedName string
 }
 
-func (t *mcpTool) Name() string               { return t.exposedName }
-func (t *mcpTool) Description() string        { return t.info.Description }
+func (t *mcpTool) Name() string                { return t.exposedName }
+func (t *mcpTool) Description() string         { return t.info.Description }
 func (t *mcpTool) Capability() tool.Capability { return tool.CapNetwork }
 func (t *mcpTool) InputSchema() json.RawMessage {
 	if len(t.info.InputSchema) == 0 {
@@ -44,8 +44,10 @@ func (t *mcpResourceListTool) Name() string { return t.exposedName }
 func (t *mcpResourceListTool) Description() string {
 	return "List available resources from the " + t.client.Server() + " MCP server"
 }
-func (t *mcpResourceListTool) Capability() tool.Capability  { return tool.CapNetwork }
-func (t *mcpResourceListTool) InputSchema() json.RawMessage  { return json.RawMessage(`{"type":"object","properties":{}}`) }
+func (t *mcpResourceListTool) Capability() tool.Capability { return tool.CapNetwork }
+func (t *mcpResourceListTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{}}`)
+}
 func (t *mcpResourceListTool) Execute(ctx context.Context, _ json.RawMessage) (tool.Result, error) {
 	resources, err := t.client.ListResources(ctx)
 	if err != nil {
@@ -100,8 +102,10 @@ func (t *mcpPromptListTool) Name() string { return t.exposedName }
 func (t *mcpPromptListTool) Description() string {
 	return "List available prompt templates from the " + t.client.Server() + " MCP server"
 }
-func (t *mcpPromptListTool) Capability() tool.Capability  { return tool.CapNetwork }
-func (t *mcpPromptListTool) InputSchema() json.RawMessage  { return json.RawMessage(`{"type":"object","properties":{}}`) }
+func (t *mcpPromptListTool) Capability() tool.Capability { return tool.CapNetwork }
+func (t *mcpPromptListTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{}}`)
+}
 func (t *mcpPromptListTool) Execute(ctx context.Context, _ json.RawMessage) (tool.Result, error) {
 	prompts, err := t.client.ListPrompts(ctx)
 	if err != nil {

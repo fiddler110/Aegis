@@ -13,10 +13,11 @@ import (
 
 // SlashResult describes what a slash command produced for the TUI to render.
 type SlashResult struct {
-	Output  string // text to append to the transcript
-	IsError bool   // render in error style
-	Quit    bool   // signal the TUI to exit
-	Message string // if non-empty, send this text to the daemon as a normal message
+	Output   string            // text to append to the transcript
+	IsError  bool              // render in error style
+	Quit     bool              // signal the TUI to exit
+	Message  string            // if non-empty, send this text to the daemon as a normal message
+	Personas []api.PersonaInfo // if non-nil, open the persona picker with these entries
 }
 
 // SlashDispatcher dispatches slash commands to built-in handlers or custom
@@ -123,7 +124,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 	b.WriteString("Available commands:\n")
 	for _, entry := range []struct{ name, desc string }{
 		{"help [cmd]", "Show this help or detail for a command"},
-		{"persona [name]", "List or switch persona"},
+		{"persona [name]", "Pick persona interactively, or switch directly by name"},
 		{"mode <plan|build|auto>", "Switch permission mode"},
 		{"clear", "Clear the transcript"},
 		{"config", "Interactive configuration wizard"},
@@ -133,7 +134,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"commands", "List custom commands"},
 		{"models", "Show current model info"},
 		{"session [list]", "Show session info or list sessions"},
-		{"quit", "Exit Aegis"},
+		{"exit", "Exit Aegis"},
 	} {
 		fmt.Fprintf(&b, "  /%-22s %s\n", entry.name, entry.desc)
 	}
@@ -159,7 +160,7 @@ func builtinHelp(name string) string {
 	case "help":
 		return "/help [command]\n  Show available commands, or detailed help for a specific command."
 	case "persona":
-		return "/persona [name]\n  No args: list available personas.\n  With name: switch to that persona for the current session."
+		return "/persona [name]\n  No args: open an interactive list to pick a persona.\n  With name: switch directly, e.g. /persona security."
 	case "mode":
 		return "/mode <plan|build|auto>\n  Switch the permission mode for the current session.\n  plan = read-only\n  build = file edits allowed, shell execution requires approval\n  auto  = all capabilities allowed without prompting"
 	case "clear":
@@ -189,25 +190,20 @@ func (d *SlashDispatcher) cmdPersona(args []string) SlashResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if len(args) == 0 {
-		personas, err := d.client.ListPersonas(ctx)
-		if err != nil {
-			return SlashResult{Output: fmt.Sprintf("Failed to list personas: %v", err), IsError: true}
-		}
-		var b strings.Builder
-		b.WriteString("Available personas:\n")
-		for _, p := range personas {
-			fmt.Fprintf(&b, "  %-28s %s\n", p.Name, p.Description)
-		}
-		b.WriteString("\nUsage: /persona <name>")
-		return SlashResult{Output: b.String()}
-	}
-
-	name := strings.ToLower(args[0])
 	personas, err := d.client.ListPersonas(ctx)
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Failed to list personas: %v", err), IsError: true}
 	}
+
+	if len(args) == 0 {
+		// No name given — signal the TUI to open the interactive picker.
+		if len(personas) == 0 {
+			return SlashResult{Output: "No personas available."}
+		}
+		return SlashResult{Personas: personas}
+	}
+
+	name := strings.ToLower(args[0])
 	var found *api.PersonaInfo
 	for _, p := range personas {
 		if p.Name == name {
@@ -226,24 +222,11 @@ func (d *SlashDispatcher) cmdPersona(args []string) SlashResult {
 		}
 	}
 
-	// Look up the full persona system prompt and update the session.
-	// The daemon resolves the persona name to a system prompt via the PATCH endpoint.
-	// We need to send the persona's system prompt. Since the client doesn't have
-	// the full system text, we'll use a convention: send the persona name as the
-	// system value prefixed with "persona:" so the daemon can resolve it.
-	// Actually, simpler: use the persona package directly from the API.
-	// The PATCH endpoint takes a raw system string, so we ask the personas endpoint
-	// for the name and then we need the system text. But PersonaInfo doesn't include
-	// the full system prompt (intentionally — it's huge).
-	//
-	// Solution: Add persona resolution in the PATCH handler. For now, send a special
-	// marker that the PATCH handler recognizes.
 	personaSystem := "persona:" + name
 	_, err = d.client.UpdateSession(ctx, d.sessionID, api.UpdateSessionRequest{System: &personaSystem})
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Failed to switch persona: %v", err), IsError: true}
 	}
-
 	return SlashResult{Output: fmt.Sprintf("Switched to %s persona: %s", found.Name, found.Description)}
 }
 
@@ -262,6 +245,9 @@ func (d *SlashDispatcher) cmdMode(args []string) SlashResult {
 		return SlashResult{Output: fmt.Sprintf("Failed to switch mode: %v", err), IsError: true}
 	}
 	d.mode = mode
+	if mode == "auto" {
+		return SlashResult{Output: "Switched to auto mode.\n⚠ auto runs all tools — including shell commands — without asking. Unless a container sandbox is configured, commands execute directly on this host."}
+	}
 	return SlashResult{Output: fmt.Sprintf("Switched to %s mode.", mode)}
 }
 

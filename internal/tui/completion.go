@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -26,7 +28,7 @@ type cmdEntry struct {
 // shared by the inline completion popup and the command palette.
 var builtinCommands = []cmdEntry{
 	{"help", "Show help or detail for a command"},
-	{"persona", "List or switch active persona"},
+	{"persona", "Pick a persona from an interactive list"},
 	{"mode", "Switch permission mode (plan / build / auto)"},
 	{"clear", "Clear the conversation transcript"},
 	{"config", "Open configuration wizard"},
@@ -36,13 +38,14 @@ var builtinCommands = []cmdEntry{
 	{"commands", "List custom commands"},
 	{"models", "Show current model info"},
 	{"session", "Show session info or list sessions"},
-	{"quit", "Exit Aegis"},
+	{"exit", "Exit Aegis"},
 }
 
 // commandsNeedingArgs are completed with a trailing space so the user can
 // immediately type arguments rather than running the bare command.
+// "persona" is intentionally absent: Tab/Enter on /persona dispatches it
+// immediately, which opens the interactive picker.
 var commandsNeedingArgs = map[string]bool{
-	"persona":  true,
 	"mode":     true,
 	"remember": true,
 	"help":     true,
@@ -59,22 +62,49 @@ func allCommandEntries(customs []api.CommandInfo) []cmdEntry {
 	return out
 }
 
-// completionState tracks the inline slash-command completion popup.
+// completionKind distinguishes slash-command completion from @file mention
+// completion; they share the popup but differ in matching and acceptance.
+type completionKind int
+
+const (
+	compSlash completionKind = iota
+	compFile
+)
+
+// completionState tracks the inline completion popup (slash commands or @file
+// mentions).
 type completionState struct {
-	active   bool
-	items    []cmdEntry
-	selected int
+	active     bool
+	kind       completionKind
+	items      []cmdEntry
+	selected   int
+	tokenStart int // byte index where the replaced token begins (for @file)
 }
 
-// computeCompletion derives popup state from the current textarea value. The
-// popup is active only while the value is a single slash token with no space
-// yet typed — i.e. the user is still naming the command.
-func computeCompletion(value string, all []cmdEntry) completionState {
-	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, " \t\n") {
-		return completionState{}
-	}
-	query := strings.ToLower(value[1:])
+const maxFileMatches = 50
 
+// computeCompletion derives popup state from the current textarea value.
+//
+//   - Slash command: active while the value is a single "/token" with no space.
+//   - @file mention: active while the final whitespace-delimited token starts
+//     with "@" and is still being typed.
+func computeCompletion(value string, all []cmdEntry, files []string) completionState {
+	if strings.HasPrefix(value, "/") && !strings.ContainsAny(value, " \t\n") {
+		return slashCompletion(value, all)
+	}
+	if start := atTokenStart(value); start >= 0 {
+		query := value[start+1:]
+		if !strings.ContainsAny(query, " \t\n") {
+			if items := matchFiles(files, query); len(items) > 0 {
+				return completionState{active: true, kind: compFile, items: items, tokenStart: start}
+			}
+		}
+	}
+	return completionState{}
+}
+
+func slashCompletion(value string, all []cmdEntry) completionState {
+	query := strings.ToLower(value[1:])
 	var prefix, substr []cmdEntry
 	for _, e := range all {
 		ln := strings.ToLower(e.name)
@@ -89,7 +119,83 @@ func computeCompletion(value string, all []cmdEntry) completionState {
 	if len(matches) == 0 {
 		return completionState{}
 	}
-	return completionState{active: true, items: matches}
+	return completionState{active: true, kind: compSlash, items: matches}
+}
+
+// atTokenStart returns the byte index of the "@" beginning the trailing mention
+// token (one at the start of the value or preceded by whitespace), or -1.
+func atTokenStart(value string) int {
+	i := strings.LastIndex(value, "@")
+	if i < 0 {
+		return -1
+	}
+	if i > 0 {
+		switch value[i-1] {
+		case ' ', '\t', '\n':
+		default:
+			return -1
+		}
+	}
+	return i
+}
+
+// matchFiles returns file entries matching query: path-prefix and base-name
+// matches first, then substring matches, capped at maxFileMatches.
+func matchFiles(files []string, query string) []cmdEntry {
+	q := strings.ToLower(query)
+	var prefix, substr []cmdEntry
+	for _, f := range files {
+		lf := strings.ToLower(f)
+		switch {
+		case q == "" || strings.HasPrefix(lf, q) || strings.HasPrefix(strings.ToLower(filepath.Base(f)), q):
+			prefix = append(prefix, cmdEntry{name: f})
+		case strings.Contains(lf, q):
+			substr = append(substr, cmdEntry{name: f})
+		}
+		if len(prefix)+len(substr) >= maxFileMatches {
+			break
+		}
+	}
+	return append(prefix, substr...)
+}
+
+// maxIndexedFiles caps the workspace file index to keep @-completion responsive
+// in large repositories.
+const maxIndexedFiles = 5000
+
+// buildFileIndex walks root and returns workspace-relative, slash-separated file
+// paths, skipping VCS/dependency/build directories and dotfiles dirs.
+func buildFileIndex(root string) []string {
+	if root == "" {
+		return nil
+	}
+	skip := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true, ".aegis": true,
+		"dist": true, "build": true, "target": true, ".idea": true, ".vscode": true,
+	}
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != root && (skip[name] || (strings.HasPrefix(name, ".") && len(name) > 1)) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		out = append(out, filepath.ToSlash(rel))
+		if len(out) >= maxIndexedFiles {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return out
 }
 
 func (c *completionState) move(delta int) {
@@ -138,12 +244,29 @@ func (c completionState) view(width int) string {
 	lines := make([]string, 0, completionVisibleRows)
 	for i := start; i < end; i++ {
 		e := c.items[i]
+		selected := i == c.selected
+
+		// @file rows are single-column full-width paths; command rows use a
+		// two-column name/description layout.
+		if c.kind == compFile {
+			label := "@" + e.name
+			if selected {
+				lines = append(lines, lipgloss.NewStyle().
+					Background(colBrandBg).Foreground(colBrandFg).Bold(true).
+					Width(width).Render(" "+truncate(label, max(width-2, 4))))
+			} else {
+				lines = append(lines, lipgloss.NewStyle().
+					Foreground(colTextDim).Render("  "+truncate(label, max(width-2, 4))))
+			}
+			continue
+		}
+
 		name := "/" + e.name
 		namePad := strings.Repeat(" ", max(nameCol-len(name), 1))
 		desc := truncate(e.desc, max(width-nameCol-2, 4))
 
 		var row string
-		if i == c.selected {
+		if selected {
 			row = lipgloss.NewStyle().
 				Background(colBrandBg).
 				Foreground(colBrandFg).
@@ -151,10 +274,10 @@ func (c completionState) view(width int) string {
 				Width(nameCol).
 				Render(name) +
 				lipgloss.NewStyle().
-				Background(colBrandBg).
-				Foreground(colTextDim).
-				Width(width - nameCol).
-				Render(" " + desc)
+					Background(colBrandBg).
+					Foreground(colTextDim).
+					Width(width-nameCol).
+					Render(" "+desc)
 		} else {
 			row = lipgloss.NewStyle().Foreground(colTextDim).Render("  "+name) +
 				namePad +

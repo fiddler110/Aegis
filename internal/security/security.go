@@ -84,9 +84,9 @@ func DefaultScanners() []Scanner {
 
 // Report is the aggregated outcome of a scan run.
 type Report struct {
-	Findings  []Finding         `json:"findings"`
-	Ran       []string          `json:"ran"`       // scanners that executed
-	Skipped   map[string]string `json:"skipped"`   // scanner -> reason (not installed / error)
+	Findings []Finding         `json:"findings"`
+	Ran      []string          `json:"ran"`     // scanners that executed
+	Skipped  map[string]string `json:"skipped"` // scanner -> reason (not installed / error)
 }
 
 // RunAll executes every available scanner over dir and aggregates findings,

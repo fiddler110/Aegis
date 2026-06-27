@@ -21,19 +21,19 @@ import (
 
 // Config is the fully resolved harness configuration.
 type Config struct {
-	DataDir    string            `koanf:"data_dir"`
-	LogLevel   string            `koanf:"log_level"`
-	Provider   ProviderConfig    `koanf:"provider"`
-	Server     ServerConfig      `koanf:"server"`
-	Permission PermissionConfig  `koanf:"permission"`
-	Diagram    DiagramConfig     `koanf:"diagram"`
-	Cost       CostConfig        `koanf:"cost"`
-	Swarm      SwarmConfig       `koanf:"swarm"`
-	Sandbox    SandboxConfig     `koanf:"sandbox"`
-	Security   SecurityConfig    `koanf:"security"`
-	LSP        []LSPServerConfig     `koanf:"lsp"`
-	Plugins    []ProcessToolConfig   `koanf:"plugins"`
-	MCP        []MCPServerConfig     `koanf:"mcp"`
+	DataDir    string              `koanf:"data_dir"`
+	LogLevel   string              `koanf:"log_level"`
+	Provider   ProviderConfig      `koanf:"provider"`
+	Server     ServerConfig        `koanf:"server"`
+	Permission PermissionConfig    `koanf:"permission"`
+	Diagram    DiagramConfig       `koanf:"diagram"`
+	Cost       CostConfig          `koanf:"cost"`
+	Swarm      SwarmConfig         `koanf:"swarm"`
+	Sandbox    SandboxConfig       `koanf:"sandbox"`
+	Security   SecurityConfig      `koanf:"security"`
+	LSP        []LSPServerConfig   `koanf:"lsp"`
+	Plugins    []ProcessToolConfig `koanf:"plugins"`
+	MCP        []MCPServerConfig   `koanf:"mcp"`
 }
 
 // SwarmConfig configures multi-agent sub-agent execution.
@@ -57,20 +57,20 @@ type CostConfig struct {
 // LSPServerConfig configures one LSP language server.
 type LSPServerConfig struct {
 	Name       string   `koanf:"name"`       // e.g. "gopls"
-	Command    string   `koanf:"command"`     // executable
-	Args       []string `koanf:"args"`        // CLI arguments
-	Extensions []string `koanf:"extensions"`  // file extensions (e.g. [".go"])
+	Command    string   `koanf:"command"`    // executable
+	Args       []string `koanf:"args"`       // CLI arguments
+	Extensions []string `koanf:"extensions"` // file extensions (e.g. [".go"])
 }
 
 // ProcessToolConfig declares one external process tool (plugin).
 type ProcessToolConfig struct {
-	Name        string `koanf:"name"`
-	Description string `koanf:"description"`
-	Command     string `koanf:"command"`
+	Name        string   `koanf:"name"`
+	Description string   `koanf:"description"`
+	Command     string   `koanf:"command"`
 	Args        []string `koanf:"args"`
-	InputSchema string `koanf:"input_schema"` // JSON Schema as a string
-	Capability  string `koanf:"capability"`    // "read", "write", "execute", "network"
-	TimeoutSec  int    `koanf:"timeout_sec"`
+	InputSchema string   `koanf:"input_schema"` // JSON Schema as a string
+	Capability  string   `koanf:"capability"`   // "read", "write", "execute", "network"
+	TimeoutSec  int      `koanf:"timeout_sec"`
 }
 
 // MCPServerConfig configures one external MCP server to connect over stdio or HTTP.
@@ -108,8 +108,8 @@ type PermissionConfig struct {
 
 // SecurityConfig configures contextual security policies.
 type SecurityConfig struct {
-	EgressThenWrite  bool     `koanf:"egress_then_write"`  // require approval for writes after network egress
-	NetworkAllowList []string `koanf:"network_allowlist"`  // restrict network calls to these domains (empty = no restriction)
+	EgressThenWrite  bool     `koanf:"egress_then_write"` // require approval for writes after network egress
+	NetworkAllowList []string `koanf:"network_allowlist"` // restrict network calls to these domains (empty = no restriction)
 }
 
 // DiagramConfig configures diagram rendering.
@@ -125,13 +125,13 @@ const (
 
 func defaults() map[string]any {
 	return map[string]any{
-		"data_dir":          defaultDataDir(),
-		"log_level":         "info",
-		"provider.default":     "anthropic",
-		"provider.model":       "claude-opus-4-8",
-		"provider.max_tokens":  16384,
-		"provider.max_retries": 4,
-		"server.addr":       "127.0.0.1:4127",
+		"data_dir":                     defaultDataDir(),
+		"log_level":                    "info",
+		"provider.default":             "anthropic",
+		"provider.model":               "claude-opus-4-8",
+		"provider.max_tokens":          16384,
+		"provider.max_retries":         4,
+		"server.addr":                  "127.0.0.1:4127",
 		"permission.mode":              "build",
 		"permission.auto_approve_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
