@@ -83,6 +83,30 @@ var (
 	colWordFrom color.Color = charmtone.Salt
 	colWordTo   color.Color = charmtone.Dolly
 
+	// ansiPalette remaps the basic ANSI-16 terminal colours that programs emit
+	// (e.g. `ls --color`, `git`, `grep --color`) onto legible Charmtone colours,
+	// so raw shell-tool output reads on-theme instead of relying on the user's
+	// terminal defaults. Indices 0–7 normal, 8–15 bright. Mirrors Crush's
+	// CharmtonePantera ANSI mapping.
+	ansiPalette = [16]color.Color{
+		charmtone.BBQ,     // 0  black
+		charmtone.Coral,   // 1  red
+		charmtone.Guac,    // 2  green
+		charmtone.Mustard, // 3  yellow
+		charmtone.Charple, // 4  blue
+		charmtone.Dolly,   // 5  magenta
+		charmtone.Malibu,  // 6  cyan
+		charmtone.Smoke,   // 7  white
+		charmtone.Iron,    // 8  bright black
+		charmtone.Tuna,    // 9  bright red
+		charmtone.Julep,   // 10 bright green
+		charmtone.Zest,    // 11 bright yellow
+		charmtone.Guppy,   // 12 bright blue
+		charmtone.Blush,   // 13 bright magenta
+		charmtone.Sardine, // 14 bright cyan
+		charmtone.Salt,    // 15 bright white
+	}
+
 	// Mode badge backgrounds — each mode gets a coloured pill for at-a-glance
 	// status. Deep desaturated backgrounds with a bright Charmtone foreground.
 	colPlanBg  color.Color = lipgloss.Color("#0C2440") // deep navy  → safe/read-only
