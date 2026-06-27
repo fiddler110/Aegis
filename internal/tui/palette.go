@@ -3,7 +3,6 @@ package tui
 import (
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 )
 
 // paletteItem is a single entry in the command palette list.
@@ -37,39 +36,12 @@ type paletteModel struct {
 }
 
 func newPalette(termW, termH int, entries []cmdEntry) paletteModel {
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colAccent).
-		Foreground(colAccent).
-		Bold(true).
-		Padding(0, 0, 0, 1)
-	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
-		Foreground(colTextDim).
-		Padding(0, 0, 0, 2)
-	delegate.Styles.NormalTitle = lipgloss.NewStyle().
-		Foreground(colTextDim).
-		Padding(0, 0, 0, 2)
-	delegate.Styles.NormalDesc = lipgloss.NewStyle().
-		Foreground(colTextMuted).
-		Padding(0, 0, 0, 2)
-
 	palW := min(termW-6, 62)
 	palH := min(termH-8, 22)
 
-	l := list.New(paletteItemsFrom(entries), delegate, palW, palH)
-	l.Title = "Command Palette"
-	l.Styles.Title = lipgloss.NewStyle().
-		Background(colBrandBg).
-		Foreground(colBrandFg).
-		Bold(true).
-		Padding(0, 1)
-	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 1, 0)
-	l.SetFilteringEnabled(true)
-	// Start in browse mode; typing any character activates filtering naturally.
-	l.SetShowStatusBar(false)
-	l.SetShowPagination(false)
-	l.SetShowHelp(false)
+	l := list.New(paletteItemsFrom(entries), aegisListDelegate(), palW, palH)
+	// Browse mode by default; typing any character activates filtering naturally.
+	configureDialogList(&l, "Command Palette", false)
 
 	return paletteModel{list: l}
 }
@@ -92,10 +64,5 @@ func (p paletteModel) Update(msg tea.Msg) (paletteModel, tea.Cmd) {
 }
 
 func (p paletteModel) View() string {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colAccent).
-		Background(colSurface).
-		Padding(0, 1).
-		Render(p.list.View())
+	return dialogFrame(p.list.View())
 }
