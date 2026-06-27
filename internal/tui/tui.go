@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -201,10 +202,23 @@ type sessionSwitchedMsg struct {
 func newModel(cfg Config) model {
 	ta := textarea.New()
 	ta.Placeholder = "Message Aegis…"
-	ta.Prompt = " "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(3)
+
+	// Crush-style editor prompt: a ❯ caret on the focused first line, and ":::"
+	// continuation dots on wrapped/subsequent lines. Width 4 keeps the text
+	// gutter aligned regardless of which variant is shown.
+	ta.SetPromptFunc(4, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 && info.Focused {
+			return lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("  ❯ ")
+		}
+		dots := colSuccessMost
+		if !info.Focused {
+			dots = colFgMore
+		}
+		return lipgloss.NewStyle().Foreground(dots).Render("::: ")
+	})
 
 	styles := ta.Styles()
 	styles.Focused.Base = lipgloss.NewStyle().
@@ -1403,9 +1417,10 @@ func (m model) renderInputArea() string {
 		}
 		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, colAccent) + elapsed
 	} else if m.activeToast != nil {
-		statusLeft = m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
+		tag, fg, bg := toastTag(m.activeToast.level)
+		statusLeft = statusTag(tag, fg, bg) + " " + m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
 	} else {
-		statusLeft = m.th.statusDim.Render("● ready")
+		statusLeft = statusTag("READY", colBgLess, colSuccess)
 	}
 	leftW := lipgloss.Width(statusLeft)
 
@@ -1443,6 +1458,25 @@ func joinedWidth(segs []string) int {
 		w += lipgloss.Width(s)
 	}
 	return w
+}
+
+// statusTag renders a Crush-style padded, coloured indicator chip (e.g. READY,
+// ERROR) — bold foreground on a solid status background.
+func statusTag(label string, fg, bg color.Color) string {
+	return lipgloss.NewStyle().Foreground(fg).Background(bg).Bold(true).Padding(0, 1).Render(label)
+}
+
+// toastTag maps a toast level to its indicator chip label and colours, mirroring
+// Crush's Status.{Success,Warn,Error}Indicator pairings.
+func toastTag(level toastLevel) (label string, fg, bg color.Color) {
+	switch level {
+	case toastWarn:
+		return "WARN", colBgMost, colWarnSubtle
+	case toastError:
+		return "ERROR", colOnPrimary, colError
+	default:
+		return "INFO", colBgLess, colInfo
+	}
 }
 
 func (m model) toastStyle(level toastLevel) lipgloss.Style {
