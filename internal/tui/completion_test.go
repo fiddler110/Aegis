@@ -70,12 +70,14 @@ func TestFileCompletion(t *testing.T) {
 		wantFirst  string
 		wantStart  int
 	}{
-		{"bare at lists files", "@", true, compFile, "internal/tui/tui.go", 0},
+		{"bare at lists ref types first", "@", true, compFile, "image:", 0},
+		{"ref-type prefix", "@diag", true, compFile, "diagnostics", 0},
 		{"base-name prefix", "@theme", true, compFile, "internal/tui/theme.go", 0},
 		{"path prefix", "@internal/tui/tu", true, compFile, "internal/tui/tui.go", 0},
 		{"mid-sentence mention", "look at @README", true, compFile, "README.md", 8},
 		{"at without whitespace before is inactive", "foo@bar", false, compSlash, "", 0},
 		{"completed mention closes", "@README.md ", false, compSlash, "", 0},
+		{"ref value being typed closes", "@image:src/x", false, compSlash, "", 0},
 		{"no file match inactive", "@zzzz", false, compSlash, "", 0},
 	}
 

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/scottymacleod/aegis/internal/config"
 	"github.com/scottymacleod/aegis/internal/discover"
@@ -193,7 +193,7 @@ func (w *wizardModel) buildConfigForm() *huh.Form {
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 func (w *wizardModel) update(msg tea.Msg) tea.Cmd {
-	if km, ok := msg.(tea.KeyMsg); ok && km.Type == tea.KeyCtrlC {
+	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "ctrl+c" {
 		w.done = true
 		return nil
 	}
@@ -423,8 +423,13 @@ func (w *wizardModel) view() string {
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
-func aegisHuhTheme() *huh.Theme {
-	t := huh.ThemeCharm()
+func aegisHuhTheme() huh.Theme {
+	return huh.ThemeFunc(func(isDark bool) *huh.Styles {
+		return aegisHuhStyles(huh.ThemeCharm(isDark))
+	})
+}
+
+func aegisHuhStyles(t *huh.Styles) *huh.Styles {
 	t.Focused.Title = lipgloss.NewStyle().Foreground(colAssistFg).Bold(true)
 	t.Focused.Description = lipgloss.NewStyle().Foreground(colTextMuted).Italic(true)
 	t.Focused.SelectSelector = lipgloss.NewStyle().Foreground(colAccent).SetString("▶ ")
