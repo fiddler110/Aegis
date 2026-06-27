@@ -94,6 +94,7 @@ type model struct {
 
 	streamStart time.Time // when the current stream began; zero when idle
 	turnCount   int       // conversation turns sent; guards turn separator logic
+	animStep    int       // frame counter for the streaming "working" shimmer
 
 	// Wrapped-transcript cache. Re-wrapping the whole (up to 1 MiB) transcript
 	// on every streamed token is O(n²) per turn; instead we wrap once and reuse
@@ -483,6 +484,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
 		if m.streaming {
+			m.animStep++ // advance the gradient working shimmer
 			cmds = append(cmds, cmd)
 			m.refresh() // animate the in-transcript thinking indicator
 		}
@@ -955,7 +957,8 @@ func (m *model) refresh() {
 				elapsed = fmt.Sprintf("  %ds", secs)
 			}
 		}
-		content += wrap(m.sp.View()+" "+m.th.statusText.Render("thinking…")+m.th.elapsedDim.Render(elapsed), m.vp.Width())
+		work := shimmerText("● thinking…", m.animStep, colTextMuted, colAccent)
+		content += wrap(work+m.th.elapsedDim.Render(elapsed), m.vp.Width())
 	}
 
 	m.vp.SetContent(content)
@@ -1135,8 +1138,8 @@ func (m *model) appendUser(text string) {
 		m.transcript.WriteString(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
 	}
 	m.turnCount++
-	m.transcript.WriteString(m.th.user.Render("You") + "\n" + text + "\n\n")
-	m.transcript.WriteString(m.th.assistant.Render("Assistant") + "\n")
+	m.transcript.WriteString(barLabel("You", colUserFg) + "\n" + text + "\n\n")
+	m.transcript.WriteString(barLabel("Assistant", colAssistFg) + "\n")
 }
 
 func (m *model) applyEvent(ev api.Event) {
@@ -1315,7 +1318,11 @@ func (m model) renderSidebar(h int) string {
 	w := sidebarInnerW - 2 // usable text width (inner - left padding)
 
 	add := func(s string) { b.WriteString(s + "\n") }
-	section := func(title string) { add(m.th.sideSection.Render(title)) }
+	// Section headers carry a small diamond marker (Crush-style) so the panel
+	// reads as a set of labelled groups rather than a flat column of words.
+	section := func(title string) {
+		add(m.th.sideSection.Render("◇ " + title))
+	}
 
 	add("")
 	section("SESSION")
@@ -1340,12 +1347,12 @@ func (m model) renderSidebar(h int) string {
 	if len(m.tools) > 0 {
 		section("TOOLS")
 		for _, t := range m.tools {
-			tag, style := "⚙", m.th.tool
+			tag, style := "●", m.th.tool
 			switch t.status {
 			case "ok":
 				tag, style = "✓", m.th.sideValue
 			case "err":
-				tag, style = "✗", m.th.toolErr
+				tag, style = "×", m.th.toolErr
 			}
 			add(style.Render(tag + " " + truncate(t.name, w-2)))
 		}
@@ -1394,7 +1401,7 @@ func (m model) renderInputArea() string {
 		if !m.streamStart.IsZero() {
 			elapsed = m.th.elapsedDim.Render(fmt.Sprintf(" %ds", int(time.Since(m.streamStart).Seconds())))
 		}
-		statusLeft = m.sp.View() + " " + m.th.statusText.Render(m.status) + elapsed
+		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, colAccent) + elapsed
 	} else if m.activeToast != nil {
 		statusLeft = m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
 	} else {

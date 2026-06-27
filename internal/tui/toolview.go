@@ -41,7 +41,7 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 	}
 	// Generic: tool name plus a compact one-line view of the input.
 	budget := max(width-len(name)-4, 20)
-	return th.tool.Render(fmt.Sprintf("⚙ %s  %s", name, truncate(oneLine(string(input)), budget)))
+	return th.tool.Render(fmt.Sprintf("● %s  %s", name, truncate(oneLine(string(input)), budget)))
 }
 
 // renderToolResult renders a finished tool call. Short, single-line results are
@@ -50,7 +50,7 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 func renderToolResult(th theme, name, result string, isErr bool, width int) string {
 	tag, style := "✓", th.tool
 	if isErr {
-		tag, style = "✗", th.toolErr
+		tag, style = "×", th.toolErr
 	}
 	result = strings.TrimRight(result, "\n")
 
@@ -108,7 +108,7 @@ func diffLines(th theme, oldS, newS string, width, budget int) (lines []string, 
 // assembleDiff builds a tool header followed by an indented diff body.
 func assembleDiff(th theme, name, path string, lines []string, hidden int) string {
 	var b strings.Builder
-	b.WriteString(th.tool.Render("⚙ "+name+" ") + th.diffMeta.Render(path) + "\n")
+	b.WriteString(th.tool.Render("● "+name+" ") + th.diffMeta.Render(path) + "\n")
 	for _, ln := range lines {
 		b.WriteString("  " + ln + "\n")
 	}
@@ -152,7 +152,7 @@ func renderMultiEditDiff(th theme, name string, input json.RawMessage, width int
 		lines, hidden := diffLines(th, e.OldString, e.NewString, width, budget)
 		budget -= len(lines)
 		if i == 0 {
-			b.WriteString(th.tool.Render("⚙ "+name+" ") + th.diffMeta.Render(e.Path) + "\n")
+			b.WriteString(th.tool.Render("● "+name+" ") + th.diffMeta.Render(e.Path) + "\n")
 		} else {
 			b.WriteString("  " + th.diffMeta.Render(e.Path) + "\n")
 		}
@@ -186,7 +186,7 @@ func renderShellCall(th theme, name string, input json.RawMessage, width int) (s
 	if json.Unmarshal(input, &a) != nil || a.Command == "" {
 		return "", false
 	}
-	header := th.tool.Render("⚙ " + name)
+	header := th.tool.Render("● " + name)
 	if a.Background {
 		header += " " + th.diffMeta.Render("(background)")
 	}
