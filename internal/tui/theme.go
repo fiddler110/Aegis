@@ -1,38 +1,54 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"image/color"
 
-// Semantic True Color palette. Lipgloss / muesli/termenv degrades gracefully
-// to 256-color and 16-color terminals automatically.
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/exp/charmtone"
+)
+
+// Semantic palette, built on the Charmtone "Pantera" dark palette (the same
+// family Crush uses) so the UI reads as a single, cohesive dark theme rather
+// than an ad-hoc set of hexes. lipgloss v2 dropped AdaptiveColor; the palette
+// is intentionally dark-first. Colors satisfy the color.Color interface (both
+// charmtone keys and lipgloss.Color do) and degrade gracefully to 256- and
+// 16-color terminals.
 var (
-	colSurface   = lipgloss.Color("#0F1117")
-	colBorder    = lipgloss.Color("#2D3148")
-	colTextDim   = lipgloss.Color("#CBD5E1")
-	colTextMuted = lipgloss.Color("#64748B")
+	colSurface color.Color = charmtone.Pepper // base background
+	colBorder  color.Color = charmtone.Iron   // visible borders / rules
 
-	colAccent  = lipgloss.Color("#7C3AED")
-	colSuccess = lipgloss.Color("#10B981")
-	colWarning = lipgloss.Color("#F59E0B")
-	colDanger  = lipgloss.Color("#EF4444")
+	// Body and secondary text.
+	colTextDim   color.Color = charmtone.Smoke  // primary body text
+	colTextMuted color.Color = charmtone.Oyster // muted / secondary text
 
-	colUserFg    = lipgloss.Color("#38BDF8")
-	colAssistFg  = lipgloss.Color("#A78BFA")
-	colToolFg    = lipgloss.Color("#94A3B8")
-	colToolErrFg = lipgloss.Color("#F87171")
+	colAccent  color.Color = charmtone.Charple // brand purple / primary accent
+	colSuccess color.Color = charmtone.Julep   // green
+	colWarning color.Color = charmtone.Mustard // amber
+	colDanger  color.Color = charmtone.Coral   // red
 
-	colBrandBg  = lipgloss.Color("#2E1065") // deep purple brand box
-	colBrandFg  = lipgloss.Color("#DDD6FE") // light lavender brand text
-	colShield   = lipgloss.Color("#818CF8") // medium indigo for shield art
-	colCwd      = lipgloss.Color("#38BDF8") // sky blue for working directory
-	colInputSep = lipgloss.Color("#374151") // slightly brighter separator for input borders
+	colUserFg    color.Color = charmtone.Malibu  // user messages (blue)
+	colAssistFg  color.Color = charmtone.Charple // assistant messages (purple)
+	colToolFg    color.Color = charmtone.Squid   // tool output
+	colToolErrFg color.Color = charmtone.Coral   // tool errors
 
-	// Mode badge backgrounds — each mode gets a coloured pill for at-a-glance status.
-	colPlanBg  = lipgloss.Color("#0C2440") // deep navy  → safe/read-only
-	colPlanFg  = lipgloss.Color("#60A5FA") // sky blue
-	colBuildBg = lipgloss.Color("#431407") // deep amber → file writes active
-	colBuildFg = lipgloss.Color("#FCD34D") // warm amber
-	colAutoBg  = lipgloss.Color("#052E16") // deep green → full capability
-	colAutoFg  = lipgloss.Color("#4ADE80") // mint green
+	colBrandBg  color.Color = charmtone.Charple // brand chip background
+	colBrandFg  color.Color = charmtone.Butter  // brand chip text
+	colShield   color.Color = charmtone.Guppy   // shield / logo art
+	colCwd      color.Color = charmtone.Malibu  // working directory
+	colInputSep color.Color = charmtone.Char    // input border separator
+
+	// Gradient ramp endpoints for the wordmark / working shimmer.
+	colGradFrom color.Color = charmtone.Dolly
+	colGradTo   color.Color = charmtone.Charple
+
+	// Mode badge backgrounds — each mode gets a coloured pill for at-a-glance
+	// status. Deep desaturated backgrounds with a bright Charmtone foreground.
+	colPlanBg  color.Color = lipgloss.Color("#0C2440") // deep navy  → safe/read-only
+	colPlanFg  color.Color = charmtone.Malibu          // sky blue
+	colBuildBg color.Color = lipgloss.Color("#431407") // deep amber → file writes active
+	colBuildFg color.Color = charmtone.Zest            // warm amber
+	colAutoBg  color.Color = lipgloss.Color("#052E16") // deep green → full capability
+	colAutoFg  color.Color = charmtone.Guac            // mint green
 )
 
 // theme holds all pre-built styles. lipgloss.Style is a value type so every
@@ -75,6 +91,9 @@ type theme struct {
 	diffMeta lipgloss.Style // file path / "N more lines" footer
 	toolBody lipgloss.Style // multi-line tool output body
 	toolGut  lipgloss.Style // gutter rule beside tool output
+
+	thinking    lipgloss.Style // "✻ thinking" header
+	thinkingDim lipgloss.Style // extended-thinking body
 }
 
 func newTheme() theme {
@@ -117,5 +136,8 @@ func newTheme() theme {
 		diffMeta: lipgloss.NewStyle().Foreground(colTextMuted),
 		toolBody: lipgloss.NewStyle().Foreground(colTextDim),
 		toolGut:  lipgloss.NewStyle().Foreground(colBorder),
+
+		thinking:    lipgloss.NewStyle().Foreground(colTextMuted).Bold(true),
+		thinkingDim: lipgloss.NewStyle().Foreground(colTextMuted).Italic(true),
 	}
 }
