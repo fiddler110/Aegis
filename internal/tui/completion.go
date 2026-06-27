@@ -266,7 +266,7 @@ func (c completionState) view(width int) string {
 			Render(fmt.Sprintf(" %d/%d ", page+1, totalPages))
 	}
 	sepW := max(width-lipgloss.Width(pageCtx), 0)
-	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", sepW)) + pageCtx
+	sep := lipgloss.NewStyle().Foreground(colSeparator).Render(strings.Repeat("─", sepW)) + pageCtx
 
 	// Build rows. Selected item gets a brand-coloured background spanning the
 	// full width so the highlight is instantly obvious without any extra
