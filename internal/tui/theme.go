@@ -37,9 +37,13 @@ var (
 	colCwd      color.Color = charmtone.Malibu  // working directory
 	colInputSep color.Color = charmtone.Char    // input border separator
 
-	// Gradient ramp endpoints for the wordmark / working shimmer.
+	// Gradient ramp endpoints. colGrad* ramps the shield art vertically (cool
+	// lavender crest → brand purple point); colWord* is a brighter horizontal
+	// ramp for the AEGIS wordmark so the name reads clearly against the shield.
 	colGradFrom color.Color = charmtone.Dolly
 	colGradTo   color.Color = charmtone.Charple
+	colWordFrom color.Color = charmtone.Salt
+	colWordTo   color.Color = charmtone.Dolly
 
 	// Mode badge backgrounds — each mode gets a coloured pill for at-a-glance
 	// status. Deep desaturated backgrounds with a bright Charmtone foreground.
@@ -73,10 +77,8 @@ type theme struct {
 	statusDim  lipgloss.Style
 	costText   lipgloss.Style
 
-	titleMeta  lipgloss.Style
-	brandLabel lipgloss.Style
+	titleMeta lipgloss.Style
 
-	shieldArt   lipgloss.Style
 	cwdStyle    lipgloss.Style
 	welcomeKey  lipgloss.Style
 	welcomeVal  lipgloss.Style
@@ -118,10 +120,8 @@ func newTheme() theme {
 		statusDim:  lipgloss.NewStyle().Foreground(colTextMuted),
 		costText:   lipgloss.NewStyle().Foreground(colSuccess),
 
-		titleMeta:  lipgloss.NewStyle().Foreground(colTextMuted),
-		brandLabel: lipgloss.NewStyle().Background(colBrandBg).Foreground(colBrandFg).Bold(true),
+		titleMeta: lipgloss.NewStyle().Foreground(colTextMuted),
 
-		shieldArt:   lipgloss.NewStyle().Foreground(colShield),
 		cwdStyle:    lipgloss.NewStyle().Foreground(colCwd),
 		welcomeKey:  lipgloss.NewStyle().Foreground(colTextMuted),
 		welcomeVal:  lipgloss.NewStyle().Foreground(colTextDim),

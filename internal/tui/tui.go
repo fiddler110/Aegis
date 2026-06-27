@@ -1286,7 +1286,7 @@ func (m model) render() string {
 }
 
 func (m model) renderTitleBar() string {
-	brand := m.th.brandLabel.Render(" ⬡ AEGIS ")
+	brand := renderBrandMark()
 	brandW := lipgloss.Width(brand)
 
 	// Scroll indicator: shown whenever transcript content overflows the viewport.
@@ -1553,19 +1553,6 @@ func defaultEditor() string {
 
 // --- welcome content ---
 
-// welcomeShield is the ASCII art shield shown on startup, each line exactly 14 chars.
-var welcomeShield = []string{
-	`  ╔══════════╗`,
-	`  ║  AEGIS   ║`,
-	`  ╠══════════╣`,
-	`  ║    /\    ║`,
-	`  ║   /  \   ║`,
-	`  ║  / ◆  \  ║`,
-	`  ║ /      \ ║`,
-	`  ╚══╗    ╔══╝`,
-	`     ╚════╝   `,
-}
-
 func buildWelcomeContent(cfg Config, workDir string, th theme) string {
 	username := getUsername()
 	shortCWD := shortenPath(workDir)
@@ -1582,10 +1569,11 @@ func buildWelcomeContent(cfg Config, workDir string, th theme) string {
 		"",
 	}
 
+	shield := renderAegisLogo()
 	var b strings.Builder
 	b.WriteString("\n")
-	for i, shieldLine := range welcomeShield {
-		b.WriteString(th.shieldArt.Render(shieldLine))
+	for i, shieldLine := range shield {
+		b.WriteString(shieldLine)
 		b.WriteString("  ")
 		if i < len(info) {
 			b.WriteString(info[i])
