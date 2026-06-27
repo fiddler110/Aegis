@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import "charm.land/bubbles/v2/key"
 
 // keyMap holds all named key bindings for the TUI. Using key.Binding means
 // each binding carries its own help text, which the help overlay aggregates.
@@ -17,6 +17,7 @@ type keyMap struct {
 	HistUp    key.Binding
 	HistDown  key.Binding
 	Teammates key.Binding
+	Sessions  key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -33,5 +34,6 @@ func defaultKeyMap() keyMap {
 		HistUp:    key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history prev")),
 		HistDown:  key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "history next")),
 		Teammates: key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "list sub-agents")),
+		Sessions:  key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "switch session")),
 	}
 }

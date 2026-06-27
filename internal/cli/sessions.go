@@ -3,9 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/scottymacleod/aegis/internal/client"
 	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/share"
 	"github.com/spf13/cobra"
 )
 
@@ -16,6 +19,7 @@ func newSessionsCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newSessionsListCmd())
 	cmd.AddCommand(newSessionsDeleteCmd())
+	cmd.AddCommand(newSessionsExportCmd())
 	return cmd
 }
 
@@ -59,6 +63,56 @@ func newSessionsListCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newSessionsExportCmd() *cobra.Command {
+	var format, out string
+	cmd := &cobra.Command{
+		Use:   "export <id>",
+		Short: "Export a session as a shareable transcript (html, md, or json)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			f, err := share.ParseFormat(format)
+			if err != nil {
+				return err
+			}
+			cl, err := dialClient()
+			if err != nil {
+				return err
+			}
+			sess, err := cl.GetSession(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			data, err := share.Render(sess, f)
+			if err != nil {
+				return err
+			}
+			if out == "-" {
+				_, err := cmd.OutOrStdout().Write(data)
+				return err
+			}
+			if out == "" {
+				out = fmt.Sprintf("aegis-session-%s.%s", shortID(sess.ID), f.Ext())
+			}
+			if err := os.WriteFile(out, data, 0o644); err != nil {
+				return err
+			}
+			abs, _ := filepath.Abs(out)
+			fmt.Fprintf(cmd.OutOrStdout(), "exported %s → %s\n", sess.ID, abs)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&format, "format", "html", "output format: html, md, or json")
+	cmd.Flags().StringVar(&out, "out", "", "output file (default aegis-session-<id>.<ext>; use - for stdout)")
+	return cmd
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func newSessionsDeleteCmd() *cobra.Command {

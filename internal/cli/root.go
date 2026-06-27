@@ -120,6 +120,13 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&initProject, "init", false, "create a project-level .aegis/config.yaml override in the current directory")
 
 	cmd.AddCommand(newServeCmd())
+	cmd.AddCommand(newACPCmd())
+	cmd.AddCommand(newUICmd())
+	cmd.AddCommand(newParallelCmd())
+	cmd.AddCommand(newRunsCmd())
+	cmd.AddCommand(newWorktreeCmd())
+	cmd.AddCommand(newBundleCmd())
+	cmd.AddCommand(newModelsCmd())
 	cmd.AddCommand(newConfigCmd())
 	cmd.AddCommand(newDryRunCmd())
 	cmd.AddCommand(newChatCmd())
@@ -128,6 +135,29 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newDiagramCmd())
 	cmd.AddCommand(newWorkerCmd())
 	return cmd
+}
+
+// ensureDaemon returns a client connected to a running daemon, starting an
+// embedded one if none is reachable. The returned stop func shuts down any
+// daemon this call started (a no-op when an existing daemon was reused).
+func ensureDaemon(ctx context.Context, cfg *config.Config) (*client.Client, func(), error) {
+	cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	healthErr := cl.Health(hctx)
+	cancel()
+	if healthErr == nil {
+		return cl, func() {}, nil
+	}
+	stop, err := startEmbeddedDaemon(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("start daemon: %w", err)
+	}
+	if !waitForDaemon(cl, 10*time.Second) {
+		stop()
+		return nil, nil, fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
+	}
+	cl = client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+	return cl, stop, nil
 }
 
 // startEmbeddedDaemon starts the Aegis daemon in-process. It returns a cancel

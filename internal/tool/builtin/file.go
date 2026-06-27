@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scottymacleod/aegis/internal/checkpoint"
 	"github.com/scottymacleod/aegis/internal/filetracker"
 	"github.com/scottymacleod/aegis/internal/tool"
 )
@@ -110,6 +111,9 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 			return tool.Result{Content: err.Error(), IsError: true}, nil
 		}
 	}
+	// Capture pre-modification content for checkpoint/rewind, if a run is
+	// snapshotting. Safe on a nil snapshotter.
+	checkpoint.SnapshotterFrom(ctx).Capture(abs)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
 		return tool.Result{Content: fmt.Sprintf("mkdir failed: %v", err), IsError: true}, nil
 	}
@@ -179,6 +183,7 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	} else {
 		updated = strings.Replace(content, args.OldString, args.NewString, 1)
 	}
+	checkpoint.SnapshotterFrom(ctx).Capture(abs)
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
 		return tool.Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}, nil
 	}

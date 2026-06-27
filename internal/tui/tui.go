@@ -6,23 +6,27 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/scottymacleod/aegis/internal/api"
 	"github.com/scottymacleod/aegis/internal/client"
 	"github.com/scottymacleod/aegis/internal/commands"
+	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/session"
 )
 
 // Config configures the TUI.
@@ -37,7 +41,7 @@ type Config struct {
 // Run starts the TUI event loop and blocks until the user quits.
 func Run(cfg Config) error {
 	m := newModel(cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m)
 	_, err := p.Run()
 	return err
 }
@@ -67,6 +71,7 @@ type model struct {
 	sp         spinner.Model
 	transcript cappedBuffer
 	liveText   *strings.Builder // pointer: strings.Builder panics if copied by value after first write
+	thinkText  *strings.Builder // accumulates extended-thinking text for the current turn
 	renderer   *glamour.TermRenderer
 	rendererW  int // tracks viewport width to know when to recreate renderer
 	slash      *SlashDispatcher
@@ -81,13 +86,16 @@ type model struct {
 	wizard     *wizardModel
 	workDir    string
 
-	tools        []toolEntry
-	inputTokens  int
-	outputTokens int
-	costUSD      float64
+	tools               []toolEntry
+	inputTokens         int // uncached input tokens (last turn)
+	outputTokens        int
+	cacheReadTokens     int // prompt-cache hits (last turn)
+	cacheCreationTokens int // prompt-cache writes (last turn)
+	costUSD             float64
 
 	streamStart time.Time // when the current stream began; zero when idle
 	turnCount   int       // conversation turns sent; guards turn separator logic
+	animStep    int       // frame counter for the streaming "working" shimmer
 
 	// Wrapped-transcript cache. Re-wrapping the whole (up to 1 MiB) transcript
 	// on every streamed token is O(n²) per turn; instead we wrap once and reuse
@@ -111,10 +119,16 @@ type model struct {
 	fileIndex      []string
 	fileIndexBuilt bool
 
+	// Cached command-entry list (built-ins + custom), rebuilt only when the
+	// custom-command count changes rather than on every keystroke.
+	cmdEntriesCache []cmdEntry
+	cmdEntriesLen   int
+
 	// overlay / modals
 	keys          keyMap
 	palette       *paletteModel
 	personaPicker *personaPickerModel
+	sessionPicker *sessionPickerModel
 	helpOpen      bool
 	activeToast   *toast
 	completion    completionState
@@ -126,6 +140,7 @@ type approvalState struct {
 	toolName string
 	input    string
 	reason   string
+	id       string // run id echoed back when answering
 }
 
 const approvalBannerH = 4 // lines rendered by renderApprovalBanner(): separator + 3 content
@@ -175,30 +190,48 @@ type teammatesMsg struct {
 	items []api.Teammate
 	err   error
 }
+type sessionsLoadedMsg struct {
+	items []api.SessionMeta
+	err   error
+}
+type sessionSwitchedMsg struct {
+	sess *session.Session
+	err  error
+}
 
 func newModel(cfg Config) model {
 	ta := textarea.New()
 	ta.Placeholder = "Message Aegis…"
-	ta.Prompt = " "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(3)
 
-	focusedStyle := ta.FocusedStyle
-	focusedStyle.Base = lipgloss.NewStyle().
+	// Crush-style editor prompt: a ❯ caret on the focused first line, and ":::"
+	// continuation dots on wrapped/subsequent lines. Width 4 keeps the text
+	// gutter aligned regardless of which variant is shown.
+	ta.SetPromptFunc(4, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 && info.Focused {
+			return lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("  ❯ ")
+		}
+		dots := colSuccessMost
+		if !info.Focused {
+			dots = colFgMore
+		}
+		return lipgloss.NewStyle().Foreground(dots).Render("::: ")
+	})
+
+	styles := ta.Styles()
+	styles.Focused.Base = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colAccent)
-	focusedStyle.CursorLine = lipgloss.NewStyle() // clear Bubbles default ANSI-black bg
-	focusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
-	ta.FocusedStyle = focusedStyle
-
-	blurredStyle := ta.BlurredStyle
-	blurredStyle.Base = lipgloss.NewStyle().
+	styles.Focused.CursorLine = lipgloss.NewStyle() // clear Bubbles default ANSI-black bg
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
+	styles.Blurred.Base = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colBorder)
-	blurredStyle.CursorLine = lipgloss.NewStyle() // same
-	blurredStyle.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
-	ta.BlurredStyle = blurredStyle
+	styles.Blurred.CursorLine = lipgloss.NewStyle() // same
+	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(colTextMuted)
+	ta.SetStyles(styles)
 
 	ta.Focus()
 
@@ -223,6 +256,7 @@ func newModel(cfg Config) model {
 		histIdx:      -1,
 		workDir:      workDir,
 		liveText:     &strings.Builder{},
+		thinkText:    &strings.Builder{},
 		renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
 		keys:         defaultKeyMap(),
 		followBottom: true,
@@ -247,17 +281,75 @@ func (m model) fetchTeammates() tea.Cmd {
 	}
 }
 
-func (m model) startStream(text string) tea.Cmd {
+func (m model) fetchSessions() tea.Cmd {
+	cl := m.cfg.Client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		items, err := cl.ListSessions(ctx)
+		return sessionsLoadedMsg{items: items, err: err}
+	}
+}
+
+func (m model) switchSessionCmd(id string) tea.Cmd {
+	cl := m.cfg.Client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		sess, err := cl.GetSession(ctx, id)
+		return sessionSwitchedMsg{sess: sess, err: err}
+	}
+}
+
+func (m model) startStream(text string, images []api.ImageInput) tea.Cmd {
 	cl, id := m.cfg.Client, m.cfg.SessionID
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
-		ch, err := cl.PostMessage(ctx, id, text)
+		ch, err := cl.PostMessageReq(ctx, id, api.PostMessageRequest{Text: text, Images: images})
 		if err != nil {
 			cancel()
 			return errMsg{err}
 		}
 		return streamStartedMsg{ch: ch, cancel: cancel}
 	}
+}
+
+// extractImageRefs pulls @image:<path> tokens out of the submitted text and
+// resolves each path (expanding ~ and making it absolute relative to workDir)
+// into an image attachment. The remaining text is returned with those tokens
+// removed. Paths must be whitespace-free in this syntax.
+func extractImageRefs(text, workDir string) (clean string, images []api.ImageInput) {
+	fields := strings.Fields(text)
+	kept := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if path, ok := strings.CutPrefix(f, "@image:"); ok && path != "" {
+			images = append(images, api.ImageInput{Path: resolveAttachPath(path, workDir)})
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return strings.Join(kept, " "), images
+}
+
+// resolveAttachPath expands a leading ~ and resolves relative paths against the
+// workspace directory so the daemon receives an absolute path it can read.
+func resolveAttachPath(path, workDir string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path[1:])
+		}
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	if workDir != "" {
+		return filepath.Join(workDir, path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
 }
 
 func (m model) handleSlashCommand(parsed *commands.ParsedCommand) tea.Cmd {
@@ -357,10 +449,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Session picker overlay: route all input to the picker.
+	if m.sessionPicker != nil {
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = ws.Width, ws.Height
+			m.layout()
+			return m, nil
+		}
+		if _, ok := msg.(sessionPickerCancelMsg); ok {
+			m.sessionPicker = nil
+			m.ta.Focus()
+			return m, nil
+		}
+		if sel, ok := msg.(sessionPickerSelectedMsg); ok {
+			m.sessionPicker = nil
+			m.ta.Focus()
+			if sel.id == m.cfg.SessionID {
+				return m, nil // already on this session
+			}
+			return m, m.switchSessionCmd(sel.id)
+		}
+		updated, cmd := m.sessionPicker.Update(msg)
+		m.sessionPicker = &updated
+		return m, cmd
+	}
+
 	// Help overlay: only Escape or F1 closes it.
 	if m.helpOpen {
 		if k, ok := msg.(tea.KeyMsg); ok {
-			if k.Type == tea.KeyEsc || k.String() == "f1" {
+			if k.String() == "esc" || k.String() == "f1" {
 				m.helpOpen = false
 			}
 		}
@@ -381,6 +498,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
 		if m.streaming {
+			m.animStep++ // advance the gradient working shimmer
 			cmds = append(cmds, cmd)
 			m.refresh() // animate the in-transcript thinking indicator
 		}
@@ -406,15 +524,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.approval != nil {
 			switch msg.String() {
 			case "y", "Y", "enter":
+				id := m.approval.id
 				m.approval = nil
 				m.status = "thinking…"
 				m.applyViewportHeight()
-				return m, m.sendApprovalCmd(true)
+				return m, m.sendApprovalCmd(id, true)
 			case "n", "N", "esc":
+				id := m.approval.id
 				m.approval = nil
 				m.status = "thinking…"
 				m.applyViewportHeight()
-				return m, m.sendApprovalCmd(false)
+				return m, m.sendApprovalCmd(id, false)
 			}
 			// Let viewport scroll keys fall through to the vp.Update below.
 			var vpCmd tea.Cmd
@@ -451,12 +571,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			if m.streaming && m.cancel != nil {
-				m.cancel()
+				m.cancel() // interrupt the in-flight run; press again to quit
 				return m, nil
+			}
+			if m.cancel != nil {
+				m.cancel() // ensure no run keeps streaming (and spending) after we exit
 			}
 			return m, tea.Quit
 		case "ctrl+t":
 			return m, m.fetchTeammates()
+		case "ctrl+r":
+			if !m.streaming {
+				return m, m.fetchSessions()
+			}
 		case "ctrl+l":
 			if !m.streaming {
 				return m, m.handleSlashCommand(&commands.ParsedCommand{Name: "clear", Raw: "/clear"})
@@ -465,7 +592,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.streaming {
 				m.completion = completionState{}
 				m.applyViewportHeight()
-				pal := newPalette(m.width, m.height, allCommandEntries(m.slash.Customs()))
+				pal := newPalette(m.width, m.height, m.commandEntries())
 				m.palette = &pal
 				return m, nil
 			}
@@ -522,13 +649,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.history = append(m.history, text)
 			m.histIdx = -1
 			m.draftInput = ""
-			m.appendUser(text)
+			cleanText, images := extractImageRefs(text, m.cfg.WorkDir)
+			displayText := cleanText
+			if displayText == "" && len(images) > 0 {
+				suffix := ""
+				if len(images) != 1 {
+					suffix = "s"
+				}
+				displayText = fmt.Sprintf("(%d image%s attached)", len(images), suffix)
+			}
+			m.appendUser(displayText)
 			m.ta.Reset()
 			m.streaming = true
 			m.status = "thinking…"
 			m.followBottom = true // jump to the freshly sent message
 			m.refresh()
-			return m, m.startStream(text)
+			return m, m.startStream(cleanText, images)
 		}
 
 	case streamStartedMsg:
@@ -543,6 +679,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.events)
 
 	case streamClosedMsg:
+		m.flushThinking()
 		m.flushLiveText() // safety: in case KindTurnDone wasn't the last event
 		m.streaming = false
 		m.events = nil
@@ -564,8 +701,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refresh()
 		return m, nil
 
+	case sessionsLoadedMsg:
+		if msg.err != nil {
+			t, cmd := newToastCmd("sessions: "+msg.err.Error(), toastError)
+			m.activeToast = t
+			return m, cmd
+		}
+		if len(msg.items) == 0 {
+			t, cmd := newToastCmd("no sessions to switch to", toastInfo)
+			m.activeToast = t
+			return m, cmd
+		}
+		picker := newSessionPicker(m.width, m.height, msg.items, m.cfg.SessionID)
+		m.sessionPicker = &picker
+		return m, nil
+
+	case sessionSwitchedMsg:
+		if msg.err != nil {
+			t, cmd := newToastCmd("switch: "+msg.err.Error(), toastError)
+			m.activeToast = t
+			return m, cmd
+		}
+		m.applySwitchedSession(msg.sess)
+		m.refresh()
+		return m, nil
+
 	case slashResultMsg:
 		if msg.Quit {
+			if m.cancel != nil {
+				m.cancel()
+			}
 			return m, tea.Quit
 		}
 		if msg.Personas != nil {
@@ -578,10 +743,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizard = wiz
 			return m, wiz.init()
 		}
+		if msg.ReloadSession {
+			// A rewind changed the conversation: reload it and report via toast,
+			// since the reload resets the transcript.
+			var cmds []tea.Cmd
+			if msg.Output != "" {
+				level := toastInfo
+				if msg.IsError {
+					level = toastError
+				}
+				t, c := newToastCmd(msg.Output, level)
+				m.activeToast = t
+				cmds = append(cmds, c)
+			}
+			cmds = append(cmds, m.switchSessionCmd(m.cfg.SessionID))
+			return m, tea.Batch(cmds...)
+		}
 		if msg.Output == "\x00clear" {
 			m.transcript.Reset()
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
+			m.cacheReadTokens, m.cacheCreationTokens = 0, 0
 			m.turnCount = 0
 			m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
 			m.refresh()
@@ -600,7 +782,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "thinking…"
 			m.followBottom = true
 			m.refresh()
-			return m, tea.Batch(m.startStream(msg.Message), m.sp.Tick)
+			return m, tea.Batch(m.startStream(msg.Message, nil), m.sp.Tick)
 		}
 		m.refresh()
 		return m, nil
@@ -652,12 +834,12 @@ func (m *model) layout() {
 	vpW = max(vpW, 10)
 
 	if !m.ready {
-		m.vp = viewport.New(vpW, max(m.height-m.fixedH(), 3))
+		m.vp = viewport.New(viewport.WithWidth(vpW), viewport.WithHeight(max(m.height-m.fixedH(), 3)))
 	} else {
-		m.vp.Width = vpW
+		m.vp.SetWidth(vpW)
 	}
 	m.applyViewportHeight()
-	m.ta.SetWidth(m.width - 2) // -2 for left+right border chars
+	m.ta.SetWidth(m.width) // SetWidth takes the total outer width; borders are handled internally
 
 	if vpW != m.rendererW {
 		m.rendererW = vpW
@@ -680,7 +862,18 @@ func (m *model) fixedH() int {
 
 // applyViewportHeight resizes the viewport to fit the current fixed budget.
 func (m *model) applyViewportHeight() {
-	m.vp.Height = max(m.height-m.fixedH(), 3)
+	m.vp.SetHeight(max(m.height-m.fixedH(), 3))
+}
+
+// commandEntries returns the cached built-in + custom command list, rebuilding
+// it only when the custom-command count changes.
+func (m *model) commandEntries() []cmdEntry {
+	customs := m.slash.Customs()
+	if m.cmdEntriesCache == nil || len(customs) != m.cmdEntriesLen {
+		m.cmdEntriesCache = allCommandEntries(customs)
+		m.cmdEntriesLen = len(customs)
+	}
+	return m.cmdEntriesCache
 }
 
 // syncCompletion recomputes the inline completion popup from the textarea
@@ -693,7 +886,7 @@ func (m *model) syncCompletion() {
 		m.fileIndex = buildFileIndex(m.workDir)
 		m.fileIndexBuilt = true
 	}
-	m.completion = computeCompletion(val, allCommandEntries(m.slash.Customs()), m.fileIndex)
+	m.completion = computeCompletion(val, m.commandEntries(), m.fileIndex)
 	if m.completion.active != prev {
 		m.applyViewportHeight()
 		m.refresh()
@@ -709,14 +902,20 @@ func (m *model) acceptCompletion(run bool) tea.Cmd {
 		return nil
 	}
 
-	// @file mention: splice the chosen path in place of the typed @token.
+	// @file mention / @ref: splice the choice in place of the typed @token.
 	if m.completion.kind == compFile {
 		val := m.ta.Value()
 		start := m.completion.tokenStart
 		if start < 0 || start > len(val) {
 			start = len(val)
 		}
-		m.ta.SetValue(val[:start] + "@" + e.name + " ")
+		// Ref kinds taking a value (e.g. "image:") keep the cursor right after
+		// the colon so the user types the value; others get a trailing space.
+		sep := " "
+		if strings.HasSuffix(e.name, ":") {
+			sep = ""
+		}
+		m.ta.SetValue(val[:start] + "@" + e.name + sep)
 		m.completion = completionState{}
 		m.applyViewportHeight()
 		m.refresh()
@@ -748,18 +947,23 @@ func (m *model) refresh() {
 	// only, so length is a sufficient change signal.
 	base := m.transcript.String()
 	if base == "" {
-		m.wrapCache, m.wrapCacheLen, m.wrapCacheW = "", 0, m.vp.Width
-	} else if len(base) != m.wrapCacheLen || m.vp.Width != m.wrapCacheW {
-		m.wrapCache = wrap(base, m.vp.Width)
+		m.wrapCache, m.wrapCacheLen, m.wrapCacheW = "", 0, m.vp.Width()
+	} else if len(base) != m.wrapCacheLen || m.vp.Width() != m.wrapCacheW {
+		m.wrapCache = wrap(base, m.vp.Width())
 		m.wrapCacheLen = len(base)
-		m.wrapCacheW = m.vp.Width
+		m.wrapCacheW = m.vp.Width()
 	}
 	content := m.wrapCache
+
+	// Streaming extended-thinking is shown dim above the answer until it flushes.
+	if think := m.thinkText.String(); think != "" {
+		content += wrap(m.th.thinking.Render("✻ thinking")+"\n"+m.th.thinkingDim.Render(think)+"\n", m.vp.Width())
+	}
 
 	// The live tail (streaming prose or the thinking indicator) is small, so it
 	// is wrapped fresh every refresh and appended to the cached transcript.
 	if live := m.liveText.String(); live != "" {
-		content += wrap(live, m.vp.Width)
+		content += wrap(live, m.vp.Width())
 	} else if m.streaming {
 		elapsed := ""
 		if !m.streamStart.IsZero() {
@@ -767,13 +971,29 @@ func (m *model) refresh() {
 				elapsed = fmt.Sprintf("  %ds", secs)
 			}
 		}
-		content += wrap(m.sp.View()+" "+m.th.statusText.Render("thinking…")+m.th.elapsedDim.Render(elapsed), m.vp.Width)
+		work := shimmerText("● thinking…", m.animStep, colTextMuted, colAccent)
+		content += wrap(work+m.th.elapsedDim.Render(elapsed), m.vp.Width())
 	}
 
 	m.vp.SetContent(content)
 	if m.followBottom {
 		m.vp.GotoBottom()
 	}
+}
+
+// flushThinking writes the accumulated extended-thinking text to the transcript
+// as a dim block. Called when the answer or a tool call begins, or at turn end.
+func (m *model) flushThinking() {
+	if m.thinkText.Len() == 0 {
+		return
+	}
+	raw := strings.TrimSpace(m.thinkText.String())
+	m.thinkText.Reset()
+	if raw == "" {
+		return
+	}
+	m.transcript.WriteString(m.th.thinking.Render("✻ thinking") + "\n")
+	m.transcript.WriteString(m.th.thinkingDim.Render(raw) + "\n\n")
 }
 
 // flushLiveText renders accumulated assistant text through glamour and appends
@@ -797,13 +1017,13 @@ func (m *model) flushLiveText() {
 // sendApprovalCmd fires a POST to /sessions/{id}/approve with the user's
 // decision. It runs in a goroutine so the TUI stays responsive while the
 // request travels to the daemon.
-func (m model) sendApprovalCmd(approved bool) tea.Cmd {
+func (m model) sendApprovalCmd(approvalID string, approved bool) tea.Cmd {
 	cl := m.cfg.Client
 	sessionID := m.cfg.SessionID
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := cl.SendApproval(ctx, sessionID, approved); err != nil {
+		if err := cl.SendApproval(ctx, sessionID, approvalID, approved); err != nil {
 			return errMsg{err: fmt.Errorf("approval: %w", err)}
 		}
 		return nil // engine continues via the existing SSE stream
@@ -835,35 +1055,130 @@ func (m model) renderApprovalBanner() string {
 	return sep + "\n" + " " + header + "\n" + reason + "\n" + prompt
 }
 
+// applySwitchedSession swaps the active session, resetting per-session UI state
+// and replaying the loaded transcript.
+func (m *model) applySwitchedSession(sess *session.Session) {
+	m.cfg.SessionID = sess.ID
+	m.cfg.Mode = sess.Mode
+	m.slash.SetSession(sess.ID, sess.Mode)
+
+	m.transcript.Reset()
+	m.tools = m.tools[:0]
+	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
+	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
+	m.turnCount = 0
+	m.wrapCacheLen = -1 // force a re-wrap on next refresh
+	m.streaming = false
+	m.status = "ready"
+
+	m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
+	m.loadHistory(sess.Messages)
+	m.followBottom = true
+}
+
+// loadHistory replays stored conversation messages into the transcript so a
+// resumed session shows its prior turns (user text, assistant prose, and tool
+// activity) using the same rendering as a live run.
+func (m *model) loadHistory(msgs []provider.Message) {
+	toolNames := map[string]string{} // tool_use ID → name, for labelling results
+	for _, msg := range msgs {
+		switch msg.Role {
+		case provider.RoleUser:
+			var text string
+			var results []provider.ToolResultBlock
+			var images int
+			for _, b := range msg.Content {
+				switch v := b.(type) {
+				case provider.TextBlock:
+					text += v.Text
+				case provider.ToolResultBlock:
+					results = append(results, v)
+				case provider.ImageBlock:
+					images++
+				}
+			}
+			if len(results) == 0 {
+				if images > 0 {
+					suffix := ""
+					if images != 1 {
+						suffix = "s"
+					}
+					note := fmt.Sprintf("🖼 %d image%s", images, suffix)
+					if text != "" {
+						text += "  " + note
+					} else {
+						text = "(" + note + ")"
+					}
+				}
+				if text != "" {
+					m.appendUser(text)
+				}
+			}
+			for _, r := range results {
+				name := toolNames[r.ToolUseID]
+				if name == "" {
+					name = "tool"
+				}
+				m.transcript.WriteString(renderToolResult(m.th, name, r.Content, r.IsError, m.vp.Width()) + "\n")
+			}
+		case provider.RoleAssistant:
+			for _, b := range msg.Content {
+				switch v := b.(type) {
+				case provider.ThinkingBlock:
+					if t := strings.TrimSpace(v.Text); t != "" {
+						m.transcript.WriteString(m.th.thinking.Render("✻ thinking") + "\n")
+						m.transcript.WriteString(m.th.thinkingDim.Render(t) + "\n\n")
+					}
+				case provider.TextBlock:
+					if v.Text != "" {
+						m.liveText.WriteString(v.Text)
+						m.flushLiveText()
+					}
+				case provider.ToolUseBlock:
+					toolNames[v.ID] = v.Name
+					m.transcript.WriteString("\n" + renderToolCall(m.th, v.Name, v.Input, m.vp.Width()) + "\n")
+				}
+			}
+		}
+	}
+}
+
 func (m *model) appendUser(text string) {
 	if m.turnCount > 0 {
-		sepW := m.vp.Width - 2
+		sepW := m.vp.Width() - 2
 		if sepW < 10 {
 			sepW = 60
 		}
 		m.transcript.WriteString(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
 	}
 	m.turnCount++
-	m.transcript.WriteString(m.th.user.Render("You") + "\n" + text + "\n\n")
-	m.transcript.WriteString(m.th.assistant.Render("Assistant") + "\n")
+	m.transcript.WriteString(barLabel("You", colUserFg) + "\n" + text + "\n\n")
+	m.transcript.WriteString(barLabel("Assistant", colAssistFg) + "\n")
 }
 
 func (m *model) applyEvent(ev api.Event) {
 	switch ev.Kind {
+	case api.KindThinking:
+		// Buffer extended-thinking text; flushed as a dim block when the answer
+		// (or a tool call) begins.
+		m.thinkText.WriteString(ev.Text)
+
 	case api.KindText:
+		m.flushThinking() // reasoning is done once the answer starts
 		// Buffer text in liveText; flushed through glamour at turn end.
 		m.liveText.WriteString(ev.Text)
 
 	case api.KindToolCall:
+		m.flushThinking()
 		m.flushLiveText() // render any preceding prose before the tool line
-		m.transcript.WriteString("\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.vp.Width) + "\n")
+		m.transcript.WriteString("\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.vp.Width()) + "\n")
 		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
 		if len(m.tools) > maxToolHistory {
 			m.tools = m.tools[1:]
 		}
 
 	case api.KindToolResult:
-		m.transcript.WriteString(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width) + "\n")
+		m.transcript.WriteString(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width()) + "\n")
 		for i := len(m.tools) - 1; i >= 0; i-- {
 			if m.tools[i].name == ev.Tool && m.tools[i].status == "pending" {
 				if ev.ToolIsError {
@@ -876,10 +1191,13 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindTurnDone:
+		m.flushThinking()
 		m.flushLiveText() // render final prose through glamour
 		if ev.OutputTokens > 0 {
 			m.inputTokens = ev.InputTokens
 			m.outputTokens = ev.OutputTokens
+			m.cacheReadTokens = ev.CacheReadTokens
+			m.cacheCreationTokens = ev.CacheCreationTokens
 			m.costUSD += ev.CostUSD
 		}
 
@@ -888,10 +1206,12 @@ func (m *model) applyEvent(ev api.Event) {
 			toolName: ev.Tool,
 			input:    string(ev.ToolInput),
 			reason:   ev.ApprovalReason,
+			id:       ev.ApprovalID,
 		}
 		m.status = "approval required"
 
 	case api.KindError:
+		m.flushThinking()
 		m.flushLiveText()
 		m.approval = nil // clear any pending approval if the run aborts
 		m.transcript.WriteString("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
@@ -926,7 +1246,17 @@ func (m *model) renderTeammates(msg teammatesMsg) {
 
 // --- view ---
 
-func (m model) View() string {
+// View wraps the rendered content in a tea.View, setting the v2 terminal modes
+// (alt-screen, mouse, background) that were previously program options.
+func (m model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.BackgroundColor = colSurface
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+func (m model) render() string {
 	if !m.ready {
 		return "initializing…"
 	}
@@ -942,13 +1272,16 @@ func (m model) View() string {
 	if m.personaPicker != nil {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.personaPicker.View())
 	}
+	if m.sessionPicker != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.sessionPicker.View())
+	}
 
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
 
 	var content string
 	if m.width >= sidebarMinTermW {
-		sidebar := m.renderSidebar(m.vp.Height)
+		sidebar := m.renderSidebar(m.vp.Height())
 		main := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
 		content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
 	} else {
@@ -970,12 +1303,12 @@ func (m model) View() string {
 }
 
 func (m model) renderTitleBar() string {
-	brand := m.th.brandLabel.Render(" ⬡ AEGIS ")
+	brand := renderBrandMark()
 	brandW := lipgloss.Width(brand)
 
 	// Scroll indicator: shown whenever transcript content overflows the viewport.
 	scroll := ""
-	if m.vp.TotalLineCount() > m.vp.Height {
+	if m.vp.TotalLineCount() > m.vp.Height() {
 		if m.vp.AtBottom() {
 			scroll = "end · "
 		} else {
@@ -999,7 +1332,11 @@ func (m model) renderSidebar(h int) string {
 	w := sidebarInnerW - 2 // usable text width (inner - left padding)
 
 	add := func(s string) { b.WriteString(s + "\n") }
-	section := func(title string) { add(m.th.sideSection.Render(title)) }
+	// Section headers carry a small diamond marker (Crush-style) so the panel
+	// reads as a set of labelled groups rather than a flat column of words.
+	section := func(title string) {
+		add(m.th.sideSection.Render("◇ " + title))
+	}
 
 	add("")
 	section("SESSION")
@@ -1024,31 +1361,38 @@ func (m model) renderSidebar(h int) string {
 	if len(m.tools) > 0 {
 		section("TOOLS")
 		for _, t := range m.tools {
-			tag, style := "⚙", m.th.tool
+			tag, style := "●", m.th.tool
 			switch t.status {
 			case "ok":
 				tag, style = "✓", m.th.sideValue
 			case "err":
-				tag, style = "✗", m.th.toolErr
+				tag, style = "×", m.th.toolErr
 			}
 			add(style.Render(tag + " " + truncate(t.name, w-2)))
 		}
 		add("")
 	}
 
-	if m.inputTokens > 0 {
+	// promptTokens is the full last-turn prompt size: uncached input plus any
+	// cache reads/writes (Anthropic reports these separately).
+	promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
+	if promptTokens > 0 {
 		section("CONTEXT")
-		add(renderContextBar(m.inputTokens, contextWindowFor(m.cfg.Model), w))
+		add(renderContextBar(promptTokens, contextWindowFor(m.cfg.Model), w))
+		if m.cacheReadTokens > 0 {
+			hit := int(float64(m.cacheReadTokens)/float64(promptTokens)*100 + 0.5)
+			add(m.th.sideMuted.Render(fmt.Sprintf("cache %d%% hit", hit)))
+		}
 		add("")
 	}
 
-	if m.inputTokens > 0 || m.costUSD > 0 {
+	if promptTokens > 0 || m.costUSD > 0 {
 		section("COST")
 		if m.costUSD > 0 {
 			add(m.th.costText.Render(fmt.Sprintf("$%.4f", m.costUSD)))
 		}
-		if m.inputTokens > 0 {
-			add(m.th.sideMuted.Render(fmt.Sprintf("in  %d", m.inputTokens)))
+		if promptTokens > 0 {
+			add(m.th.sideMuted.Render(fmt.Sprintf("in  %d", promptTokens)))
 			add(m.th.sideMuted.Render(fmt.Sprintf("out %d", m.outputTokens)))
 		}
 	}
@@ -1056,6 +1400,7 @@ func (m model) renderSidebar(h int) string {
 	return lipgloss.NewStyle().
 		Width(sidebarInnerW).
 		Height(h).
+		MaxHeight(h). // prevent overflow: lipgloss Height() pads but never truncates
 		BorderRight(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(colBorder).
@@ -1071,11 +1416,12 @@ func (m model) renderInputArea() string {
 		if !m.streamStart.IsZero() {
 			elapsed = m.th.elapsedDim.Render(fmt.Sprintf(" %ds", int(time.Since(m.streamStart).Seconds())))
 		}
-		statusLeft = m.sp.View() + " " + m.th.statusText.Render(m.status) + elapsed
+		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, colAccent) + elapsed
 	} else if m.activeToast != nil {
-		statusLeft = m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
+		tag, fg, bg := toastTag(m.activeToast.level)
+		statusLeft = statusTag(tag, fg, bg) + " " + m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
 	} else {
-		statusLeft = m.th.statusDim.Render("● ready")
+		statusLeft = statusTag("READY", colBgLess, colSuccess)
 	}
 	leftW := lipgloss.Width(statusLeft)
 
@@ -1115,6 +1461,25 @@ func joinedWidth(segs []string) int {
 	return w
 }
 
+// statusTag renders a Crush-style padded, coloured indicator chip (e.g. READY,
+// ERROR) — bold foreground on a solid status background.
+func statusTag(label string, fg, bg color.Color) string {
+	return lipgloss.NewStyle().Foreground(fg).Background(bg).Bold(true).Padding(0, 1).Render(label)
+}
+
+// toastTag maps a toast level to its indicator chip label and colours, mirroring
+// Crush's Status.{Success,Warn,Error}Indicator pairings.
+func toastTag(level toastLevel) (label string, fg, bg color.Color) {
+	switch level {
+	case toastWarn:
+		return "WARN", colBgMost, colWarnSubtle
+	case toastError:
+		return "ERROR", colOnPrimary, colError
+	default:
+		return "INFO", colBgLess, colInfo
+	}
+}
+
 func (m model) toastStyle(level toastLevel) lipgloss.Style {
 	switch level {
 	case toastWarn:
@@ -1129,11 +1494,11 @@ func (m model) toastStyle(level toastLevel) lipgloss.Style {
 func (m model) renderModeBadge() string {
 	switch m.slash.mode {
 	case "build":
-		return m.th.modeBuild.Render(" build ")
+		return m.th.sideValue.Render("build")
 	case "auto":
-		return m.th.modeAuto.Render(" auto ")
+		return m.th.sideValue.Render("auto")
 	default:
-		return m.th.modePlan.Render(" plan ")
+		return m.th.sideValue.Render("plan")
 	}
 }
 
@@ -1163,6 +1528,7 @@ func (m model) renderHelpOverlay() string {
 		{km.Editor.Help().Key, km.Editor.Help().Desc},
 		{km.CycleMode.Help().Key, km.CycleMode.Help().Desc},
 		{km.Teammates.Help().Key, km.Teammates.Help().Desc},
+		{km.Sessions.Help().Key, km.Sessions.Help().Desc},
 		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
 		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
 	}
@@ -1229,19 +1595,6 @@ func defaultEditor() string {
 
 // --- welcome content ---
 
-// welcomeShield is the ASCII art shield shown on startup, each line exactly 14 chars.
-var welcomeShield = []string{
-	`  ╔══════════╗`,
-	`  ║  AEGIS   ║`,
-	`  ╠══════════╣`,
-	`  ║    /\    ║`,
-	`  ║   /  \   ║`,
-	`  ║  / ◆  \  ║`,
-	`  ║ /      \ ║`,
-	`  ╚══╗    ╔══╝`,
-	`     ╚════╝   `,
-}
-
 func buildWelcomeContent(cfg Config, workDir string, th theme) string {
 	username := getUsername()
 	shortCWD := shortenPath(workDir)
@@ -1258,10 +1611,11 @@ func buildWelcomeContent(cfg Config, workDir string, th theme) string {
 		"",
 	}
 
+	shield := renderAegisLogo()
 	var b strings.Builder
 	b.WriteString("\n")
-	for i, shieldLine := range welcomeShield {
-		b.WriteString(th.shieldArt.Render(shieldLine))
+	for i, shieldLine := range shield {
+		b.WriteString(shieldLine)
 		b.WriteString("  ")
 		if i < len(info) {
 			b.WriteString(info[i])
@@ -1307,8 +1661,10 @@ func shortenPath(path string) string {
 // --- helpers ---
 
 func newGlamourRenderer(width int) *glamour.TermRenderer {
+	// The TUI is dark-first (Charmtone Pantera), so use glamour's dark markdown
+	// theme to match the lipgloss palette.
 	r, _ := glamour.NewTermRenderer(
-		glamour.WithStylePath("dark"),
+		glamour.WithStandardStyle("dark"),
 		glamour.WithWordWrap(width),
 	)
 	return r

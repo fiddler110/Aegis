@@ -20,6 +20,11 @@ type wireBlockJSON struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+	// thinking
+	Signature string `json:"signature,omitempty"`
+	// image
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 type wireMessageJSON struct {
@@ -35,6 +40,10 @@ func encodeBlock(b Block) (wireBlockJSON, error) {
 		return wireBlockJSON{Type: "tool_use", ID: v.ID, Name: v.Name, Input: v.Input}, nil
 	case ToolResultBlock:
 		return wireBlockJSON{Type: "tool_result", ToolUseID: v.ToolUseID, Content: v.Content, IsError: v.IsError}, nil
+	case ThinkingBlock:
+		return wireBlockJSON{Type: "thinking", Text: v.Text, Signature: v.Signature}, nil
+	case ImageBlock:
+		return wireBlockJSON{Type: "image", MediaType: v.MediaType, Data: v.Data}, nil
 	default:
 		return wireBlockJSON{}, fmt.Errorf("provider: cannot encode block %T", b)
 	}
@@ -48,6 +57,10 @@ func decodeBlock(w wireBlockJSON) (Block, error) {
 		return ToolUseBlock{ID: w.ID, Name: w.Name, Input: w.Input}, nil
 	case "tool_result":
 		return ToolResultBlock{ToolUseID: w.ToolUseID, Content: w.Content, IsError: w.IsError}, nil
+	case "thinking":
+		return ThinkingBlock{Text: w.Text, Signature: w.Signature}, nil
+	case "image":
+		return ImageBlock{MediaType: w.MediaType, Data: w.Data}, nil
 	default:
 		return nil, fmt.Errorf("provider: unknown block type %q", w.Type)
 	}

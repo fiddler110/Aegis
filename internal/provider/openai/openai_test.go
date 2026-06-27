@@ -9,6 +9,33 @@ import (
 	"github.com/scottymacleod/aegis/internal/provider"
 )
 
+func TestTranslateImage(t *testing.T) {
+	msgs := []provider.Message{{
+		Role: provider.RoleUser,
+		Content: []provider.Block{
+			provider.TextBlock{Text: "describe"},
+			provider.ImageBlock{MediaType: "image/jpeg", Data: "aGk="},
+		},
+	}}
+	wire, err := translate("", msgs)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(wire) != 1 {
+		t.Fatalf("got %d messages, want 1: %+v", len(wire), wire)
+	}
+	parts, ok := wire[0].Content.([]contentPart)
+	if !ok {
+		t.Fatalf("content = %T, want []contentPart", wire[0].Content)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[1].Type != "image_url" {
+		t.Fatalf("unexpected parts: %+v", parts)
+	}
+	if want := "data:image/jpeg;base64,aGk="; parts[1].ImageURL == nil || parts[1].ImageURL.URL != want {
+		t.Errorf("image url = %+v, want %q", parts[1].ImageURL, want)
+	}
+}
+
 const sampleStream = `data: {"choices":[{"delta":{"content":"Hello "}}]}
 
 data: {"choices":[{"delta":{"content":"there"}}]}

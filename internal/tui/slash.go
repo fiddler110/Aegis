@@ -3,12 +3,16 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/scottymacleod/aegis/internal/api"
 	"github.com/scottymacleod/aegis/internal/client"
 	"github.com/scottymacleod/aegis/internal/commands"
+	"github.com/scottymacleod/aegis/internal/share"
 )
 
 // SlashResult describes what a slash command produced for the TUI to render.
@@ -18,6 +22,12 @@ type SlashResult struct {
 	Quit     bool              // signal the TUI to exit
 	Message  string            // if non-empty, send this text to the daemon as a normal message
 	Personas []api.PersonaInfo // if non-nil, open the persona picker with these entries
+
+	// ReloadSession asks the TUI to refetch the current session and replay its
+	// (possibly truncated) transcript — used after a /rewind that changes the
+	// conversation. Output, if set, is shown as a toast rather than appended,
+	// since the reload resets the transcript.
+	ReloadSession bool
 }
 
 // SlashDispatcher dispatches slash commands to built-in handlers or custom
@@ -51,10 +61,19 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"commands": d.cmdCommands,
 		"models":   d.cmdModels,
 		"session":  d.cmdSession,
+		"rewind":   d.cmdRewind,
+		"share":    d.cmdShare,
 		"quit":     d.cmdQuit,
 		"exit":     d.cmdQuit,
 	}
 	return d
+}
+
+// SetSession points the dispatcher at a different session (used when the TUI
+// switches sessions via the picker).
+func (d *SlashDispatcher) SetSession(id, mode string) {
+	d.sessionID = id
+	d.mode = mode
 }
 
 // Dispatch executes a parsed slash command. It checks builtins first, then
@@ -134,6 +153,8 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"commands", "List custom commands"},
 		{"models", "Show current model info"},
 		{"session [list]", "Show session info or list sessions"},
+		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
+		{"share [html|md|json]", "Export this session to a shareable transcript file"},
 		{"exit", "Exit Aegis"},
 	} {
 		fmt.Fprintf(&b, "  /%-22s %s\n", entry.name, entry.desc)
@@ -179,6 +200,10 @@ func builtinHelp(name string) string {
 		return "/models\n  Show the current model and provider."
 	case "session":
 		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
+	case "rewind":
+		return "/rewind [n] [code|conversation|both]\n  No args: list checkpoints (rewind points) for this session, newest first.\n  /rewind <n>: restore checkpoint n (both files and conversation by default).\n  Scope: 'code' restores only files, 'conversation' only the transcript, 'both' (default) does both.\n  Each checkpoint is the state just before a user turn; rewinding undoes that turn's file changes and/or messages."
+	case "share":
+		return "/share [html|md|json]\n  Export this session as a shareable transcript file in the current directory.\n  html (default): a self-contained page with styling and inline images.\n  md: Markdown. json: the raw session.\n  Use `aegis sessions export <id>` for the same from the CLI."
 	case "quit", "exit":
 		return "/quit\n  Exit Aegis."
 	default:
@@ -361,6 +386,102 @@ func (d *SlashDispatcher) cmdSession(args []string) SlashResult {
 	}
 	return SlashResult{Output: fmt.Sprintf("Session: %s\nTitle: %s\nMode: %s\nMessages: %d\nCreated: %s",
 		sess.ID, sess.Title, sess.Mode, len(sess.Messages), sess.CreatedAt.Format(time.RFC3339))}
+}
+
+func (d *SlashDispatcher) cmdRewind(args []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cps, err := d.client.ListCheckpoints(ctx, d.sessionID)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to list checkpoints: %v", err), IsError: true}
+	}
+	if len(cps) == 0 {
+		return SlashResult{Output: "No checkpoints yet. One is captured at the start of each turn once you send a message."}
+	}
+
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("Checkpoints (newest first):\n")
+		for i, cp := range cps {
+			files := ""
+			if cp.FileCount > 0 {
+				files = fmt.Sprintf(" · %d file(s)", cp.FileCount)
+			}
+			label := strings.ReplaceAll(cp.Label, "\n", " ")
+			fmt.Fprintf(&b, "  %2d  %s%s\n      %s\n", i+1, cp.CreatedAt.Format("15:04:05"), files, label)
+		}
+		b.WriteString("\nUse /rewind <n> [code|conversation|both] to restore.")
+		return SlashResult{Output: b.String()}
+	}
+
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 1 || n > len(cps) {
+		return SlashResult{Output: fmt.Sprintf("Invalid checkpoint number %q. Use /rewind to see the list (1–%d).", args[0], len(cps)), IsError: true}
+	}
+	scope := "both"
+	if len(args) > 1 {
+		scope = strings.ToLower(args[1])
+		if scope != "code" && scope != "conversation" && scope != "both" {
+			return SlashResult{Output: "Scope must be 'code', 'conversation', or 'both'.", IsError: true}
+		}
+	}
+
+	cp := cps[n-1]
+	resp, err := d.client.Rewind(ctx, d.sessionID, cp.ID, scope)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Rewind failed: %v", err), IsError: true}
+	}
+
+	summary := fmt.Sprintf("Rewound to checkpoint %d (%s)", n, scope)
+	switch scope {
+	case "code":
+		summary += fmt.Sprintf(": restored %d file(s).", resp.FilesRestored)
+	case "conversation":
+		summary += fmt.Sprintf(": kept %d message(s).", resp.MessagesKept)
+	default:
+		summary += fmt.Sprintf(": restored %d file(s), kept %d message(s).", resp.FilesRestored, resp.MessagesKept)
+	}
+
+	// A code-only rewind leaves the transcript intact; otherwise the
+	// conversation changed and the TUI must reload it.
+	if scope == "code" {
+		return SlashResult{Output: summary}
+	}
+	return SlashResult{Output: summary, ReloadSession: true}
+}
+
+func (d *SlashDispatcher) cmdShare(args []string) SlashResult {
+	format := share.FormatHTML
+	if len(args) > 0 {
+		f, err := share.ParseFormat(args[0])
+		if err != nil {
+			return SlashResult{Output: err.Error(), IsError: true}
+		}
+		format = f
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sess, err := d.client.GetSession(ctx, d.sessionID)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load session: %v", err), IsError: true}
+	}
+	data, err := share.Render(sess, format)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Export failed: %v", err), IsError: true}
+	}
+
+	id := d.sessionID
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	dir, _ := os.Getwd()
+	path := filepath.Join(dir, fmt.Sprintf("aegis-session-%s.%s", id, format.Ext()))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return SlashResult{Output: fmt.Sprintf("Write failed: %v", err), IsError: true}
+	}
+	return SlashResult{Output: fmt.Sprintf("Exported session → %s", path)}
 }
 
 func (d *SlashDispatcher) cmdConfig(_ []string) SlashResult {
