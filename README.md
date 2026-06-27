@@ -343,27 +343,37 @@ aegis --resume <session-id>          # resume an existing session
 **TUI layout:**
 
 ```
-⬡ AEGIS                                          abc12345  llama3.2
+⬡ AEGIS                                          abc12345  claude-opus-4-8
 ─────────────────────────────────────────────────────────────────────
- SESSION      │  You
- abc12345      │  analyse this repo for security issues
+ SESSION       │  You
+ abc12345      │  fix the timeout bug in the client
                │
- MODE          │  Assistant
- build         │  I'll start by reading the project structure…
+ MODE          │  ✻ thinking
+ build         │  The retry loop reuses the same context…
                │
- TOOLS         │  ⚙ glob  {"pattern":"**/*.go"}
- ✓ glob        │  ✓ glob → 42 files matched
- ⚙ read_file   │  ⚙ read_file  {"path":"main.go"}
+ TOOLS         │  Assistant
+ ✓ glob        │  I'll patch the client timeout handling.
+ ✓ read_file   │
+ ⚙ edit_file   │  ⚙ edit_file internal/client/client.go
+               │  - http:  &http.Client{Timeout: 0},
+ CONTEXT       │  + http:  &http.Client{Timeout: 30 * time.Second},
+ ▰▰▰▱▱▱▱ 31%   │  ✓ edit_file → edited client.go (1 replacement)
+ cache 78% hit │
                │
  COST          │
- $0.0012       │
- in  1234      │
- out 456       │
+ $0.0123       │
+ in  64210     │
+ out 512       │
 ─────────────────────────────────────────────────────────────────────
- ◐ thinking…                               build   in:1234  out:456
+ ◐ thinking…   2s                          build   ctrl+k · f1 · ctrl+e
 ─────────────────────────────────────────────────────────────────────
- │ Send a message…
+ │ Message Aegis…
 ```
+
+The transcript renders **inline diffs** for file edits, **extended-thinking**
+blocks (dim, when enabled), and **multi-line tool output** in collapsible
+gutter blocks. The sidebar shows a live **context-window meter** and
+**prompt-cache hit rate**.
 
 **Keyboard shortcuts:**
 
@@ -371,10 +381,18 @@ aegis --resume <session-id>          # resume an existing session
 |-----|--------|
 | `Enter` | Send message |
 | `Ctrl+J` | Insert newline in input |
+| `/` | Slash-command completion popup |
+| `@` | Workspace file-path completion (`@path/to/file`) |
+| `Ctrl+K` | Command palette |
+| `Ctrl+E` | Edit the input in `$EDITOR` |
 | `Shift+Tab` | Cycle permission mode (plan → build → auto) |
+| `Ctrl+R` | Switch / resume session |
 | `Ctrl+T` | Show active sub-agents |
+| `Ctrl+L` | Clear the transcript |
+| `F1` | Toggle keyboard-shortcut help |
+| `↑` / `↓` | Navigate input history |
 | `Ctrl+C` | Interrupt streaming run / quit |
-| Mouse wheel | Scroll conversation |
+| Mouse wheel | Scroll conversation (auto-follow pauses while scrolled up) |
 
 **Slash commands** (type inside the TUI):
 
@@ -391,6 +409,7 @@ aegis --resume <session-id>          # resume an existing session
 | `/commands` | List custom commands |
 | `/models` | Show current model |
 | `/session [list]` | Session info or list all sessions |
+| `/rewind [n] [scope]` | List checkpoints, or restore one (`code`, `conversation`, or `both`) |
 | `/quit` | Exit |
 
 #### Configuration Wizard (`/config`)
@@ -401,7 +420,7 @@ The `/config` command opens a 5-step interactive wizard inside the TUI for chang
 2. **Base URL** — pre-filled for local servers; leave empty for cloud providers that use the default
 3. **Model** — shows discovered local models (Ollama/LM Studio) or a curated list for cloud providers; manual entry always available
 4. **Max tokens** — response token cap
-5. **Thinking mode** — Auto / Enabled / Disabled (for reasoning models like qwen3, deepseek-r1)
+5. **Thinking mode** — Auto / Enabled / Disabled. Drives Anthropic [extended thinking](#extended-thinking) for Claude as well as the `think` flag for local reasoning models (qwen3, deepseek-r1)
 
 Changes are written directly to your global `config.yaml` and take effect the next time you start `aegis`.
 
@@ -431,6 +450,29 @@ aegis serve --foreground
 
 The daemon listens on `127.0.0.1:4127` by default. When a separately started daemon is already running, `aegis` detects it and connects without starting a second one.
 
+### Editor Integration (ACP)
+
+Aegis speaks the [Agent Client Protocol](https://agentclientprotocol.com) (ACP) — the editor↔agent standard used by Zed, Neovim (via `codecompanion`/`avante`), and other ACP clients — so you can drive the agent from your editor without a per-IDE plugin:
+
+```bash
+# The editor launches this as a subprocess and talks JSON-RPC over stdio
+aegis acp
+aegis acp --mode plan   # read-only sessions
+```
+
+The command reuses a running daemon if one is up, or starts an embedded one. Protocol frames use **stdout** exclusively; logs go to the log file. It maps ACP `session/new`/`session/prompt` onto the daemon session API, streams assistant text, thinking, and tool calls as `session/update` notifications, and routes tool approvals through `session/request_permission`. Image content blocks in a prompt are forwarded as [image input](#image-input). Point your editor's ACP agent configuration at the `aegis acp` command — for Zed, add it under `agent_servers` in `settings.json`.
+
+### Web UI
+
+A browser surface over the same daemon API, for when you'd rather click than type in a terminal:
+
+```bash
+aegis ui            # ensures a daemon, opens http://127.0.0.1:4127/ui
+aegis ui --no-open  # just print the URL
+```
+
+It's a single self-contained page (no build step, embedded in the binary) served by the daemon at `/ui`: list and create sessions, view the transcript with collapsible thinking and tool sections, send messages with live SSE streaming, and approve/reject tool calls inline. The daemon binds to loopback only; the page is served without a bearer token (a browser navigation can't supply one) and injects the token for its own authenticated API calls, while a non-loopback `Origin` is still rejected. If a daemon is already running, `aegis ui` just opens the browser; otherwise it starts an embedded daemon and keeps it alive until Ctrl+C.
+
 ### Other Commands
 
 ```bash
@@ -445,6 +487,25 @@ aegis diagram --type mermaid --out architecture.svg < diagram.mmd
 
 # List and manage sessions
 aegis sessions list
+
+# Export a session as a shareable transcript (html, md, or json)
+aegis sessions export <id> --format html --out review.html
+
+# Run several prompts as concurrent, independent sessions
+aegis parallel "fix the failing tests" "update the README" --yes
+
+# List runs currently in flight across all sessions
+aegis runs
+
+# Isolated worktrees for parallel work
+aegis worktree add feature-x --branch feature-x
+aegis worktree list
+
+# Install a bundle of commands/agents/skills
+aegis bundle install ./my-bundle --scope project
+
+# Show the curated model catalog (and discover local servers)
+aegis models --local
 
 # Show resolved configuration
 aegis config
@@ -463,8 +524,13 @@ aegis --init
 ### File Operations
 `read_file`, `write_file`, `edit_file`, `multi_edit`, `glob`, `grep` — all confined to the workspace root. A file staleness tracker rejects edits to files modified externally since they were last read, preventing accidental overwrites.
 
+### Git
+`git` — read-only repository inspection (`status`, `diff`, `log`, `show`, `branch` listing, `remote`, `blame`, `ls-files`, `shortlog`, `tag`, `describe`, `rev-parse`, `stash list`). It runs `git` with an argument vector (never a shell string, so model input can't be interpreted as shell), confined to the workspace, and rejects flags that could escape the repo or write files (`--git-dir`, `--work-tree`, `--output`, `-c`, etc.) and the mutating shapes of otherwise-read subcommands (`branch -D`, `tag -d`, …). Because it only reads, it is available in **plan** mode.
+
+`git_commit` — stages and commits in one call (`message` required; stages all tracked modifications by default, or specific `paths`, or `all=false` to commit only what is already staged). Returns the new short hash and a diffstat; reports "nothing to commit" cleanly. It is a `write`-capability tool, so it follows the same gating as file edits (allowed in **build**/**auto**, blocked in **plan**). Pairs naturally with [checkpoints](#checkpoints--rewind) for trustworthy, reviewable agent changes. Branch creation/switching and other mutations remain available through the `shell` tool.
+
 ### Shell Execution
-`shell` — runs commands in the workspace directory with a configurable timeout. Supports background jobs (returns a task ID immediately) and optional container sandboxing. Every invocation is gated by the permission mode.
+`shell` — runs commands in the workspace directory with a configurable timeout. Supports background jobs (returns a task ID immediately) and optional container sandboxing. Every invocation is gated by the permission mode. Note that the contextual [network policies](#contextual-security-policies) operate at the tool-capability layer and do **not** constrain shell egress (e.g. `curl`); for a hard guarantee use the [container sandbox](#sandboxed-execution).
 
 ### Permission Modes
 - **Plan** — read-only; the agent can search, read, and answer but cannot modify anything.
@@ -482,6 +548,50 @@ Every tool call is recorded to an audit trail (`audit.jsonl`) with timestamps an
 2. `latex_new_document` — create a template with section titles matching the notes
 3. `edit_file` — fill each `%%TODO` with synthesised content
 4. `latex_build {"path":"report.tex","runs":2}` — compile to PDF
+
+### Extended Thinking
+For Anthropic Claude models, enabling thinking (via the `/config` wizard or `provider.think: true`) turns on [extended thinking](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking): the model reasons before answering, with a token budget of half `max_tokens` (minimum 1024). Thinking is streamed to the TUI as a dim `✻ thinking` block, the reasoning blocks (with their signatures) are preserved in conversation history so multi-step tool use validates correctly, and they persist across session resume. For local reasoning models served over the OpenAI adapter (Ollama qwen3, deepseek-r1), the same setting toggles the provider `think` flag.
+
+### Image Input
+Vision-capable models (Anthropic Claude, OpenAI GPT-4o-class, and compatible local servers) can be sent images alongside text. In the TUI, attach a file with the `@image:<path>` token:
+
+```
+What's wrong in this screenshot? @image:~/Pictures/error.png
+```
+
+Paths may be absolute, `~`-relative, or relative to the workspace; the daemon reads the file, detects its media type (PNG, JPEG, GIF, or WebP), base64-encodes it, and includes it in the turn. Multiple `@image:` tokens attach multiple images. The token is stripped from the text the model sees, and the raw bytes are never logged. Each image is capped at 5 MiB (resize larger ones first), with at most 20 per turn. Over the HTTP API, `POST /sessions/{id}/messages` accepts an `images` array of `{path}` or `{media_type, data}` (base64) entries. Text-only models will reject images at the provider; attach them only to a vision model.
+
+### Session Management
+Sessions are durable (SQLite-backed) and owned by the daemon, so they survive TUI and client restarts. Resume from the CLI with `aegis --resume <id>`, or switch between sessions live inside the TUI with **Ctrl+R**, which opens an interactive picker and replays the selected conversation (including past diffs, tool output, and thinking blocks). `/session` shows the current session; `/session list` lists all.
+
+### Worktree Isolation
+For safe parallel work, `aegis worktree add <name> [--branch <b>]` creates a git worktree under `.aegis/worktrees/` — a separate checkout sharing the repo's object store. Run `aegis` from inside one to get a session scoped to that tree, so concurrent agents don't trip over each other's edits. `aegis worktree list/remove/prune` round out management. Heed the standard caveats: worktrees can collide on absolute ports/databases/caches and accumulate disk usage quickly, so remove and prune them when done.
+
+### Plugin Bundles
+A **bundle** installs a set of artifacts together — the distribution unit Claude Code popularized. It's a directory with a `bundle.yaml` manifest (`name`, `version`, `description`, `author`) plus `commands/`, `agents/`, and/or `skills/` subdirectories. `aegis bundle info <path>` previews it; `aegis bundle install <path> [--scope project|user] [--overwrite]` copies the files into the project's `.aegis/` (default) or the user data dir, where they're picked up like any hand-authored command, agent, or skill. The installer never edits your `config.yaml`, so config-level pieces (MCP servers, hooks) stay under your control.
+
+### Curated Model Catalog
+`aegis models` prints a curated, qualitative guide to recommended models by tier (frontier / balanced / local) with context windows and notes — an at-a-glance answer to "what should I point Aegis at?" Add `--local` to also probe for running local servers (Ollama, LM Studio, LiteLLM). It's guidance, not a live benchmark: confirm current model IDs with each provider.
+
+### Context References (@refs)
+Typing `@` in the TUI opens a reference picker. Beyond `@file` paths (fuzzy-matched against a workspace index), it offers richer reference kinds: `@image:<path>` attaches an [image](#image-input) (the daemon reads and encodes it); `@diagnostics`, `@url:<address>`, and `@symbol:<name>` are textual references the agent resolves with its tools (LSP diagnostics, web fetch, code search) — the same model as `@file`, which the agent reads on demand.
+
+### Parallel Sessions
+Because the daemon owns durable, independent sessions, you can run several at once — "fix tests in one, update docs in another." `aegis parallel "prompt A" "prompt B" …` launches each prompt as its own session and runs them concurrently, interleaving progress and printing a per-session summary with resume hints (`aegis --resume <id>`); pass `--yes` to auto-approve tool calls in the unattended fan-out (otherwise they're denied), and `--mode` to set the posture. In-flight runs across all sessions are observable via `aegis runs` (or `GET /runs`), and the [web UI](#web-ui) can drive multiple sessions in separate tabs. This is distinct from the agent-spawned [swarm](#multi-agent-orchestration-swarm): these are *user-launched* top-level sessions, not sub-agents.
+
+### Session Sharing
+Because every session is persisted server-side, any session can be exported to a portable, self-contained artifact for review or handoff — the local-first equivalent of a share link. In the TUI, `/share` writes the current session to the working directory (`/share md` or `/share json` for other formats); from the CLI, `aegis sessions export <id> --format html|md|json [--out file]`. The default **HTML** export is a single styled file with collapsible thinking/tool sections and inline images that opens in any browser; **Markdown** suits pasting into issues/PRs; **JSON** is the raw session for re-import or tooling. Tool results are truncated past ~8k characters to keep the file lean.
+
+### Checkpoints & Rewind
+Every user turn captures a **checkpoint**: a restore point holding the conversation length at that moment plus a copy-on-write snapshot of any file the agent modifies during the turn (captured lazily, the first time each file is touched, so it reflects the pre-turn state). This makes agentic editing *fearless* — a bad run can be undone without `git reset` gymnastics.
+
+Use `/rewind` inside the TUI to list checkpoints (newest first, with file counts), and `/rewind <n> [scope]` to restore one:
+
+- `code` — revert only the files the turn changed (files the turn *created* are deleted); the transcript is left intact.
+- `conversation` — truncate the transcript back to before the turn, leaving files as they are.
+- `both` (default) — do both.
+
+Snapshots are stored in the session database alongside the conversation and are removed when the session is deleted. After a code restore, file-staleness tracking is cleared so the agent re-reads any reverted file before editing it again. Files larger than 16 MiB are not snapshotted (and so are left untouched by a rewind). Over the HTTP API: `GET /sessions/{id}/checkpoints` and `POST /sessions/{id}/rewind`.
 
 ### Web
 `web_fetch` — fetches a URL and returns readable text (HTML converted). `web_search` — performs a web search.
@@ -517,11 +627,13 @@ The `list_models` tool probes `localhost` for Ollama (`:11434`), LM Studio (`:12
 - `network_allowlist` — restricts outbound calls to listed domains.
 - All policy decisions are recorded to the audit trail.
 
+> **Scope:** these rules operate at the tool-capability layer (tools declaring `network`/`write` with a parseable URL) and are a fetch-layer control, **not** a system-wide egress firewall — the `shell` tool can still reach the network directly. When a network policy is enabled with the shell tool present, and when `auto` mode runs with the local sandbox, the daemon logs a startup warning. For enforced isolation, run with the [container sandbox](#sandboxed-execution).
+
 ### Sandboxed Execution
 Shell commands can run locally (default) or inside containers: Docker, Podman (Linux/macOS/Windows), and Apple Containers (macOS). Network isolation and path validation prevent workspace escapes.
 
 ### Cost Tracking
-Token usage (including cache hits for Anthropic) is tracked per turn and displayed live in the TUI status bar. A configurable `budget_usd` limit halts a run when estimated spend exceeds the threshold.
+Token usage is tracked per turn and displayed live in the TUI: a context-window meter, the prompt-cache hit rate (Anthropic prompt caching), and a running USD estimate. The pricing catalog covers Anthropic, OpenAI (GPT-4o/4.1/o1/o3 families), Google Gemini, and Groq open models, and resolves OpenRouter-style `vendor/model` ids; unknown models still have their tokens counted but contribute no cost. A configurable `budget_usd` limit halts a run when estimated spend exceeds the threshold.
 
 ---
 
@@ -597,8 +709,9 @@ provider:
   base_url: "http://localhost:11434/v1"  # required for local LLMs and proxies
   max_tokens: 8192             # response token cap
   max_retries: 4               # transient-failure retries (0 = disabled)
-  think: ~                     # null = provider default; false = disable extended
-                               # thinking for reasoning models (qwen3, deepseek-r1)
+  think: ~                     # null = provider default; true = enable extended
+                               # thinking (Anthropic Claude; local qwen3/deepseek-r1);
+                               # false = disable it
   headers:                     # extra HTTP headers on every request (gateway auth)
     X-Gateway-Token: "token"
 
@@ -634,6 +747,8 @@ sandbox:
   network: false               # allow network inside containers
 
 # ── Security policies ─────────────────────────────────────────────────────────
+# Note: these are fetch-layer controls and do not restrict the shell tool's
+# network access; use sandbox.backend=container for enforced egress isolation.
 security:
   egress_then_write: false     # require approval for writes after network access
   network_allowlist: []        # restrict to these domains (empty = unrestricted)
@@ -769,6 +884,7 @@ internal/
   tool/                    Tool registry (registration, exposure, capability tagging)
     builtin/               All built-in tools:
                              File:     read_file, write_file, edit_file, multi_edit, glob, grep
+                             Git:      git (read-only), git_commit
                              Shell:    shell (background jobs + sandbox support)
                              Web:      web_fetch, web_search
                              LaTeX:    latex_build, latex_new_document
@@ -792,7 +908,8 @@ internal/
   session/                 SQLite session store
   server/                  Daemon: HTTP + SSE API
   client/                  HTTP client for the daemon API
-  tui/                     Bubble Tea terminal dashboard (sidebar, spinner, status bar, mouse scroll)
+  tui/                     Bubble Tea terminal dashboard (sidebar, inline diffs, thinking blocks,
+                           @file + slash completion, command palette, session picker, context meter)
   api/                     Shared API types (request/response structs, event kinds)
   config/                  Layered config loading (defaults → global → project → env) + config writer
   cost/                    Token-based cost tracking + budget enforcement

@@ -839,7 +839,7 @@ func (m *model) layout() {
 		m.vp.SetWidth(vpW)
 	}
 	m.applyViewportHeight()
-	m.ta.SetWidth(m.width - 2) // -2 for left+right border chars
+	m.ta.SetWidth(m.width) // SetWidth takes the total outer width; borders are handled internally
 
 	if vpW != m.rendererW {
 		m.rendererW = vpW
@@ -1400,6 +1400,7 @@ func (m model) renderSidebar(h int) string {
 	return lipgloss.NewStyle().
 		Width(sidebarInnerW).
 		Height(h).
+		MaxHeight(h). // prevent overflow: lipgloss Height() pads but never truncates
 		BorderRight(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(colBorder).
@@ -1493,11 +1494,11 @@ func (m model) toastStyle(level toastLevel) lipgloss.Style {
 func (m model) renderModeBadge() string {
 	switch m.slash.mode {
 	case "build":
-		return m.th.modeBuild.Render(" build ")
+		return m.th.sideValue.Render("build")
 	case "auto":
-		return m.th.modeAuto.Render(" auto ")
+		return m.th.sideValue.Render("auto")
 	default:
-		return m.th.modePlan.Render(" plan ")
+		return m.th.sideValue.Render("plan")
 	}
 }
 

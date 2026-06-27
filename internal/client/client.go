@@ -96,6 +96,15 @@ func (c *Client) ListSessions(ctx context.Context) ([]api.SessionMeta, error) {
 	return out, nil
 }
 
+// ListRuns returns message runs currently in flight across all sessions.
+func (c *Client) ListRuns(ctx context.Context) ([]api.RunInfo, error) {
+	var out []api.RunInfo
+	if err := c.do(ctx, http.MethodGet, "/runs", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetSession returns a full session including messages.
 func (c *Client) GetSession(ctx context.Context, id string) (*session.Session, error) {
 	var out session.Session
@@ -160,16 +169,43 @@ func (c *Client) ListPersonas(ctx context.Context) ([]api.PersonaInfo, error) {
 	return out, nil
 }
 
+// ListCheckpoints returns the rewind points captured for a session.
+func (c *Client) ListCheckpoints(ctx context.Context, sessionID string) ([]api.CheckpointInfo, error) {
+	var out []api.CheckpointInfo
+	if err := c.do(ctx, http.MethodGet, "/sessions/"+sessionID+"/checkpoints", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Rewind restores a session to a checkpoint. scope is "both", "code", or
+// "conversation" (empty means "both").
+func (c *Client) Rewind(ctx context.Context, sessionID, checkpointID, scope string) (*api.RewindResponse, error) {
+	var out api.RewindResponse
+	req := api.RewindRequest{CheckpointID: checkpointID, Scope: scope}
+	if err := c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/rewind", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SendApproval answers a pending interactive approval request for the given
-// session. approved=true lets the tool run; false denies it.
-func (c *Client) SendApproval(ctx context.Context, sessionID string, approved bool) error {
-	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve", api.ApproveRequest{Approved: approved}, nil)
+// session. approved=true lets the tool run; false denies it. approvalID must
+// match the approval_id from the KindApprovalRequest event.
+func (c *Client) SendApproval(ctx context.Context, sessionID, approvalID string, approved bool) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve", api.ApproveRequest{Approved: approved, ID: approvalID}, nil)
 }
 
 // PostMessage streams engine events for a user turn. Events are delivered on
 // the returned channel, which is closed when the run finishes or ctx is done.
 func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.Event, error) {
-	body, _ := json.Marshal(api.PostMessageRequest{Text: text})
+	return c.PostMessageReq(ctx, id, api.PostMessageRequest{Text: text})
+}
+
+// PostMessageReq is like PostMessage but takes the full request, allowing image
+// attachments and other fields to be set.
+func (c *Client) PostMessageReq(ctx context.Context, id string, reqBody api.PostMessageRequest) (<-chan api.Event, error) {
+	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/sessions/"+id+"/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, err

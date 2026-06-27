@@ -107,14 +107,6 @@ var (
 		charmtone.Salt,    // 15 bright white
 	}
 
-	// Mode badge backgrounds — each mode gets a coloured pill for at-a-glance
-	// status. Deep desaturated backgrounds with a bright Charmtone foreground.
-	colPlanBg  color.Color = lipgloss.Color("#0C2440") // deep navy  → safe/read-only
-	colPlanFg  color.Color = charmtone.Malibu          // sky blue
-	colBuildBg color.Color = lipgloss.Color("#431407") // deep amber → file writes active
-	colBuildFg color.Color = charmtone.Zest            // warm amber
-	colAutoBg  color.Color = lipgloss.Color("#052E16") // deep green → full capability
-	colAutoFg  color.Color = charmtone.Guac            // mint green
 )
 
 // theme holds all pre-built styles. lipgloss.Style is a value type so every
@@ -130,10 +122,6 @@ type theme struct {
 	sideSection lipgloss.Style
 	sideValue   lipgloss.Style
 	sideMuted   lipgloss.Style
-
-	modePlan  lipgloss.Style
-	modeBuild lipgloss.Style
-	modeAuto  lipgloss.Style
 
 	statusText lipgloss.Style
 	statusDim  lipgloss.Style
@@ -172,11 +160,6 @@ func newTheme() theme {
 		sideSection: lipgloss.NewStyle().Foreground(colTextMuted).Bold(true),
 		sideValue:   lipgloss.NewStyle().Foreground(colTextDim),
 		sideMuted:   lipgloss.NewStyle().Foreground(colTextMuted),
-
-		// Mode pills: coloured background so status is readable at a glance.
-		modePlan:  lipgloss.NewStyle().Background(colPlanBg).Foreground(colPlanFg).Bold(true).Padding(0, 1),
-		modeBuild: lipgloss.NewStyle().Background(colBuildBg).Foreground(colBuildFg).Bold(true).Padding(0, 1),
-		modeAuto:  lipgloss.NewStyle().Background(colAutoBg).Foreground(colAutoFg).Bold(true).Padding(0, 1),
 
 		statusText: lipgloss.NewStyle().Foreground(colFgBase),
 		statusDim:  lipgloss.NewStyle().Foreground(colTextMuted),

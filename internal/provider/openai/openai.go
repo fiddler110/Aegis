@@ -69,10 +69,23 @@ func (a *Adapter) Name() string { return "openai" }
 // --- wire types ---
 
 type wireMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
+	Role string `json:"role"`
+	// Content is a plain string for text-only messages, or a []contentPart array
+	// when a user turn carries images (chat-completions multimodal format).
+	Content    any            `json:"content,omitempty"`
 	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+// contentPart is one element of a multimodal user message.
+type contentPart struct {
+	Type     string        `json:"type"` // "text" or "image_url"
+	Text     string        `json:"text,omitempty"`
+	ImageURL *imageURLPart `json:"image_url,omitempty"`
+}
+
+type imageURLPart struct {
+	URL string `json:"url"` // data:<media_type>;base64,<data>
 }
 
 type wireToolCall struct {
@@ -114,10 +127,11 @@ func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
 		switch m.Role {
 		case provider.RoleAssistant:
 			wm := wireMessage{Role: "assistant"}
+			var text string
 			for _, b := range m.Content {
 				switch v := b.(type) {
 				case provider.TextBlock:
-					wm.Content += v.Text
+					text += v.Text
 				case provider.ToolUseBlock:
 					tc := wireToolCall{ID: v.ID, Type: "function"}
 					tc.Function.Name = v.Name
@@ -128,20 +142,39 @@ func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
 					wm.ToolCalls = append(wm.ToolCalls, tc)
 				}
 			}
+			if text != "" {
+				wm.Content = text
+			}
 			out = append(out, wm)
 		case provider.RoleUser:
-			// Tool results become separate tool-role messages; plain text
-			// becomes a user message.
+			// Tool results become separate tool-role messages; text + images
+			// become a single user message (multimodal when images are present).
 			var text string
+			var images []provider.ImageBlock
 			for _, b := range m.Content {
 				switch v := b.(type) {
 				case provider.TextBlock:
 					text += v.Text
+				case provider.ImageBlock:
+					images = append(images, v)
 				case provider.ToolResultBlock:
 					out = append(out, wireMessage{Role: "tool", ToolCallID: v.ToolUseID, Content: v.Content})
 				}
 			}
-			if text != "" {
+			switch {
+			case len(images) > 0:
+				parts := make([]contentPart, 0, len(images)+1)
+				if text != "" {
+					parts = append(parts, contentPart{Type: "text", Text: text})
+				}
+				for _, img := range images {
+					parts = append(parts, contentPart{
+						Type:     "image_url",
+						ImageURL: &imageURLPart{URL: fmt.Sprintf("data:%s;base64,%s", img.MediaType, img.Data)},
+					})
+				}
+				out = append(out, wireMessage{Role: "user", Content: parts})
+			case text != "":
 				out = append(out, wireMessage{Role: "user", Content: text})
 			}
 		}
@@ -164,7 +197,7 @@ func translateTools(tools []provider.ToolSchema) []wireTool {
 
 // Stream implements provider.Adapter.
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
-	if a.apiKey == "" {
+	if a.apiKey == "" && a.baseURL == defaultBaseURL {
 		return nil, fmt.Errorf("openai: missing API key (set OPENAI_API_KEY)")
 	}
 	msgs, err := translate(req.System, req.Messages)

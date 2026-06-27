@@ -30,6 +30,7 @@ type EventKind string
 
 const (
 	KindText       EventKind = "text"        // incremental assistant text
+	KindThinking   EventKind = "thinking"    // incremental extended-thinking text
 	KindToolCall   EventKind = "tool_call"   // a tool is about to run
 	KindToolResult EventKind = "tool_result" // a tool finished
 	KindTurnDone   EventKind = "turn_done"   // one model turn completed
@@ -259,6 +260,7 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 
 	var (
 		text     []byte
+		thinking []provider.ThinkingBlock
 		toolUses []provider.ToolUseBlock
 		usage    *provider.Usage
 	)
@@ -267,6 +269,12 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 		case provider.EventTextDelta:
 			text = append(text, ev.Text...)
 			emit(Event{Kind: KindText, Text: ev.Text})
+		case provider.EventThinkingDelta:
+			emit(Event{Kind: KindThinking, Text: ev.Text})
+		case provider.EventThinking:
+			if ev.Thinking != nil {
+				thinking = append(thinking, *ev.Thinking)
+			}
 		case provider.EventToolUse:
 			if ev.ToolUse != nil {
 				toolUses = append(toolUses, *ev.ToolUse)
@@ -279,8 +287,12 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 	}
 
 	// The conversation must record exactly what the model produced, in order:
-	// text first, then tool-use blocks.
+	// thinking blocks first (required by Anthropic for tool use), then text,
+	// then tool-use blocks.
 	var content []provider.Block
+	for _, tb := range thinking {
+		content = append(content, tb)
+	}
 	if len(text) > 0 {
 		content = append(content, provider.TextBlock{Text: string(text)})
 	}

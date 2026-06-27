@@ -48,6 +48,30 @@ data: {"type":"message_stop"}
 
 `
 
+func TestToWireMessagesImage(t *testing.T) {
+	msgs := []provider.Message{{
+		Role: provider.RoleUser,
+		Content: []provider.Block{
+			provider.TextBlock{Text: "what is this?"},
+			provider.ImageBlock{MediaType: "image/png", Data: "aGVsbG8="},
+		},
+	}}
+	wire, err := toWireMessages(msgs)
+	if err != nil {
+		t.Fatalf("toWireMessages: %v", err)
+	}
+	if len(wire) != 1 || len(wire[0].Content) != 2 {
+		t.Fatalf("unexpected wire shape: %+v", wire)
+	}
+	img := wire[0].Content[1]
+	if img.Type != "image" || img.Source == nil {
+		t.Fatalf("second block = %+v, want image with source", img)
+	}
+	if img.Source.Type != "base64" || img.Source.MediaType != "image/png" || img.Source.Data != "aGVsbG8=" {
+		t.Errorf("image source = %+v", img.Source)
+	}
+}
+
 func TestStreamParsing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "test-key" {
@@ -113,6 +137,112 @@ func TestStreamParsing(t *testing.T) {
 	}
 }
 
+// thinkingStream is an SSE response containing a thinking block (with a
+// signature) followed by a text answer.
+const thinkingStream = `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG123"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Answer"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+func TestThinkingStreamParsing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(thinkingStream))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithBaseURL(srv.URL), WithThinking(2048))
+	stream, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 100})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var thinkDelta, text string
+	var assembled *provider.ThinkingBlock
+	for ev := range stream {
+		switch ev.Type {
+		case provider.EventThinkingDelta:
+			thinkDelta += ev.Text
+		case provider.EventThinking:
+			assembled = ev.Thinking
+		case provider.EventTextDelta:
+			text += ev.Text
+		case provider.EventError:
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+	if thinkDelta != "Let me reason." {
+		t.Errorf("thinking deltas = %q", thinkDelta)
+	}
+	if assembled == nil || assembled.Text != "Let me reason." || assembled.Signature != "SIG123" {
+		t.Errorf("assembled thinking = %+v", assembled)
+	}
+	if text != "Answer" {
+		t.Errorf("text = %q", text)
+	}
+}
+
+func TestThinkingRequestBody(t *testing.T) {
+	// With thinking enabled, the request must carry a thinking block and omit
+	// temperature (the API only allows the default while thinking).
+	temp := 0.7
+	body := captureBodyReq(t, provider.Request{Model: "m", MaxTokens: 4096, Temperature: &temp},
+		WithThinking(2048))
+	th, ok := body["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinking missing from body: %v", body["thinking"])
+	}
+	if th["type"] != "enabled" || th["budget_tokens"].(float64) != 2048 {
+		t.Errorf("thinking = %+v", th)
+	}
+	if _, present := body["temperature"]; present {
+		t.Error("temperature must be omitted when thinking is enabled")
+	}
+}
+
+func TestThinkingBlockSerialized(t *testing.T) {
+	// A thinking block in history must be replayed with its text and signature.
+	body := captureBodyReq(t, provider.Request{
+		Model:     "m",
+		MaxTokens: 100,
+		Messages: []provider.Message{
+			{Role: provider.RoleAssistant, Content: []provider.Block{
+				provider.ThinkingBlock{Text: "reasoned", Signature: "SIG"},
+				provider.TextBlock{Text: "hi"},
+			}},
+		},
+	})
+	msgs := body["messages"].([]any)
+	blocks := msgs[0].(map[string]any)["content"].([]any)
+	first := blocks[0].(map[string]any)
+	if first["type"] != "thinking" || first["thinking"] != "reasoned" || first["signature"] != "SIG" {
+		t.Errorf("thinking block = %+v", first)
+	}
+}
+
 func TestStreamErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -163,6 +293,30 @@ func captureBody(t *testing.T, opts ...Option) map[string]any {
 			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
 		},
 	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream { //nolint:revive // drain
+	}
+	return captured
+}
+
+// captureBodyReq decodes the JSON body for an explicit request, used to assert
+// request-shaping options like thinking.
+func captureBodyReq(t *testing.T, req provider.Request, opts ...Option) map[string]any {
+	t.Helper()
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	a := New("k", append([]Option{WithBaseURL(srv.URL)}, opts...)...)
+	stream, err := a.Stream(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
