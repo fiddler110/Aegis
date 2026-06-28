@@ -12,8 +12,9 @@ import (
 // outputs from flooding the scrollback while still showing meaningfully more
 // than a single truncated line.
 const (
-	maxDiffLines       = 24 // diff lines shown for an edit/write before collapsing
-	maxToolResultLines = 16 // body lines shown for multi-line tool output
+	maxDiffLines         = 24 // diff lines shown for an edit/write before collapsing
+	maxToolResultLines   = 16 // body lines shown for generic multi-line tool output
+	maxSearchResultLines = 32 // web_search returns ~3 lines per result × 10 results
 )
 
 // renderToolCall renders the header (and, for file-mutating tools, an inline
@@ -59,9 +60,13 @@ func renderToolResult(th theme, name, result string, isErr bool, width int) stri
 		return style.Render(fmt.Sprintf("%s %s → %s", tag, name, truncate(oneLine(result), budget)))
 	}
 
+	maxLines := maxToolResultLines
+	if name == "web_search" {
+		maxLines = maxSearchResultLines
+	}
 	var b strings.Builder
 	b.WriteString(style.Render(fmt.Sprintf("%s %s", tag, name)) + "\n")
-	b.WriteString(renderBlock(th, result, maxToolResultLines, width))
+	b.WriteString(renderBlock(th, result, maxLines, width))
 	return strings.TrimRight(b.String(), "\n")
 }
 
