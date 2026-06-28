@@ -287,8 +287,11 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content          string `json:"content"`
+					Thinking         string `json:"thinking"`          // Ollama (Gemma4, Qwen3)
+					Reasoning        string `json:"reasoning"`         // Ollama (some versions)
+					ReasoningContent string `json:"reasoning_content"` // DeepSeek-R1
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Function struct {
@@ -312,6 +315,11 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 			usage.OutputTokens = chunk.Usage.CompletionTokens
 		}
 		for _, ch := range chunk.Choices {
+			if td := ch.Delta.Thinking + ch.Delta.Reasoning + ch.Delta.ReasoningContent; td != "" {
+				if !emit(provider.Event{Type: provider.EventThinkingDelta, Text: td}) {
+					return
+				}
+			}
 			if ch.Delta.Content != "" {
 				if !emit(provider.Event{Type: provider.EventTextDelta, Text: ch.Delta.Content}) {
 					return

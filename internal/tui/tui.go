@@ -1191,6 +1191,16 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindTurnDone:
+		// Some local reasoning models (e.g. Gemma4 in Ollama) route their entire
+		// output — both the reasoning chain and the final answer — through the
+		// thinking/reasoning SSE field, leaving the content field empty. When that
+		// happens, thinkText has content but liveText is empty. Promote the
+		// thinking text to the response buffer so it renders with normal styling
+		// rather than disappearing as dim unreachable text.
+		if m.liveText.Len() == 0 && m.thinkText.Len() > 0 {
+			m.liveText.WriteString(m.thinkText.String())
+			m.thinkText.Reset()
+		}
 		m.flushThinking()
 		m.flushLiveText() // render final prose through glamour
 		if ev.OutputTokens > 0 {
