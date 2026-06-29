@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -103,7 +102,7 @@ type sseApprover struct {
 	runID string
 }
 
-func (a *sseApprover) Approve(ctx context.Context, toolName, reason string) bool {
+func (a *sseApprover) Approve(ctx context.Context, toolName, reason string, _ json.RawMessage) bool {
 	a.send(api.Event{
 		Kind:           api.KindApprovalRequest,
 		Tool:           toolName,
@@ -554,17 +553,19 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	}
 
 	return engine.New(engine.Options{
-		Adapter:   s.adapter,
-		Tools:     s.tools,
-		Gate:      gate,
-		Compactor: s.compactor,
-		Hooks:     engineHooks,
-		Cost:      cost.NewTracker(),
-		BudgetUSD: s.cfg.Cost.BudgetUSD,
-		Model:     s.cfg.Provider.Model,
-		MaxTokens: s.cfg.Provider.MaxTokens,
-		SteerChan: steerCh,
-		Logger:    s.logger,
+		Adapter:       s.adapter,
+		Tools:         s.tools,
+		Gate:          gate,
+		Compactor:     s.compactor,
+		Hooks:         engineHooks,
+		Cost:          cost.NewTracker(),
+		BudgetUSD:     s.cfg.Cost.BudgetUSD,
+		Model:         s.cfg.Provider.Model,
+		MaxTokens:     s.cfg.Provider.MaxTokens,
+		MaxIterations: s.cfg.Provider.MaxIterations,
+		LoopThreshold: s.cfg.Provider.LoopThreshold,
+		SteerChan:     steerCh,
+		Logger:        s.logger,
 	})
 }
 
@@ -958,6 +959,13 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 
+	// For non-interrupt aborts (max iterations, cost budget, loop detected) inject
+	// a note so the model knows on the next turn what happened and what remains.
+	if runErr != nil && !errors.Is(runErr, engine.ErrInterrupted) {
+		conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+			provider.TextBlock{Text: fmt.Sprintf("[System: run aborted — %v. On your next message, summarize what completed and what still needs to be done.]", runErr)},
+		}})
+	}
 	// Persist whatever was produced, even on partial failure.
 	if err := s.store.SaveMessages(context.Background(), id, conv.Messages); err != nil {
 		s.logger.Error("save messages", "session", id, "err", err)
@@ -1158,7 +1166,9 @@ func (s *Server) effectiveSystem(base string) string {
 	if base != "" {
 		parts = append(parts, base)
 	}
-	parts = append(parts, platformBlock())
+	parts = append(parts, persona.ToolUseBlock())
+	parts = append(parts, persona.CompletingTasksBlock())
+	parts = append(parts, persona.PlatformBlock())
 	if ctx := s.memory.LoadContext(); ctx != "" {
 		parts = append(parts, ctx)
 	}
@@ -1171,43 +1181,6 @@ func (s *Server) effectiveSystem(base string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// platformBlock returns a system-prompt section that describes the execution
-// environment so the model generates shell commands that work on this platform,
-// and enforces immediate tool use rather than narrating intent.
-func platformBlock() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "## Execution Environment\nOS: %s/%s\n", runtime.GOOS, runtime.GOARCH)
-	switch runtime.GOOS {
-	case "windows":
-		b.WriteString(`Shell: PowerShell (powershell -NoProfile -NonInteractive -Command ...)
-
-IMPORTANT — you are running on Windows. Every shell command MUST be valid PowerShell.
-Unix commands (ls, cat, grep, find, rm, chmod, echo, which, etc.) do NOT exist in
-PowerShell and will fail. Use their PowerShell equivalents:
-
-  ls / dir     → Get-ChildItem (or gci)
-  cat          → Get-Content
-  grep         → Select-String
-  find         → Get-ChildItem -Recurse -Filter
-  rm           → Remove-Item
-  rm -rf       → Remove-Item -Recurse -Force
-  cp           → Copy-Item
-  mv           → Move-Item
-  mkdir        → New-Item -ItemType Directory
-  which cmd    → (Get-Command cmd).Source
-  $VAR         → $env:VAR
-  echo text    → Write-Output "text"
-
-Paths: forward-slash (/) and backslash (\) are both valid in PowerShell.
-Absolute paths use Windows drive letters: C:\Users\scott\...`)
-	case "darwin":
-		b.WriteString("Shell: /bin/sh (bash-compatible)\nUse standard Unix/POSIX shell commands and forward-slash paths.")
-	default:
-		b.WriteString("Shell: /bin/sh\nUse standard Unix/POSIX shell commands and forward-slash paths.")
-	}
-	b.WriteString("\n\nWhen a task requires running a command, reading a file, searching, or fetching a URL — call the tool immediately. Do not narrate \"I will run...\" or describe what you are about to do before calling the tool; just call it.")
-	return b.String()
-}
 
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	if errors.Is(err, session.ErrNotFound) {
@@ -1339,7 +1312,9 @@ func (s *Server) sessionSemaphore(id string) chan struct{} {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -1441,8 +1416,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// authToken is always non-empty at startup (ListenAndServe rejects an
+		// empty token), but guard defensively to avoid an accidental open-door
+		// if the field were ever zero-valued in a test helper.
 		if s.authToken == "" {
-			next.ServeHTTP(w, r)
+			writeError(w, http.StatusInternalServerError, "server misconfigured: auth token missing")
 			return
 		}
 		auth := r.Header.Get("Authorization")

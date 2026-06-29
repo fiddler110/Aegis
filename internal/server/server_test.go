@@ -46,9 +46,10 @@ func newTestServer(t *testing.T) (*client.Client, func()) {
 		Permission: config.PermissionConfig{Mode: "plan"},
 	}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{text: "hello from agent"}, tool.NewRegistry())
+	srv.authToken = "test-token"
 
 	ts := httptest.NewServer(srv.Handler())
-	cl := client.New(ts.URL)
+	cl := client.New(ts.URL).WithToken("test-token")
 	return cl, func() { ts.Close(); store.Close() }
 }
 
@@ -86,6 +87,7 @@ func TestServerListTeammates(t *testing.T) {
 	}
 	cfg := &config.Config{Provider: config.ProviderConfig{Model: "test"}, Permission: config.PermissionConfig{Mode: "plan"}}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "test-token"
 
 	reg := swarm.NewRegistry()
 	id := swarm.NewIdentity("explore-1", "default", "sess")
@@ -95,7 +97,7 @@ func TestServerListTeammates(t *testing.T) {
 
 	ts := httptest.NewServer(srv.Handler())
 	defer func() { ts.Close(); store.Close() }()
-	cl := client.New(ts.URL)
+	cl := client.New(ts.URL).WithToken("test-token")
 
 	tms, err := cl.Teammates(context.Background())
 	if err != nil {
@@ -413,10 +415,11 @@ func TestMemoryEndpoints(t *testing.T) {
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 	srv.memory = memory.Sources{ProjectRoot: root, DataDir: cfg.DataDir}
 	srv.workspace = root
+	srv.authToken = "test-token"
 
 	ts := httptest.NewServer(srv.Handler())
 	defer func() { ts.Close(); store.Close() }()
-	cl := client.New(ts.URL)
+	cl := client.New(ts.URL).WithToken("test-token")
 
 	ctx := context.Background()
 
@@ -473,5 +476,25 @@ func TestIsLoopbackOrigin(t *testing.T) {
 		if got := isLoopbackOrigin(tt.origin); got != tt.want {
 			t.Errorf("isLoopbackOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
 		}
+	}
+}
+
+func TestEffectiveSystem_containsToolUseBlock(t *testing.T) {
+	s := &Server{
+		memory:    memory.Sources{},
+		workspace: "",
+	}
+	out := s.effectiveSystem("base-system")
+
+	if !strings.Contains(out, "A tool result is input") {
+		t.Error("effectiveSystem output missing ToolUseBlock content")
+	}
+	tuIdx := strings.Index(out, "A tool result is input")
+	ctIdx := strings.Index(out, "## Completing tasks")
+	if tuIdx == -1 || ctIdx == -1 {
+		t.Fatalf("missing expected block markers: tuIdx=%d ctIdx=%d", tuIdx, ctIdx)
+	}
+	if tuIdx > ctIdx {
+		t.Error("ToolUseBlock must appear before CompletingTasksBlock in effectiveSystem output")
 	}
 }
