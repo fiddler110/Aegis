@@ -224,6 +224,9 @@ func newModel(cfg Config) model {
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(3)
+	ta.DynamicHeight = true
+	ta.MinHeight = 3
+	ta.MaxHeight = 8
 
 	// Crush-style editor prompt: a ❯ caret on the focused first line, and ":::"
 	// continuation dots on wrapped/subsequent lines. Width 4 keeps the text
@@ -907,10 +910,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	{
 		var cmd tea.Cmd
+		prevTAH := m.ta.Height()
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
 		// Recompute inline completion after the textarea consumes the key.
 		if _, isKey := msg.(tea.KeyMsg); isKey {
+			// With DynamicHeight, typing or deleting can grow/shrink the textarea;
+			// update the viewport height immediately so it never overlaps the input.
+			if m.ta.Height() != prevTAH {
+				m.applyViewportHeight()
+			}
 			m.syncCompletion()
 			// Any non-ESC key while escPending clears the interrupt arm state
 			// (the ESC case already returns early and manages escPending itself).
@@ -961,11 +970,14 @@ func (m *model) layout() {
 
 	if !m.ready {
 		m.vp = viewport.New(viewport.WithWidth(vpW), viewport.WithHeight(max(m.height-m.fixedH(), 3)))
+		m.vp.SoftWrap = true // wrap long lines; disables horizontal scrolling
 	} else {
 		m.vp.SetWidth(vpW)
 	}
+	// SetWidth must run before applyViewportHeight: with DynamicHeight it
+	// triggers recalculateHeight, which changes ta.Height() and therefore fixedH().
+	m.ta.SetWidth(m.width)
 	m.applyViewportHeight()
-	m.ta.SetWidth(m.width) // SetWidth takes the total outer width; borders are handled internally
 
 	if m.termOpen {
 		m.term.resize(max(m.height-m.fixedH(), 3))

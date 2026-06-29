@@ -63,14 +63,15 @@ const globalConfigTemplate = `# ════════════════
 #   Windows (permanent):  Add to: System → Advanced → Environment Variables
 #   macOS / Linux:        export OPENAI_API_KEY=ollama    (add to ~/.zshrc etc.)
 #
-# Pull a model first:  ollama pull llama3.2
+# Ollama is started automatically if it is installed but not yet running.
 # Model library:       https://ollama.com/library
 #
 provider:
   default: openai
   base_url: "http://localhost:11434/v1"
-  model: "llama3.2"          # Any model you have pulled: llama3.2, mistral,
-                             #   gemma3, qwen2.5, deepseek-r1, phi4, etc.
+  model: "auto"              # "auto" picks the first available Ollama model
+                             # automatically. Or pin a model you have pulled:
+                             #   llama3.2, mistral, gemma3, qwen2.5, phi4, etc.
   max_tokens: 8192           # Adjust to fit your model's context window.
   max_retries: 3
   think: false               # true only for extended-thinking models such as
@@ -354,9 +355,11 @@ const projectConfigTemplate = `# ═══════════════�
 # ── Override the model for this project ──────────────────────────────────────
 # Useful when a project needs a specific capability (e.g. a reasoning model
 # for security analysis, or a fast small model for routine edits).
+# For Ollama, "auto" selects the first available model automatically.
 #
 # provider:
-#   model: "qwen3:32b"         # Ollama example
+#   model: "auto"              # Ollama: pick the first available model
+#   # model: "qwen3:32b"       # pin a specific Ollama model
 #   # model: "claude-opus-4-8" # Anthropic example
 #   # max_tokens: 32768
 

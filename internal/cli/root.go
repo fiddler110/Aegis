@@ -165,7 +165,17 @@ func ensureDaemon(ctx context.Context, cfg *config.Config) (*client.Client, func
 // Logs are written only to the configured log file, not stderr, so they don't
 // bleed into the TUI.
 func startEmbeddedDaemon(cfg *config.Config) (stop func(), err error) {
+	stopOllama, err := ensureOllamaRunning(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveOllamaModel(cfg); err != nil {
+		stopOllama()
+		return nil, err
+	}
+
 	if err := cfg.EnsureDataDir(); err != nil {
+		stopOllama()
 		return nil, fmt.Errorf("ensure data dir: %w", err)
 	}
 	logger, closer, err := logging.New(logging.Options{
@@ -174,12 +184,14 @@ func startEmbeddedDaemon(cfg *config.Config) (stop func(), err error) {
 		// ToStderr intentionally false — keep daemon logs out of the TUI.
 	})
 	if err != nil {
+		stopOllama()
 		return nil, fmt.Errorf("init logger: %w", err)
 	}
 
 	srv, err := server.New(cfg, logger)
 	if err != nil {
 		closer.Close()
+		stopOllama()
 		return nil, fmt.Errorf("create server: %w", err)
 	}
 
@@ -189,7 +201,10 @@ func startEmbeddedDaemon(cfg *config.Config) (stop func(), err error) {
 		_ = srv.ListenAndServe(ctx) // returns context.Canceled on clean shutdown
 	}()
 
-	return cancel, nil
+	return func() {
+		cancel()
+		stopOllama()
+	}, nil
 }
 
 // waitForDaemon polls the daemon health endpoint until it responds or the

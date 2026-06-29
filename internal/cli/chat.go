@@ -39,6 +39,14 @@ func newChatCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			stopOllama, err := ensureOllamaRunning(cfg)
+			if err != nil {
+				return err
+			}
+			defer stopOllama()
+			if err := resolveOllamaModel(cfg); err != nil {
+				return err
+			}
 
 			const maxPromptSize = 1 << 20 // 1 MiB
 			prompt := strings.TrimSpace(strings.Join(args, " "))
