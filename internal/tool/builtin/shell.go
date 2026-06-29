@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,10 +30,16 @@ func newShellTool(root string, timeoutSec int, mgr *task.Manager, sb sandbox.Bac
 func (t *shellTool) Name() string                { return "shell" }
 func (t *shellTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *shellTool) Description() string {
-	return "Run a shell command in the workspace directory and return combined stdout/stderr. Bounded by a timeout."
+	if runtime.GOOS == "windows" {
+		return "Run a PowerShell command in the workspace directory and return combined stdout/stderr. Commands execute via: powershell -NoProfile -NonInteractive -Command <command>. Use PowerShell syntax — Unix commands (ls, cat, grep, find, rm, chmod, etc.) are not available; use Get-ChildItem, Get-Content, Select-String, Remove-Item, etc."
+	}
+	return "Run a shell command in the workspace directory and return combined stdout/stderr. Commands execute via /bin/sh -c. Bounded by a configurable timeout."
 }
 func (t *shellTool) InputSchema() json.RawMessage {
-	return schema(`{"type":"object","properties":{"command":{"type":"string","description":"the command line to run"},"timeout_sec":{"type":"integer","description":"optional per-call timeout override"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
+	if runtime.GOOS == "windows" {
+		return schema(`{"type":"object","properties":{"command":{"type":"string","description":"PowerShell command to run. Use PowerShell syntax (Get-ChildItem, Get-Content, Select-String, Remove-Item, etc.) — Unix commands do not work in PowerShell."},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
+	}
+	return schema(`{"type":"object","properties":{"command":{"type":"string","description":"the shell command to run via /bin/sh -c"},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
 }
 
 func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {

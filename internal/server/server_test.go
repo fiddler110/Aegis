@@ -286,10 +286,14 @@ func TestEffectiveSystemCombinesMemory(t *testing.T) {
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 	srv.memory = memory.Sources{ProjectRoot: root, DataDir: filepath.Join(root, "data")}
 
-	// With no memory files, effectiveSystem returns the base system.
+	// With no memory files, effectiveSystem returns the base system plus the
+	// platform block (which is always injected).
 	got := srv.effectiveSystem("base prompt")
-	if got != "base prompt" {
-		t.Errorf("effectiveSystem = %q, want %q", got, "base prompt")
+	if !strings.Contains(got, "base prompt") {
+		t.Errorf("effectiveSystem missing base prompt: %q", got)
+	}
+	if !strings.Contains(got, "Execution Environment") {
+		t.Errorf("effectiveSystem missing platform block: %q", got)
 	}
 
 	// Create a memory file and check it gets appended.
