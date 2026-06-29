@@ -188,16 +188,29 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 		max = 10
 	}
 
-	endpoint := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(args.Query)
 	f := &fetchTool{userAgent: t.userAgent}
-	body, _, err := f.get(ctx, endpoint)
-	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("search failed: %v", err), IsError: true}, nil
+	encoded := url.QueryEscape(args.Query)
+
+	// Primary: DuckDuckGo HTML endpoint.
+	body, _, err := f.get(ctx, "https://html.duckduckgo.com/html/?q="+encoded)
+	var results []searchResult
+	if err == nil {
+		results = parseDDG(body, max)
 	}
 
-	results := parseDDG(body, max)
+	// Fallback: DuckDuckGo Lite endpoint (simpler HTML, more stable DOM).
 	if len(results) == 0 {
-		return tool.Result{Content: "no results found"}, nil
+		if body2, _, err2 := f.get(ctx, "https://lite.duckduckgo.com/lite/?q="+encoded); err2 == nil {
+			results = parseDDGLite(body2, max)
+		}
+	}
+
+	if len(results) == 0 {
+		msg := "no results found"
+		if err != nil {
+			msg = fmt.Sprintf("search failed: %v", err)
+		}
+		return tool.Result{Content: msg, IsError: err != nil}, nil
 	}
 	var b strings.Builder
 	for i, r := range results {
@@ -211,6 +224,38 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 
 type searchResult struct {
 	title, urlStr, snippet string
+}
+
+// parseDDGLite parses the DuckDuckGo Lite endpoint HTML as a fallback when
+// the primary HTML endpoint returns no results. The lite page is simpler
+// (table-based) and has historically been more structurally stable.
+func parseDDGLite(body []byte, max int) []searchResult {
+	doc, err := html.Parse(strings.NewReader(string(body)))
+	if err != nil {
+		return nil
+	}
+	var results []searchResult
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(results) >= max {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "a" {
+			href := decodeDDGHref(attr(n, "href"))
+			title := collapse(nodeText(n))
+			// Accept links that look like real external results (not DDG nav links).
+			if href != "" && title != "" &&
+				(strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://")) &&
+				!strings.Contains(href, "duckduckgo.com") {
+				results = append(results, searchResult{title: title, urlStr: href})
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return results
 }
 
 func parseDDG(body []byte, max int) []searchResult {

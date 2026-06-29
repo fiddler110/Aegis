@@ -131,7 +131,7 @@ func (g *ContextualGate) Check(ctx context.Context, t tool.Tool, input json.RawM
 				Tool: t.Name(), Cap: string(cap),
 				Rule: "egress_then_write", Decision: Ask, Reason: reason,
 			})
-			if g.base.Approver.Approve(ctx, t.Name(), reason) {
+			if g.base.Approver.Approve(ctx, t.Name(), reason, input) {
 				return true, ""
 			}
 			return false, reason

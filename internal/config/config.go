@@ -90,6 +90,8 @@ type ProviderConfig struct {
 	MaxTokens       int               `koanf:"max_tokens"`       // response token cap
 	BaseURL         string            `koanf:"base_url"`         // optional API base override
 	MaxRetries      int               `koanf:"max_retries"`      // transient-failure retries; 0 disables
+	MaxIterations   int               `koanf:"max_iterations"`   // max engine turns per run; 0 = harness default (40)
+	LoopThreshold   int               `koanf:"loop_threshold"`   // identical-turn abort count; 0 = harness default (5)
 	Headers         map[string]string `koanf:"headers"`          // extra HTTP headers sent with every request (e.g. gateway auth)
 	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
 	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
@@ -132,9 +134,14 @@ func defaults() map[string]any {
 		"log_level":                    "info",
 		"provider.default":             "anthropic",
 		"provider.model":               "claude-opus-4-8",
-		"provider.max_tokens":          16384,
+		"provider.max_tokens":          32768,
 		"provider.max_retries":         4,
 		"server.addr":                  "127.0.0.1:4127",
+		// "build" is the intentional default: the agent can read and write
+		// files freely, but shell/execute calls still prompt for approval
+		// (or are denied non-interactively). Use "plan" for read-only
+		// exploration and "auto" (with auto_approve_exec: true) only in
+		// fully trusted, sandboxed environments.
 		"permission.mode":              "build",
 		"permission.auto_approve_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
@@ -175,12 +182,59 @@ func ProjectConfigPath() string {
 	return filepath.Join(".aegis", "config.yaml")
 }
 
+// loadDotEnv reads a .env-style file and sets any variables it contains into
+// the process environment, skipping variables already present so that real
+// environment variables always take precedence. The file format is KEY=VALUE
+// per line; lines beginning with # and blank lines are ignored. Values may be
+// surrounded by single or double quotes (stripped on read).
+func loadDotEnv(path string) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		if k == "" {
+			continue
+		}
+		// Real env vars take precedence; only inject missing keys.
+		if _, exists := os.LookupEnv(k); !exists {
+			if err := os.Setenv(k, v); err != nil {
+				return fmt.Errorf("setenv %s: %w", k, err)
+			}
+		}
+	}
+	return nil
+}
+
 // Load resolves configuration from all layers and returns the result.
 func Load() (*Config, error) {
 	k := koanf.New(".")
 
 	if err := k.Load(confmap.Provider(defaults(), "."), nil); err != nil {
 		return nil, fmt.Errorf("load defaults: %w", err)
+	}
+
+	// Load .aegis/.env before other layers so secrets (MCP tokens, API keys)
+	// can be set there without living in version-controlled config files.
+	// Real environment variables always override values in the .env file.
+	if err := loadDotEnv(filepath.Join(".aegis", ".env")); err != nil {
+		return nil, fmt.Errorf("load .aegis/.env: %w", err)
 	}
 
 	for _, path := range []string{GlobalConfigPath(), ProjectConfigPath()} {
@@ -220,6 +274,15 @@ func Load() (*Config, error) {
 	}
 
 	cfg.Provider.APIKey = providerAPIKey(cfg.Provider.Default)
+
+	// Expand $VAR / ${VAR} references in MCP auth tokens so secrets can be
+	// kept in environment variables or .aegis/.env rather than in the YAML.
+	for i := range cfg.MCP {
+		if cfg.MCP[i].Auth != "" {
+			cfg.MCP[i].Auth = os.ExpandEnv(cfg.MCP[i].Auth)
+		}
+	}
+
 	return &cfg, nil
 }
 

@@ -77,9 +77,10 @@ func newCheckpointTestServer(t *testing.T, root string, adapter provider.Adapter
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, adapter, reg)
 	srv.checkpoints = cpStore
 	srv.fileTracker = ft
+	srv.authToken = "test-token"
 
 	ts := httptest.NewServer(srv.Handler())
-	cl := client.New(ts.URL)
+	cl := client.New(ts.URL).WithToken("test-token")
 	return cl, func() { ts.Close(); store.Close() }
 }
 

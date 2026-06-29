@@ -76,6 +76,10 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 
 	// Foreground execution.
 	text, err := t.exec(ctx, args.Command, timeout)
+	const maxOutput = 200 << 10 // 200 KiB — prevent context flooding on large outputs
+	if len(text) > maxOutput {
+		text = text[:maxOutput] + fmt.Sprintf("\n[...%d bytes truncated — use background:true and task_output for large commands]", len(text)-maxOutput)
+	}
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("%v\n%s", err, text), IsError: true}, nil
 	}

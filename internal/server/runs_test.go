@@ -91,9 +91,10 @@ func TestRunsEndpointReflectsActiveRun(t *testing.T) {
 	}
 	adapter := &blockingAdapter{started: make(chan struct{}), release: make(chan struct{})}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, adapter, tool.NewRegistry())
+	srv.authToken = "test-token"
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	cl := client.New(ts.URL)
+	cl := client.New(ts.URL).WithToken("test-token")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

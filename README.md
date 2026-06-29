@@ -538,8 +538,8 @@ aegis --init
 
 ### Permission Modes
 - **Plan** — read-only; the agent can search, read, and answer but cannot modify anything.
-- **Build** — full access: create, edit, delete files, run shell commands. Shell and execute calls prompt for approval unless `auto_approve_exec` is enabled.
-- **Auto** — all capabilities without prompting (use in trusted, unattended contexts).
+- **Build** _(default)_ — the agent can create, edit, and delete files freely. Shell and execute calls prompt for approval unless `auto_approve_exec` is enabled. This is the intentional default: it covers everyday development work while keeping destructive commands behind an approval step.
+- **Auto** — all capabilities without prompting (use in trusted, sandboxed contexts only).
 
 Every tool call is recorded to an audit trail (`audit.jsonl`) with timestamps and inputs.
 
@@ -674,10 +674,12 @@ Custom agent definitions (see [Custom Agent Definitions](#custom-agent-definitio
 Configuration is resolved with the following precedence (highest wins):
 
 ```
-environment variables  >  project config (.aegis/config.yaml)  >  global config  >  built-in defaults
+environment variables  >  .aegis/.env  >  project config (.aegis/config.yaml)  >  global config  >  built-in defaults
 ```
 
 API keys are **always** read from environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) and are never written to config files.
+
+**`.aegis/.env`** — a local secrets file for tokens and keys that must not live in version-controlled YAML. Add it to `.gitignore`. Values are loaded before config parsing so they can be referenced as `$VAR` in supported config fields. Real environment variables always override `.env` values.
 
 **Config file locations:**
 
@@ -821,6 +823,17 @@ mcp:
     args: ["-y", "@modelcontextprotocol/server-github"]
     env:
       GITHUB_TOKEN: "ghp_..."
+  - name: my-http-server
+    command: ""            # empty = HTTP mode
+    auth: "$MY_MCP_TOKEN" # $VAR / ${VAR} references are expanded from the environment
+```
+
+**Keeping secrets out of config files:** Place sensitive values (MCP tokens, internal API keys) in `.aegis/.env` — a gitignored file next to `.aegis/config.yaml`. Variables there are loaded before config parsing, so you can reference them in any YAML field that supports `$VAR` expansion (currently `mcp[].auth`). Real environment variables always take precedence over `.env` values.
+
+```ini
+# .aegis/.env  ← add to .gitignore
+MY_MCP_TOKEN=secret-bearer-token-here
+SOME_API_KEY=another-secret
 ```
 
 ### Custom Commands
