@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -87,10 +88,11 @@ type model struct {
 	workDir    string
 
 	tools               []toolEntry
-	inputTokens         int // uncached input tokens (last turn)
+	inputTokens         int  // uncached input tokens (last turn)
 	outputTokens        int
-	cacheReadTokens     int // prompt-cache hits (last turn)
-	cacheCreationTokens int // prompt-cache writes (last turn)
+	cacheReadTokens     int  // prompt-cache hits (last turn)
+	cacheCreationTokens int  // prompt-cache writes (last turn)
+	tokensEstimated     bool // true when token counts are derived from heuristic
 	costUSD             float64
 
 	streamStart time.Time // when the current stream began; zero when idle
@@ -104,6 +106,13 @@ type model struct {
 	wrapCache    string
 	wrapCacheLen int
 	wrapCacheW   int
+
+	// Streaming live-text prefix cache. The live tail (liveText) is re-wrapped
+	// on every token; caching the wrapped prefix up to the last safe markdown
+	// boundary reduces this from O(n²) to O(tail) per turn.
+	liveWrapCache   string
+	liveWrapCacheTo int // byte offset up to which liveWrapCache is valid
+	liveWrapCacheW  int // viewport width at which the cache was built
 
 	// followBottom tracks whether the viewport should auto-scroll to the newest
 	// content. It is true while the user is parked at the bottom and false once
@@ -127,6 +136,12 @@ type model struct {
 	// custom-command count changes rather than on every keystroke.
 	cmdEntriesCache []cmdEntry
 	cmdEntriesLen   int
+
+	// Terminal split pane (Ctrl+X to toggle).
+	termOpen    bool
+	termFocused bool
+	term        termPane
+	termRun     *termRun // non-nil while a command is running in the terminal
 
 	// overlay / modals
 	keys          keyMap
@@ -264,6 +279,7 @@ func newModel(cfg Config) model {
 		renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
 		keys:         defaultKeyMap(),
 		followBottom: true,
+		term:         newTermPane(workDir, 10), // height recalculated on first resize
 	}
 	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
 	return m
@@ -557,6 +573,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Terminal toggle: always available regardless of focus or streaming state.
+		if key.Matches(msg, m.keys.Terminal) {
+			m.toggleTerminal()
+			return m, nil
+		}
+
+		// Route all input to the terminal pane while it holds keyboard focus.
+		if m.termFocused {
+			return m, m.handleTerminalKey(msg)
+		}
+
 		// Approval prompt intercepts all keys while the engine is waiting for
 		// user confirmation. Y/enter approves; N/esc denies; everything else
 		// is swallowed (except viewport scroll which is handled after the switch).
@@ -800,6 +827,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refresh()
 		return m, nil
 
+	case termOutputMsg:
+		m.term.handleOutput(msg.text)
+		m.refresh()
+		if m.termRun != nil {
+			return m, waitForTermOutput(m.termRun)
+		}
+		return m, nil
+
+	case termDoneMsg:
+		m.termRun = nil
+		m.term.handleDone(msg.err)
+		m.term.refreshVP()
+		m.refresh()
+		return m, nil
+
 	case slashResultMsg:
 		if msg.Quit {
 			if m.cancel != nil {
@@ -838,6 +880,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
 			m.cacheReadTokens, m.cacheCreationTokens = 0, 0
+			m.tokensEstimated = false
 			m.turnCount = 0
 			m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
 			m.refresh()
@@ -911,6 +954,9 @@ func (m *model) layout() {
 		// sidebar consumes sidebarTotalW; main panel gets the rest minus left pad
 		vpW = m.width - sidebarTotalW - 1
 	}
+	if m.termOpen {
+		vpW -= termPaneTotalW
+	}
 	vpW = max(vpW, 10)
 
 	if !m.ready {
@@ -920,6 +966,10 @@ func (m *model) layout() {
 	}
 	m.applyViewportHeight()
 	m.ta.SetWidth(m.width) // SetWidth takes the total outer width; borders are handled internally
+
+	if m.termOpen {
+		m.term.resize(max(m.height-m.fixedH(), 3))
+	}
 
 	if vpW != m.rendererW {
 		m.rendererW = vpW
@@ -1040,10 +1090,21 @@ func (m *model) refresh() {
 		content += wrap(m.th.thinking.Render("✻ thinking")+"\n"+m.th.thinkingDim.Render(think)+"\n", m.vp.Width())
 	}
 
-	// The live tail (streaming prose or the thinking indicator) is small, so it
-	// is wrapped fresh every refresh and appended to the cached transcript.
+	// The live tail is re-wrapped on every token. Cache the wrapped prefix up to
+	// the last safe markdown boundary and only re-wrap the short suffix.
 	if live := m.liveText.String(); live != "" {
-		content += wrap(live, m.vp.Width())
+		w := m.vp.Width()
+		boundary := findSafeMarkdownBoundary(live)
+		if boundary > m.liveWrapCacheTo || w != m.liveWrapCacheW {
+			if boundary > 0 {
+				m.liveWrapCache = wrap(live[:boundary], w)
+			} else {
+				m.liveWrapCache = ""
+			}
+			m.liveWrapCacheTo = boundary
+			m.liveWrapCacheW = w
+		}
+		content += m.liveWrapCache + wrap(live[boundary:], w)
 	} else if m.streaming {
 		elapsed := ""
 		if !m.streamStart.IsZero() {
@@ -1084,6 +1145,7 @@ func (m *model) flushLiveText() {
 	}
 	raw := m.liveText.String()
 	m.liveText.Reset()
+	m.liveWrapCache, m.liveWrapCacheTo, m.liveWrapCacheW = "", 0, 0
 	if m.renderer != nil {
 		if rendered, err := m.renderer.Render(raw); err == nil {
 			rendered = strings.TrimRight(rendered, "\n")
@@ -1108,6 +1170,107 @@ func (m model) sendApprovalCmd(approvalID string, approved bool) tea.Cmd {
 		}
 		return nil // engine continues via the existing SSE stream
 	}
+}
+
+// toggleTerminal opens the terminal pane (with keyboard focus) if it is
+// closed, or closes it (returning focus to the chat input) if it is open.
+// Pressing ctrl+x while the terminal is open but chat is focused re-focuses
+// the terminal; pressing ctrl+x while terminal is focused closes the pane.
+func (m *model) toggleTerminal() {
+	if !m.termOpen {
+		m.termOpen = true
+		m.termFocused = true
+		m.ta.Blur()
+		m.layout()
+		m.refresh()
+	} else if m.termFocused {
+		// Close the pane and return focus to chat.
+		m.termOpen = false
+		m.termFocused = false
+		m.ta.Focus()
+		m.layout()
+		m.refresh()
+	} else {
+		// Pane is open but chat is focused: focus the terminal.
+		m.termFocused = true
+		m.ta.Blur()
+		m.refresh()
+	}
+}
+
+// handleTerminalKey processes a key event when the terminal pane has focus.
+// Printable characters append to the command line; named keys perform
+// actions (run, cancel, history, etc.). Returns an optional tea.Cmd.
+func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
+	k := msg.String()
+
+	// When a command is running, only ctrl+c (interrupt) is active.
+	if m.term.running {
+		if k == "ctrl+c" && m.termRun != nil {
+			m.termRun.cancel()
+		}
+		m.refresh()
+		return nil
+	}
+
+	switch k {
+	case "esc":
+		m.termFocused = false
+		m.ta.Focus()
+
+	case "ctrl+c":
+		m.term.input = ""
+
+	case "enter":
+		cmd := strings.TrimSpace(m.term.input)
+		if cmd == "" {
+			break
+		}
+		m.term.history = append(m.term.history, cmd)
+		m.term.histIdx = -1
+		m.term.draft = ""
+		m.term.input = ""
+		m.term.appendText("❯ " + cmd + "\n")
+		if m.term.handleCD(cmd) {
+			break
+		}
+		m.term.running = true
+		run, execCmd := execTermCmd(m.term.workDir, cmd)
+		m.termRun = run
+		m.refresh()
+		return execCmd
+
+	case "up":
+		m.term.historyPrev()
+
+	case "down":
+		m.term.historyNext()
+
+	case "backspace":
+		r := []rune(m.term.input)
+		if len(r) > 0 {
+			m.term.input = string(r[:len(r)-1])
+		}
+
+	case "ctrl+u":
+		m.term.input = ""
+
+	case "ctrl+l":
+		m.term.buf.Reset()
+		m.term.refreshVP()
+
+	case "pgup", "pgdown":
+		m.term.vp, _ = m.term.vp.Update(msg)
+
+	default:
+		// Append any single printable rune to the command line.
+		if runes := []rune(k); len(runes) == 1 {
+			m.term.input += k
+		}
+	}
+
+	m.refresh()
+	return nil
 }
 
 // renderApprovalBanner renders the 3-line prompt shown when the engine is
@@ -1146,6 +1309,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.tools = m.tools[:0]
 	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
 	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
+	m.tokensEstimated = false
 	m.turnCount = 0
 	m.wrapCacheLen = -1 // force a re-wrap on next refresh
 	m.streaming = false
@@ -1283,12 +1447,15 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 		m.flushThinking()
 		m.flushLiveText() // render final prose through glamour
-		if ev.OutputTokens > 0 {
+		if ev.OutputTokens > 0 || ev.TokensEstimated {
 			m.inputTokens = ev.InputTokens
 			m.outputTokens = ev.OutputTokens
 			m.cacheReadTokens = ev.CacheReadTokens
 			m.cacheCreationTokens = ev.CacheCreationTokens
-			m.costUSD += ev.CostUSD
+			m.tokensEstimated = ev.TokensEstimated
+			if !ev.TokensEstimated {
+				m.costUSD += ev.CostUSD
+			}
 		}
 
 	case api.KindApprovalRequest:
@@ -1380,13 +1547,21 @@ func (m model) render() string {
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
 
+	main := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
 	var content string
 	if m.width >= sidebarMinTermW {
 		sidebar := m.renderSidebar(m.vp.Height())
-		main := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
-		content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+		if m.termOpen {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main, m.term.view(m.th, m.termFocused))
+		} else {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+		}
 	} else {
-		content = lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
+		if m.termOpen {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused))
+		} else {
+			content = main
+		}
 	}
 
 	parts := []string{titleBar, content}
@@ -1609,7 +1784,11 @@ func (m model) renderStats() string {
 	if m.inputTokens == 0 && m.outputTokens == 0 {
 		return ""
 	}
-	s := fmt.Sprintf("in:%d out:%d", m.inputTokens, m.outputTokens)
+	est := ""
+	if m.tokensEstimated {
+		est = "~"
+	}
+	s := fmt.Sprintf("%sin:%d out:%d", est, m.inputTokens, m.outputTokens)
 	if m.costUSD > 0 {
 		s += fmt.Sprintf("  $%.4f", m.costUSD)
 	}
@@ -1633,6 +1812,7 @@ func (m model) renderHelpOverlay() string {
 		{km.CycleMode.Help().Key, km.CycleMode.Help().Desc},
 		{km.Teammates.Help().Key, km.Teammates.Help().Desc},
 		{km.Sessions.Help().Key, km.Sessions.Help().Desc},
+		{km.Terminal.Help().Key, km.Terminal.Help().Desc},
 		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
 		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
 	}

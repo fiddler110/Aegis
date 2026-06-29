@@ -39,6 +39,18 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 		if s, ok := renderShellCall(th, name, input, width); ok {
 			return s
 		}
+	case "read_file":
+		if s, ok := renderReadFileCall(th, name, input, width); ok {
+			return s
+		}
+	case "glob":
+		if s, ok := renderGlobCall(th, name, input, width); ok {
+			return s
+		}
+	case "grep":
+		if s, ok := renderGrepCall(th, name, input, width); ok {
+			return s
+		}
 	}
 	// Generic: tool name plus a compact one-line view of the input.
 	budget := max(width-len(name)-4, 20)
@@ -48,6 +60,7 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 // renderToolResult renders a finished tool call. Short, single-line results are
 // shown inline; multi-line output (shell, read, search) is shown as a capped,
 // gutter-marked block instead of being collapsed to one truncated line.
+
 func renderToolResult(th theme, name, result string, isErr bool, width int) string {
 	tag, style := "✓", th.tool
 	if isErr {
@@ -210,4 +223,65 @@ func renderShellCall(th theme, name string, input json.RawMessage, width int) (s
 	b.WriteString(header + "\n")
 	b.WriteString(renderBlock(th, a.Command, maxToolResultLines, width))
 	return strings.TrimRight(b.String(), "\n"), true
+}
+
+func renderReadFileCall(th theme, name string, input json.RawMessage, width int) (string, bool) {
+	var a struct {
+		Path   string `json:"path"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}
+	if json.Unmarshal(input, &a) != nil || a.Path == "" {
+		return "", false
+	}
+	label := th.tool.Render("● "+name+" ") + th.diffMeta.Render(truncate(a.Path, max(width-len(name)-12, 20)))
+	if a.Offset > 0 || a.Limit > 0 {
+		var rang string
+		if a.Limit > 0 {
+			rang = fmt.Sprintf("  lines %d–%d", a.Offset+1, a.Offset+a.Limit)
+		} else {
+			rang = fmt.Sprintf("  from line %d", a.Offset+1)
+		}
+		label += th.diffMeta.Render(rang)
+	}
+	return label, true
+}
+
+func renderGlobCall(th theme, name string, input json.RawMessage, width int) (string, bool) {
+	var a struct {
+		Pattern string `json:"pattern"`
+		Path    string `json:"path"`
+	}
+	if json.Unmarshal(input, &a) != nil || a.Pattern == "" {
+		return "", false
+	}
+	loc := a.Path
+	if loc == "" {
+		loc = "."
+	}
+	label := th.tool.Render("● "+name+" ") + th.diffMeta.Render(truncate(a.Pattern, max(width-20, 12)))
+	label += "  " + th.diffMeta.Render("in "+truncate(loc, max(width-len(a.Pattern)-20, 8)))
+	return label, true
+}
+
+func renderGrepCall(th theme, name string, input json.RawMessage, width int) (string, bool) {
+	var a struct {
+		Pattern string `json:"pattern"`
+		Path    string `json:"path"`
+		Glob    string `json:"glob"`
+	}
+	if json.Unmarshal(input, &a) != nil || a.Pattern == "" {
+		return "", false
+	}
+	loc := a.Path
+	if loc == "" {
+		loc = "."
+	}
+	filter := ""
+	if a.Glob != "" {
+		filter = " [" + a.Glob + "]"
+	}
+	label := th.tool.Render("● "+name+" ") + th.diffMeta.Render("/"+truncate(a.Pattern, max(width-24, 12))+"/")
+	label += "  " + th.diffMeta.Render("in "+truncate(loc, max(width-len(a.Pattern)-24, 8))+filter)
+	return label, true
 }

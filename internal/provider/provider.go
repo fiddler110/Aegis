@@ -115,11 +115,16 @@ const (
 // by providers that support prompt caching (e.g. Anthropic) and are zero
 // otherwise. CacheReadTokens are billed at a steep discount; CacheCreationTokens
 // at a small premium over InputTokens.
+//
+// When IsEstimated is true the counts were derived from a character-count
+// heuristic because the provider returned zero usage (common with local models).
+// Cost calculations must be skipped for estimated usage.
 type Usage struct {
-	InputTokens         int `json:"input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
+	InputTokens         int  `json:"input_tokens"`
+	OutputTokens        int  `json:"output_tokens"`
+	CacheCreationTokens int  `json:"cache_creation_tokens,omitempty"`
+	CacheReadTokens     int  `json:"cache_read_tokens,omitempty"`
+	IsEstimated         bool `json:"is_estimated,omitempty"`
 }
 
 // EventType enumerates streaming events emitted by an adapter.

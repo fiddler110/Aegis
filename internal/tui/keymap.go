@@ -19,6 +19,7 @@ type keyMap struct {
 	HistDown  key.Binding
 	Teammates key.Binding
 	Sessions  key.Binding
+	Terminal  key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -37,5 +38,6 @@ func defaultKeyMap() keyMap {
 		HistDown:  key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "history next")),
 		Teammates: key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "list sub-agents")),
 		Sessions:  key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "switch session")),
+		Terminal:  key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "toggle terminal pane")),
 	}
 }

@@ -42,6 +42,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/providerfactory"
 	"github.com/scottymacleod/aegis/internal/sandbox"
 	"github.com/scottymacleod/aegis/internal/session"
+	"github.com/scottymacleod/aegis/internal/skills"
 	"github.com/scottymacleod/aegis/internal/swarm"
 	"github.com/scottymacleod/aegis/internal/task"
 	"github.com/scottymacleod/aegis/internal/tool"
@@ -84,6 +85,10 @@ type Server struct {
 	// pendingSteers maps session ID → chan string for mid-run steering.
 	// The channel is written by handleSteer and drained by the engine between tool rounds.
 	pendingSteers sync.Map
+
+	// sessionSems serializes runs within a session. Each session maps to a
+	// buffered channel of size 1; acquiring it blocks until the prior run finishes.
+	sessionSems sync.Map // string → chan struct{}
 }
 
 // sseApprover implements permission.Approver by sending a KindApprovalRequest
@@ -270,7 +275,22 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
 	s.hooks = hooks.NewMulti(s.audit)
 	if adapter != nil {
-		s.compactor = compaction.New(compaction.Options{Adapter: adapter, Model: cfg.Provider.Model})
+		compModel := cfg.Provider.Model
+		if cfg.Provider.SmallModel != "" {
+			compModel = cfg.Provider.SmallModel // prefer a fast small model for compaction
+		}
+		compOpts := compaction.Options{
+			Adapter:       adapter,
+			Model:         compModel,
+			ContextWindow: cfg.Provider.ContextWindow,
+		}
+		// For local providers without a known context window, skip auto-compaction
+		// rather than falling back to the 120k default — cheap local sessions
+		// should not be truncated arbitrarily.
+		if cfg.Provider.ContextWindow == 0 && cfg.Provider.Default == "ollama" {
+			compOpts.MaxBudget = 0 // explicit skip
+		}
+		s.compactor = compaction.New(compOpts)
 	}
 
 	// Connect configured MCP servers and register their tools.
@@ -579,7 +599,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusCreated, toMeta(sess.ID, sess.Title, sess.Mode, sess.CreatedAt, sess.UpdatedAt))
+	writeJSON(w, http.StatusCreated, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
 }
 
 func (s *Server) handleListTeammates(w http.ResponseWriter, _ *http.Request) {
@@ -619,7 +639,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]api.SessionMeta, 0, len(metas))
 	for _, m := range metas {
-		out = append(out, toMeta(m.ID, m.Title, m.Mode, m.CreatedAt, m.UpdatedAt))
+		out = append(out, toMeta(m))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -693,7 +713,7 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toMeta(sess.ID, sess.Title, sess.Mode, sess.CreatedAt, sess.UpdatedAt))
+	writeJSON(w, http.StatusOK, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, InputTokens: sess.InputTokens, OutputTokens: sess.OutputTokens, CostUSD: sess.CostUSD, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
 }
 
 func (s *Server) handleListCommands(w http.ResponseWriter, _ *http.Request) {
@@ -792,6 +812,17 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Serialize runs within the same session: at most one active run at a time.
+	// Concurrent requests queue here rather than racing to mutate the session.
+	sem := s.sessionSemaphore(id)
+	select {
+	case sem <- struct{}{}:
+	case <-r.Context().Done():
+		writeError(w, http.StatusServiceUnavailable, "request cancelled while waiting for active run to finish")
+		return
+	}
+	defer func() { <-sem }()
 
 	sess, err := s.store.Get(r.Context(), id)
 	if err != nil {
@@ -911,16 +942,30 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if snap != nil {
 		runCtx = checkpoint.WithSnapshotter(runCtx, snap)
 	}
+	var (
+		totalIn   int
+		totalOut  int
+		totalCost float64
+	)
 	runErr := eng.Run(runCtx, conv, func(ev engine.Event) {
-		send(toAPIEvent(ev))
+		apiEv := toAPIEvent(ev)
+		send(apiEv)
+		if ev.Kind == engine.KindTurnDone && ev.Usage != nil && !ev.Usage.IsEstimated {
+			totalIn += ev.Usage.InputTokens
+			totalOut += ev.Usage.OutputTokens
+			totalCost += apiEv.CostUSD
+		}
 	})
 
 	// Persist whatever was produced, even on partial failure.
 	if err := s.store.SaveMessages(context.Background(), id, conv.Messages); err != nil {
 		s.logger.Error("save messages", "session", id, "err", err)
 	}
+	if totalIn > 0 || totalOut > 0 {
+		_ = s.store.AddUsage(context.Background(), id, totalIn, totalOut, totalCost)
+	}
 	if sess.Title == "" {
-		_ = s.store.SetTitle(context.Background(), id, deriveTitle(req.Text))
+		go s.generateTitle(id, req.Text)
 	}
 	if runErr != nil {
 		s.logger.Warn("run ended with error", "session", id, "err", runErr)
@@ -1117,6 +1162,9 @@ func (s *Server) effectiveSystem(base string) string {
 	if mem := s.memory.Load(); mem != "" {
 		parts = append(parts, mem)
 	}
+	if sk := skills.BuildBlock(s.workspace); sk != "" {
+		parts = append(parts, sk)
+	}
 	return strings.Join(parts, "\n\n")
 }
 
@@ -1148,13 +1196,23 @@ func toAPIEvent(ev engine.Event) api.Event {
 		out.OutputTokens = ev.Usage.OutputTokens
 		out.CacheReadTokens = ev.Usage.CacheReadTokens
 		out.CacheCreationTokens = ev.Usage.CacheCreationTokens
+		out.TokensEstimated = ev.Usage.IsEstimated
 	}
 	out.CostUSD = ev.CostUSD
 	return out
 }
 
-func toMeta(id, title, mode string, created, updated time.Time) api.SessionMeta {
-	return api.SessionMeta{ID: id, Title: title, Mode: mode, CreatedAt: created, UpdatedAt: updated}
+func toMeta(m session.Meta) api.SessionMeta {
+	return api.SessionMeta{
+		ID:           m.ID,
+		Title:        m.Title,
+		Mode:         m.Mode,
+		InputTokens:  m.InputTokens,
+		OutputTokens: m.OutputTokens,
+		CostUSD:      m.CostUSD,
+		CreatedAt:    m.CreatedAt,
+		UpdatedAt:    m.UpdatedAt,
+	}
 }
 
 func deriveTitle(text string) string {
@@ -1164,6 +1222,79 @@ func deriveTitle(text string) string {
 		text = string(runes[:60]) + "…"
 	}
 	return text
+}
+
+// generateTitle calls the model asynchronously to produce a short session
+// title from the user's first message. Falls back to deriveTitle when no
+// SmallModel is configured (avoids a full-model call just for a title).
+func (s *Server) generateTitle(sessionID, firstMessage string) {
+	model := s.cfg.Provider.SmallModel
+	if model == "" || s.adapter == nil {
+		// No dedicated small model configured; use the simple truncation fallback.
+		_ = s.store.SetTitle(context.Background(), sessionID, deriveTitle(firstMessage))
+		return
+	}
+
+	prompt := "Give a short title (max 8 words, no punctuation) for a chat that started with:\n" + firstMessage
+	req := provider.Request{
+		Model:     model,
+		MaxTokens: 48,
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: prompt}}},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ch, err := s.adapter.Stream(ctx, req)
+	if err != nil {
+		_ = s.store.SetTitle(context.Background(), sessionID, deriveTitle(firstMessage))
+		return
+	}
+
+	var sb strings.Builder
+	for ev := range ch {
+		if ev.Type == provider.EventTextDelta {
+			sb.WriteString(ev.Text)
+		}
+	}
+	title := cleanTitle(strings.TrimSpace(sb.String()))
+	if title == "" {
+		title = deriveTitle(firstMessage)
+	}
+	_ = s.store.SetTitle(context.Background(), sessionID, title)
+}
+
+// cleanTitle strips thinking tags and trims whitespace from a model-generated title.
+func cleanTitle(s string) string {
+	// Remove <think>...</think> blocks produced by reasoning models.
+	for {
+		start := strings.Index(s, "<think>")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(s[start:], "</think>")
+		if end < 0 {
+			s = strings.TrimSpace(s[:start])
+			break
+		}
+		s = strings.TrimSpace(s[:start] + s[start+end+len("</think>"):])
+	}
+	// Collapse internal whitespace and trim surrounding quotes.
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.Trim(s, `"'`)
+	runes := []rune(s)
+	if len(runes) > 70 {
+		s = string(runes[:70]) + "…"
+	}
+	return s
+}
+
+// sessionSemaphore returns the buffered channel used to serialize runs for a
+// session (capacity 1 — only one goroutine holds it at a time).
+func (s *Server) sessionSemaphore(id string) chan struct{} {
+	v, _ := s.sessionSems.LoadOrStore(id, make(chan struct{}, 1))
+	return v.(chan struct{})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

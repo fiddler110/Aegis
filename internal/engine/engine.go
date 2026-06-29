@@ -77,21 +77,27 @@ type Hooks interface {
 	PostToolUse(ctx context.Context, toolName string, input json.RawMessage, result string, isError bool)
 }
 
+// PrepareStepFunc is called before each model turn. It receives the current
+// message list and may return a modified copy (e.g. to inject dynamic context
+// or refresh ephemeral tool metadata). Returning nil leaves messages unchanged.
+type PrepareStepFunc func(ctx context.Context, msgs []provider.Message) []provider.Message
+
 // Options configures an Engine.
 type Options struct {
 	Adapter       provider.Adapter
 	Tools         *tool.Registry
-	Gate          Gate          // optional; nil means all tool calls are allowed
-	Compactor     Compactor     // optional; nil disables context compaction
-	Hooks         Hooks         // optional; nil disables hooks
-	Cost          *cost.Tracker // optional; nil disables cost tracking
-	BudgetUSD     float64       // optional; >0 aborts the run past this cost
+	Gate          Gate             // optional; nil means all tool calls are allowed
+	Compactor     Compactor        // optional; nil disables context compaction
+	Hooks         Hooks            // optional; nil disables hooks
+	Cost          *cost.Tracker    // optional; nil disables cost tracking
+	PrepareStep   PrepareStepFunc  // optional; called before every model turn
+	BudgetUSD     float64          // optional; >0 aborts the run past this cost
 	Model         string
 	MaxTokens     int
 	Temperature   *float64
-	MaxIterations int           // safety cap on tool-call rounds; 0 -> default
-	LoopThreshold int           // identical tool-call turns before aborting; 0 -> default, <0 disables
-	SteerChan     <-chan string  // optional; steering messages injected between tool rounds
+	MaxIterations int              // safety cap on tool-call rounds; 0 -> default
+	LoopThreshold int              // identical tool-call turns before aborting; 0 -> default, <0 disables
+	SteerChan     <-chan string     // optional; steering messages injected between tool rounds
 	Logger        *slog.Logger
 }
 
@@ -103,6 +109,7 @@ type Engine struct {
 	compactor     Compactor
 	hooks         Hooks
 	cost          *cost.Tracker
+	prepareStep   PrepareStepFunc
 	budgetUSD     float64
 	model         string
 	maxTokens     int
@@ -147,6 +154,7 @@ func New(opts Options) (*Engine, error) {
 		compactor:     opts.Compactor,
 		hooks:         opts.Hooks,
 		cost:          opts.Cost,
+		prepareStep:   opts.PrepareStep,
 		budgetUSD:     opts.BudgetUSD,
 		model:         opts.Model,
 		maxTokens:     maxTok,
@@ -164,6 +172,16 @@ func New(opts Options) (*Engine, error) {
 func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) error {
 	if emit == nil {
 		emit = func(Event) {}
+	}
+
+	// Repair any tool_use blocks left without a matching tool_result by a
+	// previous interrupted run. Without this, most providers reject the
+	// conversation with a validation error that permanently locks the session.
+	if repaired := repairOrphanedToolUses(conv.Messages); &repaired != &conv.Messages {
+		if len(repaired) != len(conv.Messages) {
+			e.logger.Info("repaired orphaned tool calls", "added", len(repaired)-len(conv.Messages))
+		}
+		conv.Messages = repaired
 	}
 
 	if e.compactor != nil {
@@ -187,6 +205,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		default:
 		}
 
+		// Allow callers to inject dynamic context or refresh tool metadata
+		// before each model turn (e.g. re-read a file, update memory state).
+		if e.prepareStep != nil {
+			if updated := e.prepareStep(ctx, conv.Messages); updated != nil {
+				conv.Messages = updated
+			}
+		}
+
 		assistant, toolUses, usage, err := e.turn(ctx, conv, emit)
 		if err != nil {
 			emit(Event{Kind: KindError, Err: err})
@@ -195,7 +221,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		conv.Append(assistant)
 
 		var runCost float64
-		if e.cost != nil && usage != nil {
+		if e.cost != nil && usage != nil && !usage.IsEstimated {
 			runCost = e.cost.Add(e.model, *usage)
 		}
 		emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
@@ -304,6 +330,15 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 		case provider.EventError:
 			return provider.Message{}, nil, nil, ev.Err
 		}
+	}
+
+	// Providers that don't report usage (common with local/Ollama models) return
+	// zero counts. Estimate from character length so compaction thresholds and
+	// token-count display remain meaningful.
+	if usage != nil && usage.InputTokens == 0 && usage.OutputTokens == 0 {
+		usage.InputTokens = estimateTokens(conv.System, conv.Messages)
+		usage.OutputTokens = len(text) / 4
+		usage.IsEstimated = true
 	}
 
 	// The conversation must record exactly what the model produced, in order:
@@ -422,6 +457,109 @@ func (e *Engine) serializeTool(name string) bool {
 	default:
 		return false
 	}
+}
+
+// repairOrphanedToolUses scans the conversation for tool_use blocks in assistant
+// messages that have no matching tool_result in a subsequent user message, and
+// injects synthetic error results. This prevents providers from rejecting a
+// conversation that was interrupted mid-tool-round (e.g. by context cancel).
+func repairOrphanedToolUses(msgs []provider.Message) []provider.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+
+	// Collect all resolved tool_use IDs.
+	resolved := make(map[string]bool, len(msgs))
+	for _, msg := range msgs {
+		if msg.Role != provider.RoleUser {
+			continue
+		}
+		for _, b := range msg.Content {
+			if tr, ok := b.(provider.ToolResultBlock); ok {
+				resolved[tr.ToolUseID] = true
+			}
+		}
+	}
+
+	// Check whether any assistant message has unresolved tool_use blocks.
+	hasOrphans := false
+	for _, msg := range msgs {
+		if msg.Role != provider.RoleAssistant {
+			continue
+		}
+		for _, b := range msg.Content {
+			if tu, ok := b.(provider.ToolUseBlock); ok && !resolved[tu.ID] {
+				hasOrphans = true
+				break
+			}
+		}
+		if hasOrphans {
+			break
+		}
+	}
+	if !hasOrphans {
+		return msgs
+	}
+
+	// Rebuild the message list, inserting synthetic error results after each
+	// assistant message that has orphaned tool_use blocks.
+	out := make([]provider.Message, 0, len(msgs)+1)
+	skip := make(map[int]bool) // next-user-message indices already merged
+	for i, msg := range msgs {
+		if skip[i] {
+			continue
+		}
+		out = append(out, msg)
+		if msg.Role != provider.RoleAssistant {
+			continue
+		}
+
+		var synth []provider.Block
+		for _, b := range msg.Content {
+			if tu, ok := b.(provider.ToolUseBlock); ok && !resolved[tu.ID] {
+				synth = append(synth, provider.ToolResultBlock{
+					ToolUseID: tu.ID,
+					Content:   fmt.Sprintf("tool call interrupted; %s did not run", tu.Name),
+					IsError:   true,
+				})
+			}
+		}
+		if len(synth) == 0 {
+			continue
+		}
+
+		nextIdx := i + 1
+		if nextIdx < len(msgs) && msgs[nextIdx].Role == provider.RoleUser {
+			// Merge synthetic results into the existing user message.
+			combined := make([]provider.Block, len(msgs[nextIdx].Content)+len(synth))
+			copy(combined, msgs[nextIdx].Content)
+			copy(combined[len(msgs[nextIdx].Content):], synth)
+			out = append(out, provider.Message{Role: provider.RoleUser, Content: combined})
+			skip[nextIdx] = true
+		} else {
+			out = append(out, provider.Message{Role: provider.RoleUser, Content: synth})
+		}
+	}
+	return out
+}
+
+// estimateTokens approximates token count using a 4-chars-per-token heuristic.
+// Used when the provider returns zero usage counts (e.g. local/Ollama models).
+func estimateTokens(system string, msgs []provider.Message) int {
+	chars := len(system)
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			switch v := b.(type) {
+			case provider.TextBlock:
+				chars += len(v.Text)
+			case provider.ToolUseBlock:
+				chars += len(v.Name) + len(v.Input)
+			case provider.ToolResultBlock:
+				chars += len(v.Content)
+			}
+		}
+	}
+	return chars / 4
 }
 
 // executeTool looks up and runs a single tool, converting failures into
