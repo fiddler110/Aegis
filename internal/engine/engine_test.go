@@ -210,3 +210,113 @@ func TestRunInterrupt(t *testing.T) {
 		t.Errorf("err = %v, want ErrInterrupted", err)
 	}
 }
+
+func TestRepairOrphanedToolUses(t *testing.T) {
+	t.Run("no orphans", func(t *testing.T) {
+		msgs := []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Block{
+				provider.ToolUseBlock{ID: "1", Name: "echo"},
+			}},
+			{Role: provider.RoleUser, Content: []provider.Block{
+				provider.ToolResultBlock{ToolUseID: "1", Content: "ok"},
+			}},
+		}
+		got := repairOrphanedToolUses(msgs)
+		if len(got) != len(msgs) {
+			t.Errorf("len = %d, want %d (should be unchanged)", len(got), len(msgs))
+		}
+	})
+
+	t.Run("orphan no following user message", func(t *testing.T) {
+		msgs := []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Block{
+				provider.ToolUseBlock{ID: "tu_1", Name: "shell"},
+			}},
+		}
+		got := repairOrphanedToolUses(msgs)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (synthetic result injected)", len(got))
+		}
+		userMsg := got[2]
+		if userMsg.Role != provider.RoleUser {
+			t.Errorf("injected message role = %s, want user", userMsg.Role)
+		}
+		if len(userMsg.Content) != 1 {
+			t.Fatalf("injected content len = %d, want 1", len(userMsg.Content))
+		}
+		tr, ok := userMsg.Content[0].(provider.ToolResultBlock)
+		if !ok {
+			t.Fatalf("injected block is not ToolResultBlock")
+		}
+		if tr.ToolUseID != "tu_1" {
+			t.Errorf("ToolUseID = %q, want %q", tr.ToolUseID, "tu_1")
+		}
+		if !tr.IsError {
+			t.Error("synthetic result should be an error")
+		}
+	})
+
+	t.Run("partial orphan merged into existing user message", func(t *testing.T) {
+		msgs := []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Block{
+				provider.ToolUseBlock{ID: "id1", Name: "read"},
+				provider.ToolUseBlock{ID: "id2", Name: "write"},
+			}},
+			// Only id1 has a result; id2 is orphaned.
+			{Role: provider.RoleUser, Content: []provider.Block{
+				provider.ToolResultBlock{ToolUseID: "id1", Content: "data"},
+			}},
+		}
+		got := repairOrphanedToolUses(msgs)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (merged into existing user message)", len(got))
+		}
+		merged := got[2]
+		if len(merged.Content) != 2 {
+			t.Fatalf("merged content len = %d, want 2", len(merged.Content))
+		}
+		tr, ok := merged.Content[1].(provider.ToolResultBlock)
+		if !ok {
+			t.Fatal("second block should be ToolResultBlock")
+		}
+		if tr.ToolUseID != "id2" {
+			t.Errorf("ToolUseID = %q, want id2", tr.ToolUseID)
+		}
+	})
+}
+
+func TestUsageFallbackEstimation(t *testing.T) {
+	// An adapter that returns zero usage simulates a local/Ollama model.
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "hello world"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{}},
+		},
+	}}
+	eng, _ := New(Options{Adapter: adapter, Model: "local"})
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}})
+
+	var usageEv *Event
+	_ = eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindTurnDone {
+			cp := ev
+			usageEv = &cp
+		}
+	})
+	if usageEv == nil {
+		t.Fatal("no KindTurnDone event")
+	}
+	if usageEv.Usage == nil {
+		t.Fatal("Usage is nil")
+	}
+	if !usageEv.Usage.IsEstimated {
+		t.Error("IsEstimated should be true when provider returns zero counts")
+	}
+	if usageEv.Usage.InputTokens == 0 {
+		t.Error("estimated InputTokens should be > 0")
+	}
+}

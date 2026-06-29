@@ -84,13 +84,16 @@ type MCPServerConfig struct {
 
 // ProviderConfig selects and configures the model provider.
 type ProviderConfig struct {
-	Default    string            `koanf:"default"`     // adapter name, e.g. "anthropic"
-	Model      string            `koanf:"model"`       // model id
-	MaxTokens  int               `koanf:"max_tokens"`  // response token cap
-	BaseURL    string            `koanf:"base_url"`    // optional API base override
-	MaxRetries int               `koanf:"max_retries"` // transient-failure retries; 0 disables
-	Headers    map[string]string `koanf:"headers"`     // extra HTTP headers sent with every request (e.g. gateway auth)
-	Think      *bool             `koanf:"think"`       // controls extended thinking for reasoning models (nil = provider default; false = disable)
+	Default         string            `koanf:"default"`          // adapter name: "anthropic", "openai", "ollama"
+	Model           string            `koanf:"model"`            // model id
+	SmallModel      string            `koanf:"small_model"`      // optional fast model for title gen + compaction (falls back to Model)
+	MaxTokens       int               `koanf:"max_tokens"`       // response token cap
+	BaseURL         string            `koanf:"base_url"`         // optional API base override
+	MaxRetries      int               `koanf:"max_retries"`      // transient-failure retries; 0 disables
+	Headers         map[string]string `koanf:"headers"`          // extra HTTP headers sent with every request (e.g. gateway auth)
+	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
+	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
+	ContextWindow   int               `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
 }

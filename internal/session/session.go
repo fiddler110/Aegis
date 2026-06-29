@@ -17,22 +17,28 @@ import (
 
 // Session is a stored conversation.
 type Session struct {
-	ID        string             `json:"id"`
-	Title     string             `json:"title"`
-	System    string             `json:"system"`
-	Mode      string             `json:"mode"`
-	Messages  []provider.Message `json:"messages"`
-	CreatedAt time.Time          `json:"created_at"`
-	UpdatedAt time.Time          `json:"updated_at"`
+	ID           string             `json:"id"`
+	Title        string             `json:"title"`
+	System       string             `json:"system"`
+	Mode         string             `json:"mode"`
+	Messages     []provider.Message `json:"messages"`
+	InputTokens  int                `json:"input_tokens"`
+	OutputTokens int                `json:"output_tokens"`
+	CostUSD      float64            `json:"cost_usd"`
+	CreatedAt    time.Time          `json:"created_at"`
+	UpdatedAt    time.Time          `json:"updated_at"`
 }
 
 // Meta is a session without its message body, for listings.
 type Meta struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Mode      string    `json:"mode"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Mode         string    `json:"mode"`
+	InputTokens  int       `json:"input_tokens"`
+	OutputTokens int       `json:"output_tokens"`
+	CostUSD      float64   `json:"cost_usd"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // ErrNotFound is returned when a session does not exist.
@@ -71,17 +77,30 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+	if _, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS sessions (
-    id         TEXT PRIMARY KEY,
-    title      TEXT NOT NULL DEFAULT '',
-    system     TEXT NOT NULL DEFAULT '',
-    mode       TEXT NOT NULL DEFAULT 'plan',
-    messages   BLOB NOT NULL DEFAULT '[]',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);`)
-	return err
+    id           TEXT PRIMARY KEY,
+    title        TEXT    NOT NULL DEFAULT '',
+    system       TEXT    NOT NULL DEFAULT '',
+    mode         TEXT    NOT NULL DEFAULT 'plan',
+    messages     BLOB    NOT NULL DEFAULT '[]',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd     REAL    NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);`); err != nil {
+		return err
+	}
+	// Idempotent additions for existing databases (errors silently ignored).
+	for _, col := range []string{
+		`ALTER TABLE sessions ADD COLUMN input_tokens  INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN cost_usd      REAL    NOT NULL DEFAULT 0`,
+	} {
+		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
+	}
+	return nil
 }
 
 // Create stores a new session and returns it.
@@ -107,13 +126,14 @@ func (s *Store) Create(ctx context.Context, title, system, mode string) (*Sessio
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, messages, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, messages, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
 		sess         Session
 		msgBlob      []byte
 		created, upd int64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &msgBlob, &created, &upd); err != nil {
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &msgBlob,
+		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -157,7 +177,7 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 // List returns session metadata, most recently updated first.
 func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, mode, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
+		`SELECT id, title, mode, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +186,7 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	for rows.Next() {
 		var m Meta
 		var created, upd int64
-		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &created, &upd); err != nil {
+		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = time.UnixMilli(created)
@@ -174,6 +194,15 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// AddUsage accumulates token counts and cost for a session (safe for concurrent
+// calls from separate goroutines — SQLite write serialization handles it).
+func (s *Store) AddUsage(ctx context.Context, id string, inputTokens, outputTokens int, costUSD float64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, cost_usd = cost_usd + ?, updated_at = ? WHERE id = ?`,
+		inputTokens, outputTokens, costUSD, time.Now().UnixMilli(), id)
+	return err
 }
 
 // SetSystem updates a session's system prompt.

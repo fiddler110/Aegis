@@ -22,11 +22,12 @@ const defaultBaseURL = "https://api.openai.com/v1"
 
 // Adapter talks to an OpenAI-compatible chat-completions endpoint.
 type Adapter struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
-	headers map[string]string
-	think   *bool // nil = omit (provider default); false = disable extended thinking (e.g. Ollama qwen/deepseek)
+	apiKey          string
+	baseURL         string
+	client          *http.Client
+	headers         map[string]string
+	think           *bool  // nil = omit; false = disable Ollama extended thinking
+	reasoningEffort string // "low"|"medium"|"high" for OpenAI o1/o3; "" = omit
 }
 
 // Option configures the adapter.
@@ -46,12 +47,18 @@ func WithHeaders(h map[string]string) Option {
 	return func(a *Adapter) { a.headers = h }
 }
 
-// WithThink controls the extended-thinking parameter for models that support it
-// (e.g. Ollama-served reasoning models like Qwen3 or DeepSeek-R1). Pass false
-// to disable thinking mode and get plain content-only responses. Nil (the
-// default) omits the parameter, letting the provider use its own default.
+// WithThink controls the extended-thinking parameter for Ollama-served
+// reasoning models (Qwen3, DeepSeek-R1). Pass false to suppress the thinking
+// preamble and get plain content-only responses. Nil (the default) omits the
+// parameter. Do NOT use this for real OpenAI endpoints — use WithReasoningEffort.
 func WithThink(v *bool) Option {
 	return func(a *Adapter) { a.think = v }
+}
+
+// WithReasoningEffort sets the reasoning_effort field for OpenAI o1/o3 models.
+// Valid values: "low", "medium", "high". An empty string omits the field.
+func WithReasoningEffort(effort string) Option {
+	return func(a *Adapter) { a.reasoningEffort = effort }
 }
 
 // New constructs an OpenAI adapter.
@@ -107,14 +114,15 @@ type wireTool struct {
 }
 
 type wireRequest struct {
-	Model         string         `json:"model"`
-	Messages      []wireMessage  `json:"messages"`
-	Tools         []wireTool     `json:"tools,omitempty"`
-	MaxTokens     int            `json:"max_tokens,omitempty"`
-	Temperature   *float64       `json:"temperature,omitempty"`
-	Stream        bool           `json:"stream"`
-	StreamOptions map[string]any `json:"stream_options,omitempty"`
-	Think         *bool          `json:"think,omitempty"` // Ollama extended-thinking control
+	Model           string         `json:"model"`
+	Messages        []wireMessage  `json:"messages"`
+	Tools           []wireTool     `json:"tools,omitempty"`
+	MaxTokens       int            `json:"max_tokens,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	Stream          bool           `json:"stream"`
+	StreamOptions   map[string]any `json:"stream_options,omitempty"`
+	Think           *bool          `json:"think,omitempty"`            // Ollama extended-thinking control
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"` // OpenAI o1/o3
 }
 
 // translate converts harness messages to chat-completions messages.
@@ -208,14 +216,15 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		return nil, err
 	}
 	body, err := json.Marshal(wireRequest{
-		Model:         req.Model,
-		Messages:      msgs,
-		Tools:         translateTools(req.Tools),
-		MaxTokens:     req.MaxTokens,
-		Temperature:   req.Temperature,
-		Stream:        true,
-		StreamOptions: map[string]any{"include_usage": true},
-		Think:         a.think,
+		Model:           req.Model,
+		Messages:        msgs,
+		Tools:           translateTools(req.Tools),
+		MaxTokens:       req.MaxTokens,
+		Temperature:     req.Temperature,
+		Stream:          true,
+		StreamOptions:   map[string]any{"include_usage": true},
+		Think:           a.think,
+		ReasoningEffort: a.reasoningEffort,
 	})
 	if err != nil {
 		return nil, err

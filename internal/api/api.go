@@ -17,11 +17,14 @@ type CreateSessionRequest struct {
 
 // SessionMeta describes a session without its messages.
 type SessionMeta struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Mode      string    `json:"mode"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Mode         string    `json:"mode"`
+	InputTokens  int       `json:"input_tokens,omitempty"`
+	OutputTokens int       `json:"output_tokens,omitempty"`
+	CostUSD      float64   `json:"cost_usd,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // PostMessageRequest sends a user turn into a session.
@@ -71,6 +74,9 @@ type Event struct {
 	// Cache token usage (Anthropic prompt caching), surfaced for observability.
 	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	// TokensEstimated is true when token counts were inferred from character
+	// length because the provider did not report usage (e.g. local/Ollama models).
+	TokensEstimated bool `json:"tokens_estimated,omitempty"`
 	// KindApprovalRequest fields
 	ApprovalReason string `json:"approval_reason,omitempty"`
 	ApprovalID     string `json:"approval_id,omitempty"` // run id to echo back when answering

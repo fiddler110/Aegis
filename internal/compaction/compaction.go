@@ -11,28 +11,49 @@ import (
 	"github.com/scottymacleod/aegis/internal/provider"
 )
 
+const (
+	// largeContextWindowThreshold is the token count above which a context window
+	// is considered "large" and uses an absolute buffer instead of a ratio.
+	largeContextWindowThreshold = 200_000
+	// largeContextWindowBuffer is the minimum remaining tokens before compaction
+	// triggers for large context windows.
+	largeContextWindowBuffer = 20_000
+	// smallContextWindowRatio is the fraction of the context window that must
+	// remain free before compaction triggers for small context windows.
+	smallContextWindowRatio = 0.20
+)
+
 // Summarizer implements engine.Compactor.
 type Summarizer struct {
 	adapter       provider.Adapter
 	model         string
-	maxBudget     int // approximate token budget that triggers compaction
+	maxBudget     int // fallback fixed budget when contextWindow == 0; 0 = skip
+	contextWindow int // model context window in tokens; 0 = use maxBudget
 	keepRecent    int // minimum number of trailing messages kept verbatim
 	summaryTokens int
 }
 
 // Options configures a Summarizer.
 type Options struct {
-	Adapter       provider.Adapter
-	Model         string
-	MaxBudget     int // default 120000
+	Adapter provider.Adapter
+	Model   string
+	// ContextWindow is the model's context window in tokens. When > 0 it drives
+	// smart compaction thresholds. When 0, MaxBudget is used as a fixed fallback.
+	ContextWindow int
+	// MaxBudget is a fixed token budget. Used only when ContextWindow == 0.
+	// A value of 0 means skip auto-compaction entirely (e.g. for local models
+	// whose context size is not known). Defaults to 120 000 when ContextWindow
+	// is also 0, for backward-compat with cloud providers.
+	MaxBudget     int
 	KeepRecent    int // default 8
 	SummaryTokens int // default 1024
 }
 
 // New constructs a Summarizer.
 func New(opts Options) *Summarizer {
-	if opts.MaxBudget <= 0 {
-		opts.MaxBudget = 120000
+	if opts.ContextWindow <= 0 && opts.MaxBudget <= 0 {
+		// Neither set: keep the existing default for cloud providers.
+		opts.MaxBudget = 120_000
 	}
 	if opts.KeepRecent <= 0 {
 		opts.KeepRecent = 8
@@ -44,9 +65,26 @@ func New(opts Options) *Summarizer {
 		adapter:       opts.Adapter,
 		model:         opts.Model,
 		maxBudget:     opts.MaxBudget,
+		contextWindow: opts.ContextWindow,
 		keepRecent:    opts.KeepRecent,
 		summaryTokens: opts.SummaryTokens,
 	}
+}
+
+// shouldCompact reports whether the current estimated token count warrants
+// compaction given the configured context window or fixed budget.
+func (s *Summarizer) shouldCompact(estimated int) bool {
+	if s.contextWindow > 0 {
+		remaining := s.contextWindow - estimated
+		if s.contextWindow > largeContextWindowThreshold {
+			return remaining < largeContextWindowBuffer
+		}
+		return remaining < int(float64(s.contextWindow)*smallContextWindowRatio)
+	}
+	if s.maxBudget <= 0 {
+		return false
+	}
+	return estimated > s.maxBudget
 }
 
 // EstimateTokens approximates token count using a 4-chars-per-token heuristic.
@@ -72,7 +110,7 @@ func EstimateTokens(system string, msgs []provider.Message) int {
 // preserves tool_use/tool_result pairing by cutting only before an assistant
 // message.
 func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider.Message) ([]provider.Message, bool, error) {
-	if EstimateTokens(system, msgs) <= s.maxBudget {
+	if !s.shouldCompact(EstimateTokens(system, msgs)) {
 		return msgs, false, nil
 	}
 	boundary := s.boundary(msgs)
