@@ -110,6 +110,10 @@ type model struct {
 	// they scroll up, so streaming output never yanks them back down mid-read.
 	followBottom bool
 
+	// escPending is true after a first ESC press during streaming; a second ESC
+	// cancels the run. Any non-ESC key clears this state.
+	escPending bool
+
 	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
 	history    []string
 	histIdx    int
@@ -352,9 +356,44 @@ func resolveAttachPath(path, workDir string) string {
 	return abs
 }
 
+// setSteerMode switches the textarea between normal input and steer mode.
+// In steer mode the placeholder and border colour signal that Enter will
+// inject a steering instruction into the running model turn rather than
+// start a new conversation turn.
+func (m *model) setSteerMode(on bool) {
+	styles := m.ta.Styles()
+	if on {
+		m.ta.Placeholder = "Steer the model…"
+		styles.Focused.Base = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colWarning)
+		m.ta.Focus()
+	} else {
+		m.ta.Placeholder = "Message Aegis…"
+		styles.Focused.Base = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colAccent)
+	}
+	m.ta.SetStyles(styles)
+}
+
 func (m model) handleSlashCommand(parsed *commands.ParsedCommand) tea.Cmd {
 	slash := m.slash
 	return func() tea.Msg { return slashResultMsg(slash.Dispatch(parsed)) }
+}
+
+// sendSteerCmd posts a steering instruction to the daemon. The instruction is
+// injected into the conversation between tool rounds by the engine.
+func (m model) sendSteerCmd(text string) tea.Cmd {
+	cl, id := m.cfg.Client, m.cfg.SessionID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := cl.Steer(ctx, id, text); err != nil {
+			return errMsg{err: fmt.Errorf("steer: %w", err)}
+		}
+		return nil
+	}
 }
 
 func waitForEvent(ch <-chan api.Event) tea.Cmd {
@@ -569,9 +608,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "esc":
+			if m.streaming {
+				if m.escPending {
+					// Second ESC: cancel the run.
+					if m.cancel != nil {
+						m.cancel()
+					}
+					m.escPending = false
+				} else {
+					// First ESC: arm the interrupt; status bar will show the warning.
+					m.escPending = true
+				}
+				m.refresh()
+				return m, nil
+			}
+			// Not streaming: clear the input box.
+			m.ta.Reset()
+			m.escPending = false
+			return m, nil
+
 		case "ctrl+c":
 			if m.streaming && m.cancel != nil {
 				m.cancel() // interrupt the in-flight run; press again to quit
+				m.escPending = false
 				return m, nil
 			}
 			if m.cancel != nil {
@@ -634,7 +694,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.streaming {
-				return m, nil
+				// While the model is running, Enter injects a steering message
+				// between tool rounds rather than starting a new conversation turn.
+				text := strings.TrimSpace(m.ta.Value())
+				if text == "" {
+					return m, nil
+				}
+				m.ta.Reset()
+				m.escPending = false
+				return m, m.sendSteerCmd(text)
 			}
 			text := strings.TrimSpace(m.ta.Value())
 			if text == "" {
@@ -671,6 +739,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.events = msg.ch
 		m.cancel = msg.cancel
 		m.streamStart = time.Now()
+		m.escPending = false
+		m.setSteerMode(true)
 		return m, tea.Batch(waitForEvent(m.events), m.sp.Tick)
 
 	case eventMsg:
@@ -685,12 +755,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.events = nil
 		m.cancel = nil
 		m.status = "ready"
+		m.escPending = false
+		m.setSteerMode(false)
 		m.transcript.WriteString("\n")
 		m.refresh()
 		return m, nil
 
 	case errMsg:
 		m.streaming = false
+		m.escPending = false
+		m.setSteerMode(false)
 		m.transcript.WriteString(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")
 		m.status = "ready"
 		m.refresh()
@@ -788,13 +862,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if !m.streaming {
+	{
 		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
 		// Recompute inline completion after the textarea consumes the key.
 		if _, isKey := msg.(tea.KeyMsg); isKey {
 			m.syncCompletion()
+			// Any non-ESC key while escPending clears the interrupt arm state
+			// (the ESC case already returns early and manages escPending itself).
+			if m.streaming && m.escPending {
+				m.escPending = false
+				m.refresh()
+			}
 		}
 	}
 	var vpCmd tea.Cmd
@@ -1220,6 +1300,17 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 		m.status = "approval required"
 
+	case api.KindSteer:
+		// A steering instruction was injected mid-run. Flush any partial model
+		// output, show the steer as a user message, then open a new assistant bar
+		// so the continuation renders under its own label.
+		m.flushThinking()
+		m.flushLiveText()
+		sepW := max(m.vp.Width()-2, 10)
+		m.transcript.WriteString(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
+		m.transcript.WriteString(barLabel("You", colUserFg) + "\n" + ev.Text + "\n\n")
+		m.transcript.WriteString(barLabel("Assistant", colAssistFg) + "\n")
+
 	case api.KindError:
 		m.flushThinking()
 		m.flushLiveText()
@@ -1421,7 +1512,9 @@ func (m model) renderSidebar(h int) string {
 func (m model) renderInputArea() string {
 	// Left side: streaming indicator with elapsed time, toast, or ready dot.
 	var statusLeft string
-	if m.streaming {
+	if m.streaming && m.escPending {
+		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to stop")
+	} else if m.streaming {
 		elapsed := ""
 		if !m.streamStart.IsZero() {
 			elapsed = m.th.elapsedDim.Render(fmt.Sprintf(" %ds", int(time.Since(m.streamStart).Seconds())))
@@ -1530,6 +1623,7 @@ func (m model) renderHelpOverlay() string {
 	entries := []struct{ k, d string }{
 		{km.Send.Help().Key, km.Send.Help().Desc},
 		{km.Newline.Help().Key, km.Newline.Help().Desc},
+		{km.Interrupt.Help().Key, km.Interrupt.Help().Desc},
 		{km.Complete.Help().Key, km.Complete.Help().Desc},
 		{km.Palette.Help().Key, km.Palette.Help().Desc},
 		{km.Cancel.Help().Key, km.Cancel.Help().Desc},
