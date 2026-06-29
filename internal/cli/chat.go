@@ -110,6 +110,11 @@ func newChatCmd() *cobra.Command {
 				p, _ := persona.Get(personaName)
 				resolvedSystem = p.System
 			}
+			// Append shared blocks (applied to all personas in the server path via
+			// effectiveSystem; mirrored here so the CLI path is equivalent).
+			resolvedSystem = resolvedSystem + "\n\n" + persona.ToolUseBlock()
+			resolvedSystem = resolvedSystem + "\n\n" + persona.CompletingTasksBlock()
+			resolvedSystem = resolvedSystem + "\n\n" + persona.PlatformBlock()
 			// Append memory and context files, matching the daemon's effectiveSystem.
 			src := memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
 			if ctxFiles := src.LoadContext(); ctxFiles != "" {
