@@ -11,6 +11,7 @@ type keyMap struct {
 	Help      key.Binding
 	Palette   key.Binding
 	Cancel    key.Binding
+	Interrupt key.Binding
 	Clear     key.Binding
 	Editor    key.Binding
 	CycleMode key.Binding
@@ -22,12 +23,13 @@ type keyMap struct {
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Send:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send message")),
+		Send:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send / steer")),
 		Newline:   key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "insert newline")),
 		Complete:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "command completion")),
 		Help:      key.NewBinding(key.WithKeys("f1"), key.WithHelp("f1", "toggle help")),
 		Palette:   key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "command palette")),
 		Cancel:    key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel / quit")),
+		Interrupt: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt run (×2 to stop)")),
 		Clear:     key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear transcript")),
 		Editor:    key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "open in $EDITOR")),
 		CycleMode: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "cycle mode")),

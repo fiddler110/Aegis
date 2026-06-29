@@ -80,6 +80,10 @@ type Server struct {
 	// pendingApprovals maps session ID → chan bool for interactive approval.
 	// The channel is written by handleApprove and read by sseApprover.Approve.
 	pendingApprovals sync.Map
+
+	// pendingSteers maps session ID → chan string for mid-run steering.
+	// The channel is written by handleSteer and drained by the engine between tool rounds.
+	pendingSteers sync.Map
 }
 
 // sseApprover implements permission.Approver by sending a KindApprovalRequest
@@ -381,7 +385,15 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 // used by tests to inject a mock adapter and an in-memory store.
 func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, adapter provider.Adapter, tools *tool.Registry) *Server {
 	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry()}
-	s.http = &http.Server{Addr: cfg.Server.Addr, Handler: s.routes()}
+	s.http = &http.Server{
+		Addr:              cfg.Server.Addr,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		// WriteTimeout is intentionally omitted: SSE streaming responses are
+		// long-lived and a write deadline would abort them prematurely.
+	}
 	return s
 }
 
@@ -398,6 +410,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleApprove)
+	mux.HandleFunc("POST /sessions/{id}/steer", s.handleSteer)
 	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
 	mux.HandleFunc("GET /runs", s.handleListRuns)
@@ -491,7 +504,7 @@ func (s *Server) providerUnconfiguredErr() error {
 	}
 }
 
-func (s *Server) newEngine(mode string, approver permission.Approver) (*engine.Engine, error) {
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, s.providerUnconfiguredErr()
 	}
@@ -529,6 +542,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver) (*engine.E
 		BudgetUSD: s.cfg.Cost.BudgetUSD,
 		Model:     s.cfg.Provider.Model,
 		MaxTokens: s.cfg.Provider.MaxTokens,
+		SteerChan: steerCh,
 		Logger:    s.logger,
 	})
 }
@@ -858,7 +872,13 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		runApprover = &sseApprover{send: send, ch: approvalCh, runID: runID}
 	}
 
-	eng, err := s.newEngine(sess.Mode, runApprover)
+	// Steer channel: the TUI can POST /sessions/{id}/steer while the run is
+	// active to inject a course-correction message between tool rounds.
+	steerCh := make(chan string, 8)
+	s.pendingSteers.Store(id, steerCh)
+	defer s.pendingSteers.Delete(id)
+
+	eng, err := s.newEngine(sess.Mode, runApprover, steerCh)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
@@ -933,6 +953,35 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusConflict, "approval already answered or not yet requested")
+	}
+}
+
+// handleSteer injects a mid-run instruction into an active session run. The
+// text is delivered to the engine between tool rounds via the steer channel;
+// if no run is active for the session the request returns 404.
+func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	id := r.PathValue("id")
+	var req api.SteerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		writeError(w, http.StatusBadRequest, "text is required")
+		return
+	}
+	val, ok := s.pendingSteers.Load(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no active run for session")
+		return
+	}
+	ch := val.(chan string)
+	select {
+	case ch <- req.Text:
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusTooManyRequests, "steer buffer full; try again momentarily")
 	}
 }
 

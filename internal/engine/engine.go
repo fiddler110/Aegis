@@ -36,6 +36,7 @@ const (
 	KindTurnDone   EventKind = "turn_done"   // one model turn completed
 	KindDone       EventKind = "done"        // the run finished (final answer)
 	KindError      EventKind = "error"       // the run failed
+	KindSteer      EventKind = "steer"       // mid-run steering instruction injected
 )
 
 // Event is emitted to the consumer-provided sink as the run progresses.
@@ -88,8 +89,9 @@ type Options struct {
 	Model         string
 	MaxTokens     int
 	Temperature   *float64
-	MaxIterations int // safety cap on tool-call rounds; 0 -> default
-	LoopThreshold int // identical tool-call turns before aborting; 0 -> default, <0 disables
+	MaxIterations int           // safety cap on tool-call rounds; 0 -> default
+	LoopThreshold int           // identical tool-call turns before aborting; 0 -> default, <0 disables
+	SteerChan     <-chan string  // optional; steering messages injected between tool rounds
 	Logger        *slog.Logger
 }
 
@@ -107,6 +109,7 @@ type Engine struct {
 	temperature   *float64
 	maxIterations int
 	loopThreshold int
+	steerChan     <-chan string
 	logger        *slog.Logger
 }
 
@@ -150,6 +153,7 @@ func New(opts Options) (*Engine, error) {
 		temperature:   opts.Temperature,
 		maxIterations: maxIter,
 		loopThreshold: loopThreshold,
+		steerChan:     opts.SteerChan,
 		logger:        logger,
 	}, nil
 }
@@ -232,6 +236,22 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return err
 		}
 		conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
+
+		// Drain one pending steer message (if any) between tool rounds, injecting
+		// it as a user message so the model adjusts its plan on the next turn.
+		if e.steerChan != nil {
+			select {
+			case steer, ok := <-e.steerChan:
+				if ok && len([]rune(steer)) > 0 {
+					conv.Append(provider.Message{
+						Role:    provider.RoleUser,
+						Content: []provider.Block{provider.TextBlock{Text: steer}},
+					})
+					emit(Event{Kind: KindSteer, Text: steer})
+				}
+			default:
+			}
+		}
 	}
 
 	err := fmt.Errorf("engine: exceeded max iterations (%d)", e.maxIterations)

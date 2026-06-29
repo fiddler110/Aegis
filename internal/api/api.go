@@ -53,6 +53,7 @@ const (
 	KindDone            EventKind = "done"
 	KindError           EventKind = "error"
 	KindApprovalRequest EventKind = "approval_request" // engine awaiting user approval
+	KindSteer           EventKind = "steer"            // mid-run steering instruction injected
 )
 
 // Event is one server-sent event during a message run.
@@ -159,6 +160,11 @@ type RunInfo struct {
 	StartedAt time.Time `json:"started_at"`
 	Tools     int       `json:"tools"`     // tool calls so far this run
 	LastKind  string    `json:"last_kind"` // most recent event kind
+}
+
+// SteerRequest injects a mid-run instruction into an active session run.
+type SteerRequest struct {
+	Text string `json:"text"`
 }
 
 // ErrorResponse is the body returned for non-2xx responses.

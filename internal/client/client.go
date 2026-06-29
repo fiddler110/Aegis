@@ -196,6 +196,13 @@ func (c *Client) SendApproval(ctx context.Context, sessionID, approvalID string,
 	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve", api.ApproveRequest{Approved: approved, ID: approvalID}, nil)
 }
 
+// Steer injects a mid-run instruction into an active session run. The text is
+// delivered to the engine between tool rounds; returns an error if no run is
+// currently active for the session.
+func (c *Client) Steer(ctx context.Context, sessionID, text string) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/steer", api.SteerRequest{Text: text}, nil)
+}
+
 // PostMessage streams engine events for a user turn. Events are delivered on
 // the returned channel, which is closed when the run finishes or ctx is done.
 func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.Event, error) {
