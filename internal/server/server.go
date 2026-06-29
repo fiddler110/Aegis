@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1149,13 +1150,15 @@ func newRunID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// effectiveSystem combines the session's base system prompt with loaded
-// project/user memory, skills, and context files (AGENTS.md, CLAUDE.md).
+// effectiveSystem combines the session's base system prompt with platform
+// context, loaded project/user memory, skills, and context files (AGENTS.md,
+// CLAUDE.md).
 func (s *Server) effectiveSystem(base string) string {
 	var parts []string
 	if base != "" {
 		parts = append(parts, base)
 	}
+	parts = append(parts, platformBlock())
 	if ctx := s.memory.LoadContext(); ctx != "" {
 		parts = append(parts, ctx)
 	}
@@ -1166,6 +1169,44 @@ func (s *Server) effectiveSystem(base string) string {
 		parts = append(parts, sk)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// platformBlock returns a system-prompt section that describes the execution
+// environment so the model generates shell commands that work on this platform,
+// and enforces immediate tool use rather than narrating intent.
+func platformBlock() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Execution Environment\nOS: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	switch runtime.GOOS {
+	case "windows":
+		b.WriteString(`Shell: PowerShell (powershell -NoProfile -NonInteractive -Command ...)
+
+IMPORTANT — you are running on Windows. Every shell command MUST be valid PowerShell.
+Unix commands (ls, cat, grep, find, rm, chmod, echo, which, etc.) do NOT exist in
+PowerShell and will fail. Use their PowerShell equivalents:
+
+  ls / dir     → Get-ChildItem (or gci)
+  cat          → Get-Content
+  grep         → Select-String
+  find         → Get-ChildItem -Recurse -Filter
+  rm           → Remove-Item
+  rm -rf       → Remove-Item -Recurse -Force
+  cp           → Copy-Item
+  mv           → Move-Item
+  mkdir        → New-Item -ItemType Directory
+  which cmd    → (Get-Command cmd).Source
+  $VAR         → $env:VAR
+  echo text    → Write-Output "text"
+
+Paths: forward-slash (/) and backslash (\) are both valid in PowerShell.
+Absolute paths use Windows drive letters: C:\Users\scott\...`)
+	case "darwin":
+		b.WriteString("Shell: /bin/sh (bash-compatible)\nUse standard Unix/POSIX shell commands and forward-slash paths.")
+	default:
+		b.WriteString("Shell: /bin/sh\nUse standard Unix/POSIX shell commands and forward-slash paths.")
+	}
+	b.WriteString("\n\nWhen a task requires running a command, reading a file, searching, or fetching a URL — call the tool immediately. Do not narrate \"I will run...\" or describe what you are about to do before calling the tool; just call it.")
+	return b.String()
 }
 
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
