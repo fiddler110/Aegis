@@ -1490,6 +1490,12 @@ func (m *model) applyEvent(ev api.Event) {
 		m.transcript.WriteString(barLabel("You", colUserFg) + "\n" + ev.Text + "\n\n")
 		m.transcript.WriteString(barLabel("Assistant", colAssistFg) + "\n")
 
+	case api.KindDone:
+		// Flush any buffered text (safety net — normally flushed at KindTurnDone).
+		// If the last action was a tool call with no follow-up text, this ensures
+		// the transcript is fully rendered before the run is marked complete.
+		m.flushLiveText()
+
 	case api.KindError:
 		m.flushThinking()
 		m.flushLiveText()

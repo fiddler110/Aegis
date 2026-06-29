@@ -77,19 +77,21 @@ func (p Policy) Decide(cap tool.Capability) Decision {
 }
 
 // Approver resolves Ask decisions, e.g. via an interactive TUI prompt.
+// input is the raw tool arguments; approvers may inspect it for context-aware
+// decisions (e.g. showing the path being written, the command being run).
 type Approver interface {
-	Approve(ctx context.Context, toolName, reason string) bool
+	Approve(ctx context.Context, toolName, reason string, input json.RawMessage) bool
 }
 
 // AutoDeny denies every Ask decision (safe default for non-interactive use).
 type AutoDeny struct{}
 
-func (AutoDeny) Approve(context.Context, string, string) bool { return false }
+func (AutoDeny) Approve(context.Context, string, string, json.RawMessage) bool { return false }
 
 // AutoApprove allows every Ask decision (use only in trusted contexts).
 type AutoApprove struct{}
 
-func (AutoApprove) Approve(context.Context, string, string) bool { return true }
+func (AutoApprove) Approve(context.Context, string, string, json.RawMessage) bool { return true }
 
 // Gate combines a policy with an approver to decide individual tool calls.
 type Gate struct {
@@ -108,18 +110,22 @@ func New(mode Mode, approver Approver) Gate {
 
 // Check decides whether a tool call may proceed, returning a human-readable
 // reason when denied. It satisfies the engine's gate interface.
-func (g Gate) Check(ctx context.Context, t tool.Tool, _ json.RawMessage) (bool, string) {
+func (g Gate) Check(ctx context.Context, t tool.Tool, input json.RawMessage) (bool, string) {
 	cap := t.Capability()
 	switch g.Policy.Decide(cap) {
 	case Allow:
 		return true, ""
 	case Ask:
 		reason := fmt.Sprintf("%s requires %s access", t.Name(), cap)
-		if g.Approver.Approve(ctx, t.Name(), reason) {
+		if g.Approver.Approve(ctx, t.Name(), reason, input) {
 			return true, ""
 		}
-		return false, fmt.Sprintf("%s denied: %s not approved", t.Name(), cap)
+		return false, fmt.Sprintf("%s denied: %s access was not approved — ask the user to approve or switch to auto mode", t.Name(), cap)
 	default: // Deny
-		return false, fmt.Sprintf("%s blocked: %s access not allowed in %s mode", t.Name(), cap, g.Policy.Mode)
+		hint := "switch to build mode to allow write/execute access, or use a read-only tool instead"
+		if cap == tool.CapExecute {
+			hint = "switch to auto mode or enable auto_approve_exec to allow shell execution"
+		}
+		return false, fmt.Sprintf("%s blocked: %s access not allowed in %s mode (%s)", t.Name(), cap, g.Policy.Mode, hint)
 	}
 }

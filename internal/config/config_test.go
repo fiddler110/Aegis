@@ -66,8 +66,8 @@ func TestLoadDefaults(t *testing.T) {
 			t.Errorf("%s = %q, want %q", tt.name, tt.got, tt.want)
 		}
 	}
-	if cfg.Provider.MaxTokens != 16384 {
-		t.Errorf("max_tokens = %d, want 16384", cfg.Provider.MaxTokens)
+	if cfg.Provider.MaxTokens != 32768 {
+		t.Errorf("max_tokens = %d, want 32768", cfg.Provider.MaxTokens)
 	}
 }
 

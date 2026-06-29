@@ -133,15 +133,15 @@ func New(opts Options) (*Engine, error) {
 	}
 	maxIter := opts.MaxIterations
 	if maxIter <= 0 {
-		maxIter = 25
+		maxIter = 40
 	}
 	maxTok := opts.MaxTokens
 	if maxTok <= 0 {
-		maxTok = 8192
+		maxTok = 32768
 	}
 	loopThreshold := opts.LoopThreshold
 	if loopThreshold == 0 {
-		loopThreshold = 3
+		loopThreshold = 5
 	}
 	logger := opts.Logger
 	if logger == nil {
@@ -213,7 +213,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			}
 		}
 
-		assistant, toolUses, usage, err := e.turn(ctx, conv, emit)
+		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit)
 		if err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
@@ -227,6 +227,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
 
 		if len(toolUses) == 0 {
+			// If the model was cut off by the token limit, inject a continuation
+			// prompt and loop rather than silently returning a truncated response.
+			if stopReason == provider.StopMaxTokens {
+				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+					provider.TextBlock{Text: "[Your response was cut off at the token limit. Continue from where you left off, completing any remaining task steps.]"},
+				}})
+				continue
+			}
 			emit(Event{Kind: KindDone})
 			return nil
 		}
@@ -287,7 +295,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 
 // turn performs a single model call, accumulating the assistant message and any
 // tool-use blocks from the stream.
-func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (provider.Message, []provider.ToolUseBlock, *provider.Usage, error) {
+func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (provider.Message, []provider.ToolUseBlock, *provider.Usage, provider.StopReason, error) {
 	req := provider.Request{
 		Model:       e.model,
 		System:      conv.System,
@@ -301,14 +309,15 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 
 	stream, err := e.adapter.Stream(ctx, req)
 	if err != nil {
-		return provider.Message{}, nil, nil, err
+		return provider.Message{}, nil, nil, provider.StopOther, err
 	}
 
 	var (
-		text     []byte
-		thinking []provider.ThinkingBlock
-		toolUses []provider.ToolUseBlock
-		usage    *provider.Usage
+		text       []byte
+		thinking   []provider.ThinkingBlock
+		toolUses   []provider.ToolUseBlock
+		usage      *provider.Usage
+		stopReason provider.StopReason
 	)
 	for ev := range stream {
 		switch ev.Type {
@@ -327,8 +336,9 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 			}
 		case provider.EventDone:
 			usage = ev.Usage
+			stopReason = ev.Stop
 		case provider.EventError:
-			return provider.Message{}, nil, nil, ev.Err
+			return provider.Message{}, nil, nil, provider.StopOther, ev.Err
 		}
 	}
 
@@ -354,7 +364,7 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 	for _, tu := range toolUses {
 		content = append(content, tu)
 	}
-	return provider.Message{Role: provider.RoleAssistant, Content: content}, toolUses, usage, nil
+	return provider.Message{Role: provider.RoleAssistant, Content: content}, toolUses, usage, stopReason, nil
 }
 
 // maxParallelTools bounds how many tool calls run concurrently in one round.
