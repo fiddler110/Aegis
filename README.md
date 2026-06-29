@@ -86,7 +86,11 @@ $env:OPENAI_API_KEY = "ollama"
 **3. Pull a model and launch**
 
 ```bash
+# Pull at least one model into Ollama (one-time, only needed once per model)
 ollama pull llama3.2
+
+# Launch — Aegis starts Ollama automatically if it is installed but not running,
+# and selects the first available model when model: "auto" is set in the config
 aegis
 ```
 
@@ -100,7 +104,7 @@ Aegis works with any server that exposes an OpenAI-compatible API (`/v1/chat/com
 
 | Server | Default Base URL | Install / Start |
 |--------|-----------------|-----------------|
-| [Ollama](https://ollama.com) | `http://localhost:11434/v1` | Install from [ollama.com](https://ollama.com). Pull a model: `ollama pull llama3.2`. Runs as a service automatically. |
+| [Ollama](https://ollama.com) | `http://localhost:11434/v1` | Install from [ollama.com](https://ollama.com). Pull a model: `ollama pull llama3.2`. Aegis starts Ollama automatically if installed but not running. Set `model: "auto"` to pick the first available model without hardcoding a name. |
 | [LM Studio](https://lmstudio.ai) | `http://localhost:1234/v1` | Download from [lmstudio.ai](https://lmstudio.ai). Load a model, then start the server from the Local Server tab. |
 | [llama.cpp](https://github.com/ggerganov/llama.cpp) | `http://localhost:8080/v1` | Build or download a release. Start: `llama-server -m model.gguf --port 8080`. |
 | [vLLM](https://github.com/vllm-project/vllm) | `http://localhost:8000/v1` | `pip install vllm`. Start: `vllm serve meta-llama/Llama-3.1-8B-Instruct`. |
@@ -247,17 +251,16 @@ On Linux/macOS: reload with `source ~/.zshrc` (or the file the script reports).
 
 Local LLM usage is the primary focus of this project. The `--first-init` template has Ollama active by default.
 
-**Step 1 — Start your local model server**
+**Step 1 — Pull at least one model into Ollama**
 
 ```bash
-# Ollama — pull once, then it runs as a service
+# Pull any model once — Ollama keeps it cached for future sessions
 ollama pull llama3.2
 # or a larger model for better tool-use:
 ollama pull qwen2.5:32b
-
-# Start manually if needed:
-ollama serve
 ```
+
+Aegis **starts Ollama automatically** if it is installed but not running — you no longer need to run `ollama serve` manually before launching Aegis.
 
 ```
 # LM Studio — download the app, load a model, start the local server from the UI
@@ -275,18 +278,19 @@ export OPENAI_API_KEY="ollama"
 $env:OPENAI_API_KEY = "ollama"
 ```
 
-**Step 3 — Edit the config if needed**
+**Step 3 — Model selection**
 
-Open the file printed by `--first-init` (or use `aegis-config`) and confirm the `model` matches a model you have pulled:
+The `--first-init` template defaults to `model: "auto"`, which selects the first available model from Ollama at startup — no config edit needed after pulling a model. To pin a specific model, open the file printed by `--first-init` (or use `aegis-config`) and set it explicitly:
 
 ```yaml
 provider:
   default: openai
   base_url: "http://localhost:11434/v1"
-  model: "llama3.2"    # ← change to any model you have pulled
+  model: "auto"        # ← picks first available Ollama model automatically
+  # model: "llama3.2"  # ← or pin to a specific pulled model
 ```
 
-Alternatively, use `/config` inside the TUI to change the provider and model interactively without editing the file manually.
+Use `/config` inside the TUI to change the provider and model interactively without editing the file manually.
 
 ### Using Cloud Providers
 
@@ -705,7 +709,9 @@ Or use `/config` inside the TUI to update provider settings interactively.
 provider:
   default: openai              # "anthropic" or "openai" (use "openai" for all
                                # local LLMs and OpenAI-compatible cloud providers)
-  model: "llama3.2"            # model ID as known to the provider or server
+  model: "auto"                # "auto" or "" → pick the first available Ollama model
+                               # at startup (ignored for non-Ollama providers).
+                               # Or set any model ID: "llama3.2", "claude-opus-4-8", etc.
   base_url: "http://localhost:11434/v1"  # required for local LLMs and proxies
   max_tokens: 8192             # response token cap
   max_retries: 4               # transient-failure retries (0 = disabled)

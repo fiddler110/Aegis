@@ -22,6 +22,14 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			stopOllama, err := ensureOllamaRunning(cfg)
+			if err != nil {
+				return err
+			}
+			defer stopOllama()
+			if err := resolveOllamaModel(cfg); err != nil {
+				return err
+			}
 			if err := cfg.EnsureDataDir(); err != nil {
 				return err
 			}

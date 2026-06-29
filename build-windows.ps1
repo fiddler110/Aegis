@@ -251,12 +251,15 @@ Write-Host ""
 Write-Ok "All done!"
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor White
-Write-Host "    aegis --first-init           generate global config (first run only)" -ForegroundColor DarkGray
-Write-Host "    aegis --init                 create .aegis/config.yaml project override (optional)" -ForegroundColor DarkGray
-Write-Host "    `$env:OPENAI_API_KEY='ollama'   required for Ollama; set ANTHROPIC_API_KEY for Claude" -ForegroundColor DarkGray
-Write-Host "    aegis                        start the TUI" -ForegroundColor DarkGray
-Write-Host "    aegis ui                     open the web UI in your browser" -ForegroundColor DarkGray
+Write-Host "    aegis --first-init                generate global config (first run only)" -ForegroundColor DarkGray
+Write-Host "    aegis --init                      create .aegis/config.yaml project override (optional)" -ForegroundColor DarkGray
+Write-Host "    `$env:OPENAI_API_KEY = 'ollama'    required for Ollama; set ANTHROPIC_API_KEY for Claude" -ForegroundColor DarkGray
+Write-Host "    ollama pull <model>               pull at least one model  (e.g. ollama pull llama3.2)" -ForegroundColor DarkGray
+Write-Host "                                        model: auto in config selects it automatically" -ForegroundColor DarkGray
+Write-Host "                                        Aegis starts Ollama itself if it is installed" -ForegroundColor DarkGray
+Write-Host "    aegis                             start the TUI" -ForegroundColor DarkGray
+Write-Host "    aegis ui                          open the web UI in your browser" -ForegroundColor DarkGray
 if ($RunAlias -and -not $AliasExists) {
-    Write-Host "    aegis-config                 open the config file  (after '. `$PROFILE')" -ForegroundColor DarkGray
+    Write-Host "    aegis-config                      open the config file  (after '. `$PROFILE')" -ForegroundColor DarkGray
 }
 Write-Host ""
