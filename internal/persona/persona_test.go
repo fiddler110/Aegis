@@ -90,6 +90,60 @@ func TestPersonaPromptKeywords(t *testing.T) {
 	}
 }
 
+func TestToolUseBlock_content(t *testing.T) {
+	block := ToolUseBlock()
+	for _, want := range []string{
+		"IMMEDIATELY",
+		"narration of intent",
+		"A tool result is input",
+		"truncated",
+	} {
+		if !contains(block, want) {
+			t.Errorf("ToolUseBlock() missing expected phrase: %q", want)
+		}
+	}
+}
+
+func TestGeneralSystem_noGenericToolRules(t *testing.T) {
+	p, _ := Get("general")
+	if contains(p.System, "call the appropriate tool IMMEDIATELY") {
+		t.Error("generalSystem still contains generic call-immediately rule (should be removed — covered by shared ToolUseBlock)")
+	}
+}
+
+func TestSecuritySystem_genericRulesRemoved(t *testing.T) {
+	p, _ := Get("security")
+	if contains(p.System, "Never narrate intent") {
+		t.Error("securitySystem still contains generic narration rule (should be removed — covered by shared ToolUseBlock)")
+	}
+	if !contains(p.System, "LOCAL project or workspace") {
+		t.Error("securitySystem must keep LOCAL/EXTERNAL tool selection guidance")
+	}
+}
+
+func TestSecurityArchitectSystem_genericRulesRemoved(t *testing.T) {
+	p, _ := Get("security-architect")
+	if contains(p.System, "Call tools immediately. Do not write") {
+		t.Error("securityArchitectSystem still contains generic call-immediately rule (should be removed — covered by shared ToolUseBlock)")
+	}
+	if !contains(p.System, "LOCAL project or workspace") {
+		t.Error("securityArchitectSystem must keep LOCAL/EXTERNAL tool selection guidance")
+	}
+}
+
+func TestPersonas_allHaveCompletingOutput(t *testing.T) {
+	for _, name := range Names() {
+		p, ok := Get(name)
+		if !ok {
+			t.Errorf("persona.Get(%q) returned false", name)
+			continue
+		}
+		if !contains(p.System, "## Completing your output") {
+			t.Errorf("persona %q missing ## Completing your output section", name)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
 }
