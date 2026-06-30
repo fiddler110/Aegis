@@ -633,7 +633,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		p, _ := persona.Get(req.Persona)
 		system = p.System
 	}
-	sess, err := s.store.Create(r.Context(), req.Title, system, mode)
+	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona)
 	if err != nil {
 		s.logger.Error("create session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

@@ -24,7 +24,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "first", "be helpful", "build")
+	sess, err := st.Create(ctx, "first", "be helpful", "build", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -67,11 +67,26 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreatePersistsPersona(t *testing.T) {
+	store := newTestStore(t) // existing helper in this test file
+	s, err := store.Create(context.Background(), "t", "sys", "build", "security-architect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(context.Background(), s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Persona != "security-architect" {
+		t.Errorf("persona = %q, want security-architect", got.Persona)
+	}
+}
+
 func TestListAndDelete(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	a, _ := st.Create(ctx, "a", "", "plan")
-	_, _ = st.Create(ctx, "b", "", "plan")
+	a, _ := st.Create(ctx, "a", "", "plan", "")
+	_, _ = st.Create(ctx, "b", "", "plan", "")
 
 	metas, err := st.List(ctx)
 	if err != nil {
@@ -100,7 +115,7 @@ func TestAppendTraces(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "traced", "sys", "build")
+	sess, err := st.Create(ctx, "traced", "sys", "build", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
