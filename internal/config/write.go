@@ -66,6 +66,65 @@ func buildProviderBlock(p ProviderPatch) string {
 	return b.String()
 }
 
+// SandboxPatch holds the sandbox fields to write into a config file.
+type SandboxPatch struct {
+	Backend  string   // "local" | "container" | "auto"
+	Runtime  string   // forced runtime; empty = omit
+	Priority []string // auto order; empty = omit
+	Image    string   // empty = omit
+	Network  bool
+}
+
+// PatchGlobalSandbox replaces the sandbox: block in the global config file,
+// preserving all other sections. Creates the file if it does not exist.
+func PatchGlobalSandbox(p SandboxPatch) error {
+	return patchSandbox(GlobalConfigPath(), p)
+}
+
+// PatchProjectSandbox replaces the sandbox: block in the project-level
+// .aegis/config.yaml, preserving all other sections.
+func PatchProjectSandbox(p SandboxPatch) error {
+	return patchSandbox(ProjectConfigPath(), p)
+}
+
+func patchSandbox(path string, p SandboxPatch) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	block := buildSandboxBlock(p)
+	var out []byte
+	if len(existing) == 0 {
+		out = []byte("# Aegis configuration\n\n" + block + "\n")
+	} else {
+		out = spliceSection(existing, "sandbox", block)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+func buildSandboxBlock(p SandboxPatch) string {
+	var b strings.Builder
+	b.WriteString("sandbox:\n")
+	if p.Backend == "" {
+		p.Backend = "local"
+	}
+	fmt.Fprintf(&b, "  backend: %s\n", p.Backend)
+	if p.Runtime != "" {
+		fmt.Fprintf(&b, "  runtime: %s\n", p.Runtime)
+	}
+	if len(p.Priority) > 0 {
+		fmt.Fprintf(&b, "  priority: [%s]\n", strings.Join(p.Priority, ", "))
+	}
+	if p.Image != "" {
+		fmt.Fprintf(&b, "  image: %q\n", p.Image)
+	}
+	fmt.Fprintf(&b, "  network: %t\n", p.Network)
+	return b.String()
+}
+
 // spliceSection replaces the named top-level YAML section with newBlock.
 // Everything from "key:" to the next top-level key is replaced. If the
 // section is not found, newBlock is appended.

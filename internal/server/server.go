@@ -47,6 +47,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/task"
 	"github.com/scottymacleod/aegis/internal/tool"
 	"github.com/scottymacleod/aegis/internal/tool/builtin"
+	"github.com/scottymacleod/aegis/internal/trace"
 )
 
 const maxRequestBody = 10 << 20 // 10 MiB
@@ -157,22 +158,31 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("getwd: %w", err)
 	}
 
-	// Sandbox backend: try container runtime if configured, else local.
+	// Sandbox backend: "container" forces a runtime (or auto-detects one);
+	// "auto" detects and picks the best available, falling back to local;
+	// anything else (default) runs commands directly on the host.
 	var sb sandbox.Backend
-	if cfg.Sandbox.Backend == "container" {
-		csb, err := sandbox.NewContainerBackend(sandbox.ContainerOpts{
-			Image:   cfg.Sandbox.Image,
-			Network: cfg.Sandbox.Network,
-			Prefer:  sandbox.ContainerRuntime(cfg.Sandbox.Runtime),
-		})
+	switch cfg.Sandbox.Backend {
+	case "container", "auto":
+		opts := sandbox.ContainerOpts{
+			Image:    cfg.Sandbox.Image,
+			Network:  cfg.Sandbox.Network,
+			Priority: sandbox.ParseRuntimes(cfg.Sandbox.Priority),
+		}
+		// Only "container" honors an explicit forced runtime; "auto" always detects.
+		if cfg.Sandbox.Backend == "container" {
+			opts.Prefer = sandbox.ContainerRuntime(cfg.Sandbox.Runtime)
+		}
+		csb, err := sandbox.NewContainerBackend(opts)
 		if err != nil {
-			logger.Warn("container sandbox unavailable, falling back to local", "err", err)
+			logger.Warn("sandbox: no container runtime available, falling back to local",
+				"backend", cfg.Sandbox.Backend, "err", err)
 			sb = sandbox.NewLocalBackend()
 		} else {
 			logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Sandbox.Image)
 			sb = csb
 		}
-	} else {
+	default:
 		sb = sandbox.NewLocalBackend()
 	}
 
@@ -948,8 +958,17 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		totalIn   int
 		totalOut  int
 		totalCost float64
+		traces    []trace.TurnTrace
 	)
 	runErr := eng.Run(runCtx, conv, func(ev engine.Event) {
+		// Trace events are server-internal observability records — collect them
+		// for persistence but never forward them to the SSE client.
+		if ev.Kind == engine.KindTrace {
+			if ev.Trace != nil {
+				traces = append(traces, *ev.Trace)
+			}
+			return
+		}
 		apiEv := toAPIEvent(ev)
 		send(apiEv)
 		if ev.Kind == engine.KindTurnDone && ev.Usage != nil && !ev.Usage.IsEstimated {
@@ -972,6 +991,11 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if totalIn > 0 || totalOut > 0 {
 		_ = s.store.AddUsage(context.Background(), id, totalIn, totalOut, totalCost)
+	}
+	if len(traces) > 0 {
+		if err := s.store.AppendTraces(context.Background(), id, traces); err != nil {
+			s.logger.Warn("save traces", "session", id, "err", err)
+		}
 	}
 	if sess.Title == "" {
 		go s.generateTitle(id, req.Text)
@@ -1180,7 +1204,6 @@ func (s *Server) effectiveSystem(base string) string {
 	}
 	return strings.Join(parts, "\n\n")
 }
-
 
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	if errors.Is(err, session.ErrNotFound) {

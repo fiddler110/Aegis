@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/trace"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -91,6 +92,60 @@ func TestListAndDelete(t *testing.T) {
 func TestGetMissing(t *testing.T) {
 	st := newTestStore(t)
 	if _, err := st.Get(context.Background(), "nope"); err != ErrNotFound {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAppendTraces(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	sess, err := st.Create(ctx, "traced", "sys", "build")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Empty append is a no-op and must not error.
+	if err := st.AppendTraces(ctx, sess.ID, nil); err != nil {
+		t.Fatalf("AppendTraces(nil): %v", err)
+	}
+
+	// First run: two turns.
+	run1 := []trace.TurnTrace{
+		{Index: 0, Model: "claude-opus-4-8", InputTokens: 100, OutputTokens: 20, CostUSD: 0.003, WallMS: 1200,
+			ToolCalls: []trace.ToolCall{{Name: "grep", DurationMS: 40}}},
+		{Index: 1, Model: "claude-opus-4-8", InputTokens: 130, OutputTokens: 8, CostUSD: 0.002, WallMS: 800},
+	}
+	if err := st.AppendTraces(ctx, sess.ID, run1); err != nil {
+		t.Fatalf("AppendTraces(run1): %v", err)
+	}
+	// Second run on the same session appends rather than overwrites.
+	run2 := []trace.TurnTrace{
+		{Index: 0, Model: "claude-opus-4-8", InputTokens: 50, OutputTokens: 5, CostUSD: 0.001, WallMS: 300},
+	}
+	if err := st.AppendTraces(ctx, sess.ID, run2); err != nil {
+		t.Fatalf("AppendTraces(run2): %v", err)
+	}
+
+	got, err := st.Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Traces) != 3 {
+		t.Fatalf("got %d traces, want 3", len(got.Traces))
+	}
+	if got.Traces[0].ToolCalls[0].Name != "grep" || got.Traces[0].ToolCalls[0].DurationMS != 40 {
+		t.Errorf("tool call not round-tripped: %+v", got.Traces[0].ToolCalls)
+	}
+	if got.Traces[2].InputTokens != 50 {
+		t.Errorf("trace[2].InputTokens = %d, want 50", got.Traces[2].InputTokens)
+	}
+}
+
+func TestAppendTracesMissingSession(t *testing.T) {
+	st := newTestStore(t)
+	err := st.AppendTraces(context.Background(), "nope", []trace.TurnTrace{{Index: 0}})
+	if err != ErrNotFound {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }

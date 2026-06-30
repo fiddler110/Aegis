@@ -174,6 +174,46 @@ func TestServerMessageStreaming(t *testing.T) {
 	}
 }
 
+func TestServerPersistsTurnTrace(t *testing.T) {
+	cl, cleanup := newTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ch, err := cl.PostMessage(ctx, meta.ID, "say hi")
+	if err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	// Trace events must NOT leak to the SSE client.
+	for ev := range ch {
+		if string(ev.Kind) == "trace" {
+			t.Errorf("trace event leaked to SSE client: %+v", ev)
+		}
+		if ev.Kind == api.KindError {
+			t.Fatalf("error event: %s", ev.Error)
+		}
+	}
+
+	sess, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Traces) != 1 {
+		t.Fatalf("persisted %d traces, want 1", len(sess.Traces))
+	}
+	tr := sess.Traces[0]
+	if tr.InputTokens != 5 || tr.OutputTokens != 2 {
+		t.Errorf("trace tokens = %d/%d, want 5/2", tr.InputTokens, tr.OutputTokens)
+	}
+	if tr.Model != "test" {
+		t.Errorf("trace model = %q, want \"test\"", tr.Model)
+	}
+}
+
 func TestServerHealthEndpoint(t *testing.T) {
 	cl, cleanup := newTestServer(t)
 	defer cleanup()

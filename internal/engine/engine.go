@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/scottymacleod/aegis/internal/cost"
 	"github.com/scottymacleod/aegis/internal/provider"
 	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/scottymacleod/aegis/internal/trace"
 )
 
 // Conversation is the mutable transcript the engine drives.
@@ -34,6 +36,7 @@ const (
 	KindToolCall   EventKind = "tool_call"   // a tool is about to run
 	KindToolResult EventKind = "tool_result" // a tool finished
 	KindTurnDone   EventKind = "turn_done"   // one model turn completed
+	KindTrace      EventKind = "trace"       // per-turn structured trace (server-internal)
 	KindDone       EventKind = "done"        // the run finished (final answer)
 	KindError      EventKind = "error"       // the run failed
 	KindSteer      EventKind = "steer"       // mid-run steering instruction injected
@@ -42,14 +45,15 @@ const (
 // Event is emitted to the consumer-provided sink as the run progresses.
 type Event struct {
 	Kind        EventKind
-	Text        string          // KindText
-	ToolName    string          // KindToolCall / KindToolResult
-	ToolInput   json.RawMessage // KindToolCall
-	ToolResult  string          // KindToolResult
-	ToolIsError bool            // KindToolResult
-	Usage       *provider.Usage // KindTurnDone
-	CostUSD     float64         // KindTurnDone: cumulative run cost (0 if untracked)
-	Err         error           // KindError
+	Text        string           // KindText
+	ToolName    string           // KindToolCall / KindToolResult
+	ToolInput   json.RawMessage  // KindToolCall
+	ToolResult  string           // KindToolResult
+	ToolIsError bool             // KindToolResult
+	Usage       *provider.Usage  // KindTurnDone
+	CostUSD     float64          // KindTurnDone: cumulative run cost (0 if untracked)
+	Trace       *trace.TurnTrace // KindTrace: per-turn observability record
+	Err         error            // KindError
 }
 
 // EmitFunc receives engine events. It must not block for long.
@@ -86,18 +90,18 @@ type PrepareStepFunc func(ctx context.Context, msgs []provider.Message) []provid
 type Options struct {
 	Adapter       provider.Adapter
 	Tools         *tool.Registry
-	Gate          Gate             // optional; nil means all tool calls are allowed
-	Compactor     Compactor        // optional; nil disables context compaction
-	Hooks         Hooks            // optional; nil disables hooks
-	Cost          *cost.Tracker    // optional; nil disables cost tracking
-	PrepareStep   PrepareStepFunc  // optional; called before every model turn
-	BudgetUSD     float64          // optional; >0 aborts the run past this cost
+	Gate          Gate            // optional; nil means all tool calls are allowed
+	Compactor     Compactor       // optional; nil disables context compaction
+	Hooks         Hooks           // optional; nil disables hooks
+	Cost          *cost.Tracker   // optional; nil disables cost tracking
+	PrepareStep   PrepareStepFunc // optional; called before every model turn
+	BudgetUSD     float64         // optional; >0 aborts the run past this cost
 	Model         string
 	MaxTokens     int
 	Temperature   *float64
-	MaxIterations int              // safety cap on tool-call rounds; 0 -> default
-	LoopThreshold int              // identical tool-call turns before aborting; 0 -> default, <0 disables
-	SteerChan     <-chan string     // optional; steering messages injected between tool rounds
+	MaxIterations int           // safety cap on tool-call rounds; 0 -> default
+	LoopThreshold int           // identical tool-call turns before aborting; 0 -> default, <0 disables
+	SteerChan     <-chan string // optional; steering messages injected between tool rounds
 	Logger        *slog.Logger
 }
 
@@ -213,6 +217,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			}
 		}
 
+		turnStart := time.Now()
 		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit)
 		if err != nil {
 			emit(Event{Kind: KindError, Err: err})
@@ -226,7 +231,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 		emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
 
+		// Assemble a structured trace for this turn. Tool calls (if any) are
+		// filled in after they run below; for a final turn it is emitted now.
+		tr := e.newTrace(iter, usage, turnStart)
+
 		if len(toolUses) == 0 {
+			tr.WallMS = time.Since(turnStart).Milliseconds()
+			emit(Event{Kind: KindTrace, Trace: &tr})
 			// If the model was cut off by the token limit, inject a continuation
 			// prompt and loop rather than silently returning a truncated response.
 			if stopReason == provider.StopMaxTokens {
@@ -264,12 +275,16 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return err
 		}
 
-		results, err := e.runTools(ctx, toolUses, emit)
+		results, toolTraces, err := e.runTools(ctx, toolUses, emit)
 		if err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
 		conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
+
+		tr.ToolCalls = toolTraces
+		tr.WallMS = time.Since(turnStart).Milliseconds()
+		emit(Event{Kind: KindTrace, Trace: &tr})
 
 		// Drain one pending steer message (if any) between tool rounds, injecting
 		// it as a user message so the model adjusts its plan on the next turn.
@@ -367,6 +382,27 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 	return provider.Message{Role: provider.RoleAssistant, Content: content}, toolUses, usage, stopReason, nil
 }
 
+// newTrace seeds a TurnTrace from a turn's usage. Per-turn cost is computed
+// directly from the pricing catalog (not the cumulative tracker, which remains
+// the source of truth for budget enforcement). Estimated usage contributes no
+// cost. ToolCalls and WallMS are filled in by the caller.
+func (e *Engine) newTrace(index int, usage *provider.Usage, startedAt time.Time) trace.TurnTrace {
+	tr := trace.TurnTrace{Index: index, Model: e.model, StartedAt: startedAt}
+	if usage != nil {
+		tr.InputTokens = usage.InputTokens
+		tr.OutputTokens = usage.OutputTokens
+		tr.CacheReadTokens = usage.CacheReadTokens
+		tr.CacheCreationTokens = usage.CacheCreationTokens
+		tr.Estimated = usage.IsEstimated
+		if !usage.IsEstimated {
+			if p, ok := cost.PricingFor(e.model); ok {
+				tr.CostUSD = p.CostUSD(*usage)
+			}
+		}
+	}
+	return tr
+}
+
 // maxParallelTools bounds how many tool calls run concurrently in one round.
 const maxParallelTools = 8
 
@@ -377,12 +413,13 @@ const maxParallelTools = 8
 // while write/execute calls are serialized (an exclusive lock) so side effects
 // never race. Event emission is serialized so streamed output is never
 // interleaved mid-write. A single tool call takes the simple sequential path.
-func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, error) {
+func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, []trace.ToolCall, error) {
 	if len(toolUses) <= 1 {
 		return e.runToolsSequential(ctx, toolUses, emit)
 	}
 
 	results := make([]provider.Block, len(toolUses))
+	traces := make([]trace.ToolCall, len(toolUses))
 	var (
 		emitMu   sync.Mutex   // serializes emit across goroutines
 		execLock sync.RWMutex // shared for read/net, exclusive for write/exec
@@ -414,7 +451,9 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 			}
 
 			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+			start := time.Now()
 			content, isErr := e.executeTool(ctx, tu)
+			traces[i] = trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr}
 			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
 			results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: isErr}
 		}(i, tu)
@@ -422,23 +461,26 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 	wg.Wait()
 
 	if ctx.Err() != nil {
-		return nil, ErrInterrupted
+		return nil, nil, ErrInterrupted
 	}
-	return results, nil
+	return results, traces, nil
 }
 
 // runToolsSequential is the simple in-order path used for a single tool call.
-func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, error) {
+func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, []trace.ToolCall, error) {
 	results := make([]provider.Block, 0, len(toolUses))
+	traces := make([]trace.ToolCall, 0, len(toolUses))
 	for _, tu := range toolUses {
 		select {
 		case <-ctx.Done():
-			return nil, ErrInterrupted
+			return nil, nil, ErrInterrupted
 		default:
 		}
 
 		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+		start := time.Now()
 		content, isErr := e.executeTool(ctx, tu)
+		traces = append(traces, trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr})
 		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
 
 		results = append(results, provider.ToolResultBlock{
@@ -447,7 +489,7 @@ func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.Too
 			IsError:   isErr,
 		})
 	}
-	return results, nil
+	return results, traces, nil
 }
 
 // serializeTool reports whether a tool must run exclusively (write/execute

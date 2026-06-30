@@ -43,10 +43,11 @@ type SwarmConfig struct {
 
 // SandboxConfig configures command execution isolation.
 type SandboxConfig struct {
-	Backend string `koanf:"backend"` // "local" (default) or "container"
-	Runtime string `koanf:"runtime"` // container runtime preference: "docker", "podman", "container" (Apple); empty = auto-detect
-	Image   string `koanf:"image"`   // container image (default "ubuntu:22.04")
-	Network bool   `koanf:"network"` // allow network access inside containers (default false)
+	Backend  string   `koanf:"backend"`  // "local" (default), "container", or "auto" (detect & pick)
+	Runtime  string   `koanf:"runtime"`  // forced runtime when backend=container: "docker", "podman", "wslc", "container" (Apple); empty = auto-detect
+	Priority []string `koanf:"priority"` // auto-detect order, e.g. ["wslc","docker","podman"]; empty = OS default
+	Image    string   `koanf:"image"`    // container image (default "ubuntu:22.04")
+	Network  bool     `koanf:"network"`  // allow network access inside containers (default false)
 }
 
 // CostConfig configures spend tracking.

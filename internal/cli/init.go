@@ -249,8 +249,15 @@ swarm:
 
 sandbox:
   backend: local             # "local"     = run commands directly on the host
-                             # "container" = isolate each command in Docker/Podman
-  # image: ubuntu:22.04      # Container image when backend=container.
+                             # "container" = isolate each command in a chosen runtime
+                             # "auto"      = detect & use the best available runtime,
+                             #               falling back to local if none is found
+  # runtime: ""              # Force a runtime when backend=container:
+                             #   docker | podman | wslc (Windows WSL containers) | container (Apple)
+                             #   Empty = auto-detect.
+  # priority: [wslc, docker, podman]  # Auto-detect order; empty = OS default.
+                             #   (Run: aegis sandbox detect  to see what's available.)
+  # image: ubuntu:22.04      # Container image when backend=container/auto.
   # network: false           # Allow outbound network inside containers?
 
 
