@@ -31,6 +31,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/cron"
 	"github.com/scottymacleod/aegis/internal/engine"
 	"github.com/scottymacleod/aegis/internal/filetracker"
+	"github.com/scottymacleod/aegis/internal/guard"
 	"github.com/scottymacleod/aegis/internal/hooks"
 	"github.com/scottymacleod/aegis/internal/lsp"
 	"github.com/scottymacleod/aegis/internal/mcp"
@@ -286,6 +287,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// Load custom agent definitions from user/project directories.
 	if n := agentdef.LoadFromDirs(agentdef.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
 		logger.Info("loaded custom agent definitions", "count", n)
+	}
+
+	// Load custom persona templates from user/project directories.
+	if n := persona.LoadFromDirs(persona.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
+		logger.Info("loaded custom personas", "count", n)
 	}
 
 	s.cmdReg = commands.Discover(commands.CommandDirs(cfg.DataDir, cwd)...)
@@ -549,7 +555,47 @@ func (s *Server) providerUnconfiguredErr() error {
 	}
 }
 
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string) (*engine.Engine, error) {
+// personaModel resolves the effective model for a persona: a config override
+// wins, then the persona's own Model, then the global provider model.
+func (s *Server) personaModel(p persona.Persona) string {
+	if ov, ok := s.cfg.Personas[p.Name]; ok && ov.Model != "" {
+		return ov.Model
+	}
+	if p.Model != "" {
+		return p.Model
+	}
+	return s.cfg.Provider.Model
+}
+
+// outputGuardConfig merges the global output-guard default with a persona's
+// override into a guard.Config.
+func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
+	c := guard.Config{
+		Mode:       s.cfg.OutputGuard.Mode,
+		Rubric:     s.cfg.OutputGuard.Rubric,
+		MaxRetries: s.cfg.OutputGuard.MaxRetries,
+	}
+	if p.Guard != nil {
+		if p.Guard.Disabled {
+			return guard.Config{Disabled: true}
+		}
+		if p.Guard.Mode != "" {
+			c.Mode = p.Guard.Mode
+		}
+		if len(p.Guard.Schema) > 0 {
+			c.Schema = p.Guard.Schema
+		}
+		if p.Guard.Rubric != "" {
+			c.Rubric = p.Guard.Rubric
+		}
+		if p.Guard.MaxRetries > 0 {
+			c.MaxRetries = p.Guard.MaxRetries
+		}
+	}
+	return c
+}
+
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, s.providerUnconfiguredErr()
 	}
@@ -581,8 +627,16 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	// evaluated before the contextual and mode gates. An explicit deny always
 	// blocks; an explicit allow grants without prompting; otherwise the call
 	// falls through to the gate(s) wrapped above.
-	if len(s.permRules) > 0 {
-		gate = permission.NewRuleGate(gate, s.permRules,
+	rules := s.permRules
+	if len(p.Rules) > 0 {
+		if pr, err := permission.ParseRules(p.Rules); err == nil {
+			rules = append(append([]permission.Rule{}, s.permRules...), pr...)
+		} else {
+			s.logger.Warn("ignoring invalid persona rules", "persona", p.Name, "err", err)
+		}
+	}
+	if len(rules) > 0 {
+		gate = permission.NewRuleGate(gate, rules,
 			permission.WithRuleObserver(func(d permission.ContextualDecision) {
 				if s.audit != nil {
 					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
@@ -590,20 +644,28 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 			}))
 	}
 
+	var guardFn func(ctx context.Context, text string) (bool, string)
+	var guardRetries int
+	if guardEnabled {
+		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, s.personaModel(p))
+	}
+
 	return engine.New(engine.Options{
-		Adapter:       s.adapter,
-		Tools:         s.tools,
-		Gate:          gate,
-		Compactor:     s.compactor,
-		Hooks:         engineHooks,
-		Cost:          cost.NewTracker(),
-		BudgetUSD:     s.cfg.Cost.BudgetUSD,
-		Model:         s.cfg.Provider.Model,
-		MaxTokens:     s.cfg.Provider.MaxTokens,
-		MaxIterations: s.cfg.Provider.MaxIterations,
-		LoopThreshold: s.cfg.Provider.LoopThreshold,
-		SteerChan:     steerCh,
-		Logger:        s.logger,
+		Adapter:               s.adapter,
+		Tools:                 s.tools,
+		Gate:                  gate,
+		Compactor:             s.compactor,
+		Hooks:                 engineHooks,
+		Cost:                  cost.NewTracker(),
+		BudgetUSD:             s.cfg.Cost.BudgetUSD,
+		Model:                 s.personaModel(p),
+		MaxTokens:             s.cfg.Provider.MaxTokens,
+		MaxIterations:         s.cfg.Provider.MaxIterations,
+		LoopThreshold:         s.cfg.Provider.LoopThreshold,
+		SteerChan:             steerCh,
+		OutputGuard:           guardFn,
+		OutputGuardMaxRetries: guardRetries,
+		Logger:                s.logger,
 	})
 }
 
@@ -620,7 +682,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	p, _ := persona.Get(req.Persona)
 	mode := req.Mode
+	if mode == "" && p.Mode != "" {
+		mode = p.Mode
+	}
 	if mode == "" {
 		mode = s.cfg.Permission.Mode
 	}
@@ -630,7 +696,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	system := req.System
 	if system == "" {
-		p, _ := persona.Get(req.Persona)
 		system = p.System
 	}
 	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona)
@@ -949,7 +1014,13 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	s.pendingSteers.Store(id, steerCh)
 	defer s.pendingSteers.Delete(id)
 
-	eng, err := s.newEngine(sess.Mode, runApprover, steerCh)
+	p, _ := persona.Get(sess.Persona)
+	guardEnabled := s.cfg.OutputGuard.Enabled
+	if req.GuardEnabled != nil {
+		guardEnabled = *req.GuardEnabled
+	}
+
+	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
