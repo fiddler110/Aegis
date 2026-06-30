@@ -21,19 +21,21 @@ import (
 
 // Config is the fully resolved harness configuration.
 type Config struct {
-	DataDir    string              `koanf:"data_dir"`
-	LogLevel   string              `koanf:"log_level"`
-	Provider   ProviderConfig      `koanf:"provider"`
-	Server     ServerConfig        `koanf:"server"`
-	Permission PermissionConfig    `koanf:"permission"`
-	Diagram    DiagramConfig       `koanf:"diagram"`
-	Cost       CostConfig          `koanf:"cost"`
-	Swarm      SwarmConfig         `koanf:"swarm"`
-	Sandbox    SandboxConfig       `koanf:"sandbox"`
-	Security   SecurityConfig      `koanf:"security"`
-	LSP        []LSPServerConfig   `koanf:"lsp"`
-	Plugins    []ProcessToolConfig `koanf:"plugins"`
-	MCP        []MCPServerConfig   `koanf:"mcp"`
+	DataDir     string                     `koanf:"data_dir"`
+	LogLevel    string                     `koanf:"log_level"`
+	Provider    ProviderConfig             `koanf:"provider"`
+	Server      ServerConfig               `koanf:"server"`
+	Permission  PermissionConfig           `koanf:"permission"`
+	Diagram     DiagramConfig              `koanf:"diagram"`
+	Cost        CostConfig                 `koanf:"cost"`
+	Swarm       SwarmConfig                `koanf:"swarm"`
+	Sandbox     SandboxConfig              `koanf:"sandbox"`
+	Security    SecurityConfig             `koanf:"security"`
+	OutputGuard OutputGuardConfig          `koanf:"output_guard"`
+	Personas    map[string]PersonaOverride `koanf:"personas"`
+	LSP         []LSPServerConfig          `koanf:"lsp"`
+	Plugins     []ProcessToolConfig        `koanf:"plugins"`
+	MCP         []MCPServerConfig          `koanf:"mcp"`
 }
 
 // SwarmConfig configures multi-agent sub-agent execution.
@@ -119,6 +121,25 @@ type SecurityConfig struct {
 	NetworkAllowList []string `koanf:"network_allowlist"` // restrict network calls to these domains (empty = no restriction)
 }
 
+// OutputGuardConfig sets the default output-validation behaviour applied to
+// every persona unless the persona overrides or disables it.
+type OutputGuardConfig struct {
+	Enabled    bool   `koanf:"enabled"`     // global default; per-session /guard toggles from this
+	Mode       string `koanf:"mode"`        // "llm" (default) or "schema"
+	Rubric     string `koanf:"rubric"`      // default llm rubric
+	MaxRetries int    `koanf:"max_retries"` // corrective retries on failure
+}
+
+// PersonaOverride holds per-persona config overrides keyed by persona name.
+type PersonaOverride struct {
+	Model string `koanf:"model"` // "" = use global provider.model
+}
+
+// DefaultGuardRubric is the generic quality rubric applied when output guarding
+// is on and a persona declares no rubric of its own.
+const DefaultGuardRubric = "The response must directly and completely address the request, " +
+	"contain no placeholders or TODOs, and ground factual claims in tool output where applicable."
+
 // DiagramConfig configures diagram rendering.
 type DiagramConfig struct {
 	KrokiURL string `koanf:"kroki_url"` // Kroki endpoint for multi-format rendering
@@ -153,6 +174,10 @@ func defaults() map[string]any {
 		"sandbox.image":                "ubuntu:22.04",
 		"sandbox.network":              false,
 		"security.egress_then_write":   false,
+		"output_guard.enabled":         true,
+		"output_guard.mode":            "llm",
+		"output_guard.max_retries":     1,
+		"output_guard.rubric":          DefaultGuardRubric,
 	}
 }
 
@@ -255,7 +280,7 @@ func Load() (*Config, error) {
 	sections := map[string]bool{
 		"provider": true, "server": true, "permission": true,
 		"diagram": true, "cost": true, "swarm": true,
-		"sandbox": true, "security": true,
+		"sandbox": true, "security": true, "output_guard": true,
 	}
 	envCb := func(s string) string {
 		s = strings.ToLower(strings.TrimPrefix(s, EnvPrefix))
