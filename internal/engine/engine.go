@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +42,7 @@ const (
 	KindDone       EventKind = "done"        // the run finished (final answer)
 	KindError      EventKind = "error"       // the run failed
 	KindSteer      EventKind = "steer"       // mid-run steering instruction injected
+	KindGuard      EventKind = "guard"       // output validation result (warning)
 )
 
 // Event is emitted to the consumer-provided sink as the run progresses.
@@ -54,6 +57,8 @@ type Event struct {
 	CostUSD     float64          // KindTurnDone: cumulative run cost (0 if untracked)
 	Trace       *trace.TurnTrace // KindTrace: per-turn observability record
 	Err         error            // KindError
+	GuardReason string           // KindGuard: why validation failed
+	GuardPassed bool             // KindGuard: whether the guard ultimately passed
 }
 
 // EmitFunc receives engine events. It must not block for long.
@@ -88,40 +93,44 @@ type PrepareStepFunc func(ctx context.Context, msgs []provider.Message) []provid
 
 // Options configures an Engine.
 type Options struct {
-	Adapter       provider.Adapter
-	Tools         *tool.Registry
-	Gate          Gate            // optional; nil means all tool calls are allowed
-	Compactor     Compactor       // optional; nil disables context compaction
-	Hooks         Hooks           // optional; nil disables hooks
-	Cost          *cost.Tracker   // optional; nil disables cost tracking
-	PrepareStep   PrepareStepFunc // optional; called before every model turn
-	BudgetUSD     float64         // optional; >0 aborts the run past this cost
-	Model         string
-	MaxTokens     int
-	Temperature   *float64
-	MaxIterations int           // safety cap on tool-call rounds; 0 -> default
-	LoopThreshold int           // identical tool-call turns before aborting; 0 -> default, <0 disables
-	SteerChan     <-chan string // optional; steering messages injected between tool rounds
-	Logger        *slog.Logger
+	Adapter               provider.Adapter
+	Tools                 *tool.Registry
+	Gate                  Gate                                                            // optional; nil means all tool calls are allowed
+	Compactor             Compactor                                                       // optional; nil disables context compaction
+	Hooks                 Hooks                                                           // optional; nil disables hooks
+	Cost                  *cost.Tracker                                                   // optional; nil disables cost tracking
+	PrepareStep           PrepareStepFunc                                                 // optional; called before every model turn
+	OutputGuard           func(ctx context.Context, text string) (ok bool, reason string) // optional; validates the final answer
+	OutputGuardMaxRetries int                                                             // corrective retries on guard failure; 0 -> 1 when a guard is set
+	BudgetUSD             float64                                                         // optional; >0 aborts the run past this cost
+	Model                 string
+	MaxTokens             int
+	Temperature           *float64
+	MaxIterations         int           // safety cap on tool-call rounds; 0 -> default
+	LoopThreshold         int           // identical tool-call turns before aborting; 0 -> default, <0 disables
+	SteerChan             <-chan string // optional; steering messages injected between tool rounds
+	Logger                *slog.Logger
 }
 
 // Engine runs the agent loop.
 type Engine struct {
-	adapter       provider.Adapter
-	tools         *tool.Registry
-	gate          Gate
-	compactor     Compactor
-	hooks         Hooks
-	cost          *cost.Tracker
-	prepareStep   PrepareStepFunc
-	budgetUSD     float64
-	model         string
-	maxTokens     int
-	temperature   *float64
-	maxIterations int
-	loopThreshold int
-	steerChan     <-chan string
-	logger        *slog.Logger
+	adapter        provider.Adapter
+	tools          *tool.Registry
+	gate           Gate
+	compactor      Compactor
+	hooks          Hooks
+	cost           *cost.Tracker
+	prepareStep    PrepareStepFunc
+	outputGuard    func(ctx context.Context, text string) (bool, string)
+	outputGuardMax int
+	budgetUSD      float64
+	model          string
+	maxTokens      int
+	temperature    *float64
+	maxIterations  int
+	loopThreshold  int
+	steerChan      <-chan string
+	logger         *slog.Logger
 }
 
 // ErrInterrupted is returned when the run is cancelled via context.
@@ -152,21 +161,23 @@ func New(opts Options) (*Engine, error) {
 		logger = slog.Default()
 	}
 	return &Engine{
-		adapter:       opts.Adapter,
-		tools:         opts.Tools,
-		gate:          opts.Gate,
-		compactor:     opts.Compactor,
-		hooks:         opts.Hooks,
-		cost:          opts.Cost,
-		prepareStep:   opts.PrepareStep,
-		budgetUSD:     opts.BudgetUSD,
-		model:         opts.Model,
-		maxTokens:     maxTok,
-		temperature:   opts.Temperature,
-		maxIterations: maxIter,
-		loopThreshold: loopThreshold,
-		steerChan:     opts.SteerChan,
-		logger:        logger,
+		adapter:        opts.Adapter,
+		tools:          opts.Tools,
+		gate:           opts.Gate,
+		compactor:      opts.Compactor,
+		hooks:          opts.Hooks,
+		cost:           opts.Cost,
+		prepareStep:    opts.PrepareStep,
+		outputGuard:    opts.OutputGuard,
+		outputGuardMax: opts.OutputGuardMaxRetries,
+		budgetUSD:      opts.BudgetUSD,
+		model:          opts.Model,
+		maxTokens:      maxTok,
+		temperature:    opts.Temperature,
+		maxIterations:  maxIter,
+		loopThreshold:  loopThreshold,
+		steerChan:      opts.SteerChan,
+		logger:         logger,
 	}, nil
 }
 
@@ -201,6 +212,8 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	if e.loopThreshold > 0 {
 		loop = newLoopDetector(e.loopThreshold)
 	}
+
+	guardRetries := 0
 
 	for iter := 0; iter < e.maxIterations; iter++ {
 		select {
@@ -245,6 +258,28 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					provider.TextBlock{Text: "[Your response was cut off at the token limit. Continue from where you left off, completing any remaining task steps.]"},
 				}})
 				continue
+			}
+			if e.outputGuard != nil {
+				maxRetries := e.outputGuardMax
+				if maxRetries <= 0 {
+					maxRetries = 1
+				}
+				if final := assistantText(assistant); final != "" {
+					ok, reason := e.outputGuard(ctx, final)
+					if !ok && guardRetries < maxRetries {
+						guardRetries++
+						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason})
+						conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+							provider.TextBlock{Text: "[Your previous response did not pass output validation: " + reason +
+								". Revise and produce a corrected final answer.]"},
+						}})
+						continue
+					}
+					if !ok {
+						emit(Event{Kind: KindGuard, GuardPassed: false,
+							GuardReason: "surfacing the response after " + itoa(maxRetries) + " failed validation attempt(s): " + reason})
+					}
+				}
 			}
 			emit(Event{Kind: KindDone})
 			return nil
@@ -647,3 +682,16 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	}
 	return content, isErr
 }
+
+// assistantText concatenates the text blocks of an assistant message.
+func assistantText(m provider.Message) string {
+	var sb strings.Builder
+	for _, b := range m.Content {
+		if t, ok := b.(provider.TextBlock); ok {
+			sb.WriteString(t.Text)
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
