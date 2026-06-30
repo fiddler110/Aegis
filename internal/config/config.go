@@ -108,8 +108,9 @@ type ServerConfig struct {
 
 // PermissionConfig sets the default agent permission posture.
 type PermissionConfig struct {
-	Mode            string `koanf:"mode"`              // "plan" or "build"
-	AutoApproveExec bool   `koanf:"auto_approve_exec"` // auto-approve shell/execute tool calls
+	Mode            string   `koanf:"mode"`              // "plan" or "build"
+	AutoApproveExec bool     `koanf:"auto_approve_exec"` // auto-approve shell/execute tool calls
+	Rules           []string `koanf:"rules"`             // text-based allow/deny rules, e.g. "allow bash(npm test*)", "deny write(/etc/*)"
 }
 
 // SecurityConfig configures contextual security policies.
@@ -131,13 +132,13 @@ const (
 
 func defaults() map[string]any {
 	return map[string]any{
-		"data_dir":                     defaultDataDir(),
-		"log_level":                    "info",
-		"provider.default":             "anthropic",
-		"provider.model":               "claude-opus-4-8",
-		"provider.max_tokens":          32768,
-		"provider.max_retries":         4,
-		"server.addr":                  "127.0.0.1:4127",
+		"data_dir":             defaultDataDir(),
+		"log_level":            "info",
+		"provider.default":     "anthropic",
+		"provider.model":       "claude-opus-4-8",
+		"provider.max_tokens":  32768,
+		"provider.max_retries": 4,
+		"server.addr":          "127.0.0.1:4127",
 		// "build" is the intentional default: the agent can read and write
 		// files freely, but shell/execute calls still prompt for approval
 		// (or are denied non-interactively). Use "plan" for read-only

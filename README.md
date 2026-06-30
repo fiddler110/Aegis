@@ -552,6 +552,22 @@ aegis --init
 
 Every tool call is recorded to an audit trail (`audit.jsonl`) with timestamps and inputs.
 
+#### Text-based permission rules
+
+Beyond the coarse mode, you can write fine-grained, versionable allow/deny rules in `.aegis/config.yaml` under `permission.rules`. Each rule is `allow <tool>(<pattern>)` or `deny <tool>(<pattern>)`, where `<tool>` is a tool name (`shell`, `write_file`, …), a capability alias (`bash`, `write`, `read`, `network`), or `*`, and `<pattern>` is a glob matched against the call's primary input (the command for shell, the path for file tools, the URL for network tools). `*` spans path separators, so `/etc/*` matches everything under `/etc`.
+
+```yaml
+permission:
+  mode: build
+  rules:
+    - "allow bash(npm test*)"      # auto-approve the test command, no prompt
+    - "allow bash(git status)"
+    - "deny write(/etc/*)"          # never write under /etc, even in auto mode
+    - "deny shell(rm -rf /*)"
+```
+
+Rules are evaluated **before** the mode and contextual gates. Precedence: a matching `deny` always blocks; otherwise a matching `allow` grants the call without prompting; otherwise the call falls through to the normal mode gate. Every rule decision is written to the audit trail. A malformed rule is logged and skipped at startup rather than aborting the daemon.
+
 ### LaTeX Documents
 - **`latex_build`** — Compiles a `.tex` file to PDF using xelatex, pdflatex, or lualatex. Runs 1–3 passes to resolve cross-references and table of contents. Returns a structured report: errors with context lines, deduplicated warnings, page count, and the output PDF path. Supports `check_only` mode for fast syntax validation without writing a PDF.
 - **`latex_new_document`** — Creates a new `.tex` file with a production-quality preamble ready for enterprise reports, white papers, and technical documents. Includes professional typography, semantic heading colours, `booktabs` tables, `listings` code blocks, `tcolorbox` callout boxes (`notebox` / `warnbox` / `keybox`), figure captions, `hyperref` PDF metadata, and a scaffolded section structure with `%%TODO` markers. Supports styles: `report`, `whitepaper`, `article`, `book`. Works with xelatex (default) and pdflatex.
@@ -585,6 +601,9 @@ A **bundle** installs a set of artifacts together — the distribution unit Clau
 
 ### Curated Model Catalog
 `aegis models` prints a curated, qualitative guide to recommended models by tier (frontier / balanced / local) with context windows and notes — an at-a-glance answer to "what should I point Aegis at?" Add `--local` to also probe for running local servers (Ollama, LM Studio, LiteLLM). It's guidance, not a live benchmark: confirm current model IDs with each provider.
+
+### Repository Map
+For large codebases, `aegis index` builds a compact structural overview — each source file with its top-level symbols (functions, types, classes) — extracted with lightweight, language-aware patterns (Go, Python, JS/TS, Rust, Ruby, Java). The map is cached at `.aegis/repomap.json` and, when present, injected into the model's system prompt so the agent has a map of the codebase without reading every file. Output is capped at a token budget (`--max-bytes`, ~2000 tokens by default) and truncated at a file boundary. The cache stores a content fingerprint (path + size + mtime), so the daemon transparently rebuilds the map when source files change. Run `aegis index --print` to inspect it. The feature is opt-in: with no cache, nothing is injected.
 
 ### Context References (@refs)
 Typing `@` in the TUI opens a reference picker. Beyond `@file` paths (fuzzy-matched against a workspace index), it offers richer reference kinds: `@image:<path>` attaches an [image](#image-input) (the daemon reads and encodes it); `@diagnostics`, `@url:<address>`, and `@symbol:<name>` are textual references the agent resolves with its tools (LSP diagnostics, web fetch, code search) — the same model as `@file`, which the agent reads on demand.

@@ -2,6 +2,23 @@
 **Date:** 2026-06-29
 **Source:** Competitive analysis against 12 frontier agent harnesses
 
+> **Status (updated 2026-06-30):** P1 (all four) and P2.1, P2.2, P2.3, P2.5 are
+> implemented. The roadmap consistently runs *ahead* of the code — several gaps
+> were already closed under different names before this doc was written. Verify
+> each item against the code before treating it as a to-do.
+>
+> | Item | Status |
+> |---|---|
+> | P1.1 sub-agent | ✅ done (`internal/tool/builtin/agent.go`) |
+> | P1.2 observability | ✅ done (`internal/trace`, `aegis sessions trace`) |
+> | P1.3 sandbox | ✅ done (`internal/sandbox`, `aegis sandbox`) |
+> | P1.4 `--resume` | ✅ done (`--resume`, TUI session picker) |
+> | P2.1 model-router | ✅ done — `openai` provider + `base_url` covers any OpenAI-compatible endpoint (Gemini/Groq/Mistral/Together) |
+> | P2.2 permission rules | ✅ done — `permission.rules` in config, `internal/permission/rules.go` |
+> | P2.3 repo-map | ✅ done — `internal/repomap`, `aegis index` |
+> | P2.4 output validation | ⬜ not started — needs core engine-loop change + persona config home (ties to P3.3) |
+> | P2.5 web search | ✅ done — `web_search` tool (DuckDuckGo, no API key) |
+
 ---
 
 ## Gap Summary
@@ -110,6 +127,14 @@ Present in 2–4 competitors; high value but not table-stakes.
 
 ### P2.2 — Text-based permission rules
 
+**✅ Implemented (2026-06-30).** Rules live in `.aegis/config.yaml` under
+`permission.rules` (versionable) as `allow <tool>(<pattern>)` / `deny <tool>(<pattern>)`.
+`<tool>` is a name, a capability alias (`bash`/`write`/`read`/`network`), or `*`;
+`<pattern>` is a glob (matched against command/path/url) where `*` spans `/`.
+Parsed in `internal/permission/rules.go`; `RuleGate` is the outermost gate
+(rules evaluated before the contextual and mode gates). Deny wins over allow; an
+allow grants without prompting. Decisions are audited. See `permission.Rules`.
+
 **Gap:** Permission mode is set globally (plan/build/sandbox). There is no way to write `allow bash(*)` or `deny write(/etc/*)` rules without code changes.
 
 **Present in:** Claude Code (CLAUDE.md `allow`/`deny` patterns), Codex CLI (approval mode tiers).
@@ -125,6 +150,13 @@ Present in 2–4 competitors; high value but not table-stakes.
 ---
 
 ### P2.3 — Repo-map / codebase index
+
+**✅ Implemented (2026-06-30).** `internal/repomap` walks the repo and extracts
+top-level symbols via language-aware regexes (Go/Python/JS/TS/Rust/Ruby/Java).
+`aegis index` caches a compact map to `.aegis/repomap.json`; the daemon injects a
+`<repo_map>` block into the system prompt and rebuilds when the content
+fingerprint (path+size+mtime) changes. Output is capped (`--max-bytes`, ~2000
+tokens) and truncated at a file boundary. Opt-in: no cache → nothing injected.
 
 **Gap:** For large repos Aegis has no way to give the model a compact structural overview without reading every file. The agent must discover structure through tool calls.
 
@@ -147,6 +179,18 @@ Present in 2–4 competitors; high value but not table-stakes.
 **Present in:** CrewAI (function guardrails + LLM guardrail per task), AutoGen (human-in-loop per turn).
 
 **Recommended approach:** Add an optional `output_guard` field to persona config. Two modes: `schema` (validate output matches a JSON schema — useful for structured-output personas like data-analyst) and `llm` (a second, cheap LLM call that checks the output against a rubric and returns pass/fail + reason). Both modes surface the result to the engine, which can retry up to N times before surfacing the raw output with a warning.
+
+**Implementation sketch (not yet started):** There is a clean seam in
+`engine.Run` at the final-answer point (where `len(toolUses) == 0`). Add an
+`OutputGuard func(ctx, finalText) (ok bool, reason string)` + `OutputGuardMaxRetries`
+to `engine.Options`; on failure, emit a new `KindGuard` event, append a
+corrective user message, and `continue` the loop up to N times, else emit the
+warning and fall through to `KindDone`. Keep the validators in a new
+`internal/guard` package (schema + LLM modes) so the engine stays generic — the
+server builds the guard func. **Blocker:** there is no per-persona config file
+yet (personas are Go constants); a clean home for `output_guard` ties to P3.3
+(persona.toml). Until then, wire it via a config-level guard or a field on the
+`persona.Persona` struct.
 
 **Acceptance criteria:**
 - `output_guard` field in persona config (optional)

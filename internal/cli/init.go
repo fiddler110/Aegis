@@ -199,6 +199,12 @@ permission:
   mode: build                # "plan" = read-only (safe default for untrusted dirs)
                              # "build" = file edits allowed; shell requires approval
   auto_approve_exec: false   # true = never prompt for shell/execute tool calls
+  # rules:                   # Fine-grained allow/deny rules, evaluated before the
+  #                          # mode gate. <tool> = name, alias (bash/write/read/
+  #                          # network), or *. <pattern> is a glob; * spans "/".
+  #   - "allow bash(npm test*)"   # auto-approve, no prompt
+  #   - "deny write(/etc/*)"       # never write under /etc, even in auto mode
+  #   - "deny shell(rm -rf /*)"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
