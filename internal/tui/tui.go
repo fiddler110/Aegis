@@ -88,7 +88,7 @@ type model struct {
 	workDir    string
 
 	tools               []toolEntry
-	inputTokens         int  // uncached input tokens (last turn)
+	inputTokens         int // uncached input tokens (last turn)
 	outputTokens        int
 	cacheReadTokens     int  // prompt-cache hits (last turn)
 	cacheCreationTokens int  // prompt-cache writes (last turn)
@@ -328,7 +328,7 @@ func (m model) startStream(text string, images []api.ImageInput) tea.Cmd {
 	cl, id := m.cfg.Client, m.cfg.SessionID
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
-		ch, err := cl.PostMessageReq(ctx, id, api.PostMessageRequest{Text: text, Images: images})
+		ch, err := cl.PostMessageReq(ctx, id, api.PostMessageRequest{Text: text, Images: images, GuardEnabled: m.slash.guardEnabled})
 		if err != nil {
 			cancel()
 			return errMsg{err}
@@ -1489,6 +1489,12 @@ func (m *model) applyEvent(ev api.Event) {
 		m.transcript.WriteString(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
 		m.transcript.WriteString(barLabel("You", colUserFg) + "\n" + ev.Text + "\n\n")
 		m.transcript.WriteString(barLabel("Assistant", colAssistFg) + "\n")
+
+	case api.KindGuard:
+		// Output validation flagged the answer; surface it as a dim warning.
+		m.flushThinking()
+		m.flushLiveText()
+		m.transcript.WriteString("\n" + m.th.elapsedDim.Render("⚠ output guard: "+ev.Text) + "\n")
 
 	case api.KindDone:
 		// Flush any buffered text (safety net — normally flushed at KindTurnDone).

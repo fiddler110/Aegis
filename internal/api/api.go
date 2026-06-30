@@ -60,6 +60,7 @@ const (
 	KindError           EventKind = "error"
 	KindApprovalRequest EventKind = "approval_request" // engine awaiting user approval
 	KindSteer           EventKind = "steer"            // mid-run steering instruction injected
+	KindGuard           EventKind = "guard"            // output validation warning
 )
 
 // Event is one server-sent event during a message run.

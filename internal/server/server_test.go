@@ -15,6 +15,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/api"
 	"github.com/scottymacleod/aegis/internal/client"
 	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/engine"
 	"github.com/scottymacleod/aegis/internal/hooks"
 	"github.com/scottymacleod/aegis/internal/memory"
 	"github.com/scottymacleod/aegis/internal/provider"
@@ -536,5 +537,15 @@ func TestEffectiveSystem_containsToolUseBlock(t *testing.T) {
 	}
 	if tuIdx > ctIdx {
 		t.Error("ToolUseBlock must appear before CompletingTasksBlock in effectiveSystem output")
+	}
+}
+
+func TestToAPIEventGuard(t *testing.T) {
+	ev := toAPIEvent(engine.Event{Kind: engine.KindGuard, GuardReason: "missing citations"})
+	if ev.Kind != api.KindGuard {
+		t.Errorf("kind = %q, want guard", ev.Kind)
+	}
+	if ev.Text != "missing citations" {
+		t.Errorf("text = %q, want the guard reason", ev.Text)
 	}
 }

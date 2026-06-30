@@ -35,12 +35,13 @@ type SlashResult struct {
 // SlashDispatcher dispatches slash commands to built-in handlers or custom
 // command templates.
 type SlashDispatcher struct {
-	client    *client.Client
-	sessionID string
-	mode      string
-	model     string
-	builtins  map[string]func(args []string) SlashResult
-	customs   []api.CommandInfo
+	client       *client.Client
+	sessionID    string
+	mode         string
+	model        string
+	guardEnabled *bool // per-session output-guard toggle; nil = server default
+	builtins     map[string]func(args []string) SlashResult
+	customs      []api.CommandInfo
 }
 
 // NewSlashDispatcher creates a dispatcher for the given session.
@@ -55,6 +56,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"help":     d.cmdHelp,
 		"persona":  d.cmdPersona,
 		"mode":     d.cmdMode,
+		"guard":    d.cmdGuard,
 		"clear":    d.cmdClear,
 		"config":   d.cmdConfig,
 		"memory":   d.cmdMemory,
@@ -148,6 +150,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"help [cmd]", "Show this help or detail for a command"},
 		{"persona [name]", "Pick persona interactively, or switch directly by name"},
 		{"mode <plan|build|auto>", "Switch permission mode"},
+		{"guard [on|off|status]", "Toggle output validation for this session"},
 		{"clear", "Clear the transcript"},
 		{"config", "Interactive configuration wizard"},
 		{"memory", "Show saved memories"},
@@ -188,6 +191,8 @@ func builtinHelp(name string) string {
 		return "/persona [name]\n  No args: open an interactive list to pick a persona.\n  With name: switch directly, e.g. /persona security."
 	case "mode":
 		return "/mode <plan|build|auto>\n  Switch the permission mode for the current session.\n  plan = read-only\n  build = file edits allowed, shell execution requires approval\n  auto  = all capabilities allowed without prompting"
+	case "guard":
+		return "/guard [on|off|status]\n  Toggle output validation for the current session.\n  Defaults to the configured output_guard.enabled; resets on restart."
 	case "clear":
 		return "/clear\n  Clear the conversation transcript (session history is preserved)."
 	case "config":
@@ -280,6 +285,47 @@ func (d *SlashDispatcher) cmdMode(args []string) SlashResult {
 		return SlashResult{Output: "Switched to auto mode.\n⚠ auto runs all tools — including shell commands — without asking. Unless a container sandbox is configured, commands execute directly on this host."}
 	}
 	return SlashResult{Output: fmt.Sprintf("Switched to %s mode.", mode)}
+}
+
+// cmdGuard toggles per-session output validation. Unlike /mode the toggle is
+// not persisted server-side; it is sent with each message turn via
+// PostMessageRequest.GuardEnabled, so it resets when the TUI restarts.
+func (d *SlashDispatcher) cmdGuard(args []string) SlashResult {
+	switch arg := strings.ToLower(strings.TrimSpace(firstArg(args))); arg {
+	case "on", "true":
+		v := true
+		d.setGuard(&v)
+		return SlashResult{Output: "Output guard: on (this session)"}
+	case "off", "false":
+		v := false
+		d.setGuard(&v)
+		return SlashResult{Output: "Output guard: off (this session)"}
+	default:
+		return SlashResult{Output: "Output guard: " + d.guardStatus() + "\nUsage: /guard [on|off|status]"}
+	}
+}
+
+// setGuard records the per-session output-guard override (nil = server default).
+func (d *SlashDispatcher) setGuard(v *bool) { d.guardEnabled = v }
+
+// guardStatus reports the current per-session toggle: "default" when no override
+// is set (the configured output_guard.enabled applies), else "on"/"off".
+func (d *SlashDispatcher) guardStatus() string {
+	if d.guardEnabled == nil {
+		return "default"
+	}
+	if *d.guardEnabled {
+		return "on"
+	}
+	return "off"
+}
+
+// firstArg returns the first argument or "" when none were given.
+func firstArg(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
 }
 
 func (d *SlashDispatcher) cmdClear(_ []string) SlashResult {
