@@ -17,6 +17,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/persona"
 	"github.com/scottymacleod/aegis/internal/provider"
 	"github.com/scottymacleod/aegis/internal/providerfactory"
+	"github.com/scottymacleod/aegis/internal/repomap"
 	"github.com/scottymacleod/aegis/internal/tool"
 	"github.com/scottymacleod/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
@@ -122,6 +123,12 @@ func newChatCmd() *cobra.Command {
 			}
 			if mem := src.Load(); mem != "" {
 				resolvedSystem = resolvedSystem + "\n\n" + mem
+			}
+			// Inject the cached repository map when present (built via `aegis index`).
+			if rm, fresh, _ := repomap.Load(cwd, repoMapCachePath(cwd), repomap.Options{}); rm != "" && fresh {
+				if block := repomap.Block(rm); block != "" {
+					resolvedSystem = resolvedSystem + "\n\n" + block
+				}
 			}
 
 			conv := &engine.Conversation{System: resolvedSystem}

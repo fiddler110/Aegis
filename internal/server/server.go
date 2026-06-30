@@ -40,6 +40,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/plugins"
 	"github.com/scottymacleod/aegis/internal/provider"
 	"github.com/scottymacleod/aegis/internal/providerfactory"
+	"github.com/scottymacleod/aegis/internal/repomap"
 	"github.com/scottymacleod/aegis/internal/sandbox"
 	"github.com/scottymacleod/aegis/internal/session"
 	"github.com/scottymacleod/aegis/internal/skills"
@@ -74,6 +75,8 @@ type Server struct {
 	lspMgr      *lsp.Manager
 	audit       *hooks.Audit
 	cmdReg      *commands.Registry
+	permRules   []permission.Rule // parsed text-based allow/deny rules
+	repoMap     string            // cached repository map block for the system prompt (empty when not indexed)
 	workspace   string
 	logger      *slog.Logger
 	http        *http.Server
@@ -259,6 +262,17 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	s := newWithDeps(cfg, logger, store, adapter, reg)
+	// Parse text-based permission rules once at startup. A malformed rule is
+	// logged and skipped rather than aborting the daemon.
+	if len(cfg.Permission.Rules) > 0 {
+		rules, err := permission.ParseRules(cfg.Permission.Rules)
+		if err != nil {
+			logger.Warn("ignoring invalid permission rules", "err", err)
+		} else {
+			s.permRules = rules
+			logger.Info("loaded permission rules", "count", len(rules))
+		}
+	}
 	s.tasks = taskMgr
 	s.cronSched = cronSched
 	s.checkpoints = checkpointStore
@@ -267,6 +281,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.lspMgr = lspMgr
 	s.workspace = cwd
 	s.memory = memory.NewSources(cwd, cfg.DataDir)
+	s.repoMap = loadRepoMap(cwd, logger)
 
 	// Load custom agent definitions from user/project directories.
 	if n := agentdef.LoadFromDirs(agentdef.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
@@ -560,6 +575,19 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		})
 		gate = ctxGate
 		engineHooks = hooks.NewMulti(s.audit, ctxGate)
+	}
+
+	// Apply text-based allow/deny rules as the outermost gate so they are
+	// evaluated before the contextual and mode gates. An explicit deny always
+	// blocks; an explicit allow grants without prompting; otherwise the call
+	// falls through to the gate(s) wrapped above.
+	if len(s.permRules) > 0 {
+		gate = permission.NewRuleGate(gate, s.permRules,
+			permission.WithRuleObserver(func(d permission.ContextualDecision) {
+				if s.audit != nil {
+					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
+				}
+			}))
 	}
 
 	return engine.New(engine.Options{
@@ -1202,7 +1230,32 @@ func (s *Server) effectiveSystem(base string) string {
 	if sk := skills.BuildBlock(s.workspace); sk != "" {
 		parts = append(parts, sk)
 	}
+	if s.repoMap != "" {
+		parts = append(parts, s.repoMap)
+	}
 	return strings.Join(parts, "\n\n")
+}
+
+// loadRepoMap loads the cached repository map for cwd, rebuilding it when the
+// cache is stale (a source file changed since the last `aegis index`). The map
+// is opt-in: when no cache exists, this returns an empty string and nothing is
+// injected. Returns a ready-to-inject <repo_map> block, or "" on any failure.
+func loadRepoMap(cwd string, logger *slog.Logger) string {
+	cache := filepath.Join(cwd, ".aegis", "repomap.json")
+	rendered, fresh, err := repomap.Load(cwd, cache, repomap.Options{})
+	if err != nil || rendered == "" {
+		return "" // not indexed, or unreadable cache
+	}
+	if !fresh {
+		// The repo changed since indexing; rebuild so the prompt isn't stale.
+		if m, buildErr := repomap.Build(cwd, repomap.Options{}); buildErr == nil {
+			if saveErr := m.Save(cache); saveErr != nil {
+				logger.Warn("repo map rebuilt but cache not saved", "err", saveErr)
+			}
+			rendered = m.Render()
+		}
+	}
+	return repomap.Block(rendered)
 }
 
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
