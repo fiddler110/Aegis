@@ -32,6 +32,9 @@ type PostMessageRequest struct {
 	Text string `json:"text"`
 	// Images attaches images to the turn (vision-capable models only).
 	Images []ImageInput `json:"images,omitempty"`
+	// GuardEnabled overrides the configured output_guard.enabled default for this
+	// turn when non-nil (per-session /guard toggle).
+	GuardEnabled *bool `json:"guard_enabled,omitempty"`
 }
 
 // ImageInput attaches an image to a user turn. Provide either a Path (the daemon
