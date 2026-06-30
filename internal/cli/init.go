@@ -208,6 +208,43 @@ permission:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Output validation  (on by default; toggle per session with /guard)
+# ─────────────────────────────────────────────────────────────────────────────
+
+output_guard:
+  enabled: true              # validate each final answer; /guard off disables per session
+  mode: llm                  # "llm" (rubric check) or "schema" (required JSON keys)
+  max_retries: 1             # corrective retries before surfacing the raw answer
+  # rubric: |                # uncomment to override the built-in generic rubric
+  #   The response must directly and completely address the request, contain no
+  #   placeholders or TODOs, and ground factual claims in tool output.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Per-persona model overrides  (blank = use the global provider.model above)
+# ─────────────────────────────────────────────────────────────────────────────
+
+personas:
+  general:                     { model: "" }
+  security:                    { model: "" }   # rec: claude-opus-4-8 — deep reasoning
+  platform-architect:          { model: "" }   # rec: claude-opus-4-8
+  security-architect:          { model: "" }   # rec: claude-opus-4-8 — threat modeling
+  security-engineer:           { model: "" }
+  appsec-engineer:             { model: "" }   # rec: claude-opus-4-8 — code review
+  developer:                   { model: "" }   # rec: claude-sonnet-4-6 — fast iteration
+  security-researcher:         { model: "" }
+  risk-assessor:               { model: "" }
+  business-analyst:            { model: "" }
+  data-analyst:                { model: "" }   # rec: claude-opus-4-8
+  network-security-architect:  { model: "" }
+  report-writer:               { model: "" }   # rec: claude-sonnet-4-6 — long-form writing
+  sre:                         { model: "" }
+  infrastructure-architect:    { model: "" }
+  cloud-architect:             { model: "" }
+  cloud-security-engineer:     { model: "" }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Spend guard  (cloud providers only — Ollama has no cost)
 # ─────────────────────────────────────────────────────────────────────────────
 
