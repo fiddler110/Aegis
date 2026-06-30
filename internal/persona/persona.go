@@ -8,11 +8,26 @@ import (
 	"strings"
 )
 
-// Persona is a named behavioral profile.
+// Persona is a named behavioral profile. The override fields are populated by
+// file-loaded personas; built-in personas leave them zero-valued.
 type Persona struct {
 	Name        string
 	Description string
 	System      string
+	Model       string       // model id override (same provider); "" = global
+	Mode        string       // permission mode; "" = session/config default
+	Tools       []string     // allowed tools (parsed; enforcement deferred)
+	Rules       []string     // permission rules merged into the session gate
+	Guard       *GuardConfig // nil = global default; Disabled = no guard
+}
+
+// GuardConfig is a persona's output-validation override parsed from frontmatter.
+type GuardConfig struct {
+	Disabled   bool
+	Mode       string   // "schema" | "llm"
+	Schema     []string // schema mode: required top-level JSON keys
+	Rubric     string   // llm mode rubric
+	MaxRetries int
 }
 
 const generalSystem = `You are Aegis, a capable assistant for research, documentation, and coding.
@@ -704,25 +719,18 @@ func Get(name string) (Persona, bool) {
 	return p, true
 }
 
-// Names returns the available persona names.
+// nameOrder preserves registration order: built-ins first, then file personas.
+var nameOrder = []string{
+	"general", "security", "platform-architect", "security-architect",
+	"security-engineer", "appsec-engineer", "developer", "security-researcher",
+	"risk-assessor", "business-analyst", "data-analyst",
+	"network-security-architect", "report-writer", "sre",
+	"infrastructure-architect", "cloud-architect", "cloud-security-engineer",
+}
+
+// Names returns the available persona names in registration order.
 func Names() []string {
-	return []string{
-		"general",
-		"security",
-		"platform-architect",
-		"security-architect",
-		"security-engineer",
-		"appsec-engineer",
-		"developer",
-		"security-researcher",
-		"risk-assessor",
-		"business-analyst",
-		"data-analyst",
-		"network-security-architect",
-		"report-writer",
-		"sre",
-		"infrastructure-architect",
-		"cloud-architect",
-		"cloud-security-engineer",
-	}
+	out := make([]string, len(nameOrder))
+	copy(out, nameOrder)
+	return out
 }
