@@ -16,8 +16,9 @@
 > | P2.1 model-router | ✅ done — `openai` provider + `base_url` covers any OpenAI-compatible endpoint (Gemini/Groq/Mistral/Together) |
 > | P2.2 permission rules | ✅ done — `permission.rules` in config, `internal/permission/rules.go` |
 > | P2.3 repo-map | ✅ done — `internal/repomap`, `aegis index` |
-> | P2.4 output validation | ⬜ not started — needs core engine-loop change + persona config home (ties to P3.3) |
+> | P2.4 output validation | ✅ done (2026-06-30) — `internal/guard` (schema+llm), engine `OutputGuard` seam, `/guard` toggle; built with P3.3 |
 > | P2.5 web search | ✅ done — `web_search` tool (DuckDuckGo, no API key) |
+> | P3.3 persona templates | ✅ done (2026-06-30) — `.aegis/personas/*.md`, per-persona model/mode/rules/guard, config `personas` model map |
 
 ---
 
@@ -178,9 +179,11 @@ tokens) and truncated at a file boundary. Opt-in: no cache → nothing injected.
 
 **Present in:** CrewAI (function guardrails + LLM guardrail per task), AutoGen (human-in-loop per turn).
 
+**✅ Implemented (2026-06-30, jointly with P3.3).** `internal/guard` provides `SchemaGuard` (valid JSON + required keys) and `LLMGuard` (rubric → PASS/FAIL via `small_model`), both fail-open. The engine runs the guard at the final-answer seam, emits `KindGuard`, appends a corrective message, and retries up to N (default 1) before surfacing the raw answer. On by default via `output_guard` config (generic rubric); per-persona override/disable via persona frontmatter; per-session runtime toggle via `/guard on|off|status`. TUI shows a dim `⚠ output guard` line. Spec: `docs/superpowers/specs/2026-06-30-persona-templates-output-validation-design.md`; plan: `docs/superpowers/plans/2026-06-30-persona-templates-output-validation.md`.
+
 **Recommended approach:** Add an optional `output_guard` field to persona config. Two modes: `schema` (validate output matches a JSON schema — useful for structured-output personas like data-analyst) and `llm` (a second, cheap LLM call that checks the output against a rubric and returns pass/fail + reason). Both modes surface the result to the engine, which can retry up to N times before surfacing the raw output with a warning.
 
-**Implementation sketch (not yet started):** There is a clean seam in
+**Implementation sketch (as built):** There is a clean seam in
 `engine.Run` at the final-answer point (where `len(toolUses) == 0`). Add an
 `OutputGuard func(ctx, finalText) (ok bool, reason string)` + `OutputGuardMaxRetries`
 to `engine.Options`; on failure, emit a new `KindGuard` event, append a
@@ -242,6 +245,8 @@ Long-horizon or niche capabilities worth tracking. No immediate implementation c
 ---
 
 ### P3.3 — Component serialization / persona templates
+
+**✅ Implemented (2026-06-30, jointly with P2.4).** File personas load from `.aegis/personas/*.md` (project) and `<data_dir>/personas/*.md` (user) via `persona.LoadFromDirs`; frontmatter carries `model`, `mode`, `tools`, `rules`, and `output_guard`, with the body as the system prompt. They register into the persona registry and are selectable like built-ins. Per-persona model overrides for built-ins live in the config `personas` map (blank = global). Effective model precedence: config map → persona file → global. Tools filtering is parsed but not yet enforced (deferred).
 
 **Gap:** Personas are Go constants. Sharing a custom persona configuration (persona + tools + model + permission rules) requires distributing source code or CLAUDE.md snippets.
 
