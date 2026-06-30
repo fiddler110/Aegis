@@ -568,6 +568,46 @@ permission:
 
 Rules are evaluated **before** the mode and contextual gates. Precedence: a matching `deny` always blocks; otherwise a matching `allow` grants the call without prompting; otherwise the call falls through to the normal mode gate. Every rule decision is written to the audit trail. A malformed rule is logged and skipped at startup rather than aborting the daemon.
 
+### Persona Templates
+
+Beyond the 17 built-in personas, you can define and share custom personas as single files. Drop a markdown file with YAML frontmatter into `.aegis/personas/<name>.md` (project-local) or `<data_dir>/personas/<name>.md` (user-global); project files win on name collision. The file is loaded at startup and selectable like any built-in persona (`/persona <name>`, or `--persona`). The body becomes the system prompt; the frontmatter carries optional overrides:
+
+```markdown
+---
+description: Strict secure code reviewer
+model: claude-opus-4-8          # run this persona on a specific model (same provider)
+mode: build                     # default permission mode for its sessions
+tools: [read_file, grep, shell] # informational (per-session tool filtering is not yet enforced)
+rules:                          # permission rules merged into the session gate
+  - "deny write(*)"
+  - "allow shell(git diff*)"
+output_guard:                   # validate this persona's answers (see below)
+  mode: llm
+  rubric: "Every finding cites a file:line and a concrete remediation."
+  max_retries: 2
+---
+You are a strict secure code reviewer. ...
+```
+
+**Per-persona model from config.** Because built-in personas have no file, their model is overridden from `.aegis/config.yaml` under a `personas:` map — each persona listed with a blank `model` (so the global `provider.model` is used) and a commented recommendation. Change one line to pin a persona to a stronger or cheaper model:
+
+```yaml
+personas:
+  security-architect: { model: claude-opus-4-8 }   # was blank → now pinned
+  developer:          { model: "" }                # blank → global model
+```
+
+The effective model is the first non-empty of: the config `personas[name].model`, the persona file's `model`, then the global `provider.model`. Model overrides are model-id only, within the configured provider (they do not switch provider).
+
+### Output Validation
+
+Each final answer is checked by an **output guard** before it's returned — on by default. Two modes:
+
+- **`llm`** _(default)_ — a cheap second model call (the configured `small_model`, falling back to the main model) checks the answer against a rubric and replies pass/fail. The built-in rubric requires the response to fully address the request, contain no placeholders/TODOs, and ground claims in tool output. Personas can supply their own rubric.
+- **`schema`** — the answer must be a valid JSON object containing the declared required top-level keys (useful for structured-output personas).
+
+On failure, the guard appends the reason and asks the model to revise, retrying up to `max_retries` (default 1) before surfacing the raw answer with a warning. Guards **fail open**: any validator error, missing model, or unparseable verdict yields a pass, so a flaky check never traps your answer. Configure defaults under `output_guard` in `config.yaml`; a persona overrides via its `output_guard` frontmatter or disables it with `output_guard: none`. Toggle it per session at runtime with **`/guard on|off|status`** (resets to the configured default on restart). When the guard fires, the TUI shows a dim `⚠ output guard: …` line.
+
 ### LaTeX Documents
 - **`latex_build`** — Compiles a `.tex` file to PDF using xelatex, pdflatex, or lualatex. Runs 1–3 passes to resolve cross-references and table of contents. Returns a structured report: errors with context lines, deduplicated warnings, page count, and the output PDF path. Supports `check_only` mode for fast syntax validation without writing a PDF.
 - **`latex_new_document`** — Creates a new `.tex` file with a production-quality preamble ready for enterprise reports, white papers, and technical documents. Includes professional typography, semantic heading colours, `booktabs` tables, `listings` code blocks, `tcolorbox` callout boxes (`notebox` / `warnbox` / `keybox`), figure captions, `hyperref` PDF metadata, and a scaffolded section structure with `%%TODO` markers. Supports styles: `report`, `whitepaper`, `article`, `book`. Works with xelatex (default) and pdflatex.

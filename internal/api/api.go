@@ -32,6 +32,9 @@ type PostMessageRequest struct {
 	Text string `json:"text"`
 	// Images attaches images to the turn (vision-capable models only).
 	Images []ImageInput `json:"images,omitempty"`
+	// GuardEnabled overrides the configured output_guard.enabled default for this
+	// turn when non-nil (per-session /guard toggle).
+	GuardEnabled *bool `json:"guard_enabled,omitempty"`
 }
 
 // ImageInput attaches an image to a user turn. Provide either a Path (the daemon
@@ -57,6 +60,7 @@ const (
 	KindError           EventKind = "error"
 	KindApprovalRequest EventKind = "approval_request" // engine awaiting user approval
 	KindSteer           EventKind = "steer"            // mid-run steering instruction injected
+	KindGuard           EventKind = "guard"            // output validation warning
 )
 
 // Event is one server-sent event during a message run.

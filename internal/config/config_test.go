@@ -131,6 +131,25 @@ func TestDefaultDataDir(t *testing.T) {
 	}
 }
 
+func TestOutputGuardDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OutputGuard.Enabled {
+		t.Error("output_guard.enabled should default to true")
+	}
+	if cfg.OutputGuard.Mode != "llm" {
+		t.Errorf("default mode = %q, want llm", cfg.OutputGuard.Mode)
+	}
+	if cfg.OutputGuard.MaxRetries != 1 {
+		t.Errorf("default max_retries = %d, want 1", cfg.OutputGuard.MaxRetries)
+	}
+	if cfg.OutputGuard.Rubric == "" {
+		t.Error("default rubric should be set")
+	}
+}
+
 func TestAPIKeyFromEnv(t *testing.T) {
 	redirectConfigDir(t) // prevent real config file from overriding provider.default
 	clearEnv(t, "AEGIS_PROVIDER_DEFAULT", "OPENAI_API_KEY")

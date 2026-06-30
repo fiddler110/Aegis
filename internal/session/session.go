@@ -23,6 +23,7 @@ type Session struct {
 	Title        string             `json:"title"`
 	System       string             `json:"system"`
 	Mode         string             `json:"mode"`
+	Persona      string             `json:"persona"`
 	Messages     []provider.Message `json:"messages"`
 	Traces       []trace.TurnTrace  `json:"traces,omitempty"`
 	InputTokens  int                `json:"input_tokens"`
@@ -37,6 +38,7 @@ type Meta struct {
 	ID           string    `json:"id"`
 	Title        string    `json:"title"`
 	Mode         string    `json:"mode"`
+	Persona      string    `json:"persona"`
 	InputTokens  int       `json:"input_tokens"`
 	OutputTokens int       `json:"output_tokens"`
 	CostUSD      float64   `json:"cost_usd"`
@@ -86,6 +88,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title        TEXT    NOT NULL DEFAULT '',
     system       TEXT    NOT NULL DEFAULT '',
     mode         TEXT    NOT NULL DEFAULT 'plan',
+    persona      TEXT    NOT NULL DEFAULT '',
     messages     BLOB    NOT NULL DEFAULT '[]',
     traces       BLOB    NOT NULL DEFAULT '[]',
     input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -102,6 +105,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 		`ALTER TABLE sessions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN cost_usd      REAL    NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN traces        BLOB    NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE sessions ADD COLUMN persona TEXT NOT NULL DEFAULT ''`,
 	} {
 		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
 	}
@@ -109,19 +113,20 @@ CREATE TABLE IF NOT EXISTS sessions (
 }
 
 // Create stores a new session and returns it.
-func (s *Store) Create(ctx context.Context, title, system, mode string) (*Session, error) {
+func (s *Store) Create(ctx context.Context, title, system, mode, persona string) (*Session, error) {
 	now := time.Now()
 	sess := &Session{
 		ID:        uuid.NewString(),
 		Title:     title,
 		System:    system,
 		Mode:      mode,
+		Persona:   persona,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, title, system, mode, messages, created_at, updated_at) VALUES (?, ?, ?, ?, '[]', ?, ?)`,
-		sess.ID, sess.Title, sess.System, sess.Mode, now.UnixMilli(), now.UnixMilli())
+		`INSERT INTO sessions (id, title, system, mode, persona, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '[]', ?, ?)`,
+		sess.ID, sess.Title, sess.System, sess.Mode, sess.Persona, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
@@ -131,14 +136,14 @@ func (s *Store) Create(ctx context.Context, title, system, mode string) (*Sessio
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, messages, traces, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, persona, messages, traces, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
 		sess         Session
 		msgBlob      []byte
 		traceBlob    []byte
 		created, upd int64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &msgBlob, &traceBlob,
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &msgBlob, &traceBlob,
 		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -228,7 +233,7 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 // List returns session metadata, most recently updated first.
 func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, mode, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
+		`SELECT id, title, mode, persona, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +242,7 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	for rows.Next() {
 		var m Meta
 		var created, upd int64
-		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
+		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = time.UnixMilli(created)
