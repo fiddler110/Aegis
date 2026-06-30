@@ -1352,6 +1352,9 @@ func toAPIEvent(ev engine.Event) api.Event {
 	if ev.Err != nil {
 		out.Error = ev.Err.Error()
 	}
+	if ev.Kind == engine.KindGuard {
+		out.Text = ev.GuardReason
+	}
 	if ev.Usage != nil {
 		out.InputTokens = ev.Usage.InputTokens
 		out.OutputTokens = ev.Usage.OutputTokens

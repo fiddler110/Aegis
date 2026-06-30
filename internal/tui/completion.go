@@ -30,6 +30,7 @@ var builtinCommands = []cmdEntry{
 	{"help", "Show help or detail for a command"},
 	{"persona", "Pick a persona from an interactive list"},
 	{"mode", "Switch permission mode (plan / build / auto)"},
+	{"guard", "Toggle output validation (on / off / status)"},
 	{"clear", "Clear the conversation transcript"},
 	{"config", "Open configuration wizard"},
 	{"memory", "Show saved memories"},
@@ -50,6 +51,7 @@ var builtinCommands = []cmdEntry{
 // immediately, which opens the interactive picker.
 var commandsNeedingArgs = map[string]bool{
 	"mode":     true,
+	"guard":    true,
 	"remember": true,
 	"help":     true,
 	"session":  true,
