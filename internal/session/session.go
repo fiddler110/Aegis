@@ -5,12 +5,14 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/scottymacleod/aegis/internal/trace"
 
 	_ "modernc.org/sqlite"
 )
@@ -22,6 +24,7 @@ type Session struct {
 	System       string             `json:"system"`
 	Mode         string             `json:"mode"`
 	Messages     []provider.Message `json:"messages"`
+	Traces       []trace.TurnTrace  `json:"traces,omitempty"`
 	InputTokens  int                `json:"input_tokens"`
 	OutputTokens int                `json:"output_tokens"`
 	CostUSD      float64            `json:"cost_usd"`
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     system       TEXT    NOT NULL DEFAULT '',
     mode         TEXT    NOT NULL DEFAULT 'plan',
     messages     BLOB    NOT NULL DEFAULT '[]',
+    traces       BLOB    NOT NULL DEFAULT '[]',
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd     REAL    NOT NULL DEFAULT 0,
@@ -97,6 +101,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 		`ALTER TABLE sessions ADD COLUMN input_tokens  INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN cost_usd      REAL    NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN traces        BLOB    NOT NULL DEFAULT '[]'`,
 	} {
 		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
 	}
@@ -126,13 +131,14 @@ func (s *Store) Create(ctx context.Context, title, system, mode string) (*Sessio
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, messages, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, messages, traces, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
 		sess         Session
 		msgBlob      []byte
+		traceBlob    []byte
 		created, upd int64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &msgBlob,
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &msgBlob, &traceBlob,
 		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -144,9 +150,54 @@ func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 		return nil, fmt.Errorf("decode messages: %w", err)
 	}
 	sess.Messages = msgs
+	if len(traceBlob) > 0 {
+		if err := json.Unmarshal(traceBlob, &sess.Traces); err != nil {
+			return nil, fmt.Errorf("decode traces: %w", err)
+		}
+	}
 	sess.CreatedAt = time.UnixMilli(created)
 	sess.UpdatedAt = time.UnixMilli(upd)
 	return &sess, nil
+}
+
+// AppendTraces appends per-turn trace records to a session's trace log. It is a
+// read-modify-write within a transaction so concurrent runs on different
+// sessions stay isolated (and the store serializes writes on a single
+// connection). A nil/empty slice is a no-op.
+func (s *Store) AppendTraces(ctx context.Context, id string, ts []trace.TurnTrace) error {
+	if len(ts) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	var blob []byte
+	if err := tx.QueryRowContext(ctx, `SELECT traces FROM sessions WHERE id = ?`, id).Scan(&blob); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	var existing []trace.TurnTrace
+	if len(blob) > 0 {
+		if err := json.Unmarshal(blob, &existing); err != nil {
+			return fmt.Errorf("decode traces: %w", err)
+		}
+	}
+	existing = append(existing, ts...)
+	out, err := json.Marshal(existing)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET traces = ?, updated_at = ? WHERE id = ?`,
+		out, time.Now().UnixMilli(), id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SaveMessages persists the message list and bumps updated_at.

@@ -132,6 +132,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newChatCmd())
 	cmd.AddCommand(newSessionsCmd())
 	cmd.AddCommand(newScanCmd())
+	cmd.AddCommand(newSandboxCmd())
 	cmd.AddCommand(newDiagramCmd())
 	cmd.AddCommand(newWorkerCmd())
 	return cmd

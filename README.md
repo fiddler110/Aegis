@@ -412,6 +412,7 @@ gutter blocks. The sidebar shows a live **context-window meter** and
 | `/skills` | List saved skills |
 | `/commands` | List custom commands |
 | `/models` | Show current model |
+| `/sandbox [use <target>]` | Show detected container runtimes and the active backend, or switch it |
 | `/session [list]` | Session info or list all sessions |
 | `/rewind [n] [scope]` | List checkpoints, or restore one (`code`, `conversation`, or `both`) |
 | `/quit` | Exit |
@@ -494,6 +495,14 @@ aegis sessions list
 
 # Export a session as a shareable transcript (html, md, or json)
 aegis sessions export <id> --format html --out review.html
+
+# Print the per-turn trace (tokens, cost, tools + durations, wall time)
+aegis sessions trace <id>
+
+# Inspect, select, and test the shell-execution sandbox
+aegis sandbox detect            # probe for Docker / Podman / WSL / Apple Containers
+aegis sandbox use auto          # detect & use the best available runtime
+aegis sandbox test              # run a command in the configured sandbox
 
 # Run several prompts as concurrent, independent sessions
 aegis parallel "fix the failing tests" "update the README" --yes
@@ -634,10 +643,25 @@ The `list_models` tool probes `localhost` for Ollama (`:11434`), LM Studio (`:12
 > **Scope:** these rules operate at the tool-capability layer (tools declaring `network`/`write` with a parseable URL) and are a fetch-layer control, **not** a system-wide egress firewall — the `shell` tool can still reach the network directly. When a network policy is enabled with the shell tool present, and when `auto` mode runs with the local sandbox, the daemon logs a startup warning. For enforced isolation, run with the [container sandbox](#sandboxed-execution).
 
 ### Sandboxed Execution
-Shell commands can run locally (default) or inside containers: Docker, Podman (Linux/macOS/Windows), and Apple Containers (macOS). Network isolation and path validation prevent workspace escapes.
+Shell commands can run locally (default) or inside containers: **Docker**, **Podman**, **WSL containers** (Windows, via `wslc`), and **Apple Containers** (macOS). Network isolation and path validation prevent workspace escapes.
+
+Aegis detects which runtimes are actually present on the host. Set `sandbox.backend: auto` and it probes the available runtimes and picks the best one by priority (on Windows, WSL containers are preferred), falling back to local execution if none is found; `sandbox.backend: container` with an explicit `sandbox.runtime` forces a specific engine. The `sandbox.priority` list overrides the auto order.
+
+Inspect and switch the sandbox without editing files:
+
+```bash
+aegis sandbox detect            # table of runtimes: available?, version, and the auto pick
+aegis sandbox status            # configured backend + live detection
+aegis sandbox use <target>      # local | auto | docker | podman | wslc | container (writes config)
+aegis sandbox test              # run `uname -a` in the configured sandbox to verify it works
+```
+
+The same is available in the TUI via `/sandbox` (and `/sandbox use <target>`). Backend changes are written to config and take effect on the next restart.
 
 ### Cost Tracking
 Token usage is tracked per turn and displayed live in the TUI: a context-window meter, the prompt-cache hit rate (Anthropic prompt caching), and a running USD estimate. The pricing catalog covers Anthropic, OpenAI (GPT-4o/4.1/o1/o3 families), Google Gemini, and Groq open models, and resolves OpenRouter-style `vendor/model` ids; unknown models still have their tokens counted but contribute no cost. A configurable `budget_usd` limit halts a run when estimated spend exceeds the threshold.
+
+Beyond the running total, a structured **per-turn trace** is persisted with each session: turn index, model, input/output (and cache) tokens, per-turn cost, the tool calls the turn triggered with their durations, and wall time. Print it with `aegis sessions trace <id>` for a per-turn table and session totals — useful for auditing or profiling a run after the fact.
 
 ---
 
@@ -749,9 +773,10 @@ swarm:
 
 # ── Shell sandbox ─────────────────────────────────────────────────────────────
 sandbox:
-  backend: local               # "local" | "container"
-  runtime: ""                  # "docker" | "podman" | "container" (Apple); empty = auto
-  image: "ubuntu:22.04"        # container image when backend=container
+  backend: local               # "local" | "container" | "auto" (detect & pick, else local)
+  runtime: ""                  # force when backend=container: docker | podman | wslc | container (Apple)
+  priority: []                 # auto order, e.g. [wslc, docker, podman]; empty = OS default
+  image: "ubuntu:22.04"        # container image when backend=container/auto
   network: false               # allow network inside containers
 
 # ── Security policies ─────────────────────────────────────────────────────────
@@ -932,8 +957,9 @@ internal/
   api/                     Shared API types (request/response structs, event kinds)
   config/                  Layered config loading (defaults → global → project → env) + config writer
   cost/                    Token-based cost tracking + budget enforcement
+  trace/                   Per-turn observability records (tokens, cost, tools, timing)
   swarm/                   Multi-agent coordination: identities, mailbox, registry, backends
-  sandbox/                 Pluggable sandbox: local, Docker, Podman, Apple Containers
+  sandbox/                 Pluggable sandbox + runtime detection: local, Docker, Podman, WSL (wslc), Apple Containers
   filetracker/             File staleness detection
   lsp/                     LSP client manager (lifecycle, diagnostics, references)
   discover/                Auto-discovery of local model servers (Ollama, LM Studio, LiteLLM)

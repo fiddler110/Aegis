@@ -106,6 +106,77 @@ func TestRunToolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRunEmitsTurnTraces(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		// Turn 1: assistant asks to call the echo tool.
+		{
+			{Type: provider.EventTextDelta, Text: "let me check"},
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
+				ID: "tu_1", Name: "echo", Input: json.RawMessage(`{"msg":"hi"}`),
+			}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		// Turn 2: final answer, no tools.
+		{
+			{Type: provider.EventTextDelta, Text: "done"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 20, OutputTokens: 3}},
+		},
+	}}
+
+	reg := tool.NewRegistry()
+	if err := reg.Register(&echoTool{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a priced model so per-turn cost is exercised.
+	eng, err := New(Options{Adapter: adapter, Tools: reg, Model: "claude-opus-4-8", MaxTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var traces []TurnTraceForTest
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hello"}}})
+
+	err = eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindTrace && ev.Trace != nil {
+			traces = append(traces, TurnTraceForTest{
+				Index: ev.Trace.Index, In: ev.Trace.InputTokens, Out: ev.Trace.OutputTokens,
+				Cost: ev.Trace.CostUSD, Tools: len(ev.Trace.ToolCalls),
+			})
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(traces) != 2 {
+		t.Fatalf("got %d traces, want 2", len(traces))
+	}
+	if traces[0].Index != 0 || traces[1].Index != 1 {
+		t.Errorf("trace indices = %d,%d want 0,1", traces[0].Index, traces[1].Index)
+	}
+	if traces[0].Tools != 1 {
+		t.Errorf("turn 0 tool calls = %d, want 1 (echo)", traces[0].Tools)
+	}
+	if traces[1].Tools != 0 {
+		t.Errorf("turn 1 tool calls = %d, want 0", traces[1].Tools)
+	}
+	if traces[0].In != 10 || traces[1].In != 20 {
+		t.Errorf("input tokens = %d,%d want 10,20", traces[0].In, traces[1].In)
+	}
+	// Priced model must yield a positive per-turn cost.
+	if traces[0].Cost <= 0 {
+		t.Errorf("turn 0 cost = %f, want > 0", traces[0].Cost)
+	}
+}
+
+// TurnTraceForTest is a flattened view used to assert on emitted traces.
+type TurnTraceForTest struct {
+	Index, In, Out, Tools int
+	Cost                  float64
+}
+
 func TestRunUnknownTool(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
 		{

@@ -12,6 +12,8 @@ import (
 	"github.com/scottymacleod/aegis/internal/api"
 	"github.com/scottymacleod/aegis/internal/client"
 	"github.com/scottymacleod/aegis/internal/commands"
+	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/scottymacleod/aegis/internal/sandbox"
 	"github.com/scottymacleod/aegis/internal/share"
 )
 
@@ -60,6 +62,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"skills":   d.cmdSkills,
 		"commands": d.cmdCommands,
 		"models":   d.cmdModels,
+		"sandbox":  d.cmdSandbox,
 		"session":  d.cmdSession,
 		"rewind":   d.cmdRewind,
 		"share":    d.cmdShare,
@@ -152,6 +155,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"skills", "List saved skills"},
 		{"commands", "List custom commands"},
 		{"models", "Show current model info"},
+		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
 		{"session [list]", "Show session info or list sessions"},
 		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
 		{"share [html|md|json]", "Export this session to a shareable transcript file"},
@@ -198,6 +202,8 @@ func builtinHelp(name string) string {
 		return "/commands\n  List custom user-defined commands from .aegis/commands/."
 	case "models":
 		return "/models\n  Show the current model and provider."
+	case "sandbox":
+		return "/sandbox [use <target>]\n  No args: show the configured sandbox backend and detected container runtimes (docker, podman, wslc, container).\n  use <local|auto|docker|podman|wslc|container>: set the backend (written to global config; takes effect on restart)."
 	case "session":
 		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
 	case "rewind":
@@ -354,6 +360,51 @@ func (d *SlashDispatcher) cmdCommands(_ []string) SlashResult {
 
 func (d *SlashDispatcher) cmdModels(_ []string) SlashResult {
 	return SlashResult{Output: fmt.Sprintf("Model: %s\nMode: %s", d.model, d.mode)}
+}
+
+func (d *SlashDispatcher) cmdSandbox(args []string) SlashResult {
+	cfg, err := config.Load()
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load config: %v", err), IsError: true}
+	}
+	priority := sandbox.ParseRuntimes(cfg.Sandbox.Priority)
+
+	// /sandbox use <target>: persist a new backend choice.
+	if len(args) >= 2 && strings.ToLower(args[0]) == "use" {
+		patch := config.SandboxPatch{Image: cfg.Sandbox.Image, Network: cfg.Sandbox.Network, Priority: cfg.Sandbox.Priority}
+		target := strings.ToLower(strings.TrimSpace(args[1]))
+		switch target {
+		case "local", "auto":
+			patch.Backend = target
+		case "wsl", "wslc":
+			patch.Backend, patch.Runtime = "container", "wslc"
+		case "docker", "podman", "container":
+			patch.Backend, patch.Runtime = "container", target
+		default:
+			return SlashResult{Output: fmt.Sprintf("Unknown sandbox target %q (want local, auto, docker, podman, wslc, or container).", args[1]), IsError: true}
+		}
+		if err := config.PatchGlobalSandbox(patch); err != nil {
+			return SlashResult{Output: fmt.Sprintf("Failed to write config: %v", err), IsError: true}
+		}
+		return SlashResult{Output: fmt.Sprintf("Sandbox backend set to %q. Restart Aegis to apply.", target)}
+	}
+
+	// /sandbox: show current config and detected runtimes.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	backend := cfg.Sandbox.Backend
+	if backend == "" {
+		backend = "local"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Sandbox backend: %s", backend)
+	if cfg.Sandbox.Runtime != "" {
+		fmt.Fprintf(&b, " (runtime: %s)", cfg.Sandbox.Runtime)
+	}
+	b.WriteString("\n\n")
+	b.WriteString(sandbox.Report(ctx, priority))
+	b.WriteString("\n\nChange with: /sandbox use <local|auto|docker|podman|wslc|container>")
+	return SlashResult{Output: b.String()}
 }
 
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {

@@ -14,12 +14,14 @@ type ContainerRuntime string
 const (
 	RuntimeDocker          ContainerRuntime = "docker"
 	RuntimePodman          ContainerRuntime = "podman"
+	RuntimeWSL             ContainerRuntime = "wslc"      // Windows WSL containers (via `wslc` CLI)
 	RuntimeAppleContainers ContainerRuntime = "container" // macOS Apple Containers (via `container` CLI)
 )
 
 // ContainerBackend runs commands inside a container using whichever container
-// runtime is available (Docker, Podman, or Apple Containers on macOS). The
-// workspace is bind-mounted so file tools continue to work on the host.
+// runtime is available (Docker, Podman, WSL containers on Windows, or Apple
+// Containers on macOS). The workspace is bind-mounted so file tools continue to
+// work on the host.
 type ContainerBackend struct {
 	runtime ContainerRuntime
 	image   string
@@ -28,15 +30,16 @@ type ContainerBackend struct {
 
 // ContainerOpts configures the container sandbox.
 type ContainerOpts struct {
-	Image   string           // container image (default "ubuntu:22.04")
-	Network bool             // allow network access inside the container
-	Prefer  ContainerRuntime // force a specific runtime; empty = auto-detect
+	Image    string             // container image (default "ubuntu:22.04")
+	Network  bool               // allow network access inside the container
+	Prefer   ContainerRuntime   // force a specific runtime; empty = auto-detect
+	Priority []ContainerRuntime // auto-detect order when Prefer is empty; empty = OS default
 }
 
 // NewContainerBackend creates a container sandbox, auto-detecting the best
 // available runtime. Returns ErrNoContainerRuntime if none is found.
 func NewContainerBackend(opts ContainerOpts) (*ContainerBackend, error) {
-	rt, err := detectRuntime(opts.Prefer)
+	rt, err := selectRuntime(context.Background(), opts.Prefer, opts.Priority)
 	if err != nil {
 		return nil, err
 	}
@@ -47,45 +50,22 @@ func NewContainerBackend(opts ContainerOpts) (*ContainerBackend, error) {
 }
 
 // ErrNoContainerRuntime is returned when no container engine is available.
-var ErrNoContainerRuntime = fmt.Errorf("sandbox: no container runtime found (tried docker, podman, apple containers)")
+var ErrNoContainerRuntime = fmt.Errorf("sandbox: no container runtime found (tried docker, podman, wsl, apple containers)")
 
-// detectRuntime probes for available container runtimes. If prefer is set and
-// available, it is used; otherwise the first available runtime wins.
-func detectRuntime(prefer ContainerRuntime) (ContainerRuntime, error) {
+// selectRuntime resolves which runtime to use. A non-empty prefer is honored if
+// available; otherwise the best runtime in priority order (or the OS default)
+// wins.
+func selectRuntime(ctx context.Context, prefer ContainerRuntime, priority []ContainerRuntime) (ContainerRuntime, error) {
 	if prefer != "" {
-		if runtimeAvailable(prefer) {
+		if probeRuntime(ctx, prefer).Available {
 			return prefer, nil
 		}
 		return "", fmt.Errorf("sandbox: preferred runtime %q is not available", prefer)
 	}
-
-	// Probe order: Docker first (most common), then Podman, then Apple Containers.
-	candidates := []ContainerRuntime{RuntimeDocker, RuntimePodman}
-	if runtime.GOOS == "darwin" {
-		candidates = append(candidates, RuntimeAppleContainers)
-	}
-	for _, rt := range candidates {
-		if runtimeAvailable(rt) {
-			return rt, nil
-		}
+	if rt, ok := DetectBest(ctx, priority); ok {
+		return rt, nil
 	}
 	return "", ErrNoContainerRuntime
-}
-
-// runtimeAvailable checks whether a container runtime's CLI is on PATH and
-// responds to a basic info/version command.
-func runtimeAvailable(rt ContainerRuntime) bool {
-	bin := string(rt)
-	switch rt {
-	case RuntimeDocker, RuntimePodman:
-		err := exec.Command(bin, "info").Run()
-		return err == nil
-	case RuntimeAppleContainers:
-		err := exec.Command(bin, "list").Run()
-		return err == nil
-	default:
-		return false
-	}
 }
 
 // DetectedRuntime returns the runtime this backend is using.
@@ -144,9 +124,41 @@ func (c *ContainerBackend) runArgs(command string, opts ExecOpts) []string {
 	switch c.runtime {
 	case RuntimeAppleContainers:
 		return c.appleContainerArgs(command, opts)
+	case RuntimeWSL:
+		return c.wslRunArgs(command, opts)
 	default:
 		return c.ociRunArgs(command, opts)
 	}
+}
+
+// wslRunArgs builds `wslc run` arguments. wslc presents a Docker-style CLI.
+// Verified against wslc 2.9.3.0: it accepts --rm, --network, -v, and -w, but
+// does NOT expose the OCI hardening flags (--cap-drop, --security-opt), so those
+// are omitted. The bind-mount source is a path inside the WSL VM, where Windows
+// drives are mounted under /mnt/<drive>, so C:\work becomes /mnt/c/work.
+func (c *ContainerBackend) wslRunArgs(command string, opts ExecOpts) []string {
+	args := []string{"run", "--rm"}
+	if !c.network {
+		args = append(args, "--network", "none")
+	}
+	if opts.Dir != "" {
+		args = append(args, "-v", wslHostPath(opts.Dir)+":/workspace", "-w", "/workspace")
+	}
+	args = append(args, c.image, "/bin/sh", "-c", command)
+	return args
+}
+
+// wslHostPath converts a Windows host directory to its path inside the WSL VM
+// (C:\foo\bar -> /mnt/c/foo/bar). Non-Windows paths pass through unchanged.
+func wslHostPath(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	if len(p) >= 2 && p[1] == ':' {
+		p = "/mnt/" + strings.ToLower(string(p[0])) + p[2:]
+	}
+	return p
 }
 
 // ociRunArgs builds `docker run` / `podman run` arguments.

@@ -37,6 +37,7 @@ var builtinCommands = []cmdEntry{
 	{"skills", "List saved skills"},
 	{"commands", "List custom commands"},
 	{"models", "Show current model info"},
+	{"sandbox", "Show or switch the execution sandbox"},
 	{"session", "Show session info or list sessions"},
 	{"rewind", "List or restore checkpoints"},
 	{"share", "Export session to a shareable file"},
