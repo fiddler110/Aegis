@@ -57,6 +57,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"persona":  d.cmdPersona,
 		"mode":     d.cmdMode,
 		"guard":    d.cmdGuard,
+		"tools":    d.cmdTools,
 		"clear":    d.cmdClear,
 		"config":   d.cmdConfig,
 		"memory":   d.cmdMemory,
@@ -68,6 +69,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"session":  d.cmdSession,
 		"rewind":   d.cmdRewind,
 		"share":    d.cmdShare,
+		"timeline": d.cmdTimeline,
 		"quit":     d.cmdQuit,
 		"exit":     d.cmdQuit,
 	}
@@ -151,6 +153,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"persona [name]", "Pick persona interactively, or switch directly by name"},
 		{"mode <plan|build|auto>", "Switch permission mode"},
 		{"guard [on|off|status]", "Toggle output validation for this session"},
+		{"tools <compact|full>", "Set tool-output line cap (compact=10 lines, full=unlimited)"},
 		{"clear", "Clear the transcript"},
 		{"config", "Interactive configuration wizard"},
 		{"memory", "Show saved memories"},
@@ -161,6 +164,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
 		{"session [list]", "Show session info or list sessions"},
 		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
+		{"timeline", "Jump to a past turn in the conversation timeline"},
 		{"share [html|md|json]", "Export this session to a shareable transcript file"},
 		{"exit", "Exit Aegis"},
 	} {
@@ -193,6 +197,8 @@ func builtinHelp(name string) string {
 		return "/mode <plan|build|auto>\n  Switch the permission mode for the current session.\n  plan = read-only\n  build = file edits allowed, shell execution requires approval\n  auto  = all capabilities allowed without prompting"
 	case "guard":
 		return "/guard [on|off|status]\n  Toggle output validation for the current session.\n  Defaults to the configured output_guard.enabled; resets on restart."
+	case "tools":
+		return "/tools <compact|full>\n  compact: cap multi-line tool output at 10 lines (default).\n  full: show complete tool output without truncation.\n  Applies to new results; toggle resets on TUI restart."
 	case "clear":
 		return "/clear\n  Clear the conversation transcript (session history is preserved)."
 	case "config":
@@ -318,6 +324,19 @@ func (d *SlashDispatcher) guardStatus() string {
 		return "on"
 	}
 	return "off"
+}
+
+// cmdTools toggles per-session tool-output display between compact (10-line cap)
+// and full (no cap). The result carries a sentinel string handled by the TUI.
+func (d *SlashDispatcher) cmdTools(args []string) SlashResult {
+	switch strings.ToLower(firstArg(args)) {
+	case "compact":
+		return SlashResult{Output: "\x00tools-compact"}
+	case "full":
+		return SlashResult{Output: "\x00tools-full"}
+	default:
+		return SlashResult{Output: "Usage: /tools <compact|full>\n  compact  cap tool output at 10 lines (default)\n  full     show complete tool output"}
+	}
 }
 
 // firstArg returns the first argument or "" when none were given.
@@ -583,6 +602,10 @@ func (d *SlashDispatcher) cmdShare(args []string) SlashResult {
 
 func (d *SlashDispatcher) cmdConfig(_ []string) SlashResult {
 	return SlashResult{Output: "\x00wizard"}
+}
+
+func (d *SlashDispatcher) cmdTimeline(_ []string) SlashResult {
+	return SlashResult{Output: "\x00timeline"}
 }
 
 func (d *SlashDispatcher) cmdQuit(_ []string) SlashResult {

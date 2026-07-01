@@ -5,12 +5,14 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -87,6 +89,7 @@ type model struct {
 	wizard     *wizardModel
 	workDir    string
 
+	toolCompact         bool        // when true, tool results are capped at toolMaxLinesCompact lines
 	tools               []toolEntry
 	inputTokens         int // uncached input tokens (last turn)
 	outputTokens        int
@@ -143,15 +146,28 @@ type model struct {
 	term        termPane
 	termRun     *termRun // non-nil while a command is running in the terminal
 
+	// File frecency map for @-mention completion ranking (P2.3).
+	fileFrecency map[string]int
+
+	// Files written/edited this session for the sidebar FILES section (P2.4).
+	changedFiles []string
+
+	// Running sub-agents shown in the sidebar (P2.5).
+	teammates []api.Teammate
+
+	// Conversation timeline entries for /timeline picker (P2.8).
+	timelineEntries []timelineEntry
+
 	// overlay / modals
-	keys          keyMap
-	palette       *paletteModel
-	personaPicker *personaPickerModel
-	sessionPicker *sessionPickerModel
-	helpOpen      bool
-	activeToast   *toast
-	completion    completionState
-	approval      *approvalState // non-nil while engine is blocked waiting for user approval
+	keys           keyMap
+	palette        *paletteModel
+	personaPicker  *personaPickerModel
+	sessionPicker  *sessionPickerModel
+	timelinePicker *timelinePickerModel
+	helpOpen       bool
+	activeToast    *toast
+	completion     completionState
+	approval       *approvalState // non-nil while engine is blocked waiting for user approval
 }
 
 // approvalState holds the details of a pending tool-execution approval request.
@@ -205,6 +221,17 @@ type streamStartedMsg struct {
 type eventMsg api.Event
 type streamClosedMsg struct{}
 type errMsg struct{ err error }
+
+// bangMsg carries the result of a ! shell command (P2.2).
+type bangMsg struct {
+	cmd    string
+	output string
+	code   int
+}
+
+// teammatesUpdateMsg is a silent subagent poll result (P2.5).
+type teammatesUpdateMsg struct{ items []api.Teammate }
+
 type teammatesMsg struct {
 	items []api.Teammate
 	err   error
@@ -282,6 +309,7 @@ func newModel(cfg Config) model {
 		renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
 		keys:         defaultKeyMap(),
 		followBottom: true,
+		toolCompact:  true,
 		term:         newTermPane(workDir, 10), // height recalculated on first resize
 	}
 	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
@@ -302,6 +330,51 @@ func (m model) fetchTeammates() tea.Cmd {
 		items, err := cl.Teammates(ctx)
 		return teammatesMsg{items: items, err: err}
 	}
+}
+
+// fetchTeammatesQuiet polls sub-agent status silently during streaming (P2.5).
+func (m model) fetchTeammatesQuiet() tea.Cmd {
+	cl := m.cfg.Client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		items, err := cl.Teammates(ctx)
+		if err != nil {
+			return nil
+		}
+		return teammatesUpdateMsg{items: items}
+	}
+}
+
+// execBangCmd runs a ! shell command and returns its output (P2.2).
+func (m model) execBangCmd(cmd string) tea.Cmd {
+	workDir := m.workDir
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		c := exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec
+		c.Dir = workDir
+		out, err := c.CombinedOutput()
+		code := 0
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else {
+				code = 1
+			}
+		}
+		return bangMsg{cmd: cmd, output: strings.TrimRight(string(out), "\n"), code: code}
+	}
+}
+
+// recordChangedFile adds path to changedFiles if not already present (P2.4).
+func (m *model) recordChangedFile(path string) {
+	for _, f := range m.changedFiles {
+		if f == path {
+			return
+		}
+	}
+	m.changedFiles = append(m.changedFiles, path)
 }
 
 func (m model) fetchSessions() tea.Cmd {
@@ -532,6 +605,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Timeline picker overlay (P2.8).
+	if m.timelinePicker != nil {
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = ws.Width, ws.Height
+			m.layout()
+			return m, nil
+		}
+		if _, ok := msg.(timelinePickerCancelMsg); ok {
+			m.timelinePicker = nil
+			m.ta.Focus()
+			return m, nil
+		}
+		if sel, ok := msg.(timelinePickerSelectedMsg); ok {
+			m.timelinePicker = nil
+			m.ta.Focus()
+			// Scroll to the selected turn's byte offset in the wrapped transcript.
+			base := m.transcript.String()
+			offset := sel.entry.byteOffset
+			if offset > len(base) {
+				offset = len(base)
+			}
+			prefix := wrap(base[:offset], m.vp.Width())
+			m.vp.SetYOffset(strings.Count(prefix, "\n"))
+			m.followBottom = false
+			m.refresh()
+			return m, nil
+		}
+		updated, cmd := m.timelinePicker.Update(msg)
+		m.timelinePicker = &updated
+		return m, cmd
+	}
+
 	// Help overlay: only Escape or F1 closes it.
 	if m.helpOpen {
 		if k, ok := msg.(tea.KeyMsg); ok {
@@ -559,6 +664,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.animStep++ // advance the gradient working shimmer
 			cmds = append(cmds, cmd)
 			m.refresh() // animate the in-transcript thinking indicator
+			// P2.5: poll sub-agent roster every 20 animation frames.
+			if m.animStep%20 == 0 {
+				cmds = append(cmds, m.fetchTeammatesQuiet())
+			}
 		}
 
 	case toastExpiredMsg:
@@ -588,8 +697,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Approval prompt intercepts all keys while the engine is waiting for
-		// user confirmation. Y/enter approves; N/esc denies; everything else
-		// is swallowed (except viewport scroll which is handled after the switch).
+		// user confirmation. Y/enter approves once; A approves always (caches
+		// for the session); N/esc denies. Everything else is swallowed (except
+		// viewport scroll which is handled after the switch).
 		if m.approval != nil {
 			switch msg.String() {
 			case "y", "Y", "enter":
@@ -597,13 +707,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.approval = nil
 				m.status = "thinking…"
 				m.applyViewportHeight()
-				return m, m.sendApprovalCmd(id, true)
+				return m, m.sendApprovalCmd(id, true, false)
+			case "a", "A":
+				id := m.approval.id
+				m.approval = nil
+				m.status = "thinking…"
+				m.applyViewportHeight()
+				return m, m.sendApprovalCmd(id, true, true)
 			case "n", "N", "esc":
 				id := m.approval.id
 				m.approval = nil
 				m.status = "thinking…"
 				m.applyViewportHeight()
-				return m, m.sendApprovalCmd(id, false)
+				return m, m.sendApprovalCmd(id, false, false)
 			}
 			// Let viewport scroll keys fall through to the vp.Update below.
 			var vpCmd tea.Cmd
@@ -738,6 +854,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, nil
 			}
+			// P2.2: Bang ! shell mode — execute the rest as a shell command.
+			if strings.HasPrefix(text, "!") {
+				shellCmd := strings.TrimSpace(text[1:])
+				if shellCmd == "" {
+					return m, nil
+				}
+				m.ta.Reset()
+				m.history = append(m.history, text)
+				m.histIdx = -1
+				m.draftInput = ""
+				return m, m.execBangCmd(shellCmd)
+			}
 			if parsed := commands.Parse(text); parsed != nil {
 				m.ta.Reset()
 				m.histIdx = -1
@@ -797,6 +925,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setSteerMode(false)
 		m.transcript.WriteString(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")
 		m.status = "ready"
+		m.refresh()
+		return m, nil
+
+	case bangMsg: // P2.2: shell command result
+		header := m.th.tool.Render("! " + msg.cmd)
+		m.transcript.WriteString("\n" + header + "\n")
+		if msg.output != "" {
+			style := m.th.sideValue
+			if msg.code != 0 {
+				style = m.th.toolErr
+			}
+			m.transcript.WriteString(style.Render(msg.output) + "\n")
+		}
+		if msg.code != 0 {
+			m.transcript.WriteString(m.th.toolErr.Render(fmt.Sprintf("exit %d", msg.code)) + "\n")
+		}
+		m.transcript.WriteString("\n")
+		m.followBottom = true
+		m.refresh()
+		return m, nil
+
+	case teammatesUpdateMsg: // P2.5: silent sub-agent poll
+		m.teammates = msg.items
 		m.refresh()
 		return m, nil
 
@@ -862,6 +1013,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizard = wiz
 			return m, wiz.init()
 		}
+		if msg.Output == "\x00timeline" { // P2.8
+			if len(m.timelineEntries) == 0 {
+				t, cmd := newToastCmd("no turns in timeline yet", toastInfo)
+				m.activeToast = t
+				return m, cmd
+			}
+			picker := newTimelinePicker(m.width, m.height, m.timelineEntries)
+			m.timelinePicker = &picker
+			return m, nil
+		}
 		if msg.ReloadSession {
 			// A rewind changed the conversation: reload it and report via toast,
 			// since the reload resets the transcript.
@@ -885,7 +1046,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cacheReadTokens, m.cacheCreationTokens = 0, 0
 			m.tokensEstimated = false
 			m.turnCount = 0
+			m.changedFiles = m.changedFiles[:0]
+			m.teammates = nil
+			m.timelineEntries = m.timelineEntries[:0]
 			m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
+			m.refresh()
+			return m, nil
+		}
+		if msg.Output == "\x00tools-compact" {
+			m.toolCompact = true
+			m.refresh()
+			return m, nil
+		}
+		if msg.Output == "\x00tools-full" {
+			m.toolCompact = false
 			m.refresh()
 			return m, nil
 		}
@@ -1028,7 +1202,17 @@ func (m *model) syncCompletion() {
 		m.fileIndex = buildFileIndex(m.workDir)
 		m.fileIndexBuilt = true
 	}
-	m.completion = computeCompletion(val, m.commandEntries(), m.fileIndex)
+	// P2.3: sort file index by frecency so recently-used files appear first.
+	files := m.fileIndex
+	if len(m.fileFrecency) > 0 {
+		sorted := make([]string, len(files))
+		copy(sorted, files)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return m.fileFrecency[sorted[i]] > m.fileFrecency[sorted[j]]
+		})
+		files = sorted
+	}
+	m.completion = computeCompletion(val, m.commandEntries(), files)
 	if m.completion.active != prev {
 		m.applyViewportHeight()
 		m.refresh()
@@ -1170,14 +1354,15 @@ func (m *model) flushLiveText() {
 
 // sendApprovalCmd fires a POST to /sessions/{id}/approve with the user's
 // decision. It runs in a goroutine so the TUI stays responsive while the
-// request travels to the daemon.
-func (m model) sendApprovalCmd(approvalID string, approved bool) tea.Cmd {
+// request travels to the daemon. allowAlways=true caches the approval
+// server-side so subsequent calls to the same tool skip the prompt.
+func (m model) sendApprovalCmd(approvalID string, approved, allowAlways bool) tea.Cmd {
 	cl := m.cfg.Client
 	sessionID := m.cfg.SessionID
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := cl.SendApproval(ctx, sessionID, approvalID, approved); err != nil {
+		if err := cl.SendApproval(ctx, sessionID, approvalID, approved, allowAlways); err != nil {
 			return errMsg{err: fmt.Errorf("approval: %w", err)}
 		}
 		return nil // engine continues via the existing SSE stream
@@ -1291,23 +1476,25 @@ func (m model) renderApprovalBanner() string {
 	a := m.approval
 	w := max(m.width-2, 20)
 
-	// Line 1: tool name + truncated input
+	// Line 1: tool name + reason
 	header := lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚡ "+a.toolName) +
-		"  " + lipgloss.NewStyle().Foreground(colTextDim).Render(
-		truncate(a.input, max(w-len(a.toolName)-6, 12)))
+		"  " + lipgloss.NewStyle().Foreground(colTextMuted).Render(
+		truncate(a.reason, max(w-len(a.toolName)-6, 12)))
 
-	// Line 2: permission reason
-	reason := "  " + lipgloss.NewStyle().Foreground(colTextMuted).Render(a.reason)
+	// Line 2: content preview derived from tool input
+	preview := renderApprovalPreview(m.th, a.toolName, a.input, w)
 
-	// Line 3: Y/N prompt
+	// Line 3: y / a / n prompt
 	prompt := "  " +
 		lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("[y]") +
-		lipgloss.NewStyle().Foreground(colTextDim).Render(" approve  ") +
+		lipgloss.NewStyle().Foreground(colTextDim).Render(" once  ") +
+		lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("[a]") +
+		lipgloss.NewStyle().Foreground(colTextDim).Render(" always  ") +
 		lipgloss.NewStyle().Foreground(colDanger).Bold(true).Render("[n]") +
 		lipgloss.NewStyle().Foreground(colTextDim).Render(" deny")
 
 	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", w))
-	return sep + "\n" + " " + header + "\n" + reason + "\n" + prompt
+	return sep + "\n" + " " + header + "\n" + preview + "\n" + prompt
 }
 
 // applySwitchedSession swaps the active session, resetting per-session UI state
@@ -1323,6 +1510,9 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
 	m.tokensEstimated = false
 	m.turnCount = 0
+	m.changedFiles = nil
+	m.teammates = nil
+	m.timelineEntries = nil
 	m.wrapCacheLen = -1 // force a re-wrap on next refresh
 	m.streaming = false
 	m.status = "ready"
@@ -1375,7 +1565,7 @@ func (m *model) loadHistory(msgs []provider.Message) {
 				if name == "" {
 					name = "tool"
 				}
-				m.transcript.WriteString(renderToolResult(m.th, name, r.Content, r.IsError, m.vp.Width()) + "\n")
+				m.transcript.WriteString(renderToolResult(m.th, name, r.Content, r.IsError, m.vp.Width(), m.toolMaxLines()) + "\n")
 			}
 		case provider.RoleAssistant:
 			for _, b := range msg.Content {
@@ -1400,6 +1590,13 @@ func (m *model) loadHistory(msgs []provider.Message) {
 }
 
 func (m *model) appendUser(text string) {
+	// P2.8: record this turn in the timeline before writing anything.
+	m.timelineEntries = append(m.timelineEntries, timelineEntry{
+		text:       oneLine(text),
+		ts:         time.Now(),
+		byteOffset: len(m.transcript.buf),
+	})
+
 	if m.turnCount > 0 {
 		sepW := m.vp.Width() - 2
 		if sepW < 10 {
@@ -1432,9 +1629,25 @@ func (m *model) applyEvent(ev api.Event) {
 		if len(m.tools) > maxToolHistory {
 			m.tools = m.tools[1:]
 		}
+		// P2.3 + P2.4: track file access frecency and changed-file list.
+		switch ev.Tool {
+		case "read_file", "write_file", "edit_file", "multi_edit":
+			var inp struct {
+				Path string `json:"path"`
+			}
+			if json.Unmarshal(ev.ToolInput, &inp) == nil && inp.Path != "" {
+				if m.fileFrecency == nil {
+					m.fileFrecency = make(map[string]int)
+				}
+				m.fileFrecency[inp.Path]++
+				if ev.Tool != "read_file" {
+					m.recordChangedFile(inp.Path)
+				}
+			}
+		}
 
 	case api.KindToolResult:
-		m.transcript.WriteString(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width()) + "\n")
+		m.transcript.WriteString(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width(), m.toolMaxLines()) + "\n")
 		for i := len(m.tools) - 1; i >= 0; i-- {
 			if m.tools[i].name == ev.Tool && m.tools[i].status == "pending" {
 				if ev.ToolIsError {
@@ -1567,6 +1780,9 @@ func (m model) render() string {
 	if m.sessionPicker != nil {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.sessionPicker.View())
 	}
+	if m.timelinePicker != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.timelinePicker.View())
+	}
 
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
@@ -1669,6 +1885,38 @@ func (m model) renderSidebar(h int) string {
 				tag, style = "×", m.th.toolErr
 			}
 			add(style.Render(tag + " " + truncate(t.name, w-2)))
+		}
+		add("")
+	}
+
+	// P2.4: show files edited this session.
+	if len(m.changedFiles) > 0 {
+		section("FILES")
+		for _, f := range m.changedFiles {
+			add(m.th.sideValue.Render("✎ " + truncate(filepath.Base(f), w-2)))
+		}
+		add("")
+	}
+
+	// P2.5: show running sub-agents.
+	var runningAgents []api.Teammate
+	for _, tm := range m.teammates {
+		if tm.Status == "running" {
+			runningAgents = append(runningAgents, tm)
+		}
+	}
+	if len(runningAgents) > 0 {
+		section("AGENTS")
+		for _, tm := range runningAgents {
+			id := tm.AgentID
+			if len(id) > 8 {
+				id = id[:8]
+			}
+			label := "⚇ " + id
+			if tm.Summary != "" {
+				label += ": " + oneLine(tm.Summary)
+			}
+			add(m.th.tool.Render(truncate(label, w)))
 		}
 		add("")
 	}
@@ -1817,6 +2065,14 @@ func (m model) renderStats() string {
 		s += fmt.Sprintf("  $%.4f", m.costUSD)
 	}
 	return s
+}
+
+// toolMaxLines returns the effective per-result line cap based on compact mode.
+func (m *model) toolMaxLines() int {
+	if m.toolCompact {
+		return toolMaxLinesCompact
+	}
+	return 9999
 }
 
 // --- help overlay ---

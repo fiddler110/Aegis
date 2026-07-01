@@ -127,7 +127,7 @@ func runOneParallel(ctx context.Context, cl *client.Client, idx int, prompt, mod
 			logf("[%d] 🔧 %s\n", idx, ev.Tool)
 		case api.KindApprovalRequest:
 			actx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			_ = cl.SendApproval(actx, meta.ID, ev.ApprovalID, autoApprove)
+			_ = cl.SendApproval(actx, meta.ID, ev.ApprovalID, autoApprove, false)
 			cancel()
 			if autoApprove {
 				logf("[%d] ✓ approved %s\n", idx, ev.Tool)

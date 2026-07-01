@@ -191,9 +191,11 @@ func (c *Client) Rewind(ctx context.Context, sessionID, checkpointID, scope stri
 
 // SendApproval answers a pending interactive approval request for the given
 // session. approved=true lets the tool run; false denies it. approvalID must
-// match the approval_id from the KindApprovalRequest event.
-func (c *Client) SendApproval(ctx context.Context, sessionID, approvalID string, approved bool) error {
-	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve", api.ApproveRequest{Approved: approved, ID: approvalID}, nil)
+// match the approval_id from the KindApprovalRequest event. allowAlways=true
+// persists an auto-approve entry for this (session, tool) pair.
+func (c *Client) SendApproval(ctx context.Context, sessionID, approvalID string, approved, allowAlways bool) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve",
+		api.ApproveRequest{Approved: approved, AllowAlways: allowAlways, ID: approvalID}, nil)
 }
 
 // Steer injects a mid-run instruction into an active session run. The text is

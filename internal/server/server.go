@@ -83,9 +83,13 @@ type Server struct {
 	http        *http.Server
 	authToken   string // shared secret for API authentication
 
-	// pendingApprovals maps session ID → chan bool for interactive approval.
+	// pendingApprovals maps run ID → chan approvalDecision for interactive approval.
 	// The channel is written by handleApprove and read by sseApprover.Approve.
 	pendingApprovals sync.Map
+
+	// sessionPermCache maps "sessionID\x00toolName" → struct{} for tools the
+	// user has approved with "allow always" during the current daemon lifetime.
+	sessionPermCache sync.Map
 
 	// pendingSteers maps session ID → chan string for mid-run steering.
 	// The channel is written by handleSteer and drained by the engine between tool rounds.
@@ -96,27 +100,45 @@ type Server struct {
 	sessionSems sync.Map // string → chan struct{}
 }
 
+// approvalDecision carries the client's answer to an interactive approval prompt.
+type approvalDecision struct {
+	Approved    bool
+	AllowAlways bool
+}
+
 // sseApprover implements permission.Approver by sending a KindApprovalRequest
 // SSE event and blocking until the client POSTs a /sessions/{id}/approve answer.
 // The runID is echoed to the client so the approval reply is matched to this
 // specific run, preventing a concurrent run on the same session from consuming
-// the answer.
+// the answer. AllowAlways decisions are stored in permCache so future calls to
+// the same tool within the session are auto-approved without prompting.
 type sseApprover struct {
-	send  func(api.Event)
-	ch    <-chan bool
-	runID string
+	send      func(api.Event)
+	ch        <-chan approvalDecision
+	runID     string
+	sessionID string
+	permCache *sync.Map // key: sessionID+"\x00"+toolName → struct{}
 }
 
-func (a *sseApprover) Approve(ctx context.Context, toolName, reason string, _ json.RawMessage) bool {
+func (a *sseApprover) Approve(ctx context.Context, toolName, reason string, input json.RawMessage) bool {
+	// Check session-scoped allow-always cache before prompting.
+	cacheKey := a.sessionID + "\x00" + toolName
+	if _, ok := a.permCache.Load(cacheKey); ok {
+		return true
+	}
 	a.send(api.Event{
 		Kind:           api.KindApprovalRequest,
 		Tool:           toolName,
+		ToolInput:      input,
 		ApprovalReason: reason,
 		ApprovalID:     a.runID,
 	})
 	select {
-	case approved := <-a.ch:
-		return approved
+	case d := <-a.ch:
+		if d.AllowAlways && d.Approved {
+			a.permCache.Store(cacheKey, struct{}{})
+		}
+		return d.Approved
 	case <-ctx.Done():
 		return false
 	}
@@ -662,6 +684,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		MaxTokens:             s.cfg.Provider.MaxTokens,
 		MaxIterations:         s.cfg.Provider.MaxIterations,
 		LoopThreshold:         s.cfg.Provider.LoopThreshold,
+		ContextWindowTokens:   s.cfg.Provider.ContextWindow,
 		SteerChan:             steerCh,
 		OutputGuard:           guardFn,
 		OutputGuardMaxRetries: guardRetries,
@@ -982,7 +1005,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// Register a per-run approval channel keyed by a unique run id so a
 	// concurrent run on the same session can't consume this run's answer.
 	runID := newRunID()
-	approvalCh := make(chan bool, 1)
+	approvalCh := make(chan approvalDecision, 1)
 	s.pendingApprovals.Store(runID, approvalCh)
 	defer s.pendingApprovals.Delete(runID)
 
@@ -1005,7 +1028,13 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Permission.AutoApproveExec {
 		runApprover = permission.AutoApprove{}
 	} else {
-		runApprover = &sseApprover{send: send, ch: approvalCh, runID: runID}
+		runApprover = &sseApprover{
+			send:      send,
+			ch:        approvalCh,
+			runID:     runID,
+			sessionID: id,
+			permCache: &s.sessionPermCache,
+		}
 	}
 
 	// Steer channel: the TUI can POST /sessions/{id}/steer while the run is
@@ -1124,9 +1153,9 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no pending approval for run")
 		return
 	}
-	ch := val.(chan bool)
+	ch := val.(chan approvalDecision)
 	select {
-	case ch <- req.Approved:
+	case ch <- approvalDecision{Approved: req.Approved, AllowAlways: req.AllowAlways}:
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusConflict, "approval already answered or not yet requested")
