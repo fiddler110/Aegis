@@ -108,29 +108,31 @@ type Options struct {
 	Temperature           *float64
 	MaxIterations         int           // safety cap on tool-call rounds; 0 -> default
 	LoopThreshold         int           // identical tool-call turns before aborting; 0 -> default, <0 disables
+	ContextWindowTokens   int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
 	SteerChan             <-chan string // optional; steering messages injected between tool rounds
 	Logger                *slog.Logger
 }
 
 // Engine runs the agent loop.
 type Engine struct {
-	adapter        provider.Adapter
-	tools          *tool.Registry
-	gate           Gate
-	compactor      Compactor
-	hooks          Hooks
-	cost           *cost.Tracker
-	prepareStep    PrepareStepFunc
-	outputGuard    func(ctx context.Context, text string) (bool, string)
-	outputGuardMax int
-	budgetUSD      float64
-	model          string
-	maxTokens      int
-	temperature    *float64
-	maxIterations  int
-	loopThreshold  int
-	steerChan      <-chan string
-	logger         *slog.Logger
+	adapter             provider.Adapter
+	tools               *tool.Registry
+	gate                Gate
+	compactor           Compactor
+	hooks               Hooks
+	cost                *cost.Tracker
+	prepareStep         PrepareStepFunc
+	outputGuard         func(ctx context.Context, text string) (bool, string)
+	outputGuardMax      int
+	budgetUSD           float64
+	model               string
+	maxTokens           int
+	temperature         *float64
+	maxIterations       int
+	loopThreshold       int
+	contextWindowTokens int
+	steerChan           <-chan string
+	logger              *slog.Logger
 }
 
 // ErrInterrupted is returned when the run is cancelled via context.
@@ -161,23 +163,24 @@ func New(opts Options) (*Engine, error) {
 		logger = slog.Default()
 	}
 	return &Engine{
-		adapter:        opts.Adapter,
-		tools:          opts.Tools,
-		gate:           opts.Gate,
-		compactor:      opts.Compactor,
-		hooks:          opts.Hooks,
-		cost:           opts.Cost,
-		prepareStep:    opts.PrepareStep,
-		outputGuard:    opts.OutputGuard,
-		outputGuardMax: opts.OutputGuardMaxRetries,
-		budgetUSD:      opts.BudgetUSD,
-		model:          opts.Model,
-		maxTokens:      maxTok,
-		temperature:    opts.Temperature,
-		maxIterations:  maxIter,
-		loopThreshold:  loopThreshold,
-		steerChan:      opts.SteerChan,
-		logger:         logger,
+		adapter:             opts.Adapter,
+		tools:               opts.Tools,
+		gate:                opts.Gate,
+		compactor:           opts.Compactor,
+		hooks:               opts.Hooks,
+		cost:                opts.Cost,
+		prepareStep:         opts.PrepareStep,
+		outputGuard:         opts.OutputGuard,
+		outputGuardMax:      opts.OutputGuardMaxRetries,
+		budgetUSD:           opts.BudgetUSD,
+		model:               opts.Model,
+		maxTokens:           maxTok,
+		temperature:         opts.Temperature,
+		maxIterations:       maxIter,
+		loopThreshold:       loopThreshold,
+		contextWindowTokens: opts.ContextWindowTokens,
+		steerChan:           opts.SteerChan,
+		logger:              logger,
 	}, nil
 }
 
@@ -214,6 +217,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	}
 
 	guardRetries := 0
+	toolRoundsCompleted := 0
 
 	for iter := 0; iter < e.maxIterations; iter++ {
 		select {
@@ -230,8 +234,35 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			}
 		}
 
+		// P2.7: Proactive per-turn compaction — check token headroom before every
+		// turn so context-limit errors never interrupt a run mid-flight.
+		if e.compactor != nil && e.contextWindowTokens > 0 {
+			est := estimateTokens(conv.System, conv.Messages)
+			if est > e.contextWindowTokens*85/100 {
+				if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
+					e.logger.Warn("proactive compaction failed", "err", compErr)
+				} else if changed {
+					e.logger.Info("proactive compaction", "before", len(conv.Messages), "after", len(out))
+					conv.Messages = out
+				}
+			}
+		}
+
+		// P2.6: On the final iteration, if any tool rounds have already completed,
+		// inject a step-limit summary instruction and suppress tool schemas so the
+		// model produces a plain-text progress summary rather than aborting with an
+		// error. If no tools ran yet, skip the injection (model is in its first turn
+		// and should simply answer).
+		suppressTools := false
+		if iter == e.maxIterations-1 && toolRoundsCompleted > 0 {
+			suppressTools = true
+			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+				provider.TextBlock{Text: "[Step limit reached. Summarize what you have accomplished, what constraints were met, and what work remains. Do not call any tools.]"},
+			}})
+		}
+
 		turnStart := time.Now()
-		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit)
+		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit, suppressTools)
 		if err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
@@ -247,6 +278,12 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// Assemble a structured trace for this turn. Tool calls (if any) are
 		// filled in after they run below; for a final turn it is emitted now.
 		tr := e.newTrace(iter, usage, turnStart)
+
+		// P2.6: If we suppressed tools but the model hallucinated tool calls,
+		// discard them so the turn is treated as a final text answer.
+		if suppressTools && len(toolUses) > 0 {
+			toolUses = nil
+		}
 
 		if len(toolUses) == 0 {
 			tr.WallMS = time.Since(turnStart).Milliseconds()
@@ -285,17 +322,6 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return nil
 		}
 
-		// Mid-run compaction: re-check after every 5 tool rounds to prevent
-		// unbounded conversation growth during long multi-tool runs.
-		if e.compactor != nil && iter > 0 && iter%5 == 0 {
-			if out, changed, err := e.compactor.Compact(ctx, conv.System, conv.Messages); err != nil {
-				e.logger.Warn("mid-run compaction failed", "err", err)
-			} else if changed {
-				e.logger.Info("mid-run compaction", "before", len(conv.Messages), "after", len(out))
-				conv.Messages = out
-			}
-		}
-
 		// Loop guard: stop if the model keeps requesting the same tool calls.
 		if loop != nil && loop.record(turnSignature(toolUses)) {
 			err := fmt.Errorf("engine: aborting suspected loop: identical tool calls repeated %d turns", e.loopThreshold)
@@ -316,6 +342,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return err
 		}
 		conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
+		toolRoundsCompleted++
 
 		tr.ToolCalls = toolTraces
 		tr.WallMS = time.Since(turnStart).Milliseconds()
@@ -345,7 +372,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 
 // turn performs a single model call, accumulating the assistant message and any
 // tool-use blocks from the stream.
-func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (provider.Message, []provider.ToolUseBlock, *provider.Usage, provider.StopReason, error) {
+func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, suppressTools bool) (provider.Message, []provider.ToolUseBlock, *provider.Usage, provider.StopReason, error) {
 	req := provider.Request{
 		Model:       e.model,
 		System:      conv.System,
@@ -355,6 +382,9 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc) (p
 	}
 	if e.tools != nil {
 		req.Tools = e.tools.Schemas()
+	}
+	if suppressTools {
+		req.Tools = nil
 	}
 
 	stream, err := e.adapter.Stream(ctx, req)

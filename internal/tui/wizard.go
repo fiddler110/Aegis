@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -47,16 +49,19 @@ var wCurated = map[string][]string{
 
 type modelsDiscoveredMsg struct{ models []discover.Model }
 type wizardSavedMsg struct{ err error }
+type ripgrepInstalledMsg struct{ err error }
 
 // ─── Phases ───────────────────────────────────────────────────────────────────
 
 type wizardPhase int
 
 const (
-	wPhaseProvider  wizardPhase = iota // huh form: provider select
-	wPhaseDiscovery                    // async model discovery
-	wPhaseConfig                       // huh form: settings
-	wPhaseSaving                       // async config save
+	wPhaseProvider           wizardPhase = iota // huh form: provider select
+	wPhaseDiscovery                             // async model discovery
+	wPhaseConfig                                // huh form: settings
+	wPhaseSaving                                // async config save
+	wPhaseRipgrep                               // huh confirm: install ripgrep?
+	wPhaseRipgrepInstalling                     // async ripgrep install (brew only)
 )
 
 // ─── Model ────────────────────────────────────────────────────────────────────
@@ -81,9 +86,11 @@ type wizardModel struct {
 	// Discovered / curated model options
 	modelOpts []huh.Option[string]
 
-	done    bool
-	saved   bool
-	saveErr string
+	done          bool
+	saved         bool
+	saveErr       string
+	confirmRipgrep bool
+	ripgrepMsg    string // shown after install attempt (info or error)
 
 	width  int
 	height int
@@ -207,6 +214,10 @@ func (w *wizardModel) update(msg tea.Msg) tea.Cmd {
 		return w.updateConfig(msg)
 	case wPhaseSaving:
 		return w.updateSaving(msg)
+	case wPhaseRipgrep:
+		return w.updateRipgrep(msg)
+	case wPhaseRipgrepInstalling:
+		return w.updateRipgrepInstalling(msg)
 	}
 	return nil
 }
@@ -343,12 +354,103 @@ func (w *wizardModel) updateSaving(msg tea.Msg) tea.Cmd {
 	case wizardSavedMsg:
 		if msg.err != nil {
 			w.saveErr = msg.err.Error()
-		} else {
-			w.saved = true
+			w.done = true
+			return nil
 		}
+		// Offer ripgrep install only if rg is not already available.
+		if _, err := exec.LookPath("rg"); err != nil {
+			w.phase = wPhaseRipgrep
+			w.form = w.buildRipgrepForm()
+			return w.form.Init()
+		}
+		w.saved = true
 		w.done = true
 	}
 	return nil
+}
+
+func (w *wizardModel) buildRipgrepForm() *huh.Form {
+	_, hasBrew := exec.LookPath("brew")
+	affirmative := "Install (brew)"
+	negative := "Skip"
+	desc := "Ripgrep speeds up file search significantly."
+	if hasBrew != nil { // brew not found
+		desc += "\n\nTo install manually: sudo apt-get install ripgrep\nor visit https://github.com/BurntSushi/ripgrep"
+		affirmative = "OK"
+		negative = ""
+	}
+	confirm := huh.NewConfirm().
+		Title("Ripgrep not found").
+		Description(desc).
+		Affirmative(affirmative).
+		Value(&w.confirmRipgrep)
+	if negative != "" {
+		confirm = confirm.Negative(negative)
+	}
+	return huh.NewForm(
+		huh.NewGroup(confirm),
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+}
+
+func (w *wizardModel) updateRipgrep(msg tea.Msg) tea.Cmd {
+	m, cmd := w.form.Update(msg)
+	if f, ok := m.(*huh.Form); ok {
+		w.form = f
+	}
+	switch w.form.State {
+	case huh.StateAborted, huh.StateCompleted:
+		_, hasBrew := exec.LookPath("brew")
+		if hasBrew != nil || !w.confirmRipgrep {
+			// No brew or user skipped — show instructions and finish.
+			if hasBrew != nil {
+				w.ripgrepMsg = "Install ripgrep manually then restart Aegis."
+			}
+			w.saved = true
+			w.done = true
+			return nil
+		}
+		w.phase = wPhaseRipgrepInstalling
+		return tea.Batch(w.sp.Tick, w.installRipgrepCmd())
+	}
+	return cmd
+}
+
+func (w *wizardModel) updateRipgrepInstalling(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		w.sp, cmd = w.sp.Update(msg)
+		return cmd
+	case ripgrepInstalledMsg:
+		if msg.err != nil {
+			w.ripgrepMsg = "Install failed: " + msg.err.Error()
+		} else {
+			w.ripgrepMsg = "Ripgrep installed. Restart Aegis to enable fast search."
+		}
+		w.saved = true
+		w.done = true
+	}
+	return nil
+}
+
+func (w *wizardModel) installRipgrepCmd() tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			brew, err := exec.LookPath("brew")
+			if err != nil {
+				return ripgrepInstalledMsg{err: fmt.Errorf("brew not found")}
+			}
+			cmd = exec.Command(brew, "install", "ripgrep")
+		default:
+			return ripgrepInstalledMsg{err: fmt.Errorf("install ripgrep with your package manager (e.g. sudo apt-get install ripgrep)")}
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return ripgrepInstalledMsg{err: fmt.Errorf("%v\n%s", err, out)}
+		}
+		return ripgrepInstalledMsg{}
+	}
 }
 
 func (w *wizardModel) saveCmd() tea.Cmd {
@@ -403,10 +505,14 @@ func (w *wizardModel) view() string {
 	case w.saveErr != "":
 		body = w.th.errLine.Render("Failed to save:") + "\n" +
 			w.th.statusDim.Render("  "+w.saveErr)
+	case w.ripgrepMsg != "":
+		body = w.th.statusDim.Render(w.ripgrepMsg)
 	case w.phase == wPhaseDiscovery:
 		body = w.sp.View() + " Discovering models…"
 	case w.phase == wPhaseSaving:
 		body = w.sp.View() + " Saving configuration…"
+	case w.phase == wPhaseRipgrepInstalling:
+		body = w.sp.View() + " Installing ripgrep…"
 	default:
 		body = w.form.View()
 	}

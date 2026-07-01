@@ -8,6 +8,9 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// toolMaxLinesCompact is the default line cap for tool results in compact mode.
+const toolMaxLinesCompact = 10
+
 // Rendering budgets for tool activity in the transcript. These keep large
 // outputs from flooding the scrollback while still showing meaningfully more
 // than a single truncated line.
@@ -60,8 +63,9 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 // renderToolResult renders a finished tool call. Short, single-line results are
 // shown inline; multi-line output (shell, read, search) is shown as a capped,
 // gutter-marked block instead of being collapsed to one truncated line.
-
-func renderToolResult(th theme, name, result string, isErr bool, width int) string {
+// maxBodyLines controls the cap for multi-line output; pass a very large number
+// (e.g. 9999) to disable truncation (full mode).
+func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyLines int) string {
 	tag, style := "✓", th.tool
 	if isErr {
 		tag, style = "×", th.toolErr
@@ -73,8 +77,11 @@ func renderToolResult(th theme, name, result string, isErr bool, width int) stri
 		return style.Render(fmt.Sprintf("%s %s → %s", tag, name, truncate(oneLine(result), budget)))
 	}
 
-	maxLines := maxToolResultLines
-	if name == "web_search" {
+	maxLines := maxBodyLines
+	if maxLines <= 0 {
+		maxLines = maxToolResultLines
+	}
+	if name == "web_search" && maxLines < maxSearchResultLines {
 		maxLines = maxSearchResultLines
 	}
 	var b strings.Builder
@@ -109,7 +116,7 @@ func renderBlock(th theme, text string, maxLines, width int) string {
 		b.WriteString("  " + gutter + body + "\n")
 	}
 	if hidden > 0 {
-		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("… %d more line(s)", hidden)) + "\n")
+		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("▶ %d more lines  (/tools full to expand)", hidden)) + "\n")
 	}
 	return b.String()
 }
@@ -142,7 +149,7 @@ func assembleDiff(th theme, name, path string, lines []string, hidden int) strin
 		b.WriteString("  " + ln + "\n")
 	}
 	if hidden > 0 {
-		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("… %d more diff line(s)", hidden)) + "\n")
+		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("▶ %d more diff lines", hidden)) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -189,7 +196,7 @@ func renderMultiEditDiff(th theme, name string, input json.RawMessage, width int
 			b.WriteString("  " + ln + "\n")
 		}
 		if hidden > 0 {
-			b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("… %d more diff line(s)", hidden)) + "\n")
+			b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("▶ %d more diff lines", hidden)) + "\n")
 		}
 	}
 	return strings.TrimRight(b.String(), "\n"), true
@@ -284,4 +291,70 @@ func renderGrepCall(th theme, name string, input json.RawMessage, width int) (st
 	label := th.tool.Render("● "+name+" ") + th.diffMeta.Render("/"+truncate(a.Pattern, max(width-24, 12))+"/")
 	label += "  " + th.diffMeta.Render("in "+truncate(loc, max(width-len(a.Pattern)-24, 8))+filter)
 	return label, true
+}
+
+// renderApprovalPreview returns a compact one-line preview string for the
+// approval banner, derived from the raw tool-input JSON. The preview is
+// tool-type-specific: shell shows the command, file tools show the path, network
+// tools show the URL. Falls back to a trimmed JSON excerpt for unknown tools.
+func renderApprovalPreview(th theme, toolName, inputJSON string, width int) string {
+	maxW := max(width-4, 20)
+	prefix := "  "
+	var raw json.RawMessage
+	if json.Unmarshal([]byte(inputJSON), &raw) != nil || inputJSON == "" {
+		return prefix + th.diffMeta.Render("(no preview)")
+	}
+	switch toolName {
+	case "shell":
+		var a struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(raw, &a) == nil && a.Command != "" {
+			cmd := strings.Join(strings.Fields(a.Command), " ")
+			return prefix + th.diffMeta.Render("❯ "+truncate(cmd, maxW-2))
+		}
+	case "write_file":
+		var a struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(raw, &a) == nil && a.Path != "" {
+			note := a.Path
+			if a.Content != "" {
+				note = fmt.Sprintf("%s (%d lines)", a.Path, strings.Count(a.Content, "\n")+1)
+			}
+			return prefix + th.diffMeta.Render("✎ "+truncate(note, maxW-2))
+		}
+	case "edit_file", "multi_edit":
+		var a struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(raw, &a) == nil && a.Path != "" {
+			return prefix + th.diffMeta.Render("✎ "+truncate(a.Path, maxW-2))
+		}
+	case "read_file":
+		var a struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(raw, &a) == nil && a.Path != "" {
+			return prefix + th.diffMeta.Render("▸ "+truncate(a.Path, maxW-2))
+		}
+	case "web_fetch":
+		var a struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal(raw, &a) == nil && a.URL != "" {
+			return prefix + th.diffMeta.Render("⬡ "+truncate(a.URL, maxW-2))
+		}
+	case "web_search":
+		var a struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal(raw, &a) == nil && a.Query != "" {
+			return prefix + th.diffMeta.Render("⬡ "+truncate(a.Query, maxW-2))
+		}
+	}
+	// Generic: compact single-line JSON excerpt.
+	compact := strings.Join(strings.Fields(inputJSON), " ")
+	return prefix + th.diffMeta.Render(truncate(compact, maxW))
 }

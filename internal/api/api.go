@@ -88,10 +88,13 @@ type Event struct {
 
 // ApproveRequest is posted to /sessions/{id}/approve to answer a pending
 // approval request. Approved true lets the tool run; false denies it. ID must
-// match the approval_id from the KindApprovalRequest event.
+// match the approval_id from the KindApprovalRequest event. AllowAlways
+// persists an auto-approve entry for this (session, tool) pair so subsequent
+// calls to the same tool are approved without prompting.
 type ApproveRequest struct {
-	Approved bool   `json:"approved"`
-	ID       string `json:"id,omitempty"`
+	Approved    bool   `json:"approved"`
+	AllowAlways bool   `json:"allow_always,omitempty"`
+	ID          string `json:"id,omitempty"`
 }
 
 // Teammate describes a sub-agent tracked by the swarm registry.

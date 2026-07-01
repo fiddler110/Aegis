@@ -50,7 +50,7 @@ func (f *fakeBackend) PostMessageReq(ctx context.Context, _ string, _ api.PostMe
 	return ch, nil
 }
 
-func (f *fakeBackend) SendApproval(_ context.Context, _, _ string, approved bool) error {
+func (f *fakeBackend) SendApproval(_ context.Context, _, _ string, approved, _ bool) error {
 	f.mu.Lock()
 	f.approvals = append(f.approvals, approved)
 	f.mu.Unlock()

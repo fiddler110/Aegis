@@ -17,7 +17,7 @@ import (
 type Backend interface {
 	CreateSession(ctx context.Context, req api.CreateSessionRequest) (*api.SessionMeta, error)
 	PostMessageReq(ctx context.Context, id string, req api.PostMessageRequest) (<-chan api.Event, error)
-	SendApproval(ctx context.Context, sessionID, approvalID string, approved bool) error
+	SendApproval(ctx context.Context, sessionID, approvalID string, approved, allowAlways bool) error
 }
 
 // Agent implements the ACP Handler, translating ACP methods into daemon calls
@@ -185,7 +185,7 @@ func (a *Agent) streamEvents(ctx context.Context, sessionID string, events <-cha
 			a.notifyUpdate(sessionID, upd)
 		case api.KindApprovalRequest:
 			approved := a.requestPermission(ctx, sessionID, ev, tracker.current(ev.Tool))
-			if err := a.backend.SendApproval(ctx, sessionID, ev.ApprovalID, approved); err != nil {
+			if err := a.backend.SendApproval(ctx, sessionID, ev.ApprovalID, approved, false); err != nil {
 				a.logger.Warn("acp: send approval failed", "err", err)
 			}
 		case api.KindError:

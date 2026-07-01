@@ -71,6 +71,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&writeTool{root: root, tracker: ft},
 		&editTool{root: root, tracker: ft},
 		&multieditTool{root: root, tracker: ft},
+		&lsTool{root: root},
 		&globTool{root: root},
 		&grepTool{root: root},
 		&gitTool{root: root},

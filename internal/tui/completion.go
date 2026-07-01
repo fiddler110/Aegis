@@ -31,6 +31,7 @@ var builtinCommands = []cmdEntry{
 	{"persona", "Pick a persona from an interactive list"},
 	{"mode", "Switch permission mode (plan / build / auto)"},
 	{"guard", "Toggle output validation (on / off / status)"},
+	{"tools", "Set tool-output display mode (compact / full)"},
 	{"clear", "Clear the conversation transcript"},
 	{"config", "Open configuration wizard"},
 	{"memory", "Show saved memories"},
@@ -41,6 +42,7 @@ var builtinCommands = []cmdEntry{
 	{"sandbox", "Show or switch the execution sandbox"},
 	{"session", "Show session info or list sessions"},
 	{"rewind", "List or restore checkpoints"},
+	{"timeline", "Jump to a past turn in the conversation"},
 	{"share", "Export session to a shareable file"},
 	{"exit", "Exit Aegis"},
 }
@@ -52,6 +54,7 @@ var builtinCommands = []cmdEntry{
 var commandsNeedingArgs = map[string]bool{
 	"mode":     true,
 	"guard":    true,
+	"tools":    true,
 	"remember": true,
 	"help":     true,
 	"session":  true,

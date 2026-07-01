@@ -1,11 +1,13 @@
 package builtin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -13,6 +15,9 @@ import (
 
 	"github.com/scottymacleod/aegis/internal/tool"
 )
+
+// rgPath is set once at startup; empty string means fall back to WalkDir.
+var rgPath, _ = exec.LookPath("rg")
 
 // --- glob ---
 
@@ -35,6 +40,10 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	if strings.TrimSpace(args.Pattern) == "" {
 		return tool.Result{Content: "pattern is required", IsError: true}, nil
+	}
+
+	if rgPath != "" {
+		return t.executeRg(ctx, args.Pattern)
 	}
 
 	var matches []string
@@ -64,6 +73,33 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	if len(matches) > 1000 {
 		matches = matches[:1000]
+	}
+	return tool.Result{Content: strings.Join(matches, "\n")}, nil
+}
+
+func (t *globTool) executeRg(ctx context.Context, pattern string) (tool.Result, error) {
+	cmd := exec.CommandContext(ctx, rgPath, "--files", "--hidden", "-g", pattern, "--", t.root)
+	out, _ := cmd.Output() // exit 1 = no matches, not an error
+	if len(bytes.TrimSpace(out)) == 0 {
+		return tool.Result{Content: "no files matched"}, nil
+	}
+	var matches []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		rel, err := filepath.Rel(t.root, line)
+		if err != nil {
+			rel = line
+		}
+		matches = append(matches, filepath.ToSlash(rel))
+	}
+	sort.Strings(matches)
+	if len(matches) > 1000 {
+		matches = matches[:1000]
+	}
+	if len(matches) == 0 {
+		return tool.Result{Content: "no files matched"}, nil
 	}
 	return tool.Result{Content: strings.Join(matches, "\n")}, nil
 }
@@ -137,6 +173,11 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
+
+	if rgPath != "" {
+		return t.executeRg(ctx, args.Pattern, args.Glob, args.IgnoreCase)
+	}
+
 	pat := args.Pattern
 	if args.IgnoreCase {
 		pat = "(?i)" + pat
@@ -189,6 +230,47 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		return tool.Result{Content: "no matches"}, nil
 	}
 	return tool.Result{Content: strings.Join(out, "\n")}, nil
+}
+
+func (t *grepTool) executeRg(ctx context.Context, pattern, glob string, ignoreCase bool) (tool.Result, error) {
+	argv := []string{"--line-number", "--no-heading", "--color=never", "--hidden", "-e", pattern}
+	if ignoreCase {
+		argv = append(argv, "-i")
+	}
+	if glob != "" {
+		argv = append(argv, "-g", glob)
+	}
+	argv = append(argv, "--", t.root)
+
+	cmd := exec.CommandContext(ctx, rgPath, argv...)
+	raw, _ := cmd.Output() // exit 1 = no matches
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return tool.Result{Content: "no matches"}, nil
+	}
+
+	var results []string
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		// rg outputs: /abs/path/file:lineno:content — strip root prefix
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) == 3 {
+			rel, err := filepath.Rel(t.root, parts[0])
+			if err != nil {
+				rel = parts[0]
+			}
+			line = filepath.ToSlash(rel) + ":" + parts[1] + ":" + parts[2]
+		}
+		results = append(results, line)
+		if len(results) >= 500 {
+			break
+		}
+	}
+	if len(results) == 0 {
+		return tool.Result{Content: "no matches"}, nil
+	}
+	return tool.Result{Content: strings.Join(results, "\n")}, nil
 }
 
 func skipDir(name string) bool {
