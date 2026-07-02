@@ -3,7 +3,9 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/scottymacleod/aegis/internal/bundle"
 	"github.com/scottymacleod/aegis/internal/config"
@@ -24,11 +26,18 @@ func newBundleCmd() *cobra.Command {
 
 func newBundleInfoCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "info <path>",
+		Use:   "info <path-or-git-url>",
 		Short: "Show a bundle's manifest and the artifacts it would install",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			b, err := bundle.Load(args[0])
+			path, cleanup, err := resolveBundle(args[0])
+			if err != nil {
+				return err
+			}
+			if cleanup != nil {
+				defer cleanup()
+			}
+			b, err := bundle.Load(path)
 			if err != nil {
 				return err
 			}
@@ -54,11 +63,18 @@ func newBundleInstallCmd() *cobra.Command {
 	var scope string
 	var overwrite bool
 	cmd := &cobra.Command{
-		Use:   "install <path>",
+		Use:   "install <path-or-git-url>",
 		Short: "Install a bundle into the project (default) or user scope",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			b, err := bundle.Load(args[0])
+			path, cleanup, err := resolveBundle(args[0])
+			if err != nil {
+				return err
+			}
+			if cleanup != nil {
+				defer cleanup()
+			}
+			b, err := bundle.Load(path)
 			if err != nil {
 				return err
 			}
@@ -89,6 +105,35 @@ func newBundleInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&scope, "scope", "project", "install scope: project (./.aegis) or user (data dir)")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace artifacts that already exist")
 	return cmd
+}
+
+// resolveBundle returns a local directory path for the bundle, plus an optional
+// cleanup func to remove a temporary clone. If src is a git URL it is cloned
+// with --depth=1 into a temp dir; otherwise src is returned as-is.
+func resolveBundle(src string) (path string, cleanup func(), err error) {
+	if !isGitURL(src) {
+		return src, nil, nil
+	}
+	dir, err := os.MkdirTemp("", "aegis-bundle-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	rm := func() { os.RemoveAll(dir) }
+	out, cloneErr := exec.Command("git", "clone", "--depth=1", src, dir).CombinedOutput()
+	if cloneErr != nil {
+		rm()
+		return "", nil, fmt.Errorf("git clone %s: %v\n%s", src, cloneErr, strings.TrimSpace(string(out)))
+	}
+	return dir, rm, nil
+}
+
+// isGitURL reports whether s looks like a remote git URL.
+func isGitURL(s string) bool {
+	return strings.HasPrefix(s, "https://") ||
+		strings.HasPrefix(s, "http://") ||
+		strings.HasPrefix(s, "git@") ||
+		strings.HasPrefix(s, "git://") ||
+		strings.HasPrefix(s, "ssh://")
 }
 
 // scopeDir resolves the destination root for the chosen scope.

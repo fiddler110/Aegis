@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"charm.land/lipgloss/v2"
 )
 
 // toolMaxLinesCompact is the default line cap for tool results in compact mode.
@@ -121,24 +119,143 @@ func renderBlock(th theme, text string, maxLines, width int) string {
 	return b.String()
 }
 
-// diffLines turns an old→new string pair into styled, prefixed diff lines
-// (removed first, then added), capped at budget with a hidden-line count.
+// diffLines computes a proper unified diff between oldS and newS and returns a
+// list of styled lines (context + removed + added) capped at budget. Hidden
+// reports how many lines were omitted. The algorithm uses a standard LCS DP
+// table so small edits appear as small diffs rather than delete-all/add-all.
 func diffLines(th theme, oldS, newS string, width, budget int) (lines []string, hidden int) {
-	add := func(prefix string, st lipgloss.Style, text string) {
-		if text == "" {
-			return
-		}
-		for _, ln := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-			lines = append(lines, st.Render(prefix+truncate(ln, max(width-6, 16))))
+	maxW := max(width-4, 8)
+	oldL := splitDiffLines(oldS)
+	newL := splitDiffLines(newS)
+	edits := buildEdits(oldL, newL)
+
+	// Mark positions within ±diffCtxLines of any change.
+	const diffCtxLines = 3
+	show := make([]bool, len(edits))
+	anyChange := false
+	for i, e := range edits {
+		if e.op != opEqual {
+			anyChange = true
+			for j := max(i-diffCtxLines, 0); j < min(i+diffCtxLines+1, len(edits)); j++ {
+				show[j] = true
+			}
 		}
 	}
-	add("- ", th.diffDel, oldS)
-	add("+ ", th.diffAdd, newS)
+	if !anyChange {
+		return nil, 0
+	}
+
+	// Emit styled lines; insert @@ separator between non-adjacent spans.
+	prevShown := false
+	for i, e := range edits {
+		if !show[i] {
+			prevShown = false
+			continue
+		}
+		if !prevShown && len(lines) > 0 {
+			lines = append(lines, th.diffMeta.Render("  @@ ... @@"))
+		}
+		prevShown = true
+		txt := truncate(e.text, maxW)
+		switch e.op {
+		case opDel:
+			lines = append(lines, th.diffDel.Render("- "+txt))
+		case opAdd:
+			lines = append(lines, th.diffAdd.Render("+ "+txt))
+		default:
+			lines = append(lines, th.diffMeta.Render("  "+txt))
+		}
+	}
 	if len(lines) > budget {
 		hidden = len(lines) - budget
 		lines = lines[:budget]
 	}
 	return lines, hidden
+}
+
+// splitDiffLines splits s into trimmed lines without a trailing newline.
+func splitDiffLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(s, "\n"), "\n")
+}
+
+// editOp classifies a single line in an edit sequence.
+type editOp byte
+
+const (
+	opEqual editOp = iota
+	opDel
+	opAdd
+)
+
+type editLine struct {
+	op   editOp
+	text string
+}
+
+// lcsIndices returns matched (ia, ib) index pairs for the LCS of a and b.
+// Uses O(m·n) DP — acceptable for the small strings found in tool inputs.
+func lcsIndices(a, b []string) [][2]int {
+	m, n := len(a), len(b)
+	if m == 0 || n == 0 {
+		return nil
+	}
+	dp := make([][]int32, m+1)
+	for i := range dp {
+		dp[i] = make([]int32, n+1)
+	}
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if a[i-1] == b[j-1] {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else if dp[i-1][j] >= dp[i][j-1] {
+				dp[i][j] = dp[i-1][j]
+			} else {
+				dp[i][j] = dp[i][j-1]
+			}
+		}
+	}
+	pairs := make([][2]int, 0, int(dp[m][n]))
+	i, j := m, n
+	for i > 0 && j > 0 {
+		if a[i-1] == b[j-1] {
+			pairs = append([][2]int{{i - 1, j - 1}}, pairs...)
+			i--
+			j--
+		} else if dp[i-1][j] >= dp[i][j-1] {
+			i--
+		} else {
+			j--
+		}
+	}
+	return pairs
+}
+
+// buildEdits turns an LCS into an ordered equal/del/add edit sequence.
+func buildEdits(oldL, newL []string) []editLine {
+	pairs := lcsIndices(oldL, newL)
+	edits := make([]editLine, 0, len(oldL)+len(newL))
+	ia, ib := 0, 0
+	for _, p := range pairs {
+		for ; ia < p[0]; ia++ {
+			edits = append(edits, editLine{opDel, oldL[ia]})
+		}
+		for ; ib < p[1]; ib++ {
+			edits = append(edits, editLine{opAdd, newL[ib]})
+		}
+		edits = append(edits, editLine{opEqual, oldL[ia]})
+		ia++
+		ib++
+	}
+	for ; ia < len(oldL); ia++ {
+		edits = append(edits, editLine{opDel, oldL[ia]})
+	}
+	for ; ib < len(newL); ib++ {
+		edits = append(edits, editLine{opAdd, newL[ib]})
+	}
+	return edits
 }
 
 // assembleDiff builds a tool header followed by an indented diff body.

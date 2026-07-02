@@ -20,7 +20,20 @@ const (
 	MsgUser       MessageType = "user_message" // a steering message to a teammate
 	MsgShutdown   MessageType = "shutdown"     // ask a teammate to stop
 	MsgIdleNotify MessageType = "idle"         // a teammate reports it is idle
+	MsgPeer       MessageType = "peer"         // a direct teammate-to-teammate message (P5.1)
 )
+
+// SendTo delivers a message to another teammate's inbox under root, opening
+// (creating) the recipient's mailbox as needed. This enables peer-to-peer
+// messaging, not just parent→child delivery.
+func SendTo(root string, recipient Identity, msg Message) error {
+	mb, err := OpenMailbox(root, recipient)
+	if err != nil {
+		return err
+	}
+	msg.Recipient = recipient.AgentID
+	return mb.Send(msg)
+}
 
 // Message is one item in a mailbox. Payload carries type-specific data.
 type Message struct {

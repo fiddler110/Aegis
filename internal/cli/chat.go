@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -25,10 +26,11 @@ import (
 
 func newChatCmd() *cobra.Command {
 	var (
-		system      string
-		mode        string
-		personaName string
-		autoApprove bool
+		system       string
+		mode         string
+		personaName  string
+		autoApprove  bool
+		outputFormat string
 	)
 
 	cmd := &cobra.Command{
@@ -137,26 +139,67 @@ func newChatCmd() *cobra.Command {
 				Content: []provider.Block{provider.TextBlock{Text: prompt}},
 			})
 
+			format, err := parseOutputFormat(outputFormat)
+			if err != nil {
+				return err
+			}
+
 			out := cmd.OutOrStdout()
+			var answer strings.Builder
+			toolCalls := 0
 			runErr := eng.Run(ctx, conv, func(ev engine.Event) {
-				switch ev.Kind {
-				case engine.KindText:
-					fmt.Fprint(out, ev.Text)
-				case engine.KindToolCall:
-					fmt.Fprintf(out, "\n[tool: %s %s]\n", ev.ToolName, string(ev.ToolInput))
-				case engine.KindToolResult:
-					tag := "ok"
-					if ev.ToolIsError {
-						tag = "error"
+				switch format {
+				case outputStreamJSON:
+					emitStreamEvent(out, ev)
+				case outputJSON:
+					if ev.Kind == engine.KindText {
+						answer.WriteString(ev.Text)
 					}
-					fmt.Fprintf(out, "[tool result (%s): %s]\n", tag, truncate(ev.ToolResult, 500))
-				case engine.KindDone:
-					fmt.Fprintln(out)
+					if ev.Kind == engine.KindToolCall {
+						toolCalls++
+					}
+				default: // text
+					switch ev.Kind {
+					case engine.KindText:
+						fmt.Fprint(out, ev.Text)
+					case engine.KindToolCall:
+						fmt.Fprintf(out, "\n[tool: %s %s]\n", ev.ToolName, string(ev.ToolInput))
+					case engine.KindToolResult:
+						tag := "ok"
+						if ev.ToolIsError {
+							tag = "error"
+						}
+						fmt.Fprintf(out, "[tool result (%s): %s]\n", tag, truncate(ev.ToolResult, 500))
+					case engine.KindDone:
+						fmt.Fprintln(out)
+					}
 				}
 			})
-			if snap := tracker.Snapshot(); snap.TotalUSD > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "\n[cost: $%.4f over %d turn(s), %d in / %d out tokens]\n",
-					snap.TotalUSD, snap.Turns, snap.Usage.InputTokens, snap.Usage.OutputTokens)
+
+			snap := tracker.Snapshot()
+			switch format {
+			case outputJSON:
+				emitFinalJSON(out, chatResult{
+					Answer:       strings.TrimSpace(answer.String()),
+					CostUSD:      snap.TotalUSD,
+					Turns:        snap.Turns,
+					InputTokens:  snap.Usage.InputTokens,
+					OutputTokens: snap.Usage.OutputTokens,
+					ToolCalls:    toolCalls,
+					Error:        errString(runErr),
+				})
+			case outputStreamJSON:
+				// Final summary line so consumers can read cost without tracking usage.
+				emitFinalJSON(out, chatResult{
+					Type: "result", CostUSD: snap.TotalUSD, Turns: snap.Turns,
+					InputTokens: snap.Usage.InputTokens, OutputTokens: snap.Usage.OutputTokens,
+					ToolCalls: toolCalls, Error: errString(runErr),
+				})
+			default:
+				if snap.TotalUSD > 0 {
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n[cost: $%.4f over %d turn(s), %d in / %d out tokens]\n",
+						snap.TotalUSD, snap.Turns, snap.Usage.InputTokens, snap.Usage.OutputTokens)
+				}
 			}
 			return runErr
 		},
@@ -166,7 +209,88 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", "", "permission mode: plan (read-only) or build (default from config)")
 	cmd.Flags().StringVar(&personaName, "persona", "", "persona to use (e.g. security, developer, sre)")
 	cmd.Flags().BoolVar(&autoApprove, "yes", false, "auto-approve tool calls that would otherwise require confirmation")
+	cmd.Flags().StringVar(&outputFormat, "output-format", "text", "output format: text, json (final result object), or stream-json (one event per line)")
 	return cmd
+}
+
+type outputFormatKind int
+
+const (
+	outputText outputFormatKind = iota
+	outputJSON
+	outputStreamJSON
+)
+
+func parseOutputFormat(s string) (outputFormatKind, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "text":
+		return outputText, nil
+	case "json":
+		return outputJSON, nil
+	case "stream-json", "stream_json", "streamjson":
+		return outputStreamJSON, nil
+	default:
+		return outputText, fmt.Errorf("invalid --output-format %q (want text, json, or stream-json)", s)
+	}
+}
+
+// chatResult is the machine-readable summary emitted in json / stream-json mode.
+type chatResult struct {
+	Type         string  `json:"type,omitempty"` // "result" in stream-json trailer
+	Answer       string  `json:"answer,omitempty"`
+	CostUSD      float64 `json:"cost_usd"`
+	Turns        int     `json:"turns"`
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	ToolCalls    int     `json:"tool_calls"`
+	Error        string  `json:"error,omitempty"`
+}
+
+// streamEvent is one line of stream-json output.
+type streamEvent struct {
+	Type       string          `json:"type"`
+	Text       string          `json:"text,omitempty"`
+	Tool       string          `json:"tool,omitempty"`
+	ToolInput  json.RawMessage `json:"tool_input,omitempty"`
+	ToolResult string          `json:"tool_result,omitempty"`
+	IsError    bool            `json:"is_error,omitempty"`
+	Error      string          `json:"error,omitempty"`
+}
+
+func emitStreamEvent(w io.Writer, ev engine.Event) {
+	se := streamEvent{Type: string(ev.Kind)}
+	switch ev.Kind {
+	case engine.KindText, engine.KindThinking:
+		se.Text = ev.Text
+	case engine.KindToolCall:
+		se.Tool, se.ToolInput = ev.ToolName, ev.ToolInput
+	case engine.KindToolResult:
+		se.Tool, se.ToolResult, se.IsError = ev.ToolName, ev.ToolResult, ev.ToolIsError
+	case engine.KindError:
+		se.Error = errString(ev.Err)
+	case engine.KindTrace:
+		return // server-internal; never emit
+	}
+	line, err := json.Marshal(se)
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(w, string(line))
+}
+
+func emitFinalJSON(w io.Writer, res chatResult) {
+	line, err := json.Marshal(res)
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(w, string(line))
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func handleCLISlash(cmd *cobra.Command, cfg *config.Config, parsed *commands.ParsedCommand) error {

@@ -194,6 +194,14 @@ func (c *Client) initialize(ctx context.Context, rootURI string) error {
 		"capabilities": map[string]any{
 			"textDocument": map[string]any{
 				"publishDiagnostics": map[string]any{},
+				"definition":         map[string]any{},
+				"references":         map[string]any{},
+				"hover":              map[string]any{"contentFormat": []string{"markdown", "plaintext"}},
+				"documentSymbol":     map[string]any{"hierarchicalDocumentSymbolSupport": true},
+				"callHierarchy":      map[string]any{},
+			},
+			"workspace": map[string]any{
+				"symbol": map[string]any{},
 			},
 		},
 	}
@@ -317,6 +325,291 @@ func (c *Client) References(ctx context.Context, fileURI string, line, col int) 
 		})
 	}
 	return out, nil
+}
+
+// DidOpen notifies the server that a document is open with the given content.
+// Position-based requests (definition, hover, call hierarchy) are more reliable
+// after the document is opened.
+func (c *Client) DidOpen(ctx context.Context, fileURI, content string, version int) error {
+	return c.notify("textDocument/didOpen", map[string]any{
+		"textDocument": map[string]any{
+			"uri":        fileURI,
+			"languageId": langID(fileURI),
+			"version":    version,
+			"text":       content,
+		},
+	})
+}
+
+// Symbol is a named program symbol with a kind and location.
+type Symbol struct {
+	Name     string   `json:"name"`
+	Kind     string   `json:"kind"`
+	Detail   string   `json:"detail,omitempty"`
+	Location Location `json:"location"`
+}
+
+// lspRange mirrors the LSP Range shape used across responses.
+type lspRange struct {
+	Start struct {
+		Line      int `json:"line"`
+		Character int `json:"character"`
+	} `json:"start"`
+	End struct {
+		Line      int `json:"line"`
+		Character int `json:"character"`
+	} `json:"end"`
+}
+
+func (r lspRange) toLocation(uri string) Location {
+	return Location{
+		URI:       uri,
+		StartLine: r.Start.Line + 1,
+		StartCol:  r.Start.Character + 1,
+		EndLine:   r.End.Line + 1,
+		EndCol:    r.End.Character + 1,
+	}
+}
+
+// Definition finds where the symbol at the given position is defined. It
+// handles the Location, Location[], and LocationLink[] response shapes.
+func (c *Client) Definition(ctx context.Context, fileURI string, line, col int) ([]Location, error) {
+	res, err := c.call(ctx, "textDocument/definition", map[string]any{
+		"textDocument": map[string]any{"uri": fileURI},
+		"position":     map[string]any{"line": line - 1, "character": col - 1},
+	})
+	if err != nil || res == nil {
+		return nil, err
+	}
+	return parseLocations(res), nil
+}
+
+// Hover returns the hover documentation for the symbol at the given position.
+func (c *Client) Hover(ctx context.Context, fileURI string, line, col int) (string, error) {
+	res, err := c.call(ctx, "textDocument/hover", map[string]any{
+		"textDocument": map[string]any{"uri": fileURI},
+		"position":     map[string]any{"line": line - 1, "character": col - 1},
+	})
+	if err != nil || res == nil {
+		return "", err
+	}
+	var hover struct {
+		Contents json.RawMessage `json:"contents"`
+	}
+	if json.Unmarshal(res, &hover) != nil {
+		return "", nil
+	}
+	return parseMarkup(hover.Contents), nil
+}
+
+// DocumentSymbols returns the symbols declared in a file. It handles both the
+// hierarchical DocumentSymbol[] and the flat SymbolInformation[] shapes.
+func (c *Client) DocumentSymbols(ctx context.Context, fileURI string) ([]Symbol, error) {
+	res, err := c.call(ctx, "textDocument/documentSymbol", map[string]any{
+		"textDocument": map[string]any{"uri": fileURI},
+	})
+	if err != nil || res == nil {
+		return nil, err
+	}
+
+	// Try hierarchical DocumentSymbol[] first.
+	var docSyms []struct {
+		Name     string          `json:"name"`
+		Detail   string          `json:"detail"`
+		Kind     int             `json:"kind"`
+		Range    lspRange        `json:"range"`
+		Children json.RawMessage `json:"children"`
+	}
+	if json.Unmarshal(res, &docSyms) == nil && len(docSyms) > 0 && docSyms[0].Name != "" {
+		var out []Symbol
+		var walk func(uri string, raw json.RawMessage)
+		walk = func(uri string, raw json.RawMessage) {
+			var syms []struct {
+				Name     string          `json:"name"`
+				Detail   string          `json:"detail"`
+				Kind     int             `json:"kind"`
+				Range    lspRange        `json:"range"`
+				Children json.RawMessage `json:"children"`
+			}
+			if json.Unmarshal(raw, &syms) != nil {
+				return
+			}
+			for _, s := range syms {
+				out = append(out, Symbol{Name: s.Name, Kind: symbolKindName(s.Kind), Detail: s.Detail, Location: s.Range.toLocation(uri)})
+				if len(s.Children) > 0 {
+					walk(uri, s.Children)
+				}
+			}
+		}
+		walk(fileURI, res)
+		return out, nil
+	}
+
+	// Fall back to flat SymbolInformation[].
+	return parseSymbolInformation(res), nil
+}
+
+// WorkspaceSymbols searches the whole workspace for symbols matching query.
+func (c *Client) WorkspaceSymbols(ctx context.Context, query string) ([]Symbol, error) {
+	res, err := c.call(ctx, "workspace/symbol", map[string]any{"query": query})
+	if err != nil || res == nil {
+		return nil, err
+	}
+	return parseSymbolInformation(res), nil
+}
+
+// IncomingCalls returns the callers of the symbol at the given position via the
+// call-hierarchy protocol (prepareCallHierarchy → incomingCalls).
+func (c *Client) IncomingCalls(ctx context.Context, fileURI string, line, col int) ([]Symbol, error) {
+	prep, err := c.call(ctx, "textDocument/prepareCallHierarchy", map[string]any{
+		"textDocument": map[string]any{"uri": fileURI},
+		"position":     map[string]any{"line": line - 1, "character": col - 1},
+	})
+	if err != nil || prep == nil {
+		return nil, err
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(prep, &items) != nil || len(items) == 0 {
+		return nil, nil
+	}
+	res, err := c.call(ctx, "callHierarchy/incomingCalls", map[string]any{"item": items[0]})
+	if err != nil || res == nil {
+		return nil, err
+	}
+	var calls []struct {
+		From struct {
+			Name string   `json:"name"`
+			Kind int      `json:"kind"`
+			URI  string   `json:"uri"`
+			Rng  lspRange `json:"range"`
+		} `json:"from"`
+	}
+	if json.Unmarshal(res, &calls) != nil {
+		return nil, nil
+	}
+	var out []Symbol
+	for _, call := range calls {
+		out = append(out, Symbol{
+			Name:     call.From.Name,
+			Kind:     symbolKindName(call.From.Kind),
+			Location: call.From.Rng.toLocation(call.From.URI),
+		})
+	}
+	return out, nil
+}
+
+// parseLocations decodes a definition/declaration response, tolerating the
+// Location, Location[], and LocationLink[] shapes.
+func parseLocations(res json.RawMessage) []Location {
+	trimmed := strings.TrimSpace(string(res))
+	if trimmed == "null" || trimmed == "" {
+		return nil
+	}
+	// Array form.
+	if strings.HasPrefix(trimmed, "[") {
+		var links []struct {
+			URI          string   `json:"uri"`
+			Range        lspRange `json:"range"`
+			TargetURI    string   `json:"targetUri"`
+			TargetRange  lspRange `json:"targetRange"`
+			TargetSelect lspRange `json:"targetSelectionRange"`
+		}
+		if json.Unmarshal(res, &links) != nil {
+			return nil
+		}
+		var out []Location
+		for _, l := range links {
+			if l.TargetURI != "" {
+				out = append(out, l.TargetRange.toLocation(l.TargetURI))
+			} else {
+				out = append(out, l.Range.toLocation(l.URI))
+			}
+		}
+		return out
+	}
+	// Single Location object.
+	var one struct {
+		URI   string   `json:"uri"`
+		Range lspRange `json:"range"`
+	}
+	if json.Unmarshal(res, &one) != nil || one.URI == "" {
+		return nil
+	}
+	return []Location{one.Range.toLocation(one.URI)}
+}
+
+// parseSymbolInformation decodes a flat SymbolInformation[] response.
+func parseSymbolInformation(res json.RawMessage) []Symbol {
+	var syms []struct {
+		Name     string `json:"name"`
+		Kind     int    `json:"kind"`
+		Location struct {
+			URI   string   `json:"uri"`
+			Range lspRange `json:"range"`
+		} `json:"location"`
+	}
+	if json.Unmarshal(res, &syms) != nil {
+		return nil
+	}
+	var out []Symbol
+	for _, s := range syms {
+		out = append(out, Symbol{Name: s.Name, Kind: symbolKindName(s.Kind), Location: s.Location.Range.toLocation(s.Location.URI)})
+	}
+	return out
+}
+
+// parseMarkup flattens an LSP hover contents value (MarkupContent,
+// MarkedString, or MarkedString[]) into plain text.
+func parseMarkup(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	// MarkupContent {kind, value} or MarkedString {language, value}.
+	if strings.HasPrefix(trimmed, "{") {
+		var obj struct {
+			Value string `json:"value"`
+		}
+		if json.Unmarshal(raw, &obj) == nil {
+			return strings.TrimSpace(obj.Value)
+		}
+	}
+	// Plain string.
+	if strings.HasPrefix(trimmed, "\"") {
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return strings.TrimSpace(s)
+		}
+	}
+	// Array of MarkedString.
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []json.RawMessage
+		if json.Unmarshal(raw, &arr) == nil {
+			var parts []string
+			for _, el := range arr {
+				if p := parseMarkup(el); p != "" {
+					parts = append(parts, p)
+				}
+			}
+			return strings.Join(parts, "\n")
+		}
+	}
+	return ""
+}
+
+// symbolKindName maps an LSP SymbolKind integer to a readable name.
+func symbolKindName(k int) string {
+	names := []string{
+		"", "file", "module", "namespace", "package", "class", "method",
+		"property", "field", "constructor", "enum", "interface", "function",
+		"variable", "constant", "string", "number", "boolean", "array",
+		"object", "key", "null", "enum-member", "struct", "event",
+		"operator", "type-parameter",
+	}
+	if k >= 0 && k < len(names) && names[k] != "" {
+		return names[k]
+	}
+	return "symbol"
 }
 
 // DidChange notifies the server of a file change.

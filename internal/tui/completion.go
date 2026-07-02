@@ -43,6 +43,8 @@ var builtinCommands = []cmdEntry{
 	{"session", "Show session info or list sessions"},
 	{"rewind", "List or restore checkpoints"},
 	{"timeline", "Jump to a past turn in the conversation"},
+	{"sidebar", "Toggle the sidebar panel on/off"},
+	{"copy", "Copy last assistant message or code block N to clipboard"},
 	{"share", "Export session to a shareable file"},
 	{"exit", "Exit Aegis"},
 }

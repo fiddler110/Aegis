@@ -160,14 +160,22 @@ func mustParseCIDR(s string) *net.IPNet {
 	return n
 }
 
-// --- search (DuckDuckGo HTML endpoint, no API key required) ---
+// --- search (pluggable provider; DuckDuckGo HTML scrape is the zero-config default) ---
 
-type searchTool struct{ userAgent string }
+// searchTool queries a web-search provider. When provider is empty it scrapes
+// DuckDuckGo (no API key). Configured providers (brave, tavily, searxng) use
+// their APIs and fall back to DuckDuckGo on error (P5.3).
+type searchTool struct {
+	userAgent string
+	provider  string
+	apiKey    string
+	baseURL   string
+}
 
 func (t *searchTool) Name() string                { return "web_search" }
 func (t *searchTool) Capability() tool.Capability { return tool.CapNetwork }
 func (t *searchTool) Description() string {
-	return "Search the web and return a list of result titles, URLs, and snippets. Best-effort via DuckDuckGo."
+	return "Search the web and return a list of result titles, URLs, and snippets."
 }
 func (t *searchTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer"}},"required":["query"]}`)
@@ -188,29 +196,26 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 		max = 10
 	}
 
-	f := &fetchTool{userAgent: t.userAgent}
-	encoded := url.QueryEscape(args.Query)
-
-	// Primary: DuckDuckGo HTML endpoint.
-	body, _, err := f.get(ctx, "https://html.duckduckgo.com/html/?q="+encoded)
 	var results []searchResult
-	if err == nil {
-		results = parseDDG(body, max)
+	var provErr error
+	if p := strings.ToLower(strings.TrimSpace(t.provider)); p != "" && p != "duckduckgo" {
+		results, provErr = t.providerSearch(ctx, p, args.Query, max)
+		if provErr != nil {
+			// Configured provider failed; fall through to the DuckDuckGo scrape.
+			results = nil
+		}
 	}
 
-	// Fallback: DuckDuckGo Lite endpoint (simpler HTML, more stable DOM).
 	if len(results) == 0 {
-		if body2, _, err2 := f.get(ctx, "https://lite.duckduckgo.com/lite/?q="+encoded); err2 == nil {
-			results = parseDDGLite(body2, max)
-		}
+		results = t.duckDuckGo(ctx, args.Query, max)
 	}
 
 	if len(results) == 0 {
 		msg := "no results found"
-		if err != nil {
-			msg = fmt.Sprintf("search failed: %v", err)
+		if provErr != nil {
+			msg = fmt.Sprintf("search failed (provider %q: %v; DuckDuckGo fallback returned nothing)", t.provider, provErr)
 		}
-		return tool.Result{Content: msg, IsError: err != nil}, nil
+		return tool.Result{Content: msg, IsError: provErr != nil}, nil
 	}
 	var b strings.Builder
 	for i, r := range results {
@@ -220,6 +225,23 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 		}
 	}
 	return tool.Result{Content: b.String()}, nil
+}
+
+// duckDuckGo runs the zero-config HTML scrape (primary + lite fallback).
+func (t *searchTool) duckDuckGo(ctx context.Context, query string, max int) []searchResult {
+	f := &fetchTool{userAgent: t.userAgent}
+	encoded := url.QueryEscape(query)
+	body, _, err := f.get(ctx, "https://html.duckduckgo.com/html/?q="+encoded)
+	var results []searchResult
+	if err == nil {
+		results = parseDDG(body, max)
+	}
+	if len(results) == 0 {
+		if body2, _, err2 := f.get(ctx, "https://lite.duckduckgo.com/lite/?q="+encoded); err2 == nil {
+			results = parseDDGLite(body2, max)
+		}
+	}
+	return results
 }
 
 type searchResult struct {

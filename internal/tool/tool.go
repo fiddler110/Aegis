@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/scottymacleod/aegis/internal/provider"
@@ -60,15 +61,24 @@ type Registry struct {
 	mu          sync.RWMutex
 	tools       map[string]Tool
 	exposed     map[string]bool
+	deferred    map[string]bool       // tool is known but loaded on demand via tool_search
 	schemaCache []provider.ToolSchema // nil means dirty; rebuilt on next Schemas call
 }
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		tools:   map[string]Tool{},
-		exposed: map[string]bool{},
+		tools:    map[string]Tool{},
+		exposed:  map[string]bool{},
+		deferred: map[string]bool{},
 	}
+}
+
+// Info is a lightweight name+description pair used to advertise deferred tools
+// in the system prompt without shipping their full schema.
+type Info struct {
+	Name        string
+	Description string
 }
 
 // Register adds a tool. By default a newly registered tool is exposed.
@@ -104,6 +114,88 @@ func (r *Registry) SetExposed(name string, exposed bool) {
 		r.exposed[name] = exposed
 		r.schemaCache = nil
 	}
+}
+
+// RegisterDeferred adds a tool that is known to the harness but not exposed to
+// the model until loaded on demand (P4.6). Deferred tools appear only as a
+// name+description line in the system prompt; the tool_search meta-tool exposes
+// them when a task needs them. This keeps per-turn schema tokens low.
+func (r *Registry) RegisterDeferred(t Tool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name := t.Name()
+	if _, exists := r.tools[name]; exists {
+		return fmt.Errorf("tool %q already registered", name)
+	}
+	r.tools[name] = t
+	r.exposed[name] = false
+	r.deferred[name] = true
+	r.schemaCache = nil
+	return nil
+}
+
+// Deferred returns the name+description of every deferred tool that has not yet
+// been loaded (exposed). Used to build the system-prompt advertisement.
+func (r *Registry) Deferred() []Info {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Info
+	for name, t := range r.tools {
+		if r.deferred[name] && !r.exposed[name] {
+			out = append(out, Info{Name: t.Name(), Description: t.Description()})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Load exposes previously-deferred tools by name so their schemas are offered on
+// the next turn. Unknown names are ignored. Returns the tools that were newly
+// exposed.
+func (r *Registry) Load(names ...string) []Tool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var loaded []Tool
+	for _, n := range names {
+		t, ok := r.tools[n]
+		if !ok {
+			continue
+		}
+		if !r.exposed[n] {
+			r.exposed[n] = true
+			r.schemaCache = nil
+		}
+		loaded = append(loaded, t)
+	}
+	return loaded
+}
+
+// SearchDeferred returns deferred, not-yet-loaded tools whose name or
+// description contains any of the given lowercase query terms. An empty query
+// matches all deferred tools.
+func (r *Registry) SearchDeferred(query string) []Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	terms := strings.Fields(strings.ToLower(query))
+	var out []Tool
+	for name, t := range r.tools {
+		if !r.deferred[name] || r.exposed[name] {
+			continue
+		}
+		if len(terms) == 0 {
+			out = append(out, t)
+			continue
+		}
+		hay := strings.ToLower(t.Name() + " " + t.Description())
+		for _, term := range terms {
+			if strings.Contains(hay, term) {
+				out = append(out, t)
+				break
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out
 }
 
 // Get returns a registered tool by name.

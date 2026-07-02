@@ -148,6 +148,15 @@ func Report(ctx context.Context, priority []ContainerRuntime) string {
 	if !hasBest {
 		b.WriteString("\nNo container runtime available — `auto`/`container` backends fall back to local execution.")
 	}
+
+	// Report OS-level sandbox availability (P4.7) — usable via backend "os"
+	// without any container runtime.
+	mech, osAvail, osDetail := OSSandboxInfo()
+	avail := "no"
+	if osAvail {
+		avail = "yes"
+	}
+	fmt.Fprintf(&b, "\n\nOS sandbox (backend \"os\"): %s — %s (%s)", avail, mech, osDetail)
 	return b.String()
 }
 

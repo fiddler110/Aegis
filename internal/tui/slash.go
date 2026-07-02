@@ -74,6 +74,8 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"humor":    d.cmdHumor,
 		"share":    d.cmdShare,
 		"timeline": d.cmdTimeline,
+		"sidebar":  d.cmdSidebar,
+		"copy":     d.cmdCopy,
 		"quit":     d.cmdQuit,
 		"exit":     d.cmdQuit,
 	}
@@ -173,6 +175,8 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"humor [on|off]", "Toggle D&D-themed thinking phrases in the response area"},
 		{"archive [off]", "Archive this session (hidden from listings; data kept). /archive off to restore"},
 		{"timeline", "Jump to a past turn in the conversation timeline"},
+		{"sidebar", "Toggle the sidebar panel on/off (also ctrl+b)"},
+		{"copy [N]", "Copy last assistant message, or Nth code block, to clipboard"},
 		{"share [html|md|json]", "Export this session to a shareable transcript file"},
 		{"exit", "Exit Aegis"},
 	} {
@@ -729,6 +733,19 @@ func (d *SlashDispatcher) cmdConfig(_ []string) SlashResult {
 
 func (d *SlashDispatcher) cmdTimeline(_ []string) SlashResult {
 	return SlashResult{Output: "\x00timeline"}
+}
+
+// cmdSidebar toggles the sidebar panel. Uses the "\x00sidebar-toggle" protocol.
+func (d *SlashDispatcher) cmdSidebar(_ []string) SlashResult {
+	return SlashResult{Output: "\x00sidebar-toggle"}
+}
+
+// cmdCopy copies the last assistant message (or Nth code block) to the clipboard.
+func (d *SlashDispatcher) cmdCopy(args []string) SlashResult {
+	if len(args) > 0 {
+		return SlashResult{Output: "\x00copy " + args[0]}
+	}
+	return SlashResult{Output: "\x00copy"}
 }
 
 func (d *SlashDispatcher) cmdQuit(_ []string) SlashResult {
