@@ -107,6 +107,7 @@ func newRootCmd() *cobra.Command {
 				Mode:      resolvedMode,
 				Model:     cfg.Provider.Model,
 				WorkDir:   cwd,
+				HumorMode: cfg.TUI.HumorMode,
 			})
 			unloadOllamaModel(cfg)
 			return runErr
@@ -136,6 +137,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newIndexCmd())
 	cmd.AddCommand(newDiagramCmd())
 	cmd.AddCommand(newWorkerCmd())
+	cmd.AddCommand(newBGCmd()) // P3.2: background session management
 	return cmd
 }
 

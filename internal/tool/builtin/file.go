@@ -34,6 +34,9 @@ func (t *readTool) Description() string {
 func (t *readTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative file path"},"offset":{"type":"integer","description":"1-based start line (optional)"},"limit":{"type":"integer","description":"max lines to read (optional)"}},"required":["path"]}`)
 }
+func (t *readTool) OutputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"content":{"type":"string","description":"file contents with 1-based line numbers prefixed"}},"required":["content"]}`)
+}
 func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Path   string `json:"path"`
@@ -90,6 +93,9 @@ func (t *writeTool) Description() string {
 }
 func (t *writeTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative file path to write, e.g. \"report.md\" or \"docs/output.md\""},"content":{"type":"string","description":"full text content to write to the file"}},"required":["path","content"]}`)
+}
+func (t *writeTool) OutputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"path":{"type":"string"},"bytes_written":{"type":"integer"}},"required":["path","bytes_written"]}`)
 }
 func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {

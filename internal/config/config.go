@@ -28,6 +28,8 @@ type Config struct {
 	Permission  PermissionConfig           `koanf:"permission"`
 	Diagram     DiagramConfig              `koanf:"diagram"`
 	Cost        CostConfig                 `koanf:"cost"`
+	Cleanup     CleanupConfig              `koanf:"cleanup"`
+	TUI         TUIConfig                  `koanf:"tui"`
 	Swarm       SwarmConfig                `koanf:"swarm"`
 	Sandbox     SandboxConfig              `koanf:"sandbox"`
 	Security    SecurityConfig             `koanf:"security"`
@@ -36,6 +38,22 @@ type Config struct {
 	LSP         []LSPServerConfig          `koanf:"lsp"`
 	Plugins     []ProcessToolConfig        `koanf:"plugins"`
 	MCP         []MCPServerConfig          `koanf:"mcp"`
+}
+
+// TUIConfig holds terminal UI preferences.
+type TUIConfig struct {
+	// HumorMode enables D&D-themed thinking phrases while the model generates.
+	// Set to false for plain "thinking…" / "working…" status text.
+	HumorMode bool `koanf:"humor_mode"`
+}
+
+// CleanupConfig controls automatic pruning of old sessions.
+type CleanupConfig struct {
+	// SessionTTLDays is how many days since last update before a non-archived
+	// session is automatically deleted. 0 disables auto-cleanup.
+	SessionTTLDays int `koanf:"session_ttl_days"`
+	// IntervalHours is how often the pruner runs. Defaults to 24.
+	IntervalHours int `koanf:"interval_hours"`
 }
 
 // SwarmConfig configures multi-agent sub-agent execution.
@@ -178,6 +196,7 @@ func defaults() map[string]any {
 		"output_guard.mode":            "llm",
 		"output_guard.max_retries":     1,
 		"output_guard.rubric":          DefaultGuardRubric,
+		"tui.humor_mode":               true,
 	}
 }
 

@@ -119,6 +119,39 @@ func (c *Client) DeleteSession(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/sessions/"+id, nil, nil)
 }
 
+// ArchiveSession soft-deletes a session; it is hidden from normal listings.
+func (c *Client) ArchiveSession(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+id+"/archive", nil, nil)
+}
+
+// UnarchiveSession restores an archived session to active status.
+func (c *Client) UnarchiveSession(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+id+"/unarchive", nil, nil)
+}
+
+// ListArchivedSessions returns all sessions including archived ones.
+func (c *Client) ListArchivedSessions(ctx context.Context) ([]api.SessionMeta, error) {
+	var out []api.SessionMeta
+	if err := c.do(ctx, http.MethodGet, "/sessions?archived=true", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PruneSessions deletes non-archived sessions older than days. Pass 0 to use
+// the server's configured TTL.
+func (c *Client) PruneSessions(ctx context.Context, days int) (*api.PruneResponse, error) {
+	path := "/sessions/prune"
+	if days > 0 {
+		path = fmt.Sprintf("/sessions/prune?days=%d", days)
+	}
+	var out api.PruneResponse
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Teammates returns the sub-agents tracked by the daemon's swarm registry.
 func (c *Client) Teammates(ctx context.Context) ([]api.Teammate, error) {
 	var out []api.Teammate
@@ -187,6 +220,36 @@ func (c *Client) Rewind(ctx context.Context, sessionID, checkpointID, scope stri
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Rollback is like Rewind but also runs `git reset --hard <sha>` to restore
+// git HEAD to the pre-turn state (P3.4). Scope defaults to "both".
+func (c *Client) Rollback(ctx context.Context, sessionID, checkpointID, scope string) (*api.RewindResponse, error) {
+	var out api.RewindResponse
+	req := api.RewindRequest{CheckpointID: checkpointID, Scope: scope, GitRollback: true}
+	if err := c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/rewind", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SetBackground marks or unmarks a session as a background (detached) session.
+// When background is true, subsequent message runs use a server-level context
+// so the turn continues even if the TUI disconnects (P3.2).
+func (c *Client) SetBackground(ctx context.Context, sessionID string, background bool) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/background",
+		api.SetBackgroundRequest{Background: background}, nil)
+}
+
+// GetBGEvents returns buffered engine events for a background session.
+// since is the last event id received; pass 0 to start from the beginning.
+func (c *Client) GetBGEvents(ctx context.Context, sessionID string, since int64) ([]api.BGEventItem, error) {
+	path := fmt.Sprintf("/sessions/%s/events?since=%d", sessionID, since)
+	var out []api.BGEventItem
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // SendApproval answers a pending interactive approval request for the given

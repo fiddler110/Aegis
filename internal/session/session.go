@@ -24,6 +24,8 @@ type Session struct {
 	System       string             `json:"system"`
 	Mode         string             `json:"mode"`
 	Persona      string             `json:"persona"`
+	Background   bool               `json:"background,omitempty"`  // P3.2: runs detached from TUI
+	Archived     bool               `json:"archived,omitempty"`    // soft-deleted; hidden from normal listings
 	Messages     []provider.Message `json:"messages"`
 	Traces       []trace.TurnTrace  `json:"traces,omitempty"`
 	InputTokens  int                `json:"input_tokens"`
@@ -31,19 +33,23 @@ type Session struct {
 	CostUSD      float64            `json:"cost_usd"`
 	CreatedAt    time.Time          `json:"created_at"`
 	UpdatedAt    time.Time          `json:"updated_at"`
+	ArchivedAt   *time.Time         `json:"archived_at,omitempty"`
 }
 
 // Meta is a session without its message body, for listings.
 type Meta struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Mode         string    `json:"mode"`
-	Persona      string    `json:"persona"`
-	InputTokens  int       `json:"input_tokens"`
-	OutputTokens int       `json:"output_tokens"`
-	CostUSD      float64   `json:"cost_usd"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string     `json:"id"`
+	Title        string     `json:"title"`
+	Mode         string     `json:"mode"`
+	Persona      string     `json:"persona"`
+	Background   bool       `json:"background,omitempty"`  // P3.2
+	Archived     bool       `json:"archived,omitempty"`
+	InputTokens  int        `json:"input_tokens"`
+	OutputTokens int        `json:"output_tokens"`
+	CostUSD      float64    `json:"cost_usd"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	ArchivedAt   *time.Time `json:"archived_at,omitempty"`
 }
 
 // ErrNotFound is returned when a session does not exist.
@@ -96,7 +102,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_usd     REAL    NOT NULL DEFAULT 0,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL
-);`); err != nil {
+);
+CREATE TABLE IF NOT EXISTS bg_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT    NOT NULL,
+    data       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bg_events_session ON bg_events(session_id, id);`); err != nil {
 		return err
 	}
 	// Idempotent additions for existing databases (errors silently ignored).
@@ -106,6 +119,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 		`ALTER TABLE sessions ADD COLUMN cost_usd      REAL    NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN traces        BLOB    NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE sessions ADD COLUMN persona TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN background INTEGER NOT NULL DEFAULT 0`, // P3.2
+		`ALTER TABLE sessions ADD COLUMN archived_at INTEGER`,                   // NULL = active
 	} {
 		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
 	}
@@ -136,19 +151,27 @@ func (s *Store) Create(ctx context.Context, title, system, mode, persona string)
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, persona, messages, traces, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, persona, background, archived_at, messages, traces, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
-		sess         Session
-		msgBlob      []byte
-		traceBlob    []byte
-		created, upd int64
+		sess           Session
+		msgBlob        []byte
+		traceBlob      []byte
+		created, upd   int64
+		background     int
+		archivedAtMS   sql.NullInt64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &msgBlob, &traceBlob,
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &background, &archivedAtMS, &msgBlob, &traceBlob,
 		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	sess.Background = background == 1
+	if archivedAtMS.Valid {
+		t := time.UnixMilli(archivedAtMS.Int64)
+		sess.ArchivedAt = &t
+		sess.Archived = true
 	}
 	msgs, err := provider.UnmarshalMessages(msgBlob)
 	if err != nil {
@@ -230,10 +253,23 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 	return err
 }
 
-// List returns session metadata, most recently updated first.
+// List returns active (non-archived) session metadata, most recently updated first.
 func (s *Store) List(ctx context.Context) ([]Meta, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, mode, persona, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
+	return s.listSessions(ctx, false)
+}
+
+// ListAll returns all sessions including archived ones, most recently updated first.
+func (s *Store) ListAll(ctx context.Context) ([]Meta, error) {
+	return s.listSessions(ctx, true)
+}
+
+func (s *Store) listSessions(ctx context.Context, includeArchived bool) ([]Meta, error) {
+	q := `SELECT id, title, mode, persona, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions`
+	if !includeArchived {
+		q += ` WHERE archived_at IS NULL`
+	}
+	q += ` ORDER BY updated_at DESC`
+	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
 	}
@@ -242,12 +278,92 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	for rows.Next() {
 		var m Meta
 		var created, upd int64
-		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
+		var background int
+		var archivedAtMS sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &background, &archivedAtMS, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
 			return nil, err
+		}
+		m.Background = background == 1
+		if archivedAtMS.Valid {
+			t := time.UnixMilli(archivedAtMS.Int64)
+			m.ArchivedAt = &t
+			m.Archived = true
 		}
 		m.CreatedAt = time.UnixMilli(created)
 		m.UpdatedAt = time.UnixMilli(upd)
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SetBackground marks a session as a background (detached) session (P3.2).
+func (s *Store) SetBackground(ctx context.Context, id string, on bool) error {
+	v := 0
+	if on {
+		v = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET background = ?, updated_at = ? WHERE id = ?`,
+		v, time.Now().UnixMilli(), id)
+	return err
+}
+
+// Archive soft-deletes a session; it is hidden from normal listings but preserved.
+func (s *Store) Archive(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET archived_at = ? WHERE id = ?`,
+		time.Now().UnixMilli(), id)
+	return err
+}
+
+// Unarchive restores a previously archived session to active status.
+func (s *Store) Unarchive(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET archived_at = NULL WHERE id = ?`, id)
+	return err
+}
+
+// Prune deletes non-archived sessions whose updated_at is older than olderThan.
+// Returns the number of sessions deleted.
+func (s *Store) Prune(ctx context.Context, olderThan time.Duration) (int, error) {
+	threshold := time.Now().Add(-olderThan).UnixMilli()
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE archived_at IS NULL AND updated_at < ?`, threshold)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// BGEvent is one buffered engine event for a background session.
+type BGEvent struct {
+	ID        int64  `json:"id"`
+	SessionID string `json:"session_id"`
+	Data      string `json:"data"`
+}
+
+// AppendBGEvent saves an event JSON payload for a background session.
+func (s *Store) AppendBGEvent(ctx context.Context, sessionID, data string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO bg_events (session_id, data, created_at) VALUES (?, ?, ?)`,
+		sessionID, data, time.Now().UnixMilli())
+	return err
+}
+
+// ListBGEvents returns buffered events for a session with id > since.
+func (s *Store) ListBGEvents(ctx context.Context, sessionID string, since int64) ([]BGEvent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, session_id, data FROM bg_events WHERE session_id = ? AND id > ? ORDER BY id ASC`,
+		sessionID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BGEvent
+	for rows.Next() {
+		var e BGEvent
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.Data); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }

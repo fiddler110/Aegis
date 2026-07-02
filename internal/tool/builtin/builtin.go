@@ -10,6 +10,8 @@ import (
 
 	"github.com/scottymacleod/aegis/internal/cron"
 	"github.com/scottymacleod/aegis/internal/filetracker"
+	"github.com/scottymacleod/aegis/internal/knowledge"
+	"github.com/scottymacleod/aegis/internal/longmem"
 	"github.com/scottymacleod/aegis/internal/lsp"
 	"github.com/scottymacleod/aegis/internal/memory"
 	"github.com/scottymacleod/aegis/internal/sandbox"
@@ -47,6 +49,10 @@ type Options struct {
 	TodoList *TodoList
 	// Questioner, when set, enables the ask_user tool for structured questions.
 	Questioner Questioner
+	// Knowledge, when set, enables the project_knowledge search tool (P3.3).
+	Knowledge *knowledge.Store
+	// LongMem, when set, enables entity_remember and entity_recall tools (P3.1).
+	LongMem *longmem.Store
 }
 
 // Register adds all built-in tools to the registry.
@@ -103,6 +109,12 @@ func Register(reg *tool.Registry, opts Options) error {
 	}
 	if opts.Questioner != nil {
 		tools = append(tools, &askTool{questioner: opts.Questioner})
+	}
+	if opts.Knowledge != nil {
+		tools = append(tools, KnowledgeTools(opts.Knowledge)...)
+	}
+	if opts.LongMem != nil {
+		tools = append(tools, LongMemTools(opts.LongMem)...)
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {

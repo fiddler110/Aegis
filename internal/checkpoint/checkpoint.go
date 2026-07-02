@@ -35,8 +35,9 @@ var ErrNotFound = errors.New("checkpoint not found")
 type Checkpoint struct {
 	ID        string    `json:"id"`
 	SessionID string    `json:"session_id"`
-	Seq       int       `json:"seq"`   // message count to truncate the conversation to on rewind
-	Label     string    `json:"label"` // typically the user's prompt text, truncated
+	Seq       int       `json:"seq"`    // message count to truncate the conversation to on rewind
+	Label     string    `json:"label"`  // typically the user's prompt text, truncated
+	GitSHA    string    `json:"git_sha,omitempty"` // HEAD commit at checkpoint time (P3.4)
 	FileCount int       `json:"file_count"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -80,7 +81,12 @@ CREATE TABLE IF NOT EXISTS checkpoint_files (
     content       BLOB,
     PRIMARY KEY (checkpoint_id, path)
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Idempotent additions for existing databases (P3.4: git SHA column).
+	_, _ = s.db.Exec(`ALTER TABLE checkpoints ADD COLUMN git_sha TEXT NOT NULL DEFAULT ''`)
+	return nil
 }
 
 // Create records a new checkpoint for sessionID. seq is the conversation
@@ -120,7 +126,7 @@ func (s *Store) recordFile(checkpointID, path string, existed bool, content []by
 // List returns checkpoints for a session, most recent first, with file counts.
 func (s *Store) List(ctx context.Context, sessionID string) ([]Checkpoint, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT c.id, c.session_id, c.seq, c.label, c.created_at,
+SELECT c.id, c.session_id, c.seq, c.label, c.git_sha, c.created_at,
        (SELECT COUNT(*) FROM checkpoint_files f WHERE f.checkpoint_id = c.id)
 FROM checkpoints c
 WHERE c.session_id = ?
@@ -133,7 +139,7 @@ ORDER BY c.created_at DESC, c.id DESC`, sessionID)
 	for rows.Next() {
 		var cp Checkpoint
 		var created int64
-		if err := rows.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &created, &cp.FileCount); err != nil {
+		if err := rows.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &cp.GitSHA, &created, &cp.FileCount); err != nil {
 			return nil, err
 		}
 		cp.CreatedAt = time.UnixMilli(created)
@@ -145,12 +151,12 @@ ORDER BY c.created_at DESC, c.id DESC`, sessionID)
 // Get loads a single checkpoint's metadata.
 func (s *Store) Get(ctx context.Context, id string) (*Checkpoint, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT c.id, c.session_id, c.seq, c.label, c.created_at,
+SELECT c.id, c.session_id, c.seq, c.label, c.git_sha, c.created_at,
        (SELECT COUNT(*) FROM checkpoint_files f WHERE f.checkpoint_id = c.id)
 FROM checkpoints c WHERE c.id = ?`, id)
 	var cp Checkpoint
 	var created int64
-	if err := row.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &created, &cp.FileCount); err != nil {
+	if err := row.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &cp.GitSHA, &created, &cp.FileCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -158,6 +164,13 @@ FROM checkpoints c WHERE c.id = ?`, id)
 	}
 	cp.CreatedAt = time.UnixMilli(created)
 	return &cp, nil
+}
+
+// SetGitSHA records the HEAD commit SHA at checkpoint creation time (P3.4).
+// Best-effort: called asynchronously so errors are tolerated.
+func (s *Store) SetGitSHA(ctx context.Context, id, sha string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE checkpoints SET git_sha = ? WHERE id = ?`, sha, id)
+	return err
 }
 
 // files returns the captured file snapshots for a checkpoint.

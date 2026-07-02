@@ -68,6 +68,10 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"sandbox":  d.cmdSandbox,
 		"session":  d.cmdSession,
 		"rewind":   d.cmdRewind,
+		"rollback": d.cmdRollback,
+		"detach":   d.cmdDetach,
+		"archive":  d.cmdArchive,
+		"humor":    d.cmdHumor,
 		"share":    d.cmdShare,
 		"timeline": d.cmdTimeline,
 		"quit":     d.cmdQuit,
@@ -164,6 +168,10 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
 		{"session [list]", "Show session info or list sessions"},
 		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
+		{"rollback [n]", "Restore checkpoint n and run git reset --hard to pre-turn HEAD"},
+		{"detach [on|off]", "Run this session in the background (turn continues after TUI closes)"},
+		{"humor [on|off]", "Toggle D&D-themed thinking phrases in the response area"},
+		{"archive [off]", "Archive this session (hidden from listings; data kept). /archive off to restore"},
 		{"timeline", "Jump to a past turn in the conversation timeline"},
 		{"share [html|md|json]", "Export this session to a shareable transcript file"},
 		{"exit", "Exit Aegis"},
@@ -219,6 +227,12 @@ func builtinHelp(name string) string {
 		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
 	case "rewind":
 		return "/rewind [n] [code|conversation|both]\n  No args: list checkpoints (rewind points) for this session, newest first.\n  /rewind <n>: restore checkpoint n (both files and conversation by default).\n  Scope: 'code' restores only files, 'conversation' only the transcript, 'both' (default) does both.\n  Each checkpoint is the state just before a user turn; rewinding undoes that turn's file changes and/or messages."
+	case "detach":
+		return "/detach [on|off]\n  Toggle background (detached) mode for this session.\n  on (default): turns continue running after the TUI closes. Use `aegis bg events <id>` to check progress.\n  off: revert to normal foreground execution."
+	case "humor":
+		return "/humor [on|off]\n  Toggle D&D-themed thinking phrases in the response area.\n  on: show phrases like \"Rolling for Initiative\", \"Consulting the Tome\", etc.\n  off: show plain \"thinking…\" status.\n  No args: toggle current state.\n  Set tui.humor_mode in your config file to make this permanent."
+	case "archive":
+		return "/archive [off]\n  Archive the current session — it is hidden from normal session listings but all data is preserved.\n  /archive off: restore an archived session to active status.\n  To permanently remove a session, use `aegis sessions delete <id>` from the CLI."
 	case "share":
 		return "/share [html|md|json]\n  Export this session as a shareable transcript file in the current directory.\n  html (default): a self-contained page with styling and inline images.\n  md: Markdown. json: the raw session.\n  Use `aegis sessions export <id>` for the same from the CLI."
 	case "quit", "exit":
@@ -565,6 +579,115 @@ func (d *SlashDispatcher) cmdRewind(args []string) SlashResult {
 		return SlashResult{Output: summary}
 	}
 	return SlashResult{Output: summary, ReloadSession: true}
+}
+
+// cmdRollback is like rewind but also resets git HEAD to the pre-turn commit,
+// providing a true "undo everything" for multi-file task failures (P3.4).
+func (d *SlashDispatcher) cmdRollback(args []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cps, err := d.client.ListCheckpoints(ctx, d.sessionID)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to list checkpoints: %v", err), IsError: true}
+	}
+	if len(cps) == 0 {
+		return SlashResult{Output: "No checkpoints yet. Send a message first."}
+	}
+
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("Checkpoints available for rollback (newest first):\n")
+		for i, cp := range cps {
+			git := ""
+			if cp.GitSHA != "" {
+				git = fmt.Sprintf(" · git:%s", cp.GitSHA[:8])
+			}
+			label := strings.ReplaceAll(cp.Label, "\n", " ")
+			fmt.Fprintf(&b, "  %2d  %s%s\n      %s\n", i+1, cp.CreatedAt.Format("15:04:05"), git, label)
+		}
+		b.WriteString("\nUse /rollback <n> to restore files AND git reset --hard to pre-turn HEAD.")
+		return SlashResult{Output: b.String()}
+	}
+
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 1 || n > len(cps) {
+		return SlashResult{Output: fmt.Sprintf("Invalid number %q (1–%d).", args[0], len(cps)), IsError: true}
+	}
+	cp := cps[n-1]
+
+	noGit := ""
+	if cp.GitSHA == "" {
+		noGit = " (no git SHA recorded — file-only restore)"
+	}
+
+	resp, err := d.client.Rollback(ctx, d.sessionID, cp.ID, "both")
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Rollback failed: %v", err), IsError: true}
+	}
+
+	summary := fmt.Sprintf("Rolled back to checkpoint %d%s: restored %d file(s), kept %d message(s).",
+		n, noGit, resp.FilesRestored, resp.MessagesKept)
+	return SlashResult{Output: summary, ReloadSession: true}
+}
+
+// cmdDetach toggles the background (detached) flag on the current session.
+// When on, subsequent message turns run with a server-level context so they
+// continue even after the TUI disconnects (P3.2).
+func (d *SlashDispatcher) cmdDetach(args []string) SlashResult {
+	on := true // default to enabling
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "off", "false", "0":
+			on = false
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := d.client.SetBackground(ctx, d.sessionID, on); err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to set background mode: %v", err), IsError: true}
+	}
+	if on {
+		return SlashResult{Output: "Background mode: on\nThis session now runs detached from the TUI. Close the TUI at any time — the turn will continue running.\nUse `aegis bg list` to check status or /detach off to disable."}
+	}
+	return SlashResult{Output: "Background mode: off\nThis session is back to normal (foreground) execution."}
+}
+
+// cmdHumor toggles D&D-themed thinking phrases in the response area.
+// Uses the "\x00humor-*" magic output protocol (same as /tools compact|full).
+func (d *SlashDispatcher) cmdHumor(args []string) SlashResult {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "off", "false", "0":
+			return SlashResult{Output: "\x00humor-off"}
+		case "on", "true", "1":
+			return SlashResult{Output: "\x00humor-on"}
+		default:
+			return SlashResult{Output: "Usage: /humor [on|off]", IsError: true}
+		}
+	}
+	// No arg: toggle current state
+	return SlashResult{Output: "\x00humor-toggle"}
+}
+
+// cmdArchive archives or unarchives the current session. Archived sessions are
+// hidden from normal listings but their data is preserved. Use /archive off to
+// restore. To permanently remove a session, use `aegis sessions delete <id>`.
+func (d *SlashDispatcher) cmdArchive(args []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	unarchive := len(args) > 0 && (strings.ToLower(args[0]) == "off" || strings.ToLower(args[0]) == "false")
+	if unarchive {
+		if err := d.client.UnarchiveSession(ctx, d.sessionID); err != nil {
+			return SlashResult{Output: fmt.Sprintf("Failed to unarchive session: %v", err), IsError: true}
+		}
+		return SlashResult{Output: "Session unarchived. It will now appear in normal session listings."}
+	}
+	if err := d.client.ArchiveSession(ctx, d.sessionID); err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to archive session: %v", err), IsError: true}
+	}
+	return SlashResult{Output: fmt.Sprintf("Session %s archived.\nIt is now hidden from normal listings but all data is preserved.\nUse /archive off to restore, or `aegis sessions delete %s` to permanently remove.", d.sessionID[:8], d.sessionID[:8])}
 }
 
 func (d *SlashDispatcher) cmdShare(args []string) SlashResult {

@@ -79,9 +79,10 @@ func (ThinkingBlock) blockType() string { return "thinking" }
 
 // ToolSchema describes a tool exposed to the model.
 type ToolSchema struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	OutputSchema json.RawMessage `json:"output_schema,omitempty"` // P3.6: typed output schema
 }
 
 // ThinkingConfig requests extended thinking with a token budget for the model's

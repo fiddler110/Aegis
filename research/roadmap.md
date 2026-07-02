@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-01 (v5 — P2 complete; only P3 exploratory work remains)
+**Updated:** 2026-07-02 (v6 — P3.1–P3.4, P3.6, P3.7 shipped)
 
 ---
 
@@ -17,22 +17,24 @@
 - P2.8 Conversation timeline dialog (`/timeline`)
 - P2.9 Workflow agent primitives (sequential / parallel / loop)
 
+**P3 (shipped 2026-07-02):**
+- P3.1 Tiered long-term memory — SQLite FTS5 entity store (`internal/longmem`); `entity_remember` / `entity_recall` tools; ADK `BaseMemoryService`-compatible interface
+- P3.2 Async/background task execution — `/detach` TUI command; daemon persists session to `bg_events` table; `aegis bg list/events` CLI; detached context survives TUI disconnect
+- P3.3 DeepWiki-style project knowledge base — SQLite FTS5 index of docs/comments (`internal/knowledge`); `project_knowledge` tool with BM25 ranking and snippet extraction
+- P3.4 Automatic rollback on tool failure — `git_sha` captured per checkpoint; `/rollback` TUI command runs `git reset --hard <sha>`; `GitRollback` flag on `RewindRequest`
+- P3.6 Typed tool output schemas — optional `OutputSchemer` interface on `Tool`; `OutputSchema json.RawMessage` on `ToolSchema`; all built-in tools declare output schemas
+- P3.7 Animation pause off-screen — spinner tick suppressed when `followBottom` is false; animation resumes automatically on scroll-back
+
 ---
 
 ## Remaining Gaps
 
-| Category | Gap | Missing vs. |
-|---|---|---|
-| TUI | No `@file#start-end` line-range syntax in @mentions | OpenCode |
-| Memory | No tiered long-term / entity memory | CrewAI, Devin, ADK |
-| Async | No background / detached task execution | Cursor, Devin |
-| Context | No DeepWiki-style project knowledge base | Devin |
-| Safety | No automatic rollback on tool failure | Windsurf |
-| Persistence | No mid-turn state persistence on crash | Crush, OpenCode |
-| Tooling | No typed tool output schemas | OpenCode |
-| TUI | Animation ticks fire even when content is off-screen | Crush |
-| TUI | No draft stash across sessions | OpenCode |
-| Interop | No A2A protocol support for cross-framework agent communication | ADK Go 2.0 |
+| Category    | Gap                                                             | Missing vs.        |
+| ----------- | --------------------------------------------------------------- | ------------------ |
+| TUI         | No `@file#start-end` line-range syntax in @mentions             | OpenCode           |
+| Persistence | No mid-turn state persistence on crash                          | Crush, OpenCode    |
+| TUI         | No draft stash across sessions                                  | OpenCode           |
+| Interop     | No A2A protocol support for cross-framework agent communication | ADK Go 2.0         |
 
 ---
 
@@ -40,7 +42,7 @@
 
 Long-horizon or niche capabilities worth tracking; no immediate implementation commitment.
 
-### P3.1 — Tiered long-term memory
+### ✓ P3.1 — Tiered long-term memory (shipped 2026-07-02)
 
 **Gap:** Aegis memory is session-scoped (SQLite) and project-scoped (CLAUDE.md). No persistent entity memory or cross-session factual store.
 
@@ -50,7 +52,7 @@ Long-horizon or niche capabilities worth tracking; no immediate implementation c
 
 ---
 
-### P3.2 — Async / background task execution
+### ✓ P3.2 — Async / background task execution (shipped 2026-07-02)
 
 **Gap:** All sessions are synchronous. Long-running tasks (full-repo audit, multi-file refactor) block the TUI.
 
@@ -60,7 +62,7 @@ Long-horizon or niche capabilities worth tracking; no immediate implementation c
 
 ---
 
-### P3.3 — DeepWiki-style project knowledge base
+### ✓ P3.3 — DeepWiki-style project knowledge base (shipped 2026-07-02)
 
 **Gap:** No queryable knowledge base auto-generated from the repo. Re-reading files on every session discards accumulated structural knowledge.
 
@@ -70,7 +72,7 @@ Long-horizon or niche capabilities worth tracking; no immediate implementation c
 
 ---
 
-### P3.4 — Automatic rollback on tool failure
+### ✓ P3.4 — Automatic rollback on tool failure (shipped 2026-07-02)
 
 **Gap:** Partial failures leave the workspace in an inconsistent state. No rollback mechanism exists.
 
@@ -78,17 +80,10 @@ Long-horizon or niche capabilities worth tracking; no immediate implementation c
 
 **Notes:** Git-native rollback is the simplest approach: checkpoint the workspace with a commit before a multi-step task begins; on unrecoverable failure, offer `git reset --hard` to the pre-task commit. Requires explicit task boundaries — ties to the sub-agent primitive (P2.9, shipped).
 
----
-
-### P3.5 — Mid-turn state persistence
-
-**Gap:** If the process crashes mid-turn, the partial turn (accumulated assistant text, tool calls received) is lost. Crush and OpenCode commit incremental state to SQLite during streaming.
-
-**Notes:** The session layer persists completed turns to SQLite. Extending this to write partial state per streaming callback (assistant text accumulated so far, tool calls received but not yet dispatched) would require threading the session store into the engine or reusing the checkpoint infrastructure. High implementation complexity for a relatively low-probability failure mode; revisit if crash-during-long-turn becomes a reported pain point.
 
 ---
 
-### P3.6 — Typed tool output schemas
+### ✓ P3.6 — Typed tool output schemas (shipped 2026-07-02)
 
 **Gap:** Aegis tools return raw strings. OpenCode tools declare Effect Schema for both input and output; the harness validates and serializes cleanly.
 
@@ -96,7 +91,7 @@ Long-horizon or niche capabilities worth tracking; no immediate implementation c
 
 ---
 
-### P3.7 — Animation pause off-screen
+### ✓ P3.7 — Animation pause off-screen (shipped 2026-07-02)
 
 **Gap:** The shimmer animation and spinner tick unconditionally, triggering redraws even when the animated content is scrolled off-screen.
 
@@ -116,7 +111,16 @@ Long-horizon or niche capabilities worth tracking; no immediate implementation c
 
 ---
 
-### P3.9 — ADK Agent-to-Agent (A2A) protocol integration
+### P4.1 — Mid-turn state persistence
+
+**Gap:** If the process crashes mid-turn, the partial turn (accumulated assistant text, tool calls received) is lost. Crush and OpenCode commit incremental state to SQLite during streaming.
+
+**Notes:** The session layer persists completed turns to SQLite. Extending this to write partial state per streaming callback (assistant text accumulated so far, tool calls received but not yet dispatched) would require threading the session store into the engine or reusing the checkpoint infrastructure. High implementation complexity for a relatively low-probability failure mode; revisit if crash-during-long-turn becomes a reported pain point.
+
+
+---
+
+### P4.2 — ADK Agent-to-Agent (A2A) protocol integration
 
 **Source:** ADK Go 2.0 A2A protocol (GA June 2026).
 

@@ -34,11 +34,12 @@ import (
 
 // Config configures the TUI.
 type Config struct {
-	Client    *client.Client
-	SessionID string
-	Mode      string
-	Model     string
-	WorkDir   string
+	Client     *client.Client
+	SessionID  string
+	Mode       string
+	Model      string
+	WorkDir    string
+	HumorMode  bool // D&D-themed thinking phrases; false = plain "thinking…"
 }
 
 // Run starts the TUI event loop and blocks until the user quits.
@@ -101,6 +102,7 @@ type model struct {
 	streamStart time.Time // when the current stream began; zero when idle
 	turnCount   int       // conversation turns sent; guards turn separator logic
 	animStep    int       // frame counter for the streaming "working" shimmer
+	humorMode   bool      // when true, D&D phrases replace plain "thinking…"
 
 	// Wrapped-transcript cache. Re-wrapping the whole (up to 1 MiB) transcript
 	// on every streamed token is O(n²) per turn; instead we wrap once and reuse
@@ -310,6 +312,7 @@ func newModel(cfg Config) model {
 		keys:         defaultKeyMap(),
 		followBottom: true,
 		toolCompact:  true,
+		humorMode:    cfg.HumorMode,
 		term:         newTermPane(workDir, 10), // height recalculated on first resize
 	}
 	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
@@ -661,12 +664,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
 		if m.streaming {
-			m.animStep++ // advance the gradient working shimmer
-			cmds = append(cmds, cmd)
-			m.refresh() // animate the in-transcript thinking indicator
-			// P2.5: poll sub-agent roster every 20 animation frames.
-			if m.animStep%20 == 0 {
-				cmds = append(cmds, m.fetchTeammatesQuiet())
+			cmds = append(cmds, cmd) // always re-queue so animation resumes on scroll-back
+			// P3.7: suppress redraws when the "● thinking…" indicator is scrolled
+			// off-screen — it lives at the viewport bottom, visible only when
+			// followBottom is true.
+			if m.followBottom {
+				m.animStep++
+				m.refresh()
+				// P2.5: poll sub-agent roster every 20 animation frames.
+				if m.animStep%20 == 0 {
+					cmds = append(cmds, m.fetchTeammatesQuiet())
+				}
 			}
 		}
 
@@ -1063,6 +1071,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refresh()
 			return m, nil
 		}
+		if msg.Output == "\x00humor-on" {
+			m.humorMode = true
+			m.transcript.WriteString(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
+			m.refresh()
+			return m, nil
+		}
+		if msg.Output == "\x00humor-off" {
+			m.humorMode = false
+			m.transcript.WriteString(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
+			m.refresh()
+			return m, nil
+		}
+		if msg.Output == "\x00humor-toggle" {
+			m.humorMode = !m.humorMode
+			if m.humorMode {
+				m.transcript.WriteString(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
+			} else {
+				m.transcript.WriteString(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
+			}
+			m.refresh()
+			return m, nil
+		}
 		if msg.Output != "" {
 			style := m.th.statusText
 			if msg.IsError {
@@ -1302,14 +1332,14 @@ func (m *model) refresh() {
 		}
 		content += m.liveWrapCache + wrap(live[boundary:], w)
 	} else if m.streaming {
-		elapsed := ""
+		secs := 0
 		if !m.streamStart.IsZero() {
-			if secs := int(time.Since(m.streamStart).Seconds()); secs > 0 {
-				elapsed = fmt.Sprintf("  %ds", secs)
-			}
+			secs = int(time.Since(m.streamStart).Seconds())
 		}
-		work := shimmerText("● thinking…", m.animStep, colTextMuted, colAccent)
-		content += wrap(work+m.th.elapsedDim.Render(elapsed), m.vp.Width())
+		phrase := thinkingPhrase(m.animStep, m.humorMode)
+		hint := formatStreamHint(secs, m.inputTokens, 0) // no live-text bytes here; liveText is empty
+		work := shimmerText("● "+phrase, m.animStep, colTextMuted, colAccent)
+		content += wrap(work+m.th.elapsedDim.Render(hint), m.vp.Width())
 	}
 
 	m.vp.SetContent(content)
@@ -1962,11 +1992,15 @@ func (m model) renderInputArea() string {
 	if m.streaming && m.escPending {
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to stop")
 	} else if m.streaming {
-		elapsed := ""
+		secs := 0
 		if !m.streamStart.IsZero() {
-			elapsed = m.th.elapsedDim.Render(fmt.Sprintf(" %ds", int(time.Since(m.streamStart).Seconds())))
+			secs = int(time.Since(m.streamStart).Seconds())
 		}
-		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, colAccent) + elapsed
+		hint := ""
+		if secs > 0 {
+			hint = m.th.elapsedDim.Render(fmt.Sprintf(" %ds", secs))
+		}
+		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, colAccent) + hint
 	} else if m.activeToast != nil {
 		tag, fg, bg := toastTag(m.activeToast.level)
 		statusLeft = statusTag(tag, fg, bg) + " " + m.toastStyle(m.activeToast.level).Render(m.activeToast.message)

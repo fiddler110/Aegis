@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -486,6 +487,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/steer", s.handleSteer)
 	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
+	mux.HandleFunc("POST /sessions/{id}/background", s.handleSetBackground)  // P3.2
+	mux.HandleFunc("GET /sessions/{id}/events", s.handleGetBGEvents)         // P3.2
+	mux.HandleFunc("POST /sessions/{id}/archive", s.handleArchiveSession)
+	mux.HandleFunc("POST /sessions/{id}/unarchive", s.handleUnarchiveSession)
+	mux.HandleFunc("POST /sessions/prune", s.handlePruneSessions)
 	mux.HandleFunc("GET /runs", s.handleListRuns)
 	mux.HandleFunc("GET /teammates", s.handleListTeammates)
 	mux.HandleFunc("GET /commands", s.handleListCommands)
@@ -518,6 +524,32 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		cronCtx, cronCancel := context.WithCancel(context.Background())
 		s.cronCancel = cronCancel
 		go s.cronSched.Run(cronCtx)
+	}
+
+	// Start the session auto-pruner when a TTL is configured.
+	if s.cfg.Cleanup.SessionTTLDays > 0 {
+		interval := 24 * time.Hour
+		if h := s.cfg.Cleanup.IntervalHours; h > 0 {
+			interval = time.Duration(h) * time.Hour
+		}
+		ttl := time.Duration(s.cfg.Cleanup.SessionTTLDays) * 24 * time.Hour
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					n, err := s.store.Prune(context.Background(), ttl)
+					if err != nil {
+						s.logger.Error("auto-prune sessions", "err", err)
+					} else if n > 0 {
+						s.logger.Info("auto-pruned old sessions", "deleted", n, "ttl_days", s.cfg.Cleanup.SessionTTLDays)
+					}
+				}
+			}
+		}()
 	}
 
 	errCh := make(chan error, 1)
@@ -759,7 +791,15 @@ func (s *Server) handleListRuns(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	metas, err := s.store.List(r.Context())
+	var (
+		metas []session.Meta
+		err   error
+	)
+	if r.URL.Query().Get("archived") == "true" {
+		metas, err = s.store.ListAll(r.Context())
+	} else {
+		metas, err = s.store.List(r.Context())
+	}
 	if err != nil {
 		s.logger.Error("list sessions", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -1057,6 +1097,20 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	conv := &engine.Conversation{System: s.effectiveSystem(sess.System), Messages: sess.Messages}
 
+	// P3.2: background (detached) sessions run the engine in a goroutine bound to
+	// a server-level context so the turn continues even after the HTTP client
+	// disconnects. All events are buffered to SQLite in addition to being sent
+	// over SSE while the client is still connected.
+	if sess.Background {
+		origSend := send
+		send = func(ev api.Event) {
+			origSend(ev) // best-effort SSE while client is connected
+			if data, jerr := json.Marshal(ev); jerr == nil {
+				_ = s.store.AppendBGEvent(context.Background(), id, string(data))
+			}
+		}
+	}
+
 	// Create a checkpoint for this turn before appending the user message, so a
 	// rewind restores the conversation to just before this turn and undoes any
 	// file changes the turn makes. seq is the pre-turn message count.
@@ -1066,6 +1120,14 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("create checkpoint", "session", id, "err", err)
 		} else {
 			snap = s.checkpoints.NewSnapshotter(cp.ID)
+			// P3.4: capture the HEAD commit SHA asynchronously so rollback can reset to it.
+			go func(cpID string) {
+				if sha := captureGitSHA(context.Background(), s.workspace); sha != "" {
+					if err := s.checkpoints.SetGitSHA(context.Background(), cpID, sha); err != nil {
+						s.logger.Warn("set checkpoint git sha", "checkpoint", cpID, "err", err)
+					}
+				}
+			}(cp.ID)
 		}
 	}
 
@@ -1077,8 +1139,13 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: content})
 
 	// Carry the session's permission mode so the `agent` tool can clamp any
-	// sub-agents it spawns to no more than this posture.
-	runCtx := swarm.WithParentMode(r.Context(), sess.Mode)
+	// sub-agents it spawns to no more than this posture. P3.2: background sessions
+	// use a server-level context so the run continues after the HTTP client drops.
+	baseRunCtx := r.Context()
+	if sess.Background {
+		baseRunCtx = context.Background()
+	}
+	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)
 	if snap != nil {
 		runCtx = checkpoint.WithSnapshotter(runCtx, snap)
 	}
@@ -1210,6 +1277,7 @@ func (s *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 			ID:        cp.ID,
 			Seq:       cp.Seq,
 			Label:     cp.Label,
+			GitSHA:    cp.GitSHA,
 			FileCount: cp.FileCount,
 			CreatedAt: cp.CreatedAt,
 		})
@@ -1263,6 +1331,16 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 	resp := api.RewindResponse{Scope: scope}
 
 	if scope == "both" || scope == "code" {
+		// P3.4: git-native rollback — run `git reset --hard <sha>` before restoring
+		// snapshotted files so untracked changes and index state are also reset.
+		if req.GitRollback && cp.GitSHA != "" {
+			gitArgs := []string{"-C", s.workspace, "reset", "--hard", cp.GitSHA}
+			if out, err := execGitCmd(r.Context(), gitArgs...); err != nil {
+				s.logger.Warn("git rollback failed", "sha", cp.GitSHA, "out", out, "err", err)
+			} else {
+				s.logger.Info("git rollback", "sha", cp.GitSHA)
+			}
+		}
 		n, err := s.checkpoints.RestoreFiles(r.Context(), cp.ID)
 		if err != nil {
 			s.logger.Warn("rewind: restore files", "checkpoint", cp.ID, "err", err)
@@ -1299,6 +1377,108 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleSetBackground marks or unmarks a session as a background (detached)
+// session. A background session's engine runs are detached from the HTTP
+// request context so the turn continues even if the TUI disconnects (P3.2).
+func (s *Server) handleSetBackground(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	id := r.PathValue("id")
+	var req api.SetBackgroundRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if err := s.store.SetBackground(r.Context(), id, req.Background); err != nil {
+		s.logger.Error("set background", "session", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetBGEvents returns buffered engine events for a background session,
+// supporting incremental polling via the ?since=<id> query parameter (P3.2).
+func (s *Server) handleGetBGEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var since int64
+	if v := r.URL.Query().Get("since"); v != "" {
+		fmt.Sscan(v, &since)
+	}
+	events, err := s.store.ListBGEvents(r.Context(), id, since)
+	if err != nil {
+		s.logger.Error("list bg events", "session", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	out := make([]api.BGEventItem, 0, len(events))
+	for _, e := range events {
+		out = append(out, api.BGEventItem{ID: e.ID, Data: e.Data})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleArchiveSession soft-deletes a session; it is hidden from normal listings.
+func (s *Server) handleArchiveSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.Archive(r.Context(), id); err != nil {
+		s.logger.Error("archive session", "session", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUnarchiveSession restores an archived session to active status.
+func (s *Server) handleUnarchiveSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.Unarchive(r.Context(), id); err != nil {
+		s.logger.Error("unarchive session", "session", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePruneSessions deletes non-archived sessions older than the configured TTL,
+// or an explicit ?days=N override from the request.
+func (s *Server) handlePruneSessions(w http.ResponseWriter, r *http.Request) {
+	days := s.cfg.Cleanup.SessionTTLDays
+	if v := r.URL.Query().Get("days"); v != "" {
+		fmt.Sscan(v, &days)
+	}
+	if days <= 0 {
+		writeError(w, http.StatusBadRequest, "days must be > 0 (or configure cleanup.session_ttl_days)")
+		return
+	}
+	n, err := s.store.Prune(r.Context(), time.Duration(days)*24*time.Hour)
+	if err != nil {
+		s.logger.Error("prune sessions", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.logger.Info("pruned old sessions", "deleted", n, "ttl_days", days)
+	writeJSON(w, http.StatusOK, api.PruneResponse{Deleted: n})
+}
+
+// execGitCmd runs a git sub-command and returns combined output. Used for
+// git-native rollback (P3.4).
+func execGitCmd(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// captureGitSHA returns the current HEAD commit SHA via `git rev-parse HEAD`,
+// returning an empty string if git is unavailable or the directory is not a
+// repo.
+func captureGitSHA(ctx context.Context, root string) string {
+	out, err := execGitCmd(ctx, "-C", root, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return out
 }
 
 // newRunID returns a short random identifier for a single message run.
@@ -1400,6 +1580,9 @@ func toMeta(m session.Meta) api.SessionMeta {
 		ID:           m.ID,
 		Title:        m.Title,
 		Mode:         m.Mode,
+		Background:   m.Background,
+		Archived:     m.Archived,
+		ArchivedAt:   m.ArchivedAt,
 		InputTokens:  m.InputTokens,
 		OutputTokens: m.OutputTokens,
 		CostUSD:      m.CostUSD,
