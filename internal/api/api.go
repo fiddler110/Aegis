@@ -17,14 +17,22 @@ type CreateSessionRequest struct {
 
 // SessionMeta describes a session without its messages.
 type SessionMeta struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Mode         string    `json:"mode"`
-	InputTokens  int       `json:"input_tokens,omitempty"`
-	OutputTokens int       `json:"output_tokens,omitempty"`
-	CostUSD      float64   `json:"cost_usd,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string     `json:"id"`
+	Title        string     `json:"title"`
+	Mode         string     `json:"mode"`
+	Background   bool       `json:"background,omitempty"`   // P3.2
+	Archived     bool       `json:"archived,omitempty"`
+	InputTokens  int        `json:"input_tokens,omitempty"`
+	OutputTokens int        `json:"output_tokens,omitempty"`
+	CostUSD      float64    `json:"cost_usd,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	ArchivedAt   *time.Time `json:"archived_at,omitempty"`
+}
+
+// PruneResponse reports how many sessions were deleted by a prune operation.
+type PruneResponse struct {
+	Deleted int `json:"deleted"`
 }
 
 // PostMessageRequest sends a user turn into a session.
@@ -145,16 +153,19 @@ type CheckpointInfo struct {
 	ID        string    `json:"id"`
 	Seq       int       `json:"seq"`        // conversation message count at capture
 	Label     string    `json:"label"`      // the user prompt that began the turn
+	GitSHA    string    `json:"git_sha,omitempty"` // HEAD commit at checkpoint time (P3.4)
 	FileCount int       `json:"file_count"` // number of files snapshotted in the turn
 	CreatedAt time.Time `json:"created_at"`
 }
 
 // RewindRequest restores a session to a checkpoint. Scope selects what to
 // restore: "code" (files only), "conversation" (messages only), or "both"
-// (default).
+// (default). When GitRollback is true and the checkpoint has a GitSHA, the
+// server runs `git reset --hard <sha>` before restoring files (P3.4).
 type RewindRequest struct {
 	CheckpointID string `json:"checkpoint_id"`
 	Scope        string `json:"scope,omitempty"`
+	GitRollback  bool   `json:"git_rollback,omitempty"` // P3.4: also reset git HEAD
 }
 
 // RewindResponse reports the result of a rewind.
@@ -178,6 +189,17 @@ type RunInfo struct {
 // SteerRequest injects a mid-run instruction into an active session run.
 type SteerRequest struct {
 	Text string `json:"text"`
+}
+
+// SetBackgroundRequest marks a session as a background (detached) session (P3.2).
+type SetBackgroundRequest struct {
+	Background bool `json:"background"`
+}
+
+// BGEventItem is one buffered engine event from a background session.
+type BGEventItem struct {
+	ID   int64  `json:"id"`
+	Data string `json:"data"`
 }
 
 // ErrorResponse is the body returned for non-2xx responses.

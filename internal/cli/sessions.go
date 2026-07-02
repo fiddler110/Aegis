@@ -8,6 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/scottymacleod/aegis/internal/api"
 	"github.com/scottymacleod/aegis/internal/client"
 	"github.com/scottymacleod/aegis/internal/config"
 	"github.com/scottymacleod/aegis/internal/share"
@@ -25,6 +26,9 @@ func newSessionsCmd() *cobra.Command {
 	cmd.AddCommand(newSessionsDeleteCmd())
 	cmd.AddCommand(newSessionsExportCmd())
 	cmd.AddCommand(newSessionsTraceCmd())
+	cmd.AddCommand(newSessionsArchiveCmd())
+	cmd.AddCommand(newSessionsUnarchiveCmd())
+	cmd.AddCommand(newSessionsPruneCmd())
 	return cmd
 }
 
@@ -41,7 +45,8 @@ func dialClient() (*client.Client, error) {
 }
 
 func newSessionsListCmd() *cobra.Command {
-	return &cobra.Command{
+	var showArchived bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List stored sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -49,7 +54,12 @@ func newSessionsListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			metas, err := cl.ListSessions(cmd.Context())
+			var metas []api.SessionMeta
+			if showArchived {
+				metas, err = cl.ListArchivedSessions(cmd.Context())
+			} else {
+				metas, err = cl.ListSessions(cmd.Context())
+			}
 			if err != nil {
 				return err
 			}
@@ -57,17 +67,26 @@ func newSessionsListCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "no sessions yet")
 				return nil
 			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tMODE\tSTATUS\tUPDATED\tTITLE")
 			for _, m := range metas {
 				title := m.Title
 				if title == "" {
 					title = "(untitled)"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%s  %-5s  %s  %s\n",
-					m.ID, m.Mode, m.UpdatedAt.Local().Format("2006-01-02 15:04"), title)
+				status := "active"
+				if m.Archived {
+					status = "archived"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+					m.ID[:8], m.Mode, status,
+					m.UpdatedAt.Local().Format("2006-01-02 15:04"), title)
 			}
-			return nil
+			return w.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&showArchived, "archived", false, "include archived sessions")
+	return cmd
 }
 
 func newSessionsExportCmd() *cobra.Command {
@@ -192,7 +211,7 @@ func shortID(id string) string {
 func newSessionsDeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <id>",
-		Short: "Delete a session",
+		Short: "Permanently delete a session and all its checkpoints",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cl, err := dialClient()
@@ -207,3 +226,68 @@ func newSessionsDeleteCmd() *cobra.Command {
 		},
 	}
 }
+
+func newSessionsArchiveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "archive <id>",
+		Short: "Archive a session (hidden from normal listing; data preserved)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, err := dialClient()
+			if err != nil {
+				return err
+			}
+			if err := cl.ArchiveSession(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "archived %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+func newSessionsUnarchiveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unarchive <id>",
+		Short: "Restore an archived session to active status",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, err := dialClient()
+			if err != nil {
+				return err
+			}
+			if err := cl.UnarchiveSession(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "unarchived %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+func newSessionsPruneCmd() *cobra.Command {
+	var days int
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Delete non-archived sessions older than N days",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, err := dialClient()
+			if err != nil {
+				return err
+			}
+			resp, err := cl.PruneSessions(cmd.Context(), days)
+			if err != nil {
+				return err
+			}
+			if resp.Deleted == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no sessions matched (nothing pruned)")
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "pruned %d session(s)\n", resp.Deleted)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&days, "days", 0, "delete sessions not updated in this many days (overrides server config)")
+	return cmd
+}
+

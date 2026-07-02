@@ -22,6 +22,10 @@ func (t *lsTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"directory to list relative to workspace root (default '.')"},"depth":{"type":"integer","description":"max directory depth 1-5 (default 2)"}},"required":[]}`)
 }
 
+func (t *lsTool) OutputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"tree":{"type":"string","description":"indented directory tree"}},"required":["tree"]}`)
+}
+
 func (t *lsTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Path  string `json:"path"`

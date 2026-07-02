@@ -31,6 +31,7 @@ It borrows proven patterns from existing agents — provider abstraction and con
   - [Process Plugins](#process-plugins)
 - [Project Structure](#project-structure)
 - [Testing](#testing)
+- [Documentation](#documentation)
 
 ---
 
@@ -1049,6 +1050,29 @@ go test -v ./internal/provider/anthropic/...
 # Live model calls (requires an API key or local server running)
 OPENAI_API_KEY="ollama" go test -run TestLive ./internal/provider/openai/...
 ```
+
+---
+
+## Documentation
+
+The `docs/` directory contains comprehensive documentation covering every aspect of Aegis:
+
+| Document | What it covers |
+|----------|----------------|
+| [docs/overview.md](docs/overview.md) | Architecture deep dive: daemon/client model, agent loop, event system |
+| [docs/installation.md](docs/installation.md) | Build scripts, platform setup, first-time configuration |
+| [docs/configuration.md](docs/configuration.md) | Every config key with examples, environment variables, common recipes |
+| [docs/cli-reference.md](docs/cli-reference.md) | Every command and flag (`aegis`, `aegis serve`, `aegis sessions`, …) |
+| [docs/tui-guide.md](docs/tui-guide.md) | TUI layout, all keyboard shortcuts, all slash commands, `@` references |
+| [docs/tools-reference.md](docs/tools-reference.md) | All 39 built-in tools: inputs, outputs, examples |
+| [docs/personas.md](docs/personas.md) | All 17 built-in personas, custom persona files, per-persona model overrides |
+| [docs/permissions.md](docs/permissions.md) | Plan/Build/Auto modes, text-based rules, contextual security policies |
+| [docs/sessions.md](docs/sessions.md) | Durable sessions, checkpoints, rewind, export, archiving |
+| [docs/providers.md](docs/providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
+| [docs/memory-and-knowledge.md](docs/memory-and-knowledge.md) | Project/user memory, skills, knowledge base, long-term entity store |
+| [docs/extensibility.md](docs/extensibility.md) | MCP servers, custom commands, custom agents, process plugins, bundles |
+| [docs/multi-agent.md](docs/multi-agent.md) | Swarm, sub-agents, parallel sessions, background tasks, cron scheduling |
+| [docs/security.md](docs/security.md) | Security scanning, sandbox backends, contextual policies, audit trail |
 
 ---
 

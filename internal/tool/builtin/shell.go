@@ -42,6 +42,10 @@ func (t *shellTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"command":{"type":"string","description":"the shell command to run via /bin/sh -c"},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
 }
 
+func (t *shellTool) OutputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"output":{"type":"string","description":"combined stdout and stderr"},"exit_code":{"type":"integer"}},"required":["output","exit_code"]}`)
+}
+
 func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Command    string `json:"command"`

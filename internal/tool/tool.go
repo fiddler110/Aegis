@@ -47,6 +47,14 @@ type Tool interface {
 	Execute(ctx context.Context, input json.RawMessage) (Result, error)
 }
 
+// OutputSchemer is an optional extension a Tool may implement to declare a
+// typed JSON Schema for its return value (P3.6). The registry emits the schema
+// alongside the input schema so clients and validators can handle structured
+// results without string-parsing.
+type OutputSchemer interface {
+	OutputSchema() json.RawMessage
+}
+
 // Registry holds registered tools and tracks which are exposed.
 type Registry struct {
 	mu          sync.RWMutex
@@ -127,11 +135,15 @@ func (r *Registry) Schemas() []provider.ToolSchema {
 		if !r.exposed[name] {
 			continue
 		}
-		out = append(out, provider.ToolSchema{
+		ts := provider.ToolSchema{
 			Name:        t.Name(),
 			Description: t.Description(),
 			InputSchema: t.InputSchema(),
-		})
+		}
+		if os, ok := t.(OutputSchemer); ok {
+			ts.OutputSchema = os.OutputSchema()
+		}
+		out = append(out, ts)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	r.schemaCache = out
