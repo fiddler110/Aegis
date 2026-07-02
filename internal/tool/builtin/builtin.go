@@ -15,6 +15,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/lsp"
 	"github.com/scottymacleod/aegis/internal/memory"
 	"github.com/scottymacleod/aegis/internal/sandbox"
+	"github.com/scottymacleod/aegis/internal/swarm"
 	"github.com/scottymacleod/aegis/internal/task"
 	"github.com/scottymacleod/aegis/internal/tool"
 )
@@ -53,6 +54,22 @@ type Options struct {
 	Knowledge *knowledge.Store
 	// LongMem, when set, enables entity_remember and entity_recall tools (P3.1).
 	LongMem *longmem.Store
+	// Search selects the web_search provider (P5.3). Empty provider uses the
+	// zero-config DuckDuckGo scrape.
+	Search SearchOptions
+	// TeamTasks, when set, enables the agent-team coordination tools (P5.1):
+	// shared task list + peer messaging.
+	TeamTasks *swarm.TaskList
+	// MailboxRoot is the on-disk root for team mailboxes (P5.1); required for
+	// the peer-messaging tools.
+	MailboxRoot string
+}
+
+// SearchOptions configures the web_search tool's provider.
+type SearchOptions struct {
+	Provider string
+	APIKey   string
+	BaseURL  string
 }
 
 // Register adds all built-in tools to the registry.
@@ -72,6 +89,8 @@ func Register(reg *tool.Registry, opts Options) error {
 	}
 
 	ft := opts.FileTracker
+	// Core tools are always exposed: file ops, search, shell, git, web, and the
+	// two meta-tools (skill, tool_search) that unlock the rest.
 	tools := []tool.Tool{
 		&readTool{root: root, tracker: ft},
 		&writeTool{root: root, tracker: ft},
@@ -82,11 +101,19 @@ func Register(reg *tool.Registry, opts Options) error {
 		&grepTool{root: root},
 		&gitTool{root: root},
 		&gitCommitTool{root: root},
+		&gitPRTool{root: root},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
 		&fetchTool{userAgent: opts.HTTPUserAgent},
-		&searchTool{userAgent: opts.HTTPUserAgent},
+		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL},
 		&modelsTool{},
 		&securityScanTool{root: root},
+		&skillTool{root: root},
+		&toolSearchTool{reg: reg},
+	}
+	// Deferred tools are niche: registered but advertised only as a name+
+	// description line in the system prompt, loaded on demand via tool_search
+	// (P4.6). This keeps per-turn schema tokens low.
+	deferred := []tool.Tool{
 		&diagramTool{root: root, krokiURL: opts.KrokiURL},
 		&latexBuildTool{root: root},
 		&latexNewDocumentTool{root: root},
@@ -99,10 +126,10 @@ func Register(reg *tool.Registry, opts Options) error {
 		tools = append(tools, TaskTools(opts.Tasks, root, opts.ShellTimeoutSec, opts.Sandbox)...)
 	}
 	if opts.Cron != nil {
-		tools = append(tools, CronTools(opts.Cron)...)
+		deferred = append(deferred, CronTools(opts.Cron)...)
 	}
 	if opts.LSP != nil {
-		tools = append(tools, LSPTools(opts.LSP, root)...)
+		deferred = append(deferred, LSPTools(opts.LSP, root)...)
 	}
 	if opts.TodoList != nil {
 		tools = append(tools, TodoTools(opts.TodoList)...)
@@ -114,10 +141,18 @@ func Register(reg *tool.Registry, opts Options) error {
 		tools = append(tools, KnowledgeTools(opts.Knowledge)...)
 	}
 	if opts.LongMem != nil {
-		tools = append(tools, LongMemTools(opts.LongMem)...)
+		deferred = append(deferred, LongMemTools(opts.LongMem)...)
+	}
+	if opts.TeamTasks != nil && opts.MailboxRoot != "" {
+		deferred = append(deferred, TeamTools(opts.TeamTasks, opts.MailboxRoot)...)
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {
+			return err
+		}
+	}
+	for _, t := range deferred {
+		if err := reg.RegisterDeferred(t); err != nil {
 			return err
 		}
 	}

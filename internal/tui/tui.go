@@ -142,6 +142,19 @@ type model struct {
 	cmdEntriesCache []cmdEntry
 	cmdEntriesLen   int
 
+	// Sidebar visibility (Ctrl+B / /sidebar to toggle, default off).
+	sidebarOpen bool
+
+	// lastAssistantText holds the most recent complete assistant message for /copy.
+	lastAssistantText string
+
+	// todo strip — populated from todo_add/todo_update/todo_list tool events.
+	todoItems       []todoStripItem
+	pendingTodoText string // captured from todo_add call input, matched to result
+
+	// stashPath is the .aegis/stash.json path for draft persistence (P5.6).
+	stashPath string
+
 	// Terminal split pane (Ctrl+X to toggle).
 	termOpen    bool
 	termFocused bool
@@ -179,6 +192,16 @@ type approvalState struct {
 	reason   string
 	id       string // run id echoed back when answering
 }
+
+// todoStripItem is one entry in the live plan strip (TQ7).
+type todoStripItem struct {
+	id     int
+	text   string
+	status string // "pending" | "in_progress" | "done"
+}
+
+// clipboardResultMsg carries the result of an async clipboard write.
+type clipboardResultMsg struct{ err error }
 
 const approvalBannerH = 4 // lines rendered by renderApprovalBanner(): separator + 3 content
 
@@ -297,6 +320,7 @@ func newModel(cfg Config) model {
 		workDir, _ = os.Getwd()
 	}
 
+	stashPath := filepath.Join(workDir, ".aegis", "stash.json")
 	m := model{
 		cfg:          cfg,
 		ta:           ta,
@@ -314,6 +338,11 @@ func newModel(cfg Config) model {
 		toolCompact:  true,
 		humorMode:    cfg.HumorMode,
 		term:         newTermPane(workDir, 10), // height recalculated on first resize
+		stashPath:    stashPath,
+	}
+	// P5.6: restore an unsent draft if one was saved from the previous session.
+	if draft := loadStash(stashPath); draft != "" {
+		m.ta.SetValue(draft)
 	}
 	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
 	return m
@@ -681,6 +710,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toastExpiredMsg:
 		m.activeToast = nil
 
+	case clipboardResultMsg:
+		if msg.err != nil {
+			t, cmd := newToastCmd("copy: "+msg.err.Error(), toastError)
+			m.activeToast = t
+			return m, cmd
+		}
+		t, cmd := newToastCmd("copied to clipboard", toastInfo)
+		m.activeToast = t
+		return m, cmd
+
 	case editorDoneMsg:
 		m.ta.Focus()
 		if msg.err != nil {
@@ -789,9 +828,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.cancel != nil {
-				m.cancel() // ensure no run keeps streaming (and spending) after we exit
+				m.cancel()
 			}
+			saveStash(m.stashPath, m.ta.Value())
 			return m, tea.Quit
+		case "ctrl+b":
+			m.sidebarOpen = !m.sidebarOpen
+			m.layout()
+			m.refresh()
+			return m, nil
 		case "ctrl+t":
 			return m, m.fetchTeammates()
 		case "ctrl+r":
@@ -1009,6 +1054,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cancel != nil {
 				m.cancel()
 			}
+			saveStash(m.stashPath, m.ta.Value())
 			return m, tea.Quit
 		}
 		if msg.Personas != nil {
@@ -1070,6 +1116,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toolCompact = false
 			m.refresh()
 			return m, nil
+		}
+		if msg.Output == "\x00sidebar-toggle" {
+			m.sidebarOpen = !m.sidebarOpen
+			m.layout()
+			m.refresh()
+			return m, nil
+		}
+		if strings.HasPrefix(msg.Output, "\x00copy") {
+			arg := strings.TrimPrefix(msg.Output, "\x00copy")
+			arg = strings.TrimSpace(arg)
+			var text string
+			if arg == "" {
+				text = m.lastAssistantText
+			} else {
+				n := 0
+				fmt.Sscanf(arg, "%d", &n)
+				blocks := extractCodeBlocks(m.lastAssistantText)
+				if n >= 1 && n <= len(blocks) {
+					text = blocks[n-1]
+				} else {
+					t, cmd := newToastCmd(fmt.Sprintf("no code block #%d in last message", n), toastError)
+					m.activeToast = t
+					return m, cmd
+				}
+			}
+			if text == "" {
+				t, cmd := newToastCmd("nothing to copy (no assistant message yet)", toastInfo)
+				m.activeToast = t
+				return m, cmd
+			}
+			return m, copyToClipboardCmd(text)
 		}
 		if msg.Output == "\x00humor-on" {
 			m.humorMode = true
@@ -1163,7 +1240,7 @@ func (m model) cycleModeCmd() tea.Cmd {
 // plus the completion popup box (completionBoxH) when the popup is active.
 func (m *model) layout() {
 	vpW := m.width - 1 // -1 for PaddingLeft on the main panel
-	if m.width >= sidebarMinTermW {
+	if m.sidebarOpen && m.width >= sidebarMinTermW {
 		// sidebar consumes sidebarTotalW; main panel gets the rest minus left pad
 		vpW = m.width - sidebarTotalW - 1
 	}
@@ -1194,7 +1271,7 @@ func (m *model) layout() {
 }
 
 // fixedH is the non-viewport vertical budget: title + textarea(+border) +
-// belowBar, plus the completion popup when it is open.
+// belowBar, plus the completion popup and optional strips.
 func (m *model) fixedH() int {
 	h := 1 + m.ta.Height() + 2 + 1
 	if m.completion.active {
@@ -1202,6 +1279,9 @@ func (m *model) fixedH() int {
 	}
 	if m.approval != nil {
 		h += approvalBannerH
+	}
+	if len(m.todoItems) > 0 {
+		h += 1 // todo strip: one line
 	}
 	return h
 }
@@ -1372,6 +1452,7 @@ func (m *model) flushLiveText() {
 	raw := m.liveText.String()
 	m.liveText.Reset()
 	m.liveWrapCache, m.liveWrapCacheTo, m.liveWrapCacheW = "", 0, 0
+	m.lastAssistantText = raw // TQ4: capture for /copy
 	if m.renderer != nil {
 		if rendered, err := m.renderer.Render(raw); err == nil {
 			rendered = strings.TrimRight(rendered, "\n")
@@ -1674,6 +1755,14 @@ func (m *model) applyEvent(ev api.Event) {
 					m.recordChangedFile(inp.Path)
 				}
 			}
+		case "todo_add":
+			// TQ7: capture the task text so we can match it when the result arrives.
+			var inp struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(ev.ToolInput, &inp) == nil {
+				m.pendingTodoText = inp.Text
+			}
 		}
 
 	case api.KindToolResult:
@@ -1686,6 +1775,35 @@ func (m *model) applyEvent(ev api.Event) {
 					m.tools[i].status = "ok"
 				}
 				break
+			}
+		}
+		// TQ7: update the live todo strip from tool results.
+		if !ev.ToolIsError {
+			switch ev.Tool {
+			case "todo_add":
+				var id int
+				fmt.Sscanf(ev.ToolResult, "added todo #%d", &id)
+				if id > 0 {
+					m.todoItems = append(m.todoItems, todoStripItem{id: id, text: m.pendingTodoText, status: "pending"})
+					m.pendingTodoText = ""
+				}
+			case "todo_update":
+				var id int
+				var status string
+				if parts := strings.SplitN(ev.ToolResult, " → ", 2); len(parts) == 2 {
+					fmt.Sscanf(parts[0], "todo #%d", &id)
+					status = strings.TrimSpace(parts[1])
+				}
+				if id > 0 && status != "" {
+					for i := range m.todoItems {
+						if m.todoItems[i].id == id {
+							m.todoItems[i].status = status
+							break
+						}
+					}
+				}
+			case "todo_list":
+				m.todoItems = parseTodoList(ev.ToolResult)
 			}
 		}
 
@@ -1819,7 +1937,7 @@ func (m model) render() string {
 
 	main := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
 	var content string
-	if m.width >= sidebarMinTermW {
+	if m.sidebarOpen && m.width >= sidebarMinTermW {
 		sidebar := m.renderSidebar(m.vp.Height())
 		if m.termOpen {
 			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main, m.term.view(m.th, m.termFocused))
@@ -1842,6 +1960,9 @@ func (m model) render() string {
 	}
 	if m.approval != nil {
 		parts = append(parts, m.renderApprovalBanner())
+	}
+	if len(m.todoItems) > 0 {
+		parts = append(parts, m.renderTodoStrip())
 	}
 	parts = append(parts, inputArea)
 
@@ -2011,12 +2132,27 @@ func (m model) renderInputArea() string {
 
 	// Right side segments, highest → lowest priority. The loop drops from the
 	// tail so lower-value segments disappear first on narrow terminals.
-	//   badge (always)  →  hints  →  stats  →  cwd
-	// Hints are more useful than cwd (cwd is also in the sidebar).
+	//   badge (always)  →  hints  →  stats  →  context/agents (sidebar off)  →  cwd
 	segs := []string{m.renderModeBadge()}
 	segs = append(segs, m.th.statusDim.Render("ctrl+k · f1 · ctrl+e"))
 	if stats := m.renderStats(); stats != "" {
 		segs = append(segs, m.th.statusDim.Render(stats))
+	}
+	if !m.sidebarOpen {
+		// Fold glanceable sidebar data into the status bar when sidebar is hidden.
+		promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
+		if promptTokens > 0 {
+			segs = append(segs, renderContextBar(promptTokens, contextWindowFor(m.cfg.Model), 14))
+		}
+		running := 0
+		for _, tm := range m.teammates {
+			if tm.Status == "running" {
+				running++
+			}
+		}
+		if running > 0 {
+			segs = append(segs, m.th.tool.Render(fmt.Sprintf("⚇%d", running)))
+		}
 	}
 	segs = append(segs, m.th.cwdStyle.Render(shortenPath(m.workDir)))
 
@@ -2109,6 +2245,179 @@ func (m *model) toolMaxLines() int {
 	return 9999
 }
 
+// --- todo strip ---
+
+// renderTodoStrip renders a compact one-line plan progress strip (TQ7).
+// Format: ▣▣▢▢ 2/4  → refactor session store
+func (m model) renderTodoStrip() string {
+	done, inProg, total := 0, 0, len(m.todoItems)
+	var activeText string
+	for _, it := range m.todoItems {
+		switch it.status {
+		case "done":
+			done++
+		case "in_progress":
+			inProg++
+			if activeText == "" {
+				activeText = it.text
+			}
+		}
+	}
+
+	var dots strings.Builder
+	for _, it := range m.todoItems {
+		switch it.status {
+		case "done":
+			dots.WriteString(m.th.sideValue.Render("▣"))
+		case "in_progress":
+			dots.WriteString(m.th.tool.Render("▶"))
+		default:
+			dots.WriteString(m.th.sideMuted.Render("▢"))
+		}
+	}
+
+	counter := m.th.sideMuted.Render(fmt.Sprintf(" %d/%d ", done+inProg, total))
+	active := ""
+	if activeText != "" {
+		maxW := max(m.width-total-8, 10)
+		active = m.th.statusDim.Render("→ " + truncate(activeText, maxW))
+	}
+	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", m.width))
+	return sep + "\n" + " " + dots.String() + counter + active
+}
+
+// parseTodoList parses the formatted output of todo_list into strip items.
+func parseTodoList(result string) []todoStripItem {
+	var items []todoStripItem
+	for _, line := range strings.Split(strings.TrimRight(result, "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 5 {
+			continue
+		}
+		var status string
+		rest := line
+		switch {
+		case strings.HasPrefix(line, "[x]"):
+			status = "done"
+			rest = strings.TrimPrefix(line, "[x]")
+		case strings.HasPrefix(line, "[~]"):
+			status = "in_progress"
+			rest = strings.TrimPrefix(line, "[~]")
+		case strings.HasPrefix(line, "[ ]"):
+			status = "pending"
+			rest = strings.TrimPrefix(line, "[ ]")
+		default:
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		var id int
+		var text string
+		if n, _ := fmt.Sscanf(rest, "%d.", &id); n == 1 {
+			if dot := strings.Index(rest, "."); dot >= 0 {
+				text = strings.TrimSpace(rest[dot+1:])
+			}
+		}
+		if text == "" {
+			text = rest
+		}
+		items = append(items, todoStripItem{id: id, text: text, status: status})
+	}
+	return items
+}
+
+// --- clipboard ---
+
+// extractCodeBlocks returns the contents of fenced code blocks in text.
+func extractCodeBlocks(text string) []string {
+	var blocks []string
+	var current strings.Builder
+	inBlock := false
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "```") {
+			if inBlock {
+				blocks = append(blocks, strings.TrimRight(current.String(), "\n"))
+				current.Reset()
+				inBlock = false
+			} else {
+				inBlock = true
+			}
+			continue
+		}
+		if inBlock {
+			current.WriteString(line + "\n")
+		}
+	}
+	return blocks
+}
+
+// copyToClipboardCmd returns a tea.Cmd that copies text to the system clipboard.
+func copyToClipboardCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		return clipboardResultMsg{err: copyToClipboard(text)}
+	}
+}
+
+// copyToClipboard writes text to the platform clipboard using native tools.
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		for _, tool := range [][]string{
+			{"xclip", "-selection", "clipboard"},
+			{"xsel", "--clipboard", "--input"},
+			{"wl-copy"},
+		} {
+			if _, err := exec.LookPath(tool[0]); err == nil {
+				cmd = exec.Command(tool[0], tool[1:]...)
+				break
+			}
+		}
+		if cmd == nil {
+			return fmt.Errorf("no clipboard tool found (install xclip, xsel, or wl-copy)")
+		}
+	case "windows":
+		cmd = exec.Command("clip.exe")
+	default:
+		return fmt.Errorf("clipboard not supported on %s", runtime.GOOS)
+	}
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
+}
+
+// --- stash (P5.6) ---
+
+// loadStash reads a previously saved draft from path, returning "" on any error.
+func loadStash(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var v struct{ Draft string `json:"draft"` }
+	if err := json.Unmarshal(data, &v); err != nil {
+		return ""
+	}
+	return v.Draft
+}
+
+// saveStash persists the draft text to path, silently ignoring errors.
+func saveStash(path, draft string) {
+	if path == "" {
+		return
+	}
+	draft = strings.TrimSpace(draft)
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	if draft == "" {
+		_ = os.Remove(path)
+		return
+	}
+	data, _ := json.Marshal(struct {
+		Draft string `json:"draft"`
+	}{Draft: draft})
+	_ = os.WriteFile(path, data, 0o600)
+}
+
 // --- help overlay ---
 
 func (m model) renderHelpOverlay() string {
@@ -2127,6 +2436,7 @@ func (m model) renderHelpOverlay() string {
 		{km.Teammates.Help().Key, km.Teammates.Help().Desc},
 		{km.Sessions.Help().Key, km.Sessions.Help().Desc},
 		{km.Terminal.Help().Key, km.Terminal.Help().Desc},
+		{km.SidebarToggle.Help().Key, km.SidebarToggle.Help().Desc},
 		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
 		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
 	}

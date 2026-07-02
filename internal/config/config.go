@@ -38,6 +38,35 @@ type Config struct {
 	LSP         []LSPServerConfig          `koanf:"lsp"`
 	Plugins     []ProcessToolConfig        `koanf:"plugins"`
 	MCP         []MCPServerConfig          `koanf:"mcp"`
+	Hooks       []HookConfig               `koanf:"hooks"`
+	Search      SearchConfig               `koanf:"search"`
+	Notify      NotifyConfig               `koanf:"notify"`
+}
+
+// HookConfig declares one user-configurable lifecycle hook (P4.4). The command
+// receives a JSON event on stdin. For tool events, exit code 2 vetoes the tool
+// call and the command's stderr is surfaced to the model; any other non-zero
+// exit is logged but does not block.
+type HookConfig struct {
+	Event      string   `koanf:"event"`       // pre_tool_use, post_tool_use, session_start, stop, subagent_stop
+	Command    string   `koanf:"command"`     // shell command run via `sh -c`; JSON event on stdin
+	Tools      []string `koanf:"tools"`       // optional tool-name filter for tool events (empty = all)
+	TimeoutSec int      `koanf:"timeout_sec"` // command timeout; 0 -> default (30s)
+}
+
+// SearchConfig selects the web-search provider (P5.3). Empty provider keeps the
+// zero-config DuckDuckGo HTML scrape.
+type SearchConfig struct {
+	Provider string `koanf:"provider"` // "", "duckduckgo", "brave", "tavily", "searxng"
+	APIKey   string `koanf:"api_key"`  // may reference $ENV; expanded on load
+	BaseURL  string `koanf:"base_url"` // required for searxng self-host
+}
+
+// NotifyConfig configures notifications when a background session finishes or
+// needs input (P5.4).
+type NotifyConfig struct {
+	Desktop bool   `koanf:"desktop"` // fire an OS desktop notification
+	Webhook string `koanf:"webhook"` // POST the event JSON to this URL (may reference $ENV)
 }
 
 // TUIConfig holds terminal UI preferences.
@@ -328,6 +357,8 @@ func Load() (*Config, error) {
 			cfg.MCP[i].Auth = os.ExpandEnv(cfg.MCP[i].Auth)
 		}
 	}
+	cfg.Search.APIKey = os.ExpandEnv(cfg.Search.APIKey)
+	cfg.Notify.Webhook = os.ExpandEnv(cfg.Notify.Webhook)
 
 	return &cfg, nil
 }

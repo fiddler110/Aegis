@@ -16,8 +16,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +37,7 @@ import (
 	"github.com/scottymacleod/aegis/internal/lsp"
 	"github.com/scottymacleod/aegis/internal/mcp"
 	"github.com/scottymacleod/aegis/internal/memory"
+	"github.com/scottymacleod/aegis/internal/notify"
 	"github.com/scottymacleod/aegis/internal/permission"
 	"github.com/scottymacleod/aegis/internal/persona"
 	"github.com/scottymacleod/aegis/internal/plugins"
@@ -76,6 +77,8 @@ type Server struct {
 	sandbox     sandbox.Backend
 	lspMgr      *lsp.Manager
 	audit       *hooks.Audit
+	execHook    *hooks.Exec      // user-configured lifecycle hooks (P4.4); nil when none
+	notifier    *notify.Notifier // background-session notifications (P5.4); nil when disabled
 	cmdReg      *commands.Registry
 	permRules   []permission.Rule // parsed text-based allow/deny rules
 	repoMap     string            // cached repository map block for the system prompt (empty when not indexed)
@@ -209,6 +212,17 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Sandbox.Image)
 			sb = csb
 		}
+	case "os":
+		// OS-level isolation without a container runtime (P4.7): seatbelt on
+		// macOS, bwrap on Linux. Falls back to local when unavailable.
+		osb, err := sandbox.NewOSBackend(cwd, cfg.Sandbox.Network)
+		if err != nil {
+			logger.Warn("sandbox: OS sandbox unavailable, falling back to local", "err", err)
+			sb = sandbox.NewLocalBackend()
+		} else {
+			logger.Info("sandbox backend", "mechanism", osb.Name(), "network", cfg.Sandbox.Network)
+			sb = osb
+		}
 	default:
 		sb = sandbox.NewLocalBackend()
 	}
@@ -231,6 +245,14 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
 
+	// Shared team task list for agent-team coordination (P5.1); reuses the
+	// session DB. A failure here is non-fatal — team tools are simply skipped.
+	teamTasks, err := swarm.NewTaskList(store.DB())
+	if err != nil {
+		logger.Warn("swarm: team task list unavailable", "err", err)
+		teamTasks = nil
+	}
+
 	// LSP manager: start configured language servers.
 	var lspMgr *lsp.Manager
 	if len(cfg.LSP) > 0 {
@@ -247,7 +269,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
 	todoList := builtin.NewTodoList()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir)}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -327,7 +349,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.authToken = token
 
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
-	s.hooks = hooks.NewMulti(s.audit)
+	s.notifier = notify.New(cfg.Notify.Desktop, cfg.Notify.Webhook, logger)
+	s.execHook = hooks.NewExec(toExecSpecs(cfg.Hooks), logger)
+	if s.execHook != nil {
+		s.hooks = hooks.NewMulti(s.audit, s.execHook)
+	} else {
+		s.hooks = hooks.NewMulti(s.audit)
+	}
 	if adapter != nil {
 		compModel := cfg.Provider.Model
 		if cfg.Provider.SmallModel != "" {
@@ -383,6 +411,9 @@ func (s *Server) onSubagentStop(id swarm.Identity, res swarm.Result) {
 	}
 	if s.audit != nil {
 		s.audit.SubagentStop(id.AgentID, status, truncateSummary(summary, 200), res.Failed())
+	}
+	if s.execHook != nil {
+		s.execHook.SubagentStop(context.Background(), id.AgentID, status, truncateSummary(summary, 200), res.Failed())
 	}
 	s.logger.Info("subagent stopped", "agent", id.AgentID, "status", status)
 }
@@ -487,8 +518,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/steer", s.handleSteer)
 	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
-	mux.HandleFunc("POST /sessions/{id}/background", s.handleSetBackground)  // P3.2
-	mux.HandleFunc("GET /sessions/{id}/events", s.handleGetBGEvents)         // P3.2
+	mux.HandleFunc("POST /sessions/{id}/background", s.handleSetBackground) // P3.2
+	mux.HandleFunc("GET /sessions/{id}/events", s.handleGetBGEvents)        // P3.2
 	mux.HandleFunc("POST /sessions/{id}/archive", s.handleArchiveSession)
 	mux.HandleFunc("POST /sessions/{id}/unarchive", s.handleUnarchiveSession)
 	mux.HandleFunc("POST /sessions/prune", s.handlePruneSessions)
@@ -1133,7 +1164,8 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	content := make([]provider.Block, 0, 1+len(imageBlocks))
 	if strings.TrimSpace(req.Text) != "" {
-		content = append(content, provider.TextBlock{Text: req.Text})
+		// P5.5: expand @path#L10-40 file mentions to inline file excerpts.
+		content = append(content, provider.TextBlock{Text: expandFileMentions(req.Text, s.workspace)})
 	}
 	content = append(content, imageBlocks...)
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: content})
@@ -1148,6 +1180,10 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)
 	if snap != nil {
 		runCtx = checkpoint.WithSnapshotter(runCtx, snap)
+	}
+	if s.execHook != nil {
+		s.execHook.SessionStart(runCtx, id)
+		defer s.execHook.Stop(context.Background(), id)
 	}
 	var (
 		totalIn   int
@@ -1198,6 +1234,35 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if runErr != nil {
 		s.logger.Warn("run ended with error", "session", id, "err", runErr)
 	}
+
+	// Notify when a detached (background) session finishes: the user is not
+	// watching the TUI, so surface completion/failure out-of-band (P5.4).
+	if sess.Background && s.notifier != nil {
+		ev := notify.Event{
+			SessionID: id,
+			Title:     sess.Title,
+			Status:    notify.StatusCompleted,
+			Message:   fmt.Sprintf("Background session %q completed", displayTitle(sess.Title, id)),
+			CostUSD:   totalCost,
+		}
+		if runErr != nil && !errors.Is(runErr, engine.ErrInterrupted) {
+			ev.Status = notify.StatusError
+			ev.Message = fmt.Sprintf("Background session %q failed: %v", displayTitle(sess.Title, id), runErr)
+		}
+		s.notifier.Notify(context.Background(), ev)
+	}
+}
+
+// displayTitle returns a human-friendly session label, falling back to a
+// truncated id when the session has no title yet.
+func displayTitle(title, id string) string {
+	if title != "" {
+		return title
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // handleApprove answers a pending interactive approval request. The body must
@@ -1507,13 +1572,50 @@ func (s *Server) effectiveSystem(base string) string {
 	if mem := s.memory.Load(); mem != "" {
 		parts = append(parts, mem)
 	}
-	if sk := skills.BuildBlock(s.workspace); sk != "" {
+	if sk := skills.BuildIndex(s.workspace); sk != "" {
 		parts = append(parts, sk)
 	}
 	if s.repoMap != "" {
 		parts = append(parts, s.repoMap)
 	}
+	if dt := deferredToolsBlock(s.tools); dt != "" {
+		parts = append(parts, dt)
+	}
 	return strings.Join(parts, "\n\n")
+}
+
+// toExecSpecs converts config hook entries into hooks.ExecSpec values.
+func toExecSpecs(cfgHooks []config.HookConfig) []hooks.ExecSpec {
+	specs := make([]hooks.ExecSpec, 0, len(cfgHooks))
+	for _, h := range cfgHooks {
+		specs = append(specs, hooks.ExecSpec{
+			Event:      h.Event,
+			Command:    h.Command,
+			Tools:      h.Tools,
+			TimeoutSec: h.TimeoutSec,
+		})
+	}
+	return specs
+}
+
+// deferredToolsBlock advertises tools that are registered but not exposed by
+// default (P4.6). The model loads them on demand with the tool_search tool.
+func deferredToolsBlock(reg *tool.Registry) string {
+	if reg == nil {
+		return ""
+	}
+	deferred := reg.Deferred()
+	if len(deferred) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("<deferred_tools>\n")
+	sb.WriteString("These tools are not loaded yet. When a task needs one, call `tool_search` with keywords to load it before use.\n")
+	for _, d := range deferred {
+		fmt.Fprintf(&sb, "- %s: %s\n", d.Name, d.Description)
+	}
+	sb.WriteString("</deferred_tools>")
+	return sb.String()
 }
 
 // loadRepoMap loads the cached repository map for cwd, rebuilding it when the
@@ -1828,4 +1930,48 @@ func isLoopbackOrigin(origin string) bool {
 	h = strings.Trim(h, "[]")
 	ip := net.ParseIP(h)
 	return (ip != nil && ip.IsLoopback()) || h == "localhost"
+}
+
+// expandFileMentions replaces @path#L10-40 tokens in text with the referenced
+// file lines so the model sees the content directly (P5.5).
+// Tokens must be preceded by whitespace or start-of-text and have the form
+// @<relpath>#L<start>-<end> or @<relpath>#<start>-<end>.
+// If a token cannot be resolved (file missing, range invalid) it is left as-is.
+func expandFileMentions(text, workspace string) string {
+	if !strings.Contains(text, "@") || !strings.Contains(text, "#") {
+		return text
+	}
+	fields := strings.Fields(text)
+	changed := false
+	for i, f := range fields {
+		if !strings.HasPrefix(f, "@") || !strings.Contains(f, "#") {
+			continue
+		}
+		atPath, rangeStr, _ := strings.Cut(strings.TrimPrefix(f, "@"), "#")
+		if atPath == "" || rangeStr == "" {
+			continue
+		}
+		// Parse #L10-40 or #10-40.
+		rangeStr = strings.TrimPrefix(rangeStr, "L")
+		var start, end int
+		if _, err := fmt.Sscanf(rangeStr, "%d-%d", &start, &end); err != nil || start < 1 || end < start {
+			continue
+		}
+		abs := filepath.Join(workspace, filepath.FromSlash(atPath))
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		if end > len(lines) {
+			end = len(lines)
+		}
+		excerpt := strings.Join(lines[start-1:end], "\n")
+		fields[i] = fmt.Sprintf("```\n// @%s#L%d-%d\n%s\n```", atPath, start, end, excerpt)
+		changed = true
+	}
+	if !changed {
+		return text
+	}
+	return strings.Join(fields, " ")
 }
