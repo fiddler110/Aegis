@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/scottymacleod/aegis/internal/cost"
+	"github.com/scottymacleod/aegis/internal/guard"
 	"github.com/scottymacleod/aegis/internal/provider"
 	"github.com/scottymacleod/aegis/internal/tool"
 	"github.com/scottymacleod/aegis/internal/trace"
@@ -99,9 +101,9 @@ type Options struct {
 	Compactor             Compactor                                                       // optional; nil disables context compaction
 	Hooks                 Hooks                                                           // optional; nil disables hooks
 	Cost                  *cost.Tracker                                                   // optional; nil disables cost tracking
-	PrepareStep           PrepareStepFunc                                                 // optional; called before every model turn
-	OutputGuard           func(ctx context.Context, text string) (ok bool, reason string) // optional; validates the final answer
-	OutputGuardMaxRetries int                                                             // corrective retries on guard failure; 0 -> 1 when a guard is set
+	PrepareStep           PrepareStepFunc // optional; called before every model turn
+	OutputGuard           guard.Func      // optional; validates the final answer (and any files written this turn)
+	OutputGuardMaxRetries int             // corrective retries on guard failure; 0 -> 1 when a guard is set
 	BudgetUSD             float64                                                         // optional; >0 aborts the run past this cost
 	Model                 string
 	MaxTokens             int
@@ -122,7 +124,7 @@ type Engine struct {
 	hooks               Hooks
 	cost                *cost.Tracker
 	prepareStep         PrepareStepFunc
-	outputGuard         func(ctx context.Context, text string) (bool, string)
+	outputGuard         guard.Func
 	outputGuardMax      int
 	budgetUSD           float64
 	model               string
@@ -133,6 +135,14 @@ type Engine struct {
 	contextWindowTokens int
 	steerChan           <-chan string
 	logger              *slog.Logger
+
+	// writtenFiles tracks workspace-relative paths touched by a successful
+	// write-capability tool call during the current Run, so the output guard
+	// can validate the actual file content instead of only the assistant's
+	// chat summary of it. Reset at the start of each Run; guarded by mu since
+	// parallel tool rounds write to it from multiple goroutines.
+	writtenFilesMu sync.Mutex
+	writtenFiles   map[string]struct{}
 }
 
 // ErrInterrupted is returned when the run is cancelled via context.
@@ -215,6 +225,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	if e.loopThreshold > 0 {
 		loop = newLoopDetector(e.loopThreshold)
 	}
+
+	e.writtenFilesMu.Lock()
+	e.writtenFiles = make(map[string]struct{})
+	e.writtenFilesMu.Unlock()
 
 	guardRetries := 0
 	toolRoundsCompleted := 0
@@ -302,7 +316,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					maxRetries = 1
 				}
 				if final := assistantText(assistant); final != "" {
-					ok, reason := e.outputGuard(ctx, final)
+					ok, reason := e.outputGuard(ctx, guard.Input{Text: final, Files: e.collectWrittenFiles(ctx)})
 					if !ok && guardRetries < maxRetries {
 						guardRetries++
 						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason})
@@ -715,10 +729,103 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
 		content, isErr = fmt.Sprintf("tool error: %v", err), true
 	}
+	if !isErr && t.Capability() == tool.CapWrite {
+		e.recordWrittenPaths(writtenPathsFromInput(tu.Input))
+	}
 	if e.hooks != nil {
 		e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)
 	}
 	return content, isErr
+}
+
+// writtenPathsFromInput extracts workspace-relative file paths from a
+// write-capability tool call's input, recognizing the "path"/"file_path"
+// fields used by write_file/edit_file/diagram, and the "edits[].path" shape
+// used by multi_edit. Unrecognized shapes (e.g. an MCP or custom write tool
+// with different field names) yield no paths — the guard simply won't see
+// that tool's output, matching the existing subjectFor limitation in
+// internal/permission/rules.go rather than guessing.
+func writtenPathsFromInput(input json.RawMessage) []string {
+	var args struct {
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
+		Edits    []struct {
+			Path string `json:"path"`
+		} `json:"edits"`
+	}
+	if json.Unmarshal(input, &args) != nil {
+		return nil
+	}
+	var paths []string
+	if args.Path != "" {
+		paths = append(paths, args.Path)
+	}
+	if args.FilePath != "" {
+		paths = append(paths, args.FilePath)
+	}
+	for _, e := range args.Edits {
+		if e.Path != "" {
+			paths = append(paths, e.Path)
+		}
+	}
+	return paths
+}
+
+// recordWrittenPaths adds paths to the current run's written-files set.
+func (e *Engine) recordWrittenPaths(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	e.writtenFilesMu.Lock()
+	defer e.writtenFilesMu.Unlock()
+	for _, p := range paths {
+		e.writtenFiles[p] = struct{}{}
+	}
+}
+
+// maxGuardFiles caps how many written files are read back for guard
+// validation, so a task that touches dozens of files doesn't balloon the
+// validator prompt or issue that many extra reads.
+const maxGuardFiles = 5
+
+// collectWrittenFiles reads back the current content of every file written
+// or edited so far this run via the registered read_file tool (so path
+// resolution/sandboxing matches whatever wrote it), for the output guard to
+// validate against the actual deliverable rather than only the assistant's
+// chat summary. Best-effort: a tool registry without read_file, or a read
+// failure for a given path, silently yields no content for that path rather
+// than failing the run — the guard still gets the chat text either way.
+func (e *Engine) collectWrittenFiles(ctx context.Context) []guard.FileContent {
+	e.writtenFilesMu.Lock()
+	paths := make([]string, 0, len(e.writtenFiles))
+	for p := range e.writtenFiles {
+		paths = append(paths, p)
+	}
+	e.writtenFilesMu.Unlock()
+	if len(paths) == 0 || e.tools == nil {
+		return nil
+	}
+	reader, ok := e.tools.Get("read_file")
+	if !ok {
+		return nil
+	}
+	sort.Strings(paths) // deterministic order for reproducible prompts/tests
+	if len(paths) > maxGuardFiles {
+		paths = paths[:maxGuardFiles]
+	}
+	var out []guard.FileContent
+	for _, p := range paths {
+		input, err := json.Marshal(map[string]string{"path": p})
+		if err != nil {
+			continue
+		}
+		res, err := reader.Execute(ctx, input)
+		if err != nil || res.IsError {
+			continue
+		}
+		out = append(out, guard.FileContent{Path: p, Content: res.Content})
+	}
+	return out
 }
 
 // assistantText concatenates the text blocks of an assistant message.

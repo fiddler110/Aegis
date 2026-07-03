@@ -2,6 +2,7 @@ package guard
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/scottymacleod/aegis/internal/provider"
@@ -19,36 +20,79 @@ func (f fakeAdapter) Stream(ctx context.Context, req provider.Request) (<-chan p
 	return ch, nil
 }
 
+// capturingAdapter records the user-message text of the request it receives
+// (the validator prompt) into *capture, then replies with a fixed verdict.
+type capturingAdapter struct {
+	capture *string
+	reply   string
+}
+
+func (c capturingAdapter) Name() string { return "capturing" }
+func (c capturingAdapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	for _, m := range req.Messages {
+		for _, b := range m.Content {
+			if tb, ok := b.(provider.TextBlock); ok {
+				*c.capture += tb.Text
+			}
+		}
+	}
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: c.reply}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn}
+	close(ch)
+	return ch, nil
+}
+
 func TestSchemaGuard(t *testing.T) {
 	g := SchemaGuard([]string{"findings", "summary"})
-	if ok, _ := g(context.Background(), `{"findings":[],"summary":"x"}`); !ok {
+	if ok, _ := g(context.Background(), Input{Text: `{"findings":[],"summary":"x"}`}); !ok {
 		t.Error("valid object with required keys should pass")
 	}
-	if ok, reason := g(context.Background(), `{"summary":"x"}`); ok || reason == "" {
+	if ok, reason := g(context.Background(), Input{Text: `{"summary":"x"}`}); ok || reason == "" {
 		t.Errorf("missing key should fail with reason, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, _ := g(context.Background(), `not json`); ok {
+	if ok, _ := g(context.Background(), Input{Text: `not json`}); ok {
 		t.Error("non-JSON should fail")
 	}
 	// Fenced JSON is tolerated.
-	if ok, _ := g(context.Background(), "```json\n{\"findings\":1,\"summary\":2}\n```"); !ok {
+	if ok, _ := g(context.Background(), Input{Text: "```json\n{\"findings\":1,\"summary\":2}\n```"}); !ok {
 		t.Error("fenced JSON should pass")
 	}
 }
 
 func TestLLMGuardPassFail(t *testing.T) {
 	pass := LLMGuard(fakeAdapter{reply: "PASS"}, "m", "rubric")
-	if ok, _ := pass(context.Background(), "answer"); !ok {
+	if ok, _ := pass(context.Background(), Input{Text: "answer"}); !ok {
 		t.Error("PASS verdict should pass")
 	}
 	fail := LLMGuard(fakeAdapter{reply: "FAIL: missing citations"}, "m", "rubric")
-	if ok, reason := fail(context.Background(), "answer"); ok || reason != "missing citations" {
+	if ok, reason := fail(context.Background(), Input{Text: "answer"}); ok || reason != "missing citations" {
 		t.Errorf("FAIL verdict should fail with reason, got ok=%v reason=%q", ok, reason)
 	}
 	// Unparseable verdict fails open.
 	weird := LLMGuard(fakeAdapter{reply: "I think maybe"}, "m", "rubric")
-	if ok, _ := weird(context.Background(), "answer"); !ok {
+	if ok, _ := weird(context.Background(), Input{Text: "answer"}); !ok {
 		t.Error("unparseable verdict should fail open (pass)")
+	}
+}
+
+// TestLLMGuardIncludesFileContent verifies the actual written file content
+// reaches the validator prompt, not just the assistant's chat summary — this
+// is the fix for a guard that could be satisfied by a vague final answer
+// while the real file still had placeholders/TODOs in it.
+func TestLLMGuardIncludesFileContent(t *testing.T) {
+	var seenPrompt string
+	capture := capturingAdapter{capture: &seenPrompt, reply: "PASS"}
+	g := LLMGuard(capture, "m", "must not contain TODO")
+	_, _ = g(context.Background(), Input{
+		Text:  "I've written the document.",
+		Files: []FileContent{{Path: "docs/report.md", Content: "# Report\nTODO: fill in numbers"}},
+	})
+	if !strings.Contains(seenPrompt, "docs/report.md") {
+		t.Errorf("expected file path in validator prompt, got: %q", seenPrompt)
+	}
+	if !strings.Contains(seenPrompt, "TODO: fill in numbers") {
+		t.Errorf("expected file content in validator prompt, got: %q", seenPrompt)
 	}
 }
 
