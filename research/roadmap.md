@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-03 (v11 — TQ3/TQ6/TQ8/TQ9/TQ10 shipped; the entire TQ track is done; remaining open work: P6)
+**Updated:** 2026-07-03 (v12 — P6.4 context editing/tool-result pruning shipped; remaining open work: P6.1/P6.2/P6.3/P6.5)
 
 ---
 
@@ -158,8 +158,8 @@ Agent-to-Agent HTTP+SSE protocol (ADK Go 2.0, GA June 2026): `a2a_agent` client 
 ### P6.3 — MCP server mode
 Expose Aegis itself as an MCP server (`aegis mcp-serve`): sessions and selected tools become MCP tools callable from other harnesses (Claude Code, Codex, editors). Complements A2A; the daemon API maps cleanly. Codex already does this and it materially expands where the harness can be embedded.
 
-### P6.4 — Context editing / tool-result pruning
-Before invoking LLM summarization (compaction), deterministically drop or truncate *stale tool results* (old file reads superseded by later reads, large search dumps already acted upon). Cheaper than a model call, preserves conversational text verbatim, and mirrors Anthropic's context-editing direction. Fits in `internal/compaction` as a pre-pass.
+### P6.4 — Context editing / tool-result pruning ✅ Done 2026-07-03
+`compaction.pruneStaleToolResults` (`internal/compaction/prune.go`) runs as a deterministic pre-pass inside `Summarizer.Compact`, before any LLM call: `read_file` results for a path that was read again later are blanked to a one-line marker, and large `grep`/`glob`/`ls` dumps outside the trailing `keepRecent` window are truncated to a short preview. Never touches conversational text, tool errors, or the recent window. If pruning alone brings the estimate back under budget, `Compact` returns immediately — no summarizer call, no LLM cost.
 
 ### P6.5 — Desktop / IDE surface beyond ACP
 ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code extension speaking to the daemon API, (b) wrapping the web UI in a lightweight desktop shell. Only worth it if user demand materializes — the TUI is the product.
@@ -170,11 +170,11 @@ ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code ext
 
 ```
 Done 2026-07-02:  P5.8 semantic recall → P5.9 provider failover → TQ1 block transcript
-Done 2026-07-03:  TQ3 streaming markdown → TQ9 input polish → TQ8 queueing → TQ6 approvals → TQ10 themes
-Long-horizon:     P6.4 context editing → P6.1 mid-turn persistence → P6.2 A2A → P6.3 MCP server
+Done 2026-07-03:  TQ3 streaming markdown → TQ9 input polish → TQ8 queueing → TQ6 approvals → TQ10 themes → P6.4 context editing
+Long-horizon:     P6.1 mid-turn persistence → P6.2 A2A → P6.3 MCP server → P6.5 desktop/IDE surface
 ```
 
-With the TQ track complete, only P6 (long-horizon/exploratory) remains open. P6.4 (deterministic tool-result pruning before LLM compaction) is the highest-leverage candidate: it is cheaper than a model call, fits `internal/compaction` as a pre-pass, and mirrors Anthropic's context-editing direction.
+With the TQ track and P6.4 complete, the remaining P6 items are all exploratory/low-probability-payoff: P6.1 (crash-during-turn persistence) has no reported pain point yet; P6.2/P6.3 (A2A, MCP server mode) are interop bets with no current consumer; P6.5 (desktop/IDE surface) is speculative pending user demand. None are blocking — revisit if a concrete need surfaces.
 
 ---
 
