@@ -116,21 +116,14 @@ rules:
 
 ## Approval Dialogs
 
-In `build` mode, the agent pauses before shell/execute calls and shows an approval dialog:
+In `build` mode, the agent pauses before shell/execute or write calls and shows an option-list approval dialog with a preview of the pending change (unified diff for file edits, the literal command for shell calls):
 
-```
-┌─────────────────────────────────────────────────┐
-│  ⚙ shell                                        │
-│                                                 │
-│  rm -rf dist/                                   │
-│                                                 │
-│  [y] approve  [n] deny  [a] approve all         │
-└─────────────────────────────────────────────────┘
-```
+- **Allow once** (`y`) — approve just this call
+- **Allow always for `<pattern>`** (`a`) — approve this call and derive a scoped permission rule from it (e.g. a shell command like `npm test --watch` suggests `allow bash(npm test*)`; a file path suggests a directory glob), then persist that rule to `.aegis/config.yaml → permission.rules` so the same class of call stops prompting for the rest of the project
+- **Deny** (`n`) — deny this call; the agent gets an error and can plan an alternative
+- **Deny with feedback…** (`f`) — deny and type a reason, passed back to the model as the tool error so it can adjust course instead of just retrying blind
 
-- **`[y]`** — approve this call
-- **`[n]`** — deny this call (returns an error to the agent)
-- **`[a]`** — approve all remaining calls in this run (equivalent to `auto` for the rest of the run)
+Navigate with `↑`/`↓` or `Tab`/`Shift+Tab`, confirm with `Enter`; the transcript behind the dialog stays scrollable.
 
 The `aegis chat --yes` flag auto-approves all calls for non-interactive use.
 

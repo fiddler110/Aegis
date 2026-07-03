@@ -85,19 +85,23 @@ Shows the current run state (`◐ thinking…`, `◐ running…`, elapsed time) 
 | Key | Action |
 |-----|--------|
 | `Enter` | Send message |
-| `Ctrl+J` | Insert newline in the input field |
+| `Shift+Enter` | Insert newline in the input field (`Ctrl+J` fallback for terminals that can't send Shift+Enter) |
+| `Alt+Enter` | While streaming: queue the current draft as the next message instead of sending immediately |
+| `Esc` (×2) | Interrupt the streaming run — first press arms it, second press (quickly after) confirms and cancels; also discards any queued message |
+| `Ctrl+C` | Cancel the current run, or quit if nothing is running |
+| `Ctrl+O` | Expand/collapse a collapsed thinking block |
 | `/` | Open slash-command completion popup |
 | `@` | Open workspace file/reference completion |
 | `Ctrl+K` | Open command palette |
 | `Ctrl+B` | Toggle sidebar on/off |
+| `Ctrl+X` | Toggle the embedded terminal pane |
 | `Ctrl+E` | Edit the current input in `$EDITOR` |
 | `Shift+Tab` | Cycle permission mode: plan → build → auto → plan |
 | `Ctrl+R` | Open interactive session picker (switch / resume) |
 | `Ctrl+T` | Show active sub-agents panel |
 | `Ctrl+L` | Clear the transcript (history preserved in session) |
 | `F1` | Toggle keyboard-shortcut help overlay |
-| `↑` / `↓` | Navigate input history |
-| `Ctrl+C` | Interrupt a streaming run; second press quits |
+| `↑` / `↓` | Navigate input history (moves the cursor within a multiline draft first; history nav only at the first/last line) |
 | Mouse wheel | Scroll conversation (auto-follow pauses while scrolled up) |
 
 ---
@@ -121,11 +125,19 @@ Paths can be absolute, `~`-relative, or relative to the workspace. File path com
 
 ### Multi-line input
 
-Press `Ctrl+J` to insert newlines. Press `Ctrl+E` to open the full input in `$EDITOR` (uses `$VISUAL` or `$EDITOR` environment variable, defaulting to `vi`).
+Press `Shift+Enter` (or `Ctrl+J` as a fallback on terminals that don't disambiguate Shift+Enter from Enter) to insert newlines. Press `Ctrl+E` to open the full input in `$EDITOR` (uses `$VISUAL` or `$EDITOR` environment variable, defaulting to `vi`).
 
 ### Input history
 
-`↑` / `↓` navigates through previously sent messages in the current session.
+`↑` / `↓` navigates through previously sent messages in the current session. Inside a multiline draft, `↑`/`↓` first move the cursor between lines; history navigation only kicks in when the cursor is already on the first (↑) or last (↓) line.
+
+### Pasted image paths
+
+Pasting or typing a bare image file path (PNG/JPEG/GIF/WebP, quoted or unquoted) into the input is detected automatically and converted into an `@image:` attachment token — you don't have to type the `@image:` prefix yourself.
+
+### Message queueing
+
+Pressing `Alt+Enter` while a run is streaming queues the current draft instead of sending it immediately. Queued messages show as a dimmed `⏳ queued ▸` block and are sent automatically, one per completed run, once the stream closes. An explicit interrupt (`Esc` ×2 or `Ctrl+C`) or a stream error discards the queue instead of auto-sending it — the assumption is that if you stopped the run, you don't want the next queued message firing on its own.
 
 ---
 
@@ -183,7 +195,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/copy` | Copy the last assistant message to clipboard |
 | `/copy <n>` | Copy the Nth fenced code block from the last response |
 | `/tasks` | Show the live task/todo progress strip (also visible above input) |
-| `/humor [on\|off]` | Toggle D&D-themed thinking phrases in the status bar |
+| `/humor [on\|off]` | Toggle D&D-themed flavor phrases in the status bar |
 | `/share [html\|md\|json]` | Export session to a shareable file in the current directory |
 
 ### Exit
@@ -250,13 +262,14 @@ Press `Ctrl+R` to open the interactive session picker. It lists all sessions (ne
 
 ## Approval Dialogs
 
-In `build` mode (and `plan` mode for network tools), the agent pauses before running shell commands and prompts for approval. The dialog shows:
+In `build` mode (and `plan` mode for network tools), the agent pauses before running shell/execute or write calls and shows an option-list approval dialog with a preview of the pending change (unified diff for file edits, the literal command for shell calls):
 
-- Tool name and capability
-- The full input (command to run, file to write, URL to fetch)
-- `[y]` approve / `[n]` deny / `[a]` approve all remaining calls in this run
+- **Allow once** (`y`) — approve just this call
+- **Allow always for `<pattern>`** (`a`) — approve this call and derive a scoped permission rule (e.g. `allow bash(npm test*)` from a shell command, or a directory glob from a file path) that's persisted to `.aegis/config.yaml → permission.rules`, so the same class of call is auto-approved for the rest of this project going forward
+- **Deny** (`n`) — deny this call; the agent gets an error and can plan an alternative
+- **Deny with feedback…** (`f`) — deny and type a reason, which is passed back to the model as the tool error instead of a generic denial, steering its next attempt
 
-Denied calls return an error to the agent, which can then plan an alternative.
+Navigate options with `↑`/`↓` or `Tab`/`Shift+Tab`, confirm with `Enter`. The transcript behind the dialog is still scrollable so you can review context before deciding.
 
 ---
 
@@ -284,7 +297,7 @@ Unsent input is automatically saved to `.aegis/stash.json` when you quit Aegis. 
 
 ## Extended Thinking Display
 
-When extended thinking is enabled (Anthropic Claude or local reasoning models), thinking blocks appear as dim `✻ thinking` sections in the transcript. They are streamed live so you can watch the model reason in real time. Thinking blocks are preserved in session history for multi-step correctness.
+When extended thinking is enabled (Anthropic Claude or local reasoning models), thinking blocks stream live as dim `✻ thinking` sections so you can watch the model reason in real time. Once the block settles, it collapses to a one-line `✻ thought for Ns` summary; press `Ctrl+O` to expand it back to the full text. Thinking blocks are preserved in session history for multi-step correctness.
 
 ---
 
@@ -305,3 +318,9 @@ The sidebar shows a fill bar (`▰▰▰▱▱▱▱ 31%`) representing how full
 ## Sub-Agent Panel (`Ctrl+T`)
 
 When the `agent` tool spawns sub-agents, press `Ctrl+T` to open a panel listing all active agents with their status (running, done, failed) and task description.
+
+---
+
+## Terminal Pane (`Ctrl+X`)
+
+Press `Ctrl+X` to open a scrollable shell pane docked to the right of the transcript. It runs commands directly (via the same local sandbox backend used for shell execution) independent of the agent — useful for poking around the workspace without spending a turn. `Enter` runs the typed command, `↑`/`↓` navigates its own command history, and `Ctrl+C` interrupts a running command in the pane. `Esc` (or `Ctrl+X` again) closes it and returns focus to the main input.
