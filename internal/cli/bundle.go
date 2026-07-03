@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/bundle"
-	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/bundle"
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/spf13/cobra"
 )
 

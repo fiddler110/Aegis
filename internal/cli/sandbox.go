@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 

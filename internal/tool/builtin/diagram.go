@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/scottymacleod/aegis/internal/diagram"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/diagram"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 type diagramTool struct {

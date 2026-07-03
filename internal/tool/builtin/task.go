@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/sandbox"
-	"github.com/scottymacleod/aegis/internal/task"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/task"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // TaskTools returns the background-job management tools, all backed by the same

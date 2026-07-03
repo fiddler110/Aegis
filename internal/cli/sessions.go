@@ -8,11 +8,11 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/client"
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/share"
-	"github.com/scottymacleod/aegis/internal/trace"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/client"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/share"
+	"github.com/fiddler110/aegis/internal/trace"
 	"github.com/spf13/cobra"
 )
 

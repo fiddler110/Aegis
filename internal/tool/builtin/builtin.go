@@ -8,16 +8,16 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/scottymacleod/aegis/internal/cron"
-	"github.com/scottymacleod/aegis/internal/filetracker"
-	"github.com/scottymacleod/aegis/internal/knowledge"
-	"github.com/scottymacleod/aegis/internal/longmem"
-	"github.com/scottymacleod/aegis/internal/lsp"
-	"github.com/scottymacleod/aegis/internal/memory"
-	"github.com/scottymacleod/aegis/internal/sandbox"
-	"github.com/scottymacleod/aegis/internal/swarm"
-	"github.com/scottymacleod/aegis/internal/task"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/cron"
+	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/knowledge"
+	"github.com/fiddler110/aegis/internal/longmem"
+	"github.com/fiddler110/aegis/internal/lsp"
+	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/task"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // Options configures the built-in tool set.

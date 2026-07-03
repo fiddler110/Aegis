@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/knowledge"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/knowledge"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // --- project_knowledge ---

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 // FileContent is the content of one file written or edited during the turn

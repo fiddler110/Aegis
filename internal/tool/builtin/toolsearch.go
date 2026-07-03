@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // toolSearchTool implements deferred tool loading (P4.6). Most niche tools are

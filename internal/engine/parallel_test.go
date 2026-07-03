@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // barrierTool signals on each Execute start and blocks until released, letting a

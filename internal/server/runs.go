@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/api"
 )
 
 // runRegistry tracks in-flight message runs so concurrent, user-driven parallel

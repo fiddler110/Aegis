@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/client"
-	"github.com/scottymacleod/aegis/internal/commands"
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/sandbox"
-	"github.com/scottymacleod/aegis/internal/share"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/client"
+	"github.com/fiddler110/aegis/internal/commands"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/share"
 )
 
 // SlashResult describes what a slash command produced for the TUI to render.

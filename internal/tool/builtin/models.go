@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/discover"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/discover"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // modelsTool lets the model discover locally available models.

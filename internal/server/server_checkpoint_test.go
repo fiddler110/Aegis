@@ -12,15 +12,15 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/checkpoint"
-	"github.com/scottymacleod/aegis/internal/client"
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/filetracker"
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/session"
-	"github.com/scottymacleod/aegis/internal/tool"
-	"github.com/scottymacleod/aegis/internal/tool/builtin"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/checkpoint"
+	"github.com/fiddler110/aegis/internal/client"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
 
 // scriptedAdapter issues a write_file tool call on its first turn, then a final

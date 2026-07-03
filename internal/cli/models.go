@@ -5,8 +5,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/discover"
-	"github.com/scottymacleod/aegis/internal/modelcatalog"
+	"github.com/fiddler110/aegis/internal/discover"
+	"github.com/fiddler110/aegis/internal/modelcatalog"
 	"github.com/spf13/cobra"
 )
 

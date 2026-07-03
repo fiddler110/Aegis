@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/provider/anthropic"
-	"github.com/scottymacleod/aegis/internal/provider/openai"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider/anthropic"
+	"github.com/fiddler110/aegis/internal/provider/openai"
 )
 
 // Build constructs the adapter selected by cfg.Provider.Default, wrapped with

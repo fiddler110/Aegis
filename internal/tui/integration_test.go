@@ -9,7 +9,7 @@ import (
 	"charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/api"
 )
 
 // driveUpdate is a small helper that applies msg through the real Update

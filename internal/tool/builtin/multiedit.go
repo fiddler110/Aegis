@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/checkpoint"
-	"github.com/scottymacleod/aegis/internal/filetracker"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/checkpoint"
+	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // multieditTool applies multiple edits to one or more files in a single call,

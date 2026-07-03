@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/config"
 )
 
 // runFirstInit writes the global config template to the user's OS config

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/embed"
-	"github.com/scottymacleod/aegis/internal/knowledge"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/embed"
+	"github.com/fiddler110/aegis/internal/knowledge"
 	"github.com/spf13/cobra"
 )
 

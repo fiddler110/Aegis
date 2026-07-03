@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/config"
 )
 
 func testLogger(buf *bytes.Buffer) *slog.Logger {

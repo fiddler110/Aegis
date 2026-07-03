@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // scriptedAdapter returns a predefined event sequence for each successive call.

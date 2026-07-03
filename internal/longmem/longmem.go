@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/embed"
+	"github.com/fiddler110/aegis/internal/embed"
 	_ "modernc.org/sqlite"
 )
 

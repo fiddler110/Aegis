@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/cost"
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/cost"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // TestBudgetGateStopsRun verifies the run aborts before the next tool round once

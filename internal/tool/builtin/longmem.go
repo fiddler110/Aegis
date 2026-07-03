@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/longmem"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/longmem"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // --- entity_remember ---

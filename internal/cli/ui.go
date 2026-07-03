@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/client"
-	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/client"
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/spf13/cobra"
 )
 

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/scottymacleod/aegis/internal/security"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/spf13/cobra"
 )
 

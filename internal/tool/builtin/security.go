@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/scottymacleod/aegis/internal/security"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/security"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 type securityScanTool struct{ root string }

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/session"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 func TestWebUIServedAndTokenInjected(t *testing.T) {

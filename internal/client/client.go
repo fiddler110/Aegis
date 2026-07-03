@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/session"
 )
 
 // Client talks to a running harness daemon.

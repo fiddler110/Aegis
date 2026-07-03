@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 func discardLogger() *slog.Logger {

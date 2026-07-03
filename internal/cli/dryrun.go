@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/memory"
-	"github.com/scottymacleod/aegis/internal/tool"
-	"github.com/scottymacleod/aegis/internal/tool/builtin"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
 )
 
