@@ -257,8 +257,14 @@ func (c *Client) GetBGEvents(ctx context.Context, sessionID string, since int64)
 // match the approval_id from the KindApprovalRequest event. allowAlways=true
 // persists an auto-approve entry for this (session, tool) pair.
 func (c *Client) SendApproval(ctx context.Context, sessionID, approvalID string, approved, allowAlways bool) error {
-	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve",
-		api.ApproveRequest{Approved: approved, AllowAlways: allowAlways, ID: approvalID}, nil)
+	return c.SendApprovalReq(ctx, sessionID,
+		api.ApproveRequest{Approved: approved, AllowAlways: allowAlways, ID: approvalID})
+}
+
+// SendApprovalReq is SendApproval with the full request body, allowing a
+// pattern-scoped allow-always rule to be attached (TQ6).
+func (c *Client) SendApprovalReq(ctx context.Context, sessionID string, req api.ApproveRequest) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve", req, nil)
 }
 
 // Steer injects a mid-run instruction into an active session run. The text is

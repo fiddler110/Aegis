@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-02 (v10 — P5.8, P5.9, and TQ1 shipped; all P2–P5.9 and TQ1/TQ2/TQ4a-b/TQ5/TQ7 done; remaining open work: TQ3/TQ6/TQ8/TQ9/TQ10, P6)
+**Updated:** 2026-07-03 (v11 — TQ3/TQ6/TQ8/TQ9/TQ10 shipped; the entire TQ track is done; remaining open work: P6)
 
 ---
 
@@ -51,6 +51,13 @@
 - TQ4a/b Copy affordances — `/copy` copies last assistant message via `pbcopy`/`xclip`/`clip.exe`; `/copy N` copies Nth fenced code block; toast confirmation.
 - TQ5 Toggleable sidebar — `sidebarOpen bool` (default off); `ctrl+b` / `/sidebar` toggle; context %, cost, agent count folded into status bar when hidden.
 - TQ7 Live todo strip — intercepts `todo_add`/`todo_update`/`todo_list` tool results; renders `▣▶▢` progress strip above input with in-progress task text.
+
+**TQ3/TQ6/TQ8/TQ9/TQ10 (shipped 2026-07-03 — TQ track complete):**
+- TQ3 Streaming markdown — the live tail renders through glamour incrementally: `liveBlock.render` takes a markdown-render callback (`model.mdRender`, trailing newlines normalized so settled-prefix + tail concatenation is byte-identical to a whole-source render); the settled prefix up to the last safe boundary is cached, only the growing tail re-renders per token. The end-of-turn restyle "pop" is gone — `flushLiveText` produces the same styled output the user was already watching.
+- TQ6 Richer approval flow — y/a/n banner replaced by an option-list dialog (`internal/tui/approval.go`): ↑/↓ + enter or y/a/n/f shortcuts across `Allow once / Allow always for pattern / Deny / Deny with feedback`. Edits/writes/shell show the TQ2 diff or command block as the preview. "Allow always" derives a scoped pattern (`suggestRulePattern`: `npm test -v` → `npm test*`, file paths → directory glob, URLs → host) and sends it as `ApproveRequest.Pattern`; the server installs `allow <tool>(<pattern>)` into the live rule set (`Server.addPermissionRule`, mutex-guarded) and persists it to `.aegis/config.yaml → permission.rules` (`config.AppendProjectPermissionRule`, dedup + key-preserving) so it survives restarts. Pattern-less allow-always keeps the old per-tool session cache. "Deny with feedback" sends the denial then injects the typed reason via the buffered steer channel so the model learns *why*.
+- TQ8 Message queueing — `alt+enter` during streaming queues the draft as the next user turn (dimmed `⏳ queued ▸` block below the live tail); queued messages auto-send one per completed run at stream close. Plain enter keeps steer semantics. Explicit cancel (esc-esc / ctrl+c) or a stream error discards the queue rather than auto-sending into a broken run.
+- TQ9 Input polish bundle — `shift+enter` newline via the textarea keymap (bubbletea v2 requests Kitty key disambiguation by default; `ctrl+j` fallback kept); pasted image paths (`tea.PasteMsg`, quoted or bare, `.png/.jpg/.jpeg/.gif/.webp/.bmp`) become `@image:` attachment tokens automatically — `extractImageRefs` now regex-based with quoted-path support, and no longer flattens newlines in messages; ↑/↓ move the cursor inside a multiline draft with history navigation only at the first/last line; thinking blocks collapse to `✻ thought for Ns  (ctrl+o to expand)` — ctrl+o swaps every thinking block between collapsed/expanded in place via `transcript.setBlockRaw` (byte-accounting exact).
+- TQ10 Theme system — the hardcoded Charmtone palette moved behind `colorScheme` (`internal/tui/colorscheme.go`) with `darkScheme` (identical to the old Pantera look) and `lightScheme` built-ins; `tui.theme` config key ("dark"/"light", default dark) applied by `tui.Run` before styles are built; the matching glamour markdown style ("dark"/"light") follows the scheme, as does the ANSI-16 shell-output remap. Terminal-background auto-detection remains a stretch goal.
 
 **TQ1 (shipped 2026-07-02):**
 - TQ1 Block-based transcript model — `internal/tui/transcript.go`: `transcriptBlock` (raw ANSI content + per-block width-keyed wrap cache) replaces the old whole-buffer `cappedBuffer`/`wrapCache`; `liveBlock` keeps the settled-prefix boundary-cache trick (previously scattered `liveWrapCache*` fields on `model`) so a long streaming reply stays O(tail) per token. Trimming now drops whole blocks (with a one-time "[earlier output trimmed]" marker held outside the evictable slice) instead of severing content mid-line. Resize/theme changes self-correct lazily — each block just notices its cached width is stale on next render, no explicit invalidation needed. The timeline picker's scroll-to-turn moved from a byte offset into `cappedBuffer.buf` to a block index (`transcript.renderUpTo`). Verified via `internal/tui/transcript_test.go` (block cache, trim, live-block boundary caching) and `internal/tui/integration_test.go`, which drives a full turn (thinking → streamed text → tool call/result → turn done) plus two resizes through the real `Update`/`applyEvent`/`refresh`/`View` path — interactive PTY tools (tmux, winpty) weren't available in this sandbox, so this scripted drive substitutes for a live terminal session.
@@ -130,51 +137,13 @@ A code-level review of `internal/tui` against the Claude Code and opencode/Crush
 | TQ5 | Toggleable sidebar, default off; `ctrl+b` / `/sidebar`; context bar in status line | 2026-07-02 |
 | TQ7 | Live todo strip (`▣▶▢`) above input, intercepts todo tool results | 2026-07-02 |
 | TQ1 | Block-based transcript model (`internal/tui/transcript.go`: `transcriptBlock`/`transcript`/`liveBlock`) | 2026-07-02 |
+| TQ3 | Streaming markdown — live tail renders through glamour incrementally from the last safe boundary; no end-of-turn restyle pop | 2026-07-03 |
+| TQ9 | Input polish: `shift+enter` newline, image-path paste → attachment token, cursor-aware ↑/↓ history, collapsible `✻ thought for Ns` blocks (`ctrl+o`) | 2026-07-03 |
+| TQ8 | Message queueing — `alt+enter` queues next turn during streaming; dimmed pending blocks auto-send at stream close | 2026-07-03 |
+| TQ6 | Option-list approval dialog with diff preview; "allow always" writes a pattern-scoped `permission.rules` entry persisted to `.aegis/config.yaml`; deny-with-feedback steers the reason back to the model | 2026-07-03 |
+| TQ10 | Theme system — `colorScheme` with dark + light built-ins, `tui.theme` config key, glamour style + ANSI-16 remap follow the scheme | 2026-07-03 |
 
-### Remaining
-
-| # | Gap | Evidence in code | vs. | Severity |
-|---|-----|------------------|-----|----------|
-| TQ3 | Streaming text is plain-wrapped raw markdown; glamour render only at turn end causes a visible "pop"/reflow | `refresh()` wraps `liveText` raw; `flushLiveText()` restyles at `KindTurnDone` | Claude Code | **High** |
-| TQ6 | Approval prompt is a minimal 3-line y/a/n banner; "always" = coarse per-tool server cache | `renderApprovalBanner()`; `SendApproval(allowAlways)` keyed by tool only | Claude Code (option list, pattern-level rules, previews) | Medium |
-| TQ8 | Cannot queue the next message while streaming (Enter = steer only) | `Update()`: Enter during streaming → `sendSteerCmd` | Claude Code (message queueing) | Low |
-| TQ9 | Input/interaction polish: newline is `ctrl+j` (no shift+enter), image attach requires typed `@image:<path>`, ↑/↓ doubles as history vs. cursor-move in multiline input, thinking text permanently inlined (no collapse) | `keymap.go`; `extractImageRefs()`; `appendThinking()` | Claude Code, opencode | Low |
-| TQ10 | Dark-only theme; glamour hardcoded to `"dark"` style | `newGlamourRenderer()`, Charmtone dark-first palette | opencode/Crush (theme system + light) | Low |
-
-### TQ3 — Streaming markdown rendering
-Render the live tail through glamour incrementally instead of raw-wrapping until turn end. Practical approach (used by Crush): re-render the live block through glamour on each refresh tick, but only from the last safe markdown boundary (the `findSafeMarkdownBoundary` helper already exists); with TQ1, the live block is just a block whose source keeps growing.
-**Why:** the end-of-turn restyle "pop" — raw `**bold**` and backticks suddenly becoming formatted — is the most visible streaming-quality difference vs. Claude Code.
-**Effort:** Medium. Sequence after TQ1 to avoid doing the work twice.
-
-### TQ6 — Richer approval flow
-Upgrade the y/a/n banner to an option-list dialog: arrow-key selection with `Allow once / Allow always for this pattern / Deny / Deny with feedback`. "Always" should write a text permission rule (e.g. `allow bash(npm test*)` — the `permission.Rules` syntax already exists) scoped to the *command pattern or path*, not the whole tool, and persist it to project config so it survives restarts. Show the TQ2 diff for pending edits.
-**Why:** approval is where trust is built; per-tool "always" is too coarse for a security-branded harness (approving one `shell` call approves every future shell command).
-**Effort:** Medium.
-
-### TQ8 — Message queueing while streaming
-Let Enter during streaming offer *queue* as well as *steer*: keep the current steer semantics on plain Enter (it is genuinely good), and add `alt+enter` (or a prefix) to queue the text as the next user turn, shown as a dimmed pending block that auto-sends at `KindDone`.
-**Effort:** Small (after TQ1 makes pending blocks trivial to render).
-
-### TQ9 — Input polish bundle
-- `shift+enter` for newline via the Kitty keyboard protocol (bubbletea v2 supports it; keep `ctrl+j` fallback)
-- Paste-detection for image paths: a pasted path ending in `.png/.jpg/...` becomes an attachment chip instead of requiring the typed `@image:` incantation
-- ↑/↓ moves the cursor within a multiline draft; history navigation only when the cursor is already at the first/last line (the standard Claude Code/opencode behavior)
-- Collapse thinking blocks to a one-line `✻ thought for 12s` header, expandable (needs TQ1)
-**Effort:** Small each; bundle into one pass.
-
-### TQ10 — Theme system & light mode
-Move the hardcoded Charmtone palette behind a small theme interface with dark + light built-ins and a `tui.theme` config key; pass the matching glamour style through. Terminal-background auto-detection is a stretch goal.
-**Effort:** Medium. Lowest priority in this track — cosmetic, and the dark default is fine for the core audience.
-
-### Recommended TQ sequence
-
-```
-Foundation (done):  TQ1 block transcript ✅ 2026-07-02
-On the foundation:  TQ3 streaming markdown → TQ9 input polish → TQ8 queueing → TQ6 approvals
-Cosmetic tail:      TQ10 themes, TQ4c scoped mouse capture
-```
-
-TQ1 shipped and removed the wrap-cache/truncation debt; TQ3, TQ6, TQ8, and TQ9 can now build directly on `internal/tui/transcript.go`'s per-block model instead of the old flat buffer.
+The TQ track is complete. Remaining cosmetic stretch ideas (not scheduled): TQ4c scoped mouse capture, terminal-background auto-detection for theme selection.
 
 ---
 
@@ -200,12 +169,12 @@ ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code ext
 ## Recommended Next Steps
 
 ```
-Done 2026-07-02:         P5.8 semantic recall → P5.9 provider failover → TQ1 block transcript
-TUI polish (post-TQ1):   TQ3 streaming markdown → TQ9 input polish → TQ8 queueing → TQ6 approvals
-Cosmetic/long-horizon:   TQ10 themes → P6.1 mid-turn persistence → P6.2 A2A → P6.3 MCP server
+Done 2026-07-02:  P5.8 semantic recall → P5.9 provider failover → TQ1 block transcript
+Done 2026-07-03:  TQ3 streaming markdown → TQ9 input polish → TQ8 queueing → TQ6 approvals → TQ10 themes
+Long-horizon:     P6.4 context editing → P6.1 mid-turn persistence → P6.2 A2A → P6.3 MCP server
 ```
 
-With TQ1 shipped, TQ3 (streaming markdown) is the next highest-leverage item: the live tail is already its own `liveBlock` with a boundary cache, so incremental glamour rendering slots in without another structural change.
+With the TQ track complete, only P6 (long-horizon/exploratory) remains open. P6.4 (deterministic tool-result pruning before LLM compaction) is the highest-leverage candidate: it is cheaper than a model call, fits `internal/compaction` as a pre-pass, and mirrors Anthropic's context-editing direction.
 
 ---
 

@@ -20,7 +20,7 @@ type SessionMeta struct {
 	ID           string     `json:"id"`
 	Title        string     `json:"title"`
 	Mode         string     `json:"mode"`
-	Background   bool       `json:"background,omitempty"`   // P3.2
+	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
 	InputTokens  int        `json:"input_tokens,omitempty"`
 	OutputTokens int        `json:"output_tokens,omitempty"`
@@ -96,12 +96,16 @@ type Event struct {
 
 // ApproveRequest is posted to /sessions/{id}/approve to answer a pending
 // approval request. Approved true lets the tool run; false denies it. ID must
-// match the approval_id from the KindApprovalRequest event. AllowAlways
-// persists an auto-approve entry for this (session, tool) pair so subsequent
-// calls to the same tool are approved without prompting.
+// match the approval_id from the KindApprovalRequest event.
+//
+// AllowAlways with a Pattern creates a persistent text permission rule
+// "allow <tool>(<pattern>)" scoped to that command/path pattern, saved to the
+// project config so it survives daemon restarts (TQ6). AllowAlways without a
+// Pattern falls back to the coarser session-lifetime per-tool cache.
 type ApproveRequest struct {
 	Approved    bool   `json:"approved"`
 	AllowAlways bool   `json:"allow_always,omitempty"`
+	Pattern     string `json:"pattern,omitempty"`
 	ID          string `json:"id,omitempty"`
 }
 
@@ -151,10 +155,10 @@ type CommandInfo struct {
 // CheckpointInfo describes a rewind point captured at the start of a turn.
 type CheckpointInfo struct {
 	ID        string    `json:"id"`
-	Seq       int       `json:"seq"`        // conversation message count at capture
-	Label     string    `json:"label"`      // the user prompt that began the turn
+	Seq       int       `json:"seq"`               // conversation message count at capture
+	Label     string    `json:"label"`             // the user prompt that began the turn
 	GitSHA    string    `json:"git_sha,omitempty"` // HEAD commit at checkpoint time (P3.4)
-	FileCount int       `json:"file_count"` // number of files snapshotted in the turn
+	FileCount int       `json:"file_count"`        // number of files snapshotted in the turn
 	CreatedAt time.Time `json:"created_at"`
 }
 

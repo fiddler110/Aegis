@@ -72,6 +72,35 @@ func (t *transcript) append(raw string) {
 	t.trim()
 }
 
+// appendBlock is append, but returns the created block so the caller can
+// later swap its content in place (collapsible thinking blocks, TQ9).
+// Returns nil for an empty raw string.
+func (t *transcript) appendBlock(raw string) *transcriptBlock {
+	if raw == "" {
+		return nil
+	}
+	b := newBlock(raw)
+	t.blocks = append(t.blocks, b)
+	t.rawBytes += len(raw)
+	t.trim()
+	// trim may have evicted the block we just appended (pathological budget);
+	// report it only if it survived.
+	if len(t.blocks) > 0 && t.blocks[len(t.blocks)-1] == b {
+		return b
+	}
+	return nil
+}
+
+// setBlockRaw replaces a live block's content, keeping the byte accounting
+// exact and invalidating its wrap cache. The caller must ensure b is still
+// part of this transcript.
+func (t *transcript) setBlockRaw(b *transcriptBlock, raw string) {
+	t.rawBytes += len(raw) - len(b.raw)
+	b.raw = raw
+	b.cached = false
+	t.trim()
+}
+
 // trim drops the oldest blocks until the transcript is back under budget.
 // The first time this happens, a "[earlier output trimmed]" marker is
 // recorded (rendered ahead of the remaining blocks) — it is never itself
@@ -129,9 +158,15 @@ func (t *transcript) renderUpTo(n, w int) string {
 // liveBlock renders actively-streaming text. Unlike transcriptBlock it keeps
 // a boundary-caching trick: only the "settled" prefix up to the last safe
 // markdown paragraph break is cached, and the short growing suffix is
-// rewrapped every token. This keeps a long streaming reply O(tail) per token
-// instead of O(n), the same guarantee the old model-level liveWrapCache
+// re-rendered every token. This keeps a long streaming reply O(tail) per
+// token instead of O(n), the same guarantee the old model-level liveWrapCache
 // fields gave, just encapsulated per-block instead of scattered on model.
+//
+// Rendering goes through md, the caller-supplied markdown renderer (TQ3), so
+// streamed text is styled identically to the flushed transcript block and the
+// old end-of-turn restyle "pop" no longer happens. The settled prefix always
+// ends at a blank line outside a code fence, so rendering it separately from
+// the tail produces the same output as one whole-source render.
 type liveBlock struct {
 	raw string
 
@@ -142,21 +177,21 @@ type liveBlock struct {
 
 func (b *liveBlock) setText(s string) { b.raw = s }
 
-func (b *liveBlock) render(w int) string {
+func (b *liveBlock) render(w int, md func(string) string) string {
 	if b.raw == "" {
 		return ""
 	}
 	boundary := findSafeMarkdownBoundary(b.raw)
-	if boundary > b.prefixCacheTo || w != b.prefixCacheW {
+	if boundary != b.prefixCacheTo || w != b.prefixCacheW {
 		if boundary > 0 {
-			b.prefixCache = wrap(b.raw[:boundary], w)
+			b.prefixCache = md(b.raw[:boundary])
 		} else {
 			b.prefixCache = ""
 		}
 		b.prefixCacheTo = boundary
 		b.prefixCacheW = w
 	}
-	return b.prefixCache + wrap(b.raw[boundary:], w)
+	return b.prefixCache + md(b.raw[boundary:])
 }
 
 func (b *liveBlock) reset() {
