@@ -113,6 +113,17 @@ func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider
 	if !s.shouldCompact(EstimateTokens(system, msgs)) {
 		return msgs, false, nil
 	}
+
+	// Deterministic pre-pass: drop stale tool results (superseded file reads,
+	// old search dumps) before paying for an LLM summarization call. Cheaper,
+	// and it preserves the exact wording of everything the model actually said.
+	if pruned, prunedChars := pruneStaleToolResults(msgs, s.keepRecent); prunedChars > 0 {
+		if !s.shouldCompact(EstimateTokens(system, pruned)) {
+			return pruned, true, nil
+		}
+		msgs = pruned
+	}
+
 	boundary := s.boundary(msgs)
 	if boundary <= 0 {
 		return msgs, false, nil // nothing safe to compact
