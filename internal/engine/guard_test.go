@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scottymacleod/aegis/internal/guard"
 	"github.com/scottymacleod/aegis/internal/provider"
 	"github.com/scottymacleod/aegis/internal/tool"
 )
@@ -57,7 +58,7 @@ func kinds(evs []Event) []EventKind {
 func TestGuardPassEmitsDoneOnly(t *testing.T) {
 	evs := runWith(t, Options{
 		Adapter: &scriptAdapter{replies: []string{"final"}}, Model: "m",
-		OutputGuard:           func(context.Context, string) (bool, string) { return true, "" },
+		OutputGuard:           func(context.Context, guard.Input) (bool, string) { return true, "" },
 		OutputGuardMaxRetries: 2,
 	})
 	for _, k := range kinds(evs) {
@@ -72,9 +73,9 @@ func TestGuardFailThenPass(t *testing.T) {
 	evs := runWith(t, Options{
 		Adapter: &scriptAdapter{replies: []string{"bad", "good"}}, Model: "m",
 		OutputGuardMaxRetries: 2,
-		OutputGuard: func(_ context.Context, text string) (bool, string) {
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
 			calls++
-			if text == "good" {
+			if in.Text == "good" {
 				return true, ""
 			}
 			return false, "needs work"
@@ -136,8 +137,8 @@ func TestGuardCorrectiveMentionsToolsAfterToolRound(t *testing.T) {
 	eng, err := New(Options{
 		Adapter: adapter, Tools: reg, Model: "test",
 		OutputGuardMaxRetries: 1,
-		OutputGuard: func(_ context.Context, text string) (bool, string) {
-			if strings.Contains(text, "TODO") {
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
+			if strings.Contains(in.Text, "TODO") {
 				return false, "contains TODOs"
 			}
 			return true, ""
@@ -183,8 +184,8 @@ func TestGuardCorrectiveOmitsToolMentionWithoutToolRound(t *testing.T) {
 	eng, err := New(Options{
 		Adapter: &scriptAdapter{replies: []string{"bad", "good"}}, Model: "m",
 		OutputGuardMaxRetries: 2,
-		OutputGuard: func(_ context.Context, text string) (bool, string) {
-			if text == "good" {
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
+			if in.Text == "good" {
 				return true, ""
 			}
 			return false, "needs work"
@@ -213,11 +214,112 @@ func TestGuardCorrectiveOmitsToolMentionWithoutToolRound(t *testing.T) {
 	}
 }
 
+// fakeFS backs fakeWriteTool/fakeReadTool with an in-memory path->content map,
+// standing in for the real write_file/read_file tools without touching disk.
+type fakeFS struct{ files map[string]string }
+
+type fakeWriteTool struct{ fs *fakeFS }
+
+func (t *fakeWriteTool) Name() string                 { return "write_file" }
+func (t *fakeWriteTool) Description() string          { return "" }
+func (t *fakeWriteTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (t *fakeWriteTool) Capability() tool.Capability  { return tool.CapWrite }
+func (t *fakeWriteTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+	var args struct{ Path, Content string }
+	if err := json.Unmarshal(input, &args); err != nil {
+		return tool.Result{}, err
+	}
+	t.fs.files[args.Path] = args.Content
+	return tool.Result{Content: "wrote " + args.Path}, nil
+}
+
+type fakeReadTool struct{ fs *fakeFS }
+
+func (t *fakeReadTool) Name() string                 { return "read_file" }
+func (t *fakeReadTool) Description() string          { return "" }
+func (t *fakeReadTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (t *fakeReadTool) Capability() tool.Capability  { return tool.CapRead }
+func (t *fakeReadTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+	var args struct{ Path string }
+	if err := json.Unmarshal(input, &args); err != nil {
+		return tool.Result{}, err
+	}
+	content, ok := t.fs.files[args.Path]
+	if !ok {
+		return tool.Result{Content: "not found", IsError: true}, nil
+	}
+	return tool.Result{Content: content}, nil
+}
+
+// TestGuardValidatesActualFileContentNotJustChatReply is the end-to-end
+// regression: a model can write a file containing TODOs/placeholders while
+// giving an innocuous chat reply ("Done") that says nothing about it. Before
+// this fix, the guard only ever saw the chat text and would pass such a
+// response. It must now read back the file the run wrote and fail the guard
+// on the file's actual content.
+func TestGuardValidatesActualFileContentNotJustChatReply(t *testing.T) {
+	fs := &fakeFS{files: map[string]string{}}
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		// Turn 1: writes a file containing a TODO, via a tool call.
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
+				ID: "tu_1", Name: "write_file",
+				Input: json.RawMessage(`{"path":"docs/report.md","content":"# Report\nTODO: fill in numbers"}`),
+			}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{IsEstimated: true}},
+		},
+		// Turn 2: an innocuous final chat reply that says nothing about TODOs.
+		{
+			{Type: provider.EventTextDelta, Text: "Done."},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{IsEstimated: true}},
+		},
+	}}
+
+	reg := tool.NewRegistry()
+	if err := reg.Register(&fakeWriteTool{fs: fs}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&fakeReadTool{fs: fs}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The guard always passes here — the point of this test is only to
+	// observe what Files it was given, not to exercise the retry path
+	// (covered separately by TestGuardCorrectiveMentionsToolsAfterToolRound).
+	var seenFiles []guard.FileContent
+	eng, err := New(Options{
+		Adapter: adapter, Tools: reg, Model: "test",
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
+			seenFiles = in.Files
+			return true, ""
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "write a document"}}})
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(seenFiles) != 1 {
+		t.Fatalf("expected the guard to see 1 written file, got %d: %+v", len(seenFiles), seenFiles)
+	}
+	if seenFiles[0].Path != "docs/report.md" {
+		t.Errorf("path = %q, want docs/report.md", seenFiles[0].Path)
+	}
+	if !strings.Contains(seenFiles[0].Content, "TODO: fill in numbers") {
+		t.Errorf("expected guard to see actual file content, got: %q", seenFiles[0].Content)
+	}
+}
+
 func TestGuardExhaustedSurfaces(t *testing.T) {
 	evs := runWith(t, Options{
 		Adapter: &scriptAdapter{replies: []string{"a", "b", "c", "d"}}, Model: "m",
 		OutputGuardMaxRetries: 2,
-		OutputGuard:           func(context.Context, string) (bool, string) { return false, "always bad" },
+		OutputGuard:           func(context.Context, guard.Input) (bool, string) { return false, "always bad" },
 	})
 	var guardEvents, doneEvents int
 	for _, e := range evs {

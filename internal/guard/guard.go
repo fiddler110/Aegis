@@ -7,15 +7,38 @@ package guard
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/scottymacleod/aegis/internal/provider"
 )
 
+// FileContent is the content of one file written or edited during the turn
+// being validated, included so a guard can check the actual deliverable
+// rather than only what the model said about it.
+type FileContent struct {
+	Path    string
+	Content string
+}
+
+// Input is what a guard validates: the assistant's final chat text, plus the
+// content of any files it wrote or edited this turn. Files is empty when no
+// write-capability tool ran, or when the engine has no way to read them back.
+type Input struct {
+	Text  string
+	Files []FileContent
+}
+
 // Func validates a final answer. ok=false means it failed; reason is a short
 // explanation appended to the corrective retry prompt.
-type Func func(ctx context.Context, text string) (ok bool, reason string)
+type Func func(ctx context.Context, in Input) (ok bool, reason string)
+
+// maxGuardFileBytes caps how much file content is folded into an LLM guard
+// prompt, per file, so a large generated document doesn't blow the
+// validator's context window or cost. Content beyond this is truncated with
+// a note; the guard still sees enough to judge structure/completeness.
+const maxGuardFileBytes = 8000
 
 // Config is the resolved guard configuration for a single persona/session.
 type Config struct {
@@ -26,12 +49,14 @@ type Config struct {
 	MaxRetries int
 }
 
-// SchemaGuard requires text to parse as a JSON object containing every required
-// key. A leading ```json fence is tolerated.
+// SchemaGuard requires the final text to parse as a JSON object containing
+// every required key. A leading ```json fence is tolerated. Files are
+// ignored: schema mode validates the shape of the chat reply itself, not any
+// artifact it produced.
 func SchemaGuard(required []string) Func {
-	return func(_ context.Context, text string) (bool, string) {
+	return func(_ context.Context, in Input) (bool, string) {
 		var obj map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(stripFence(text)), &obj); err != nil {
+		if err := json.Unmarshal([]byte(stripFence(in.Text)), &obj); err != nil {
 			return false, "output is not a valid JSON object"
 		}
 		var missing []string
@@ -47,16 +72,36 @@ func SchemaGuard(required []string) Func {
 	}
 }
 
-// LLMGuard asks model whether text satisfies rubric, expecting "PASS" or
-// "FAIL: <reason>". Any error or unparseable reply fails open.
+// LLMGuard asks model whether the output satisfies rubric, expecting "PASS"
+// or "FAIL: <reason>". When in.Files is non-empty (write-capability tools ran
+// this turn), their content is folded into the OUTPUT so the rubric is
+// checked against what was actually delivered — e.g. "no placeholders or
+// TODOs" — not just the assistant's chat summary of it. Any error or
+// unparseable reply fails open.
 func LLMGuard(adapter provider.Adapter, model, rubric string) Func {
-	return func(ctx context.Context, text string) (bool, string) {
+	return func(ctx context.Context, in Input) (bool, string) {
 		if adapter == nil || model == "" {
 			return true, ""
 		}
+		output := in.Text
+		if len(in.Files) > 0 {
+			var sb strings.Builder
+			sb.WriteString(in.Text)
+			sb.WriteString("\n\nFiles written or edited this turn:")
+			for _, f := range in.Files {
+				content := f.Content
+				truncated := ""
+				if len(content) > maxGuardFileBytes {
+					content = content[:maxGuardFileBytes]
+					truncated = "\n[...truncated]"
+				}
+				fmt.Fprintf(&sb, "\n\n--- %s ---\n%s%s", f.Path, content, truncated)
+			}
+			output = sb.String()
+		}
 		prompt := "You are an output validator. Given the RUBRIC and the OUTPUT, reply with exactly " +
 			"\"PASS\" if the output satisfies the rubric, or \"FAIL: <one-line reason>\" if it does not. " +
-			"Reply with nothing else.\n\nRUBRIC:\n" + rubric + "\n\nOUTPUT:\n" + text
+			"Reply with nothing else.\n\nRUBRIC:\n" + rubric + "\n\nOUTPUT:\n" + output
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		ch, err := adapter.Stream(cctx, provider.Request{

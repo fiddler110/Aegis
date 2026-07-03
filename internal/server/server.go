@@ -821,7 +821,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 			}))
 	}
 
-	var guardFn func(ctx context.Context, text string) (bool, string)
+	var guardFn guard.Func
 	var guardRetries int
 	if guardEnabled {
 		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, s.personaModel(p))
