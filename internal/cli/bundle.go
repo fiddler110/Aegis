@@ -54,6 +54,9 @@ func newBundleInfoCmd() *cobra.Command {
 			for _, a := range b.Artifacts {
 				fmt.Fprintf(out, "  %s/%s\n", a.Kind, a.Rel)
 			}
+			if hash, err := b.ContentHash(); err == nil {
+				fmt.Fprintf(out, "\ncontent hash: %s\n(pin with `bundle install --expect-sha256 %s` to detect upstream changes)\n", hash, hash)
+			}
 			return nil
 		},
 	}
@@ -62,6 +65,7 @@ func newBundleInfoCmd() *cobra.Command {
 func newBundleInstallCmd() *cobra.Command {
 	var scope string
 	var overwrite bool
+	var expectHash string
 	cmd := &cobra.Command{
 		Use:   "install <path-or-git-url>",
 		Short: "Install a bundle into the project (default) or user scope",
@@ -78,6 +82,26 @@ func newBundleInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			out := cmd.OutOrStdout()
+
+			// P7.6: a bundle installs arbitrary tool/persona code with no other
+			// provenance check. --expect-sha256 lets a caller pin what they
+			// reviewed (e.g. in a script or CI config) and abort before writing
+			// anything if the upstream repo now serves something different.
+			hash, hashErr := b.ContentHash()
+			if expectHash != "" {
+				if hashErr != nil {
+					return fmt.Errorf("compute content hash: %w", hashErr)
+				}
+				want := expectHash
+				if !strings.Contains(want, ":") {
+					want = "sha256:" + want // allow the bare hex digest too
+				}
+				if !strings.EqualFold(hash, want) {
+					return fmt.Errorf("bundle content hash mismatch: got %s, expected %s — refusing to install (the source may have changed)", hash, expectHash)
+				}
+			}
+
 			dest, err := scopeDir(scope)
 			if err != nil {
 				return err
@@ -86,7 +110,6 @@ func newBundleInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 			if len(written) == 0 {
 				fmt.Fprintf(out, "nothing installed (all artifacts already exist; use --overwrite to replace)\n")
 				return nil
@@ -99,11 +122,18 @@ func newBundleInstallCmd() *cobra.Command {
 			if skipped > 0 {
 				fmt.Fprintf(out, "(%d already present, skipped; --overwrite to replace)\n", skipped)
 			}
+			if hashErr == nil {
+				fmt.Fprintf(out, "content hash: %s\n", hash)
+				if expectHash == "" {
+					fmt.Fprintf(out, "(pin with --expect-sha256 %s on future installs to detect upstream changes)\n", hash)
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&scope, "scope", "project", "install scope: project (./.aegis) or user (data dir)")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace artifacts that already exist")
+	cmd.Flags().StringVar(&expectHash, "expect-sha256", "", "abort if the bundle's content hash doesn't match this pinned value (see `bundle info`)")
 	return cmd
 }
 

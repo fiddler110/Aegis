@@ -110,6 +110,16 @@ type SandboxConfig struct {
 	Priority []string `koanf:"priority"` // auto-detect order, e.g. ["wslc","docker","podman"]; empty = OS default
 	Image    string   `koanf:"image"`    // container image (default "ubuntu:22.04")
 	Network  bool     `koanf:"network"`  // allow network access inside containers (default false)
+	// Strict, when true, makes the daemon refuse to start (rather than
+	// silently falling back to the unsandboxed local backend) if the
+	// configured "container" or "os" backend cannot be initialized (P7.4).
+	Strict bool `koanf:"strict"`
+	// StripEnv names additional environment variables to exclude from
+	// commands run by the local/os backends, on top of the built-in default
+	// (provider API keys) (P7.2). Use this for secrets loaded via
+	// .aegis/.env for MCP server auth or gateway headers that the shell tool
+	// has no legitimate reason to read.
+	StripEnv []string `koanf:"strip_env"`
 }
 
 // CostConfig configures spend tracking.
@@ -143,6 +153,14 @@ type MCPServerConfig struct {
 	Args    []string          `koanf:"args"`
 	Env     map[string]string `koanf:"env"`
 	Auth    string            `koanf:"auth"` // Bearer token for HTTP servers
+	// Capability is the default tool.Capability ("read", "write", "network",
+	// "execute", or "spawn") assigned to every tool this server exposes.
+	// Empty/unrecognized defaults to "execute" (most restrictive) so an
+	// unlabeled or untrusted MCP server cannot bypass the permission gate.
+	Capability string `koanf:"capability"`
+	// ToolCapabilities overrides Capability per remote tool name for servers
+	// that expose a known mix of tools with different risk levels.
+	ToolCapabilities map[string]string `koanf:"tool_capabilities"`
 }
 
 // ProviderConfig selects and configures the model provider.

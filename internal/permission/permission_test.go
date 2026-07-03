@@ -9,14 +9,20 @@ import (
 )
 
 type fakeTool struct {
-	name string
-	cap  tool.Capability
+	name   string
+	cap    tool.Capability
+	schema json.RawMessage // optional; defaults to "{}" (no properties) when unset
 }
 
-func (f fakeTool) Name() string                 { return f.name }
-func (f fakeTool) Description() string          { return "" }
-func (f fakeTool) InputSchema() json.RawMessage { return json.RawMessage(`{}`) }
-func (f fakeTool) Capability() tool.Capability  { return f.cap }
+func (f fakeTool) Name() string        { return f.name }
+func (f fakeTool) Description() string { return "" }
+func (f fakeTool) InputSchema() json.RawMessage {
+	if len(f.schema) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return f.schema
+}
+func (f fakeTool) Capability() tool.Capability { return f.cap }
 func (f fakeTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
 	return tool.Result{}, nil
 }

@@ -115,7 +115,7 @@ sensitive data exposure, insecure deserialization, SSRF.
 | `name` | string | Persona name (used with `--persona` and `/persona`) |
 | `description` | string | Short description shown in the picker |
 | `model` | string | Model ID override (same provider as global config) |
-| `mode` | string | Default permission mode: `plan`, `build`, or `auto` |
+| `mode` | string | Default permission mode: `plan`, `build`, or `auto` (see trust note below) |
 | `tools` | list | Informational list of tool names (shown in UI) |
 | `rules` | list | Permission rules merged into the session gate |
 | `output_guard` | object | Output validation config (see [Configuration](configuration.md)) |
@@ -124,6 +124,8 @@ To disable output validation for a persona:
 ```yaml
 output_guard: none
 ```
+
+**Trust note on `mode` (P7.5):** a persona file — including one from a third-party bundle (`aegis bundle install <git-url>`) — is less trusted than a built-in persona. Its `mode:` is only honored implicitly (i.e. when a session is created without an explicit `--mode`/`mode` request) if it's no more permissive than the daemon's configured default (`permission.mode` in config.yaml). A loaded persona declaring `mode: auto` while the configured default is `plan`/`build` has that request ignored and logged as a warning, instead of silently granting unattended shell execution. Pass `--mode auto` explicitly (or configure `permission.mode: auto`) if you actually want that persona's elevated mode.
 
 ---
 

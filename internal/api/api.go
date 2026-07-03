@@ -30,6 +30,17 @@ type SessionMeta struct {
 	ArchivedAt   *time.Time `json:"archived_at,omitempty"`
 }
 
+// HealthStatus is the /healthz response. SandboxFallback signals that the
+// configured sandbox backend failed to initialize and the daemon fell back to
+// unsandboxed local execution (P7.4); clients should warn the user rather
+// than silently trusting a sandbox that isn't actually there.
+type HealthStatus struct {
+	Status                string `json:"status"`
+	Model                 string `json:"model"`
+	SandboxFallback       bool   `json:"sandbox_fallback,omitempty"`
+	SandboxFallbackReason string `json:"sandbox_fallback_reason,omitempty"`
+}
+
 // PruneResponse reports how many sessions were deleted by a prune operation.
 type PruneResponse struct {
 	Deleted int `json:"deleted"`

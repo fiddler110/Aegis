@@ -93,6 +93,13 @@ type Server struct {
 	http        *http.Server
 	authToken   string // shared secret for API authentication
 
+	// sandboxFallback and sandboxFallbackReason record whether the configured
+	// sandbox backend failed to initialize and the daemon fell back to
+	// unsandboxed local execution (P7.4). Surfaced via /healthz so clients can
+	// warn the user instead of silently trusting a sandbox that isn't there.
+	sandboxFallback       bool
+	sandboxFallbackReason string
+
 	// pendingApprovals maps run ID → chan approvalDecision for interactive approval.
 	// The channel is written by handleApprove and read by sseApprover.Approve.
 	pendingApprovals sync.Map
@@ -206,43 +213,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("getwd: %w", err)
 	}
 
-	// Sandbox backend: "container" forces a runtime (or auto-detects one);
-	// "auto" detects and picks the best available, falling back to local;
-	// anything else (default) runs commands directly on the host.
-	var sb sandbox.Backend
-	switch cfg.Sandbox.Backend {
-	case "container", "auto":
-		opts := sandbox.ContainerOpts{
-			Image:    cfg.Sandbox.Image,
-			Network:  cfg.Sandbox.Network,
-			Priority: sandbox.ParseRuntimes(cfg.Sandbox.Priority),
-		}
-		// Only "container" honors an explicit forced runtime; "auto" always detects.
-		if cfg.Sandbox.Backend == "container" {
-			opts.Prefer = sandbox.ContainerRuntime(cfg.Sandbox.Runtime)
-		}
-		csb, err := sandbox.NewContainerBackend(opts)
-		if err != nil {
-			logger.Warn("sandbox: no container runtime available, falling back to local",
-				"backend", cfg.Sandbox.Backend, "err", err)
-			sb = sandbox.NewLocalBackend()
-		} else {
-			logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Sandbox.Image)
-			sb = csb
-		}
-	case "os":
-		// OS-level isolation without a container runtime (P4.7): seatbelt on
-		// macOS, bwrap on Linux. Falls back to local when unavailable.
-		osb, err := sandbox.NewOSBackend(cwd, cfg.Sandbox.Network)
-		if err != nil {
-			logger.Warn("sandbox: OS sandbox unavailable, falling back to local", "err", err)
-			sb = sandbox.NewLocalBackend()
-		} else {
-			logger.Info("sandbox backend", "mechanism", osb.Name(), "network", cfg.Sandbox.Network)
-			sb = osb
-		}
-	default:
-		sb = sandbox.NewLocalBackend()
+	sb, sandboxFallback, sandboxFallbackReason, err := selectSandbox(cfg.Sandbox, cwd, logger)
+	if err != nil {
+		store.Close()
+		return nil, err
 	}
 
 	// Cron scheduler: fires due jobs as background tasks.
@@ -354,6 +328,12 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		} else {
 			s.permRules = rules
 			logger.Info("loaded permission rules", "count", len(rules))
+			// P7.7: flag any rule that can never match because the target
+			// tool's schema has none of the fields subjectFor knows how to
+			// read — otherwise a scoped deny silently never fires.
+			permission.WarnUnmatchableRules(rules, reg.All(), func(msg string, args ...any) {
+				logger.Warn(msg, args...)
+			})
 		}
 	}
 	s.tasks = taskMgr
@@ -361,6 +341,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.checkpoints = checkpointStore
 	s.fileTracker = ft
 	s.sandbox = sb
+	s.sandboxFallback = sandboxFallback
+	s.sandboxFallbackReason = sandboxFallbackReason
 	s.lspMgr = lspMgr
 	s.knowledge = knowledgeStore
 	s.longMem = longMemStore
@@ -417,7 +399,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// Connect configured MCP servers and register their tools.
 	mcpServers := make([]mcp.ServerConfig, 0, len(cfg.MCP))
 	for _, m := range cfg.MCP {
-		mcpServers = append(mcpServers, mcp.ServerConfig{Name: m.Name, Command: m.Command, Args: m.Args, Env: m.Env, Auth: m.Auth})
+		mcpServers = append(mcpServers, mcp.ServerConfig{
+			Name:             m.Name,
+			Command:          m.Command,
+			Args:             m.Args,
+			Env:              m.Env,
+			Auth:             m.Auth,
+			Capability:       m.Capability,
+			ToolCapabilities: m.ToolCapabilities,
+		})
 	}
 	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)
 
@@ -439,6 +429,59 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// selectSandbox picks the command-execution backend per cfg.Backend:
+// "container" forces a runtime (or auto-detects one); "auto" detects and
+// picks the best available; "os" uses OS-level isolation without a container
+// runtime; anything else (default) runs commands directly on the host.
+//
+// A fallback to the unsandboxed local backend is a silent security downgrade
+// for an operator who believes sandboxing is active (P7.4): it is always
+// logged, reported back via the fallback/reason return values (surfaced by
+// the caller via /healthz for clients to warn the user), and — when
+// cfg.Strict is set — turned into a hard error instead of a silent fallback.
+func selectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (sb sandbox.Backend, fallback bool, reason string, err error) {
+	switch cfg.Backend {
+	case "container", "auto":
+		opts := sandbox.ContainerOpts{
+			Image:    cfg.Image,
+			Network:  cfg.Network,
+			Priority: sandbox.ParseRuntimes(cfg.Priority),
+		}
+		// Only "container" honors an explicit forced runtime; "auto" always detects.
+		if cfg.Backend == "container" {
+			opts.Prefer = sandbox.ContainerRuntime(cfg.Runtime)
+		}
+		csb, cerr := sandbox.NewContainerBackend(opts)
+		if cerr != nil {
+			if cfg.Strict {
+				return nil, false, "", fmt.Errorf("sandbox: no container runtime available for backend %q and sandbox.strict is set: %w", cfg.Backend, cerr)
+			}
+			logger.Warn("sandbox: no container runtime available, falling back to local",
+				"backend", cfg.Backend, "err", cerr)
+			reason = fmt.Sprintf("configured sandbox backend %q unavailable (%v) — running unsandboxed on the host", cfg.Backend, cerr)
+			return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), true, reason, nil
+		}
+		logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Image)
+		return csb, false, "", nil
+	case "os":
+		// OS-level isolation without a container runtime (P4.7): seatbelt on
+		// macOS, bwrap on Linux. Falls back to local when unavailable.
+		osb, oerr := sandbox.NewOSBackend(cwd, cfg.Network, cfg.StripEnv)
+		if oerr != nil {
+			if cfg.Strict {
+				return nil, false, "", fmt.Errorf("sandbox: OS sandbox unavailable and sandbox.strict is set: %w", oerr)
+			}
+			logger.Warn("sandbox: OS sandbox unavailable, falling back to local", "err", oerr)
+			reason = fmt.Sprintf("configured sandbox backend \"os\" unavailable (%v) — running unsandboxed on the host", oerr)
+			return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), true, reason, nil
+		}
+		logger.Info("sandbox backend", "mechanism", osb.Name(), "network", cfg.Network)
+		return osb, false, "", nil
+	default:
+		return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), false, "", nil
+	}
 }
 
 // onSubagentStop records the SUBAGENT_STOP lifecycle event in the audit trail.
@@ -807,7 +850,51 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 // --- handlers ---
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "model": s.cfg.Provider.Model})
+	resp := api.HealthStatus{
+		Status:                "ok",
+		Model:                 s.cfg.Provider.Model,
+		SandboxFallback:       s.sandboxFallback,
+		SandboxFallbackReason: s.sandboxFallbackReason,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// permModeRank orders permission modes by permissiveness for the P7.5 persona
+// escalation guard: plan < build < auto. An unrecognized mode ranks as plan
+// (least permissive) so it can never be treated as an escalation.
+func permModeRank(mode string) int {
+	switch mode {
+	case "build":
+		return 1
+	case "auto":
+		return 2
+	default:
+		return 0
+	}
+}
+
+// resolveSessionMode picks the permission mode for a new session: an explicit
+// reqMode always wins; otherwise a persona's Mode is used, except a loaded
+// (non-built-in) persona — including one installed by a bundle (P5.7) or
+// picked up from .aegis/personas/*.md — is less trusted than a built-in, so
+// its Mode must not silently escalate a session past the configured default
+// when the caller didn't explicitly ask for a mode (P7.5). Built-in personas
+// are reviewed and shipped with Aegis, so they remain fully trusted. Returns
+// "" when neither reqMode nor an applicable persona mode is set, leaving the
+// caller to apply the configured default.
+func (s *Server) resolveSessionMode(reqMode string, p persona.Persona) string {
+	if reqMode != "" {
+		return reqMode
+	}
+	if p.Mode == "" {
+		return ""
+	}
+	if p.Loaded && permModeRank(p.Mode) > permModeRank(s.cfg.Permission.Mode) {
+		s.logger.Warn("persona requested a more permissive mode than the configured default; ignoring",
+			"persona", p.Name, "persona_mode", p.Mode, "default_mode", s.cfg.Permission.Mode)
+		return ""
+	}
+	return p.Mode
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -818,10 +905,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := persona.Get(req.Persona)
-	mode := req.Mode
-	if mode == "" && p.Mode != "" {
-		mode = p.Mode
-	}
+	mode := s.resolveSessionMode(req.Mode, p)
 	if mode == "" {
 		mode = s.cfg.Permission.Mode
 	}

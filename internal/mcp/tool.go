@@ -15,11 +15,12 @@ type mcpTool struct {
 	client      *Client
 	info        ToolInfo
 	exposedName string
+	capability  tool.Capability
 }
 
 func (t *mcpTool) Name() string                { return t.exposedName }
 func (t *mcpTool) Description() string         { return t.info.Description }
-func (t *mcpTool) Capability() tool.Capability { return tool.CapNetwork }
+func (t *mcpTool) Capability() tool.Capability { return t.capability }
 func (t *mcpTool) InputSchema() json.RawMessage {
 	if len(t.info.InputSchema) == 0 {
 		return json.RawMessage(`{"type":"object"}`)
@@ -38,13 +39,14 @@ func (t *mcpTool) Execute(ctx context.Context, input json.RawMessage) (tool.Resu
 type mcpResourceListTool struct {
 	client      *Client
 	exposedName string
+	capability  tool.Capability
 }
 
 func (t *mcpResourceListTool) Name() string { return t.exposedName }
 func (t *mcpResourceListTool) Description() string {
 	return "List available resources from the " + t.client.Server() + " MCP server"
 }
-func (t *mcpResourceListTool) Capability() tool.Capability { return tool.CapNetwork }
+func (t *mcpResourceListTool) Capability() tool.Capability { return t.capability }
 func (t *mcpResourceListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{}}`)
 }
@@ -64,13 +66,14 @@ func (t *mcpResourceListTool) Execute(ctx context.Context, _ json.RawMessage) (t
 type mcpResourceReadTool struct {
 	client      *Client
 	exposedName string
+	capability  tool.Capability
 }
 
 func (t *mcpResourceReadTool) Name() string { return t.exposedName }
 func (t *mcpResourceReadTool) Description() string {
 	return "Read a resource by URI from the " + t.client.Server() + " MCP server"
 }
-func (t *mcpResourceReadTool) Capability() tool.Capability { return tool.CapNetwork }
+func (t *mcpResourceReadTool) Capability() tool.Capability { return t.capability }
 func (t *mcpResourceReadTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"Resource URI to read"}},"required":["uri"]}`)
 }
@@ -96,13 +99,14 @@ func (t *mcpResourceReadTool) Execute(ctx context.Context, input json.RawMessage
 type mcpPromptListTool struct {
 	client      *Client
 	exposedName string
+	capability  tool.Capability
 }
 
 func (t *mcpPromptListTool) Name() string { return t.exposedName }
 func (t *mcpPromptListTool) Description() string {
 	return "List available prompt templates from the " + t.client.Server() + " MCP server"
 }
-func (t *mcpPromptListTool) Capability() tool.Capability { return tool.CapNetwork }
+func (t *mcpPromptListTool) Capability() tool.Capability { return t.capability }
 func (t *mcpPromptListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{}}`)
 }
@@ -122,13 +126,14 @@ func (t *mcpPromptListTool) Execute(ctx context.Context, _ json.RawMessage) (too
 type mcpPromptGetTool struct {
 	client      *Client
 	exposedName string
+	capability  tool.Capability
 }
 
 func (t *mcpPromptGetTool) Name() string { return t.exposedName }
 func (t *mcpPromptGetTool) Description() string {
 	return "Get a prompt template by name from the " + t.client.Server() + " MCP server"
 }
-func (t *mcpPromptGetTool) Capability() tool.Capability { return tool.CapNetwork }
+func (t *mcpPromptGetTool) Capability() tool.Capability { return t.capability }
 func (t *mcpPromptGetTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Prompt name"},"arguments":{"type":"object","description":"Prompt arguments as key-value pairs","additionalProperties":{"type":"string"}}},"required":["name"]}`)
 }
@@ -162,6 +167,45 @@ type ServerConfig struct {
 	Args    []string          `koanf:"args"`
 	Env     map[string]string `koanf:"env"`
 	Auth    string            `koanf:"auth"` // Bearer token for HTTP servers
+	// Capability is the default tool.Capability assigned to every tool this
+	// server exposes: "read", "write", "network", "execute", or "spawn".
+	// Empty/unrecognized defaults to "execute" — the most restrictive class —
+	// so an unlabeled or untrusted server's tools hit the Ask gate in build
+	// mode and are denied outright in plan mode, instead of silently
+	// inheriting the always-allowed "network" capability (P7.1).
+	Capability string `koanf:"capability"`
+	// ToolCapabilities overrides Capability per remote tool name (as reported
+	// by the server's tools/list, before the mcp__<server>__ namespace
+	// prefix is applied) for servers that expose a known mix of tools.
+	ToolCapabilities map[string]string `koanf:"tool_capabilities"`
+}
+
+// parseCapability maps a config capability string to a tool.Capability,
+// defaulting anything empty or unrecognized to the most restrictive class,
+// tool.CapExecute, so it always requires approval (or is denied in plan
+// mode) rather than silently inheriting a permissive capability.
+func parseCapability(s string) tool.Capability {
+	switch s {
+	case "read":
+		return tool.CapRead
+	case "write":
+		return tool.CapWrite
+	case "network":
+		return tool.CapNetwork
+	case "spawn":
+		return tool.CapSpawn
+	default:
+		return tool.CapExecute
+	}
+}
+
+// resolveCapability returns the capability for a specific remote tool name,
+// preferring a per-tool override over the server's default.
+func resolveCapability(sc ServerConfig, toolName string) tool.Capability {
+	if c, ok := sc.ToolCapabilities[toolName]; ok {
+		return parseCapability(c)
+	}
+	return parseCapability(sc.Capability)
 }
 
 // RegisterServers connects each configured MCP server, registers its tools
@@ -194,31 +238,39 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		}
 		for _, info := range tools {
 			name := fmt.Sprintf("mcp__%s__%s", sc.Name, info.Name)
-			if err := reg.Register(&mcpTool{client: client, info: info, exposedName: name}); err != nil {
+			cap := resolveCapability(sc, info.Name)
+			if err := reg.Register(&mcpTool{client: client, info: info, exposedName: name, capability: cap}); err != nil {
 				logger.Warn("mcp tool register failed", "tool", name, "err", err)
 			}
 		}
+
+		// Meta-tools (resource/prompt listing) are fixed, protocol-defined
+		// operations rather than server-defined behavior, but they still
+		// proxy to a possibly-untrusted server, so they take the server's
+		// default capability rather than a hardcoded one.
+		metaCap := parseCapability(sc.Capability)
 
 		// Probe resources support. Servers that don't implement resources/list
 		// return an MCP error; we skip registration silently in that case.
 		if _, err := client.ListResources(ctx); err == nil {
 			prefix := fmt.Sprintf("mcp__%s", sc.Name)
-			_ = reg.Register(&mcpResourceListTool{client: client, exposedName: prefix + "__list_resources"})
-			_ = reg.Register(&mcpResourceReadTool{client: client, exposedName: prefix + "__read_resource"})
+			_ = reg.Register(&mcpResourceListTool{client: client, exposedName: prefix + "__list_resources", capability: metaCap})
+			_ = reg.Register(&mcpResourceReadTool{client: client, exposedName: prefix + "__read_resource", capability: metaCap})
 			logger.Info("mcp resources registered", "server", sc.Name)
 		}
 
 		// Probe prompts support similarly.
 		if _, err := client.ListPrompts(ctx); err == nil {
 			prefix := fmt.Sprintf("mcp__%s", sc.Name)
-			_ = reg.Register(&mcpPromptListTool{client: client, exposedName: prefix + "__list_prompts"})
-			_ = reg.Register(&mcpPromptGetTool{client: client, exposedName: prefix + "__get_prompt"})
+			_ = reg.Register(&mcpPromptListTool{client: client, exposedName: prefix + "__list_prompts", capability: metaCap})
+			_ = reg.Register(&mcpPromptGetTool{client: client, exposedName: prefix + "__get_prompt", capability: metaCap})
 			logger.Info("mcp prompts registered", "server", sc.Name)
 		}
 
 		// Wire dynamic tool refresh: re-list and upsert on tools/list_changed.
 		if reg != nil {
 			serverName := sc.Name
+			serverCfg := sc
 			cl := client
 			client.onToolsChanged = func() {
 				newTools, err := cl.ListTools(ctx)
@@ -228,7 +280,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 				}
 				for _, info := range newTools {
 					name := fmt.Sprintf("mcp__%s__%s", serverName, info.Name)
-					reg.Upsert(&mcpTool{client: cl, info: info, exposedName: name})
+					reg.Upsert(&mcpTool{client: cl, info: info, exposedName: name, capability: resolveCapability(serverCfg, info.Name)})
 				}
 				logger.Info("mcp tools refreshed", "server", serverName, "tools", len(newTools))
 			}

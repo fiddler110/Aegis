@@ -76,6 +76,8 @@ func newRootCmd() *cobra.Command {
 				cl = client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
 			}
 
+			warnSandboxFallback(cl)
+
 			resolvedMode := cfg.Permission.Mode
 			if mode != "" {
 				resolvedMode = mode
@@ -211,6 +213,20 @@ func startEmbeddedDaemon(cfg *config.Config) (stop func(), err error) {
 		cancel()
 		stopOllama()
 	}, nil
+}
+
+// warnSandboxFallback prints a visible warning to stderr, before the TUI
+// takes over the terminal, when the daemon reports it fell back to
+// unsandboxed local execution (P7.4). Best-effort: a status-check failure is
+// silently ignored since Health() already gated entry to this point.
+func warnSandboxFallback(cl *client.Client) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, err := cl.Status(ctx)
+	if err != nil || !status.SandboxFallback {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n⚠ sandbox fallback: %s\n\n", status.SandboxFallbackReason)
 }
 
 // waitForDaemon polls the daemon health endpoint until it responds or the

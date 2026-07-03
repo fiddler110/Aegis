@@ -440,6 +440,20 @@ aegis bundle install https://github.com/org/security-bundle
 
 Git URL install works with any HTTPS or SSH git URL. The clone is discarded after installation.
 
+### Pinning a bundle's content hash (P7.6)
+
+A bundle installs arbitrary tool/persona/command code with no other provenance check — a git-URL install has no signature verification, so a compromised or force-pushed upstream repo would otherwise install different code than what you reviewed, silently. `bundle info`/`bundle install` print a `sha256:`-prefixed content hash covering the manifest and every artifact file. Pin it once you've reviewed a bundle, and re-verify on every later install (e.g. in CI or a setup script):
+
+```bash
+aegis bundle info https://github.com/org/security-bundle
+# ... content hash: sha256:9f2b...
+
+aegis bundle install https://github.com/org/security-bundle --expect-sha256 9f2b...
+# aborts with an error instead of installing if the repo now serves different content
+```
+
+This is trust-on-first-use pinning (like an SSH host key fingerprint), not a signature — it detects change after you've reviewed a bundle once, it doesn't establish who authored it.
+
 **Scope:**
 - `project` (default) — installs to `.aegis/commands/`, `.aegis/agents/`, `.aegis/skills/`
 - `user` — installs to the user data directory

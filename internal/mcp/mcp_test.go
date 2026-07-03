@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/scottymacleod/aegis/internal/tool"
 )
 
 func discardLogger() *slog.Logger {
@@ -341,5 +343,59 @@ func TestRegisterServersSkipsBadConfig(t *testing.T) {
 	clients := RegisterServers(context.Background(), nil, []ServerConfig{{Name: "x"}}, discardLogger())
 	if len(clients) != 0 {
 		t.Errorf("expected no clients for command-less config")
+	}
+}
+
+// TestParseCapabilityDefaultsToExecute is the core P7.1 regression: any
+// unlabeled or unrecognized capability string must resolve to the most
+// restrictive class, not silently fall through to something permissive.
+func TestParseCapabilityDefaultsToExecute(t *testing.T) {
+	cases := []struct {
+		in   string
+		want tool.Capability
+	}{
+		{"read", tool.CapRead},
+		{"write", tool.CapWrite},
+		{"network", tool.CapNetwork},
+		{"execute", tool.CapExecute},
+		{"spawn", tool.CapSpawn},
+		{"", tool.CapExecute},
+		{"bogus", tool.CapExecute},
+	}
+	for _, tc := range cases {
+		if got := parseCapability(tc.in); got != tc.want {
+			t.Errorf("parseCapability(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResolveCapabilityPerToolOverride(t *testing.T) {
+	sc := ServerConfig{
+		Name:       "fs",
+		Capability: "execute",
+		ToolCapabilities: map[string]string{
+			"read_file":  "read",
+			"write_file": "write",
+		},
+	}
+	if got := resolveCapability(sc, "read_file"); got != tool.CapRead {
+		t.Errorf("read_file capability = %q, want read", got)
+	}
+	if got := resolveCapability(sc, "write_file"); got != tool.CapWrite {
+		t.Errorf("write_file capability = %q, want write", got)
+	}
+	// No override present — falls back to the server default.
+	if got := resolveCapability(sc, "delete_file"); got != tool.CapExecute {
+		t.Errorf("delete_file capability = %q, want execute (server default)", got)
+	}
+}
+
+func TestResolveCapabilityDefaultsExecuteWithNoConfig(t *testing.T) {
+	// A server with no capability declared at all must not launder its tools
+	// as tool.CapNetwork — the pre-P7.1 behavior that bypassed the permission
+	// gate unconditionally, including in plan mode.
+	sc := ServerConfig{Name: "untrusted"}
+	if got := resolveCapability(sc, "whatever"); got != tool.CapExecute {
+		t.Errorf("capability = %q, want execute", got)
 	}
 }

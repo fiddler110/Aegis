@@ -206,6 +206,17 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return t, ok
 }
 
+// All returns every registered tool, regardless of exposure/deferred state.
+func (r *Registry) All() []Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		out = append(out, t)
+	}
+	return out
+}
+
 // Schemas returns provider tool schemas for all exposed tools, sorted by name.
 // Results are cached until the registry is mutated.
 func (r *Registry) Schemas() []provider.ToolSchema {

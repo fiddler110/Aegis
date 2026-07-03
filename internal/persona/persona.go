@@ -19,6 +19,14 @@ type Persona struct {
 	Tools       []string     // allowed tools (parsed; enforcement deferred)
 	Rules       []string     // permission rules merged into the session gate
 	Guard       *GuardConfig // nil = global default; Disabled = no guard
+	// Loaded is true for a persona parsed from a *.md file (user/project
+	// personas dir, including ones installed by a bundle) rather than one of
+	// the built-ins compiled into this package. The permission gate uses this
+	// to decide whether the persona's Mode can be trusted implicitly (P7.5):
+	// a bundle-installed persona file is less trusted than code reviewed and
+	// shipped with Aegis, so its Mode should not silently escalate a session
+	// past the configured default.
+	Loaded bool
 }
 
 // GuardConfig is a persona's output-validation override parsed from frontmatter.

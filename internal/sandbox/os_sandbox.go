@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -18,12 +19,18 @@ type OSBackend struct {
 	denyNet    bool   // deny network egress inside the sandbox
 	mechanism  string // "seatbelt" or "bwrap"
 	wrapperBin string // resolved path to sandbox-exec / bwrap
+	// stripEnv lists env var names excluded from the spawned command's
+	// environment (P7.2). Always includes DefaultStripEnv. Seatbelt/bwrap
+	// confine the filesystem and network but do not touch the process
+	// environment, so this still runs on the host's inherited env otherwise.
+	stripEnv []string
 }
 
 // NewOSBackend builds an OS sandbox for the workspace. Network is denied unless
-// allowNetwork is true. Returns an error when no OS sandbox mechanism is
-// available on this host (callers should fall back to local).
-func NewOSBackend(workspace string, allowNetwork bool) (*OSBackend, error) {
+// allowNetwork is true. strip lists additional env var names to exclude from
+// commands beyond DefaultStripEnv (P7.2). Returns an error when no OS sandbox
+// mechanism is available on this host (callers should fall back to local).
+func NewOSBackend(workspace string, allowNetwork bool, strip []string) (*OSBackend, error) {
 	mech, bin, ok := detectOSSandbox()
 	if !ok {
 		return nil, fmt.Errorf("no OS sandbox available on %s (need sandbox-exec on macOS or bwrap on Linux)", runtime.GOOS)
@@ -33,6 +40,7 @@ func NewOSBackend(workspace string, allowNetwork bool) (*OSBackend, error) {
 		denyNet:    !allowNetwork,
 		mechanism:  mech,
 		wrapperBin: bin,
+		stripEnv:   mergeStripEnv(strip),
 	}, nil
 }
 
@@ -45,6 +53,7 @@ func (o *OSBackend) Exec(ctx context.Context, command string, opts ExecOpts) (st
 	name, args := o.wrap(command, opts)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = o.dir(opts)
+	cmd.Env = filteredEnv(os.Environ(), o.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 
 	out, err := cmd.CombinedOutput()
@@ -68,6 +77,7 @@ func (o *OSBackend) ExecStreaming(ctx context.Context, command string, opts Exec
 	name, args := o.wrap(command, opts)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = o.dir(opts)
+	cmd.Env = filteredEnv(os.Environ(), o.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 	w := emitWriter{emit: emit}
 	cmd.Stdout = w

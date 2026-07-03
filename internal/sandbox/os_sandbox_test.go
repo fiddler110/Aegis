@@ -44,7 +44,7 @@ func TestOSBackendConfinesWrites(t *testing.T) {
 		t.Skip("no OS sandbox mechanism on this host")
 	}
 	ws := t.TempDir()
-	be, err := NewOSBackend(ws, false)
+	be, err := NewOSBackend(ws, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
