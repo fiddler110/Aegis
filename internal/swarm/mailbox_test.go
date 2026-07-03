@@ -49,6 +49,52 @@ func TestMailboxSendReadMarkRead(t *testing.T) {
 	}
 }
 
+// TestMarkReadEvictsFromInbox verifies MarkRead physically moves the message
+// out of the inbox directory (P8.3) rather than leaving it there forever with
+// just its Read flag flipped — otherwise every unread-only poll of a
+// long-running mailbox keeps re-scanning and re-parsing it.
+func TestMarkReadEvictsFromInbox(t *testing.T) {
+	root := t.TempDir()
+	id := NewIdentity("worker", "team-a", "sess-1")
+	mb, err := OpenMailbox(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mb.Send(Message{Type: MsgResult, Sender: id.AgentID, Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := mb.ReadAll(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mb.MarkRead(msgs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := inboxDir(root, id)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			t.Errorf("read message file %q left in inbox dir, want moved to processed/", e.Name())
+		}
+	}
+	processed, err := os.ReadDir(filepath.Join(dir, processedSubdir))
+	if err != nil {
+		t.Fatalf("processed dir: %v", err)
+	}
+	if len(processed) != 1 {
+		t.Errorf("processed dir has %d entries, want 1", len(processed))
+	}
+
+	// A second MarkRead on the same (now-moved) id must stay a no-op.
+	if err := mb.MarkRead(msgs[0].ID); err != nil {
+		t.Fatalf("MarkRead on already-processed id: %v", err)
+	}
+}
+
 func TestMailboxSkipsCorruptAndTemp(t *testing.T) {
 	root := t.TempDir()
 	id := NewIdentity("w", "t", "")

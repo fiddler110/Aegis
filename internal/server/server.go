@@ -1260,7 +1260,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conv := &engine.Conversation{System: s.effectiveSystem(sess.System), Messages: sess.Messages}
+	conv := &engine.Conversation{System: s.effectiveSystem(sess.System), Messages: sess.Messages, Persisted: len(sess.Messages)}
 
 	// P3.2: background (detached) sessions run the engine in a goroutine bound to
 	// a server-level context so the turn continues even after the HTTP client
@@ -1350,8 +1350,15 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			provider.TextBlock{Text: fmt.Sprintf("[System: run aborted — %v. On your next message, summarize what completed and what still needs to be done.]", runErr)},
 		}})
 	}
-	// Persist whatever was produced, even on partial failure.
-	if err := s.store.SaveMessages(context.Background(), id, conv.Messages); err != nil {
+	// Persist whatever was produced, even on partial failure. P8.1: when
+	// earlier history is untouched (the common case), append only the new
+	// tail instead of rewriting the whole transcript; compaction/repair
+	// mark conv.Persisted invalid (-1) to force a full rewrite instead.
+	if conv.Persisted >= 0 {
+		if err := s.store.AppendMessages(context.Background(), id, conv.Messages[conv.Persisted:]); err != nil {
+			s.logger.Error("append messages", "session", id, "err", err)
+		}
+	} else if err := s.store.SaveMessages(context.Background(), id, conv.Messages); err != nil {
 		s.logger.Error("save messages", "session", id, "err", err)
 	}
 	if totalIn > 0 || totalOut > 0 {

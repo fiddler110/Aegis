@@ -26,6 +26,10 @@ type sourcesCache struct {
 	// ctx caches Sources.LoadContext output
 	ctxVal    string
 	ctxExpiry time.Time
+	// relevance caches LoadRelevant's entries + document-frequency table
+	// (P8.5), invalidated on the underlying files' mtime/size rather than a
+	// fixed TTL since a stale relevance score is worse than a stale skip.
+	relevance relevanceSnapshot
 }
 
 // Sources locates memory and skill files for a workspace and the user.

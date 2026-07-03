@@ -278,10 +278,14 @@ func (s *Store) bm25Search(ctx context.Context, query string, limit int) ([]Resu
 	return out, rows.Err()
 }
 
-// semanticRanking embeds query and ranks all stored document vectors by
-// cosine similarity, returning the top `limit` paths (best first) plus a
-// fallback Result (title-less, snippet from the doc body) for any path not
-// already present in the BM25 candidate set.
+// semanticRanking embeds query and ranks stored document vectors by cosine
+// similarity, returning the top `limit` paths (best first) plus a fallback
+// Result (title-less, snippet from the doc body) for any path not already
+// present in the BM25 candidate set.
+//
+// P8.2: this only pulls path+vector for the scoring pass (never the full doc
+// body, which can be large) — bodies are fetched in a second targeted query
+// for just the top-K paths that survive ranking.
 func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([]string, map[string]Result, error) {
 	vecs, err := s.embedder.Embed(ctx, []string{query})
 	if err != nil || len(vecs) == 0 {
@@ -289,41 +293,73 @@ func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([
 	}
 	qv := vecs[0]
 
-	rows, err := s.db.QueryContext(ctx, `SELECT v.path, v.vector, d.title, d.body FROM docs_vec v JOIN docs d ON d.path = v.path`)
+	rows, err := s.db.QueryContext(ctx, `SELECT path, vector FROM docs_vec`)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
 
 	type scored struct {
 		path  string
 		score float64
-		title string
-		body  string
 	}
 	var all []scored
 	for rows.Next() {
-		var path, title, body string
+		var path string
 		var raw []byte
-		if err := rows.Scan(&path, &raw, &title, &body); err != nil {
+		if err := rows.Scan(&path, &raw); err != nil {
+			rows.Close()
 			return nil, nil, err
 		}
-		all = append(all, scored{path: path, score: embed.Cosine(qv, embed.DecodeVector(raw)), title: title, body: body})
+		all = append(all, scored{path: path, score: embed.Cosine(qv, embed.DecodeVector(raw))})
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, nil, err
 	}
+	rows.Close()
+
 	sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
 	if len(all) > limit {
 		all = all[:limit]
 	}
 	ranking := make([]string, 0, len(all))
-	snippets := make(map[string]Result, len(all))
 	for _, a := range all {
 		ranking = append(ranking, a.path)
-		snippets[a.path] = Result{Path: a.path, Title: a.title, Snippet: snippetOf(a.body, 200)}
+	}
+	snippets, err := s.fetchSnippets(ctx, ranking)
+	if err != nil {
+		return nil, nil, err
 	}
 	return ranking, snippets, nil
+}
+
+// fetchSnippets loads title/body for exactly the given paths (the P8.2
+// second targeted query, run only against the top-K scored candidates).
+func (s *Store) fetchSnippets(ctx context.Context, paths []string) (map[string]Result, error) {
+	out := make(map[string]Result, len(paths))
+	if len(paths) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path, title, body FROM docs WHERE path IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path, title, body string
+		if err := rows.Scan(&path, &title, &body); err != nil {
+			return nil, err
+		}
+		out[path] = Result{Path: path, Title: title, Snippet: snippetOf(body, 200)}
+	}
+	return out, rows.Err()
 }
 
 func snippetOf(body string, n int) string {

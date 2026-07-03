@@ -34,6 +34,49 @@ func TestLoadRelevantScoresHigherForMatching(t *testing.T) {
 	}
 }
 
+// TestLoadRelevantCacheInvalidatesOnFileChange verifies the P8.5 relevance
+// cache (only active on a NewSources-constructed Sources, which carries a
+// cache pointer) picks up edits to the underlying memory file rather than
+// serving a stale snapshot forever, and that scoring a query doesn't corrupt
+// the cached entries for a subsequent, differently-scored query.
+func TestLoadRelevantCacheInvalidatesOnFileChange(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+	memDir := filepath.Join(root, ".aegis")
+	os.MkdirAll(memDir, 0o755)
+	memPath := filepath.Join(memDir, "memory.md")
+	os.WriteFile(memPath, []byte("- The database uses PostgreSQL\n"), 0o644)
+
+	src := NewSources(root, dataDir)
+
+	first := src.LoadRelevant("database", 5, 0)
+	if len(first) != 1 {
+		t.Fatalf("got %d entries, want 1", len(first))
+	}
+
+	// A second call with a different query must not have its scores polluted
+	// by the first call's in-place mutation of any shared cached slice.
+	second := src.LoadRelevant("nonexistent-term-xyz", 5, 0)
+	if len(second) != 1 {
+		t.Fatalf("got %d entries, want 1", len(second))
+	}
+	if second[0].Score != 0 {
+		t.Errorf("query with no matching terms should score 0, got %v (cache corruption?)", second[0].Score)
+	}
+	// Re-run the original query to confirm its score wasn't corrupted either.
+	firstAgain := src.LoadRelevant("database", 5, 0)
+	if firstAgain[0].Score != first[0].Score {
+		t.Errorf("score changed across calls: %v -> %v", first[0].Score, firstAgain[0].Score)
+	}
+
+	// Editing the file (mtime/size change) must be reflected on the next call.
+	os.WriteFile(memPath, []byte("- The database uses PostgreSQL\n- A brand new entry about widgets\n"), 0o644)
+	updated := src.LoadRelevant("widgets", 5, 0)
+	if len(updated) != 2 {
+		t.Fatalf("after file edit, got %d entries, want 2 (cache not invalidated?)", len(updated))
+	}
+}
+
 func TestLoadRelevantRespectsMaxEntries(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()

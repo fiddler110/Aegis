@@ -1,50 +1,20 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-03 (v15 — audited all shipped claims + docs/*.md against current code; fixed stale approval-dialog docs, missing TUI keybinds/config key, and an undocumented terminal-pane feature; corrected P8 line-number drift)
+**Updated:** 2026-07-03 (v16 — implemented all of P8, the 2026-07-03 performance audit's findings; see Appendix A)
 
 ---
 
 ## Status
 
-P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, and all of P7 (P7.1–P7.7) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
+P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), and all of P8 (P8.1–P8.6) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
 
-A 2026-07-03 code-level audit (three parallel passes: security, performance, feature-gap) found concrete, verified issues that outrank the exploratory P6 backlog — see **P8 (Performance)** below. P9 collects smaller engineering-quality gaps (test coverage, eval harness) that are real but lower urgency. P6 remains long-horizon/exploratory with no forcing function.
+P9 collects smaller engineering-quality gaps (test coverage, eval harness) that are real but lower urgency. P6 remains long-horizon/exploratory with no forcing function.
 
-**Recommended priority order:** P8.1 → rest of P8 → P9 → P6.
+**Recommended priority order:** P9 → P6.
 
 **Reviewed and found sound, no action needed (from the P7 audit):** SSRF dialer (private-IP check happens at dial time, closing the DNS-rebind window); path traversal / symlink handling in `ValidatePath`; local daemon HTTP API (constant-time bearer token + loopback-origin check); persona YAML parsing (safe library, no unsafe type deserialization); `team_tasks` claim path (properly transactional, no duplicate-claim race).
 
 **2026-07-03 documentation audit:** cross-checked every P7.1–P7.7 and TQ-track "shipped" claim above against the actual code (all confirmed; only P8's cited line numbers had minor drift, now corrected) and re-read `docs/*.md` against current behavior. Found and fixed real staleness: `docs/tui-guide.md` and `docs/permissions.md` still described the pre-TQ6 y/n/a approval banner instead of the current option-list dialog (allow once / allow always+persist rule / deny / deny with feedback); the keyboard shortcut table was missing `Alt+Enter` (queue), `Shift+Enter` (primary newline binding), `Ctrl+O` (expand thinking), `Ctrl+X` (terminal pane), and a correct `Esc` row (it, not `Ctrl+C`, is the double-tap interrupt); `docs/configuration.md`'s `tui:` block was missing the `theme` key entirely; and the `Ctrl+X` embedded terminal pane (pre-existing, not a recent addition) had never been documented at all. All fixed in place.
-
----
-
-## Open Work — P8 (Performance — 2026-07-03 audit)
-
-### P8.1 — Session store rewrites the entire message/trace blob every turn
-`internal/session/session.go:232-247` (`SaveMessages`) and `:195-229` (`AppendTraces`) do a full read-modify-write of the whole messages/traces BLOB on every single turn (`AppendTraces` even does SELECT-full-blob → unmarshal → append → re-marshal → UPDATE inside a transaction). At N turns this is O(N) work per turn → O(N²) total I/O/CPU over a session's lifetime, and the trace blob never shrinks except on VACUUM. This is the clearest scaling risk found — it taxes every turn more as a session ages.
-**Fix:** move to incremental/append-only storage (separate row-per-message or a WAL-style append log) instead of whole-blob rewrite. Effort: **M**, Impact: **High**.
-
-### P8.2 — Knowledge semantic search loads the full corpus per query
-`internal/knowledge/knowledge.go:292` joins `docs_vec`/`docs` and pulls every document's vector *and full body* into memory with no `LIMIT`, then ranks in application code. At a few thousand indexed docs this is a full-corpus load on every search.
-**Fix:** score against vectors only, then a second targeted query for just the top-K bodies. Effort: **M**, Impact: **Medium**.
-
-### P8.3 — Swarm mailbox has no eviction; grows unbounded in long team sessions
-`internal/swarm/mailbox.go:105-133` (`ReadAll`) lists and reads every `.json` file in the inbox directory on each call, including already-read messages, with nothing anywhere in the package that archives or deletes them. Long-running multi-agent teams accumulate ever-more file I/O per poll.
-**Fix:** move read messages to a `processed/` subdir excluded from listing, or delete after ack. Effort: **S/M**, Impact: **Medium**.
-
-### P8.4 — Token estimation double-scans the full conversation per turn for local models
-`internal/engine/engine.go:254,451` (`estimateTokens`) walks every message/block in the conversation — once for the proactive-compaction check, again whenever a provider returns zero usage (all local/Ollama models hit this every turn). Two full-conversation scans per turn, scaling with session length.
-**Fix:** maintain a running character/token count updated incrementally on `Append` instead of re-scanning. Effort: **S**, Impact: **Medium**.
-
-### P8.5 — Memory relevance scoring recomputes TF-IDF from scratch on every call
-`internal/memory/relevance.go:24-90,119-137` (`LoadRelevant`/`allEntries`) reloads and re-tokenizes every memory/skill file and rebuilds the full document-frequency table on every invocation, with no caching keyed on mtime/content hash. Low impact at today's memory-file scale, but pure waste.
-**Fix:** cache `allEntries()`/`df` until underlying files change. Effort: **S**, Impact: **Low-Medium**.
-
-### P8.6 — Write/execute tool calls serialize concurrent reads unnecessarily
-`internal/engine/engine.go` `runTools` (~line 512-537) uses `execLock sync.RWMutex`; a single write/execute call in a round takes the write lock and excludes *all* concurrent read/network calls in that same round, rather than letting reads proceed around it. Minor throughput loss on mixed tool-call rounds.
-**Fix:** scope the lock more narrowly, or let independent reads run before/after rather than fully serializing the round. Effort: **S**, Impact: **Low**.
-
-No goroutine leaks, unbounded channels, or missing context-cancellation were found in `engine.go`/`mailbox.go`/`subprocess.go` — cancellation is checked consistently and `exec.CommandContext` is used throughout.
 
 ---
 
@@ -171,6 +141,19 @@ ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code ext
 </details>
 
 <details>
+<summary><strong>P8 — Performance audit findings, all 6 items shipped 2026-07-03</strong></summary>
+
+- **P8.1 (session store O(N²) rewrite):** `internal/session/session.go` gained `session_messages`/`session_traces` row-per-message/row-per-trace tables. `AppendMessages` (new) and `AppendTraces` (rewritten) now pure-`INSERT` new rows keyed by an incrementing `seq`, no more read-modify-write of the whole blob; `SaveMessages` keeps full-replace semantics (delete + reinsert) for the rewind/truncation case where earlier history itself changes. A one-time `migrateLegacyBlobs` backfills any pre-P8.1 whole-blob `messages`/`traces` columns into the row tables on first `Open()` after upgrade, then zeroes the legacy columns so it's a no-op on every later startup. `engine.Conversation` gained a `Persisted int` field (count of already-durable leading messages; `-1` means "rewritten in place, must fully re-save") that `repairOrphanedToolUses`/compaction reset via a new `invalidate()` helper; `server.go`'s per-turn save now calls `AppendMessages(conv.Messages[conv.Persisted:])` on the common path and only falls back to full `SaveMessages` when history was actually rewritten this turn. `Delete`/`Prune` clean up the new row tables too.
+- **P8.2 (knowledge search full-corpus load):** `internal/knowledge/knowledge.go`'s `semanticRanking` now queries `docs_vec` (path+vector only) for the scoring pass, then a new `fetchSnippets` runs a second `WHERE path IN (...)` query for just the top-K survivors' title/body — no more pulling every document's full body into memory to rank.
+- **P8.3 (swarm mailbox unbounded growth):** `internal/swarm/mailbox.go`'s `MarkRead` now moves the message file into a `processed/` subdirectory (instead of rewriting its `read` flag in place); `ReadAll(unreadOnly=true)` — the hot poll path used by the `team_inbox` tool — only lists the inbox directory, which now shrinks as messages are consumed instead of growing forever. `ReadAll(false)` still merges in `processed/` for full-history callers.
+- **P8.4 (token estimation double-scan):** `engine.Conversation` gained a cached `estimatedChars()`/`charCountValid` pair; `Append` updates the cache incrementally, and anything that rewrites history calls the same `invalidate()` used by P8.1 to force a full recompute on next access. The two `estimateTokens` call sites (proactive-compaction check, zero-usage fallback) now share one scan per turn instead of two, and normal turns pay zero extra scan cost.
+- **P8.5 (memory relevance TF-IDF recompute):** `internal/memory/relevance.go` gained `cachedEntries()` / `relevanceSnapshot`, keyed on a cheap `entriesSignature()` fingerprint (mtime+size per memory/skill file, no content read) stored on the existing `sourcesCache` (from `NewSources`); `allEntries()`/document-frequency build only reruns when a source file actually changed. `LoadRelevant` copies the cached entries before scoring so concurrent/sequential queries never mutate the shared cache.
+- **P8.6 (execLock over-serializes reads):** `internal/engine/engine.go`'s `runTools` swapped `execLock sync.RWMutex` for a plain `sync.Mutex` taken only by write/execute tool calls; read/network calls no longer take any lock and run fully concurrently with a same-round write/execute call instead of blocking behind it.
+- Tests: `internal/session/session_test.go` (`TestAppendMessagesIsIncremental`, `TestAppendMessagesMissingSession`, `TestSaveMessagesTruncates`, `TestDeleteRemovesMessageAndTraceRows`, `TestLegacyBlobMigration`), `internal/swarm/mailbox_test.go` (`TestMarkReadEvictsFromInbox`), `internal/memory/relevance_test.go` (`TestLoadRelevantCacheInvalidatesOnFileChange`).
+
+</details>
+
+<details>
 <summary><strong>P6.4 — Context editing / tool-result pruning, shipped 2026-07-03</strong></summary>
 
 `compaction.pruneStaleToolResults` (`internal/compaction/prune.go`) runs as a deterministic pre-pass inside `Summarizer.Compact`, before any LLM call: `read_file` results for a path that was read again later are blanked to a one-line marker, and large `grep`/`glob`/`ls` dumps outside the trailing `keepRecent` window are truncated to a short preview. Never touches conversational text, tool errors, or the recent window. If pruning alone brings the estimate back under budget, `Compact` returns immediately — no summarizer call, no LLM cost.
@@ -254,12 +237,12 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 | 22 | Security | Bundle persona can silently escalate session to `auto` mode | — (internal audit) | Medium | ✅ P7.5 |
 | 23 | Security | No signature/checksum verification on git-URL bundle installs | opencode plugin registry | Medium | ✅ P7.6 |
 | 24 | Security | Deny rules silently no-op for tools with non-standard argument fields | — (internal audit) | Low | ✅ P7.7 |
-| 25 | Performance | Session store rewrites entire message/trace blob every turn — O(N²) over session life | — (internal audit) | High | ⬜ P8.1 |
-| 26 | Performance | Knowledge semantic search loads full corpus (vectors + bodies) per query | — (internal audit) | Medium | ⬜ P8.2 |
-| 27 | Performance | Swarm mailbox has no eviction, grows unbounded | — (internal audit) | Medium | ⬜ P8.3 |
-| 28 | Performance | Token estimation double-scans full conversation per turn (local models) | — (internal audit) | Medium | ⬜ P8.4 |
-| 29 | Performance | Memory relevance TF-IDF recomputed from scratch every call | — (internal audit) | Low-Med | ⬜ P8.5 |
-| 30 | Performance | Write/execute tool calls unnecessarily serialize concurrent reads | — (internal audit) | Low | ⬜ P8.6 |
+| 25 | Performance | Session store rewrites entire message/trace blob every turn — O(N²) over session life | — (internal audit) | High | ✅ P8.1 |
+| 26 | Performance | Knowledge semantic search loads full corpus (vectors + bodies) per query | — (internal audit) | Medium | ✅ P8.2 |
+| 27 | Performance | Swarm mailbox has no eviction, grows unbounded | — (internal audit) | Medium | ✅ P8.3 |
+| 28 | Performance | Token estimation double-scans full conversation per turn (local models) | — (internal audit) | Medium | ✅ P8.4 |
+| 29 | Performance | Memory relevance TF-IDF recomputed from scratch every call | — (internal audit) | Low-Med | ✅ P8.5 |
+| 30 | Performance | Write/execute tool calls unnecessarily serialize concurrent reads | — (internal audit) | Low | ✅ P8.6 |
 | 31 | Quality | No agent-behavior eval/regression harness | Codex, Claude Code (internal eval suites) | Medium | ⬜ P9.1 |
 | 32 | Quality | Zero test coverage in trace/logging/api/client packages | — (internal audit) | Medium | ⬜ P9.2 |
 
