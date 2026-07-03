@@ -6,7 +6,9 @@ import "charm.land/bubbles/v2/key"
 // each binding carries its own help text, which the help overlay aggregates.
 type keyMap struct {
 	Send          key.Binding
+	Queue         key.Binding
 	Newline       key.Binding
+	Thinking      key.Binding
 	Complete      key.Binding
 	Help          key.Binding
 	Palette       key.Binding
@@ -26,7 +28,9 @@ type keyMap struct {
 func defaultKeyMap() keyMap {
 	return keyMap{
 		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send / steer")),
-		Newline:       key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "insert newline")),
+		Queue:         key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "queue next message (while streaming)")),
+		Newline:       key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("shift+enter", "insert newline (ctrl+j fallback)")),
+		Thinking:      key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand/collapse thinking")),
 		Complete:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "command completion")),
 		Help:          key.NewBinding(key.WithKeys("f1"), key.WithHelp("f1", "toggle help")),
 		Palette:       key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "command palette")),

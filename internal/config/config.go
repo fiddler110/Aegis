@@ -85,6 +85,8 @@ type TUIConfig struct {
 	// HumorMode enables D&D-themed thinking phrases while the model generates.
 	// Set to false for plain "thinking…" / "working…" status text.
 	HumorMode bool `koanf:"humor_mode"`
+	// Theme selects the TUI color scheme: "dark" (default) or "light".
+	Theme string `koanf:"theme"`
 }
 
 // CleanupConfig controls automatic pruning of old sessions.
@@ -252,6 +254,7 @@ func defaults() map[string]any {
 		"output_guard.max_retries":     1,
 		"output_guard.rubric":          DefaultGuardRubric,
 		"tui.humor_mode":               true,
+		"tui.theme":                    "dark",
 		"embeddings.enabled":           false,
 		"embeddings.provider":          "ollama",
 		"embeddings.model":             "nomic-embed-text",

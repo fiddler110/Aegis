@@ -108,6 +108,7 @@ func newRootCmd() *cobra.Command {
 				Model:     cfg.Provider.Model,
 				WorkDir:   cwd,
 				HumorMode: cfg.TUI.HumorMode,
+				Theme:     cfg.TUI.Theme,
 			})
 			unloadOllamaModel(cfg)
 			return runErr

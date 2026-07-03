@@ -85,7 +85,8 @@ type Server struct {
 	execHook    *hooks.Exec      // user-configured lifecycle hooks (P4.4); nil when none
 	notifier    *notify.Notifier // background-session notifications (P5.4); nil when disabled
 	cmdReg      *commands.Registry
-	permRules   []permission.Rule // parsed text-based allow/deny rules
+	permRules   []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
+	permMu      sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
 	repoMap     string            // cached repository map block for the system prompt (empty when not indexed)
 	workspace   string
 	logger      *slog.Logger
@@ -113,6 +114,7 @@ type Server struct {
 type approvalDecision struct {
 	Approved    bool
 	AllowAlways bool
+	Pattern     string // non-empty: persist "allow tool(pattern)" instead of caching per-tool (TQ6)
 }
 
 // sseApprover implements permission.Approver by sending a KindApprovalRequest
@@ -127,6 +129,11 @@ type sseApprover struct {
 	runID     string
 	sessionID string
 	permCache *sync.Map // key: sessionID+"\x00"+toolName → struct{}
+
+	// persistRule installs a pattern-scoped "allow tool(pattern)" permission
+	// rule when the client answers allow-always with a pattern (TQ6). May be
+	// nil (e.g. tests), in which case the per-tool cache is used instead.
+	persistRule func(toolName, pattern string)
 }
 
 func (a *sseApprover) Approve(ctx context.Context, toolName, reason string, input json.RawMessage) bool {
@@ -145,7 +152,13 @@ func (a *sseApprover) Approve(ctx context.Context, toolName, reason string, inpu
 	select {
 	case d := <-a.ch:
 		if d.AllowAlways && d.Approved {
-			a.permCache.Store(cacheKey, struct{}{})
+			// A pattern-scoped rule beats the whole-tool cache: approving
+			// "npm test*" must not silently approve every future shell call.
+			if d.Pattern != "" && a.persistRule != nil {
+				a.persistRule(toolName, d.Pattern)
+			} else {
+				a.permCache.Store(cacheKey, struct{}{})
+			}
 		}
 		return d.Approved
 	case <-ctx.Done():
@@ -746,10 +759,12 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	// evaluated before the contextual and mode gates. An explicit deny always
 	// blocks; an explicit allow grants without prompting; otherwise the call
 	// falls through to the gate(s) wrapped above.
-	rules := s.permRules
+	s.permMu.Lock()
+	rules := append([]permission.Rule{}, s.permRules...)
+	s.permMu.Unlock()
 	if len(p.Rules) > 0 {
 		if pr, err := permission.ParseRules(p.Rules); err == nil {
-			rules = append(append([]permission.Rule{}, s.permRules...), pr...)
+			rules = append(rules, pr...)
 		} else {
 			s.logger.Warn("ignoring invalid persona rules", "persona", p.Name, "err", err)
 		}
@@ -1134,11 +1149,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		runApprover = permission.AutoApprove{}
 	} else {
 		runApprover = &sseApprover{
-			send:      send,
-			ch:        approvalCh,
-			runID:     runID,
-			sessionID: id,
-			permCache: &s.sessionPermCache,
+			send:        send,
+			ch:          approvalCh,
+			runID:       runID,
+			sessionID:   id,
+			permCache:   &s.sessionPermCache,
+			persistRule: s.addPermissionRule,
 		}
 	}
 
@@ -1299,6 +1315,29 @@ func displayTitle(title, id string) string {
 	return id
 }
 
+// addPermissionRule installs a pattern-scoped allow rule from an interactive
+// "allow always" approval (TQ6): it takes effect for subsequent runs in this
+// daemon immediately and is appended to the project config
+// (.aegis/config.yaml → permission.rules) so it survives restarts. A rule
+// that fails to parse or persist is logged, never fatal — the approval that
+// produced it has already been granted.
+func (s *Server) addPermissionRule(toolName, pattern string) {
+	line := fmt.Sprintf("allow %s(%s)", toolName, pattern)
+	rule, err := permission.ParseRule(line)
+	if err != nil {
+		s.logger.Warn("ignoring invalid approval-derived permission rule", "rule", line, "err", err)
+		return
+	}
+	s.permMu.Lock()
+	s.permRules = append(s.permRules, rule)
+	s.permMu.Unlock()
+	if err := config.AppendProjectPermissionRule(s.workspace, line); err != nil {
+		s.logger.Warn("permission rule active for this daemon but not persisted", "rule", line, "err", err)
+		return
+	}
+	s.logger.Info("persisted permission rule from approval", "rule", line)
+}
+
 // handleApprove answers a pending interactive approval request. The body must
 // be {"approved": bool, "id": "<run id from the approval event>"}. Returns 204
 // on success, 404 if no approval is pending for that run id, or 409 if it was
@@ -1321,7 +1360,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	ch := val.(chan approvalDecision)
 	select {
-	case ch <- approvalDecision{Approved: req.Approved, AllowAlways: req.AllowAlways}:
+	case ch <- approvalDecision{Approved: req.Approved, AllowAlways: req.AllowAlways, Pattern: req.Pattern}:
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusConflict, "approval already answered or not yet requested")

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -34,16 +35,20 @@ import (
 
 // Config configures the TUI.
 type Config struct {
-	Client     *client.Client
-	SessionID  string
-	Mode       string
-	Model      string
-	WorkDir    string
-	HumorMode  bool // D&D-themed thinking phrases; false = plain "thinking…"
+	Client    *client.Client
+	SessionID string
+	Mode      string
+	Model     string
+	WorkDir   string
+	HumorMode bool   // D&D-themed thinking phrases; false = plain "thinking…"
+	Theme     string // color scheme name: "dark" (default) or "light" (TQ10)
 }
 
 // Run starts the TUI event loop and blocks until the user quits.
 func Run(cfg Config) error {
+	// Bind the configured color scheme before any styles are built — lipgloss
+	// styles capture colors at creation time (TQ10).
+	applyTheme(cfg.Theme)
 	m := newModel(cfg)
 	p := tea.NewProgram(m)
 	_, err := p.Run()
@@ -89,7 +94,7 @@ type model struct {
 	wizard     *wizardModel
 	workDir    string
 
-	toolCompact         bool        // when true, tool results are capped at toolMaxLinesCompact lines
+	toolCompact         bool // when true, tool results are capped at toolMaxLinesCompact lines
 	tools               []toolEntry
 	inputTokens         int // uncached input tokens (last turn)
 	outputTokens        int
@@ -99,6 +104,7 @@ type model struct {
 	costUSD             float64
 
 	streamStart time.Time // when the current stream began; zero when idle
+	thinkStart  time.Time // when extended thinking began this turn; zero when idle
 	turnCount   int       // conversation turns sent; guards turn separator logic
 	animStep    int       // frame counter for the streaming "working" shimmer
 	humorMode   bool      // when true, D&D phrases replace plain "thinking…"
@@ -116,6 +122,11 @@ type model struct {
 	history    []string
 	histIdx    int
 	draftInput string
+
+	// queued holds messages typed with alt+enter during streaming (TQ8); they
+	// render as dimmed pending blocks and auto-send one at a time when the
+	// current stream closes. An explicit cancel discards the queue.
+	queued []string
 
 	// Lazily-built workspace file index for @file mention completion.
 	fileIndex      []string
@@ -135,6 +146,12 @@ type model struct {
 	// todo strip — populated from todo_add/todo_update/todo_list tool events.
 	todoItems       []todoStripItem
 	pendingTodoText string // captured from todo_add call input, matched to result
+
+	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
+	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
+	// every block between the two in place.
+	thinkEntries  []thinkEntry
+	thinkExpanded bool
 
 	// stashPath is the .aegis/stash.json path for draft persistence (P5.6).
 	stashPath string
@@ -169,12 +186,18 @@ type model struct {
 	approval       *approvalState // non-nil while engine is blocked waiting for user approval
 }
 
-// approvalState holds the details of a pending tool-execution approval request.
+// approvalState holds the details of a pending tool-execution approval request
+// plus the option-list dialog state (TQ6).
 type approvalState struct {
 	toolName string
 	input    string
 	reason   string
 	id       string // run id echoed back when answering
+
+	selected     int    // highlighted dialog option
+	pattern      string // suggested pattern for the "allow always" rule
+	feedbackMode bool   // typing a deny reason
+	feedback     string // the reason being typed
 }
 
 // todoStripItem is one entry in the live plan strip (TQ7).
@@ -186,8 +209,6 @@ type todoStripItem struct {
 
 // clipboardResultMsg carries the result of an async clipboard write.
 type clipboardResultMsg struct{ err error }
-
-const approvalBannerH = 4 // lines rendered by renderApprovalBanner(): separator + 3 content
 
 type slashResultMsg SlashResult
 type editorDoneMsg struct {
@@ -241,6 +262,15 @@ func newModel(cfg Config) model {
 	// Crush-style editor prompt: a ❯ caret on the focused first line, and ":::"
 	// continuation dots on wrapped/subsequent lines. Width 4 keeps the text
 	// gutter aligned regardless of which variant is shown.
+	// TQ9: shift+enter inserts a newline on terminals speaking the Kitty
+	// keyboard protocol (bubbletea v2 requests key disambiguation by default);
+	// ctrl+j stays as the fallback everywhere else. Plain enter never reaches
+	// the textarea — the Update switch intercepts it to send/steer.
+	ta.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("shift+enter", "ctrl+j"),
+		key.WithHelp("shift+enter", "insert newline"),
+	)
+
 	ta.SetPromptFunc(4, func(info textarea.PromptInfo) string {
 		if info.LineNumber == 0 && info.Focused {
 			return lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("  ❯ ")
@@ -401,21 +431,58 @@ func (m model) startStream(text string, images []api.ImageInput) tea.Cmd {
 	}
 }
 
+// imageRefRe matches @image:<path> tokens. The path is either double-quoted
+// (may contain spaces — what pasted Windows/macOS paths often look like) or a
+// bare whitespace-free token.
+var imageRefRe = regexp.MustCompile(`@image:(?:"([^"]+)"|(\S+))`)
+
 // extractImageRefs pulls @image:<path> tokens out of the submitted text and
 // resolves each path (expanding ~ and making it absolute relative to workDir)
 // into an image attachment. The remaining text is returned with those tokens
-// removed. Paths must be whitespace-free in this syntax.
+// removed. Paths containing spaces must be double-quoted (the paste handler
+// quotes them automatically, TQ9).
 func extractImageRefs(text, workDir string) (clean string, images []api.ImageInput) {
-	fields := strings.Fields(text)
-	kept := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if path, ok := strings.CutPrefix(f, "@image:"); ok && path != "" {
-			images = append(images, api.ImageInput{Path: resolveAttachPath(path, workDir)})
-			continue
+	clean = imageRefRe.ReplaceAllStringFunc(text, func(tok string) string {
+		sub := imageRefRe.FindStringSubmatch(tok)
+		path := sub[1]
+		if path == "" {
+			path = sub[2]
 		}
-		kept = append(kept, f)
+		images = append(images, api.ImageInput{Path: resolveAttachPath(path, workDir)})
+		return ""
+	})
+	if len(images) == 0 {
+		return text, nil
 	}
-	return strings.Join(kept, " "), images
+	// Tidy the holes the removed tokens left, preserving intentional newlines.
+	lines := strings.Split(clean, "\n")
+	for i, ln := range lines {
+		lines[i] = strings.Join(strings.Fields(ln), " ")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n")), images
+}
+
+// imageExts are the file extensions the paste handler recognizes as images.
+var imageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".bmp": true,
+}
+
+// looksLikeImagePath reports whether pasted text is a single-line path to an
+// image file (TQ9): no newlines, an image extension, and no leftover quotes.
+func looksLikeImagePath(s string) bool {
+	if s == "" || strings.ContainsAny(s, "\n\r\"") {
+		return false
+	}
+	return imageExts[strings.ToLower(filepath.Ext(s))]
+}
+
+// attachTokenFor builds the @image: token for a pasted path, quoting it when
+// it contains spaces so extractImageRefs can recover it intact.
+func attachTokenFor(path string) string {
+	if strings.ContainsAny(path, " \t") {
+		return `@image:"` + path + `" `
+	}
+	return "@image:" + path + " "
 }
 
 // resolveAttachPath expands a leading ~ and resolves relative paths against the
@@ -463,6 +530,29 @@ func (m *model) setSteerMode(on bool) {
 func (m model) handleSlashCommand(parsed *commands.ParsedCommand) tea.Cmd {
 	slash := m.slash
 	return func() tea.Msg { return slashResultMsg(slash.Dispatch(parsed)) }
+}
+
+// sendUserMessage appends text as a user turn and starts the stream. Shared by
+// the enter/alt+enter key paths and the queued-message drain (TQ8).
+func (m *model) sendUserMessage(text string) tea.Cmd {
+	m.history = append(m.history, text)
+	m.histIdx = -1
+	m.draftInput = ""
+	cleanText, images := extractImageRefs(text, m.cfg.WorkDir)
+	displayText := cleanText
+	if displayText == "" && len(images) > 0 {
+		suffix := ""
+		if len(images) != 1 {
+			suffix = "s"
+		}
+		displayText = fmt.Sprintf("(%d image%s attached)", len(images), suffix)
+	}
+	m.appendUser(displayText)
+	m.streaming = true
+	m.status = "thinking…"
+	m.followBottom = true // jump to the freshly sent message
+	m.refresh()
+	return m.startStream(cleanText, images)
 }
 
 // sendSteerCmd posts a steering instruction to the daemon. The instruction is
@@ -685,6 +775,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ta.SetValue(msg.content)
 		}
 
+	case tea.PasteMsg:
+		// TQ9: a pasted image path becomes an attachment token instead of raw
+		// text, replacing the typed @image:<path> incantation. Anything else
+		// falls through to the textarea's own paste handling.
+		if !m.termFocused {
+			p := strings.TrimSpace(msg.Content)
+			// Windows "Copy as path" and shell copies often quote the path.
+			if len(p) >= 2 && ((p[0] == '"' && p[len(p)-1] == '"') || (p[0] == '\'' && p[len(p)-1] == '\'')) {
+				p = p[1 : len(p)-1]
+			}
+			if looksLikeImagePath(p) {
+				m.ta.InsertString(attachTokenFor(p))
+				t, cmd := newToastCmd("image attached: "+filepath.Base(p), toastInfo)
+				m.activeToast = t
+				return m, cmd
+			}
+		}
+
 	case tea.KeyMsg:
 		// Terminal toggle: always available regardless of focus or streaming state.
 		if key.Matches(msg, m.keys.Terminal) {
@@ -697,36 +805,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.handleTerminalKey(msg)
 		}
 
-		// Approval prompt intercepts all keys while the engine is waiting for
-		// user confirmation. Y/enter approves once; A approves always (caches
-		// for the session); N/esc denies. Everything else is swallowed (except
-		// viewport scroll which is handled after the switch).
+		// Approval dialog intercepts all keys while the engine is waiting for
+		// user confirmation (TQ6): ↑/↓ + enter select an option; y/a/n/f are
+		// shortcuts; unmatched keys fall through to viewport scrolling.
 		if m.approval != nil {
-			switch msg.String() {
-			case "y", "Y", "enter":
-				id := m.approval.id
-				m.approval = nil
-				m.status = "thinking…"
-				m.applyViewportHeight()
-				return m, m.sendApprovalCmd(id, true, false)
-			case "a", "A":
-				id := m.approval.id
-				m.approval = nil
-				m.status = "thinking…"
-				m.applyViewportHeight()
-				return m, m.sendApprovalCmd(id, true, true)
-			case "n", "N", "esc":
-				id := m.approval.id
-				m.approval = nil
-				m.status = "thinking…"
-				m.applyViewportHeight()
-				return m, m.sendApprovalCmd(id, false, false)
-			}
-			// Let viewport scroll keys fall through to the vp.Update below.
-			var vpCmd tea.Cmd
-			m.vp, vpCmd = m.vp.Update(msg)
-			m.followBottom = m.vp.AtBottom()
-			return m, vpCmd
+			return m.handleApprovalKey(msg)
 		}
 
 		// Inline completion popup intercepts navigation/accept keys first.
@@ -758,11 +841,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			if m.streaming {
 				if m.escPending {
-					// Second ESC: cancel the run.
+					// Second ESC: cancel the run. An explicit interrupt also
+					// discards any queued messages (TQ8) — auto-sending after
+					// the user hit the brakes would be a surprise.
 					if m.cancel != nil {
 						m.cancel()
 					}
 					m.escPending = false
+					m.queued = nil
 				} else {
 					// First ESC: arm the interrupt; status bar will show the warning.
 					m.escPending = true
@@ -779,6 +865,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.streaming && m.cancel != nil {
 				m.cancel() // interrupt the in-flight run; press again to quit
 				m.escPending = false
+				m.queued = nil // TQ8: explicit interrupt discards the queue
 				return m, nil
 			}
 			if m.cancel != nil {
@@ -790,6 +877,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sidebarOpen = !m.sidebarOpen
 			m.layout()
 			m.refresh()
+			return m, nil
+		case "ctrl+o":
+			// TQ9: expand/collapse all thinking blocks in the transcript.
+			m.toggleThinking()
 			return m, nil
 		case "ctrl+t":
 			return m, m.fetchTeammates()
@@ -821,9 +912,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.cycleModeCmd()
 			}
 		case "up":
-			// Intercept only when input is single-line (no newlines) so that
-			// multi-line editing keeps normal cursor-up behaviour.
-			if !m.streaming && !strings.Contains(m.ta.Value(), "\n") && len(m.history) > 0 {
+			// TQ9: within a multiline draft ↑ moves the cursor; history
+			// navigation only triggers when the cursor is already on the first
+			// line (the standard Claude Code/opencode behaviour).
+			if !m.streaming && m.ta.Line() == 0 && len(m.history) > 0 {
 				if m.histIdx == -1 {
 					m.draftInput = m.ta.Value()
 					m.histIdx = len(m.history) - 1
@@ -834,7 +926,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "down":
-			if !m.streaming && m.histIdx != -1 {
+			// TQ9: mirror of ↑ — only leave history when the cursor sits on
+			// the last line of the recalled entry.
+			if !m.streaming && m.histIdx != -1 && m.ta.Line() == m.ta.LineCount()-1 {
 				if m.histIdx == len(m.history)-1 {
 					m.histIdx = -1
 					m.ta.SetValue(m.draftInput)
@@ -879,25 +973,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.draftInput = ""
 				return m, m.handleSlashCommand(parsed)
 			}
-			m.history = append(m.history, text)
-			m.histIdx = -1
-			m.draftInput = ""
-			cleanText, images := extractImageRefs(text, m.cfg.WorkDir)
-			displayText := cleanText
-			if displayText == "" && len(images) > 0 {
-				suffix := ""
-				if len(images) != 1 {
-					suffix = "s"
-				}
-				displayText = fmt.Sprintf("(%d image%s attached)", len(images), suffix)
-			}
-			m.appendUser(displayText)
 			m.ta.Reset()
-			m.streaming = true
-			m.status = "thinking…"
-			m.followBottom = true // jump to the freshly sent message
-			m.refresh()
-			return m, m.startStream(cleanText, images)
+			return m, m.sendUserMessage(text)
+
+		case "alt+enter":
+			// TQ8: while streaming, alt+enter queues the draft as the next
+			// user turn instead of steering; it auto-sends when the current
+			// run finishes. When idle it behaves like a plain send.
+			text := strings.TrimSpace(m.ta.Value())
+			if text == "" {
+				return m, nil
+			}
+			m.ta.Reset()
+			if m.streaming {
+				m.queued = append(m.queued, text)
+				m.escPending = false
+				m.followBottom = true
+				m.refresh()
+				return m, nil
+			}
+			return m, m.sendUserMessage(text)
 		}
 
 	case streamStartedMsg:
@@ -923,6 +1018,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.escPending = false
 		m.setSteerMode(false)
 		m.transcript.append("\n")
+		// TQ8: auto-send the next queued message, one per completed run.
+		if len(m.queued) > 0 {
+			next := m.queued[0]
+			m.queued = m.queued[1:]
+			return m, m.sendUserMessage(next)
+		}
 		m.refresh()
 		return m, nil
 
@@ -931,6 +1032,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.escPending = false
 		m.setSteerMode(false)
 		m.transcript.append(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")
+		// TQ8: don't auto-send into a failing session.
+		if len(m.queued) > 0 {
+			m.queued = nil
+			m.transcript.append(m.th.statusDim.Render("⏳ queued messages discarded after error") + "\n\n")
+		}
 		m.status = "ready"
 		m.refresh()
 		return m, nil
@@ -1049,6 +1155,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Output == "\x00clear" {
 			m.transcript.reset()
+			m.thinkEntries = nil
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
 			m.cacheReadTokens, m.cacheCreationTokens = 0, 0
@@ -1232,7 +1339,8 @@ func (m *model) fixedH() int {
 		h += completionBoxH
 	}
 	if m.approval != nil {
-		h += approvalBannerH
+		// The dialog height varies with its preview and option list (TQ6).
+		h += lipgloss.Height(m.renderApprovalDialog())
 	}
 	if len(m.todoItems) > 0 {
 		h += 1 // todo strip: one line
@@ -1341,11 +1449,13 @@ func (m *model) refresh() {
 		content += wrap(m.th.thinking.Render("✻ thinking")+"\n"+m.th.thinkingDim.Render(think)+"\n", m.vp.Width())
 	}
 
-	// The live tail keeps its own boundary-cached rewrap (see liveBlock) so a
-	// long streaming reply stays O(tail) per token instead of O(n).
+	// The live tail keeps its own boundary-cached re-render (see liveBlock) so
+	// a long streaming reply stays O(tail) per token instead of O(n). Text is
+	// styled through glamour as it streams (TQ3) so there is no end-of-turn
+	// restyle pop.
 	if live := m.liveText.String(); live != "" {
 		m.live.setText(live)
-		content += m.live.render(m.vp.Width())
+		content += m.live.render(m.vp.Width(), m.mdRender)
 	} else if m.streaming {
 		secs := 0
 		if !m.streamStart.IsZero() {
@@ -1357,25 +1467,106 @@ func (m *model) refresh() {
 		content += wrap(work+m.th.elapsedDim.Render(hint), m.vp.Width())
 	}
 
+	// TQ8: queued messages render as dimmed pending blocks below the live tail.
+	for _, q := range m.queued {
+		line := m.th.statusDim.Render("⏳ queued ▸ " + truncate(oneLine(q), max(m.vp.Width()-12, 16)))
+		content += "\n" + wrap(line, m.vp.Width())
+	}
+
 	m.vp.SetContent(content)
 	if m.followBottom {
 		m.vp.GotoBottom()
 	}
 }
 
-// flushThinking writes the accumulated extended-thinking text to the transcript
-// as a dim block. Called when the answer or a tool call begins, or at turn end.
+// thinkEntry pairs a flushed thinking transcript block with its two renderings
+// so ctrl+o can swap them in place (TQ9).
+type thinkEntry struct {
+	blk       *transcriptBlock
+	collapsed string
+	expanded  string
+}
+
+// flushThinking writes the accumulated extended-thinking text to the
+// transcript as a collapsible block (TQ9): a one-line "✻ thought for Ns"
+// header by default, expandable to the full text with ctrl+o. Called when the
+// answer or a tool call begins, or at turn end.
 func (m *model) flushThinking() {
 	if m.thinkText.Len() == 0 {
 		return
 	}
 	raw := strings.TrimSpace(m.thinkText.String())
 	m.thinkText.Reset()
+	secs := 0
+	if !m.thinkStart.IsZero() {
+		secs = int(time.Since(m.thinkStart).Seconds() + 0.5)
+	}
+	m.thinkStart = time.Time{}
 	if raw == "" {
 		return
 	}
-	m.transcript.append(m.th.thinking.Render("✻ thinking") + "\n")
-	m.transcript.append(m.th.thinkingDim.Render(raw) + "\n\n")
+	m.appendThinkingBlock(raw, secs)
+}
+
+// appendThinkingBlock adds one collapsible thinking block to the transcript,
+// honouring the current expand/collapse state. secs 0 (e.g. replayed history,
+// where the duration is unknown) omits the "for Ns" suffix.
+func (m *model) appendThinkingBlock(raw string, secs int) {
+	header := "✻ thought"
+	if secs > 0 {
+		header += fmt.Sprintf(" for %ds", secs)
+	}
+	collapsed := m.th.thinking.Render(header) + m.th.thinkingDim.Render("  (ctrl+o to expand)") + "\n\n"
+	expanded := m.th.thinking.Render(header) + "\n" + m.th.thinkingDim.Render(raw) + "\n\n"
+	use := collapsed
+	if m.thinkExpanded {
+		use = expanded
+	}
+	blk := m.transcript.appendBlock(use)
+	if blk != nil {
+		m.thinkEntries = append(m.thinkEntries, thinkEntry{blk: blk, collapsed: collapsed, expanded: expanded})
+	}
+}
+
+// toggleThinking swaps every thinking block between its collapsed and expanded
+// form in place (TQ9, ctrl+o). Entries whose block has been trimmed out of the
+// transcript are dropped.
+func (m *model) toggleThinking() {
+	if len(m.thinkEntries) == 0 {
+		return
+	}
+	m.thinkExpanded = !m.thinkExpanded
+	present := make(map[*transcriptBlock]bool, m.transcript.len())
+	for _, b := range m.transcript.blocks {
+		present[b] = true
+	}
+	kept := m.thinkEntries[:0]
+	for _, e := range m.thinkEntries {
+		if !present[e.blk] {
+			continue
+		}
+		raw := e.collapsed
+		if m.thinkExpanded {
+			raw = e.expanded
+		}
+		m.transcript.setBlockRaw(e.blk, raw)
+		kept = append(kept, e)
+	}
+	m.thinkEntries = kept
+	m.refresh()
+}
+
+// mdRender renders markdown through glamour with trailing newlines normalized
+// to exactly one, so a settled-prefix + tail concatenation (liveBlock) is
+// byte-identical to a single whole-source render split at the same paragraph
+// boundary. Falls back to a plain wrap if the renderer is unavailable.
+func (m *model) mdRender(s string) string {
+	if m.renderer != nil {
+		if rendered, err := m.renderer.Render(s); err == nil {
+			return strings.TrimRight(rendered, "\n") + "\n"
+		}
+	}
+	return wrap(s, m.vp.Width())
 }
 
 // flushLiveText renders accumulated assistant text through glamour and appends
@@ -1388,31 +1579,7 @@ func (m *model) flushLiveText() {
 	m.liveText.Reset()
 	m.live.reset()
 	m.lastAssistantText = raw // TQ4: capture for /copy
-	if m.renderer != nil {
-		if rendered, err := m.renderer.Render(raw); err == nil {
-			rendered = strings.TrimRight(rendered, "\n")
-			m.transcript.append(rendered + "\n")
-			return
-		}
-	}
-	m.transcript.append(raw)
-}
-
-// sendApprovalCmd fires a POST to /sessions/{id}/approve with the user's
-// decision. It runs in a goroutine so the TUI stays responsive while the
-// request travels to the daemon. allowAlways=true caches the approval
-// server-side so subsequent calls to the same tool skip the prompt.
-func (m model) sendApprovalCmd(approvalID string, approved, allowAlways bool) tea.Cmd {
-	cl := m.cfg.Client
-	sessionID := m.cfg.SessionID
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := cl.SendApproval(ctx, sessionID, approvalID, approved, allowAlways); err != nil {
-			return errMsg{err: fmt.Errorf("approval: %w", err)}
-		}
-		return nil // engine continues via the existing SSE stream
-	}
+	m.transcript.append(m.mdRender(raw))
 }
 
 // toggleTerminal opens the terminal pane (with keyboard focus) if it is
@@ -1516,33 +1683,6 @@ func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// renderApprovalBanner renders the 3-line prompt shown when the engine is
-// blocked waiting for the user to approve or deny a tool execution.
-func (m model) renderApprovalBanner() string {
-	a := m.approval
-	w := max(m.width-2, 20)
-
-	// Line 1: tool name + reason
-	header := lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚡ "+a.toolName) +
-		"  " + lipgloss.NewStyle().Foreground(colTextMuted).Render(
-		truncate(a.reason, max(w-len(a.toolName)-6, 12)))
-
-	// Line 2: content preview derived from tool input
-	preview := renderApprovalPreview(m.th, a.toolName, a.input, w)
-
-	// Line 3: y / a / n prompt
-	prompt := "  " +
-		lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("[y]") +
-		lipgloss.NewStyle().Foreground(colTextDim).Render(" once  ") +
-		lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("[a]") +
-		lipgloss.NewStyle().Foreground(colTextDim).Render(" always  ") +
-		lipgloss.NewStyle().Foreground(colDanger).Bold(true).Render("[n]") +
-		lipgloss.NewStyle().Foreground(colTextDim).Render(" deny")
-
-	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", w))
-	return sep + "\n" + " " + header + "\n" + preview + "\n" + prompt
-}
-
 // applySwitchedSession swaps the active session, resetting per-session UI state
 // and replaying the loaded transcript.
 func (m *model) applySwitchedSession(sess *session.Session) {
@@ -1551,6 +1691,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.slash.SetSession(sess.ID, sess.Mode)
 
 	m.transcript.reset()
+	m.thinkEntries = nil
 	m.tools = m.tools[:0]
 	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
 	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
@@ -1617,8 +1758,7 @@ func (m *model) loadHistory(msgs []provider.Message) {
 				switch v := b.(type) {
 				case provider.ThinkingBlock:
 					if t := strings.TrimSpace(v.Text); t != "" {
-						m.transcript.append(m.th.thinking.Render("✻ thinking") + "\n")
-						m.transcript.append(m.th.thinkingDim.Render(t) + "\n\n")
+						m.appendThinkingBlock(t, 0) // duration unknown for replayed turns
 					}
 				case provider.TextBlock:
 					if v.Text != "" {
@@ -1657,8 +1797,12 @@ func (m *model) appendUser(text string) {
 func (m *model) applyEvent(ev api.Event) {
 	switch ev.Kind {
 	case api.KindThinking:
-		// Buffer extended-thinking text; flushed as a dim block when the answer
-		// (or a tool call) begins.
+		// Buffer extended-thinking text; flushed as a collapsible block when
+		// the answer (or a tool call) begins. The first token starts the
+		// "thought for Ns" clock.
+		if m.thinkText.Len() == 0 {
+			m.thinkStart = time.Now()
+		}
 		m.thinkText.WriteString(ev.Text)
 
 	case api.KindText:
@@ -1751,6 +1895,7 @@ func (m *model) applyEvent(ev api.Event) {
 		if m.liveText.Len() == 0 && m.thinkText.Len() > 0 {
 			m.liveText.WriteString(m.thinkText.String())
 			m.thinkText.Reset()
+			m.thinkStart = time.Time{}
 		}
 		m.flushThinking()
 		m.flushLiveText() // render final prose through glamour
@@ -1771,8 +1916,10 @@ func (m *model) applyEvent(ev api.Event) {
 			input:    string(ev.ToolInput),
 			reason:   ev.ApprovalReason,
 			id:       ev.ApprovalID,
+			pattern:  suggestRulePattern(string(ev.ToolInput)),
 		}
 		m.status = "approval required"
+		m.applyViewportHeight() // dialog height varies with the preview (TQ6)
 
 	case api.KindSteer:
 		// A steering instruction was injected mid-run. Flush any partial model
@@ -1893,7 +2040,7 @@ func (m model) render() string {
 		parts = append(parts, popup)
 	}
 	if m.approval != nil {
-		parts = append(parts, m.renderApprovalBanner())
+		parts = append(parts, m.renderApprovalDialog())
 	}
 	if len(m.todoItems) > 0 {
 		parts = append(parts, m.renderTodoStrip())
@@ -2328,7 +2475,9 @@ func loadStash(path string) string {
 	if err != nil {
 		return ""
 	}
-	var v struct{ Draft string `json:"draft"` }
+	var v struct {
+		Draft string `json:"draft"`
+	}
 	if err := json.Unmarshal(data, &v); err != nil {
 		return ""
 	}
@@ -2358,7 +2507,9 @@ func (m model) renderHelpOverlay() string {
 	km := m.keys
 	entries := []struct{ k, d string }{
 		{km.Send.Help().Key, km.Send.Help().Desc},
+		{km.Queue.Help().Key, km.Queue.Help().Desc},
 		{km.Newline.Help().Key, km.Newline.Help().Desc},
+		{km.Thinking.Help().Key, km.Thinking.Help().Desc},
 		{km.Interrupt.Help().Key, km.Interrupt.Help().Desc},
 		{km.Complete.Help().Key, km.Complete.Help().Desc},
 		{km.Palette.Help().Key, km.Palette.Help().Desc},
@@ -2503,10 +2654,10 @@ func shortenPath(path string) string {
 // --- helpers ---
 
 func newGlamourRenderer(width int) *glamour.TermRenderer {
-	// The TUI is dark-first (Charmtone Pantera), so use glamour's dark markdown
-	// theme to match the lipgloss palette.
+	// The markdown style follows the active color scheme (TQ10) so rendered
+	// prose matches the lipgloss palette in both dark and light themes.
 	r, _ := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStandardStyle(glamourStyleName),
 		glamour.WithWordWrap(width),
 	)
 	return r

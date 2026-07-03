@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -73,10 +74,24 @@ func TestTUIFullTurn_NoPTY(t *testing.T) {
 	m.refresh()
 
 	got := plainView(m)
-	for _, want := range []string{"considering the code path", "reads a file", "read_file", "Confirmed: it's the file reader"} {
+	for _, want := range []string{"✻ thought", "reads a file", "read_file", "Confirmed: it's the file reader"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("expected rendered transcript to contain %q, got:\n%s", want, got)
 		}
+	}
+	// TQ9: thinking is collapsed to a one-line header by default; ctrl+o
+	// (toggleThinking) reveals the full text in place, and toggling back
+	// re-collapses it.
+	if strings.Contains(got, "considering the code path") {
+		t.Errorf("expected thinking text to be collapsed by default, got:\n%s", got)
+	}
+	m.toggleThinking()
+	if expanded := plainView(m); !strings.Contains(expanded, "considering the code path") {
+		t.Errorf("expected ctrl+o to expand thinking text, got:\n%s", expanded)
+	}
+	m.toggleThinking()
+	if collapsed := plainView(m); strings.Contains(collapsed, "considering the code path") {
+		t.Errorf("expected second toggle to re-collapse thinking text, got:\n%s", collapsed)
 	}
 	if m.transcript.len() == 0 {
 		t.Fatal("expected the transcript to have accumulated blocks after a full turn")
@@ -102,6 +117,42 @@ func TestTUIFullTurn_NoPTY(t *testing.T) {
 	gotAfterWideResize := plainView(m)
 	if !strings.Contains(gotAfterWideResize, "what does this function do?") {
 		t.Fatalf("expected the original user turn to survive a second resize, got:\n%s", gotAfterWideResize)
+	}
+}
+
+// TestTUIQueuedMessageDrain_NoPTY verifies TQ8: a message queued during
+// streaming renders as a pending block and auto-sends when the stream closes.
+func TestTUIQueuedMessageDrain_NoPTY(t *testing.T) {
+	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m.appendUser("first question")
+	m.streaming = true
+	m.applyEvent(api.Event{Kind: api.KindText, Text: "answering…"})
+	m.queued = append(m.queued, "follow-up question")
+	m.refresh()
+
+	if got := plainView(m); !strings.Contains(got, "queued ▸ follow-up question") {
+		t.Fatalf("expected queued message rendered as pending block, got:\n%s", got)
+	}
+
+	// Stream closes → the queued message becomes the next user turn.
+	m = driveUpdate(t, m, streamClosedMsg{})
+	if len(m.queued) != 0 {
+		t.Fatalf("expected queue drained, got %d", len(m.queued))
+	}
+	if !m.streaming {
+		t.Fatal("expected a new stream to have started for the queued message")
+	}
+	if got := plainView(m); !strings.Contains(got, "follow-up question") {
+		t.Fatalf("expected the queued text as a user turn, got:\n%s", got)
+	}
+
+	// An error discards any remaining queue rather than auto-sending into it.
+	m.queued = append(m.queued, "never sent")
+	m = driveUpdate(t, m, errMsg{err: context.DeadlineExceeded})
+	if len(m.queued) != 0 {
+		t.Fatal("expected queue cleared after a stream error")
 	}
 }
 

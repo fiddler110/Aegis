@@ -134,14 +134,18 @@ func TestTranscriptRenderUpTo(t *testing.T) {
 	}
 }
 
+// mdPlain is a stand-in markdown renderer for liveBlock tests: it wraps like
+// the real glamour path but stays deterministic and dependency-free.
+func mdPlain(s string) string { return wrap(s, 80) }
+
 func TestLiveBlockRenderAndReset(t *testing.T) {
 	lb := &liveBlock{}
-	if got := lb.render(80); got != "" {
+	if got := lb.render(80, mdPlain); got != "" {
 		t.Fatalf("empty live block should render empty, got %q", got)
 	}
 
 	lb.setText("hello")
-	if got := lb.render(80); !strings.Contains(got, "hello") {
+	if got := lb.render(80, mdPlain); !strings.Contains(got, "hello") {
 		t.Fatalf("expected rendered text to contain %q, got %q", "hello", got)
 	}
 
@@ -154,17 +158,42 @@ func TestLiveBlockRenderAndReset(t *testing.T) {
 func TestLiveBlockPrefixCacheStableAcrossGrowth(t *testing.T) {
 	lb := &liveBlock{}
 	lb.setText("paragraph one.\n\npar")
-	first := lb.render(80)
+	first := lb.render(80, mdPlain)
 	cachedPrefixLen := len(lb.prefixCache)
 
 	// Growing the tail (without crossing a new blank-line boundary) must not
 	// shrink the cached settled prefix.
 	lb.setText("paragraph one.\n\nparagraph two continues here")
-	second := lb.render(80)
+	second := lb.render(80, mdPlain)
 	if len(lb.prefixCache) != cachedPrefixLen {
 		t.Fatalf("expected the settled prefix cache to remain stable, got len %d vs %d", len(lb.prefixCache), cachedPrefixLen)
 	}
 	if first == second {
 		t.Fatalf("expected rendered output to reflect the grown tail")
+	}
+}
+
+func TestLiveBlockRendersThroughMarkdownRenderer(t *testing.T) {
+	lb := &liveBlock{}
+	calls := 0
+	md := func(s string) string {
+		calls++
+		return "R[" + s + "]"
+	}
+	lb.setText("settled paragraph.\n\ntail")
+	out := lb.render(80, md)
+	// Both the settled prefix and the live tail must pass through the markdown
+	// renderer (TQ3) — no raw-wrapped text on screen while streaming.
+	if !strings.Contains(out, "R[settled paragraph.\n\n]") || !strings.Contains(out, "R[tail]") {
+		t.Fatalf("expected prefix and tail rendered via md callback, got %q", out)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 renderer calls (prefix + tail), got %d", calls)
+	}
+	// The settled prefix is cached: rendering again re-renders only the tail.
+	lb.setText("settled paragraph.\n\ntail grows")
+	_ = lb.render(80, md)
+	if calls != 3 {
+		t.Fatalf("expected cached prefix to skip re-render, got %d calls", calls)
 	}
 }
