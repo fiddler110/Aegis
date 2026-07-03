@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-03 (v14 — P7 security hardening track fully shipped (P7.1–P7.7); P8 performance remains open, ahead of exploratory P6/P9)
+**Updated:** 2026-07-03 (v15 — audited all shipped claims + docs/*.md against current code; fixed stale approval-dialog docs, missing TUI keybinds/config key, and an undocumented terminal-pane feature; corrected P8 line-number drift)
 
 ---
 
@@ -13,6 +13,8 @@ A 2026-07-03 code-level audit (three parallel passes: security, performance, fea
 **Recommended priority order:** P8.1 → rest of P8 → P9 → P6.
 
 **Reviewed and found sound, no action needed (from the P7 audit):** SSRF dialer (private-IP check happens at dial time, closing the DNS-rebind window); path traversal / symlink handling in `ValidatePath`; local daemon HTTP API (constant-time bearer token + loopback-origin check); persona YAML parsing (safe library, no unsafe type deserialization); `team_tasks` claim path (properly transactional, no duplicate-claim race).
+
+**2026-07-03 documentation audit:** cross-checked every P7.1–P7.7 and TQ-track "shipped" claim above against the actual code (all confirmed; only P8's cited line numbers had minor drift, now corrected) and re-read `docs/*.md` against current behavior. Found and fixed real staleness: `docs/tui-guide.md` and `docs/permissions.md` still described the pre-TQ6 y/n/a approval banner instead of the current option-list dialog (allow once / allow always+persist rule / deny / deny with feedback); the keyboard shortcut table was missing `Alt+Enter` (queue), `Shift+Enter` (primary newline binding), `Ctrl+O` (expand thinking), `Ctrl+X` (terminal pane), and a correct `Esc` row (it, not `Ctrl+C`, is the double-tap interrupt); `docs/configuration.md`'s `tui:` block was missing the `theme` key entirely; and the `Ctrl+X` embedded terminal pane (pre-existing, not a recent addition) had never been documented at all. All fixed in place.
 
 ---
 
@@ -31,7 +33,7 @@ A 2026-07-03 code-level audit (three parallel passes: security, performance, fea
 **Fix:** move read messages to a `processed/` subdir excluded from listing, or delete after ack. Effort: **S/M**, Impact: **Medium**.
 
 ### P8.4 — Token estimation double-scans the full conversation per turn for local models
-`internal/engine/engine.go:240,429` (`estimateTokens`) walks every message/block in the conversation — once for the proactive-compaction check, again whenever a provider returns zero usage (all local/Ollama models hit this every turn). Two full-conversation scans per turn, scaling with session length.
+`internal/engine/engine.go:254,451` (`estimateTokens`) walks every message/block in the conversation — once for the proactive-compaction check, again whenever a provider returns zero usage (all local/Ollama models hit this every turn). Two full-conversation scans per turn, scaling with session length.
 **Fix:** maintain a running character/token count updated incrementally on `Append` instead of re-scanning. Effort: **S**, Impact: **Medium**.
 
 ### P8.5 — Memory relevance scoring recomputes TF-IDF from scratch on every call
@@ -39,7 +41,7 @@ A 2026-07-03 code-level audit (three parallel passes: security, performance, fea
 **Fix:** cache `allEntries()`/`df` until underlying files change. Effort: **S**, Impact: **Low-Medium**.
 
 ### P8.6 — Write/execute tool calls serialize concurrent reads unnecessarily
-`internal/engine/engine.go` `runTools` (~line 481-532) uses `execLock sync.RWMutex`; a single write/execute call in a round takes the write lock and excludes *all* concurrent read/network calls in that same round, rather than letting reads proceed around it. Minor throughput loss on mixed tool-call rounds.
+`internal/engine/engine.go` `runTools` (~line 512-537) uses `execLock sync.RWMutex`; a single write/execute call in a round takes the write lock and excludes *all* concurrent read/network calls in that same round, rather than letting reads proceed around it. Minor throughput loss on mixed tool-call rounds.
 **Fix:** scope the lock more narrowly, or let independent reads run before/after rather than fully serializing the round. Effort: **S**, Impact: **Low**.
 
 No goroutine leaks, unbounded channels, or missing context-cancellation were found in `engine.go`/`mailbox.go`/`subprocess.go` — cancellation is checked consistently and `exec.CommandContext` is used throughout.

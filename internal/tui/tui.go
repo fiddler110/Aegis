@@ -838,9 +838,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "esc":
+		case "esc", "alt+esc":
 			if m.streaming {
-				if m.escPending {
+				// A fast double-tap can land both ESC bytes in the same terminal
+				// read — likeliest exactly here, while streaming keeps the reader
+				// busy re-rendering. Ultraviolet's decoder then reports that as one
+				// "alt+esc" event instead of two separate "esc" ones, so treat it
+				// as an already-confirmed second press rather than requiring a
+				// third/fourth tap to get through.
+				if m.escPending || msg.String() == "alt+esc" {
 					// Second ESC: cancel the run. An explicit interrupt also
 					// discards any queued messages (TQ8) — auto-sending after
 					// the user hit the brakes would be a surprise.
@@ -1461,7 +1467,11 @@ func (m *model) refresh() {
 		if !m.streamStart.IsZero() {
 			secs = int(time.Since(m.streamStart).Seconds())
 		}
-		phrase := thinkingPhrase(m.animStep, m.humorMode)
+		cat := catThinking
+		if n := len(m.tools); n > 0 && m.tools[n-1].status == "pending" {
+			cat = categoryFor(m.tools[n-1].name)
+		}
+		phrase := thinkingPhrase(m.animStep, m.humorMode, cat)
 		hint := formatStreamHint(secs, m.inputTokens, 0) // no live-text bytes here; liveText is empty
 		work := shimmerText("● "+phrase, m.animStep, colTextMuted, colAccent)
 		content += wrap(work+m.th.elapsedDim.Render(hint), m.vp.Width())

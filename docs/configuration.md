@@ -176,8 +176,17 @@ log_level: info
 
 # ── TUI ───────────────────────────────────────────────────────────────────────
 tui:
-  # D&D-themed thinking phrases in the status bar while the model reasons.
+  # D&D-themed flavor phrases in the status bar while the agent is busy.
+  # Phrases are bucketed to match what's actually happening: wizardly/
+  # intellectual phrases while the model is reasoning, and separate
+  # investigation/crafting/combat/travel/party banks while a tool call is
+  # in flight (read/write/execute/network/spawn respectively).
   humor_mode: false
+
+  # Color scheme: "dark" (default) or "light". Applied to the sidebar,
+  # status bar, glamour markdown rendering, and the ANSI-16 remap used for
+  # shell tool output.
+  theme: dark
 
 
 # ── Diagrams ──────────────────────────────────────────────────────────────────
