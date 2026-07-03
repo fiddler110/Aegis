@@ -80,6 +80,7 @@ func parsePersonaFile(path string) (Persona, error) {
 		Tools:       fm.Tools,
 		Rules:       fm.Rules,
 		Guard:       parseGuard(fm.OutputGuard),
+		Loaded:      true,
 	}
 	return p, nil
 }

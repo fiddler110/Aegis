@@ -3,6 +3,7 @@ package bundle
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,65 @@ func TestInstall(t *testing.T) {
 	}
 	if len(written) != 3 {
 		t.Errorf("overwrite wrote %v", written)
+	}
+}
+
+// TestContentHash is the P7.6 regression: the same bundle contents must
+// always hash the same way (so a pinned --expect-sha256 stays valid across
+// re-clones), and any change to manifest or artifact content must change it
+// (so a compromised/altered upstream repo is detectable).
+func TestContentHash(t *testing.T) {
+	dir := makeBundle(t)
+	b1, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1, err := b1.ContentHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(h1, "sha256:") || len(h1) != len("sha256:")+64 {
+		t.Errorf("unexpected hash format: %q", h1)
+	}
+
+	// Re-loading the identical bundle must produce an identical hash.
+	b2, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := b2.ContentHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 {
+		t.Errorf("hash not deterministic: %q vs %q", h1, h2)
+	}
+
+	// Changing an artifact's content must change the hash.
+	writeFile(t, filepath.Join(dir, "commands", "review.md"), "Review the diff, but different now")
+	b3, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3, err := b3.ContentHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h3 == h1 {
+		t.Error("expected hash to change after artifact content changed")
+	}
+
+	// Changing only the manifest must also change the hash.
+	writeFile(t, filepath.Join(dir, ManifestName), "name: sec-pack\nversion: 1.2.1\ndescription: security tools\nauthor: tester\n")
+	b4, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h4, err := b4.ContentHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h4 == h3 {
+		t.Error("expected hash to change after manifest changed")
 	}
 }

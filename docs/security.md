@@ -133,6 +133,8 @@ aegis sandbox test            # run uname -a in configured sandbox to verify
 
 **SSRF protection:** The `web_fetch` and `web_search` tools independently reject private IP addresses (10.x, 172.16–31.x, 192.168.x, 127.x, ::1) regardless of sandbox backend.
 
+**Secret env stripping (P7.2):** The `local` and `os` backends run on the host and would otherwise inherit the daemon's full environment, including `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` — a prompt-injected instruction that gets the agent to run `shell` could read them back out, then use `web_fetch` to exfiltrate them to a public host. Both backends always strip those two names before exec; add more via `sandbox.strip_env` (e.g. MCP tokens loaded from `.aegis/.env`). The `container` backend is unaffected — `docker run`/`podman run` never pass host env into the container in the first place.
+
 ### When to use
 
 - **Any time the agent runs untrusted code** (executing downloaded scripts, building user-provided packages)
@@ -148,6 +150,14 @@ WARN: network_allowlist is set but sandbox.backend=local — the shell tool can 
 reach the network directly. Set sandbox.backend=container with network=false for
 enforced egress isolation.
 ```
+
+### Fallback-to-local warning
+
+If `sandbox.backend` is `container` or `os` but the runtime can't be initialized (e.g. the Docker daemon isn't running), the daemon falls back to the unsandboxed local backend rather than refusing to start. This is a silent security downgrade if you don't notice it, so:
+
+- It's always logged at `WARN`.
+- It's reported by `/healthz` (`sandbox_fallback`/`sandbox_fallback_reason`), and the TUI/CLI print a warning banner before entering a session when it's active.
+- Set `sandbox.strict: true` to turn this into a hard startup failure instead of a silent downgrade — use this when you depend on sandboxing being active (e.g. CI running untrusted code).
 
 ---
 
@@ -168,7 +178,7 @@ security:
 
 **Behavior:** Even in `auto` mode, if the agent fetches a URL and then tries to write a file, a permission prompt appears. The agent can still proceed after your approval.
 
-**What counts as network:** Tool calls with the `network` capability — `web_fetch`, `web_search`, MCP server calls. Does not affect `shell` (even if shell runs curl — that's why container sandboxing matters).
+**What counts as network:** Tool calls with the `network` capability — `web_fetch`, `web_search`, and any MCP server tool whose config declares `capability: network` (MCP tools default to `execute`, the most restrictive class, unless the server config says otherwise — see [configuration.md](configuration.md)). Does not affect `shell` (even if shell runs curl — that's why container sandboxing matters).
 
 ### `network_allowlist`
 

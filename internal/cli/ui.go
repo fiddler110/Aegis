@@ -36,6 +36,7 @@ func newUICmd() *cobra.Command {
 
 			if healthErr == nil {
 				// A daemon is already running; just point the browser at it.
+				warnSandboxFallback(cl)
 				fmt.Fprintf(cmd.OutOrStdout(), "Web UI: %s\n", url)
 				if !noOpen {
 					_ = openBrowser(url)
@@ -53,6 +54,7 @@ func newUICmd() *cobra.Command {
 				return fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
 			}
 
+			warnSandboxFallback(cl)
 			fmt.Fprintf(cmd.OutOrStdout(), "Web UI: %s  (Ctrl+C to stop the daemon)\n", url)
 			if !noOpen {
 				_ = openBrowser(url)

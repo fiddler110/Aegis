@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -10,9 +11,23 @@ import (
 
 // LocalBackend runs commands directly on the host OS. This is the default
 // backend and preserves the harness's existing behavior.
-type LocalBackend struct{}
+type LocalBackend struct {
+	// stripEnv lists env var names excluded from the spawned command's
+	// environment (P7.2). Always includes DefaultStripEnv.
+	stripEnv []string
+}
 
-func NewLocalBackend() *LocalBackend { return &LocalBackend{} }
+// NewLocalBackend returns a local backend that strips DefaultStripEnv (the
+// provider API keys) from commands it runs.
+func NewLocalBackend() *LocalBackend { return &LocalBackend{stripEnv: DefaultStripEnv} }
+
+// NewLocalBackendWithEnv returns a local backend that also strips the given
+// env var names in addition to DefaultStripEnv (P7.2) — e.g. secrets loaded
+// from .aegis/.env for MCP server authentication that the shell tool has no
+// business reading.
+func NewLocalBackendWithEnv(strip []string) *LocalBackend {
+	return &LocalBackend{stripEnv: mergeStripEnv(strip)}
+}
 
 func (l *LocalBackend) Name() string { return "local" }
 
@@ -29,6 +44,7 @@ func (l *LocalBackend) Exec(ctx context.Context, command string, opts ExecOpts) 
 	name, args := shellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = opts.Dir
+	cmd.Env = filteredEnv(os.Environ(), l.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 
 	out, err := cmd.CombinedOutput()
@@ -52,6 +68,7 @@ func (l *LocalBackend) ExecStreaming(ctx context.Context, command string, opts E
 	name, args := shellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = opts.Dir
+	cmd.Env = filteredEnv(os.Environ(), l.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 	w := emitWriter{emit: emit}
 	cmd.Stdout = w

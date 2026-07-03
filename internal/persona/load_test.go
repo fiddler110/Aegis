@@ -63,6 +63,9 @@ You are a strict secure code reviewer.`)
 	if p.Guard == nil || p.Guard.Mode != "llm" || p.Guard.Rubric == "" || p.Guard.MaxRetries != 2 {
 		t.Errorf("guard = %+v", p.Guard)
 	}
+	if !p.Loaded {
+		t.Error("expected Loaded=true for a persona parsed from a file (P7.5)")
+	}
 	if p.System != "You are a strict secure code reviewer." {
 		t.Errorf("system = %q", p.System)
 	}

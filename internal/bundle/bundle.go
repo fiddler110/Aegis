@@ -10,6 +10,8 @@
 package bundle
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -110,6 +112,34 @@ func Load(dir string) (*Bundle, error) {
 		return b.Artifacts[i].Rel < b.Artifacts[j].Rel
 	})
 	return b, nil
+}
+
+// ContentHash returns a deterministic SHA-256 digest (hex-encoded, prefixed
+// "sha256:") over the bundle's manifest and every artifact file's path and
+// contents (P7.6). It lets a user pin what they installed — e.g. record the
+// hash printed on first `bundle install <git-url>` and pass it back via
+// --expect-sha256 on later installs/updates — so a compromised or altered
+// upstream repo is caught instead of silently re-installing different code.
+// This is trust-on-first-use pinning, not a signature: it detects change, it
+// doesn't establish provenance. Hashing is order-independent of directory
+// listing order since b.Artifacts is already sorted by Load.
+func (b *Bundle) ContentHash() (string, error) {
+	h := sha256.New()
+	manifest, err := os.ReadFile(filepath.Join(b.Dir, ManifestName))
+	if err != nil {
+		return "", fmt.Errorf("read manifest: %w", err)
+	}
+	fmt.Fprintf(h, "manifest:%d:", len(manifest))
+	h.Write(manifest)
+	for _, a := range b.Artifacts {
+		data, err := os.ReadFile(filepath.Join(b.Dir, a.Kind, filepath.FromSlash(a.Rel)))
+		if err != nil {
+			return "", fmt.Errorf("read %s/%s: %w", a.Kind, a.Rel, err)
+		}
+		fmt.Fprintf(h, "\x00%s/%s:%d:", a.Kind, a.Rel, len(data))
+		h.Write(data)
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Install copies the bundle's artifacts into destRoot (a scope directory such as

@@ -64,18 +64,33 @@ func (c *Client) setAuth(req *http.Request) {
 
 // Health checks daemon reachability.
 func (c *Client) Health(ctx context.Context) error {
+	_, err := c.status(ctx)
+	return err
+}
+
+// Status returns the daemon's health status, including whether it fell back
+// to an unsandboxed execution backend (P7.4).
+func (c *Client) Status(ctx context.Context) (*api.HealthStatus, error) {
+	return c.status(ctx)
+}
+
+func (c *Client) status(ctx context.Context) (*api.HealthStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/healthz", nil)
 	resp, err := c.httpShort.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("daemon unhealthy: %d", resp.StatusCode)
+		return nil, fmt.Errorf("daemon unhealthy: %d", resp.StatusCode)
 	}
-	return nil
+	var out api.HealthStatus
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode health response: %w", err)
+	}
+	return &out, nil
 }
 
 // CreateSession creates a new session.

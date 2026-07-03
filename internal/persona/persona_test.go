@@ -14,6 +14,22 @@ func TestGet(t *testing.T) {
 	}
 }
 
+// TestBuiltinPersonasAreNotMarkedLoaded guards the P7.5 trust boundary: only
+// personas parsed from a *.md file (LoadFromDirs) are Loaded=true. Built-ins
+// must stay Loaded=false since callers use that flag to decide whether a
+// persona's Mode can be trusted to implicitly set a session's permission mode.
+func TestBuiltinPersonasAreNotMarkedLoaded(t *testing.T) {
+	for _, name := range Names() {
+		p, ok := Get(name)
+		if !ok {
+			continue
+		}
+		if p.Loaded {
+			t.Errorf("built-in persona %q unexpectedly has Loaded=true", name)
+		}
+	}
+}
+
 func TestAllRegisteredPersonasResolvable(t *testing.T) {
 	for _, name := range Names() {
 		p, ok := Get(name)

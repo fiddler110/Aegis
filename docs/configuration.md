@@ -278,6 +278,23 @@ sandbox:
   # Allow network access inside containers. false = network-isolated (safer).
   network: false
 
+  # If backend=container/os and the runtime can't be initialized (e.g. Docker
+  # daemon down), the default is to log a warning and fall back to running
+  # unsandboxed on the host — a silent security downgrade an operator might
+  # not notice (P7.4). Set strict=true to make that a hard startup failure
+  # instead. The daemon also reports an active fallback via /healthz, and the
+  # TUI/CLI print a warning before entering a session when it's set.
+  strict: false
+
+  # Commands run by the local/os backends never see ANTHROPIC_API_KEY or
+  # OPENAI_API_KEY (P7.2) — a prompt-injected `shell` call can't read the
+  # daemon's own provider credentials back out and exfiltrate them via
+  # web_fetch. List additional env var names here to also exclude them, e.g.
+  # secrets loaded from .aegis/.env for MCP server auth that the shell tool
+  # has no legitimate reason to see. Container backend tools never inherit
+  # host env at all, so this only applies to backend: local/os/auto(fallback).
+  strip_env: []
+
 
 # ── Contextual security policies ──────────────────────────────────────────────
 # Note: these are tool-layer controls, not system-wide egress firewalls.
@@ -343,21 +360,36 @@ lsp:
 # ── MCP servers ───────────────────────────────────────────────────────────────
 # External tools via the Model Context Protocol (stdio or HTTP/SSE transport).
 # The agent sees MCP tools alongside built-in tools with no distinction.
+#
+# `capability` sets the tool.Capability ("read", "write", "network", "execute",
+# or "spawn") the permission gate uses for every tool this server exposes.
+# It defaults to "execute" — the most restrictive class — for any server that
+# doesn't declare one, since Aegis has no way to know what an MCP server's
+# tools actually do; an unlabeled or untrusted server must not silently get
+# the always-allowed "network" capability. Use `tool_capabilities` to override
+# per remote tool name when a server exposes a known mix (e.g. a read-only
+# `search` tool alongside a `write_file` tool).
 mcp:
   - name: filesystem
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    tool_capabilities:
+      read_file: read
+      list_directory: read
+      write_file: write
 
   - name: github
     command: npx
     args: ["-y", "@modelcontextprotocol/server-github"]
     env:
       GITHUB_TOKEN: "ghp_..."
+    capability: network   # trusted, well-known server; all its tools call out to GitHub's API
 
   # HTTP/SSE transport: set command to empty string and provide a URL.
   - name: my-http-server
     command: ""
     auth: "$MY_MCP_TOKEN"   # $VAR references expanded from environment / .aegis/.env
+    # capability omitted → defaults to "execute", so calls hit the Ask gate in build mode
 
 
 # ── Process plugins ───────────────────────────────────────────────────────────

