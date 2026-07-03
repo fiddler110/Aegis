@@ -306,9 +306,17 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					if !ok && guardRetries < maxRetries {
 						guardRetries++
 						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason})
+						corrective := "[Your previous response did not pass output validation: " + reason +
+							". This means the actual deliverable is incomplete or unpolished, not just its" +
+							" description. Do not reply with only an acknowledgment, a plan, or a promise to" +
+							" fix it later — that will fail validation again."
+						if toolRoundsCompleted > 0 {
+							corrective += " If you already wrote or edited a file for this task, call your file" +
+								" tools now (e.g. edit_file/write_file) to fix the real content directly."
+						}
+						corrective += " Finish the work now, then give a corrected final answer that reflects the fixed result.]"
 						conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-							provider.TextBlock{Text: "[Your previous response did not pass output validation: " + reason +
-								". Revise and produce a corrected final answer.]"},
+							provider.TextBlock{Text: corrective},
 						}})
 						continue
 					}
