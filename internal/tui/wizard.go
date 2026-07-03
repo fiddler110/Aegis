@@ -14,8 +14,8 @@ import (
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/discover"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/discover"
 )
 
 // ─── Provider presets ─────────────────────────────────────────────────────────

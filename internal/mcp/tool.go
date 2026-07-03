@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // mcpTool adapts an MCP server tool to the harness tool.Tool interface.

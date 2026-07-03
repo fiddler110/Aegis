@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool"
 	"golang.org/x/net/html"
 )
 

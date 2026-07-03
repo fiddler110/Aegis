@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 type summaryAdapter struct {

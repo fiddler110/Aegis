@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/lsp"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/lsp"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // LSPTools returns the LSP-powered code intelligence tools.

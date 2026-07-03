@@ -26,11 +26,11 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/client"
-	"github.com/scottymacleod/aegis/internal/commands"
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/client"
+	"github.com/fiddler110/aegis/internal/commands"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/session"
 )
 
 // Config configures the TUI.

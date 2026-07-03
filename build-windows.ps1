@@ -127,7 +127,7 @@ if ($RunBuild) {
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     }
-    $ldf = "-s -w -X github.com/scottymacleod/aegis/internal/cli.Version=$Version"
+    $ldf = "-s -w -X github.com/fiddler110/aegis/internal/cli.Version=$Version"
     go build -ldflags $ldf -o $BinDest ./cmd/aegis
     if ($LASTEXITCODE -ne 0) { Write-Error "Build failed."; exit 1 }
 

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 type fakeTool struct {

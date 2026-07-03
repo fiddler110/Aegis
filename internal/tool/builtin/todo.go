@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // TodoList is a structured task list the model maintains to track its plan.

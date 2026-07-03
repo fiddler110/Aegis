@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // rgPath is set once at startup; empty string means fall back to WalkDir.

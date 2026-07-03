@@ -12,16 +12,16 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/client"
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/engine"
-	"github.com/scottymacleod/aegis/internal/hooks"
-	"github.com/scottymacleod/aegis/internal/memory"
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/session"
-	"github.com/scottymacleod/aegis/internal/swarm"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/client"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/hooks"
+	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // fixedAdapter returns a single text response regardless of input.

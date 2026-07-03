@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/api"
 )
 
 // Backend is the subset of the daemon client the ACP agent needs. *client.Client

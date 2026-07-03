@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/checkpoint"
-	"github.com/scottymacleod/aegis/internal/filetracker"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/checkpoint"
+	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 const (

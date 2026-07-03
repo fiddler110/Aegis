@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/scottymacleod/aegis/internal/worktree"
+	"github.com/fiddler110/aegis/internal/worktree"
 	"github.com/spf13/cobra"
 )
 

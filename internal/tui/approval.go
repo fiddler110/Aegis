@@ -11,7 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/api"
 )
 
 // Approval dialog options (TQ6), in display order.

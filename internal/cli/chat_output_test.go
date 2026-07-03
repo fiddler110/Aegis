@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/engine"
 )
 
 func TestParseOutputFormat(t *testing.T) {

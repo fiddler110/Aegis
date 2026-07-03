@@ -7,12 +7,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/client"
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/logging"
-	"github.com/scottymacleod/aegis/internal/server"
-	"github.com/scottymacleod/aegis/internal/tui"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/client"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/logging"
+	"github.com/fiddler110/aegis/internal/server"
+	"github.com/fiddler110/aegis/internal/tui"
 	"github.com/spf13/cobra"
 )
 

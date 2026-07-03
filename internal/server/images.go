@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/api"
-	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 const (

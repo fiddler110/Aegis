@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/config"
 )
 
 // redirectConfigDir points GlobalConfigPath() at a temp dir so the test never

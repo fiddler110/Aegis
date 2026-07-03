@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/cost"
-	"github.com/scottymacleod/aegis/internal/guard"
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/tool"
-	"github.com/scottymacleod/aegis/internal/trace"
+	"github.com/fiddler110/aegis/internal/cost"
+	"github.com/fiddler110/aegis/internal/guard"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/trace"
 )
 
 // Conversation is the mutable transcript the engine drives.

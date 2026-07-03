@@ -3,7 +3,7 @@ package engine
 import (
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 // loopDetector spots a stuck agent that issues the same tool calls turn after

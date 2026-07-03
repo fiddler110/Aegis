@@ -194,7 +194,7 @@ echo ""
 if [ "${RUN_BUILD}" = true ]; then
     header "[1] Building aegis ${VERSION}..."
 
-    LDFLAGS="-s -w -X github.com/scottymacleod/aegis/internal/cli.Version=${VERSION}"
+    LDFLAGS="-s -w -X github.com/fiddler110/aegis/internal/cli.Version=${VERSION}"
     if ! go build -ldflags "${LDFLAGS}" -o ./aegis ./cmd/aegis; then
         echo "Build failed." >&2; exit 1
     fi

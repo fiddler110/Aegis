@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/scottymacleod/aegis/internal/repomap"
+	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/spf13/cobra"
 )
 

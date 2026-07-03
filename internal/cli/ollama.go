@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/config"
 )
 
 // unloadOllamaModel sends keep_alive=0 to the Ollama native API, which

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/config"
 )
 
 func discardLogger() *slog.Logger {

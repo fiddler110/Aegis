@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/scottymacleod/aegis/internal/agentdef"
-	"github.com/scottymacleod/aegis/internal/swarm"
-	"github.com/scottymacleod/aegis/internal/task"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/agentdef"
+	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/task"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 const maxAgentDuration = 10 * time.Minute

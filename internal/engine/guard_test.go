@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/guard"
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/guard"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // scriptAdapter returns one text response per Stream call, in order.

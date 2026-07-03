@@ -5,9 +5,9 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/logging"
-	"github.com/scottymacleod/aegis/internal/server"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/logging"
+	"github.com/fiddler110/aegis/internal/server"
 	"github.com/spf13/cobra"
 )
 

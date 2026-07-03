@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scottymacleod/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/api"
 )
 
 func discardLogger() *slog.Logger {

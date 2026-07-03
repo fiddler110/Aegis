@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/scottymacleod/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 const (

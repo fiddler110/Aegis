@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/memory"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 func mustJSON(t *testing.T, v any) json.RawMessage {

@@ -1,4 +1,4 @@
-module github.com/scottymacleod/aegis
+module github.com/fiddler110/aegis
 
 go 1.26.4
 

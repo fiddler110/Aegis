@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/config"
-	"github.com/scottymacleod/aegis/internal/persona"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/persona"
 )
 
 func TestOutputGuardConfigMerge(t *testing.T) {

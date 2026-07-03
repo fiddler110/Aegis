@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/task"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/task"
+	"github.com/fiddler110/aegis/internal/tool"
 
 	_ "modernc.org/sqlite"
 )

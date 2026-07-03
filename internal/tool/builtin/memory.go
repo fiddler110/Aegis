@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/scottymacleod/aegis/internal/memory"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // --- remember ---

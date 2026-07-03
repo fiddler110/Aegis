@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/skills"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // skillTool implements progressive disclosure (P4.3): the system prompt lists

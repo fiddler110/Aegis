@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/scottymacleod/aegis/internal/swarm"
-	"github.com/scottymacleod/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // TeamTools returns the agent-team coordination tools (P5.1): a shared task list

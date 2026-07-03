@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scottymacleod/aegis/internal/provider"
-	"github.com/scottymacleod/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/session"
 )
 
 func sampleSession() *session.Session {
