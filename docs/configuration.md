@@ -157,10 +157,23 @@ permission:
 
 # ── Cost guard ────────────────────────────────────────────────────────────────
 cost:
-  # 0 = unlimited. Set e.g. 5.0 to abort runs that exceed $5 of estimated spend.
-  # Pricing covers Anthropic, OpenAI, Gemini, Groq, OpenRouter families.
-  # Unknown models have tokens counted but no dollar cost.
+  # 0 = unlimited. Set e.g. 5.0 to abort runs that exceed $5 of estimated spend
+  # within a single turn. Pricing covers Anthropic, OpenAI, Gemini, Groq,
+  # OpenRouter families. Unknown models have tokens counted but no dollar cost.
   budget_usd: 0.0
+
+  # 0 = unlimited. Refuses to start a new turn once a session's cumulative
+  # (persisted) cost reaches this amount.
+  session_cap_usd: 0.0
+
+  # 0 = unlimited. Refuses to start a new turn once total spend across all
+  # sessions for the current UTC day reaches this amount.
+  daily_cap_usd: 0.0
+
+  # Fraction (0-1) of session_cap_usd/daily_cap_usd at which a "cost_alert"
+  # warning event is surfaced to the client instead of a hard stop. Only
+  # applies to whichever cap above is non-zero.
+  alert_threshold: 0.8
 
 
 # ── Daemon ────────────────────────────────────────────────────────────────────
@@ -527,6 +540,15 @@ security:
 ```yaml
 cost:
   budget_usd: 2.0   # abort the run if estimated spend exceeds $2
+```
+
+### Cap total session/daily spend
+
+```yaml
+cost:
+  session_cap_usd: 10.0   # refuse new turns once a session has spent $10
+  daily_cap_usd: 25.0     # refuse new turns once all sessions spend $25 in a UTC day
+  alert_threshold: 0.8    # warn at 80% of whichever cap above is set
 ```
 
 ### Configure per-persona models

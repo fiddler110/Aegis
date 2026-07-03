@@ -1,0 +1,11 @@
+{
+  "scenario": "tool round trip",
+  "turns": [
+    {
+      "final_text": "let me checkdone",
+      "tool_calls": [
+        "echo"
+      ]
+    }
+  ]
+}

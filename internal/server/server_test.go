@@ -215,6 +215,121 @@ func TestServerPersistsTurnTrace(t *testing.T) {
 	}
 }
 
+// TestSessionCostCapBlocksTurn verifies a session whose persisted cost has
+// already reached the configured session_cap_usd is refused a new turn,
+// before any model call is made (P9.5).
+func TestSessionCostCapBlocksTurn(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+		Cost:       config.CostConfig{SessionCapUSD: 1.0},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{text: "hi"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddUsage(ctx, meta.ID, 100, 100, 1.5); err != nil {
+		t.Fatalf("AddUsage: %v", err)
+	}
+
+	_, err = cl.PostMessage(ctx, meta.ID, "hello")
+	if err == nil {
+		t.Fatal("expected PostMessage to fail once the session cost cap is reached")
+	}
+	if !strings.Contains(err.Error(), "session spend cap") {
+		t.Errorf("error = %v, want mention of session spend cap", err)
+	}
+}
+
+// TestDailyCostCapBlocksTurn verifies the cross-session daily cap refuses a
+// new turn once today's accumulated spend reaches daily_cap_usd (P9.5).
+func TestDailyCostCapBlocksTurn(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+		Cost:       config.CostConfig{DailyCapUSD: 1.0},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{text: "hi"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddDailyCost(ctx, 2.0); err != nil {
+		t.Fatalf("AddDailyCost: %v", err)
+	}
+
+	_, err = cl.PostMessage(ctx, meta.ID, "hello")
+	if err == nil {
+		t.Fatal("expected PostMessage to fail once the daily cost cap is reached")
+	}
+	if !strings.Contains(err.Error(), "daily spend cap") {
+		t.Errorf("error = %v, want mention of daily spend cap", err)
+	}
+}
+
+// TestCostAlertThresholdFires verifies a KindCostAlert event is emitted the
+// turn spend crosses alert_threshold of the session cap, using a priced model
+// so the fixed-usage turn produces a non-zero cost (P9.5).
+func TestCostAlertThresholdFires(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "claude-sonnet", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+		Cost:       config.CostConfig{SessionCapUSD: 0.00005, AlertThreshold: 0.5},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{text: "hi"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := cl.PostMessage(ctx, meta.ID, "hello")
+	if err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	var sawAlert bool
+	for ev := range ch {
+		if ev.Kind == api.KindCostAlert {
+			sawAlert = true
+		}
+		if ev.Kind == api.KindError {
+			t.Fatalf("error event: %s", ev.Error)
+		}
+	}
+	if !sawAlert {
+		t.Error("expected a cost_alert event once spend crossed the threshold")
+	}
+}
+
 func TestServerHealthEndpoint(t *testing.T) {
 	cl, cleanup := newTestServer(t)
 	defer cleanup()

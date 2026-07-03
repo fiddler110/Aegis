@@ -80,6 +80,7 @@ const (
 	KindApprovalRequest EventKind = "approval_request" // engine awaiting user approval
 	KindSteer           EventKind = "steer"            // mid-run steering instruction injected
 	KindGuard           EventKind = "guard"            // output validation warning
+	KindCostAlert       EventKind = "cost_alert"       // spend crossed the configured alert threshold (P9.5)
 )
 
 // Event is one server-sent event during a message run.

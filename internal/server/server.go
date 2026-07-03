@@ -1162,6 +1162,22 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var dailyCostBefore float64
+	if cap := s.cfg.Cost.SessionCapUSD; cap > 0 && sess.CostUSD >= cap {
+		writeError(w, http.StatusPaymentRequired, fmt.Sprintf("session spend cap reached: $%.4f of $%.2f limit", sess.CostUSD, cap))
+		return
+	}
+	if cap := s.cfg.Cost.DailyCapUSD; cap > 0 {
+		dailyCostBefore, err = s.store.TodayCost(r.Context())
+		if err != nil {
+			s.logger.Warn("read daily cost", "err", err)
+		}
+		if dailyCostBefore >= cap {
+			writeError(w, http.StatusPaymentRequired, fmt.Sprintf("daily spend cap reached: $%.4f of $%.2f limit", dailyCostBefore, cap))
+			return
+		}
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -1364,6 +1380,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if totalIn > 0 || totalOut > 0 {
 		_ = s.store.AddUsage(context.Background(), id, totalIn, totalOut, totalCost)
 	}
+	if totalCost > 0 && s.cfg.Cost.DailyCapUSD > 0 {
+		if err := s.store.AddDailyCost(context.Background(), totalCost); err != nil {
+			s.logger.Warn("add daily cost", "err", err)
+		}
+	}
+	s.alertOnCostThreshold(send, sess.CostUSD, totalCost, dailyCostBefore)
 	if len(traces) > 0 {
 		if err := s.store.AppendTraces(context.Background(), id, traces); err != nil {
 			s.logger.Warn("save traces", "session", id, "err", err)
@@ -1391,6 +1413,34 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			ev.Message = fmt.Sprintf("Background session %q failed: %v", displayTitle(sess.Title, id), runErr)
 		}
 		s.notifier.Notify(context.Background(), ev)
+	}
+}
+
+// alertOnCostThreshold sends a KindCostAlert event when this turn's spend
+// pushes either the session or the daily total across the configured alert
+// fraction of its cap, but only on the turn that crosses it (not every turn
+// past the threshold) — checked by comparing the before/after totals (P9.5).
+func (s *Server) alertOnCostThreshold(send func(api.Event), sessionCostBefore, turnCost, dailyCostBefore float64) {
+	if turnCost <= 0 {
+		return
+	}
+	frac := s.cfg.Cost.AlertThreshold
+	if frac <= 0 {
+		return
+	}
+	if cap := s.cfg.Cost.SessionCapUSD; cap > 0 {
+		threshold := cap * frac
+		after := sessionCostBefore + turnCost
+		if sessionCostBefore < threshold && after >= threshold {
+			send(api.Event{Kind: api.KindCostAlert, Text: fmt.Sprintf("session spend at $%.4f — %.0f%% of the $%.2f cap", after, after/cap*100, cap)})
+		}
+	}
+	if cap := s.cfg.Cost.DailyCapUSD; cap > 0 {
+		threshold := cap * frac
+		after := dailyCostBefore + turnCost
+		if dailyCostBefore < threshold && after >= threshold {
+			send(api.Event{Kind: api.KindCostAlert, Text: fmt.Sprintf("daily spend at $%.4f — %.0f%% of the $%.2f cap", after, after/cap*100, cap)})
+		}
 	}
 }
 

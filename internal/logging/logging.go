@@ -25,13 +25,17 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 	var w io.Writer = os.Stderr
 	var closer io.Closer = nopCloser{}
 
-	if opts.Path != "" && !opts.ToStderr {
+	if opts.Path != "" {
 		f, err := os.OpenFile(opts.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open log file %s: %w", opts.Path, err)
 		}
-		w = f
 		closer = f
+		if opts.ToStderr {
+			w = io.MultiWriter(os.Stderr, f)
+		} else {
+			w = f
+		}
 	}
 
 	handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: parseLevel(opts.Level)})
