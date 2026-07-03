@@ -143,7 +143,7 @@ This creates `.aegis/config.yaml` with commented examples for overriding model, 
   agents/           Custom agent definitions
   worktrees/        Git worktrees (created by aegis worktree add)
   repomap.json      Repository structure cache (aegis index)
-  knowledge.db      Project knowledge base (aegis index)
+  knowledge.db      Project knowledge base (aegis knowledge index)
 ```
 
 ---

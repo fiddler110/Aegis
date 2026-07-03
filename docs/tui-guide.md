@@ -19,6 +19,10 @@ The daemon starts automatically in the same process — no second terminal neede
 
 ## Layout
 
+The sidebar is **off by default**. Toggle it with `Ctrl+B` or `/sidebar`. When hidden, glanceable stats (context %, cost, agent count) fold into the status bar.
+
+**With sidebar open:**
+
 ```
 ⬡ AEGIS                                          abc12345  claude-opus-4-8
 ─────────────────────────────────────────────────────────────────────────
@@ -42,7 +46,7 @@ The daemon starts automatically in the same process — no second terminal neede
  in  64210     │
  out 512       │
 ─────────────────────────────────────────────────────────────────────────
- ◐ thinking…   2s                          build   ctrl+k · f1 · ctrl+e
+ ◐ thinking…   2s              31% $0.01   build   ctrl+k · f1 · ctrl+e
 ─────────────────────────────────────────────────────────────────────────
  │ Message Aegis…
 ```
@@ -56,6 +60,8 @@ The daemon starts automatically in the same process — no second terminal neede
 | **TOOLS** | Tool calls in this run: `✓` done, `⚙` running, `✗` failed |
 | **CONTEXT** | Context-window fill meter + prompt-cache hit rate (Anthropic) |
 | **COST** | Cumulative USD spend, input tokens, output tokens |
+
+Toggle with `Ctrl+B` or `/sidebar`. When hidden, context % and cost move to the status bar.
 
 ### Transcript area (right)
 
@@ -83,6 +89,7 @@ Shows the current run state (`◐ thinking…`, `◐ running…`, elapsed time) 
 | `/` | Open slash-command completion popup |
 | `@` | Open workspace file/reference completion |
 | `Ctrl+K` | Open command palette |
+| `Ctrl+B` | Toggle sidebar on/off |
 | `Ctrl+E` | Edit the current input in `$EDITOR` |
 | `Shift+Tab` | Cycle permission mode: plan → build → auto → plan |
 | `Ctrl+R` | Open interactive session picker (switch / resume) |
@@ -104,12 +111,13 @@ Type `@` to open the reference picker:
 | Syntax | What it does |
 |--------|-------------|
 | `@path/to/file.go` | Attach file path — agent reads it with `read_file` |
+| `@path/to/file.go#L10-40` | Attach a specific line range — only lines 10–40 are injected |
 | `@image:<path>` | Attach image (PNG/JPEG/GIF/WebP, max 5 MiB) to send to vision model |
 | `@diagnostics` | Reference to LSP diagnostics for the current project |
 | `@url:<address>` | Reference to a URL — agent fetches it with `web_fetch` |
 | `@symbol:<name>` | Reference to a code symbol — agent locates it with search tools |
 
-Paths can be absolute, `~`-relative, or relative to the workspace. File path completion is fuzzy-matched against a workspace index.
+Paths can be absolute, `~`-relative, or relative to the workspace. File path completion is fuzzy-matched against a workspace index. Line-range references (`#L10-40` or `#10-40`) are expanded by the daemon before the engine call — the model sees only the specified lines.
 
 ### Multi-line input
 
@@ -171,6 +179,10 @@ Type `/` to open the command completion popup and browse available commands.
 | `/models` | Show current model and provider |
 | `/tools compact` | Set tool-output display to 10 lines max |
 | `/tools full` | Show complete tool output (no line cap) |
+| `/sidebar` | Toggle the left sidebar on/off (also `Ctrl+B`) |
+| `/copy` | Copy the last assistant message to clipboard |
+| `/copy <n>` | Copy the Nth fenced code block from the last response |
+| `/tasks` | Show the live task/todo progress strip (also visible above input) |
 | `/humor [on\|off]` | Toggle D&D-themed thinking phrases in the status bar |
 | `/share [html\|md\|json]` | Export session to a shareable file in the current directory |
 
@@ -245,6 +257,28 @@ In `build` mode (and `plan` mode for network tools), the agent pauses before run
 - `[y]` approve / `[n]` deny / `[a]` approve all remaining calls in this run
 
 Denied calls return an error to the agent, which can then plan an alternative.
+
+---
+
+## Live Task Progress Strip
+
+When the model uses the `todo_add`, `todo_update`, or `todo_list` tools, a compact progress strip appears above the input area:
+
+```
+▣▣▶▢▢  2/5  refactor session store
+```
+
+- `▣` done  `▶` in progress  `▢` pending
+- Shows the current in-progress task text
+- Expand the full list with `/tasks`
+
+The strip disappears when all tasks are done and reappears as new tasks are added.
+
+---
+
+## Draft Stash
+
+Unsent input is automatically saved to `.aegis/stash.json` when you quit Aegis. The next time you start the same session, the draft is restored into the input field. This works per-session — drafts in different sessions don't interfere.
 
 ---
 

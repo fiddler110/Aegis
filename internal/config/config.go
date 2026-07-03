@@ -41,6 +41,17 @@ type Config struct {
 	Hooks       []HookConfig               `koanf:"hooks"`
 	Search      SearchConfig               `koanf:"search"`
 	Notify      NotifyConfig               `koanf:"notify"`
+	Embeddings  EmbeddingsConfig           `koanf:"embeddings"`
+}
+
+// EmbeddingsConfig enables the optional semantic recall layer (P5.8) over the
+// project knowledge base and long-term entity memory. Disabled by default —
+// both stores remain BM25-only (FTS5) unless this is turned on.
+type EmbeddingsConfig struct {
+	Enabled  bool   `koanf:"enabled"`  // opt-in; false keeps FTS5-only search
+	Provider string `koanf:"provider"` // only "ollama" is supported today
+	Model    string `koanf:"model"`    // embedding model name, e.g. "nomic-embed-text"
+	BaseURL  string `koanf:"base_url"` // Ollama base URL; defaults to http://localhost:11434
 }
 
 // HookConfig declares one user-configurable lifecycle hook (P4.4). The command
@@ -146,8 +157,23 @@ type ProviderConfig struct {
 	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
 	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
 	ContextWindow   int               `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
+	// Fallback lists ordered (provider, model) pairs tried in order after the
+	// primary adapter exhausts its own retries (P5.9). Empty = no failover.
+	Fallback []ProviderFallbackConfig `koanf:"fallback"`
+	// AllowCloudFallback must be explicitly set to fail over from a local
+	// provider (ollama) to a cloud provider (anthropic, openai). Cloud-to-cloud
+	// and any-to-local failover never requires this flag. Guards against a
+	// local-only session silently sending data off the machine on an outage.
+	AllowCloudFallback bool `koanf:"allow_cloud_fallback"`
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
+}
+
+// ProviderFallbackConfig is one entry in ProviderConfig.Fallback.
+type ProviderFallbackConfig struct {
+	Provider string `koanf:"provider"` // "anthropic", "openai", or "ollama"
+	Model    string `koanf:"model"`    // model id for this fallback
+	BaseURL  string `koanf:"base_url"` // optional API base override
 }
 
 // ServerConfig configures the local daemon.
@@ -226,6 +252,10 @@ func defaults() map[string]any {
 		"output_guard.max_retries":     1,
 		"output_guard.rubric":          DefaultGuardRubric,
 		"tui.humor_mode":               true,
+		"embeddings.enabled":           false,
+		"embeddings.provider":          "ollama",
+		"embeddings.model":             "nomic-embed-text",
+		"embeddings.base_url":          "http://localhost:11434",
 	}
 }
 
@@ -329,6 +359,7 @@ func Load() (*Config, error) {
 		"provider": true, "server": true, "permission": true,
 		"diagram": true, "cost": true, "swarm": true,
 		"sandbox": true, "security": true, "output_guard": true,
+		"embeddings": true,
 	}
 	envCb := func(s string) string {
 		s = strings.ToLower(strings.TrimPrefix(s, EnvPrefix))
@@ -348,7 +379,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	cfg.Provider.APIKey = providerAPIKey(cfg.Provider.Default)
+	cfg.Provider.APIKey = ProviderAPIKey(cfg.Provider.Default)
 
 	// Expand $VAR / ${VAR} references in MCP auth tokens so secrets can be
 	// kept in environment variables or .aegis/.env rather than in the YAML.
@@ -363,8 +394,10 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// providerAPIKey reads the API key for the given provider from the environment.
-func providerAPIKey(provider string) string {
+// ProviderAPIKey reads the API key for the given provider from the
+// environment. Exported so the provider factory can resolve keys for
+// fallback providers (P5.9), not just the primary.
+func ProviderAPIKey(provider string) string {
 	switch provider {
 	case "anthropic":
 		return os.Getenv("ANTHROPIC_API_KEY")
@@ -401,4 +434,17 @@ func (c *Config) LogPath() string {
 // AuthTokenPath returns the path to the daemon auth token file.
 func (c *Config) AuthTokenPath() string {
 	return filepath.Join(c.DataDir, "daemon.token")
+}
+
+// KnowledgeDBPath returns the path to the project knowledge base (P3.3).
+// Project-scoped (under root's .aegis/ directory, like memory.md and
+// repomap.json) rather than DataDir-scoped, so separate projects don't share
+// (and collide in) the same index.
+func (c *Config) KnowledgeDBPath(root string) string {
+	return filepath.Join(root, ".aegis", "knowledge.db")
+}
+
+// LongMemDBPath returns the path to the long-term entity memory store (P3.1).
+func (c *Config) LongMemDBPath() string {
+	return filepath.Join(c.DataDir, "longmem.db")
 }

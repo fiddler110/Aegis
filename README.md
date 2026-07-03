@@ -77,18 +77,21 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 
 - **Daemon + client architecture** — durable SQLite-backed sessions survive TUI restarts; resume any session with `aegis --resume <id>`
 - **Plan / Build / Auto modes** — read-only exploration, guided file editing, or fully automatic; fine-grained text-based allow/deny rules per tool and path
-- **39 built-in tools** — file ops, git (read + commit), shell with background jobs, web fetch/search, LaTeX compilation, LSP diagnostics, security scanning, diagram rendering, memory, planning, and more
+- **50+ built-in tools** — file ops, git (read + commit + push/PR), shell with background jobs, web fetch/search, LaTeX compilation, LSP code intelligence, security scanning, diagram rendering, memory, planning, and more; niche tools load on demand via `tool_search` to keep context lean
 - **17 built-in personas** + custom persona files — security, developer, SRE, cloud architect, risk assessor, and others; each can pin a model and carry its own permission rules
 - **Output validation** — a lightweight second-model pass checks every answer against a configurable rubric before it's returned
 - **Checkpoints & rewind** — every user turn captures a restore point; `/rewind` reverts files, conversation, or both without `git reset` gymnastics
-- **Multi-agent orchestration** — spawn sub-agents (goroutines or subprocesses) with their own permission scopes and an inter-agent file mailbox
+- **Multi-agent orchestration** — spawn sub-agents (goroutines or subprocesses) with their own permission scopes; agent teams with a shared task list and peer messaging for coordinated parallel work
+- **Lifecycle hooks** — config-driven shell hooks on `pre_tool_use`, `post_tool_use`, `session_start`, `stop`; exit code 2 vetoes a tool call, enabling lint-on-edit and policy enforcement without recompiling
 - **Parallel sessions** — run independent prompts concurrently with `aegis parallel`
 - **MCP support** — consume any Model Context Protocol server as additional tools (stdio or HTTP/SSE)
 - **Extended thinking** — Anthropic extended thinking streamed live to the TUI; `think` flag for local reasoning models (qwen3, deepseek-r1)
-- **Container sandbox** — Docker, Podman, WSL containers, Apple Containers; `aegis sandbox detect` to probe what's available
+- **Sandbox** — Docker, Podman, WSL containers, Apple Containers; OS-level isolation via macOS seatbelt / Linux bwrap when no container runtime is available; `aegis sandbox detect` to probe what's available
 - **Web UI + ACP editor integration** — browser dashboard at `aegis ui`; ACP protocol for Zed, Neovim (codecompanion/avante), and other editors
 - **Cost tracking** — live token meter, prompt-cache hit rate, configurable spend budget that halts a run when exceeded
 - **Session export** — share transcripts as self-contained HTML, Markdown, or JSON with `aegis sessions export`
+- **Project knowledge base & long-term memory** — FTS5-indexed docs/comments (`aegis knowledge index`) and a cross-session entity store; optional local-embedding hybrid recall (`embeddings.enabled`) for queries that share no keywords with the source text
+- **Provider failover** — ordered fallback providers kick in when the primary exhausts its retry budget, mid-stream output never replayed; local→cloud failover is opt-in only, guarding against silent data egress on an outage
 
 ---
 
@@ -101,13 +104,13 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 | [Configuration Reference](docs/configuration.md) | Every config key, environment variables, common recipes |
 | [CLI Reference](docs/cli-reference.md) | Every command and flag |
 | [TUI Guide](docs/tui-guide.md) | Layout, keyboard shortcuts, slash commands, `@` references |
-| [Tools Reference](docs/tools-reference.md) | All 39 built-in tools with inputs, outputs, and examples |
+| [Tools Reference](docs/tools-reference.md) | All 50+ built-in tools with inputs, outputs, and examples |
 | [Personas](docs/personas.md) | All 17 built-in personas, custom persona files, per-persona model overrides |
 | [Permission System](docs/permissions.md) | Plan/Build/Auto modes, text-based rules, contextual security policies |
 | [Session Management](docs/sessions.md) | Checkpoints, rewind, export, archiving |
 | [Providers & Models](docs/providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
 | [Memory & Knowledge](docs/memory-and-knowledge.md) | Project/user memory, skills, knowledge base |
-| [Extensibility](docs/extensibility.md) | MCP servers, custom commands, agents, process plugins, bundles |
+| [Extensibility](docs/extensibility.md) | Lifecycle hooks, MCP servers, custom commands, agents, process plugins, bundles |
 | [Multi-Agent & Background Tasks](docs/multi-agent.md) | Swarm, parallel sessions, background tasks, cron scheduling |
 | [Security Features](docs/security.md) | Security scanning, sandbox backends, contextual policies, audit trail |
 

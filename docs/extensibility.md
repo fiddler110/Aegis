@@ -4,6 +4,75 @@ Aegis can be extended in four main ways: MCP servers (external tools via a stand
 
 ---
 
+## Lifecycle Hooks
+
+Hooks let you run shell commands (or any executable) in response to agent lifecycle events — no Go code required.
+
+### Configuration
+
+```yaml
+hooks:
+  pre_tool_use:   "my-hook pre"    # runs before every tool call
+  post_tool_use:  "my-hook post"   # runs after every tool call
+  session_start:  ""               # runs when a session starts
+  stop:           ""               # runs when the agent finishes
+  subagent_stop:  ""               # runs when a sub-agent finishes
+```
+
+### Event contract
+
+Aegis writes a JSON event object to the hook command's **stdin**. For `pre_tool_use`:
+
+```json
+{
+  "event": "pre_tool_use",
+  "session_id": "abc12345",
+  "tool_name": "shell",
+  "tool_input": {"command": "rm -rf build/"},
+  "timestamp": "2026-07-02T10:00:00Z"
+}
+```
+
+**Exit codes:**
+- `0` — allow (proceed normally)
+- `2` — **veto** the tool call; the hook's stderr is returned to the model as an error message
+- Any other non-zero — logged as a warning; execution continues
+
+### Examples
+
+**Lint on file write:**
+```bash
+#!/bin/sh
+# pre-tool-lint — runs before every tool call
+input=$(cat)
+tool=$(echo "$input" | jq -r '.tool_name')
+if [ "$tool" = "write_file" ] || [ "$tool" = "edit_file" ]; then
+    path=$(echo "$input" | jq -r '.tool_input.path')
+    golangci-lint run "$path" 2>&1 || exit 2
+fi
+```
+
+**Audit trail to a custom log:**
+```bash
+#!/bin/sh
+cat >> /var/log/aegis-audit.jsonl
+```
+
+**Block writes to production config:**
+```bash
+#!/bin/sh
+input=$(cat)
+path=$(echo "$input" | jq -r '.tool_input.path // empty')
+if echo "$path" | grep -q '^/etc/production'; then
+    echo "Writes to production config are not allowed" >&2
+    exit 2
+fi
+```
+
+Hooks complement the `permission.rules` text-rule system. Rules are evaluated first (fast, in-process); hooks run after (shell-out, can do arbitrary logic).
+
+---
+
 ## MCP Servers
 
 [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers expose additional tools to the agent. From the agent's perspective, MCP tools appear alongside built-in tools with no distinction.
@@ -358,11 +427,18 @@ author: security-team
 ### Installing a bundle
 
 ```bash
+# From a local directory
 aegis bundle info ./my-bundle             # preview what would be installed
 aegis bundle install ./my-bundle          # install to .aegis/ (project scope)
 aegis bundle install ./my-bundle --scope user    # install to user data dir
 aegis bundle install ./my-bundle --overwrite     # overwrite existing files
+
+# From a git URL (clones --depth=1 to a temp dir, then installs)
+aegis bundle info https://github.com/org/security-bundle
+aegis bundle install https://github.com/org/security-bundle
 ```
+
+Git URL install works with any HTTPS or SSH git URL. The clone is discarded after installation.
 
 **Scope:**
 - `project` (default) — installs to `.aegis/commands/`, `.aegis/agents/`, `.aegis/skills/`
