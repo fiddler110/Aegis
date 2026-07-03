@@ -3,7 +3,7 @@ package tui
 import "fmt"
 
 // humorPhrases is the D&D-themed phrase bank shown while the model is
-// generating. Phrases cycle at roughly 3-second intervals so the indicator
+// generating. Phrases cycle at roughly 20-second intervals so the indicator
 // stays lively across long turns without flashing too quickly.
 var humorPhrases = []string{
 	// 🧙 Wizardly / Intellectual
@@ -73,8 +73,8 @@ var plainPhrases = []string{
 }
 
 // phraseChangeTicks is how many animation steps a phrase stays visible.
-// At ~100 ms per tick this is roughly 3 seconds per phrase.
-const phraseChangeTicks = 30
+// At ~100 ms per tick this is roughly 20 seconds per phrase.
+const phraseChangeTicks = 200
 
 // thinkingPhrase returns the display phrase for the current animation step.
 func thinkingPhrase(animStep int, humorMode bool) string {
