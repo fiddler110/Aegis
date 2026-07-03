@@ -405,6 +405,20 @@ aegis index --print   # inspect the map
 
 ---
 
+## `aegis knowledge`
+
+Manage the project knowledge base — a separate, searchable FTS5 (optionally hybrid BM25+semantic) index of documentation and code comments backing the `project_knowledge` tool. Not to be confused with `aegis index` above (the structural repo map); see [Memory & Knowledge](memory-and-knowledge.md) for how the two differ.
+
+### `aegis knowledge index`
+
+```bash
+aegis knowledge index
+```
+
+Rebuilds `.aegis/knowledge.db` from `README.md`, `.md`/`.txt`/`.rst` files, and Go doc comments across the project. When `embeddings.enabled: true` in config, also computes and stores semantic embeddings for hybrid recall (see [Configuration Reference](configuration.md#full-config-reference)). This is a full reindex — there's no incremental staleness detection, so rerun it after adding significant documentation.
+
+---
+
 ## `aegis diagram`
 
 Render a diagram from stdin.

@@ -30,10 +30,13 @@ import (
 	"github.com/scottymacleod/aegis/internal/config"
 	"github.com/scottymacleod/aegis/internal/cost"
 	"github.com/scottymacleod/aegis/internal/cron"
+	"github.com/scottymacleod/aegis/internal/embed"
 	"github.com/scottymacleod/aegis/internal/engine"
 	"github.com/scottymacleod/aegis/internal/filetracker"
 	"github.com/scottymacleod/aegis/internal/guard"
 	"github.com/scottymacleod/aegis/internal/hooks"
+	"github.com/scottymacleod/aegis/internal/knowledge"
+	"github.com/scottymacleod/aegis/internal/longmem"
 	"github.com/scottymacleod/aegis/internal/lsp"
 	"github.com/scottymacleod/aegis/internal/mcp"
 	"github.com/scottymacleod/aegis/internal/memory"
@@ -73,6 +76,8 @@ type Server struct {
 	cronCancel  context.CancelFunc
 	checkpoints *checkpoint.Store
 	fileTracker *filetracker.Tracker
+	knowledge   *knowledge.Store // project knowledge base (P3.3); nil when unavailable
+	longMem     *longmem.Store   // long-term entity memory (P3.1); nil when unavailable
 	runs        *runRegistry
 	sandbox     sandbox.Backend
 	lspMgr      *lsp.Manager
@@ -266,10 +271,29 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		}
 	}
 
+	// Semantic recall layer (P5.8): opt-in; nil embedder keeps both stores
+	// BM25-only, which is the zero-config default.
+	embedder := embed.New(cfg.Embeddings.Enabled, cfg.Embeddings.Provider, cfg.Embeddings.Model, cfg.Embeddings.BaseURL)
+
+	// Project knowledge base (P3.3) and long-term entity memory (P3.1) share
+	// the per-user data directory. Failures here are non-fatal — the tools
+	// are simply skipped, mirroring the teamTasks pattern above.
+	knowledgeStore, err := knowledge.Open(cwd, cfg.KnowledgeDBPath(cwd), embedder)
+	if err != nil {
+		logger.Warn("knowledge store unavailable", "err", err)
+		knowledgeStore = nil
+	}
+	projectName := filepath.Base(cwd)
+	longMemStore, err := longmem.Open(projectName, cfg.LongMemDBPath(), embedder)
+	if err != nil {
+		logger.Warn("long-term memory store unavailable", "err", err)
+		longMemStore = nil
+	}
+
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
 	todoList := builtin.NewTodoList()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir)}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -325,6 +349,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.fileTracker = ft
 	s.sandbox = sb
 	s.lspMgr = lspMgr
+	s.knowledge = knowledgeStore
+	s.longMem = longMemStore
 	s.workspace = cwd
 	s.memory = memory.NewSources(cwd, cfg.DataDir)
 	s.repoMap = loadRepoMap(cwd, logger)
@@ -540,6 +566,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return fmt.Errorf("server: refusing to start: auth token was not generated")
 	}
 	defer s.store.Close()
+	defer func() {
+		if s.knowledge != nil {
+			_ = s.knowledge.Close()
+		}
+		if s.longMem != nil {
+			_ = s.longMem.Close()
+		}
+	}()
 	defer func() {
 		if s.audit != nil {
 			_ = s.audit.Close()

@@ -135,6 +135,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newScanCmd())
 	cmd.AddCommand(newSandboxCmd())
 	cmd.AddCommand(newIndexCmd())
+	cmd.AddCommand(newKnowledgeCmd())
 	cmd.AddCommand(newDiagramCmd())
 	cmd.AddCommand(newWorkerCmd())
 	cmd.AddCommand(newBGCmd()) // P3.2: background session management

@@ -279,6 +279,62 @@ aegis --persona developer --mode build
 
 ---
 
+## Agent Teams
+
+Agent teams are a peer-to-peer coordination model distinct from the parent-child sub-agent model. There is no coordinator — each team agent claims tasks independently and communicates directly with peers.
+
+### Shared task list
+
+```json
+// Create a task
+{"tool": "team_task_create", "title": "Review internal/permission/", "priority": "high"}
+
+// Claim it (atomic — only one agent succeeds)
+{"tool": "team_task_claim", "task_id": "teamtask-abc123"}
+
+// Mark it done
+{"tool": "team_task_complete", "task_id": "teamtask-abc123", "result": "Found 2 issues"}
+
+// List all tasks (any agent can see the full board)
+{"tool": "team_task_list"}
+```
+
+The shared task list is SQLite-backed. `team_task_claim` is atomic — if two agents race for the same task, exactly one wins and the other receives an error and should try a different task.
+
+### Peer messaging
+
+```json
+// Send a message to a peer
+{"tool": "team_send", "to": "agent-def456", "subject": "handoff", "body": "Finished auth review, starting on session store"}
+
+// Read your inbox
+{"tool": "team_inbox"}
+```
+
+The file mailbox persists messages across agent restarts. Team agents don't need a shared parent — they coordinate through the task list and mailbox directly.
+
+### When to use teams vs. sub-agents
+
+| Pattern | Use when |
+|---------|---------|
+| Sub-agents | Parent needs results to continue; depth ≤ 3 |
+| Agent teams | Peers collaborate as equals; no single coordinator; work pool is large |
+
+### Practical example
+
+```bash
+# Spawn three peer agents, each reading the task board and working independently
+aegis parallel \
+  "Join the security-review team. Claim tasks from team_task_list and review each package." \
+  "Join the security-review team. Claim tasks from team_task_list and review each package." \
+  "Join the security-review team. Claim tasks from team_task_list and review each package." \
+  --yes
+```
+
+Pre-populate the board in one agent's first message, then let the peers race to claim tasks.
+
+---
+
 ## Inter-Agent Communication
 
 Sub-agents spawned via the `agent` tool can communicate through a mailbox system when using the `subprocess` backend. This is an advanced feature for multi-agent workflows where agents need to coordinate.

@@ -1,6 +1,8 @@
 # Tools Reference
 
-Aegis has 39 built-in tools across 13 categories. Tools are exposed to the model as callable functions; the model decides when and how to use them. All tool calls go through the permission gate before execution.
+Aegis has 50+ built-in tools across 14 categories. Tools are exposed to the model as callable functions; the model decides when and how to use them. All tool calls go through the permission gate before execution.
+
+Niche tools (LaTeX, diagram, cron, LSP, long-term memory, agent teams) are registered as **deferred**: the model sees only their names in a compact index and loads full schemas on demand via `tool_search`. This keeps per-turn context lean — especially important for local models.
 
 **Capability tags** control which permission modes allow a tool:
 
@@ -146,7 +148,7 @@ Search file contents with a regular expression. Returns `path:line:text` matches
 
 **Capability:** read
 
-Full-text search of the project knowledge base (FTS5-indexed README, documentation, and code comments). Faster than `grep` for finding conceptual content.
+Full-text search of the project knowledge base (FTS5-indexed README, documentation, and code comments). Faster than `grep` for finding conceptual content. When `embeddings.enabled: true`, results are a reciprocal-rank fusion of BM25 keyword matches and semantic (cosine-similarity) matches — see [Memory & Knowledge → Semantic Recall](memory-and-knowledge.md#semantic-recall-optional).
 
 ```json
 {
@@ -154,7 +156,7 @@ Full-text search of the project knowledge base (FTS5-indexed README, documentati
 }
 ```
 
-The knowledge base is populated by `aegis index`. If no index exists, the tool returns nothing.
+The knowledge base is populated by `aegis knowledge index` (not `aegis index`, which builds the unrelated repo map). If no index exists, the tool returns nothing.
 
 ---
 
@@ -205,6 +207,25 @@ Stage changes and create a commit.
 By default, stages all tracked modifications. Pass `paths` to stage specific files, or set `all: false` to commit only what is already staged (useful when the agent wants to stage selectively with `shell` first).
 
 Returns the new short commit hash and a diffstat. Reports "nothing to commit" cleanly rather than failing.
+
+---
+
+### `git_pr`
+
+**Capability:** network
+
+Push the current branch and open a pull request via the `gh` CLI. Falls back to printing a GitHub compare URL if `gh` is not available or not authenticated.
+
+```json
+{
+  "title": "fix: increase HTTP client timeout to 30s",
+  "body": "Increases the default timeout from 0 (no timeout) to 30s to prevent hung connections.",
+  "draft": false,        // optional: open as a draft PR
+  "base": "main"         // optional: target branch (defaults to repo default)
+}
+```
+
+Returns the PR URL on success. Used by background sessions to automatically close the loop after autonomous coding work.
 
 ---
 
@@ -403,12 +424,21 @@ Private IP addresses are rejected (SSRF protection).
 
 **Capability:** network
 
-Search the web via DuckDuckGo. Returns titles, URLs, and snippets.
+Search the web and return titles, URLs, and snippets. The provider is selected by the `search:` config section; DuckDuckGo HTML scraping is the zero-config fallback.
 
 ```json
 {
   "query": "golang context cancellation best practices"
 }
+```
+
+Configure a dedicated search API in `config.yaml`:
+
+```yaml
+search:
+  provider: brave          # brave | tavily | searxng | duckduckgo (default)
+  api_key: "$BRAVE_API_KEY"   # expanded from environment / .aegis/.env
+  base_url: ""             # required for searxng self-hosted instances
 ```
 
 ---
@@ -429,6 +459,22 @@ Persist a fact to project or user memory. Loaded into every future session's sys
 ```
 
 Project memory goes to `.aegis/memory.md`. User memory goes to the global data directory.
+
+---
+
+### `skill`
+
+**Capability:** read
+
+Load the full body of a skill by name. At session start, only skill names and descriptions are injected as a compact index. Use this tool to fetch the full procedure when you need to follow it.
+
+```json
+{
+  "name": "deploy-staging"
+}
+```
+
+Returns the skill's full markdown content. Skills without a `description:` frontmatter field are still eagerly injected for backward compatibility.
 
 ---
 
@@ -470,7 +516,7 @@ Persist structured facts about a named entity to the long-term cross-session sto
 
 **Capability:** read
 
-Search the long-term entity memory for facts matching a query.
+Search the long-term entity memory for facts matching a query. Ranking is BM25 by default, or hybrid BM25 + semantic when `embeddings.enabled: true` (see [Memory & Knowledge → Semantic Recall](memory-and-knowledge.md#semantic-recall-optional)).
 
 ```json
 {
@@ -520,7 +566,110 @@ Returns a list of locations (file, line, character) where the symbol is used.
 
 ---
 
-## Documents & Reports
+### `definition`
+
+**Capability:** read  *(deferred — load via `tool_search`)*
+
+Jump to the definition of a symbol using LSP.
+
+```json
+{
+  "path": "internal/engine/engine.go",
+  "line": 42,
+  "character": 15
+}
+```
+
+Returns the file path and position of the symbol's declaration.
+
+---
+
+### `hover`
+
+**Capability:** read  *(deferred)*
+
+Get hover documentation for a symbol using LSP.
+
+```json
+{
+  "path": "internal/engine/engine.go",
+  "line": 42,
+  "character": 15
+}
+```
+
+Returns the LSP hover content (type signature, docstring, etc.).
+
+---
+
+### `document_symbols`
+
+**Capability:** read  *(deferred)*
+
+List all symbols (functions, types, variables) in a file.
+
+```json
+{
+  "path": "internal/engine/engine.go"
+}
+```
+
+Returns a hierarchical list of symbol names, kinds, and locations.
+
+---
+
+### `workspace_symbols`
+
+**Capability:** read  *(deferred)*
+
+Search for symbols across the entire workspace by name.
+
+```json
+{
+  "query": "Engine"
+}
+```
+
+Returns all matching symbols (name, kind, location) across all open files and packages.
+
+---
+
+### `call_hierarchy`
+
+**Capability:** read  *(deferred)*
+
+Get the call hierarchy (callers or callees) for a function using LSP.
+
+```json
+{
+  "path": "internal/engine/engine.go",
+  "line": 42,
+  "character": 15,
+  "direction": "incoming"   // "incoming" (callers) or "outgoing" (callees)
+}
+```
+
+---
+
+## Discovery & Meta
+
+### `tool_search`
+
+**Capability:** read
+
+Search for deferred tools by name or keyword and load their schemas into the session registry. Deferred tools are advertised only by name at session start to save context; calling `tool_search` makes them callable.
+
+```json
+{
+  "query": "latex diagram"    // keyword search across deferred tool names and descriptions
+}
+```
+
+Returns matching tool schemas and registers them for immediate use. The model should call this when it needs a capability that was mentioned in `<deferred_tools>` but not yet loaded.
+
+---
+
+## Multi-Agent
 
 ### `latex_build`
 
@@ -716,3 +865,102 @@ Delegate a task to a sub-agent. The sub-agent runs independently with its own en
 - **Loop** — repeat the same agent until a condition is met
 
 Recursion depth is limited to 3 levels.
+
+---
+
+## Agent Teams
+
+Agent teams use a SQLite-backed shared task list and a file mailbox for peer-to-peer messaging. Multiple agents claim and complete tasks independently without a parent-child hierarchy. All team tools are deferred — load them with `tool_search`.
+
+### `team_task_create`
+
+**Capability:** write  *(deferred)*
+
+Add a task to the shared team task list.
+
+```json
+{
+  "title": "Review internal/permission/ for correctness",
+  "description": "Check all rule evaluation paths",   // optional
+  "priority": "high"                                   // optional: "high", "medium", "low"
+}
+```
+
+Returns the task ID. Any team agent can claim and complete it.
+
+---
+
+### `team_task_list`
+
+**Capability:** read  *(deferred)*
+
+List all team tasks with their current state.
+
+```json
+{}
+```
+
+Returns: id, title, state (pending/claimed/done), claimed_by, priority.
+
+---
+
+### `team_task_claim`
+
+**Capability:** write  *(deferred)*
+
+Atomically claim a pending task. Fails if another agent already claimed it.
+
+```json
+{
+  "task_id": "teamtask-abc123"
+}
+```
+
+Returns the task details on success. Used to prevent two agents working the same task.
+
+---
+
+### `team_task_complete`
+
+**Capability:** write  *(deferred)*
+
+Mark a claimed task as done and record the result.
+
+```json
+{
+  "task_id": "teamtask-abc123",
+  "result": "Found 2 issues in rules.go, see findings above"
+}
+```
+
+---
+
+### `team_send`
+
+**Capability:** write  *(deferred)*
+
+Send a message to a peer agent via the file mailbox.
+
+```json
+{
+  "to": "agent-abc123",       // recipient agent session ID
+  "subject": "handoff",
+  "body": "Finished reviewing auth — starting on session store next"
+}
+```
+
+---
+
+### `team_inbox`
+
+**Capability:** read  *(deferred)*
+
+Read messages sent to this agent by peers.
+
+```json
+{
+  "since": "2026-07-02T10:00:00Z"   // optional: only messages after this timestamp
+}
+```
+
+Returns a list of messages with sender, subject, body, and timestamp.

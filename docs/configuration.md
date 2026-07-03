@@ -117,6 +117,21 @@ provider:
   # advertise its context window and you want compaction to work.
   context_window: 0
 
+  # Ordered (provider, model) pairs tried in sequence after the primary
+  # adapter exhausts max_retries (P5.9). Empty = no failover.
+  fallback: []
+  #   - provider: ollama
+  #     model: "llama3.2"
+  #   - provider: openai
+  #     model: "gpt-4o-mini"
+  #     base_url: ""      # optional per-fallback API base override
+
+  # Required to fail over FROM a local provider (ollama) TO a cloud provider
+  # (anthropic, openai) — guards against a local-only session silently
+  # sending data off the machine on an outage. Cloud-to-cloud and any-to-local
+  # failover are always allowed and never need this flag.
+  allow_cloud_fallback: false
+
 
 # ── Permission ────────────────────────────────────────────────────────────────
 permission:
@@ -179,9 +194,71 @@ swarm:
   backend: in_process
 
 
+# ── Lifecycle hooks ───────────────────────────────────────────────────────────
+# Shell commands that fire on agent lifecycle events.
+# Aegis passes a JSON event object to the command's stdin.
+# Exit 0 = allow. Exit 2 = veto (stderr message shown to the model).
+# Other non-zero exits are logged as warnings but do not block execution.
+hooks:
+  # Fires before a tool call. Exit 2 vetoes the call.
+  pre_tool_use: ""           # e.g. "aegis-hook-lint"
+  # Fires after a tool call completes.
+  post_tool_use: ""
+  # Fires once when the session starts.
+  session_start: ""
+  # Fires when the agent finishes (success or error).
+  stop: ""
+  # Fires when a sub-agent finishes.
+  subagent_stop: ""
+
+
+# ── Web search ────────────────────────────────────────────────────────────────
+# Provider for the web_search tool. DuckDuckGo scraping is the zero-config default.
+search:
+  # brave | tavily | searxng | duckduckgo (default)
+  provider: duckduckgo
+
+  # API key for brave or tavily. Supports $VAR expansion from environment / .aegis/.env.
+  api_key: ""
+
+  # Required when provider=searxng. Base URL of your self-hosted SearxNG instance.
+  base_url: ""
+
+
+# ── Background session notifications ──────────────────────────────────────────
+# Alert when a detached session finishes, errors, or needs input.
+notify:
+  # Desktop notification via osascript (macOS), notify-send (Linux), or
+  # PowerShell toast (Windows). Enabled by default.
+  desktop: true
+
+  # POST the event JSON to this URL (optional). Leave empty to disable.
+  webhook: ""
+
+
+# ── Semantic recall ───────────────────────────────────────────────────────────
+# Optional embedding layer over the project knowledge base and long-term
+# entity memory (P5.8). Disabled by default — both stay FTS5/BM25-only, which
+# needs no extra service running. When enabled, search results are the
+# reciprocal-rank fusion of the BM25 ranking and a cosine-similarity ranking
+# over embeddings computed via a local Ollama model.
+embeddings:
+  enabled: false
+
+  # Only "ollama" is supported today.
+  provider: ollama
+
+  # Any Ollama embedding model, e.g. "nomic-embed-text", "mxbai-embed-large".
+  model: "nomic-embed-text"
+
+  # Ollama server base URL.
+  base_url: "http://localhost:11434"
+
+
 # ── Shell sandbox ─────────────────────────────────────────────────────────────
 sandbox:
   # "local"     — run directly on the host (default)
+  # "os"        — OS-level isolation: seatbelt on macOS, bwrap/Landlock on Linux; no container needed
   # "container" — run inside a container (requires runtime)
   # "auto"      — detect available runtimes and pick the best one
   backend: local
@@ -418,6 +495,22 @@ personas:
   security-architect: { model: claude-opus-4-8 }
   developer:          { model: gpt-4o }
   report-writer:      { model: claude-opus-4-8 }
+```
+
+### Configure lifecycle hooks
+
+```yaml
+hooks:
+  pre_tool_use: "/usr/local/bin/aegis-lint-hook"   # lint before file writes
+  post_tool_use: "jq . >> /var/log/aegis-audit.jsonl"
+```
+
+### Configure pluggable web search
+
+```yaml
+search:
+  provider: brave
+  api_key: "$BRAVE_API_KEY"   # set BRAVE_API_KEY in environment or .aegis/.env
 ```
 
 ### Use an AI gateway

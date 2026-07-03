@@ -51,8 +51,6 @@ func Run(cfg Config) error {
 }
 
 const (
-	maxTranscriptBytes = 1 << 20
-
 	// Sidebar geometry. sidebarInnerW is the content width passed to lipgloss
 	// Width(); the rendered block is sidebarInnerW+1 wide (right border char).
 	sidebarInnerW   = 21
@@ -73,8 +71,9 @@ type model struct {
 	vp         viewport.Model
 	ta         textarea.Model
 	sp         spinner.Model
-	transcript cappedBuffer
+	transcript transcript
 	liveText   *strings.Builder // pointer: strings.Builder panics if copied by value after first write
+	live       *liveBlock       // actively-streaming block; pointer for the same reason as liveText
 	thinkText  *strings.Builder // accumulates extended-thinking text for the current turn
 	renderer   *glamour.TermRenderer
 	rendererW  int // tracks viewport width to know when to recreate renderer
@@ -103,21 +102,6 @@ type model struct {
 	turnCount   int       // conversation turns sent; guards turn separator logic
 	animStep    int       // frame counter for the streaming "working" shimmer
 	humorMode   bool      // when true, D&D phrases replace plain "thinking…"
-
-	// Wrapped-transcript cache. Re-wrapping the whole (up to 1 MiB) transcript
-	// on every streamed token is O(n²) per turn; instead we wrap once and reuse
-	// until the transcript content length or viewport width changes. Only the
-	// small live tail is wrapped per refresh.
-	wrapCache    string
-	wrapCacheLen int
-	wrapCacheW   int
-
-	// Streaming live-text prefix cache. The live tail (liveText) is re-wrapped
-	// on every token; caching the wrapped prefix up to the last safe markdown
-	// boundary reduces this from O(n²) to O(tail) per turn.
-	liveWrapCache   string
-	liveWrapCacheTo int // byte offset up to which liveWrapCache is valid
-	liveWrapCacheW  int // viewport width at which the cache was built
 
 	// followBottom tracks whether the viewport should auto-scroll to the newest
 	// content. It is true while the user is parked at the bottom and false once
@@ -210,32 +194,6 @@ type editorDoneMsg struct {
 	content string
 	err     error
 }
-
-// cappedBuffer is a []byte-backed writer that trims old content when it
-// exceeds maxTranscriptBytes, preventing unbounded memory growth.
-type cappedBuffer struct{ buf []byte }
-
-const trimPrefix = "[earlier output trimmed]\n\n"
-
-func (b *cappedBuffer) WriteString(s string) {
-	b.buf = append(b.buf, s...)
-	cap := maxTranscriptBytes - len(trimPrefix)
-	if len(b.buf) > maxTranscriptBytes {
-		trim := len(b.buf) - cap
-		for trim < len(b.buf) && b.buf[trim] != '\n' {
-			trim++
-		}
-		if trim < len(b.buf) {
-			trim++
-		}
-		copy(b.buf, b.buf[trim:])
-		b.buf = b.buf[:len(b.buf)-trim]
-		b.buf = append([]byte(trimPrefix), b.buf...)
-	}
-}
-
-func (b *cappedBuffer) String() string { return string(b.buf) }
-func (b *cappedBuffer) Reset()         { b.buf = b.buf[:0] }
 
 // --- messages ---
 
@@ -331,6 +289,7 @@ func newModel(cfg Config) model {
 		histIdx:      -1,
 		workDir:      workDir,
 		liveText:     &strings.Builder{},
+		live:         &liveBlock{},
 		thinkText:    &strings.Builder{},
 		renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
 		keys:         defaultKeyMap(),
@@ -344,7 +303,7 @@ func newModel(cfg Config) model {
 	if draft := loadStash(stashPath); draft != "" {
 		m.ta.SetValue(draft)
 	}
-	m.transcript.WriteString(buildWelcomeContent(cfg, workDir, th))
+	m.transcript.append(buildWelcomeContent(cfg, workDir, th))
 	return m
 }
 
@@ -547,7 +506,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.wizard.update(msg)
 		if m.wizard.done {
 			if m.wizard.saved {
-				m.transcript.WriteString(
+				m.transcript.append(
 					m.th.statusText.Render("✓ Configuration saved — restart Aegis to apply changes.") + "\n\n",
 				)
 			}
@@ -652,13 +611,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if sel, ok := msg.(timelinePickerSelectedMsg); ok {
 			m.timelinePicker = nil
 			m.ta.Focus()
-			// Scroll to the selected turn's byte offset in the wrapped transcript.
-			base := m.transcript.String()
-			offset := sel.entry.byteOffset
-			if offset > len(base) {
-				offset = len(base)
-			}
-			prefix := wrap(base[:offset], m.vp.Width())
+			// Scroll to the selected turn's recorded block position.
+			prefix := m.transcript.renderUpTo(sel.entry.blockIndex, m.vp.Width())
 			m.vp.SetYOffset(strings.Count(prefix, "\n"))
 			m.followBottom = false
 			m.refresh()
@@ -968,7 +922,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "ready"
 		m.escPending = false
 		m.setSteerMode(false)
-		m.transcript.WriteString("\n")
+		m.transcript.append("\n")
 		m.refresh()
 		return m, nil
 
@@ -976,25 +930,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.escPending = false
 		m.setSteerMode(false)
-		m.transcript.WriteString(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")
+		m.transcript.append(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")
 		m.status = "ready"
 		m.refresh()
 		return m, nil
 
 	case bangMsg: // P2.2: shell command result
 		header := m.th.tool.Render("! " + msg.cmd)
-		m.transcript.WriteString("\n" + header + "\n")
+		m.transcript.append("\n" + header + "\n")
 		if msg.output != "" {
 			style := m.th.sideValue
 			if msg.code != 0 {
 				style = m.th.toolErr
 			}
-			m.transcript.WriteString(style.Render(msg.output) + "\n")
+			m.transcript.append(style.Render(msg.output) + "\n")
 		}
 		if msg.code != 0 {
-			m.transcript.WriteString(m.th.toolErr.Render(fmt.Sprintf("exit %d", msg.code)) + "\n")
+			m.transcript.append(m.th.toolErr.Render(fmt.Sprintf("exit %d", msg.code)) + "\n")
 		}
-		m.transcript.WriteString("\n")
+		m.transcript.append("\n")
 		m.followBottom = true
 		m.refresh()
 		return m, nil
@@ -1094,7 +1048,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 		if msg.Output == "\x00clear" {
-			m.transcript.Reset()
+			m.transcript.reset()
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
 			m.cacheReadTokens, m.cacheCreationTokens = 0, 0
@@ -1103,7 +1057,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.changedFiles = m.changedFiles[:0]
 			m.teammates = nil
 			m.timelineEntries = m.timelineEntries[:0]
-			m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
+			m.transcript.append(buildWelcomeContent(m.cfg, m.workDir, m.th))
 			m.refresh()
 			return m, nil
 		}
@@ -1150,22 +1104,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Output == "\x00humor-on" {
 			m.humorMode = true
-			m.transcript.WriteString(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
+			m.transcript.append(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
 			m.refresh()
 			return m, nil
 		}
 		if msg.Output == "\x00humor-off" {
 			m.humorMode = false
-			m.transcript.WriteString(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
+			m.transcript.append(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
 			m.refresh()
 			return m, nil
 		}
 		if msg.Output == "\x00humor-toggle" {
 			m.humorMode = !m.humorMode
 			if m.humorMode {
-				m.transcript.WriteString(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
+				m.transcript.append(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
 			} else {
-				m.transcript.WriteString(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
+				m.transcript.append(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
 			}
 			m.refresh()
 			return m, nil
@@ -1175,7 +1129,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.IsError {
 				style = m.th.errLine
 			}
-			m.transcript.WriteString(style.Render(msg.Output) + "\n\n")
+			m.transcript.append(style.Render(msg.Output) + "\n\n")
 		}
 		if msg.Message != "" {
 			m.appendUser(msg.Message)
@@ -1378,39 +1332,20 @@ func (m *model) acceptCompletion(run bool) tea.Cmd {
 }
 
 func (m *model) refresh() {
-	// Wrap the static transcript once and cache it; only re-wrap when its byte
-	// length or the viewport width changes. The transcript is append/reset/trim
-	// only, so length is a sufficient change signal.
-	base := m.transcript.String()
-	if base == "" {
-		m.wrapCache, m.wrapCacheLen, m.wrapCacheW = "", 0, m.vp.Width()
-	} else if len(base) != m.wrapCacheLen || m.vp.Width() != m.wrapCacheW {
-		m.wrapCache = wrap(base, m.vp.Width())
-		m.wrapCacheLen = len(base)
-		m.wrapCacheW = m.vp.Width()
-	}
-	content := m.wrapCache
+	// Each block wraps and caches itself; only blocks whose cached width no
+	// longer matches the viewport get rewrapped (TQ1).
+	content := m.transcript.render(m.vp.Width())
 
 	// Streaming extended-thinking is shown dim above the answer until it flushes.
 	if think := m.thinkText.String(); think != "" {
 		content += wrap(m.th.thinking.Render("✻ thinking")+"\n"+m.th.thinkingDim.Render(think)+"\n", m.vp.Width())
 	}
 
-	// The live tail is re-wrapped on every token. Cache the wrapped prefix up to
-	// the last safe markdown boundary and only re-wrap the short suffix.
+	// The live tail keeps its own boundary-cached rewrap (see liveBlock) so a
+	// long streaming reply stays O(tail) per token instead of O(n).
 	if live := m.liveText.String(); live != "" {
-		w := m.vp.Width()
-		boundary := findSafeMarkdownBoundary(live)
-		if boundary > m.liveWrapCacheTo || w != m.liveWrapCacheW {
-			if boundary > 0 {
-				m.liveWrapCache = wrap(live[:boundary], w)
-			} else {
-				m.liveWrapCache = ""
-			}
-			m.liveWrapCacheTo = boundary
-			m.liveWrapCacheW = w
-		}
-		content += m.liveWrapCache + wrap(live[boundary:], w)
+		m.live.setText(live)
+		content += m.live.render(m.vp.Width())
 	} else if m.streaming {
 		secs := 0
 		if !m.streamStart.IsZero() {
@@ -1439,8 +1374,8 @@ func (m *model) flushThinking() {
 	if raw == "" {
 		return
 	}
-	m.transcript.WriteString(m.th.thinking.Render("✻ thinking") + "\n")
-	m.transcript.WriteString(m.th.thinkingDim.Render(raw) + "\n\n")
+	m.transcript.append(m.th.thinking.Render("✻ thinking") + "\n")
+	m.transcript.append(m.th.thinkingDim.Render(raw) + "\n\n")
 }
 
 // flushLiveText renders accumulated assistant text through glamour and appends
@@ -1451,16 +1386,16 @@ func (m *model) flushLiveText() {
 	}
 	raw := m.liveText.String()
 	m.liveText.Reset()
-	m.liveWrapCache, m.liveWrapCacheTo, m.liveWrapCacheW = "", 0, 0
+	m.live.reset()
 	m.lastAssistantText = raw // TQ4: capture for /copy
 	if m.renderer != nil {
 		if rendered, err := m.renderer.Render(raw); err == nil {
 			rendered = strings.TrimRight(rendered, "\n")
-			m.transcript.WriteString(rendered + "\n")
+			m.transcript.append(rendered + "\n")
 			return
 		}
 	}
-	m.transcript.WriteString(raw)
+	m.transcript.append(raw)
 }
 
 // sendApprovalCmd fires a POST to /sessions/{id}/approve with the user's
@@ -1615,7 +1550,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.cfg.Mode = sess.Mode
 	m.slash.SetSession(sess.ID, sess.Mode)
 
-	m.transcript.Reset()
+	m.transcript.reset()
 	m.tools = m.tools[:0]
 	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
 	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
@@ -1624,11 +1559,10 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.changedFiles = nil
 	m.teammates = nil
 	m.timelineEntries = nil
-	m.wrapCacheLen = -1 // force a re-wrap on next refresh
 	m.streaming = false
 	m.status = "ready"
 
-	m.transcript.WriteString(buildWelcomeContent(m.cfg, m.workDir, m.th))
+	m.transcript.append(buildWelcomeContent(m.cfg, m.workDir, m.th))
 	m.loadHistory(sess.Messages)
 	m.followBottom = true
 }
@@ -1676,15 +1610,15 @@ func (m *model) loadHistory(msgs []provider.Message) {
 				if name == "" {
 					name = "tool"
 				}
-				m.transcript.WriteString(renderToolResult(m.th, name, r.Content, r.IsError, m.vp.Width(), m.toolMaxLines()) + "\n")
+				m.transcript.append(renderToolResult(m.th, name, r.Content, r.IsError, m.vp.Width(), m.toolMaxLines()) + "\n")
 			}
 		case provider.RoleAssistant:
 			for _, b := range msg.Content {
 				switch v := b.(type) {
 				case provider.ThinkingBlock:
 					if t := strings.TrimSpace(v.Text); t != "" {
-						m.transcript.WriteString(m.th.thinking.Render("✻ thinking") + "\n")
-						m.transcript.WriteString(m.th.thinkingDim.Render(t) + "\n\n")
+						m.transcript.append(m.th.thinking.Render("✻ thinking") + "\n")
+						m.transcript.append(m.th.thinkingDim.Render(t) + "\n\n")
 					}
 				case provider.TextBlock:
 					if v.Text != "" {
@@ -1693,7 +1627,7 @@ func (m *model) loadHistory(msgs []provider.Message) {
 					}
 				case provider.ToolUseBlock:
 					toolNames[v.ID] = v.Name
-					m.transcript.WriteString("\n" + renderToolCall(m.th, v.Name, v.Input, m.vp.Width()) + "\n")
+					m.transcript.append("\n" + renderToolCall(m.th, v.Name, v.Input, m.vp.Width()) + "\n")
 				}
 			}
 		}
@@ -1705,7 +1639,7 @@ func (m *model) appendUser(text string) {
 	m.timelineEntries = append(m.timelineEntries, timelineEntry{
 		text:       oneLine(text),
 		ts:         time.Now(),
-		byteOffset: len(m.transcript.buf),
+		blockIndex: m.transcript.len(),
 	})
 
 	if m.turnCount > 0 {
@@ -1713,11 +1647,11 @@ func (m *model) appendUser(text string) {
 		if sepW < 10 {
 			sepW = 60
 		}
-		m.transcript.WriteString(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
+		m.transcript.append(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
 	}
 	m.turnCount++
-	m.transcript.WriteString(barLabel("You", colUserFg) + "\n" + text + "\n\n")
-	m.transcript.WriteString(barLabel("Assistant", colAssistFg) + "\n")
+	m.transcript.append(barLabel("You", colUserFg) + "\n" + text + "\n\n")
+	m.transcript.append(barLabel("Assistant", colAssistFg) + "\n")
 }
 
 func (m *model) applyEvent(ev api.Event) {
@@ -1735,7 +1669,7 @@ func (m *model) applyEvent(ev api.Event) {
 	case api.KindToolCall:
 		m.flushThinking()
 		m.flushLiveText() // render any preceding prose before the tool line
-		m.transcript.WriteString("\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.vp.Width()) + "\n")
+		m.transcript.append("\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.vp.Width()) + "\n")
 		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
 		if len(m.tools) > maxToolHistory {
 			m.tools = m.tools[1:]
@@ -1766,7 +1700,7 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindToolResult:
-		m.transcript.WriteString(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width(), m.toolMaxLines()) + "\n")
+		m.transcript.append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width(), m.toolMaxLines()) + "\n")
 		for i := len(m.tools) - 1; i >= 0; i-- {
 			if m.tools[i].name == ev.Tool && m.tools[i].status == "pending" {
 				if ev.ToolIsError {
@@ -1847,15 +1781,15 @@ func (m *model) applyEvent(ev api.Event) {
 		m.flushThinking()
 		m.flushLiveText()
 		sepW := max(m.vp.Width()-2, 10)
-		m.transcript.WriteString(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
-		m.transcript.WriteString(barLabel("You", colUserFg) + "\n" + ev.Text + "\n\n")
-		m.transcript.WriteString(barLabel("Assistant", colAssistFg) + "\n")
+		m.transcript.append(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
+		m.transcript.append(barLabel("You", colUserFg) + "\n" + ev.Text + "\n\n")
+		m.transcript.append(barLabel("Assistant", colAssistFg) + "\n")
 
 	case api.KindGuard:
 		// Output validation flagged the answer; surface it as a dim warning.
 		m.flushThinking()
 		m.flushLiveText()
-		m.transcript.WriteString("\n" + m.th.elapsedDim.Render("⚠ output guard: "+ev.Text) + "\n")
+		m.transcript.append("\n" + m.th.elapsedDim.Render("⚠ output guard: "+ev.Text) + "\n")
 
 	case api.KindDone:
 		// Flush any buffered text (safety net — normally flushed at KindTurnDone).
@@ -1867,17 +1801,17 @@ func (m *model) applyEvent(ev api.Event) {
 		m.flushThinking()
 		m.flushLiveText()
 		m.approval = nil // clear any pending approval if the run aborts
-		m.transcript.WriteString("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
+		m.transcript.append("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
 	}
 }
 
 func (m *model) renderTeammates(msg teammatesMsg) {
 	if msg.err != nil {
-		m.transcript.WriteString("\n" + m.th.errLine.Render("teammates: "+msg.err.Error()) + "\n\n")
+		m.transcript.append("\n" + m.th.errLine.Render("teammates: "+msg.err.Error()) + "\n\n")
 		return
 	}
 	if len(msg.items) == 0 {
-		m.transcript.WriteString("\n" + m.th.statusDim.Render("⚇ no sub-agents spawned yet") + "\n\n")
+		m.transcript.append("\n" + m.th.statusDim.Render("⚇ no sub-agents spawned yet") + "\n\n")
 		return
 	}
 	var b strings.Builder
@@ -1894,7 +1828,7 @@ func (m *model) renderTeammates(msg teammatesMsg) {
 		b.WriteString(style.Render(truncate(line, m.width-1)) + "\n")
 	}
 	b.WriteString("\n")
-	m.transcript.WriteString(b.String())
+	m.transcript.append(b.String())
 }
 
 // --- view ---

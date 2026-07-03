@@ -414,6 +414,37 @@ Set to `0` to disable retries.
 
 ---
 
+## Provider Failover
+
+When the primary provider exhausts `max_retries`, Aegis can fail over to an ordered list of backup providers instead of aborting the run. Failover only triggers on a synchronous request failure (before any tokens have streamed) — a run that has already started streaming a response is never interrupted mid-stream to switch providers, so partial output is never lost or replayed.
+
+```yaml
+provider:
+  default: anthropic
+  model: "claude-opus-4-8"
+  max_retries: 4
+
+  fallback:
+    - provider: ollama
+      model: "llama3.2"          # falls back to a local model if Anthropic is down
+    - provider: openai
+      model: "gpt-4o-mini"
+      base_url: ""                # optional per-fallback base URL override
+```
+
+Each fallback entry gets its own retry budget (`max_retries`) before the chain moves to the next entry. API keys for fallback providers are read from the environment the same way as the primary (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`); a fallback missing its key is skipped with a warning rather than failing the whole chain.
+
+**Trust boundary guard:** failing over *from* a local provider (`ollama`) *to* a cloud provider (`anthropic`, `openai`) is skipped by default — an outage shouldn't silently start sending your conversation to a cloud API. Opt in explicitly:
+
+```yaml
+provider:
+  allow_cloud_fallback: true
+```
+
+Cloud→cloud and any→local failover are never gated behind this flag.
+
+---
+
 ## Context Window
 
 Aegis uses the model's context window size to determine when to run compaction (at 85% fill). For local models that don't report their context size:

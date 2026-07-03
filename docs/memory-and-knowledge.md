@@ -11,8 +11,8 @@ Aegis has several systems for persisting information across sessions. Together t
 | Project memory | Project | `.aegis/memory.md` | System prompt | Facts about this project |
 | User memory | Global | `~/.local/share/aegis/memory.md` | System prompt | Facts that apply everywhere |
 | Skills | Project or global | `*.md` files | System prompt | Reusable procedures |
-| Project knowledge base | Project | `.aegis/knowledge.db` | System prompt + `project_knowledge` tool | FTS5-indexed docs and code comments |
-| Long-term entity store | Global | `~/.local/share/aegis/longmem.db` | `entity_recall` tool | Cross-session structured facts |
+| Project knowledge base | Project | `.aegis/knowledge.db` | `project_knowledge` tool | FTS5-indexed docs and code comments, optionally hybrid BM25+semantic |
+| Long-term entity store | Global | `~/.local/share/aegis/longmem.db` | `entity_recall` tool | Cross-session structured facts, optionally hybrid BM25+semantic |
 
 ---
 
@@ -136,21 +136,23 @@ When asked to do a security review:
 
 ## Project Knowledge Base
 
-**Database:** `.aegis/knowledge.db`
+**Database:** `.aegis/knowledge.db` (project-scoped — each project gets its own index)
 
-The knowledge base is a SQLite FTS5 index of your project's documentation and code comments. It provides fast, semantic search without reading individual files.
+The knowledge base is a SQLite FTS5 index of your project's documentation and code comments, searched with BM25 keyword ranking by default (or hybrid BM25 + semantic ranking when [embeddings are enabled](#semantic-recall-optional)). It provides fast search without reading individual files.
 
 **Building the index:**
 ```bash
-aegis index
+aegis knowledge index
 ```
 
 The index covers:
-- `README.md` and all `.md` files in `docs/`
-- Exported Go doc comments (`// Package ...`, `// FunctionName ...`)
+- `README.md` and all `.md`/`.txt`/`.rst` files in the project
+- Go doc comments (`// Package ...`, `// FunctionName ...`)
 - Comparable comments in other languages
 
-The cache stores a content fingerprint (path + size + mtime) and is automatically rebuilt when files change.
+Rerun this after adding significant documentation or refactoring large parts of the codebase — it's a full reindex, not incremental.
+
+> Don't confuse this with `aegis index`, which builds a *different*, lighter artifact: the repo map (`.aegis/repomap.json`), a structural symbol listing (top-level functions/types per file) injected into the system prompt automatically when present. `aegis knowledge index` builds the searchable prose/comment index behind the `project_knowledge` tool. Both are useful together; neither substitutes for the other.
 
 **Using the knowledge base:**
 
@@ -161,14 +163,33 @@ The agent can search it with the `project_knowledge` tool:
 }
 ```
 
-Part of the index is also injected into the system prompt (token budget ~2000 tokens, truncated at file boundaries) so the agent has high-level project context without tool calls.
-
 **Inspecting the repo map:**
 ```bash
 aegis index --print   # show the symbol map
 ```
 
-The repo map (a separate, lighter index of top-level symbols per file) is injected automatically if `.aegis/repomap.json` exists.
+---
+
+## Semantic Recall (optional)
+
+**Config:** `embeddings.*` — see [Configuration Reference](configuration.md#full-config-reference)
+
+By default, the project knowledge base and the long-term entity store are BM25-only (FTS5) — no extra service required. Setting `embeddings.enabled: true` adds a semantic layer: a local Ollama embedding model (default `nomic-embed-text`) embeds every indexed document/fact, and searches become the [reciprocal-rank fusion](https://en.wikipedia.org/wiki/Learning_to_rank#Reciprocal_rank_fusion) of the BM25 ranking and a cosine-similarity ranking over those embeddings. This surfaces matches that share no keywords with the query but are topically related.
+
+```yaml
+embeddings:
+  enabled: true
+  provider: ollama
+  model: "nomic-embed-text"
+  base_url: "http://localhost:11434"
+```
+
+```bash
+ollama pull nomic-embed-text
+aegis knowledge index   # re-embeds existing docs once enabled
+```
+
+If the embedder is unreachable or misconfigured at search time, both stores silently fall back to BM25-only results for that query — semantic recall is strictly additive, never a hard dependency.
 
 ---
 
@@ -217,9 +238,10 @@ At session start, Aegis loads memory in this order:
 3. User skills (`~/.local/share/aegis/skills/*.md`)
 4. Project skills (`.aegis/skills/*.md`)
 5. Repo map (`.aegis/repomap.json` → injected into system prompt)
-6. Knowledge base snippet (`.aegis/knowledge.db` → top ~2000 tokens)
 
 Memory files are cached for 5 seconds — file edits are picked up within a few seconds without restarting Aegis.
+
+The project knowledge base and long-term entity store are *not* injected into the system prompt — they're queried on demand via the `project_knowledge` and `entity_recall` tools, keeping their (potentially large) content out of every turn's token budget.
 
 ---
 
@@ -252,10 +274,10 @@ Use **memory** for static facts (endpoints, conventions, constraints). Use **ski
 ### Rebuild the index after major changes
 
 ```bash
-aegis index
+aegis knowledge index
 ```
 
-Run this after adding significant documentation or refactoring large parts of the codebase. The daemon detects file changes and rebuilds automatically, but triggering it manually ensures the index is fresh before a large session.
+Run this after adding significant documentation. Unlike the repo map (which the daemon rebuilds automatically when it detects file changes), the knowledge base is a full reindex you trigger manually — there's no incremental staleness detection, so run it before a large session if docs have moved since the last index.
 
 ### Entity store for cross-project knowledge
 

@@ -12,7 +12,7 @@ import (
 type timelineEntry struct {
 	text       string    // first line of the user's message
 	ts         time.Time // when the turn was sent
-	byteOffset int       // byte offset in transcript.buf at the time of writing
+	blockIndex int       // transcript block count at the time of writing
 }
 
 type timelineItem struct{ e timelineEntry }
