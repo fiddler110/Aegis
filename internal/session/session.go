@@ -121,6 +121,10 @@ CREATE TABLE IF NOT EXISTS session_traces (
     seq        INTEGER NOT NULL,
     data       BLOB    NOT NULL,
     PRIMARY KEY (session_id, seq)
+);
+CREATE TABLE IF NOT EXISTS daily_cost (
+    day      TEXT PRIMARY KEY, -- UTC date, YYYY-MM-DD
+    cost_usd REAL NOT NULL DEFAULT 0
 );`); err != nil {
 		return err
 	}
@@ -585,6 +589,29 @@ func (s *Store) AddUsage(ctx context.Context, id string, inputTokens, outputToke
 		`UPDATE sessions SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, cost_usd = cost_usd + ?, updated_at = ? WHERE id = ?`,
 		inputTokens, outputTokens, costUSD, time.Now().UnixMilli(), id)
 	return err
+}
+
+// AddDailyCost accumulates cost against the current UTC day, for the
+// cross-session daily spend cap (P9.5). Safe for concurrent calls.
+func (s *Store) AddDailyCost(ctx context.Context, costUSD float64) error {
+	day := time.Now().UTC().Format("2006-01-02")
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO daily_cost (day, cost_usd) VALUES (?, ?)
+		 ON CONFLICT(day) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd`,
+		day, costUSD)
+	return err
+}
+
+// TodayCost returns accumulated spend across all sessions for the current UTC
+// day (0 if nothing has been spent yet today).
+func (s *Store) TodayCost(ctx context.Context) (float64, error) {
+	day := time.Now().UTC().Format("2006-01-02")
+	var cost float64
+	err := s.db.QueryRowContext(ctx, `SELECT cost_usd FROM daily_cost WHERE day = ?`, day).Scan(&cost)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return cost, err
 }
 
 // SetSystem updates a session's system prompt.

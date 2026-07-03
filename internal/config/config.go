@@ -125,6 +125,17 @@ type SandboxConfig struct {
 // CostConfig configures spend tracking.
 type CostConfig struct {
 	BudgetUSD float64 `koanf:"budget_usd"` // abort a run past this estimated cost; 0 = unlimited
+
+	// SessionCapUSD refuses to start a new turn once a session's cumulative
+	// (persisted) cost reaches this amount; 0 = unlimited (P9.5).
+	SessionCapUSD float64 `koanf:"session_cap_usd"`
+	// DailyCapUSD refuses to start a new turn once total spend across all
+	// sessions for the current UTC day reaches this amount; 0 = unlimited (P9.5).
+	DailyCapUSD float64 `koanf:"daily_cap_usd"`
+	// AlertThreshold is the fraction (0-1) of SessionCapUSD/DailyCapUSD at which
+	// a warning event is surfaced to the client instead of a hard stop. Only
+	// takes effect for whichever cap is non-zero. Default 0.8 (P9.5).
+	AlertThreshold float64 `koanf:"alert_threshold"`
 }
 
 // LSPServerConfig configures one LSP language server.
@@ -262,6 +273,9 @@ func defaults() map[string]any {
 		"permission.auto_approve_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
 		"cost.budget_usd":              0.0,
+		"cost.session_cap_usd":         0.0,
+		"cost.daily_cap_usd":           0.0,
+		"cost.alert_threshold":         0.8,
 		"swarm.backend":                "in_process",
 		"sandbox.backend":              "local",
 		"sandbox.image":                "ubuntu:22.04",

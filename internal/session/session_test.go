@@ -378,3 +378,38 @@ func TestDeleteRemovesMessageAndTraceRows(t *testing.T) {
 		t.Errorf("Delete left orphan rows: messages=%d traces=%d", msgCount, traceCount)
 	}
 }
+
+// TestTodayCostDefaultsToZero verifies a fresh store with no recorded spend
+// reports zero rather than erroring (P9.5 daily spend cap).
+func TestTodayCostDefaultsToZero(t *testing.T) {
+	st := newTestStore(t)
+	got, err := st.TodayCost(context.Background())
+	if err != nil {
+		t.Fatalf("TodayCost: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("TodayCost on empty store = %v, want 0", got)
+	}
+}
+
+// TestAddDailyCostAccumulates verifies repeated calls sum into the same day's
+// row instead of overwriting it (P9.5 daily spend cap).
+func TestAddDailyCostAccumulates(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.AddDailyCost(ctx, 1.5); err != nil {
+		t.Fatalf("AddDailyCost: %v", err)
+	}
+	if err := st.AddDailyCost(ctx, 2.25); err != nil {
+		t.Fatalf("AddDailyCost: %v", err)
+	}
+	got, err := st.TodayCost(ctx)
+	if err != nil {
+		t.Fatalf("TodayCost: %v", err)
+	}
+	const want = 3.75
+	if got != want {
+		t.Errorf("TodayCost = %v, want %v", got, want)
+	}
+}

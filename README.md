@@ -88,7 +88,7 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 - **Extended thinking** — Anthropic extended thinking streamed live to the TUI; `think` flag for local reasoning models (qwen3, deepseek-r1)
 - **Sandbox** — Docker, Podman, WSL containers, Apple Containers; OS-level isolation via macOS seatbelt / Linux bwrap when no container runtime is available; `aegis sandbox detect` to probe what's available
 - **Web UI + ACP editor integration** — browser dashboard at `aegis ui`; ACP protocol for Zed, Neovim (codecompanion/avante), and other editors
-- **Cost tracking** — live token meter, prompt-cache hit rate, configurable spend budget that halts a run when exceeded
+- **Cost tracking** — live token meter, prompt-cache hit rate, configurable per-run spend budget plus session/daily spend caps with an alert threshold before the hard stop
 - **Session export** — share transcripts as self-contained HTML, Markdown, or JSON with `aegis sessions export`
 - **Project knowledge base & long-term memory** — FTS5-indexed docs/comments (`aegis knowledge index`) and a cross-session entity store; optional local-embedding hybrid recall (`embeddings.enabled`) for queries that share no keywords with the source text
 - **Provider failover** — ordered fallback providers kick in when the primary exhausts its retry budget, mid-stream output never replayed; local→cloud failover is opt-in only, guarding against silent data egress on an outage

@@ -33,6 +33,9 @@ go test ./internal/engine/... -run TestBudget
 
 # Run with race detector
 go test -race ./...
+
+# Regenerate an eval golden transcript after an intentional behavior change
+AEGIS_EVAL_UPDATE=1 go test ./internal/eval/... -run TestScenario_ToolRoundTrip
 ```
 
 ## Architecture
@@ -72,6 +75,7 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers |
 | `internal/cron` | Cron scheduler for background tasks |
 | `internal/guard` | Output validation — calls a second model pass against a rubric or JSON schema |
+| `internal/eval` | Scenario-based agent-behavior regression harness: scripted multi-turn conversations run against a real engine (deterministic adapter, no live model) with tool-call/text/error assertions and golden transcripts |
 
 ### Provider model
 

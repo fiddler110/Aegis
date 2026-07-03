@@ -1948,6 +1948,12 @@ func (m *model) applyEvent(ev api.Event) {
 		m.flushLiveText()
 		m.transcript.append("\n" + m.th.elapsedDim.Render("⚠ output guard: "+ev.Text) + "\n")
 
+	case api.KindCostAlert:
+		// Spend crossed the configured alert threshold; surface it as a dim warning.
+		m.flushThinking()
+		m.flushLiveText()
+		m.transcript.append("\n" + m.th.elapsedDim.Render("⚠ "+ev.Text) + "\n")
+
 	case api.KindDone:
 		// Flush any buffered text (safety net — normally flushed at KindTurnDone).
 		// If the last action was a tool call with no follow-up text, this ensures

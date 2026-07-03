@@ -101,6 +101,7 @@ Every daemon response is delivered as a stream of typed events. Clients (TUI, `a
 | `steer` | Mid-run steering message injected |
 | `trace` | Per-turn observability record |
 | `guard` | Output validation result |
+| `cost_alert` | Spend crossed the configured session/daily alert threshold |
 | `approval_request` | Waiting for user approval |
 | `done` | Entire run finished |
 | `error` | Run failed with error |
@@ -182,6 +183,7 @@ internal/
   hooks/                      Pre/post tool hooks + JSONL audit
   persona/                    17 built-in personas
   guard/                      Output validation
+  eval/                       Scenario-based agent-behavior regression harness
   sandbox/                    Local/container shell execution backends
   filetracker/                File staleness detection (prevents overwrites)
   lsp/                        LSP client manager

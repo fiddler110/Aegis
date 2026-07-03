@@ -1,16 +1,16 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-03 (v16 — implemented all of P8, the 2026-07-03 performance audit's findings; see Appendix A)
+**Updated:** 2026-07-03 (v17 — implemented P9.1/P9.2/P9.5, the engineering-quality items with real (if non-urgent) value; see Appendix A. P9.3/P9.4/P9.6 remain open, deliberately unbuilt — no demand signal yet.)
 
 ---
 
 ## Status
 
-P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), and all of P8 (P8.1–P8.6) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
+P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), and P9.1/P9.2/P9.5 are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
 
-P9 collects smaller engineering-quality gaps (test coverage, eval harness) that are real but lower urgency. P6 remains long-horizon/exploratory with no forcing function.
+P9.3, P9.4, and P9.6 remain open with no current trigger. P6 remains long-horizon/exploratory with no forcing function.
 
-**Recommended priority order:** P9 → P6.
+**Recommended priority order:** remaining P9 items only on a concrete trigger → P6.
 
 **Reviewed and found sound, no action needed (from the P7 audit):** SSRF dialer (private-IP check happens at dial time, closing the DNS-rebind window); path traversal / symlink handling in `ValidatePath`; local daemon HTTP API (constant-time bearer token + loopback-origin check); persona YAML parsing (safe library, no unsafe type deserialization); `team_tasks` claim path (properly transactional, no duplicate-claim race).
 
@@ -20,11 +20,7 @@ P9 collects smaller engineering-quality gaps (test coverage, eval harness) that 
 
 ## Open Work — P9 (Engineering Quality — lower urgency, no current trigger)
 
-### P9.1 — No eval/regression harness for agent behavior
-No golden-transcript tests or scripted multi-turn scenario suite exists to catch prompt/behavior regressions across model or persona changes — unit-test coverage is otherwise good (nearly every package has a `_test.go`). Codex and Claude Code both maintain internal eval suites for this. Priority: **Medium**, Effort: **M**.
-
-### P9.2 — Zero test coverage in `internal/trace`, `internal/logging`, `internal/api`, `internal/client`
-`internal/api` in particular defines the wire contract between daemon and both clients (TUI/CLI) — untested serialization there is a real regression risk on refactors. Priority: **Medium**, Effort: **S**.
+P9.1, P9.2, and P9.5 are shipped (see [Appendix A](#appendix-a--completed-work)). Remaining:
 
 ### P9.3 — No OpenTelemetry/Prometheus export
 TurnTrace/cost data is SQLite-only and pull-based. Fine for a single-operator daemon; becomes relevant the moment Aegis runs as shared infra someone wants in an existing metrics stack. No current trigger — don't build speculatively. Priority: **Low**, Effort: **M**.
@@ -32,13 +28,10 @@ TurnTrace/cost data is SQLite-only and pull-based. Fine for a single-operator da
 ### P9.4 — No per-task/complexity model routing
 P5.9 only reroutes on failure. Nothing picks a cheaper model for simple turns and reserves an expensive one for hard turns (cf. Aider). Plausible cheap win given cost tracking already exists, but no evidence of demand. Priority: **Low**, Effort: **M**.
 
-### P9.5 — Cost tracking has no spend caps
-`internal/cost.Tracker` only accumulates a running total; no daily/session cap or alert threshold, and no multi-tenant concept at all (by design — single-operator tool). A spend-cap config knob would be small and low-risk if a runaway-cost incident ever happens. Priority: **Low**, Effort: **S**.
-
 ### P9.6 — No bulk export/import of session/memory stores
 `internal/share` already exports a single session to Markdown/JSON/HTML (stronger than expected), but migrating the full session/`longmem`/`knowledge` SQLite stores to a new machine today means copying files by hand. Priority: **Low**, Effort: **S**.
 
-**None of P9 is blocking** — same posture as P6: real but no concrete trigger, don't build speculatively.
+**None of the remaining P9 items are blocking** — same posture as P6: real but no concrete trigger, don't build speculatively.
 
 ---
 
@@ -150,6 +143,16 @@ ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code ext
 - **P8.5 (memory relevance TF-IDF recompute):** `internal/memory/relevance.go` gained `cachedEntries()` / `relevanceSnapshot`, keyed on a cheap `entriesSignature()` fingerprint (mtime+size per memory/skill file, no content read) stored on the existing `sourcesCache` (from `NewSources`); `allEntries()`/document-frequency build only reruns when a source file actually changed. `LoadRelevant` copies the cached entries before scoring so concurrent/sequential queries never mutate the shared cache.
 - **P8.6 (execLock over-serializes reads):** `internal/engine/engine.go`'s `runTools` swapped `execLock sync.RWMutex` for a plain `sync.Mutex` taken only by write/execute tool calls; read/network calls no longer take any lock and run fully concurrently with a same-round write/execute call instead of blocking behind it.
 - Tests: `internal/session/session_test.go` (`TestAppendMessagesIsIncremental`, `TestAppendMessagesMissingSession`, `TestSaveMessagesTruncates`, `TestDeleteRemovesMessageAndTraceRows`, `TestLegacyBlobMigration`), `internal/swarm/mailbox_test.go` (`TestMarkReadEvictsFromInbox`), `internal/memory/relevance_test.go` (`TestLoadRelevantCacheInvalidatesOnFileChange`).
+
+</details>
+
+<details>
+<summary><strong>P9.1/P9.2/P9.5 — Eval harness, test coverage, spend caps, shipped 2026-07-03</strong></summary>
+
+- **P9.1 (eval/regression harness):** new `internal/eval` package. A `Scenario` (system prompt + fully-built `engine.Options` + a sequence of user turns) runs against a real `engine.Engine` wired with a scripted/deterministic `provider.Adapter` — no live model, so it's part of `go test ./...` with no API key required. `Check` functions (`ExpectToolCalled`, `ExpectToolNotCalled`, `ExpectNoError`, `ExpectErrorContains`, `ExpectFinalTextContains`) assert on the `Result`; `AssertGolden` pins a deterministic JSON transcript per scenario under `internal/eval/testdata/`, regenerated via `AEGIS_EVAL_UPDATE=1 go test ./internal/eval/...`. Four scenarios ship as the initial suite (`internal/eval/scenarios_test.go`): a tool-call round trip (golden-pinned), plan-mode denying a write tool before `Execute` ever runs, a cost-budget abort stopping before its second turn, and multi-turn conversation continuity across two user turns. This exercises the interaction between engine, permission gate, and tool registry the way a real session would — regressions that only show up when those mechanisms combine won't necessarily trip a narrower per-mechanism unit test.
+- **P9.2 (test coverage for trace/logging/api/client):** `internal/trace`, `internal/logging`, `internal/api`, `internal/client` all gained `_test.go` files (previously zero coverage). `internal/api`'s tests lock the on-the-wire `EventKind` strings and round-trip every wire type, since a silent rename there breaks the TUI/CLI without a compile error. Writing `internal/logging`'s tests surfaced a real bug: `ToStderr: true` with a `Path` set was replacing file output with stderr-only instead of mirroring both (contradicting the field's own doc comment) — fixed with `io.MultiWriter`, which is what `aegis serve --foreground` needs to keep a durable log file while also printing to the terminal.
+- **P9.5 (spend caps):** `internal/config.CostConfig` gained `session_cap_usd` and `daily_cap_usd` (0 = unlimited, same convention as the existing `budget_usd`) plus `alert_threshold` (fraction, default 0.8). `internal/session.Store` gained a `daily_cost` table (`AddDailyCost`/`TodayCost`, keyed by UTC date) since the existing per-session `cost_usd` column can't answer "how much across all sessions today." `server.handlePostMessage` checks both caps before starting a turn (rejecting with 402 rather than the existing mid-run `budget_usd` abort, which is per-turn only) and emits a new `api.KindCostAlert` SSE event the turn that crosses `alert_threshold` of either cap (rendered in the TUI like the existing guard warning). This is additive to the pre-existing `budget_usd` single-run abort, not a replacement.
+- Tests: `internal/eval/scenarios_test.go` (4 scenarios + golden transcript), `internal/api/api_test.go`, `internal/trace/trace_test.go`, `internal/logging/logging_test.go`, `internal/client/client_test.go`, `internal/session/session_test.go` (`TestTodayCostDefaultsToZero`, `TestAddDailyCostAccumulates`), `internal/server/server_test.go` (`TestSessionCostCapBlocksTurn`, `TestDailyCostCapBlocksTurn`, `TestCostAlertThresholdFires`).
 
 </details>
 
