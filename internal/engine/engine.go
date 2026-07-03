@@ -26,10 +26,62 @@ import (
 type Conversation struct {
 	System   string
 	Messages []provider.Message
+
+	// Persisted is the number of leading Messages already durably saved by
+	// the caller (e.g. the session store); callers that persist
+	// incrementally (P8.1) save only Messages[Persisted:] each turn. -1
+	// means the leading messages were rewritten in place (repair,
+	// compaction) rather than just appended to, so the caller must fall
+	// back to a full re-save instead of appending.
+	Persisted int
+
+	charCount      int // cached estimatedChars() total (P8.4)
+	charCountValid bool
 }
 
 // Append adds a message to the conversation.
-func (c *Conversation) Append(m provider.Message) { c.Messages = append(c.Messages, m) }
+func (c *Conversation) Append(m provider.Message) {
+	c.Messages = append(c.Messages, m)
+	if c.charCountValid {
+		c.charCount += messageChars(m)
+	}
+}
+
+// invalidate marks the conversation as rewritten in place: cached char
+// totals are stale and Persisted no longer reflects a safe append point.
+func (c *Conversation) invalidate() {
+	c.charCountValid = false
+	c.Persisted = -1
+}
+
+// estimatedChars returns the total character count across system + messages,
+// recomputing only when the conversation has been rewritten since the last
+// call (P8.4 — avoids double-scanning the full conversation every turn).
+func (c *Conversation) estimatedChars() int {
+	if !c.charCountValid {
+		c.charCount = len(c.System)
+		for _, m := range c.Messages {
+			c.charCount += messageChars(m)
+		}
+		c.charCountValid = true
+	}
+	return c.charCount
+}
+
+func messageChars(m provider.Message) int {
+	n := 0
+	for _, b := range m.Content {
+		switch v := b.(type) {
+		case provider.TextBlock:
+			n += len(v.Text)
+		case provider.ToolUseBlock:
+			n += len(v.Name) + len(v.Input)
+		case provider.ToolResultBlock:
+			n += len(v.Content)
+		}
+	}
+	return n
+}
 
 // EventKind classifies engine events delivered to consumers (TUI, CLI, logs).
 type EventKind string
@@ -97,14 +149,14 @@ type PrepareStepFunc func(ctx context.Context, msgs []provider.Message) []provid
 type Options struct {
 	Adapter               provider.Adapter
 	Tools                 *tool.Registry
-	Gate                  Gate                                                            // optional; nil means all tool calls are allowed
-	Compactor             Compactor                                                       // optional; nil disables context compaction
-	Hooks                 Hooks                                                           // optional; nil disables hooks
-	Cost                  *cost.Tracker                                                   // optional; nil disables cost tracking
+	Gate                  Gate            // optional; nil means all tool calls are allowed
+	Compactor             Compactor       // optional; nil disables context compaction
+	Hooks                 Hooks           // optional; nil disables hooks
+	Cost                  *cost.Tracker   // optional; nil disables cost tracking
 	PrepareStep           PrepareStepFunc // optional; called before every model turn
 	OutputGuard           guard.Func      // optional; validates the final answer (and any files written this turn)
 	OutputGuardMaxRetries int             // corrective retries on guard failure; 0 -> 1 when a guard is set
-	BudgetUSD             float64                                                         // optional; >0 aborts the run past this cost
+	BudgetUSD             float64         // optional; >0 aborts the run past this cost
 	Model                 string
 	MaxTokens             int
 	Temperature           *float64
@@ -205,11 +257,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the
 	// conversation with a validation error that permanently locks the session.
-	if repaired := repairOrphanedToolUses(conv.Messages); &repaired != &conv.Messages {
-		if len(repaired) != len(conv.Messages) {
-			e.logger.Info("repaired orphaned tool calls", "added", len(repaired)-len(conv.Messages))
-		}
+	if repaired := repairOrphanedToolUses(conv.Messages); len(repaired) != len(conv.Messages) {
+		e.logger.Info("repaired orphaned tool calls", "added", len(repaired)-len(conv.Messages))
 		conv.Messages = repaired
+		conv.invalidate()
 	}
 
 	if e.compactor != nil {
@@ -218,6 +269,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		} else if changed {
 			e.logger.Info("compacted conversation", "before", len(conv.Messages), "after", len(out))
 			conv.Messages = out
+			conv.invalidate()
 		}
 	}
 
@@ -245,19 +297,21 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		if e.prepareStep != nil {
 			if updated := e.prepareStep(ctx, conv.Messages); updated != nil {
 				conv.Messages = updated
+				conv.invalidate()
 			}
 		}
 
 		// P2.7: Proactive per-turn compaction — check token headroom before every
 		// turn so context-limit errors never interrupt a run mid-flight.
 		if e.compactor != nil && e.contextWindowTokens > 0 {
-			est := estimateTokens(conv.System, conv.Messages)
+			est := conv.estimatedChars() / 4
 			if est > e.contextWindowTokens*85/100 {
 				if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
 					e.logger.Warn("proactive compaction failed", "err", compErr)
 				} else if changed {
 					e.logger.Info("proactive compaction", "before", len(conv.Messages), "after", len(out))
 					conv.Messages = out
+					conv.invalidate()
 				}
 			}
 		}
@@ -448,7 +502,7 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 	// zero counts. Estimate from character length so compaction thresholds and
 	// token-count display remain meaningful.
 	if usage != nil && usage.InputTokens == 0 && usage.OutputTokens == 0 {
-		usage.InputTokens = estimateTokens(conv.System, conv.Messages)
+		usage.InputTokens = conv.estimatedChars() / 4
 		usage.OutputTokens = len(text) / 4
 		usage.IsEstimated = true
 	}
@@ -496,10 +550,12 @@ const maxParallelTools = 8
 // runTools executes the requested tools and returns tool-result blocks in the
 // same order they were requested (as required for tool-use/result pairing).
 //
-// When the model requests several tools, read/network calls run concurrently
-// while write/execute calls are serialized (an exclusive lock) so side effects
-// never race. Event emission is serialized so streamed output is never
-// interleaved mid-write. A single tool call takes the simple sequential path.
+// When the model requests several tools, read/network calls run fully
+// concurrently with everything else; write/execute calls take a shared
+// exclusive lock so they never race with each other (P8.6 — reads are no
+// longer blocked behind a concurrent write/execute call in the same round).
+// Event emission is serialized so streamed output is never interleaved
+// mid-write. A single tool call takes the simple sequential path.
 func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, []trace.ToolCall, error) {
 	if len(toolUses) <= 1 {
 		return e.runToolsSequential(ctx, toolUses, emit)
@@ -508,8 +564,8 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 	results := make([]provider.Block, len(toolUses))
 	traces := make([]trace.ToolCall, len(toolUses))
 	var (
-		emitMu   sync.Mutex   // serializes emit across goroutines
-		execLock sync.RWMutex // shared for read/net, exclusive for write/exec
+		emitMu   sync.Mutex // serializes emit across goroutines
+		execLock sync.Mutex // exclusive among write/exec calls only
 		wg       sync.WaitGroup
 		sem      = make(chan struct{}, maxParallelTools)
 	)
@@ -532,9 +588,6 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 			if e.serializeTool(tu.Name) {
 				execLock.Lock()
 				defer execLock.Unlock()
-			} else {
-				execLock.RLock()
-				defer execLock.RUnlock()
 			}
 
 			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
@@ -680,25 +733,6 @@ func repairOrphanedToolUses(msgs []provider.Message) []provider.Message {
 		}
 	}
 	return out
-}
-
-// estimateTokens approximates token count using a 4-chars-per-token heuristic.
-// Used when the provider returns zero usage counts (e.g. local/Ollama models).
-func estimateTokens(system string, msgs []provider.Message) int {
-	chars := len(system)
-	for _, m := range msgs {
-		for _, b := range m.Content {
-			switch v := b.(type) {
-			case provider.TextBlock:
-				chars += len(v.Text)
-			case provider.ToolUseBlock:
-				chars += len(v.Name) + len(v.Input)
-			case provider.ToolResultBlock:
-				chars += len(v.Content)
-			}
-		}
-	}
-	return chars / 4
 }
 
 // executeTool looks up and runs a single tool, converting failures into

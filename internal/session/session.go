@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/trace"
+	"github.com/google/uuid"
 
 	_ "modernc.org/sqlite"
 )
@@ -24,8 +24,8 @@ type Session struct {
 	System       string             `json:"system"`
 	Mode         string             `json:"mode"`
 	Persona      string             `json:"persona"`
-	Background   bool               `json:"background,omitempty"`  // P3.2: runs detached from TUI
-	Archived     bool               `json:"archived,omitempty"`    // soft-deleted; hidden from normal listings
+	Background   bool               `json:"background,omitempty"` // P3.2: runs detached from TUI
+	Archived     bool               `json:"archived,omitempty"`   // soft-deleted; hidden from normal listings
 	Messages     []provider.Message `json:"messages"`
 	Traces       []trace.TurnTrace  `json:"traces,omitempty"`
 	InputTokens  int                `json:"input_tokens"`
@@ -42,7 +42,7 @@ type Meta struct {
 	Title        string     `json:"title"`
 	Mode         string     `json:"mode"`
 	Persona      string     `json:"persona"`
-	Background   bool       `json:"background,omitempty"`  // P3.2
+	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
 	InputTokens  int        `json:"input_tokens"`
 	OutputTokens int        `json:"output_tokens"`
@@ -109,7 +109,19 @@ CREATE TABLE IF NOT EXISTS bg_events (
     data       TEXT    NOT NULL,
     created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_bg_events_session ON bg_events(session_id, id);`); err != nil {
+CREATE INDEX IF NOT EXISTS idx_bg_events_session ON bg_events(session_id, id);
+CREATE TABLE IF NOT EXISTS session_messages (
+    session_id TEXT    NOT NULL,
+    seq        INTEGER NOT NULL,
+    data       BLOB    NOT NULL,
+    PRIMARY KEY (session_id, seq)
+);
+CREATE TABLE IF NOT EXISTS session_traces (
+    session_id TEXT    NOT NULL,
+    seq        INTEGER NOT NULL,
+    data       BLOB    NOT NULL,
+    PRIMARY KEY (session_id, seq)
+);`); err != nil {
 		return err
 	}
 	// Idempotent additions for existing databases (errors silently ignored).
@@ -124,7 +136,101 @@ CREATE INDEX IF NOT EXISTS idx_bg_events_session ON bg_events(session_id, id);`)
 	} {
 		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
 	}
+	// P8.1: one-time backfill of legacy whole-blob messages/traces into
+	// row-per-message/row-per-trace tables, so the hot per-turn path can
+	// append instead of read-modify-write. Cheap no-op on repeat startups:
+	// migrated sessions have their legacy blob columns reset to '[]'.
+	return s.migrateLegacyBlobs()
+}
+
+// migrateLegacyBlobs moves any pre-P8.1 whole-blob messages/traces into
+// session_messages/session_traces, one row per message/trace. Runs once per
+// session (skipped once its legacy blob column reads back as '[]').
+func (s *Store) migrateLegacyBlobs() error {
+	rows, err := s.db.Query(`SELECT id, messages, traces FROM sessions WHERE messages != '[]' OR traces != '[]'`)
+	if err != nil {
+		return err
+	}
+	type legacy struct {
+		id           string
+		msgs, traces []byte
+	}
+	var pending []legacy
+	for rows.Next() {
+		var l legacy
+		if err := rows.Scan(&l.id, &l.msgs, &l.traces); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, l)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, l := range pending {
+		if err := s.migrateSessionBlobs(l.id, l.msgs, l.traces); err != nil {
+			return fmt.Errorf("migrate legacy blobs for session %s: %w", l.id, err)
+		}
+	}
 	return nil
+}
+
+func (s *Store) migrateSessionBlobs(id string, msgBlob, traceBlob []byte) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	var msgCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_messages WHERE session_id = ?`, id).Scan(&msgCount); err != nil {
+		return err
+	}
+	if msgCount == 0 {
+		msgs, err := provider.UnmarshalMessages(msgBlob)
+		if err != nil {
+			return fmt.Errorf("decode legacy messages: %w", err)
+		}
+		for i, m := range msgs {
+			data, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO session_messages (session_id, seq, data) VALUES (?, ?, ?)`, id, i, data); err != nil {
+				return err
+			}
+		}
+	}
+
+	var traceCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_traces WHERE session_id = ?`, id).Scan(&traceCount); err != nil {
+		return err
+	}
+	if traceCount == 0 {
+		var traces []trace.TurnTrace
+		if len(traceBlob) > 0 {
+			if err := json.Unmarshal(traceBlob, &traces); err != nil {
+				return fmt.Errorf("decode legacy traces: %w", err)
+			}
+		}
+		for i, t := range traces {
+			data, err := json.Marshal(t)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO session_traces (session_id, seq, data) VALUES (?, ?, ?)`, id, i, data); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := tx.Exec(`UPDATE sessions SET messages = '[]', traces = '[]' WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Create stores a new session and returns it.
@@ -151,16 +257,14 @@ func (s *Store) Create(ctx context.Context, title, system, mode, persona string)
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, persona, background, archived_at, messages, traces, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, persona, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
-		sess           Session
-		msgBlob        []byte
-		traceBlob      []byte
-		created, upd   int64
-		background     int
-		archivedAtMS   sql.NullInt64
+		sess         Session
+		created, upd int64
+		background   int
+		archivedAtMS sql.NullInt64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &background, &archivedAtMS, &msgBlob, &traceBlob,
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &background, &archivedAtMS,
 		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -173,25 +277,66 @@ func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 		sess.ArchivedAt = &t
 		sess.Archived = true
 	}
-	msgs, err := provider.UnmarshalMessages(msgBlob)
+	msgs, err := s.loadMessages(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("decode messages: %w", err)
+		return nil, err
 	}
 	sess.Messages = msgs
-	if len(traceBlob) > 0 {
-		if err := json.Unmarshal(traceBlob, &sess.Traces); err != nil {
-			return nil, fmt.Errorf("decode traces: %w", err)
-		}
+	traces, err := s.loadTraces(ctx, id)
+	if err != nil {
+		return nil, err
 	}
+	sess.Traces = traces
 	sess.CreatedAt = time.UnixMilli(created)
 	sess.UpdatedAt = time.UnixMilli(upd)
 	return &sess, nil
 }
 
-// AppendTraces appends per-turn trace records to a session's trace log. It is a
-// read-modify-write within a transaction so concurrent runs on different
-// sessions stay isolated (and the store serializes writes on a single
-// connection). A nil/empty slice is a no-op.
+func (s *Store) loadMessages(ctx context.Context, id string) ([]provider.Message, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT data FROM session_messages WHERE session_id = ? ORDER BY seq`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []provider.Message
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var m provider.Message
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, fmt.Errorf("decode message: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) loadTraces(ctx context.Context, id string) ([]trace.TurnTrace, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT data FROM session_traces WHERE session_id = ? ORDER BY seq`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []trace.TurnTrace
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var t trace.TurnTrace
+		if err := json.Unmarshal(data, &t); err != nil {
+			return nil, fmt.Errorf("decode trace: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// AppendTraces appends per-turn trace records to a session's trace log as new
+// rows (P8.1) — no read-modify-write of prior traces. A nil/empty slice is a
+// no-op.
 func (s *Store) AppendTraces(ctx context.Context, id string, ts []trace.TurnTrace) error {
 	if len(ts) == 0 {
 		return nil
@@ -202,48 +347,98 @@ func (s *Store) AppendTraces(ctx context.Context, id string, ts []trace.TurnTrac
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after Commit
 
-	var blob []byte
-	if err := tx.QueryRowContext(ctx, `SELECT traces FROM sessions WHERE id = ?`, id).Scan(&blob); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE id = ?`, id).Scan(&exists); err != nil {
 		return err
 	}
-	var existing []trace.TurnTrace
-	if len(blob) > 0 {
-		if err := json.Unmarshal(blob, &existing); err != nil {
-			return fmt.Errorf("decode traces: %w", err)
-		}
+	if exists == 0 {
+		return ErrNotFound
 	}
-	existing = append(existing, ts...)
-	out, err := json.Marshal(existing)
-	if err != nil {
+
+	var base int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq) + 1, 0) FROM session_traces WHERE session_id = ?`, id).Scan(&base); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE sessions SET traces = ?, updated_at = ? WHERE id = ?`,
-		out, time.Now().UnixMilli(), id); err != nil {
+	for i, t := range ts {
+		data, err := json.Marshal(t)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO session_traces (session_id, seq, data) VALUES (?, ?, ?)`, id, base+i, data); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, time.Now().UnixMilli(), id); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// SaveMessages persists the message list and bumps updated_at.
-func (s *Store) SaveMessages(ctx context.Context, id string, msgs []provider.Message) error {
-	blob, err := provider.MarshalMessages(msgs)
+// AppendMessages appends new messages to a session's transcript as new rows
+// (P8.1) without rewriting existing ones — the per-turn hot path, so cost is
+// O(new messages) rather than O(total messages). Use SaveMessages instead
+// when the earlier history itself changed (e.g. rewind/truncation). A
+// nil/empty slice still bumps updated_at.
+func (s *Store) AppendMessages(ctx context.Context, id string, msgs []provider.Message) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET messages = ?, updated_at = ? WHERE id = ?`,
-		blob, time.Now().UnixMilli(), id)
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	var base int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq) + 1, 0) FROM session_messages WHERE session_id = ?`, id).Scan(&base); err != nil {
+		return err
+	}
+	for i, m := range msgs {
+		data, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO session_messages (session_id, seq, data) VALUES (?, ?, ?)`, id, base+i, data); err != nil {
+			return err
+		}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, time.Now().UnixMilli(), id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
+}
+
+// SaveMessages replaces a session's entire message transcript. This is a full
+// rewrite — used for rewind/truncation where earlier history changes; the
+// per-turn hot path uses AppendMessages instead (P8.1).
+func (s *Store) SaveMessages(ctx context.Context, id string, msgs []provider.Message) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	res, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_messages WHERE session_id = ?`, id); err != nil {
+		return err
+	}
+	for i, m := range msgs {
+		data, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO session_messages (session_id, seq, data) VALUES (?, ?, ?)`, id, i, data); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SetTitle updates a session's title.
@@ -324,13 +519,28 @@ func (s *Store) Unarchive(ctx context.Context, id string) error {
 // Returns the number of sessions deleted.
 func (s *Store) Prune(ctx context.Context, olderThan time.Duration) (int, error) {
 	threshold := time.Now().Add(-olderThan).UnixMilli()
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM sessions WHERE archived_at IS NULL AND updated_at < ?`, threshold)
+	const pred = `archived_at IS NULL AND updated_at < ?`
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM session_messages WHERE session_id IN (SELECT id FROM sessions WHERE `+pred+`)`, threshold); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM session_traces WHERE session_id IN (SELECT id FROM sessions WHERE `+pred+`)`, threshold); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE `+pred, threshold)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
-	return int(n), nil
+	return int(n), tx.Commit()
 }
 
 // BGEvent is one buffered engine event for a background session.
@@ -391,8 +601,22 @@ func (s *Store) SetMode(ctx context.Context, id, mode string) error {
 	return err
 }
 
-// Delete removes a session.
+// Delete removes a session and its message/trace rows.
 func (s *Store) Delete(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_messages WHERE session_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_traces WHERE session_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

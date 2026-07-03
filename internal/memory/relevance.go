@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -22,10 +23,14 @@ type Entry struct {
 //
 // When query is empty, it falls back to returning all entries (same as Load).
 func (s Sources) LoadRelevant(query string, maxEntries int, maxTokens int) []Entry {
-	entries := s.allEntries()
-	if len(entries) == 0 {
+	cached, df, n := s.cachedEntries()
+	if len(cached) == 0 {
 		return nil
 	}
+	// Copy before scoring/sorting in place: cached is shared (and may be
+	// reused by concurrent callers) via the P8.5 relevance cache.
+	entries := make([]Entry, len(cached))
+	copy(entries, cached)
 
 	if query == "" || maxEntries <= 0 {
 		if maxEntries <= 0 {
@@ -41,19 +46,6 @@ func (s Sources) LoadRelevant(query string, maxEntries int, maxTokens int) []Ent
 	if len(queryTerms) == 0 {
 		return entries
 	}
-
-	// Build document frequency for IDF weighting.
-	df := make(map[string]int)
-	for _, e := range entries {
-		seen := make(map[string]bool)
-		for _, t := range tokenize(e.Text) {
-			if !seen[t] {
-				df[t]++
-				seen[t] = true
-			}
-		}
-	}
-	n := float64(len(entries))
 
 	// Score each entry.
 	for i := range entries {
@@ -113,6 +105,95 @@ func FormatEntries(entries []Entry) string {
 		sections = append(sections, sb.String())
 	}
 	return strings.Join(sections, "\n")
+}
+
+// relevanceSnapshot is the cached result of allEntries() plus its derived
+// document-frequency table, valid as long as sig still matches the
+// underlying files' mtime/size (P8.5).
+type relevanceSnapshot struct {
+	sig     string
+	entries []Entry
+	df      map[string]int
+	n       float64
+}
+
+// cachedEntries returns allEntries() and its TF-IDF document-frequency table,
+// rebuilding only when a source file's mtime/size has changed since the last
+// call (P8.5) — otherwise every LoadRelevant call re-reads, re-tokenizes, and
+// rebuilds the full document-frequency table from scratch even when nothing
+// changed. Zero-value Sources (cache == nil, used in tests) always recompute.
+func (s Sources) cachedEntries() ([]Entry, map[string]int, float64) {
+	if s.cache == nil {
+		entries := s.allEntries()
+		df, n := buildDF(entries)
+		return entries, df, n
+	}
+
+	sig := s.entriesSignature()
+	s.cache.mu.Lock()
+	if s.cache.relevance.entries != nil && s.cache.relevance.sig == sig {
+		snap := s.cache.relevance
+		s.cache.mu.Unlock()
+		return snap.entries, snap.df, snap.n
+	}
+	s.cache.mu.Unlock()
+
+	entries := s.allEntries()
+	df, n := buildDF(entries)
+
+	s.cache.mu.Lock()
+	s.cache.relevance = relevanceSnapshot{sig: sig, entries: entries, df: df, n: n}
+	s.cache.mu.Unlock()
+	return entries, df, n
+}
+
+// buildDF computes the document-frequency table used for IDF weighting.
+func buildDF(entries []Entry) (map[string]int, float64) {
+	df := make(map[string]int)
+	for _, e := range entries {
+		seen := make(map[string]bool)
+		for _, t := range tokenize(e.Text) {
+			if !seen[t] {
+				df[t]++
+				seen[t] = true
+			}
+		}
+	}
+	return df, float64(len(entries))
+}
+
+// entriesSignature builds a cheap fingerprint (mtime+size per source file,
+// no file content read) used to detect when cachedEntries must rebuild.
+func (s Sources) entriesSignature() string {
+	var sb strings.Builder
+	stat := func(path string) {
+		fi, err := os.Stat(path)
+		if err != nil {
+			sb.WriteString("-;")
+			return
+		}
+		fmt.Fprintf(&sb, "%d:%d;", fi.ModTime().UnixNano(), fi.Size())
+	}
+	stat(s.GlobalMemoryPath())
+	stat(s.ProjectMemoryPath())
+	for _, dir := range s.skillDirs() {
+		dirEntries, err := os.ReadDir(dir)
+		if err != nil {
+			sb.WriteString("-;")
+			continue
+		}
+		names := make([]string, 0, len(dirEntries))
+		for _, e := range dirEntries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			stat(filepath.Join(dir, name))
+		}
+	}
+	return sb.String()
 }
 
 // allEntries loads all memory entries from all sources.

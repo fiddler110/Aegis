@@ -99,11 +99,18 @@ func (m *Mailbox) Send(msg Message) error {
 	return nil
 }
 
-// ReadAll returns messages sorted by timestamp. Corrupt or partial files are
-// skipped rather than failing the whole read. When unreadOnly is true, messages
-// already marked read are excluded.
-func (m *Mailbox) ReadAll(unreadOnly bool) ([]Message, error) {
-	entries, err := os.ReadDir(m.dir)
+// processedSubdir holds messages already marked read, out of ReadAll's
+// unread-only scan path (P8.3 — otherwise every already-read message is
+// re-listed, re-read, and re-parsed on every poll of a long-running mailbox).
+const processedSubdir = "processed"
+
+func (m *Mailbox) processedDir() string { return filepath.Join(m.dir, processedSubdir) }
+
+// readMessagesFrom lists and decodes every message file directly in dir
+// (non-recursive). Corrupt or partial files are skipped rather than failing
+// the whole read.
+func readMessagesFrom(dir string) ([]Message, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -113,9 +120,9 @@ func (m *Mailbox) ReadAll(unreadOnly bool) ([]Message, error) {
 	var out []Message
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue // skip .tmp and stray files
+			continue // skip subdirs (e.g. processed/), .tmp, and stray files
 		}
-		data, err := os.ReadFile(filepath.Join(m.dir, e.Name()))
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
 			continue
 		}
@@ -123,17 +130,35 @@ func (m *Mailbox) ReadAll(unreadOnly bool) ([]Message, error) {
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue // skip corrupt/partial
 		}
-		if unreadOnly && msg.Read {
-			continue
-		}
 		out = append(out, msg)
+	}
+	return out, nil
+}
+
+// ReadAll returns messages sorted by timestamp. When unreadOnly is true, only
+// the inbox's unread messages are scanned — already-read messages live under
+// processed/ (moved there by MarkRead) and are skipped entirely rather than
+// read and filtered out (P8.3). When unreadOnly is false, processed messages
+// are included too, for callers that want full history.
+func (m *Mailbox) ReadAll(unreadOnly bool) ([]Message, error) {
+	out, err := readMessagesFrom(m.dir)
+	if err != nil {
+		return nil, err
+	}
+	if !unreadOnly {
+		processed, err := readMessagesFrom(m.processedDir())
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, processed...)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
 	return out, nil
 }
 
-// MarkRead flips the read flag for the message with the given id, rewriting it
-// atomically. It is a no-op if the message is absent.
+// MarkRead flips the read flag for the message with the given id and moves it
+// out of the inbox into processed/, so future unread-only scans never have to
+// look at it again (P8.3). It is a no-op if the message is absent.
 func (m *Mailbox) MarkRead(id string) error {
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
@@ -152,19 +177,24 @@ func (m *Mailbox) MarkRead(id string) error {
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return err
 		}
-		if msg.Read {
-			return nil
-		}
 		msg.Read = true
 		out, err := json.Marshal(msg)
 		if err != nil {
 			return err
 		}
-		tmp := path + ".tmp"
+		if err := os.MkdirAll(m.processedDir(), 0o700); err != nil {
+			return err
+		}
+		dest := filepath.Join(m.processedDir(), e.Name())
+		tmp := dest + ".tmp"
 		if err := os.WriteFile(tmp, out, 0o644); err != nil {
 			return err
 		}
-		return os.Rename(tmp, path)
+		if err := os.Rename(tmp, dest); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		return os.Remove(path)
 	}
 	return nil
 }
