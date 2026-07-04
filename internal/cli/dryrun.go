@@ -39,7 +39,7 @@ func newDryRunCmd() *cobra.Command {
 			// Tools.
 			fmt.Fprintln(out, "\n=== Registered Tools ===")
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security)}); err != nil {
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
 				fmt.Fprintf(out, "(error registering tools: %v)\n", err)
 			} else {
 				schemas := reg.Schemas()

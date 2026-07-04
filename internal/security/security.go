@@ -54,15 +54,44 @@ func normalizeSeverity(s string) Severity {
 	}
 }
 
+// Reachability classifies whether a vulnerable dependency's flagged code is
+// actually invoked by the project, for the handful of tools that can tell
+// (currently: osv-scanner's --call-analysis, govulncheck-backed for Go and
+// experimental for Rust/Java). Left at ReachabilityUnknown for every other
+// tool/ecosystem rather than guessed — a wrong "unreachable" claim would
+// understate real risk, which is worse than saying nothing.
+type Reachability string
+
+const (
+	ReachabilityUnknown     Reachability = ""            // not analyzed — most scanners/ecosystems today
+	ReachabilityReachable   Reachability = "reachable"   // call-graph analysis found an actual call path to the vulnerable code
+	ReachabilityUnreachable Reachability = "unreachable" // call-graph analysis confirms the code is present but never invoked
+)
+
+// weight orders Reachability as a severity tiebreaker: confirmed-reachable
+// findings should surface above unanalyzed ones, which in turn surface above
+// confirmed-unreachable ones, when severity is otherwise equal.
+func (r Reachability) weight() int {
+	switch r {
+	case ReachabilityReachable:
+		return 2
+	case ReachabilityUnreachable:
+		return 0
+	default:
+		return 1
+	}
+}
+
 // Finding is a single normalized security issue.
 type Finding struct {
-	Tool        string   `json:"tool"`
-	RuleID      string   `json:"rule_id"`
-	Severity    Severity `json:"severity"`
-	Title       string   `json:"title"`
-	Location    string   `json:"location"` // file:line or package/target
-	Description string   `json:"description,omitempty"`
-	Remediation string   `json:"remediation,omitempty"`
+	Tool         string       `json:"tool"`
+	RuleID       string       `json:"rule_id"`
+	Severity     Severity     `json:"severity"`
+	Title        string       `json:"title"`
+	Location     string       `json:"location"` // file:line or package/target
+	Description  string       `json:"description,omitempty"`
+	Remediation  string       `json:"remediation,omitempty"`
+	Reachability Reachability `json:"reachability,omitempty"`
 }
 
 // Scanner is one external analysis tool.
@@ -76,18 +105,33 @@ type Scanner interface {
 	// image is only meaningful when method == MethodContainer.
 	Resolve(ctx context.Context, opts Options) (method Method, runtime sandbox.ContainerRuntime, image string, reason string)
 	// Scan analyzes dir using the method/runtime/image Resolve returned and
-	// returns normalized findings.
-	Scan(ctx context.Context, dir string, method Method, runtime sandbox.ContainerRuntime, image string) ([]Finding, error)
+	// returns normalized findings. opts is the same per-tool policy passed to
+	// RunWithOptions, threaded through for scanners (grype) that themselves
+	// resolve a second tool (syft) internally.
+	Scan(ctx context.Context, dir string, method Method, runtime sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error)
 }
 
-// DefaultScanners returns the built-in filesystem scanners.
+// DefaultScanners returns the built-in filesystem scanners. opengrep is the
+// default SAST engine (P11.3); semgrep and the four language-targeted
+// engines (gosec/bandit/brakeman/njsscan) are included too but resolve to
+// MethodNone ("opt-in tool, not enabled by default") unless explicitly
+// enabled via security.tools.<name>.enabled — listed here rather than
+// omitted so `aegis security status`/`/security-config` can always discover
+// and toggle them, matching P11.1's "never a silent skip" posture.
 func DefaultScanners() []Scanner {
 	return []Scanner{
+		opengrepScanner{},
 		semgrepScanner{},
+		gosecScanner{},
+		banditScanner{},
+		brakemanScanner{},
+		njsscanScanner{},
 		trivyScanner{},
 		gitleaksScanner{},
 		kubescapeScanner{},
 		hadolintScanner{},
+		osvScanner{},
+		grypeDirScanner{},
 	}
 }
 
@@ -116,7 +160,7 @@ func RunWithOptions(ctx context.Context, dir string, scanners []Scanner, opts Op
 			rep.Skipped[sc.Name()] = reason
 			continue
 		}
-		findings, err := sc.Scan(ctx, dir, method, rt, image)
+		findings, err := sc.Scan(ctx, dir, method, rt, image, opts)
 		rep.record(sc.Name(), method, findings, err)
 	}
 	rep.sortFindings()
@@ -143,7 +187,11 @@ func (r *Report) record(name string, method Method, findings []Finding, err erro
 
 func (r *Report) sortFindings() {
 	sort.SliceStable(r.Findings, func(i, j int) bool {
-		return r.Findings[i].Severity.rank() > r.Findings[j].Severity.rank()
+		si, sj := r.Findings[i].Severity.rank(), r.Findings[j].Severity.rank()
+		if si != sj {
+			return si > sj
+		}
+		return r.Findings[i].Reachability.weight() > r.Findings[j].Reachability.weight()
 	})
 }
 
@@ -230,10 +278,24 @@ func (r Report) Format() string {
 	}
 	b.WriteString("\n")
 	for _, f := range r.Findings {
-		fmt.Fprintf(&b, "[%s] %s — %s\n  %s (%s)\n", f.Severity, f.Tool, f.Title, f.Location, f.RuleID)
+		fmt.Fprintf(&b, "[%s]%s %s — %s\n  %s (%s)\n", f.Severity, reachabilityTag(f.Reachability), f.Tool, f.Title, f.Location, f.RuleID)
 		if f.Remediation != "" {
 			fmt.Fprintf(&b, "  fix: %s\n", f.Remediation)
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// reachabilityTag renders a short suffix for the one severity/tool line in
+// Format when reachability was actually analyzed; empty (ReachabilityUnknown)
+// findings render exactly as before — no tag, no implied claim either way.
+func reachabilityTag(r Reachability) string {
+	switch r {
+	case ReachabilityReachable:
+		return " [reachable: called by this project]"
+	case ReachabilityUnreachable:
+		return " [not reachable: present but never called]"
+	default:
+		return ""
+	}
 }
