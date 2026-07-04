@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Updated:** 2026-07-03 (v17 — implemented P9.1/P9.2/P9.5, the engineering-quality items with real (if non-urgent) value; see Appendix A. P9.3/P9.4/P9.6 remain open, deliberately unbuilt — no demand signal yet.)
+**Updated:** 2026-07-03 (v18 — shipped a persona QoL pass: advisory `PersonaToolGate` enforcement path, `aegis persona` CLI (list/show/new/use), `default_persona` config, and full-profile mid-session persona switching including permission mode; see Appendix A. No open roadmap item tracked this — it closes out the persona-system loose ends noted in prior sessions' P7.5/persona-improvements work.)
 
 ---
 
@@ -157,6 +157,21 @@ ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code ext
 </details>
 
 <details>
+<summary><strong>Persona QoL pass — advisory tool gate, CLI, default persona, shipped 2026-07-03</strong></summary>
+
+Not a numbered roadmap item — a follow-through pass closing gaps left by the P7.5 persona-trust model and earlier persona hot-reload/full-profile-switch work.
+
+- **`permission.PersonaToolGate`** (`internal/permission/persona_tools.go`, new): wraps the base gate with an advisory check against a persona's declared `Tools` list. Deliberately not a security boundary (same trust model as P7.5) — a tool call outside the list is logged and routed through the session's `Approver`: a non-interactive approver (e.g. auto mode) warns and allows, the TUI's interactive approver prompts and reuses its session-scoped allow-always cache. Declining blocks that call; approving (or an empty `Tools` list) always falls through to the real base gate.
+- **`aegis persona` CLI** (`internal/cli/persona.go`, new): `list` (built-in/custom/default markers), `show <name>` (source, model, mode, tools, rules, guard, prompt; `--full` for the entire prompt), `new <name>` (scaffolds a commented frontmatter template, `--global` for the user directory), `use <name>` (writes `default_persona` to project or `--global` user config).
+- **`default_persona` config** (`internal/config`): a new session with no explicit `--persona` resolves project `default_persona` → user-global `default_persona` → `general`. `config.PatchProjectDefaultPersona`/`PatchGlobalDefaultPersona` back the CLI's `use` subcommand.
+- **Full-profile mid-session persona switch**: `api.UpdateSessionRequest` gained `Persona`; `/persona` in the TUI now switches the persisted persona name (so model/rules/guard re-resolve every turn, not just the system prompt) and applies the persona's default permission mode when the user hasn't set one explicitly, reporting the mode change.
+- **Output guard rubric refinement**: `DefaultGuardRubric` and the `--first-init` template now explicitly excuse clearly-marked example/placeholder values in documentation (illustrative IPs, `<your-api-key>`-style tokens) from the "no placeholders" check, since those are legitimate and the real value was never supplied to the model.
+- Tests: `internal/permission/persona_tools_test.go`, `internal/cli/persona_test.go`, `internal/config/write_persona_test.go`, plus updates to `internal/persona/load_test.go`, `internal/persona/persona_test.go`, `internal/server/server_test.go`.
+- Docs: `README.md`, `CLAUDE.md`, `docs/cli-reference.md`, `docs/configuration.md`, `docs/personas.md` all updated in the same commit.
+
+</details>
+
+<details>
 <summary><strong>P6.4 — Context editing / tool-result pruning, shipped 2026-07-03</strong></summary>
 
 `compaction.pruneStaleToolResults` (`internal/compaction/prune.go`) runs as a deterministic pre-pass inside `Summarizer.Compact`, before any LLM call: `read_file` results for a path that was read again later are blanked to a one-line marker, and large `grep`/`glob`/`ls` dumps outside the trailing `keepRecent` window are truncated to a short preview. Never touches conversational text, tool errors, or the recent window. If pruning alone brings the estimate back under budget, `Compact` returns immediately — no summarizer call, no LLM cost.
@@ -246,8 +261,8 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 | 28 | Performance | Token estimation double-scans full conversation per turn (local models) | — (internal audit) | Medium | ✅ P8.4 |
 | 29 | Performance | Memory relevance TF-IDF recomputed from scratch every call | — (internal audit) | Low-Med | ✅ P8.5 |
 | 30 | Performance | Write/execute tool calls unnecessarily serialize concurrent reads | — (internal audit) | Low | ✅ P8.6 |
-| 31 | Quality | No agent-behavior eval/regression harness | Codex, Claude Code (internal eval suites) | Medium | ⬜ P9.1 |
-| 32 | Quality | Zero test coverage in trace/logging/api/client packages | — (internal audit) | Medium | ⬜ P9.2 |
+| 31 | Quality | No agent-behavior eval/regression harness | Codex, Claude Code (internal eval suites) | Medium | ✅ P9.1 |
+| 32 | Quality | Zero test coverage in trace/logging/api/client packages | — (internal audit) | Medium | ✅ P9.2 |
 
 ---
 

@@ -8,67 +8,161 @@
 // disclosure. Skills without a description fall back to eager injection so
 // legacy skill files keep working unchanged.
 //
-// Search order (first match wins per filename):
-//  1. .aegis/skills/*.md  in the current working directory (project-local)
-//  2. ~/.aegis/skills/*.md  in the user's home directory (global)
+// A skill can be either a single flat file or a directory bundling companion
+// assets (templates, scripts, reference docs) alongside the instructions:
+//
+//	.aegis/skills/deploy.md              (flat)
+//	.aegis/skills/html-report/SKILL.md   (bundled, name = directory name)
+//	.aegis/skills/html-report/template.html
+//	.aegis/skills/html-report/validate.py
+//
+// For a bundled skill, Dir holds the directory's path (relative to workDir
+// when possible) and Content carries a trailing <skill_assets> manifest
+// listing sibling files so the model knows to read them with its normal file
+// tools — the skill loader does not read asset contents itself.
+//
+// Search order (first match wins per name):
+//  1. .aegis/skills/  in the current working directory (project-local)
+//  2. ~/.aegis/skills/  in the user's home directory (global)
 package skills
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // Skill represents a loaded skill definition.
 type Skill struct {
-	Name        string // from frontmatter `name:`, else the filename without extension
+	Name        string // from frontmatter `name:`, else the filename/directory stem
 	Description string // from frontmatter `description:`; empty means eager-inject
-	Content     string // markdown body with frontmatter stripped
+	Content     string // markdown body with frontmatter stripped (plus asset manifest, if bundled)
+	Dir         string // non-empty for a bundled (directory) skill; path to its companion files
 }
 
-// Discover loads all skill files from the project and user directories.
-// Any error reading a directory is silently skipped so a missing .aegis/
-// folder doesn't break startup.
+// Discover loads all skills from the project and user directories. Any error
+// reading a directory is silently skipped so a missing .aegis/ folder doesn't
+// break startup.
 func Discover(workDir string) []Skill {
-	seen := make(map[string]bool) // filename → already loaded
+	seen := make(map[string]bool) // entry name → already loaded
 	var skills []Skill
 
 	// Project-local skills take precedence.
 	projectDir := filepath.Join(workDir, ".aegis", "skills")
-	skills = appendFromDir(skills, projectDir, seen)
+	skills = appendFromDir(skills, workDir, projectDir, seen)
 
 	// User-global skills fill in anything not overridden by the project.
 	if home, err := os.UserHomeDir(); err == nil {
 		userDir := filepath.Join(home, ".aegis", "skills")
-		skills = appendFromDir(skills, userDir, seen)
+		skills = appendFromDir(skills, workDir, userDir, seen)
 	}
 
 	return skills
 }
 
-func appendFromDir(dst []Skill, dir string, seen map[string]bool) []Skill {
+func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool) []Skill {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return dst
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".md") {
+		if seen[e.Name()] {
 			continue
 		}
-		base := e.Name()
-		if seen[base] {
+		if e.IsDir() {
+			skillDir := filepath.Join(dir, e.Name())
+			manifestName := findSkillFile(skillDir)
+			if manifestName == "" {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(skillDir, manifestName))
+			if err != nil {
+				continue
+			}
+			seen[e.Name()] = true
+			sk := parseSkill(e.Name(), string(data))
+			sk.Dir = skillDir
+			sk.Content = withAssetManifest(sk.Content, workDir, skillDir, manifestName)
+			dst = append(dst, sk)
 			continue
 		}
-		seen[base] = true
-		data, err := os.ReadFile(filepath.Join(dir, base))
+		if !strings.EqualFold(filepath.Ext(e.Name()), ".md") {
+			continue
+		}
+		seen[e.Name()] = true
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
 			continue
 		}
-		sk := parseSkill(strings.TrimSuffix(base, filepath.Ext(base)), string(data))
+		sk := parseSkill(strings.TrimSuffix(e.Name(), filepath.Ext(e.Name())), string(data))
 		dst = append(dst, sk)
 	}
 	return dst
+}
+
+// findSkillFile returns the manifest filename ("SKILL.md", case-insensitive)
+// inside a candidate skill directory, or "" if the directory isn't a skill
+// bundle.
+func findSkillFile(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(e.Name(), "SKILL.md") {
+			return e.Name()
+		}
+	}
+	return ""
+}
+
+// withAssetManifest appends a <skill_assets> block listing every file under
+// skillDir (recursively, e.g. references/foo.md or scripts/bar.py) other
+// than the manifest itself, so the model knows what companion
+// templates/scripts/references it can load with its own file tools.
+func withAssetManifest(content, workDir, skillDir, manifestName string) string {
+	var assets []string
+	_ = filepath.WalkDir(skillDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(skillDir, path)
+		if err != nil {
+			return nil
+		}
+		if filepath.Dir(rel) == "." && strings.EqualFold(rel, manifestName) {
+			return nil
+		}
+		assets = append(assets, filepath.ToSlash(rel))
+		return nil
+	})
+	if len(assets) == 0 {
+		return content
+	}
+	sort.Strings(assets)
+
+	display := skillDir
+	if workDir != "" {
+		if rel, err := filepath.Rel(workDir, skillDir); err == nil && !strings.HasPrefix(rel, "..") {
+			display = rel
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(content)
+	sb.WriteString("\n\n<skill_assets dir=\"")
+	sb.WriteString(filepath.ToSlash(display))
+	sb.WriteString("\">\n")
+	sb.WriteString("Read these with your file tools before proceeding; do not fabricate their contents.\n")
+	for _, a := range assets {
+		sb.WriteString("- ")
+		sb.WriteString(a)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("</skill_assets>")
+	return sb.String()
 }
 
 // parseSkill extracts optional YAML frontmatter (name/description) and returns a
