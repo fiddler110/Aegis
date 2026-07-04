@@ -1,6 +1,7 @@
 package persona
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,12 +43,84 @@ func LoadFromDirs(dirs ...string) int {
 	return count
 }
 
-// register adds or overrides a persona in the registry and Names list.
-func register(p Persona) {
-	if _, exists := registry[p.Name]; !exists {
-		nameOrder = append(nameOrder, p.Name)
+// Refresh rescans dirs and atomically replaces the file-loaded persona set, so
+// edits, additions, and deletions in persona directories take effect without a
+// daemon restart. A directory signature (name, size, mtime of every *.md file)
+// short-circuits the rescan when nothing changed, making it cheap enough to
+// call on every persona list or switch. Returns the number of file personas
+// now loaded and whether the set was rebuilt.
+func Refresh(dirs ...string) (int, bool) {
+	sig := dirSignature(dirs)
+
+	mu.RLock()
+	unchanged := sig == refreshSig
+	n := len(loaded)
+	mu.RUnlock()
+	if unchanged {
+		return n, false
 	}
-	registry[p.Name] = p
+
+	fresh := map[string]Persona{}
+	var freshOrder []string
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".md") {
+				continue
+			}
+			p, err := parsePersonaFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			if _, exists := fresh[p.Name]; !exists {
+				freshOrder = append(freshOrder, p.Name)
+			}
+			fresh[p.Name] = p
+		}
+	}
+
+	mu.Lock()
+	loaded = fresh
+	loadedOrder = freshOrder
+	refreshSig = sig
+	mu.Unlock()
+	return len(fresh), true
+}
+
+// dirSignature builds a change-detection key from every persona file's name,
+// size, and mtime across dirs. Any edit, add, or delete produces a new key.
+func dirSignature(dirs []string) string {
+	var b strings.Builder
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".md") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(&b, "%s/%s|%d|%d;", dir, e.Name(), info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	return b.String()
+}
+
+// register adds or overrides a file-loaded persona.
+func register(p Persona) {
+	mu.Lock()
+	defer mu.Unlock()
+	if _, exists := loaded[p.Name]; !exists {
+		loadedOrder = append(loadedOrder, p.Name)
+	}
+	loaded[p.Name] = p
 }
 
 type frontmatter struct {
@@ -81,6 +154,7 @@ func parsePersonaFile(path string) (Persona, error) {
 		Rules:       fm.Rules,
 		Guard:       parseGuard(fm.OutputGuard),
 		Loaded:      true,
+		Path:        path,
 	}
 	return p, nil
 }
@@ -119,12 +193,12 @@ func splitFrontmatter(content string) (fm, body string) {
 		return "", content
 	}
 	rest := content[3:]
-	idx := strings.Index(rest, "\n---")
-	if idx < 0 {
+	before, after, found := strings.Cut(rest, "\n---")
+	if !found {
 		return "", content
 	}
-	fm = strings.TrimSpace(rest[:idx])
-	body = rest[idx+len("\n---"):]
+	fm = strings.TrimSpace(before)
+	body = after
 	if nl := strings.IndexByte(body, '\n'); nl >= 0 {
 		body = body[nl+1:]
 	}

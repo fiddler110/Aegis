@@ -78,7 +78,7 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 - **Daemon + client architecture** — durable SQLite-backed sessions survive TUI restarts; resume any session with `aegis --resume <id>`
 - **Plan / Build / Auto modes** — read-only exploration, guided file editing, or fully automatic; fine-grained text-based allow/deny rules per tool and path
 - **50+ built-in tools** — file ops, git (read + commit + push/PR), shell with background jobs, web fetch/search, LaTeX compilation, LSP code intelligence, security scanning, diagram rendering, memory, planning, and more; niche tools load on demand via `tool_search` to keep context lean
-- **17 built-in personas** + custom persona files — security, developer, SRE, cloud architect, risk assessor, and others; each can pin a model and carry its own permission rules
+- **17 built-in personas** + custom persona files — security, developer, SRE, cloud architect, risk assessor, and others; each can pin a model, carry its own permission rules, and declare an advisory tool list (warns/asks, never blocks). Scaffold with `aegis persona new`, edit the file, and the daemon hot-reloads it — no restart needed. Set a project's starting persona with `aegis persona use <name>`
 - **Output validation** — a lightweight second-model pass checks every answer against a configurable rubric before it's returned
 - **Checkpoints & rewind** — every user turn captures a restore point; `/rewind` reverts files, conversation, or both without `git reset` gymnastics
 - **Multi-agent orchestration** — spawn sub-agents (goroutines or subprocesses) with their own permission scopes; agent teams with a shared task list and peer messaging for coordinated parallel work

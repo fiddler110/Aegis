@@ -282,12 +282,16 @@ func (d *SlashDispatcher) cmdPersona(args []string) SlashResult {
 		}
 	}
 
-	personaSystem := "persona:" + name
-	_, err = d.client.UpdateSession(ctx, d.sessionID, api.UpdateSessionRequest{System: &personaSystem})
+	meta, err := d.client.UpdateSession(ctx, d.sessionID, api.UpdateSessionRequest{Persona: &name})
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Failed to switch persona: %v", err), IsError: true}
 	}
-	return SlashResult{Output: fmt.Sprintf("Switched to %s persona: %s", found.Name, found.Description)}
+	out := fmt.Sprintf("Switched to %s persona: %s", found.Name, found.Description)
+	if meta != nil && meta.Mode != "" && meta.Mode != d.mode {
+		out += fmt.Sprintf("\nPermission mode changed: %s → %s (persona default)", d.mode, meta.Mode)
+		d.mode = meta.Mode
+	}
+	return SlashResult{Output: out}
 }
 
 func (d *SlashDispatcher) cmdMode(args []string) SlashResult {

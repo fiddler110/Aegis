@@ -247,6 +247,56 @@ Auto-delete non-archived sessions older than the configured TTL (`cleanup.sessio
 
 ---
 
+## `aegis persona`
+
+List, inspect, and scaffold personas. See [Personas](personas.md).
+
+### `aegis persona list`
+
+List all personas (built-in and custom); markers show `[custom]` for file-loaded personas and `[default]` for the currently configured default persona.
+
+```bash
+aegis persona list
+```
+
+### `aegis persona show`
+
+Show a persona's full profile: description, source (built-in or the file path to edit), model, mode, tools, rules, guard, and system prompt.
+
+```bash
+aegis persona show security
+aegis persona show my-helper --full   # print the entire system prompt
+```
+
+### `aegis persona new`
+
+Scaffold a custom persona `.md` file with a commented frontmatter template. Defaults to the project directory (`.aegis/personas/`); `--global` writes to the user personas directory instead. The daemon picks up the new persona without a restart.
+
+```bash
+aegis persona new incident-responder
+aegis persona new triage --description "Bug triage lead" --global
+```
+
+| Flag | Description |
+|------|-------------|
+| `--global` | Create in the user-global personas directory instead of the project |
+| `--description` | One-line description shown in persona listings |
+
+### `aegis persona use`
+
+Set the persona new sessions start with when `--persona` isn't passed. Writes `default_persona` to the project config (`.aegis/config.yaml`) by default so it travels with the repo; `--global` writes to the user config instead. An explicit `--persona` flag on `aegis` always overrides this.
+
+```bash
+aegis persona use developer
+aegis persona use security --global
+```
+
+| Flag | Description |
+|------|-------------|
+| `--global` | Write to the user-global config instead of the project |
+
+---
+
 ## `aegis dry-run`
 
 Preview what Aegis would do — resolved config, tools, memory, and context — without making any model call.

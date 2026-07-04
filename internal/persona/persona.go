@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // Persona is a named behavioral profile. The override fields are populated by
@@ -16,7 +17,7 @@ type Persona struct {
 	System      string
 	Model       string       // model id override (same provider); "" = global
 	Mode        string       // permission mode; "" = session/config default
-	Tools       []string     // allowed tools (parsed; enforcement deferred)
+	Tools       []string     // advisory tool list; see PersonaToolGate (never a hard restriction)
 	Rules       []string     // permission rules merged into the session gate
 	Guard       *GuardConfig // nil = global default; Disabled = no guard
 	// Loaded is true for a persona parsed from a *.md file (user/project
@@ -27,6 +28,9 @@ type Persona struct {
 	// shipped with Aegis, so its Mode should not silently escalate a session
 	// past the configured default.
 	Loaded bool
+	// Path is the source file for a Loaded persona ("" for built-ins), so
+	// tooling can point the user at the file to edit.
+	Path string
 }
 
 // GuardConfig is a persona's output-validation override parsed from frontmatter.
@@ -93,33 +97,68 @@ remediation step. Do not stop after listing raw scanner output — validate find
 remove false positives, and add issues scanners miss. For threat models, populate
 every STRIDE/LINDDUN cell before the task is done.`
 
-const platformArchitectSystem = `You are Aegis operating as a PLATFORM ARCHITECT. You design and evaluate
-large-scale system architectures with a focus on scalability, reliability, and
-operational excellence.
+const platformArchitectSystem = `You are Aegis operating as a PLATFORM ARCHITECT. You own the full
+architecture lifecycle for large-scale systems: design, security, evaluation,
+process, automation, planning, and the documentation that ties them together.
+
+## Tool use
+- When the task involves the LOCAL project or workspace: call shell, read_file,
+  glob, and grep IMMEDIATELY to read actual files. Ground designs and reviews in
+  the real system, not assumed architecture.
+- Use web_search/web_fetch for EXTERNAL references: vendor documentation,
+  benchmarks, framework comparisons, security advisories.
 
 Your responsibilities:
-1. ARCHITECTURE DESIGN — design systems at the platform level: compute, storage,
-   networking, messaging, orchestration. Produce architecture decision records (ADRs)
-   and express designs using Mermaid (C4, flowchart, sequence) or PlantUML.
+1. SYSTEM & ARCHITECTURE DESIGN — design systems end to end: compute, storage,
+   networking, messaging, orchestration, integration, and data flows. Produce
+   architecture decision records (ADRs) and express designs using Mermaid
+   (C4, flowchart, sequence) or PlantUML.
 
-2. TECHNOLOGY EVALUATION — assess platforms, frameworks, cloud services, and
-   infrastructure tooling. Compare trade-offs across cost, complexity, lock-in,
-   scalability, and operational maturity. Cite documentation and benchmarks.
+2. SECURITY DESIGN & THREAT MODELING — build security into designs from the
+   start: authentication, authorization, encryption, secrets handling, and
+   network segmentation. Apply STRIDE against assets, trust boundaries, entry
+   points, and data flows; annotate trust boundaries on architecture diagrams
+   and map mitigations to each identified threat.
 
-3. CAPACITY & PERFORMANCE — reason about throughput, latency, storage growth, and
-   resource utilization. Identify bottlenecks and single points of failure.
+3. SOLUTION EVALUATION & PROOF OF CONCEPT — assess platforms, frameworks, cloud
+   services, and tooling. Compare trade-offs across cost, complexity, lock-in,
+   scalability, security, and operational maturity, citing documentation and
+   benchmarks. Where a decision needs validation, design and build a minimal
+   proof of concept with explicit success criteria, then report what it proved
+   and disproved.
 
-4. PLATFORM STANDARDS — define conventions for deployment, observability, CI/CD,
-   service communication, and configuration management. Ensure consistency across
-   teams and services.
+4. CAPACITY & PERFORMANCE — reason about throughput, latency, storage growth,
+   and resource utilization. Identify bottlenecks and single points of failure.
+
+5. PROCESS DEVELOPMENT & STANDARDS — define and improve engineering processes:
+   deployment workflows, review and release gates, incident handling, and
+   conventions for observability, CI/CD, service communication, and
+   configuration management. Document each process with its steps, owners,
+   inputs, and outputs so teams can follow it without you.
+
+6. AUTOMATION DEVELOPMENT — build automation that removes manual toil: scripts,
+   CI/CD pipeline stages, scheduled jobs, and self-service tooling. Deliver
+   working, tested code with usage instructions — not pseudocode.
+
+7. ROADMAP PLANNING — produce phased roadmaps: milestones, dependencies,
+   sequencing rationale, resourcing assumptions, and risks per phase. Tie each
+   phase to the outcome it delivers and define what "done" means for it.
+
+8. DOCUMENTATION & REPORTING — write architecture documents, design docs,
+   runbooks, and structured reports (executive summary, findings, analysis,
+   recommendations) tailored to the audience: engineering, leadership, or audit.
 
 Ground recommendations in evidence. Distinguish proven patterns from speculative ones.
 Document assumptions, constraints, and trade-offs explicitly.
 
 ## Completing your output
 Produce complete ADRs with every section populated (context, decision, consequences).
-Render full Mermaid diagrams — do not stop at a placeholder. For technology
-evaluations, include an explicit trade-off comparison and a recommendation.`
+Render full Mermaid diagrams — do not stop at a placeholder. For threat models,
+map a mitigation to every identified threat. For evaluations and PoCs, include an
+explicit trade-off comparison, success criteria, and a recommendation. For
+roadmaps, populate every phase with milestones, dependencies, and risks. Write
+documents and reports to files via write_file, fully populated — an outline is
+not a deliverable.`
 
 const securityArchitectSystem = `You are Aegis operating as a SECURITY ARCHITECT. You design security
 architectures, define security requirements, and ensure systems are built with
@@ -199,11 +238,14 @@ const appSecEngineerSystem = `You are Aegis operating as an APPLICATION SECURITY
 applications throughout the software development lifecycle.
 
 Your responsibilities:
-1. SECURE CODE REVIEW — review application code for security vulnerabilities:
-   injection flaws, broken authentication, sensitive data exposure, XXE, broken
-   access control, security misconfigurations, XSS, insecure deserialization,
-   known vulnerable components, and insufficient logging. Reference OWASP Top 10
-   and OWASP ASVS.
+1. SECURE CODE REVIEW — review application code for security vulnerabilities
+   across the OWASP Top 10 (2025): broken access control (including SSRF),
+   security misconfiguration (including XXE), software supply chain failures,
+   cryptographic failures, injection (including XSS), insecure design,
+   authentication failures, software or data integrity failures (including
+   insecure deserialization), security logging and alerting failures, and
+   mishandling of exceptional conditions. Reference OWASP ASVS for depth
+   beyond the Top 10.
 
 2. APPLICATION TESTING — perform and interpret SAST, DAST, and IAST results.
    Run security_scan for automated findings. Write proof-of-concept exploits to
@@ -296,7 +338,8 @@ Your responsibilities:
    Consider threat capability, vulnerability exposure, and existing control effectiveness.
 
 3. RISK EVALUATION — prioritize risks against risk appetite and tolerance thresholds.
-   Map risks to compliance frameworks (NIST RMF, ISO 27005, FAIR) where applicable.
+   Frame assessments with recognized methodologies where applicable: NIST RMF and
+   ISO 27005 for the risk management process, FAIR for quantitative analysis.
    Produce risk registers with clear ownership and treatment timelines.
 
 4. RISK TREATMENT — recommend treatment options: mitigate, transfer, accept, or avoid.
@@ -322,7 +365,9 @@ Your responsibilities:
 
 2. PROCESS ANALYSIS — map and analyze business processes. Identify inefficiencies,
    bottlenecks, and automation opportunities. Document current-state and future-state
-   processes using flowcharts and BPMN diagrams (rendered in Mermaid).
+   processes as Mermaid flowcharts (Mermaid has no native BPMN type — approximate
+   BPMN-style maps with flowchart notation: labeled decision gateways and
+   swimlane-style subgraphs).
 
 3. DATA ANALYSIS — analyze business data to support decision-making. Identify trends,
    patterns, and anomalies. Present findings with clear visualizations and actionable
@@ -625,7 +670,51 @@ const toolUseBlock = `## Tool use
 // ToolUseBlock returns the shared tool-use rules injected into every session.
 func ToolUseBlock() string { return toolUseBlock }
 
-var registry = map[string]Persona{
+// Tool-name groups used to build each built-in persona's Tools list below.
+// Declaring Tools makes a persona's tool use advisory-checked: a call to a
+// tool outside the list is logged and routed through the same approval flow
+// as capability decisions — warn-and-allow under a non-interactive approver,
+// a confirmation prompt under an interactive one (permission.PersonaToolGate)
+// — never a hard block. The "general" persona deliberately leaves Tools
+// empty (no restriction, no advisory) since it has no specific focus to
+// check tool use against.
+var (
+	// coreTools covers baseline knowledge work every focused persona does:
+	// reading, writing, searching, task tracking, memory, and research.
+	coreTools = []string{
+		"read_file", "glob", "grep", "ls", "write_file", "edit_file",
+		"todo_add", "todo_list", "todo_update", "remember", "ask_user",
+		"tool_search", "web_search", "web_fetch",
+	}
+	shellGitTools    = []string{"shell", "git", "git_commit"}
+	lspTools         = []string{"definition", "references", "hover", "diagnostics", "document_symbols", "workspace_symbols", "call_hierarchy"}
+	diagramTools     = []string{"render_diagram"}
+	securityScanTool = []string{"security_scan"}
+	cronTools        = []string{"cron_create", "cron_list", "cron_delete", "cron_toggle"}
+	latexTools       = []string{"latex_new_document", "latex_build"}
+)
+
+// toolSet concatenates tool-name groups into a persona's Tools list,
+// deduplicating while preserving first-occurrence order.
+func toolSet(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, g := range groups {
+		for _, t := range g {
+			if _, ok := seen[t]; ok {
+				continue
+			}
+			seen[t] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// builtins holds the personas compiled into this package. It is never
+// mutated after init; file-loaded personas live in the separate loaded map
+// (load.go) so a hot reload can rebuild them without touching built-ins.
+var builtins = map[string]Persona{
 	"general": {
 		Name:        "general",
 		Description: "General research, documentation, and coding assistant",
@@ -635,100 +724,102 @@ var registry = map[string]Persona{
 		Name:        "security",
 		Description: "Security platform architect: research, issue identification, threat modeling, architecture",
 		System:      securitySystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, diagramTools),
 	},
 	"platform-architect": {
 		Name:        "platform-architect",
-		Description: "Platform architect: system design, technology evaluation, capacity planning, platform standards",
+		Description: "Platform architect: system & security design, threat modeling, solution evaluation & PoCs, process, automation, roadmaps, documentation",
 		System:      platformArchitectSystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, diagramTools, cronTools, []string{"multi_edit", "task_create", "task_list", "task_update"}),
 	},
 	"security-architect": {
 		Name:        "security-architect",
 		Description: "Security architect: security architecture, threat modeling, security requirements, design review",
 		System:      securityArchitectSystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, diagramTools),
 	},
 	"security-engineer": {
 		Name:        "security-engineer",
 		Description: "Security engineer: security tooling, vulnerability management, automation, incident response",
 		System:      securityEngineerSystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, cronTools),
 	},
 	"appsec-engineer": {
 		Name:        "appsec-engineer",
 		Description: "Application security engineer: secure code review, app testing, secure development, CI/CD security",
 		System:      appSecEngineerSystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, lspTools, []string{"git_pr", "multi_edit"}),
 	},
 	"developer": {
 		Name:        "developer",
 		Description: "Software developer: implementation, debugging, code review, testing",
 		System:      developerSystem,
+		Tools:       toolSet(coreTools, shellGitTools, lspTools, []string{"git_pr", "multi_edit", "save_skill"}),
 	},
 	"security-researcher": {
 		Name:        "security-researcher",
 		Description: "Security researcher: vulnerability research, attack analysis, defensive research, knowledge synthesis",
 		System:      securityResearcherSystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, []string{"save_skill"}),
 	},
 	"risk-assessor": {
 		Name:        "risk-assessor",
 		Description: "Risk assessor: risk identification, analysis, evaluation, and treatment recommendations",
 		System:      riskAssessorSystem,
+		Tools:       toolSet(coreTools, []string{"shell"}),
 	},
 	"business-analyst": {
 		Name:        "business-analyst",
 		Description: "Business analyst: requirements, process analysis, data analysis, stakeholder communication",
 		System:      businessAnalystSystem,
+		Tools:       toolSet(coreTools, diagramTools),
 	},
 	"data-analyst": {
 		Name:        "data-analyst",
 		Description: "Data analyst: data exploration, statistical analysis, visualization, reporting",
 		System:      dataAnalystSystem,
+		Tools:       toolSet(coreTools, []string{"shell"}, diagramTools),
 	},
 	"network-security-architect": {
 		Name:        "network-security-architect",
 		Description: "Network security architect: network design, security controls, cloud networking, threat analysis",
 		System:      networkSecurityArchitectSystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, diagramTools),
 	},
 	"report-writer": {
 		Name:        "report-writer",
 		Description: "Report writer: structured reports, technical writing, findings documentation, quality assurance",
 		System:      reportWriterSystem,
+		Tools:       toolSet(coreTools, diagramTools, latexTools, []string{"multi_edit"}),
 	},
 	"sre": {
 		Name:        "sre",
 		Description: "Site reliability engineer: reliability, observability, incident management, capacity planning",
 		System:      sreSystem,
+		Tools:       toolSet(coreTools, shellGitTools, diagramTools, cronTools),
 	},
 	"infrastructure-architect": {
 		Name:        "infrastructure-architect",
 		Description: "Infrastructure architect: infrastructure design, IaC, orchestration, operations lifecycle",
 		System:      infrastructureArchitectSystem,
+		Tools:       toolSet(coreTools, shellGitTools, diagramTools, cronTools, []string{"multi_edit"}),
 	},
 	"cloud-architect": {
 		Name:        "cloud-architect",
 		Description: "Cloud architect: cloud-native design, migration, multi-cloud/hybrid, cost optimization",
 		System:      cloudArchitectSystem,
+		Tools:       toolSet(coreTools, shellGitTools, diagramTools),
 	},
 	"cloud-security-engineer": {
 		Name:        "cloud-security-engineer",
 		Description: "Cloud security engineer: cloud posture, cloud-native security, automation, threat detection",
 		System:      cloudSecurityEngineerSystem,
+		Tools:       toolSet(coreTools, shellGitTools, securityScanTool, cronTools),
 	},
 }
 
-// Get returns the persona by name, falling back to the general persona for an
-// empty or unknown name. The boolean reports whether the name was recognized.
-func Get(name string) (Persona, bool) {
-	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" {
-		return registry["general"], true
-	}
-	p, ok := registry[name]
-	if !ok {
-		return registry["general"], false
-	}
-	return p, true
-}
-
-// nameOrder preserves registration order: built-ins first, then file personas.
-var nameOrder = []string{
+// builtinOrder preserves the display order of built-in personas.
+var builtinOrder = []string{
 	"general", "security", "platform-architect", "security-architect",
 	"security-engineer", "appsec-engineer", "developer", "security-researcher",
 	"risk-assessor", "business-analyst", "data-analyst",
@@ -736,9 +827,47 @@ var nameOrder = []string{
 	"infrastructure-architect", "cloud-architect", "cloud-security-engineer",
 }
 
-// Names returns the available persona names in registration order.
+// mu guards loaded, loadedOrder, and refreshSig. builtins and builtinOrder are
+// immutable after init and need no locking.
+var (
+	mu          sync.RWMutex
+	loaded      = map[string]Persona{}
+	loadedOrder []string
+	refreshSig  string
+)
+
+// Get returns the persona by name, falling back to the general persona for an
+// empty or unknown name. The boolean reports whether the name was recognized.
+// File-loaded personas shadow built-ins of the same name.
+func Get(name string) (Persona, bool) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return builtins["general"], true
+	}
+	mu.RLock()
+	p, ok := loaded[name]
+	mu.RUnlock()
+	if ok {
+		return p, true
+	}
+	if p, ok := builtins[name]; ok {
+		return p, true
+	}
+	return builtins["general"], false
+}
+
+// Names returns the available persona names: built-ins in display order, then
+// file-loaded personas in registration order (names shadowing a built-in are
+// listed once).
 func Names() []string {
-	out := make([]string, len(nameOrder))
-	copy(out, nameOrder)
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make([]string, 0, len(builtinOrder)+len(loadedOrder))
+	out = append(out, builtinOrder...)
+	for _, n := range loadedOrder {
+		if _, shadows := builtins[n]; !shadows {
+			out = append(out, n)
+		}
+	}
 	return out
 }

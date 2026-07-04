@@ -88,6 +88,7 @@ type Server struct {
 	permRules   []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
 	permMu      sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
 	repoMap     string            // cached repository map block for the system prompt (empty when not indexed)
+	personaDirs []string          // directories rescanned by refreshPersonas for hot reload
 	workspace   string
 	logger      *slog.Logger
 	http        *http.Server
@@ -355,8 +356,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		logger.Info("loaded custom agent definitions", "count", n)
 	}
 
-	// Load custom persona templates from user/project directories.
-	if n := persona.LoadFromDirs(persona.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
+	// Load custom persona templates from user/project directories. Refresh
+	// (rather than LoadFromDirs) primes the change-detection signature so
+	// later refreshPersonas calls are cheap no-ops until a file changes.
+	s.personaDirs = persona.DiscoverDirs(cfg.DataDir, cwd)
+	if n, _ := persona.Refresh(s.personaDirs...); n > 0 {
 		logger.Info("loaded custom personas", "count", n)
 	}
 
@@ -821,6 +825,18 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 			}))
 	}
 
+	// A persona's declared Tools list is advisory only (P7.5: never a
+	// security boundary) — wrapped outermost so a call outside the list is
+	// flagged before the real allow/deny rules below run.
+	if len(p.Tools) > 0 {
+		gate = permission.NewPersonaToolGate(gate, p.Name, p.Tools, approver, s.logger,
+			func(d permission.ContextualDecision) {
+				if s.audit != nil {
+					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
+				}
+			})
+	}
+
 	var guardFn guard.Func
 	var guardRetries int
 	if guardEnabled {
@@ -897,6 +913,16 @@ func (s *Server) resolveSessionMode(reqMode string, p persona.Persona) string {
 	return p.Mode
 }
 
+// refreshPersonas rescans the persona directories so file edits, additions,
+// and deletions take effect without a daemon restart. A directory signature
+// makes this a cheap no-op when nothing changed, so persona-touching handlers
+// call it on every request.
+func (s *Server) refreshPersonas() {
+	if n, changed := persona.Refresh(s.personaDirs...); changed {
+		s.logger.Info("reloaded persona files", "count", n)
+	}
+}
+
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	var req api.CreateSessionRequest
@@ -904,6 +930,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	s.refreshPersonas()
 	p, _ := persona.Get(req.Persona)
 	mode := s.resolveSessionMode(req.Mode, p)
 	if mode == "" {
@@ -1008,21 +1035,55 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if req.System == nil && req.Mode == nil {
+	if req.System == nil && req.Mode == nil && req.Persona == nil {
 		writeError(w, http.StatusBadRequest, "nothing to update")
 		return
 	}
-	if req.System != nil {
-		system := *req.System
-		if name, ok := strings.CutPrefix(system, "persona:"); ok {
-			p, found := persona.Get(name)
-			if !found {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown persona %q", name))
-				return
-			}
-			system = p.System
+
+	// A persona switch can arrive as the Persona field or as the legacy
+	// "persona:<name>" System prefix; both take the same full-profile path so
+	// the switch carries model, rules, and guard overrides — not just the
+	// system prompt.
+	personaName := ""
+	if req.Persona != nil {
+		personaName = strings.TrimSpace(*req.Persona)
+		if personaName == "" {
+			writeError(w, http.StatusBadRequest, "persona name is required")
+			return
 		}
-		if err := s.store.SetSystem(r.Context(), id, system); err != nil {
+	}
+	if req.System != nil {
+		if name, ok := strings.CutPrefix(*req.System, "persona:"); ok {
+			personaName = name
+			req.System = nil
+		}
+	}
+	if personaName != "" {
+		s.refreshPersonas()
+		p, found := persona.Get(personaName)
+		if !found {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown persona %q", personaName))
+			return
+		}
+		if err := s.store.SetPersona(r.Context(), id, p.Name); err != nil {
+			s.logger.Error("set persona", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if req.System == nil {
+			req.System = &p.System
+		}
+		// Apply the persona's permission mode (subject to the P7.5 escalation
+		// guard) unless the request pins a mode explicitly.
+		if req.Mode == nil {
+			if m := s.resolveSessionMode("", p); m != "" {
+				req.Mode = &m
+			}
+		}
+	}
+
+	if req.System != nil {
+		if err := s.store.SetSystem(r.Context(), id, *req.System); err != nil {
 			s.logger.Error("set system", "err", err)
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
@@ -1109,6 +1170,7 @@ func (s *Server) handleAppendMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPersonas(w http.ResponseWriter, _ *http.Request) {
+	s.refreshPersonas()
 	names := persona.Names()
 	out := make([]api.PersonaInfo, 0, len(names))
 	for _, name := range names {
@@ -1264,6 +1326,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	s.pendingSteers.Store(id, steerCh)
 	defer s.pendingSteers.Delete(id)
 
+	s.refreshPersonas() // pick up persona file edits without a daemon restart
 	p, _ := persona.Get(sess.Persona)
 	guardEnabled := s.cfg.OutputGuard.Enabled
 	if req.GuardEnabled != nil {

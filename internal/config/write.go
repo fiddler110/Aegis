@@ -125,6 +125,36 @@ func buildSandboxBlock(p SandboxPatch) string {
 	return b.String()
 }
 
+// PatchProjectDefaultPersona sets default_persona in the project-level
+// .aegis/config.yaml, preserving all other sections. An empty name removes
+// the override, falling back to the built-in "general" default.
+func PatchProjectDefaultPersona(name string) error {
+	return patchDefaultPersona(ProjectConfigPath(), name)
+}
+
+// PatchGlobalDefaultPersona sets default_persona in the global config file.
+func PatchGlobalDefaultPersona(name string) error {
+	return patchDefaultPersona(GlobalConfigPath(), name)
+}
+
+func patchDefaultPersona(path, name string) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	block := fmt.Sprintf("default_persona: %q\n", name)
+	var out []byte
+	if len(existing) == 0 {
+		out = []byte("# Aegis configuration\n\n" + block + "\n")
+	} else {
+		out = spliceSection(existing, "default_persona", block)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
 // spliceSection replaces the named top-level YAML section with newBlock.
 // Everything from "key:" to the next top-level key is replaced. If the
 // section is not found, newBlock is appended.

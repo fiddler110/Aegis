@@ -50,8 +50,8 @@ func TestAllRegisteredPersonasResolvable(t *testing.T) {
 
 func TestNamesMatchesRegistry(t *testing.T) {
 	names := Names()
-	if len(names) != len(registry) {
-		t.Errorf("Names() has %d entries but registry has %d", len(names), len(registry))
+	if len(names) < len(builtins) {
+		t.Errorf("Names() has %d entries but there are %d built-ins", len(names), len(builtins))
 	}
 	seen := make(map[string]bool)
 	for _, n := range names {
@@ -76,7 +76,7 @@ func TestPersonaPromptKeywords(t *testing.T) {
 		name     string
 		keywords []string
 	}{
-		{"platform-architect", []string{"PLATFORM ARCHITECT", "ARCHITECTURE DESIGN", "CAPACITY"}},
+		{"platform-architect", []string{"PLATFORM ARCHITECT", "ARCHITECTURE DESIGN", "CAPACITY", "THREAT MODELING", "PROOF OF CONCEPT", "AUTOMATION DEVELOPMENT", "ROADMAP PLANNING", "PROCESS DEVELOPMENT", "DOCUMENTATION & REPORTING"}},
 		{"security-architect", []string{"SECURITY ARCHITECT", "STRIDE", "THREAT MODELING"}},
 		{"security-engineer", []string{"SECURITY ENGINEER", "VULNERABILITY MANAGEMENT", "INCIDENT RESPONSE"}},
 		{"appsec-engineer", []string{"APPLICATION SECURITY", "OWASP", "SECURE CODE REVIEW"}},
@@ -156,6 +156,70 @@ func TestPersonas_allHaveCompletingOutput(t *testing.T) {
 		}
 		if !contains(p.System, "## Completing your output") {
 			t.Errorf("persona %q missing ## Completing your output section", name)
+		}
+	}
+}
+
+// knownToolNames mirrors the tool names registered by internal/tool/builtin
+// (see Register in builtin.go). Kept as a literal here rather than importing
+// tool/builtin — which would need live LSP/cron/task stores wired up just to
+// enumerate names — so update this list alongside any built-in tool rename
+// or addition.
+var knownToolNames = map[string]bool{
+	"read_file": true, "write_file": true, "edit_file": true, "multi_edit": true,
+	"ls": true, "glob": true, "grep": true,
+	"git": true, "git_commit": true, "git_pr": true,
+	"shell": true, "web_fetch": true, "web_search": true, "list_models": true,
+	"security_scan": true, "skill": true, "tool_search": true,
+	"render_diagram": true, "latex_build": true, "latex_new_document": true,
+	"remember": true, "save_skill": true,
+	"task_create": true, "task_list": true, "task_get": true, "task_update": true, "task_output": true, "task_stop": true,
+	"cron_create": true, "cron_list": true, "cron_delete": true, "cron_toggle": true,
+	"definition": true, "references": true, "hover": true, "diagnostics": true,
+	"document_symbols": true, "workspace_symbols": true, "call_hierarchy": true,
+	"todo_add": true, "todo_list": true, "todo_update": true,
+	"ask_user":          true,
+	"project_knowledge": true,
+	"entity_remember":   true, "entity_recall": true,
+	"team_inbox": true, "team_send": true, "team_task_add": true, "team_task_claim": true, "team_task_complete": true, "team_task_list": true,
+	"agent": true,
+}
+
+// TestBuiltinPersonaToolsAreKnown guards against typos or renames drifting a
+// persona's declared Tools list out of sync with the real tool registry —
+// the advisory gate (PersonaToolGate) would otherwise silently flag every
+// call to a genuinely valid tool just because it was misspelled here.
+func TestBuiltinPersonaToolsAreKnown(t *testing.T) {
+	for _, name := range Names() {
+		p, ok := Get(name)
+		if !ok || p.Loaded {
+			continue
+		}
+		for _, tl := range p.Tools {
+			if !knownToolNames[tl] {
+				t.Errorf("persona %q declares unknown tool %q", name, tl)
+			}
+		}
+	}
+}
+
+// TestBuiltinPersonasDeclareTools ensures every built-in except "general" (the
+// no-specific-focus fallback, left unrestricted by design) declares a Tools
+// list, so the advisory gate has something meaningful to check.
+func TestBuiltinPersonasDeclareTools(t *testing.T) {
+	for _, name := range Names() {
+		p, ok := Get(name)
+		if !ok || p.Loaded {
+			continue
+		}
+		if name == "general" {
+			if len(p.Tools) != 0 {
+				t.Errorf("general persona should stay unrestricted (empty Tools), got %v", p.Tools)
+			}
+			continue
+		}
+		if len(p.Tools) == 0 {
+			t.Errorf("persona %q has no declared Tools", name)
 		}
 	}
 }

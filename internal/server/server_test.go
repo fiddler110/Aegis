@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/hooks"
 	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/swarm"
@@ -514,7 +516,8 @@ func TestPatchSession(t *testing.T) {
 		t.Errorf("mode = %q, want build", updated.Mode)
 	}
 
-	// Patch system via persona: prefix.
+	// Patch system via legacy persona: prefix — routes through the full
+	// persona switch, so the persona column updates too.
 	system := "persona:security"
 	_, err = cl.UpdateSession(ctx, meta.ID, api.UpdateSessionRequest{System: &system})
 	if err != nil {
@@ -527,12 +530,113 @@ func TestPatchSession(t *testing.T) {
 	if !strings.Contains(sess.System, "SECURITY PLATFORM ARCHITECT") {
 		t.Errorf("system not updated to security persona, got %q...", sess.System[:50])
 	}
+	if sess.Persona != "security" {
+		t.Errorf("persona = %q, want security (legacy prefix must persist the persona name)", sess.Persona)
+	}
+
+	// Patch via the Persona field.
+	name := "developer"
+	if _, err = cl.UpdateSession(ctx, meta.ID, api.UpdateSessionRequest{Persona: &name}); err != nil {
+		t.Fatalf("UpdateSession persona field: %v", err)
+	}
+	sess, err = cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Persona != "developer" {
+		t.Errorf("persona = %q, want developer", sess.Persona)
+	}
+	if !strings.Contains(sess.System, "SOFTWARE DEVELOPER") {
+		t.Errorf("system not updated to developer persona, got %q...", sess.System[:50])
+	}
+
+	// Unknown persona rejected.
+	unknown := "does-not-exist"
+	if _, err = cl.UpdateSession(ctx, meta.ID, api.UpdateSessionRequest{Persona: &unknown}); err == nil {
+		t.Error("expected error for unknown persona")
+	}
 
 	// Invalid mode rejected.
 	bad := "invalid"
 	_, err = cl.UpdateSession(ctx, meta.ID, api.UpdateSessionRequest{Mode: &bad})
 	if err == nil {
 		t.Error("expected error for invalid mode")
+	}
+}
+
+// TestPersonaHotReload verifies persona files added while the daemon runs
+// become visible without a restart, and that switching to one carries its
+// full profile (persona name persisted on the session).
+func TestPersonaHotReload(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{text: "ok"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	dir := t.TempDir()
+	srv.personaDirs = []string{dir}
+	// Reset the package-global loaded persona set after the test.
+	t.Cleanup(func() { persona.Refresh() })
+
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	hasPersona := func(name string) bool {
+		personas, err := cl.ListPersonas(ctx)
+		if err != nil {
+			t.Fatalf("ListPersonas: %v", err)
+		}
+		for _, p := range personas {
+			if p.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if hasPersona("hot-added") {
+		t.Fatal("hot-added persona present before the file was written")
+	}
+
+	// Drop a persona file while the daemon is running.
+	content := "---\ndescription: added at runtime\n---\nYou are the hot-added persona."
+	if err := os.WriteFile(filepath.Join(dir, "hot-added.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !hasPersona("hot-added") {
+		t.Fatal("persona file added at runtime not visible via /personas")
+	}
+
+	// Switch a session to it and confirm the full profile landed.
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "hot-added"
+	if _, err := cl.UpdateSession(ctx, meta.ID, api.UpdateSessionRequest{Persona: &name}); err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+	sess, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Persona != "hot-added" || !strings.Contains(sess.System, "hot-added persona") {
+		t.Errorf("persona=%q system=%q", sess.Persona, sess.System)
+	}
+
+	// Deleting the file drops the persona on the next refresh.
+	if err := os.Remove(filepath.Join(dir, "hot-added.md")); err != nil {
+		t.Fatal(err)
+	}
+	if hasPersona("hot-added") {
+		t.Error("deleted persona file still listed")
 	}
 }
 

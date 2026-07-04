@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writePersona(t *testing.T, dir, name, content string) {
@@ -15,17 +16,20 @@ func writePersona(t *testing.T, dir, name, content string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Restore the package-global registry after the test so loaded test
-	// personas do not leak into other tests that iterate Names()/registry.
+	// Restore the package-global loaded set after the test so test personas
+	// do not leak into other tests that iterate Names().
 	stem := strings.TrimSuffix(name, filepath.Ext(name))
 	t.Cleanup(func() {
-		delete(registry, stem)
-		for i, n := range nameOrder {
+		mu.Lock()
+		defer mu.Unlock()
+		delete(loaded, stem)
+		for i, n := range loadedOrder {
 			if n == stem {
-				nameOrder = append(nameOrder[:i], nameOrder[i+1:]...)
+				loadedOrder = append(loadedOrder[:i], loadedOrder[i+1:]...)
 				break
 			}
 		}
+		refreshSig = ""
 	})
 }
 
@@ -78,6 +82,65 @@ func TestLoadGuardDisabledScalar(t *testing.T) {
 	p, _ := Get("fast")
 	if p.Guard == nil || !p.Guard.Disabled {
 		t.Errorf("expected disabled guard, got %+v", p.Guard)
+	}
+}
+
+func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		mu.Lock()
+		loaded = map[string]Persona{}
+		loadedOrder = nil
+		refreshSig = ""
+		mu.Unlock()
+	})
+
+	// Add.
+	path := filepath.Join(dir, "hotswap.md")
+	if err := os.WriteFile(path, []byte("---\ndescription: v1\n---\nFirst body."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, changed := Refresh(dir); n != 1 || !changed {
+		t.Fatalf("after add: n=%d changed=%v", n, changed)
+	}
+	p, ok := Get("hotswap")
+	if !ok || p.System != "First body." {
+		t.Fatalf("persona after add: ok=%v system=%q", ok, p.System)
+	}
+
+	// Unchanged directory short-circuits.
+	if _, changed := Refresh(dir); changed {
+		t.Error("Refresh reported a rebuild for an unchanged directory")
+	}
+
+	// Update. Backdate then rewrite so the mtime signature always differs even
+	// on coarse filesystem clocks.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := Refresh(dir); !changed {
+		t.Fatal("Refresh missed an mtime change")
+	}
+	if err := os.WriteFile(path, []byte("---\ndescription: v2\n---\nSecond body."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := Refresh(dir); !changed {
+		t.Fatal("Refresh missed a file update")
+	}
+	if p, _ := Get("hotswap"); p.System != "Second body." {
+		t.Errorf("persona not updated: system=%q", p.System)
+	}
+
+	// Delete.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if n, changed := Refresh(dir); n != 0 || !changed {
+		t.Fatalf("after delete: n=%d changed=%v", n, changed)
+	}
+	if _, ok := Get("hotswap"); ok {
+		t.Error("deleted persona still resolvable")
 	}
 }
 

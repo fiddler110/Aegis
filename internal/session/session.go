@@ -621,6 +621,14 @@ func (s *Store) SetSystem(ctx context.Context, id, system string) error {
 	return err
 }
 
+// SetPersona updates a session's persona name. The engine resolves the
+// persona's profile (model, rules, guard) from this name on each turn.
+func (s *Store) SetPersona(ctx context.Context, id, persona string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET persona = ?, updated_at = ? WHERE id = ?`,
+		persona, time.Now().UnixMilli(), id)
+	return err
+}
+
 // SetMode updates a session's permission mode.
 func (s *Store) SetMode(ctx context.Context, id, mode string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET mode = ?, updated_at = ? WHERE id = ?`,

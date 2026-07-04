@@ -83,11 +83,19 @@ func newRootCmd() *cobra.Command {
 				resolvedMode = mode
 			}
 
+			// An explicit --persona always wins; otherwise fall back to the
+			// project's (or user's) configured default_persona, then finally
+			// to the daemon's own "" -> general fallback.
+			resolvedPersona := persona
+			if resolvedPersona == "" {
+				resolvedPersona = cfg.DefaultPersona
+			}
+
 			sessionID := resume
 			if sessionID == "" {
 				meta, err := cl.CreateSession(context.Background(), api.CreateSessionRequest{
 					Mode:    resolvedMode,
-					Persona: persona,
+					Persona: resolvedPersona,
 				})
 				if err != nil {
 					return err
@@ -119,7 +127,7 @@ func newRootCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&mode, "mode", "", "permission mode: plan (read-only) or build")
 	cmd.Flags().StringVar(&resume, "resume", "", "resume an existing session by id")
-	cmd.Flags().StringVar(&persona, "persona", "", "persona for new sessions (e.g. general, security, developer, security-architect, sre, cloud-architect; see README for full list)")
+	cmd.Flags().StringVar(&persona, "persona", "", "persona for new sessions (e.g. general, security, developer, security-architect, sre, cloud-architect; see README for full list). Falls back to config's default_persona, then general (see: aegis persona use)")
 	cmd.Flags().BoolVar(&firstInit, "first-init", false, "create the global config file with a full provider template (Ollama active by default)")
 	cmd.Flags().BoolVar(&initProject, "init", false, "create a project-level .aegis/config.yaml override in the current directory")
 
@@ -135,6 +143,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newDryRunCmd())
 	cmd.AddCommand(newChatCmd())
 	cmd.AddCommand(newSessionsCmd())
+	cmd.AddCommand(newPersonaCmd())
 	cmd.AddCommand(newScanCmd())
 	cmd.AddCommand(newSandboxCmd())
 	cmd.AddCommand(newIndexCmd())

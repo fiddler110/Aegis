@@ -21,27 +21,36 @@ import (
 
 // Config is the fully resolved harness configuration.
 type Config struct {
-	DataDir     string                     `koanf:"data_dir"`
-	LogLevel    string                     `koanf:"log_level"`
-	Provider    ProviderConfig             `koanf:"provider"`
-	Server      ServerConfig               `koanf:"server"`
-	Permission  PermissionConfig           `koanf:"permission"`
-	Diagram     DiagramConfig              `koanf:"diagram"`
-	Cost        CostConfig                 `koanf:"cost"`
-	Cleanup     CleanupConfig              `koanf:"cleanup"`
-	TUI         TUIConfig                  `koanf:"tui"`
-	Swarm       SwarmConfig                `koanf:"swarm"`
-	Sandbox     SandboxConfig              `koanf:"sandbox"`
-	Security    SecurityConfig             `koanf:"security"`
-	OutputGuard OutputGuardConfig          `koanf:"output_guard"`
-	Personas    map[string]PersonaOverride `koanf:"personas"`
-	LSP         []LSPServerConfig          `koanf:"lsp"`
-	Plugins     []ProcessToolConfig        `koanf:"plugins"`
-	MCP         []MCPServerConfig          `koanf:"mcp"`
-	Hooks       []HookConfig               `koanf:"hooks"`
-	Search      SearchConfig               `koanf:"search"`
-	Notify      NotifyConfig               `koanf:"notify"`
-	Embeddings  EmbeddingsConfig           `koanf:"embeddings"`
+	DataDir     string            `koanf:"data_dir"`
+	LogLevel    string            `koanf:"log_level"`
+	Provider    ProviderConfig    `koanf:"provider"`
+	Server      ServerConfig      `koanf:"server"`
+	Permission  PermissionConfig  `koanf:"permission"`
+	Diagram     DiagramConfig     `koanf:"diagram"`
+	Cost        CostConfig        `koanf:"cost"`
+	Cleanup     CleanupConfig     `koanf:"cleanup"`
+	TUI         TUIConfig         `koanf:"tui"`
+	Swarm       SwarmConfig       `koanf:"swarm"`
+	Sandbox     SandboxConfig     `koanf:"sandbox"`
+	Security    SecurityConfig    `koanf:"security"`
+	OutputGuard OutputGuardConfig `koanf:"output_guard"`
+	// DefaultPersona names the persona new sessions start with when the
+	// caller doesn't pass --persona. Set at the project level
+	// (.aegis/config.yaml) to give a repo its own default focus; unset falls
+	// back to "general". Not validated at load time (checking it would
+	// require importing internal/persona here, which would create an import
+	// cycle since persona already has no dependency on config) — an unknown
+	// name is caught at session-creation time the same way an explicit
+	// --persona typo is.
+	DefaultPersona string                     `koanf:"default_persona"`
+	Personas       map[string]PersonaOverride `koanf:"personas"`
+	LSP            []LSPServerConfig          `koanf:"lsp"`
+	Plugins        []ProcessToolConfig        `koanf:"plugins"`
+	MCP            []MCPServerConfig          `koanf:"mcp"`
+	Hooks          []HookConfig               `koanf:"hooks"`
+	Search         SearchConfig               `koanf:"search"`
+	Notify         NotifyConfig               `koanf:"notify"`
+	Embeddings     EmbeddingsConfig           `koanf:"embeddings"`
 }
 
 // EmbeddingsConfig enables the optional semantic recall layer (P5.8) over the
@@ -242,7 +251,11 @@ type PersonaOverride struct {
 // DefaultGuardRubric is the generic quality rubric applied when output guarding
 // is on and a persona declares no rubric of its own.
 const DefaultGuardRubric = "The response must directly and completely address the request, " +
-	"contain no placeholders or TODOs, and ground factual claims in tool output where applicable."
+	"contain no unfinished work (TODO markers, \"left as an exercise\", stubbed-out logic), " +
+	"and ground factual claims in tool output where applicable. Example or placeholder values " +
+	"clearly used as such in documentation (e.g. an illustrative IP address, hostname, or " +
+	"<your-api-key>-style token) are acceptable, especially when the real value depends on the " +
+	"reader's own environment and was never supplied to the model."
 
 // DiagramConfig configures diagram rendering.
 type DiagramConfig struct {

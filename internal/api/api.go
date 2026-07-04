@@ -132,10 +132,15 @@ type Teammate struct {
 	EndedAt   time.Time `json:"ended_at,omitzero"`
 }
 
-// UpdateSessionRequest patches a session's system prompt and/or mode.
+// UpdateSessionRequest patches a session's system prompt, mode, or persona.
+// Setting Persona switches the session's full behavioral profile: system
+// prompt, persisted persona name (which carries model, permission rules, and
+// output-guard overrides on subsequent turns), and — unless Mode is also set —
+// the persona's permission mode.
 type UpdateSessionRequest struct {
-	System *string `json:"system,omitempty"`
-	Mode   *string `json:"mode,omitempty"`
+	System  *string `json:"system,omitempty"`
+	Mode    *string `json:"mode,omitempty"`
+	Persona *string `json:"persona,omitempty"`
 }
 
 // MemoryResponse describes the current memory and skills state.
