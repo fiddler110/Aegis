@@ -180,6 +180,7 @@ type model struct {
 	personaPicker  *personaPickerModel
 	sessionPicker  *sessionPickerModel
 	timelinePicker *timelinePickerModel
+	securityConfig *securityConfigModel
 	helpOpen       bool
 	activeToast    *toast
 	completion     completionState
@@ -601,6 +602,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 			}
 			m.wizard = nil
+			m.refresh()
+		}
+		return m, cmd
+	}
+
+	// Security-config overlay: delegate all messages while it's open (P11.11).
+	if m.securityConfig != nil {
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width, m.height = ws.Width, ws.Height
+			m.securityConfig.width = ws.Width
+			m.securityConfig.height = ws.Height
+			m.layout()
+			return m, nil
+		}
+		cmd := m.securityConfig.update(msg)
+		if m.securityConfig.done {
+			if m.securityConfig.saved {
+				m.transcript.append(
+					m.th.statusText.Render("✓ Security config saved — restart Aegis to apply changes.") + "\n\n",
+				)
+			}
+			m.securityConfig = nil
 			m.refresh()
 		}
 		return m, cmd
@@ -1132,6 +1155,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			wiz := newWizard(m.width, m.height, m.th)
 			m.wizard = wiz
 			return m, wiz.init()
+		}
+		if msg.SecurityConfigGlobal != nil {
+			sc := newSecurityConfigModel(m.width, m.height, m.th, *msg.SecurityConfigGlobal)
+			m.securityConfig = sc
+			return m, sc.init()
 		}
 		if msg.Output == "\x00timeline" { // P2.8
 			if len(m.timelineEntries) == 0 {
@@ -2012,6 +2040,9 @@ func (m model) render() string {
 	}
 	if m.wizard != nil {
 		return m.wizard.view()
+	}
+	if m.securityConfig != nil {
+		return m.securityConfig.view()
 	}
 	if m.helpOpen {
 		return m.renderHelpOverlay()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
@@ -38,7 +39,7 @@ func newDryRunCmd() *cobra.Command {
 			// Tools.
 			fmt.Fprintln(out, "\n=== Registered Tools ===")
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL}); err != nil {
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security)}); err != nil {
 				fmt.Fprintf(out, "(error registering tools: %v)\n", err)
 			} else {
 				schemas := reg.Schemas()

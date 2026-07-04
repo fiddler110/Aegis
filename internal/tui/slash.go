@@ -32,6 +32,10 @@ type SlashResult struct {
 	// conversation. Output, if set, is shown as a toast rather than appended,
 	// since the reload resets the transcript.
 	ReloadSession bool
+
+	// SecurityConfigGlobal is non-nil to open the /security-config dialog
+	// (P11.11): *true edits the global config, *false the project config.
+	SecurityConfigGlobal *bool
 }
 
 // SlashDispatcher dispatches slash commands to built-in handlers or custom
@@ -55,31 +59,32 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		model:     model,
 	}
 	d.builtins = map[string]func(args []string) SlashResult{
-		"help":     d.cmdHelp,
-		"persona":  d.cmdPersona,
-		"mode":     d.cmdMode,
-		"guard":    d.cmdGuard,
-		"tools":    d.cmdTools,
-		"clear":    d.cmdClear,
-		"config":   d.cmdConfig,
-		"memory":   d.cmdMemory,
-		"remember": d.cmdRemember,
-		"skills":   d.cmdSkills,
-		"commands": d.cmdCommands,
-		"models":   d.cmdModels,
-		"sandbox":  d.cmdSandbox,
-		"session":  d.cmdSession,
-		"rewind":   d.cmdRewind,
-		"rollback": d.cmdRollback,
-		"detach":   d.cmdDetach,
-		"archive":  d.cmdArchive,
-		"humor":    d.cmdHumor,
-		"share":    d.cmdShare,
-		"timeline": d.cmdTimeline,
-		"sidebar":  d.cmdSidebar,
-		"copy":     d.cmdCopy,
-		"quit":     d.cmdQuit,
-		"exit":     d.cmdQuit,
+		"help":            d.cmdHelp,
+		"persona":         d.cmdPersona,
+		"mode":            d.cmdMode,
+		"guard":           d.cmdGuard,
+		"tools":           d.cmdTools,
+		"clear":           d.cmdClear,
+		"config":          d.cmdConfig,
+		"memory":          d.cmdMemory,
+		"remember":        d.cmdRemember,
+		"skills":          d.cmdSkills,
+		"commands":        d.cmdCommands,
+		"models":          d.cmdModels,
+		"sandbox":         d.cmdSandbox,
+		"security-config": d.cmdSecurityConfig,
+		"session":         d.cmdSession,
+		"rewind":          d.cmdRewind,
+		"rollback":        d.cmdRollback,
+		"detach":          d.cmdDetach,
+		"archive":         d.cmdArchive,
+		"humor":           d.cmdHumor,
+		"share":           d.cmdShare,
+		"timeline":        d.cmdTimeline,
+		"sidebar":         d.cmdSidebar,
+		"copy":            d.cmdCopy,
+		"quit":            d.cmdQuit,
+		"exit":            d.cmdQuit,
 	}
 	return d
 }
@@ -170,6 +175,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"commands", "List custom commands"},
 		{"models", "Show current model info"},
 		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
+		{"security-config [global]", "Interactively configure security scanner enable/method/install/image"},
 		{"session [list]", "Show session info or list sessions"},
 		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
 		{"rollback [n]", "Restore checkpoint n and run git reset --hard to pre-turn HEAD"},
@@ -231,6 +237,8 @@ func builtinHelp(name string) string {
 		return "/models\n  Show the current model and provider."
 	case "sandbox":
 		return "/sandbox [use <target>]\n  No args: show the configured sandbox backend and detected container runtimes (docker, podman, wslc, container).\n  use <local|auto|docker|podman|wslc|container>: set the backend (written to global config; takes effect on restart)."
+	case "security-config":
+		return "/security-config [global]\n  Opens an interactive dialog to configure the security scanners (semgrep, trivy, gitleaks, kubescape, hadolint, grype, dockle) used by /scan and the security_scan tool: toggle enabled, pick host/container/auto, set the install policy, and set a digest-pinned container image.\n  No args: edits the project's .aegis/config.yaml. 'global': edits ~/.config/aegis/config.yaml instead.\n  Written immediately; restart Aegis to apply."
 	case "session":
 		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
 	case "rewind":
@@ -572,6 +580,19 @@ func (d *SlashDispatcher) cmdSandbox(args []string) SlashResult {
 	b.WriteString(sandbox.Report(ctx, priority))
 	b.WriteString("\n\nChange with: /sandbox use <local|auto|docker|podman|wslc|container>")
 	return SlashResult{Output: b.String()}
+}
+
+// cmdSecurityConfig opens the interactive security-scanner config dialog
+// (P11.11) — lets the user toggle enabled/method/install/image per scanner
+// without hand-editing security.tools in config.yaml. Like /sandbox use and
+// /skills enable, it defaults to the project config; pass "global" to edit
+// the user-level config instead.
+func (d *SlashDispatcher) cmdSecurityConfig(args []string) SlashResult {
+	if _, err := config.Load(); err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load config: %v", err), IsError: true}
+	}
+	global := len(args) > 0 && strings.ToLower(args[0]) == "global"
+	return SlashResult{SecurityConfigGlobal: &global}
 }
 
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {

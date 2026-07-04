@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // lookPath reports whether a binary is on PATH.
@@ -38,143 +40,77 @@ func firstLine(s string) string {
 
 type semgrepScanner struct{}
 
-func (semgrepScanner) Name() string    { return "semgrep" }
-func (semgrepScanner) Available() bool { return lookPath("semgrep") }
-func (semgrepScanner) Scan(ctx context.Context, dir string) ([]Finding, error) {
-	out, err := runJSON(ctx, dir, "semgrep", "--json", "--quiet", "--config", "auto", ".")
+func (semgrepScanner) Name() string { return "semgrep" }
+func (semgrepScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return Resolve(ctx, "semgrep", opts)
+}
+func (semgrepScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string) ([]Finding, error) {
+	var out []byte
+	var err error
+	if method == MethodContainer {
+		out, err = runContainerImage(ctx, rt, image, dir, "--sarif", "--quiet", "--config", "auto", "/src")
+	} else {
+		out, err = runJSON(ctx, dir, "semgrep", "--sarif", "--quiet", "--config", "auto", ".")
+	}
 	if err != nil {
 		return nil, err
 	}
-	return parseSemgrep(out)
-}
-
-func parseSemgrep(data []byte) ([]Finding, error) {
-	var doc struct {
-		Results []struct {
-			CheckID string `json:"check_id"`
-			Path    string `json:"path"`
-			Start   struct {
-				Line int `json:"line"`
-			} `json:"start"`
-			Extra struct {
-				Message  string `json:"message"`
-				Severity string `json:"severity"`
-				Metadata struct {
-					References []string `json:"references"`
-				} `json:"metadata"`
-			} `json:"extra"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse semgrep output: %w", err)
-	}
-	out := make([]Finding, 0, len(doc.Results))
-	for _, r := range doc.Results {
-		out = append(out, Finding{
-			Tool:        "semgrep",
-			RuleID:      r.CheckID,
-			Severity:    normalizeSeverity(r.Extra.Severity),
-			Title:       firstLine(r.Extra.Message),
-			Location:    fmt.Sprintf("%s:%d", r.Path, r.Start.Line),
-			Description: r.Extra.Message,
-		})
-	}
-	return out, nil
+	return ParseSARIF(out, "semgrep")
 }
 
 // --- trivy ---
 
 type trivyScanner struct{}
 
-func (trivyScanner) Name() string    { return "trivy" }
-func (trivyScanner) Available() bool { return lookPath("trivy") }
-func (trivyScanner) Scan(ctx context.Context, dir string) ([]Finding, error) {
-	out, err := runJSON(ctx, dir, "trivy", "fs", "--format", "json", "--quiet", ".")
+func (trivyScanner) Name() string { return "trivy" }
+func (trivyScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return Resolve(ctx, "trivy", opts)
+}
+
+// trivyScanArgs are shared between host and container invocations: fs mode
+// with all three trivy scanners explicit (P11.6) — vuln (SCA), secret, and
+// misconfig (IaC across Terraform/CloudFormation/Kubernetes/Helm/Dockerfile/
+// ARM) — rather than relying on whatever trivy's own version-dependent
+// default scanner set happens to be.
+var trivyScanArgs = []string{"--scanners", "vuln,secret,misconfig"}
+
+func (trivyScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string) ([]Finding, error) {
+	var out []byte
+	var err error
+	args := append([]string{"fs", "--format", "sarif", "--quiet"}, trivyScanArgs...)
+	if method == MethodContainer {
+		out, err = runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
+	} else {
+		out, err = runJSON(ctx, dir, "trivy", append(args, ".")...)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return parseTrivy(out)
-}
-
-func parseTrivy(data []byte) ([]Finding, error) {
-	var doc struct {
-		Results []struct {
-			Target          string `json:"Target"`
-			Vulnerabilities []struct {
-				VulnerabilityID  string `json:"VulnerabilityID"`
-				PkgName          string `json:"PkgName"`
-				InstalledVersion string `json:"InstalledVersion"`
-				FixedVersion     string `json:"FixedVersion"`
-				Severity         string `json:"Severity"`
-				Title            string `json:"Title"`
-				Description      string `json:"Description"`
-			} `json:"Vulnerabilities"`
-			Misconfigurations []struct {
-				ID         string `json:"ID"`
-				Severity   string `json:"Severity"`
-				Title      string `json:"Title"`
-				Message    string `json:"Message"`
-				Resolution string `json:"Resolution"`
-			} `json:"Misconfigurations"`
-			Secrets []struct {
-				RuleID    string `json:"RuleID"`
-				Severity  string `json:"Severity"`
-				Title     string `json:"Title"`
-				StartLine int    `json:"StartLine"`
-			} `json:"Secrets"`
-		} `json:"Results"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse trivy output: %w", err)
-	}
-	var out []Finding
-	for _, res := range doc.Results {
-		for _, v := range res.Vulnerabilities {
-			rem := ""
-			if v.FixedVersion != "" {
-				rem = fmt.Sprintf("upgrade %s to %s", v.PkgName, v.FixedVersion)
-			}
-			out = append(out, Finding{
-				Tool:        "trivy",
-				RuleID:      v.VulnerabilityID,
-				Severity:    normalizeSeverity(v.Severity),
-				Title:       firstNonEmpty(v.Title, v.VulnerabilityID),
-				Location:    fmt.Sprintf("%s (%s %s)", res.Target, v.PkgName, v.InstalledVersion),
-				Description: v.Description,
-				Remediation: rem,
-			})
-		}
-		for _, m := range res.Misconfigurations {
-			out = append(out, Finding{
-				Tool:        "trivy",
-				RuleID:      m.ID,
-				Severity:    normalizeSeverity(m.Severity),
-				Title:       firstNonEmpty(m.Title, m.ID),
-				Location:    res.Target,
-				Description: m.Message,
-				Remediation: m.Resolution,
-			})
-		}
-		for _, s := range res.Secrets {
-			out = append(out, Finding{
-				Tool:     "trivy",
-				RuleID:   s.RuleID,
-				Severity: normalizeSeverity(firstNonEmpty(s.Severity, "HIGH")),
-				Title:    firstNonEmpty(s.Title, "exposed secret"),
-				Location: fmt.Sprintf("%s:%d", res.Target, s.StartLine),
-			})
-		}
-	}
-	return out, nil
+	return ParseSARIF(out, "trivy")
 }
 
 // --- gitleaks ---
 
 type gitleaksScanner struct{}
 
-func (gitleaksScanner) Name() string    { return "gitleaks" }
-func (gitleaksScanner) Available() bool { return lookPath("gitleaks") }
-func (gitleaksScanner) Scan(ctx context.Context, dir string) ([]Finding, error) {
+func (gitleaksScanner) Name() string { return "gitleaks" }
+func (gitleaksScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return Resolve(ctx, "gitleaks", opts)
+}
+func (gitleaksScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string) ([]Finding, error) {
+	if method == MethodContainer {
+		// /dev/stdout avoids needing a second bind mount for the report file:
+		// every scanner container is a Linux image (Docker Desktop/Podman run
+		// Linux containers even on a Windows/macOS host), so /dev/stdout
+		// always exists there regardless of host OS.
+		out, err := runContainerImage(ctx, rt, image, dir, "detect", "--source", "/src", "--no-git",
+			"--report-format", "json", "--report-path", "/dev/stdout", "--exit-code", "0")
+		if err != nil {
+			return nil, err
+		}
+		return parseGitleaks(out)
+	}
+
 	report, err := os.CreateTemp("", "gitleaks-*.json")
 	if err != nil {
 		return nil, err
@@ -229,4 +165,114 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// --- kubescape (P11.6) ---
+
+type kubescapeScanner struct{}
+
+func (kubescapeScanner) Name() string { return "kubescape" }
+func (kubescapeScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return Resolve(ctx, "kubescape", opts)
+}
+
+// kubescape's --output flag writes a file rather than stdout (unlike
+// semgrep/trivy, whose SARIF flag writes directly to stdout), so this
+// mirrors gitleaks' report-file pattern: a real temp file on the host,
+// /dev/stdout inside the container (every scanner container is Linux).
+func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string) ([]Finding, error) {
+	if method == MethodContainer {
+		out, err := runContainerImage(ctx, rt, image, dir, "scan", "--format", "sarif", "--output", "/dev/stdout", "/src")
+		if err != nil {
+			return nil, err
+		}
+		return ParseSARIF(out, "kubescape")
+	}
+
+	report, err := os.CreateTemp("", "kubescape-*.sarif")
+	if err != nil {
+		return nil, err
+	}
+	path := report.Name()
+	report.Close()
+	defer os.Remove(path)
+
+	cmd := exec.CommandContext(ctx, "kubescape", "scan", "--format", "sarif", "--output", path, dir)
+	_ = cmd.Run() // kubescape exits non-zero when controls fail; it still writes the report
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, nil
+	}
+	return ParseSARIF(data, "kubescape")
+}
+
+// --- hadolint (P11.5) ---
+
+type hadolintScanner struct{}
+
+func (hadolintScanner) Name() string { return "hadolint" }
+func (hadolintScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return Resolve(ctx, "hadolint", opts)
+}
+
+// findDockerfiles walks dir for files hadolint should lint: "Dockerfile",
+// any "Dockerfile.*" variant, and "*.dockerfile". Returned paths are
+// relative to dir (forward-slash, so they work as both host args and
+// container-mounted /src-relative paths).
+func findDockerfiles(dir string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if name == "Dockerfile" || strings.HasPrefix(name, "Dockerfile.") || strings.HasSuffix(strings.ToLower(name), ".dockerfile") {
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				return nil
+			}
+			out = append(out, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (hadolintScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string) ([]Finding, error) {
+	files, err := findDockerfiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []Finding
+	for _, f := range files {
+		var data []byte
+		var err error
+		if method == MethodContainer {
+			data, err = runContainerImage(ctx, rt, image, dir, "--format", "sarif", "/src/"+f)
+		} else {
+			data, err = runJSON(ctx, dir, "hadolint", "--format", "sarif", f)
+		}
+		if err != nil {
+			return nil, err
+		}
+		findings, err := ParseSARIF(data, "hadolint")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, findings...)
+	}
+	return out, nil
 }

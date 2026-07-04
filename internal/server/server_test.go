@@ -332,6 +332,81 @@ func TestCostAlertThresholdFires(t *testing.T) {
 	}
 }
 
+// TestSessionTokenCapBlocksTurn is the P10.5 counterpart to
+// TestSessionCostCapBlocksTurn: unlike the dollar cap, the token cap must
+// still work for a session whose usage was never priced (e.g. a local model),
+// since AddUsage now records tokens regardless of estimation.
+func TestSessionTokenCapBlocksTurn(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+		Cost:       config.CostConfig{SessionTokenCap: 100},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{text: "hi"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Zero cost mirrors an unpriced/local model's turns: tokens still count.
+	if err := store.AddUsage(ctx, meta.ID, 80, 80, 0); err != nil {
+		t.Fatalf("AddUsage: %v", err)
+	}
+
+	_, err = cl.PostMessage(ctx, meta.ID, "hello")
+	if err == nil {
+		t.Fatal("expected PostMessage to fail once the session token cap is reached")
+	}
+	if !strings.Contains(err.Error(), "session token cap") {
+		t.Errorf("error = %v, want mention of session token cap", err)
+	}
+}
+
+// TestDailyTokenCapBlocksTurn is the P10.5 counterpart to
+// TestDailyCostCapBlocksTurn.
+func TestDailyTokenCapBlocksTurn(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+		Cost:       config.CostConfig{DailyTokenCap: 100},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{text: "hi"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddDailyTokens(ctx, 150); err != nil {
+		t.Fatalf("AddDailyTokens: %v", err)
+	}
+
+	_, err = cl.PostMessage(ctx, meta.ID, "hello")
+	if err == nil {
+		t.Fatal("expected PostMessage to fail once the daily token cap is reached")
+	}
+	if !strings.Contains(err.Error(), "daily token cap") {
+		t.Errorf("error = %v, want mention of daily token cap", err)
+	}
+}
+
 func TestServerHealthEndpoint(t *testing.T) {
 	cl, cleanup := newTestServer(t)
 	defer cleanup()

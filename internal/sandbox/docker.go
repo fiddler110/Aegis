@@ -174,6 +174,20 @@ func (c *ContainerBackend) ociRunArgs(command string, opts ExecOpts) []string {
 	return args
 }
 
+// HostMountPath converts a host directory path to the form the given
+// container runtime's -v flag expects: the WSL-VM path form for wslc
+// (C:\foo -> /mnt/c/foo), the Docker/Podman path form for everything else
+// (C:\foo -> /c/foo on Windows; unchanged elsewhere). Exported so other
+// packages that run their own container invocations against a runtime
+// selected via sandbox.DetectBest (e.g. internal/security's scanner
+// container fallback, P11.1) don't need to reimplement this conversion.
+func HostMountPath(rt ContainerRuntime, hostDir string) string {
+	if rt == RuntimeWSL {
+		return wslHostPath(hostDir)
+	}
+	return hostPathForMount(hostDir)
+}
+
 // hostPathForMount converts a host directory path to the format expected by
 // Docker/Podman's -v flag. On Windows, C:\foo\bar becomes /c/foo/bar.
 func hostPathForMount(p string) string {

@@ -17,7 +17,7 @@ func discardLogger() *slog.Logger {
 // local backend and reports the fallback so callers can surface it (P7.4).
 func TestSelectSandboxFallsBackToLocal(t *testing.T) {
 	cfg := config.SandboxConfig{Backend: "container", Runtime: "bogus-runtime-does-not-exist"}
-	sb, fallback, reason, err := selectSandbox(cfg, t.TempDir(), discardLogger())
+	sb, fallback, reason, err := SelectSandbox(cfg, t.TempDir(), discardLogger())
 	if err != nil {
 		t.Fatalf("selectSandbox: unexpected error: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestSelectSandboxFallsBackToLocal(t *testing.T) {
 // silent fallback into a startup error instead (P7.4).
 func TestSelectSandboxStrictHardFails(t *testing.T) {
 	cfg := config.SandboxConfig{Backend: "container", Runtime: "bogus-runtime-does-not-exist", Strict: true}
-	sb, fallback, _, err := selectSandbox(cfg, t.TempDir(), discardLogger())
+	sb, fallback, _, err := SelectSandbox(cfg, t.TempDir(), discardLogger())
 	if err == nil {
 		t.Fatal("expected an error when sandbox.strict is set and the backend is unavailable")
 	}
@@ -52,7 +52,7 @@ func TestSelectSandboxStrictHardFails(t *testing.T) {
 // runs unsandboxed without being reported as a fallback (that's the intended
 // baseline, not a downgrade from a stronger posture the operator asked for).
 func TestSelectSandboxDefaultIsLocal(t *testing.T) {
-	sb, fallback, reason, err := selectSandbox(config.SandboxConfig{}, t.TempDir(), discardLogger())
+	sb, fallback, reason, err := SelectSandbox(config.SandboxConfig{}, t.TempDir(), discardLogger())
 	if err != nil {
 		t.Fatalf("selectSandbox: unexpected error: %v", err)
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
@@ -76,7 +77,7 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL}); err != nil {
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security)}); err != nil {
 				return err
 			}
 

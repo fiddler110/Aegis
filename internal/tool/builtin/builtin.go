@@ -15,6 +15,7 @@ import (
 	"github.com/fiddler110/aegis/internal/lsp"
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -66,6 +67,13 @@ type Options struct {
 	// BuiltinSkills names which embedded built-in skills (shipped in the
 	// binary; see internal/skills) are active. Empty keeps them all dormant.
 	BuiltinSkills []string
+	// SecurityScan configures the security_scan tool's per-scanner policy
+	// (host vs container execution, enable/disable) — P11.11's config
+	// surface, translated from config.SecurityConfig via
+	// security.OptionsFromConfig. Zero value runs every built-in scanner in
+	// "auto" mode (host binary if present, else skip — no container image
+	// configured by default).
+	SecurityScan security.Options
 }
 
 // SearchOptions configures the web_search tool's provider.
@@ -109,7 +117,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&fetchTool{userAgent: opts.HTTPUserAgent},
 		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL},
 		&modelsTool{},
-		&securityScanTool{root: root},
+		&securityScanTool{root: root, opts: opts.SecurityScan},
 		&skillTool{root: root, dataDir: opts.DataDir, builtinEnabled: opts.BuiltinSkills},
 		&toolSearchTool{reg: reg},
 	}

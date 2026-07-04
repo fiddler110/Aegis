@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -15,6 +16,8 @@ import (
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
+	"github.com/fiddler110/aegis/internal/security"
+	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
@@ -54,9 +57,13 @@ func runWorker(ctx context.Context, specPath string) error {
 		return fmt.Errorf("worker: parse spec: %w", err)
 	}
 
-	output, runErr := executeWorker(ctx, spec)
+	output, snap, runErr := executeWorker(ctx, spec)
 
 	// Record the result durably so the parent can read it after we exit.
+	// cost_usd/tokens (P10.3) let SubprocessBackend fold this worker's actual
+	// spend into the shared fan-out tracker once it exits, so a sibling
+	// spawned afterward computes its own remaining budget against the
+	// updated total instead of the daemon's full configured cap again.
 	if mb, e := swarm.OpenMailbox(spec.MailboxRoot, spec.Identity); e == nil {
 		errStr := ""
 		if runErr != nil {
@@ -67,32 +74,55 @@ func runWorker(ctx context.Context, specPath string) error {
 			Sender:    spec.Identity.AgentID,
 			Recipient: spec.Config.ParentSessionID,
 			Text:      output,
-			Payload:   map[string]any{"error": errStr},
+			Payload: map[string]any{
+				"error":    errStr,
+				"cost_usd": snap.TotalUSD,
+				"tokens":   snap.Usage.InputTokens + snap.Usage.OutputTokens + snap.Usage.CacheCreationTokens + snap.Usage.CacheReadTokens,
+			},
 		})
 	}
 	return runErr
 }
 
 // executeWorker builds a sub-engine and runs the teammate to completion,
-// returning its final text. Workers do not get the `agent` tool, so they are
-// leaf nodes (no nested subprocess spawning).
-func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, error) {
+// returning its final text and its own cost.Snapshot (P10.3 — the caller
+// reports this back to the parent via the mailbox so a sibling spawned
+// afterward sees the updated shared spend). Workers do not get the `agent`
+// tool, so they are leaf nodes (no nested subprocess spawning).
+func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Snapshot, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return "", err
+		return "", cost.Snapshot{}, err
 	}
 	adapter, err := providerfactory.Build(cfg, nil)
 	if err != nil {
-		return "", err
+		return "", cost.Snapshot{}, err
 	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", err
+		return "", cost.Snapshot{}, err
 	}
+	// Reconstruct the daemon's configured sandbox backend instead of running
+	// this worker's shell tool directly on the host: the subprocess backend is
+	// sold as giving real OS-level isolation, but without this it actually
+	// provided *less* isolation than the in-process backend, and its default
+	// (no-Sandbox) local exec never stripped provider API keys from the shell
+	// env either (P10.2). Errors are non-fatal here — a worker is a background
+	// process with no interactive operator to show a strict-mode error to, so
+	// it logs and falls back rather than failing the whole spawn.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	workerSandbox, _, fallbackReason, sbErr := server.SelectSandbox(cfg.Sandbox, cwd, logger)
+	if sbErr != nil {
+		logger.Warn("worker: sandbox selection failed, running unsandboxed", "err", sbErr)
+		workerSandbox = nil
+	} else if fallbackReason != "" {
+		logger.Warn("worker: sandbox fallback", "reason", fallbackReason)
+	}
+
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL}); err != nil {
-		return "", err
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Sandbox: workerSandbox, SecurityScan: security.OptionsFromConfig(cfg.Security)}); err != nil {
+		return "", cost.Snapshot{}, err
 	}
 
 	model := spec.Config.Model
@@ -103,19 +133,49 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, error) {
 	if cfg.Permission.AutoApproveExec {
 		approver = permission.AutoApprove{}
 	}
-	gate := permission.New(permission.ParseMode(spec.Config.Mode), approver)
+	// Same gate-stack composition as the daemon's in-process path
+	// (server.buildGate, P10.1): a bare mode gate here let a subprocess
+	// teammate route straight around an operator's egress-then-write policy
+	// or deny rule, exactly the bypass P10.1 closed for in-process sub-agents
+	// — this backend needed the identical fix since it builds its engine in a
+	// wholly separate process with no access to the daemon's live Server
+	// state. cfg.Permission.Rules covers persisted rules (project/global
+	// config); a rule added via an "allow always" approval that hasn't been
+	// persisted yet is the one gap a separate process can't see.
+	baseGate := permission.New(permission.ParseMode(spec.Config.Mode), approver)
+	var gate engine.Gate = baseGate
+	if cfg.Security.EgressThenWrite || len(cfg.Security.NetworkAllowList) > 0 {
+		gate = permission.NewContextualGate(baseGate, permission.ContextualOpts{
+			EgressThenWrite:  cfg.Security.EgressThenWrite,
+			NetworkAllowList: cfg.Security.NetworkAllowList,
+			Registry:         reg,
+		})
+	}
+	if rules, rerr := permission.ParseRules(cfg.Permission.Rules); rerr == nil && len(rules) > 0 {
+		gate = permission.NewRuleGate(gate, rules)
+	}
 
+	budgetUSD := cfg.Cost.BudgetUSD
+	if spec.RemainingBudgetUSD > 0 {
+		budgetUSD = spec.RemainingBudgetUSD
+	}
+	maxTokensPerRun := cfg.Cost.MaxTokensPerRun
+	if spec.RemainingTokens > 0 {
+		maxTokensPerRun = spec.RemainingTokens
+	}
+	tracker := cost.NewTracker()
 	eng, err := engine.New(engine.Options{
-		Adapter:   adapter,
-		Tools:     reg,
-		Gate:      gate,
-		Cost:      cost.NewTracker(),
-		BudgetUSD: cfg.Cost.BudgetUSD,
-		Model:     model,
-		MaxTokens: cfg.Provider.MaxTokens,
+		Adapter:         adapter,
+		Tools:           reg,
+		Gate:            gate,
+		Cost:            tracker,
+		BudgetUSD:       budgetUSD,
+		MaxTokensPerRun: maxTokensPerRun,
+		Model:           model,
+		MaxTokens:       cfg.Provider.MaxTokens,
 	})
 	if err != nil {
-		return "", err
+		return "", cost.Snapshot{}, err
 	}
 
 	ctx = swarm.WithParentMode(ctx, spec.Config.Mode)
@@ -133,7 +193,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, error) {
 			sb.WriteString(ev.Text)
 		}
 	})
-	return strings.TrimSpace(sb.String()), runErr
+	return strings.TrimSpace(sb.String()), tracker.Snapshot(), runErr
 }
 
 // openCheckpointSnapshotter reconstructs a Snapshotter for spec's checkpoint

@@ -77,3 +77,47 @@ func TestTrackerUnpricedModel(t *testing.T) {
 		t.Error("tokens should still be counted for unpriced models")
 	}
 }
+
+// TestAddTokensCountsWithoutCost is the P10.5 regression: estimated usage
+// (from local/Ollama models reporting no real usage) must still accumulate
+// into TotalTokens so a token budget can enforce it, even though it
+// contributes no dollar figure.
+func TestAddTokensCountsWithoutCost(t *testing.T) {
+	tr := NewTracker()
+	tr.AddTokens(provider.Usage{InputTokens: 500_000, OutputTokens: 500_000, IsEstimated: true})
+	if got := tr.TotalUSD(); got != 0 {
+		t.Errorf("AddTokens must not contribute cost, got %v", got)
+	}
+	if got := tr.TotalTokens(); got != 1_000_000 {
+		t.Errorf("TotalTokens = %d, want 1000000", got)
+	}
+}
+
+// TestTotalTokensIncludesPricedUsage verifies TotalTokens reflects tokens
+// recorded via the normal (priced) Add path too.
+func TestTotalTokensIncludesPricedUsage(t *testing.T) {
+	tr := NewTracker()
+	tr.Add("claude-opus-4-8", provider.Usage{InputTokens: 100, OutputTokens: 200, CacheCreationTokens: 10, CacheReadTokens: 20})
+	if got := tr.TotalTokens(); got != 330 {
+		t.Errorf("TotalTokens = %d, want 330", got)
+	}
+}
+
+// TestAddWorkerCostFoldsIntoTotals is the P10.3 regression: a subprocess
+// sub-agent worker's self-reported spend must land in both TotalUSD and
+// TotalTokens exactly like a normal Add/AddTokens call, so a sibling spawned
+// afterward sees it when computing its own remaining budget.
+func TestAddWorkerCostFoldsIntoTotals(t *testing.T) {
+	tr := NewTracker()
+	tr.Add("claude-opus-4-8", provider.Usage{InputTokens: 100, OutputTokens: 100}) // some cost already spent
+	before := tr.TotalUSD()
+
+	tr.AddWorkerCost(2.5, 100)
+
+	if got := tr.TotalUSD(); got != before+2.5 {
+		t.Errorf("TotalUSD = %v, want %v", got, before+2.5)
+	}
+	if got := tr.TotalTokens(); got != 300 { // 100 + 100 + 100
+		t.Errorf("TotalTokens = %d, want 300", got)
+	}
+}

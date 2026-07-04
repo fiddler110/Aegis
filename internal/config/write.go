@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -196,6 +197,94 @@ func buildSkillsBlock(names []string) string {
 	b.WriteString("  builtin_enabled:\n")
 	for _, n := range names {
 		fmt.Fprintf(&b, "    - %s\n", n)
+	}
+	return b.String()
+}
+
+// SecurityPatch holds the security: fields to write into a config file
+// (P11.11 — `/security-config`). EgressThenWrite/NetworkAllowList are carried
+// through unchanged from the caller's current config rather than defaulted,
+// since patchSecurity replaces the whole security: block wholesale and this
+// patch only ever originates from an editor that means to change
+// DefaultMethod/Tools — losing an operator's existing contextual-security
+// settings as a side effect would be a real regression, not a refactor.
+type SecurityPatch struct {
+	EgressThenWrite  bool
+	NetworkAllowList []string
+	DefaultMethod    string
+	Tools            map[string]SecurityToolConfig
+}
+
+// PatchProjectSecurity replaces the security: block in the project-level
+// .aegis/config.yaml, preserving all other sections.
+func PatchProjectSecurity(p SecurityPatch) error {
+	return patchSecurity(ProjectConfigPath(), p)
+}
+
+// PatchGlobalSecurity replaces the security: block in the global config file.
+func PatchGlobalSecurity(p SecurityPatch) error {
+	return patchSecurity(GlobalConfigPath(), p)
+}
+
+func patchSecurity(path string, p SecurityPatch) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	block := buildSecurityBlock(p)
+	var out []byte
+	if len(existing) == 0 {
+		out = []byte("# Aegis configuration\n\n" + block + "\n")
+	} else {
+		out = spliceSection(existing, "security", block)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+func buildSecurityBlock(p SecurityPatch) string {
+	var b strings.Builder
+	b.WriteString("security:\n")
+	fmt.Fprintf(&b, "  egress_then_write: %t\n", p.EgressThenWrite)
+	if len(p.NetworkAllowList) == 0 {
+		b.WriteString("  network_allowlist: []\n")
+	} else {
+		b.WriteString("  network_allowlist:\n")
+		for _, d := range p.NetworkAllowList {
+			fmt.Fprintf(&b, "    - %q\n", d)
+		}
+	}
+	defaultMethod := p.DefaultMethod
+	if defaultMethod == "" {
+		defaultMethod = "auto"
+	}
+	fmt.Fprintf(&b, "  default_method: %s\n", defaultMethod)
+
+	if len(p.Tools) == 0 {
+		b.WriteString("  tools: {}\n")
+		return b.String()
+	}
+	b.WriteString("  tools:\n")
+	names := make([]string, 0, len(p.Tools))
+	for name := range p.Tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		tc := p.Tools[name]
+		fmt.Fprintf(&b, "    %s:\n", name)
+		fmt.Fprintf(&b, "      enabled: %t\n", tc.ToolEnabled())
+		if tc.Method != "" {
+			fmt.Fprintf(&b, "      method: %s\n", tc.Method)
+		}
+		if tc.Install != "" {
+			fmt.Fprintf(&b, "      install: %s\n", tc.Install)
+		}
+		if tc.Image != "" {
+			fmt.Fprintf(&b, "      image: %q\n", tc.Image)
+		}
 	}
 	return b.String()
 }

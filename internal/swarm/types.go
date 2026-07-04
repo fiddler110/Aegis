@@ -62,6 +62,17 @@ type Result struct {
 	AgentID string
 	Output  string
 	Err     string // non-empty if the teammate failed
+
+	// CostUSD and Tokens are the teammate's own cumulative spend (P10.3),
+	// populated only by the subprocess backend: a subprocess worker runs in a
+	// separate process and can't share the parent's *cost.Tracker directly
+	// via ctx the way an in-process sub-agent does, so it self-reports its
+	// final totals here and SubprocessBackend folds them back into the
+	// parent's shared ledger once the worker exits. Always zero for the
+	// in-process backend, whose sub-agents already draw from the one shared
+	// tracker with no reporting step needed.
+	CostUSD float64
+	Tokens  int
 }
 
 // Failed reports whether the teammate ended in error.

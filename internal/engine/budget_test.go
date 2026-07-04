@@ -117,6 +117,77 @@ func TestBudgetGateStopsMaxTokenContinuation(t *testing.T) {
 	}
 }
 
+// TestMaxTokensPerRunStopsEstimatedUsage is the regression for P10.5: a local
+// model (Ollama, or any provider that reports no real usage) gets its token
+// counts marked IsEstimated, and BudgetUSD silently never fires for those
+// turns since an estimate carries no dollar cost — the local-first default
+// posture had no working spend guardrail at all. MaxTokensPerRun must still
+// abort the run, because token counts (estimated or exact) are always
+// present.
+func TestMaxTokensPerRunStopsEstimatedUsage(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		// Turn 1 requests a tool and reports estimated usage that blows the
+		// token budget. BudgetUSD would never catch this turn: an estimated
+		// usage contributes $0.
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "t1", Name: "echo", Input: json.RawMessage(`{"msg":"x"}`)}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 600_000, OutputTokens: 500_000, IsEstimated: true}},
+		},
+		// Turn 2 should never run.
+		{
+			{Type: provider.EventTextDelta, Text: "should not reach"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn},
+		},
+	}}
+
+	reg := tool.NewRegistry()
+	et := &echoTool{}
+	if err := reg.Register(et); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := New(Options{
+		Adapter:         adapter,
+		Tools:           reg,
+		Cost:            cost.NewTracker(),
+		BudgetUSD:       1.0, // never fires: usage is estimated, so cost.Add is skipped
+		MaxTokensPerRun: 1_000_000,
+		Model:           "llama3.1", // not in the pricing catalog either
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotErr error
+	var gotCost float64
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+	runErr := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindError {
+			gotErr = ev.Err
+		}
+		if ev.Kind == KindTurnDone {
+			gotCost = ev.CostUSD
+		}
+	})
+
+	if runErr == nil {
+		t.Fatal("expected the run to fail on the token budget")
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "token budget") {
+		t.Errorf("expected a token budget error, got %v", gotErr)
+	}
+	if gotCost != 0 {
+		t.Errorf("estimated usage must not contribute dollar cost, got %v", gotCost)
+	}
+	if et.called != 0 {
+		t.Errorf("tool must not run after the token budget is exceeded, called %d", et.called)
+	}
+	if adapter.calls != 1 {
+		t.Errorf("second model turn must not run, calls = %d", adapter.calls)
+	}
+}
+
 // TestCostReportedOnTurnDone verifies cumulative cost rides along on KindTurnDone.
 func TestCostReportedOnTurnDone(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
