@@ -24,6 +24,10 @@
 // Search order (first match wins per name):
 //  1. .aegis/skills/  in the current working directory (project-local)
 //  2. ~/.aegis/skills/  in the user's home directory (global)
+//  3. embedded built-in skills (see embedded.go), filtered to whichever names
+//     are passed as enabledBuiltins — these ship in the binary but stay
+//     dormant (no system-prompt cost) unless named explicitly, since unlike
+//     project/user skill files a user didn't choose to author them.
 package skills
 
 import (
@@ -42,27 +46,56 @@ type Skill struct {
 	Dir         string // non-empty for a bundled (directory) skill; path to its companion files
 }
 
-// Discover loads all skills from the project and user directories. Any error
-// reading a directory is silently skipped so a missing .aegis/ folder doesn't
-// break startup.
-func Discover(workDir string) []Skill {
+// Discover loads all skills from the project and user directories, plus any
+// embedded built-in skill named in enabledBuiltins (dataDir locates the
+// per-user data directory built-ins are materialized into; see
+// MaterializeBuiltins). Any error reading a directory is silently skipped so
+// a missing .aegis/ folder doesn't break startup.
+func Discover(workDir, dataDir string, enabledBuiltins []string) []Skill {
 	seen := make(map[string]bool) // entry name → already loaded
 	var skills []Skill
 
 	// Project-local skills take precedence.
 	projectDir := filepath.Join(workDir, ".aegis", "skills")
-	skills = appendFromDir(skills, workDir, projectDir, seen)
+	skills = appendFromDir(skills, workDir, projectDir, seen, nil)
 
 	// User-global skills fill in anything not overridden by the project.
 	if home, err := os.UserHomeDir(); err == nil {
 		userDir := filepath.Join(home, ".aegis", "skills")
-		skills = appendFromDir(skills, workDir, userDir, seen)
+		skills = appendFromDir(skills, workDir, userDir, seen, nil)
+	}
+
+	// Embedded built-ins fill in last, and only the ones explicitly enabled —
+	// they never override a same-named project/user skill.
+	if enabled := enabledSet(enabledBuiltins); len(enabled) > 0 && dataDir != "" {
+		builtinDir := filepath.Join(dataDir, builtinSkillsDirName)
+		skills = appendFromDir(skills, workDir, builtinDir, seen, enabled)
 	}
 
 	return skills
 }
 
-func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool) []Skill {
+// enabledSet lowercases and dedupes a list of enabled builtin skill names for
+// filter lookups.
+func enabledSet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		n = strings.ToLower(strings.TrimSpace(n))
+		if n != "" {
+			set[n] = true
+		}
+	}
+	return set
+}
+
+// appendFromDir loads every skill entry in dir. When filter is non-nil, only
+// entries whose stem (filename without extension, or directory name) is
+// present in filter are loaded — used to gate embedded built-ins behind an
+// enabled-list without a second directory-walking implementation.
+func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool, filter map[string]bool) []Skill {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return dst
@@ -70,6 +103,15 @@ func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool) []Ski
 	for _, e := range entries {
 		if seen[e.Name()] {
 			continue
+		}
+		if filter != nil {
+			stem := e.Name()
+			if !e.IsDir() {
+				stem = strings.TrimSuffix(stem, filepath.Ext(stem))
+			}
+			if !filter[strings.ToLower(stem)] {
+				continue
+			}
 		}
 		if e.IsDir() {
 			skillDir := filepath.Join(dir, e.Name())
@@ -220,8 +262,8 @@ func splitFrontmatter(raw string) (body, front string, ok bool) {
 
 // Load returns a single discovered skill by name (matching either the
 // frontmatter name or the filename), loading its full body on demand.
-func Load(workDir, name string) (Skill, bool) {
-	for _, sk := range Discover(workDir) {
+func Load(workDir, dataDir string, enabledBuiltins []string, name string) (Skill, bool) {
+	for _, sk := range Discover(workDir, dataDir, enabledBuiltins) {
 		if strings.EqualFold(sk.Name, name) {
 			return sk, true
 		}
@@ -230,10 +272,10 @@ func Load(workDir, name string) (Skill, bool) {
 }
 
 // BuildBlock returns a <skills>…</skills> XML block with the full body of every
-// discovered skill. Retained for callers that want eager injection of all
-// skills regardless of frontmatter.
+// discovered project/user skill (no built-ins). Retained for callers that
+// want eager injection of all skills regardless of frontmatter.
 func BuildBlock(workDir string) string {
-	loaded := Discover(workDir)
+	loaded := Discover(workDir, "", nil)
 	if len(loaded) == 0 {
 		return ""
 	}
@@ -251,8 +293,8 @@ func BuildBlock(workDir string) string {
 // <skills_available> block, telling the model to load the full body with the
 // `skill` tool. Skills without a description are eager-injected in full for
 // backward compatibility. Returns an empty string when no skills exist.
-func BuildIndex(workDir string) string {
-	loaded := Discover(workDir)
+func BuildIndex(workDir, dataDir string, enabledBuiltins []string) string {
+	loaded := Discover(workDir, dataDir, enabledBuiltins)
 	if len(loaded) == 0 {
 		return ""
 	}
@@ -285,8 +327,8 @@ func BuildIndex(workDir string) string {
 
 // InjectIntoSystem appends the progressive-disclosure skills index to a system
 // prompt. Returns base unchanged when no skills are found.
-func InjectIntoSystem(base, workDir string) string {
-	block := BuildIndex(workDir)
+func InjectIntoSystem(base, workDir, dataDir string, enabledBuiltins []string) string {
+	block := BuildIndex(workDir, dataDir, enabledBuiltins)
 	if block == "" {
 		return base
 	}

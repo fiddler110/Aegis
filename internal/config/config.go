@@ -44,6 +44,7 @@ type Config struct {
 	// --persona typo is.
 	DefaultPersona string                     `koanf:"default_persona"`
 	Personas       map[string]PersonaOverride `koanf:"personas"`
+	Skills         SkillsConfig               `koanf:"skills"`
 	LSP            []LSPServerConfig          `koanf:"lsp"`
 	Plugins        []ProcessToolConfig        `koanf:"plugins"`
 	MCP            []MCPServerConfig          `koanf:"mcp"`
@@ -246,6 +247,18 @@ type OutputGuardConfig struct {
 // PersonaOverride holds per-persona config overrides keyed by persona name.
 type PersonaOverride struct {
 	Model string `koanf:"model"` // "" = use global provider.model
+}
+
+// SkillsConfig controls which of the skills embedded in the Aegis binary
+// (see `aegis skills list`) are active for this project/user.
+type SkillsConfig struct {
+	// BuiltinEnabled names which embedded built-in skills are active. Empty
+	// by default: built-ins ship in the binary but stay dormant (no
+	// system-prompt cost) until named here, via `aegis skills enable
+	// <name>`, or the /skills TUI command. Project-local (.aegis/skills) and
+	// user (~/.aegis/skills) skill files are unaffected by this list — those
+	// are always active since a user chose to author them.
+	BuiltinEnabled []string `koanf:"builtin_enabled"`
 }
 
 // DefaultGuardRubric is the generic quality rubric applied when output guarding

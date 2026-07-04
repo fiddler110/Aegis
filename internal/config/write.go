@@ -155,6 +155,51 @@ func patchDefaultPersona(path, name string) error {
 	return os.WriteFile(path, out, 0o600)
 }
 
+// PatchProjectSkillsEnabled replaces the skills.builtin_enabled list in the
+// project-level .aegis/config.yaml, preserving all other sections. Pass the
+// full desired set of enabled names, not a delta.
+func PatchProjectSkillsEnabled(names []string) error {
+	return patchSkillsEnabled(ProjectConfigPath(), names)
+}
+
+// PatchGlobalSkillsEnabled replaces the skills.builtin_enabled list in the
+// global config file.
+func PatchGlobalSkillsEnabled(names []string) error {
+	return patchSkillsEnabled(GlobalConfigPath(), names)
+}
+
+func patchSkillsEnabled(path string, names []string) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	block := buildSkillsBlock(names)
+	var out []byte
+	if len(existing) == 0 {
+		out = []byte("# Aegis configuration\n\n" + block + "\n")
+	} else {
+		out = spliceSection(existing, "skills", block)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+func buildSkillsBlock(names []string) string {
+	var b strings.Builder
+	b.WriteString("skills:\n")
+	if len(names) == 0 {
+		b.WriteString("  builtin_enabled: []\n")
+		return b.String()
+	}
+	b.WriteString("  builtin_enabled:\n")
+	for _, n := range names {
+		fmt.Fprintf(&b, "    - %s\n", n)
+	}
+	return b.String()
+}
+
 // spliceSection replaces the named top-level YAML section with newBlock.
 // Everything from "key:" to the next top-level key is replaced. If the
 // section is not found, newBlock is appended.

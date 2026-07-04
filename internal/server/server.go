@@ -180,6 +180,9 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	if err := cfg.EnsureDataDir(); err != nil {
 		return nil, err
 	}
+	if err := skills.MaterializeBuiltins(cfg.DataDir); err != nil {
+		logger.Warn("failed to materialize built-in skills", "err", err)
+	}
 	store, err := session.Open(cfg.SessionDBPath())
 	if err != nil {
 		return nil, err
@@ -281,7 +284,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
 	todoList := builtin.NewTodoList()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -1127,19 +1130,8 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, _ *http.Request) {
 		ProjectMemory: readIfExists(s.memory.ProjectMemoryPath()),
 		UserMemory:    readIfExists(s.memory.GlobalMemoryPath()),
 	}
-	for _, dir := range []string{
-		filepath.Join(s.cfg.DataDir, "skills"),
-		filepath.Join(s.workspace, ".aegis", "skills"),
-	} {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
-				resp.Skills = append(resp.Skills, strings.TrimSuffix(e.Name(), ".md"))
-			}
-		}
+	for _, sk := range skills.Discover(s.workspace, s.cfg.DataDir, s.cfg.Skills.BuiltinEnabled) {
+		resp.Skills = append(resp.Skills, sk.Name)
 	}
 	if resp.Skills == nil {
 		resp.Skills = []string{}
@@ -1849,7 +1841,7 @@ func (s *Server) effectiveSystem(base string) string {
 	if mem := s.memory.Load(); mem != "" {
 		parts = append(parts, mem)
 	}
-	if sk := skills.BuildIndex(s.workspace); sk != "" {
+	if sk := skills.BuildIndex(s.workspace, s.cfg.DataDir, s.cfg.Skills.BuiltinEnabled); sk != "" {
 		parts = append(parts, sk)
 	}
 	if s.repoMap != "" {

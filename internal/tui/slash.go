@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/share"
+	"github.com/fiddler110/aegis/internal/skills"
 )
 
 // SlashResult describes what a slash command produced for the TUI to render.
@@ -164,7 +166,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"config", "Interactive configuration wizard"},
 		{"memory", "Show saved memories"},
 		{"remember <text>", "Save a memory entry"},
-		{"skills", "List saved skills"},
+		{"skills [enable|disable <name> [global]]", "List skills, or toggle a built-in skill on/off"},
 		{"commands", "List custom commands"},
 		{"models", "Show current model info"},
 		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
@@ -220,7 +222,9 @@ func builtinHelp(name string) string {
 	case "remember":
 		return "/remember <text>\n  Save a fact to project memory for future sessions."
 	case "skills":
-		return "/skills\n  List saved skill files."
+		return "/skills\n  List active skills (project/user skill files, plus any enabled built-ins) and the full built-in catalog with on/off status.\n" +
+			"/skills enable <name> [global]\n  Turn on a built-in skill shipped with Aegis. Writes to the project config (.aegis/config.yaml) by default; add 'global' to write to the user config instead. Takes effect on restart.\n" +
+			"/skills disable <name> [global]\n  Turn off a built-in skill the same way."
 	case "commands":
 		return "/commands\n  List custom user-defined commands from .aegis/commands/."
 	case "models":
@@ -409,22 +413,98 @@ func (d *SlashDispatcher) cmdRemember(args []string) SlashResult {
 	return SlashResult{Output: "Saved to project memory."}
 }
 
-func (d *SlashDispatcher) cmdSkills(_ []string) SlashResult {
+func (d *SlashDispatcher) cmdSkills(args []string) SlashResult {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "enable", "disable":
+			return d.cmdSkillsToggle(args)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	mem, err := d.client.GetMemory(ctx)
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Failed to load skills: %v", err), IsError: true}
 	}
-	if len(mem.Skills) == 0 {
-		return SlashResult{Output: "No skills saved yet."}
+
+	cfg, err := config.Load()
+	enabled := map[string]bool{}
+	if err == nil {
+		for _, n := range cfg.Skills.BuiltinEnabled {
+			enabled[strings.ToLower(n)] = true
+		}
 	}
+
 	var b strings.Builder
-	b.WriteString("Saved skills:\n")
-	for _, s := range mem.Skills {
-		fmt.Fprintf(&b, "  %s\n", s)
+	if len(mem.Skills) == 0 {
+		b.WriteString("No active skills (none enabled, no project/user skill files).\n")
+	} else {
+		b.WriteString("Active skills:\n")
+		for _, s := range mem.Skills {
+			fmt.Fprintf(&b, "  %s\n", s)
+		}
 	}
+	b.WriteString("\nBuilt-in skills (ship with Aegis, dormant until enabled):\n")
+	for _, bi := range skills.Builtins() {
+		status := "off"
+		if enabled[strings.ToLower(bi.Name)] {
+			status = "on"
+		}
+		fmt.Fprintf(&b, "  [%3s] %-22s %s\n", status, bi.Name, bi.Description)
+	}
+	b.WriteString("\nUsage: /skills enable <name> [global] | /skills disable <name> [global]")
 	return SlashResult{Output: b.String()}
+}
+
+// cmdSkillsToggle enables or disables a built-in skill by writing the full
+// desired enabled set back to config. Like /sandbox use, the change is
+// written immediately but applies on the next restart.
+func (d *SlashDispatcher) cmdSkillsToggle(args []string) SlashResult {
+	if len(args) < 2 {
+		return SlashResult{Output: "Usage: /skills enable <name> [global] | /skills disable <name> [global]", IsError: true}
+	}
+	enable := strings.ToLower(args[0]) == "enable"
+	name := strings.ToLower(strings.TrimSpace(args[1]))
+	global := len(args) > 2 && strings.ToLower(args[2]) == "global"
+
+	if !skills.IsBuiltin(name) {
+		return SlashResult{Output: fmt.Sprintf("Unknown built-in skill %q. Run /skills to see the list.", name), IsError: true}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load config: %v", err), IsError: true}
+	}
+	set := make(map[string]bool)
+	for _, n := range cfg.Skills.BuiltinEnabled {
+		set[strings.ToLower(n)] = true
+	}
+	if enable {
+		set[name] = true
+	} else {
+		delete(set, name)
+	}
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	write := config.PatchProjectSkillsEnabled
+	scope := "project"
+	if global {
+		write = config.PatchGlobalSkillsEnabled
+		scope = "global"
+	}
+	if err := write(names); err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to write config: %v", err), IsError: true}
+	}
+	verb := "enabled"
+	if !enable {
+		verb = "disabled"
+	}
+	return SlashResult{Output: fmt.Sprintf("%s %q (%s config, written). Restart Aegis to apply.", verb, name, scope)}
 }
 
 func (d *SlashDispatcher) cmdCommands(_ []string) SlashResult {

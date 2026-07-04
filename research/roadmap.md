@@ -1,5 +1,6 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
+**Updated:** 2026-07-04 (v19 — extended P4.3 skills: skills embedded in the binary (`internal/skills/builtin`, `go:embed`), dormant by default, toggled per-name via `skills.builtin_enabled` config, `aegis skills enable|disable|list` CLI, and `/skills enable|disable` TUI command; also fixed a pre-existing bug where `internal/memory` eagerly re-injected full skill bodies in parallel with `skills.BuildIndex`'s progressive-disclosure index, silently defeating disclosure for flat (non-bundled) skill files. See Appendix A.)
 **Updated:** 2026-07-03 (v18 — shipped a persona QoL pass: advisory `PersonaToolGate` enforcement path, `aegis persona` CLI (list/show/new/use), `default_persona` config, and full-profile mid-session persona switching including permission mode; see Appendix A. No open roadmap item tracked this — it closes out the persona-system loose ends noted in prior sessions' P7.5/persona-improvements work.)
 
 ---
@@ -86,6 +87,7 @@ ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code ext
 <summary><strong>P4 — Core Harness Parity, all 6 items shipped 2026-07-02</strong></summary>
 
 - P4.3 Skills progressive disclosure — `internal/skills` now injects a compact `<skills_available>` index (name + frontmatter `description:`); a `skill` builtin tool loads the full body on demand. Description-less skills fall back to eager injection.
+- P4.3 extension (2026-07-04) — five skills embedded in the binary (content-review, html-report ported from `.aegis/skills`; security-audit, architecture-diagram, debug-investigation newly written) via `go:embed` in `internal/skills/builtin`, materialized to `<data_dir>/builtin-skills/` at daemon startup. Dormant by default (zero system-prompt cost); enabled per-name via `skills.builtin_enabled` config (project overrides global overrides built-in on a name collision), `aegis skills enable|disable|list` CLI, or `/skills enable|disable <name> [global]` TUI. Also fixed: `internal/memory`'s `loadSkills()` was eagerly re-injecting full (unstripped-frontmatter) skill bodies into the system prompt in parallel with `skills.BuildIndex`, which both duplicated bundled-skill content and silently bypassed progressive disclosure for any flat `.md` skill file with a `description:` — removed, `internal/skills` is now the single injection path.
 - P4.4 User-configurable lifecycle hooks — `hooks:` config maps `pre_tool_use`/`post_tool_use`/`session_start`/`stop`/`subagent_stop` to shell commands (`internal/hooks` `Exec`); JSON event on stdin, exit 2 vetoes with stderr surfaced.
 - P4.5 Headless structured output — `aegis chat --output-format text|json|stream-json`.
 - P4.6 Deferred tool loading — `tool.Registry` gained `RegisterDeferred`/`Deferred`/`Load`/`SearchDeferred`; niche tools (latex, diagram, cron, lsp, longmem, team) are advertised as a `<deferred_tools>` one-liner and loaded via the `tool_search` meta-tool.

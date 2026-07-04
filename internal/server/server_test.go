@@ -743,6 +743,7 @@ func TestEffectiveSystem_containsToolUseBlock(t *testing.T) {
 	s := &Server{
 		memory:    memory.Sources{},
 		workspace: "",
+		cfg:       &config.Config{},
 	}
 	out := s.effectiveSystem("base-system")
 

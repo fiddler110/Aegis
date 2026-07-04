@@ -36,7 +36,7 @@ var builtinCommands = []cmdEntry{
 	{"config", "Open configuration wizard"},
 	{"memory", "Show saved memories"},
 	{"remember", "Save a memory entry"},
-	{"skills", "List saved skills"},
+	{"skills", "List skills, or enable/disable a built-in one"},
 	{"commands", "List custom commands"},
 	{"models", "Show current model info"},
 	{"sandbox", "Show or switch the execution sandbox"},
