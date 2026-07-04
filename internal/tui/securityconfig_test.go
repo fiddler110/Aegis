@@ -102,6 +102,7 @@ func TestSecurityConfigSaveCmdPreservesEgressSettings(t *testing.T) {
 	if err := config.PatchProjectSecurity(config.SecurityPatch{
 		EgressThenWrite:  true,
 		NetworkAllowList: []string{"api.github.com"},
+		DAST:             config.DASTConfig{AllowedTargets: []string{"staging.example.com"}, AllowActive: true},
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -129,6 +130,9 @@ func TestSecurityConfigSaveCmdPreservesEgressSettings(t *testing.T) {
 	}
 	if len(cfg.Security.NetworkAllowList) != 1 || cfg.Security.NetworkAllowList[0] != "api.github.com" {
 		t.Errorf("network_allowlist = %v, want [api.github.com]", cfg.Security.NetworkAllowList)
+	}
+	if !cfg.Security.DAST.AllowActive || len(cfg.Security.DAST.AllowedTargets) != 1 || cfg.Security.DAST.AllowedTargets[0] != "staging.example.com" {
+		t.Errorf("dast policy was dropped by saving scanner config: %+v", cfg.Security.DAST)
 	}
 	if cfg.Security.Tools["gitleaks"].ToolEnabled() {
 		t.Error("expected gitleaks to be disabled after save")

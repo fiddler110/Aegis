@@ -74,6 +74,42 @@ func TestPatchGlobalSecurityPreservesEgressPolicy(t *testing.T) {
 	}
 }
 
+// TestPatchGlobalSecurityPreservesDASTPolicy is the P11.7 sibling of
+// TestPatchGlobalSecurityPreservesEgressPolicy: DAST is part of the same
+// wholesale-replaced security: block, so patching only DefaultMethod/Tools
+// must not silently drop an operator's target allowlist/allow_active.
+func TestPatchGlobalSecurityPreservesDASTPolicy(t *testing.T) {
+	redirectConfigDir(t)
+
+	err := PatchGlobalSecurity(SecurityPatch{
+		DefaultMethod: "auto",
+		DAST: DASTConfig{
+			AllowedTargets: []string{"staging.example.com", ".internal.example.com"},
+			AllowActive:    true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !cfg.Security.DAST.AllowActive {
+		t.Error("dast.allow_active was dropped")
+	}
+	want := []string{"staging.example.com", ".internal.example.com"}
+	if len(cfg.Security.DAST.AllowedTargets) != len(want) {
+		t.Fatalf("dast.allowed_targets = %v, want %v", cfg.Security.DAST.AllowedTargets, want)
+	}
+	for i, w := range want {
+		if cfg.Security.DAST.AllowedTargets[i] != w {
+			t.Errorf("allowed_targets[%d] = %q, want %q", i, cfg.Security.DAST.AllowedTargets[i], w)
+		}
+	}
+}
+
 func TestPatchProjectSecurityPreservesOtherSections(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTemp(t)

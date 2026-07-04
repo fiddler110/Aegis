@@ -260,6 +260,34 @@ type SecurityConfig struct {
 	// prefer the container image), or "auto"/"" (host if present, else
 	// container) — the default.
 	DefaultMethod string `koanf:"default_method"`
+
+	// DAST configures the dast_scan tool's target-authorization policy
+	// (P11.7) — enforced unconditionally inside the tool itself, not just
+	// advisory permission rules, since an agent pointing an active scanner
+	// at an arbitrary host is an abuse primitive.
+	DAST DASTConfig `koanf:"dast"`
+}
+
+// DASTConfig is the hard authorization gate for DAST scanning (P11.7): a
+// dast_scan call always resolves its target's host against this policy
+// before ever launching ZAP, regardless of permission mode. Loopback and
+// RFC-1918 private addresses are always allowed (the common "scan my
+// locally running app" case needs no config); anything else must be
+// explicitly declared here.
+type DASTConfig struct {
+	// AllowedTargets is a list of exact hostnames, ".suffix" subdomain
+	// wildcards, or CIDR ranges an operator has explicitly authorized for
+	// scanning, in addition to the built-in loopback/RFC-1918 default-allow.
+	// Hostnames are matched as literal strings, never DNS-resolved — a
+	// target's declared identity can't be silently changed by whatever it
+	// happens to resolve to at scan time (ZAP does its own resolution inside
+	// the container, outside Aegis's control).
+	AllowedTargets []string `koanf:"allowed_targets"`
+	// AllowActive gates active/api scan modes (which send real attack
+	// payloads, not just passive observation) behind an explicit one-time
+	// opt-in, separate from the per-call approval prompt every dast_scan
+	// call already gets from its execute capability. Default false.
+	AllowActive bool `koanf:"allow_active"`
 }
 
 // SecurityToolConfig configures one security scanner (P11.11).
@@ -364,6 +392,7 @@ func defaults() map[string]any {
 		"sandbox.network":              false,
 		"security.egress_then_write":   false,
 		"security.default_method":      "auto",
+		"security.dast.allow_active":   false,
 		"output_guard.enabled":         true,
 		"output_guard.mode":            "llm",
 		"output_guard.max_retries":     1,

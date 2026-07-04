@@ -52,6 +52,7 @@ type securityConfigModel struct {
 	// silently dropped just because this dialog only edits scanner config).
 	egressThenWrite  bool
 	networkAllowList []string
+	dast             config.DASTConfig
 
 	defaultMethod string
 	tools         map[string]config.SecurityToolConfig // working copy, mutated as the user edits
@@ -95,6 +96,7 @@ func newSecurityConfigModel(width, height int, th theme, global bool) *securityC
 		global:           global,
 		egressThenWrite:  sec.EgressThenWrite,
 		networkAllowList: sec.NetworkAllowList,
+		dast:             sec.DAST,
 		defaultMethod:    strOrDefault(sec.DefaultMethod, "auto"),
 		tools:            tools,
 		statuses:         map[string]string{},
@@ -333,6 +335,7 @@ func (m *securityConfigModel) saveCmd() tea.Cmd {
 		NetworkAllowList: m.networkAllowList,
 		DefaultMethod:    m.defaultMethod,
 		Tools:            m.tools,
+		DAST:             m.dast,
 	}
 	write := config.PatchProjectSecurity
 	if m.global {

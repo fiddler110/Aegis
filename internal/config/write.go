@@ -202,17 +202,19 @@ func buildSkillsBlock(names []string) string {
 }
 
 // SecurityPatch holds the security: fields to write into a config file
-// (P11.11 — `/security-config`). EgressThenWrite/NetworkAllowList are carried
-// through unchanged from the caller's current config rather than defaulted,
-// since patchSecurity replaces the whole security: block wholesale and this
-// patch only ever originates from an editor that means to change
-// DefaultMethod/Tools — losing an operator's existing contextual-security
-// settings as a side effect would be a real regression, not a refactor.
+// (P11.11 — `/security-config`). EgressThenWrite/NetworkAllowList/DAST are
+// carried through unchanged from the caller's current config rather than
+// defaulted, since patchSecurity replaces the whole security: block
+// wholesale and this patch only ever originates from an editor that means
+// to change DefaultMethod/Tools — losing an operator's existing contextual-
+// security settings (including the P11.7 DAST target allowlist) as a side
+// effect would be a real regression, not a refactor.
 type SecurityPatch struct {
 	EgressThenWrite  bool
 	NetworkAllowList []string
 	DefaultMethod    string
 	Tools            map[string]SecurityToolConfig
+	DAST             DASTConfig
 }
 
 // PatchProjectSecurity replaces the security: block in the project-level
@@ -264,28 +266,40 @@ func buildSecurityBlock(p SecurityPatch) string {
 
 	if len(p.Tools) == 0 {
 		b.WriteString("  tools: {}\n")
-		return b.String()
-	}
-	b.WriteString("  tools:\n")
-	names := make([]string, 0, len(p.Tools))
-	for name := range p.Tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		tc := p.Tools[name]
-		fmt.Fprintf(&b, "    %s:\n", name)
-		fmt.Fprintf(&b, "      enabled: %t\n", tc.ToolEnabled())
-		if tc.Method != "" {
-			fmt.Fprintf(&b, "      method: %s\n", tc.Method)
+	} else {
+		b.WriteString("  tools:\n")
+		names := make([]string, 0, len(p.Tools))
+		for name := range p.Tools {
+			names = append(names, name)
 		}
-		if tc.Install != "" {
-			fmt.Fprintf(&b, "      install: %s\n", tc.Install)
-		}
-		if tc.Image != "" {
-			fmt.Fprintf(&b, "      image: %q\n", tc.Image)
+		sort.Strings(names)
+		for _, name := range names {
+			tc := p.Tools[name]
+			fmt.Fprintf(&b, "    %s:\n", name)
+			fmt.Fprintf(&b, "      enabled: %t\n", tc.ToolEnabled())
+			if tc.Method != "" {
+				fmt.Fprintf(&b, "      method: %s\n", tc.Method)
+			}
+			if tc.Install != "" {
+				fmt.Fprintf(&b, "      install: %s\n", tc.Install)
+			}
+			if tc.Image != "" {
+				fmt.Fprintf(&b, "      image: %q\n", tc.Image)
+			}
 		}
 	}
+
+	b.WriteString("  dast:\n")
+	if len(p.DAST.AllowedTargets) == 0 {
+		b.WriteString("    allowed_targets: []\n")
+	} else {
+		b.WriteString("    allowed_targets:\n")
+		for _, target := range p.DAST.AllowedTargets {
+			fmt.Fprintf(&b, "      - %q\n", target)
+		}
+	}
+	fmt.Fprintf(&b, "    allow_active: %t\n", p.DAST.AllowActive)
+
 	return b.String()
 }
 

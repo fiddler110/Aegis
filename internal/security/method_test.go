@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
@@ -25,6 +26,59 @@ func withDetectRuntime(t *testing.T, fn func(ctx context.Context, priority []san
 	orig := detectRuntime
 	detectRuntime = fn
 	t.Cleanup(func() { detectRuntime = orig })
+}
+
+// TestResolveOptInToolDisabledByDefault is the P11.3 regression: a tool
+// descriptor with DefaultEnabled: false must resolve to MethodNone with a
+// distinct "opt-in" reason (not "disabled by configuration") when the
+// operator hasn't configured it at all — e.g. semgrep and the language-
+// targeted SAST engines, which are opt-in now that opengrep is the default.
+func TestResolveOptInToolDisabledByDefault(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-optin", Binary: "go", DefaultEnabled: false})
+
+	method, _, _, reason := Resolve(context.Background(), "test-optin", Options{})
+	if method != MethodNone {
+		t.Fatalf("method = %v, want MethodNone (opt-in tool, no config at all)", method)
+	}
+	if !strings.Contains(reason, "opt-in tool, not enabled by default") {
+		t.Errorf("reason = %q, want mention of opt-in default", reason)
+	}
+}
+
+// TestResolveOptInToolEnabledExplicitly proves the operator can turn an
+// opt-in tool on via security.tools.<name>.enabled without needing to touch
+// anything else.
+func TestResolveOptInToolEnabledExplicitly(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-optin-on", Binary: "go", DefaultEnabled: false})
+	opts := Options{Tools: map[string]ToolPolicy{"test-optin-on": {Enabled: true}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-optin-on", opts)
+	if method != MethodHost {
+		t.Fatalf("method = %v, reason = %q, want MethodHost once explicitly enabled", method, reason)
+	}
+}
+
+// TestOptionsFromConfigDefaultsEnabledFromDescriptor is the OptionsFromConfig
+// half of the same regression: configuring a tool for an unrelated reason
+// (e.g. just to set `method`) without an explicit `enabled` must not
+// silently opt a default-off tool back in.
+func TestOptionsFromConfigDefaultsEnabledFromDescriptor(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-cfg-optin", Binary: "go", DefaultEnabled: false})
+
+	cfg := config.SecurityConfig{Tools: map[string]config.SecurityToolConfig{
+		"test-cfg-optin": {Method: "host"}, // no Enabled set
+	}}
+	opts := OptionsFromConfig(cfg)
+	if opts.Tools["test-cfg-optin"].Enabled {
+		t.Error("expected Enabled to stay false (descriptor default) when config doesn't set it explicitly")
+	}
+
+	trueVal := true
+	cfg.Tools["test-cfg-optin"] = config.SecurityToolConfig{Method: "host", Enabled: &trueVal}
+	opts = OptionsFromConfig(cfg)
+	if !opts.Tools["test-cfg-optin"].Enabled {
+		t.Error("expected explicit enabled: true to override the descriptor default")
+	}
 }
 
 func TestResolveDisabledByConfig(t *testing.T) {

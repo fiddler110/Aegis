@@ -120,7 +120,7 @@ func (f fakeScanner) Resolve(context.Context, Options) (Method, sandbox.Containe
 	}
 	return MethodNone, "", "", "not installed"
 }
-func (f fakeScanner) Scan(context.Context, string, Method, sandbox.ContainerRuntime, string) ([]Finding, error) {
+func (f fakeScanner) Scan(context.Context, string, Method, sandbox.ContainerRuntime, string, Options) ([]Finding, error) {
 	return f.findings, nil
 }
 

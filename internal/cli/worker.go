@@ -121,7 +121,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	}
 
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Sandbox: workerSandbox, SecurityScan: security.OptionsFromConfig(cfg.Security)}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Sandbox: workerSandbox, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
 		return "", cost.Snapshot{}, err
 	}
 

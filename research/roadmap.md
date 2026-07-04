@@ -1,5 +1,75 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
+**Updated:** 2026-07-04 (v30 — shipped **P11.7 DAST via OWASP ZAP** (v1 scope), the headline
+scan ask: a new `dast_scan` tool / `aegis scan dast <target>` runs ZAP's **Automation
+Framework** (a YAML plan Aegis generates per call — `internal/security/dast.go`) in
+`baseline` (passive), `active` (+ real attack payloads), and `api` (OpenAPI + active) modes,
+parsing its SARIF report through the existing `ParseSARIF` ingester. Container-only (no
+host-binary path, following P11.1's no-baked-in-digest policy). **Authorization is a
+hard, code-enforced gate, not just approval**: every call validates its target's host against
+`security.dast.allowed_targets` (loopback/RFC-1918 always allowed; anything else — exact
+hostname, `.suffix` wildcard, or CIDR — must be explicitly declared, matched as a literal
+string, never DNS-resolved) *before* ZAP ever runs, and `active`/`api` modes additionally
+require `security.dast.allow_active: true` — both checks run unconditionally, independent of
+permission mode (even `auto`, which otherwise allows execute-capability tools outright). The
+container run is the one documented exception to every other scanner's `--network none`
+isolation (P11.1), since reaching the target is DAST's entire point. Found and fixed a real
+gap while wiring config: `SecurityPatch`/`buildSecurityBlock` (the `/security-config` TUI
+form's save path) had an early-return-on-empty-Tools bug that would have silently dropped
+the new `dast:` block (and any future block added the same way) on every save with no tools
+configured — fixed by falling through instead of returning early, with regression tests in
+both `internal/config` and `internal/tui`. v2 (composing a target container + ZAP on one
+ephemeral network) not done — v1 requires a target URL already reachable from the container.
+See "Open Work — P11" P11.7 and Appendix C row 41.)
+**Updated:** 2026-07-04 (v29 — shipped **P11.3 SAST depth**: made the SAST engine pluggable
+with **opengrep as the new default** (community-governed semgrep fork — no login/telemetry,
+openly-licensed rules) and semgrep selectable via `security.tools.semgrep.enabled: true`.
+Both now run with explicitly **pinned rule packs** (`p/owasp-top-ten`, `p/security-audit`)
+via a shared `sastScanArgs()` builder, never `--config auto` (reproducibility/supply-chain
+hygiene). Added four opt-in, language-targeted engines — **gosec** (Go), **bandit**
+(Python), **brakeman** (Ruby/Rails), **njsscan** (Node.js) — each off by default.
+This needed a real default-enablement mechanism that didn't exist before: `ScannerDescriptor`
+gained `DefaultEnabled bool` (true for every pre-existing tool, false for semgrep + the four
+new engines), `Options.policyFor`/`Resolve` consult it instead of a hardcoded `true`, and
+`OptionsFromConfig` was fixed alongside it so configuring a tool for an unrelated reason
+(e.g. just `method: host`) without an explicit `enabled` doesn't silently opt a default-off
+tool back in — it now falls back to the descriptor default, only overridden by an explicit
+`enabled:` in config. `Resolve`'s skip-reason also distinguishes "opt-in tool, not enabled by
+default" from "disabled by configuration" (an operator's explicit choice) so `aegis security
+status` reads clearly either way. See "Open Work — P11" P11.3 and Appendix C row 42.)
+**Updated:** 2026-07-04 (v28 — opened and shipped **P11.12 reachability analysis for SCA
+findings**, from a user request: a dependency CVE is much lower real-world risk if the
+project never actually calls the vulnerable function — most SCA tools (including Aegis's
+own trivy/grype/semgrep) only match on "is the vulnerable package present," not "is the
+vulnerable code path invoked." Researched the OSS landscape before implementing (never
+guess on a security-correctness feature): confirmed osv-scanner's `--call-analysis=<lang>`
+flag (stable since v1.5.0) is real call-graph reachability analysis — govulncheck-backed
+for Go (on by default), experimental for Rust (DWARF-based) and Java (JAR analysis) — and
+that no other OSS tool in the current stack (trivy, grype, semgrep) has an equivalent.
+Confirmed against the actual `google/osv-scanner` Go source that the reachability verdict
+(`groups[].experimental_analysis[id].called`) lives **only in osv-scanner's native JSON
+output, not SARIF**, so osv-scanner needed a bespoke parser (`internal/security/osv.go`)
+instead of `ParseSARIF` — switched its invocation from `--format sarif` to
+`--format json --call-analysis=all` accordingly. Added a `Reachability` field to `Finding`
+(`""`=unanalyzed, `"reachable"`, `"unreachable"` — never inferred for tools/ecosystems that
+don't support it, since a wrong "unreachable" claim understates real risk) with a small
+severity-tiebreak in `Report.sortFindings` (same severity → reachable surfaces above
+unanalyzed above unreachable) and a `Format()` tag; never hides or demotes a finding out of
+its severity tier. See "Open Work — P11" P11.12 and Appendix C row 46.)
+**Updated:** 2026-07-04 (v27 — shipped **P11.4 SCA depth + SBOM**: added **osv-scanner**
+(OSV.dev-backed, cross-ecosystem dependency CVEs, SARIF) as a new dir-based `Scanner`, and
+extended **grype** into a second, directory-oriented `Scanner` (it already existed as an
+`ImageScanner` for built images) that scans a **syft-generated CycloneDX SBOM**
+(`grype sbom:<file>`) instead of grype's own cataloger — persisting the SBOM to
+`.aegis/sbom.cdx.json` as a reusable supply-chain artifact — falling back to `grype dir:`
+directly if syft is unavailable or the SBOM-first run fails. New `security.GenerateSBOM`
+(host/container resolution via the same `Resolve` seam every scanner uses),
+`aegis scan sbom [path]` CLI subcommand, and `security_scan {"sbom": true}` tool param.
+Scanner interface's `Scan` method gained an `opts Options` parameter (threaded through from
+`RunWithOptions`) so grype's internal syft resolution respects the caller's
+`security.tools.syft.*` policy instead of hardcoding "auto". OWASP Dependency-Check
+(the optional, heavier NVD-backed SCA tool) intentionally not built — still opt-in-only per
+the original scope, no concrete demand yet. See "Open Work — P11" P11.4 and Appendix C row 42.)
 **Updated:** 2026-07-04 (v26 — shipped the P11 "fast wins": **P11.6 IaC scanning** (trivy's
 `--scanners` made explicit to include `misconfig`; added **kubescape** for deeper K8s
 manifest analysis with real severity) and **P11.5 container image security, scoped**
@@ -26,7 +96,7 @@ with near-zero bespoke parsing. See "Open Work — P11" P11.2.)
 
 ## Status
 
-P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), and P11's availability layer, SARIF normalization, image security, and IaC scanning (P11.1/P11.2/P11.5/P11.6/P11.10/P11.11) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
+P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), and P11's availability layer, SARIF normalization, image security, IaC scanning, SCA depth, reachability analysis, SAST depth, and DAST (P11.1/P11.2/P11.3/P11.4/P11.5/P11.6/P11.7/P11.10/P11.11/P11.12) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
 
 P9.3, P9.4, and P9.6 remain open with no current trigger. P6 remains long-horizon/exploratory with no forcing function.
 
@@ -38,14 +108,17 @@ resolver (`security.Resolve`), a config surface (`security.tools`), a CLI
 (`aegis security status|config|install`), and — added same-day on request — the interactive
 `/security-config` TUI form so none of this requires hand-editing YAML. Container fallback
 ships with no built-in image pin by deliberate choice (see P11.1). P11.2 (SARIF-first
-normalization), P11.6 (IaC via trivy misconfig + kubescape), and P11.5 (container image
-security, scoped to host-binary-only — see P11.5) also shipped 2026-07-04. Remaining:
-P11.3, P11.4, P11.7, P11.8, P11.9.
+normalization), P11.6 (IaC via trivy misconfig + kubescape), P11.5 (container image
+security, scoped to host-binary-only — see P11.5), P11.4 (SCA depth: osv-scanner +
+SBOM-fed grype), P11.12 (reachability: osv-scanner `--call-analysis`, govulncheck-backed
+for Go), P11.3 (SAST depth: opengrep default, semgrep + 4 language engines opt-in), and
+P11.7 (DAST via OWASP ZAP, v1 scope — hard target-allowlist gate, container-only, the one
+documented `--network none` exception) also shipped 2026-07-04. Remaining: P11.8, P11.9.
 
 **Recommended priority order:** ~~P10~~ ~~P11 availability layer~~ ~~P11.2 SARIF~~
-~~P11.5/P11.6 fast wins~~ **all shipped 2026-07-04** → P11.4 (SCA depth + SBOM) → P11.3
-(SAST depth/opengrep) → P11.7 (ZAP DAST, the headline scan ask) → P11.8 → P11.9 →
-remaining P9 items only on a concrete trigger → P6.
+~~P11.5/P11.6 fast wins~~ ~~P11.4 SCA depth~~ ~~P11.12 reachability~~ ~~P11.3 SAST depth~~
+~~P11.7 DAST~~ **all shipped 2026-07-04** → P11.8 (findings dedup/triage) → P11.9 (regression
+evals + pinned provenance) → remaining P9 items only on a concrete trigger → P6.
 
 **Reviewed and found sound, no action needed (from the P7 audit):** SSRF dialer (private-IP check happens at dial time, closing the DNS-rebind window); path traversal / symlink handling in `ValidatePath`; local daemon HTTP API (constant-time bearer token + loopback-origin check); persona YAML parsing (safe library, no unsafe type deserialization); `team_tasks` claim path (properly transactional, no duplicate-claim race).
 
@@ -289,28 +362,80 @@ Tests: `internal/security/sarif_test.go` (severity precedence: tag > security-se
 `TestParseTrivySARIF` now exercise real SARIF fixtures instead of the deleted tool-specific
 JSON shapes).
 
-### P11.3 — SAST depth
-Make the SAST engine pluggable and **default to opengrep**, with semgrep selectable. Both
-engines are LGPL and Aegis only shells out to them (no linking, so no LGPL friction), but
-opengrep is the better fit for the local-first posture: community-governed, no login/
-telemetry, and openly-licensed rules — versus semgrep's `--config auto`, which needs network,
-nudges toward platform login, and pulls unpinned/relicensed registry rules. They're rule-
-syntax compatible and both emit SARIF, so a single engine flag + shared pinned rule packs
-(`p/owasp-top-ten`, `p/security-audit`) covers either. Pin the packs explicitly (never
-`auto`) for reproducibility and supply-chain hygiene. Add opt-in language-targeted engines
-where the multi-lang core is shallow: gosec, bandit, brakeman, njsscan. Only tradeoff:
-opengrep's rule-update velocity for brand-new CVE patterns lags semgrep's registry —
-mitigated by pointing it at the still-open `semgrep-rules` pack. Priority: **Medium**,
-Effort: **M**.
+### P11.3 — ✅ shipped 2026-07-04 — SAST depth
+Made the SAST engine pluggable with **opengrep as the default** (`internal/security/
+scanners.go`, `opengrepScanner`) — community-governed semgrep fork, no login/telemetry,
+openly-licensed rules — with **semgrep selectable** (`semgrepScanner`, unchanged binary/
+behavior otherwise) via `security.tools.semgrep.enabled: true`. Both are rule-syntax
+compatible and SARIF-native, so they share one arg builder (`sastScanArgs`) and one pinned
+pack list (`p/owasp-top-ten`, `p/security-audit`) — **never `--config auto`**, for
+reproducibility and supply-chain hygiene (auto needs network egress, nudges toward a
+platform login, and resolves whatever the registry currently serves rather than a fixed set).
+Added four opt-in, language-targeted engines for where the multi-lang core is shallow:
+**gosec** (Go), **bandit** (Python), **brakeman** (Ruby/Rails), **njsscan** (Node.js) — all
+SARIF-native (confirmed per-tool before writing any parser, same research-first discipline as
+P11.12); gosec/bandit/brakeman document their SARIF formatter paired with an explicit output
+path rather than stdout-by-default, so they reuse the gitleaks/kubescape "temp file on host,
+`/dev/stdout` in container" pattern (`runHostToTempSARIF`); njsscan writes SARIF straight to
+stdout like semgrep/opengrep/trivy.
 
-### P11.4 — SCA depth + SBOM
-Add osv-scanner (best cross-ecosystem SCA, OSV.dev-backed) and grype alongside trivy;
-generate an SBOM with syft and feed grype from it, keeping the SBOM as a persisted
-supply-chain artifact. **OWASP Dependency-Check** (Apache-2.0, OWASP-native, NVD-backed) is
-available as an opt-in for teams that want the OWASP lineage — but it's not the default: it's
-heavier (needs an NVD data feed, slower first run) and strongest on Java/.NET, where
-osv-scanner/grype are lighter and broader. Dedup CVEs reported by multiple tools (P11.8).
+Making 5 of 14 scanners opt-in-by-default required a real mechanism, since `Options.
+policyFor` previously hardcoded `Enabled: true` for any tool absent from config — silently
+enabling every new opt-in scanner the moment it shipped. `ScannerDescriptor` gained
+`DefaultEnabled bool` (true for every pre-existing tool — preserves prior behavior; false for
+semgrep + the four language engines); `Resolve` now calls `opts.policyFor(name, d.
+DefaultEnabled)` instead of a bare `true`. Caught and fixed the same gap one layer up while
+implementing this: `OptionsFromConfig` also hardcoded `Enabled: true` whenever a tool had
+*any* config entry (via `SecurityToolConfig.ToolEnabled()`'s own "default true" semantics) —
+meaning an operator setting e.g. `security.tools.semgrep.method: host` for an unrelated
+reason, with no `enabled:` at all, would have silently opted a default-off tool back in.
+Fixed by having `OptionsFromConfig` resolve the descriptor default first and only override it
+when `tc.Enabled` is a non-nil pointer (i.e. actually set in YAML). `Resolve`'s skip reason
+also distinguishes "opt-in tool, not enabled by default" (the new case) from "disabled by
+configuration" (an operator's explicit choice) so `aegis security status`/`/security-config`
+read unambiguously either way — consistent with P11.1's "never a silent/confusing skip."
+Opt-in scanners are still listed in `DefaultScanners()` (not omitted) so they're always
+discoverable and toggleable, same reasoning.
 Priority: **Medium**, Effort: **M**.
+Tests: `internal/security/sast_test.go` (`TestScannerDefaultEnabledSplit`,
+`TestDefaultScannersIncludesSASTDepth`, `TestSASTScanArgsPinsPacksNeverAuto`),
+`internal/security/method_test.go` (`TestResolveOptInToolDisabledByDefault`,
+`TestResolveOptInToolEnabledExplicitly`, `TestOptionsFromConfigDefaultsEnabledFromDescriptor`).
+
+### P11.4 — ✅ shipped 2026-07-04 — SCA depth + SBOM
+Added **osv-scanner** (`internal/security/scanners.go`, `osvScanner`) as a new dir-based
+`Scanner` — cross-ecosystem SCA backed by OSV.dev, SARIF-native so it needed no bespoke
+parser (P11.2 pays off again). **Grype** — which already existed as an `ImageScanner` for
+built-image scanning (P11.5) — gained a second, directory-oriented `Scanner`
+(`grypeDirScanner`, same `Name()` — the two run in disjoint report aggregations so the
+shared name never collides) that generates a CycloneDX SBOM via **syft**
+(`security.GenerateSBOM`, `internal/security/sbom.go`) and scans that (`grype
+sbom:<file>`) instead of grype's own built-in directory cataloger — ties the CVE match to a
+standalone, reusable artifact rather than a scan-only in-memory catalog. The SBOM is
+persisted to `.aegis/sbom.cdx.json` (`security.WriteSBOMArtifact`) as the "keep the SBOM as
+a persisted supply-chain artifact" requirement. Falls back to `grype dir:<path>` directly
+whenever syft isn't available or the SBOM-first run fails for any reason, so a missing/
+broken syft install never blackholes the whole SCA control — and is scoped to grype's own
+*host* method: when grype itself resolves to a container, cross-mounting a host-generated
+SBOM into that container isn't wired up yet (no built-in scanner ships a `DefaultImage` per
+P11.1, so this combination has no current trigger), and the container path scans the
+mounted directory directly instead.
+
+`GenerateSBOM` resolves host-vs-container through the same `Resolve` seam every other
+scanner uses, so `security.tools.syft.*` config (enable/disable, method, digest-pinned
+image) applies to it identically. This required widening the `Scanner.Scan` interface with
+an `opts Options` parameter (threaded from `RunWithOptions`) — the four existing native
+scanners just ignore it; only grype's internal syft resolution needed it, so it was
+previously impossible to express "respect the caller's syft policy" from inside a Scan
+implementation. Exposed standalone via `aegis scan sbom [path] [-o file]` and
+`security_scan {"sbom": true}` for generating/persisting an SBOM without running grype at
+all. **OWASP Dependency-Check** (Apache-2.0, OWASP-native, NVD-backed) remains opt-in-only
+and was not built this pass — no concrete demand, and it's heavier (NVD data feed, slower
+first run) with its strongest fit (Java/.NET) already covered more lightly by osv-scanner/
+grype. Dedup across tools remains P11.8. Priority: **Medium**, Effort: **M**.
+Tests: `internal/security/sbom_test.go` (`TestWriteSBOMArtifactPersistsFile`,
+`TestWriteSBOMArtifactSkipsEmpty`, `TestGenerateSBOMReturnsResolveError`,
+`TestDefaultScannersIncludesSCADepth`).
 
 ### P11.5 — ✅ shipped 2026-07-04 (scoped) — Container image security
 Added the previously entirely-missing image-scanning class via a new `ImageScanner`
@@ -354,25 +479,68 @@ flag writes a file rather than stdout (unlike semgrep/trivy's SARIF, which write
 to stdout), so its `Scan` mirrors gitleaks' existing report-file pattern — a real temp file
 on the host, `/dev/stdout` inside the container. Priority: **Medium**, Effort: **M**.
 
-### P11.7 — DAST via OWASP ZAP (containerized, automated, authorization-gated)
-Run OWASP ZAP from its official image (`ghcr.io/zaproxy/zaproxy:stable`, digest-pinned)
-on the container backend and drive the packaged scans — `zap-baseline.py` (passive, fast,
-CI-friendly), `zap-full-scan.py` (active attack), `zap-api-scan.py` (OpenAPI/GraphQL/SOAP)
-— or a ZAP **Automation Framework** YAML plan for repeatable multi-step scans. Ingest the
-SARIF/JSON report into `Finding` and let the agent triage/remediate. Exposed as a
-`dast_scan` tool (capability **network+execute**, deferred/opt-in like the other niche
-tools).
+### P11.7 — ✅ shipped 2026-07-04 (v1 scope) — DAST via OWASP ZAP (containerized, automated, authorization-gated)
+Runs OWASP ZAP's **Automation Framework** (a YAML plan Aegis generates per call,
+`internal/security/dast.go` `buildZAPPlan`) rather than the packaged
+`zap-baseline.py`/`zap-full-scan.py`/`zap-api-scan.py` scripts — researched before choosing:
+the packaged scripts' own `-J`/`-r` flags only produce plain JSON/HTML, and only the
+Automation Framework's `report` job can emit **SARIF** (`template: sarif-json`), so it's the
+only path that reuses the existing `ParseSARIF` ingester instead of a bespoke parser. Three
+modes: `baseline` (spider + passive scan, no attack traffic), `active` (+ active scan, real
+attack payloads), `api` (OpenAPI import + active scan — GraphQL/SOAP not wired up yet).
+Exposed as a standalone `dast_scan` tool (deferred, like the other niche tools) and
+`aegis scan dast <target> [--mode baseline|active|api] [--api-definition <url>]`. Container-
+only, no host-binary path — `security.tools.zap.image` must be a digest-pinned
+`ghcr.io/zaproxy/zaproxy` reference, following P11.1's established no-baked-in-digest policy
+(a `zap` descriptor's `Binary` is deliberately `""`, and its `Install` map is deliberately
+empty — a prose "container-only" explanation there would have been misread as a literal
+shell command by the existing `aegis security install` flow, caught while wiring the
+descriptor). The container run (`zapContainerRunArgs`) is the one documented exception to
+every other scanner's `--network none` isolation — reaching the target is DAST's entire
+point — while keeping the rest of the hardening (`--cap-drop=ALL --security-opt=no-new-
+privileges`, ZAP's own non-root `zap` user left alone rather than overridden with `--user`).
 
-**Authorization gate — hard requirement, not optional:** an active DAST scan against a
-host you don't own is an attack, and an agent that can point ZAP at an arbitrary URL is an
-abuse primitive. The target must match a config **allowlist** (default: loopback + RFC-1918
-+ explicitly declared targets) *and* pass an explicit approval before any active scan runs;
-reuse the existing network-allowlist / egress-policy machinery (`internal/permission`
-contextual gate) rather than inventing a second path. Passive baseline may be allowed more
-freely than full/active. v1: user supplies a running target URL reachable from the
-container; v2: Aegis composes the target container + ZAP on one Docker network so it can
-scan a just-built app with no external exposure. Priority: **High** (the headline ask),
-Effort: **L**.
+**Authorization gate — hard requirement, not optional, and code-enforced rather than
+policy-advisory:** researched the existing `internal/permission` network-allowlist/
+`ContextualGate` machinery before building on it, per the original plan — and found it
+doesn't fit: `NetworkAllowList`/`domainAllowed` is a plain hostname/subdomain-suffix string
+matcher with no CIDR or private-IP awareness, and `ContextualGate.Check` only special-cases
+`CapNetwork`/`CapWrite`, not the `CapExecute` capability `dast_scan` needs (an active scan +
+container spawn is closer to shell execution than to a single `web_fetch` call). Building a
+dedicated allowlist was the more honest option instead of stretching a mechanism that
+doesn't cover this shape. `isDASTTargetAllowed` (`internal/security/dast.go`) is called
+**unconditionally inside `RunDAST`**, independent of permission mode — even `auto` mode,
+which otherwise allows every execute-capability tool outright: loopback/RFC-1918 private
+addresses are always allowed (the common "scan my locally running app" case needs no
+config); anything else needs an exact hostname, `.suffix` wildcard, or CIDR entry in
+`security.dast.allowed_targets`. Hostnames are matched as literal strings, deliberately never
+DNS-resolved, since ZAP does its own resolution inside the container outside this check's
+visibility — resolving proactively here would just move the DNS-rebind race rather than
+close it. `active`/`api` modes get a second, independent gate: `security.dast.allow_active`
+(default false) must be set, on top of the normal execute-tool approval prompt every
+`dast_scan` call already gets — baseline scanning needs neither.
+
+**A real gap found and fixed while wiring config through:** `config.SecurityPatch`/
+`buildSecurityBlock` (the `/security-config` TUI save path, and `PatchProjectSecurity`/
+`PatchGlobalSecurity` generally) had an early `return` on empty `Tools` that skipped
+everything written after it in the function — meaning the new `dast:` block (added at the
+end, after the tools loop) would have been silently dropped on every save where no
+per-scanner tool config was set, exactly the class of regression the function's own doc
+comment already warned about for `EgressThenWrite`/`NetworkAllowList`. Fixed by falling
+through instead of returning early; regression tests added in both `internal/config`
+(`TestPatchGlobalSecurityPreservesDASTPolicy`) and `internal/tui`
+(`TestSecurityConfigSaveCmdPreservesEgressSettings`, extended).
+
+**v1 scope, v2 not done:** the operator supplies an already-running target URL reachable
+from the container. Composing "build the target + scan it, on one ephemeral Docker network,
+no external exposure" is real follow-up work — deliberately out of scope for this pass, per
+the original plan's own v1/v2 split. Priority: **High** (the headline ask), Effort: **L**.
+Tests: `internal/security/dast_test.go` (target-allowlist defaults/rejections/explicit
+declarations/invalid-URL handling, ZAP plan job sequencing per mode + SARIF report job
+shape, `RunDAST`'s target-check-before-container-work and active-mode-without-allow_active
+regressions), `internal/config/write_security_test.go`
+(`TestPatchGlobalSecurityPreservesDASTPolicy`), `internal/tui/securityconfig_test.go`
+(extended `TestSecurityConfigSaveCmdPreservesEgressSettings`).
 
 ### P11.8 — Findings dedup, suppression baseline, triage loop
 Dedup by (CVE/rule-id, normalized location) across overlapping tools; a
@@ -484,12 +652,53 @@ block creation, egress-policy preservation, other-sections preservation, explici
 Priority: **High**, Effort: **M**. P11.10 + P11.11 + P11.1 together are the "tool
 availability" layer; shipped as a unit.
 
+### P11.12 — ✅ shipped 2026-07-04 — Reachability analysis for SCA findings
+User request: a dependency CVE is much lower real-world risk if the vulnerable *function*
+is never actually called by the project, versus the vulnerable *package* merely being a
+declared dependency — and none of trivy/grype/semgrep distinguish the two, so every SCA
+finding reads at face-value severity regardless of whether it's exploitable in practice.
+
+Researched the OSS landscape before writing any code, since guessing wrong on a security-
+correctness feature is worse than not building it: confirmed **osv-scanner's
+`--call-analysis=<lang>` flag** (stable since v1.5.0, not experimental) does real call-graph
+reachability analysis — for Go it's **govulncheck** under the hood and on by default; Rust
+(DWARF-based, compiles the source) and Java (JAR bytecode) analysis are newer/experimental
+upstream. No other integrated scanner has an open-source equivalent — trivy/grype/semgrep
+match on presence only. This meant no new scanner/descriptor was needed (osv-scanner already
+shipped in P11.4); the existing integration just needed to ask for and surface the signal it
+was already capable of producing.
+
+Confirmed against the actual `google/osv-scanner` Go source (`pkg/models`) that the verdict
+— `PackageVulns.Groups[].ExperimentalAnalysis[vulnID].Called` — is **only present in
+osv-scanner's native JSON report, not SARIF**. Switched `osvScanner`'s invocation from
+`--format sarif` to `--format json --call-analysis=all` (a no-op for ecosystems without
+support, not an error, so always safe to pass) and wrote a dedicated parser
+(`internal/security/osv.go`, `parseOSVScanner`) instead of routing through `ParseSARIF` —
+the first scanner to need one since gitleaks.
+
+`Finding` gained a `Reachability` field: `""` (`ReachabilityUnknown`, the default — every
+non-osv-scanner finding, and any osv-scanner ecosystem without call-analysis support today,
+e.g. npm/PyPI), `"reachable"`, or `"unreachable"`. Deliberately never inferred beyond what
+the tool actually reported — a wrong "unreachable" claim would understate real risk, which
+is worse than no claim at all. `Report.sortFindings` gained a same-severity tiebreak
+(reachable → unanalyzed → unreachable) via `Reachability.weight()`, and `Format()` appends a
+short `[reachable: ...]`/`[not reachable: ...]` tag — but severity ordering is untouched and
+an unreachable finding is never hidden or demoted out of its tier: it's still a real,
+database-confirmed CVE in the dependency tree, just lower triage urgency. Feeds directly
+into P11.8's dedup/triage loop as a natural prioritization signal.
+Priority: **Medium**, Effort: **S**.
+Tests: `internal/security/osv_test.go` (`TestParseOSVScannerReachability` — called/uncalled/
+no-analysis-entry all map correctly, `TestOSVSeverityFallsBackToMediumOnUnparseable`,
+`TestFixedVersionRemediationDedupsAndJoins`, `TestSortFindingsTiebreaksOnReachability`,
+`TestFormatIncludesReachabilityTag`).
+
 **Sequencing:** P11.1 (containerized runtime) and P11.2 (SARIF) are the enablers — every
 later item is materially cheaper once they land, and P11.7/ZAP is blocked on P11.1. The
 availability layer (P11.1 + P11.10 provisioning + P11.11 config/CLI) was the natural first
 unit of work since it makes every scanner reliably runnable on a clean machine — now shipped.
-Remaining order: P11.2 (SARIF) → P11.5/P11.6 (fast wins reusing trivy/new images) → P11.4 →
-P11.3 → P11.7 (ZAP) → P11.8 → P11.9.
+Remaining order: ~~P11.2 (SARIF)~~ → ~~P11.5/P11.6 (fast wins reusing trivy/new images)~~ →
+~~P11.4 (SCA depth + SBOM)~~ → ~~P11.12 (reachability)~~ → ~~P11.3 (SAST depth)~~ →
+~~P11.7 (ZAP)~~ **all shipped** → P11.8 → P11.9.
 
 ---
 
@@ -770,12 +979,14 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 | 36 | Quality | No eval scenario asserts a parent's deny/egress/budget still binds a spawned sub-agent | — (service-interaction review) | Medium | ✅ P10.4 |
 | 37 | Safety | Dollar-denominated budget/caps are a silent no-op for local (estimated-usage) + uncatalogued models — no working spend guardrail in the default local posture | — (provider-budgeting comparison) | **High** | ✅ P10.5 |
 | 38 | Security scanning | `Scanner.Available()` gates on a host binary; a clean machine silently skips every scanner and reports a scan it never ran | — (scan review) | High | ✅ P11.1 |
-| 39 | Security scanning | Container-image security entirely missing (`trivy fs` only, never `trivy image`/grype/hadolint/dockle) | — (scan review) | Medium | ⬜ P11.5 |
-| 40 | Security scanning | IaC coverage shallow — trivy config not fully exercised; deeper engine wanted (trivy expanded, not checkov: checkov OSS has no severity) | — (scan review) | Medium | ⬜ P11.6 |
-| 41 | Security scanning | No DAST capability; OWASP ZAP automation requested (containerized, authorization-gated) | user request | High | ⬜ P11.7 |
-| 42 | Security scanning | Single SAST engine (semgrep `auto`, unpinned); no SCA breadth (osv-scanner/grype) or SBOM | — (scan review) | Medium | ⬜ P11.3/P11.4 |
+| 39 | Security scanning | Container-image security entirely missing (`trivy fs` only, never `trivy image`/grype/hadolint/dockle) | — (scan review) | Medium | ✅ P11.5 (scoped: host-binary only) |
+| 40 | Security scanning | IaC coverage shallow — trivy config not fully exercised; deeper engine wanted (trivy expanded, not checkov: checkov OSS has no severity) | — (scan review) | Medium | ✅ P11.6 |
+| 41 | Security scanning | No DAST capability; OWASP ZAP automation requested (containerized, authorization-gated) | user request | High | ✅ P11.7 (v1 scope) |
+| 42 | Security scanning | Single SAST engine (semgrep `auto`, unpinned) | — (scan review) | Medium | ✅ P11.3 |
 | 43 | Security scanning | No way to install a missing scanner (or auto-pick host-binary vs container); missing tools silently skipped | user request | High | ✅ P11.10 |
 | 44 | Security scanning | No user configuration for which security tools to enable, run method (host/container/auto), or auto-install policy | user request | High | ✅ P11.11 (CLI + `/security-config` TUI form) |
+| 45 | Security scanning | No SCA breadth beyond trivy (osv-scanner/grype) or SBOM generation | — (scan review) | Medium | ✅ P11.4 |
+| 46 | Security scanning | SCA findings carry no reachability signal — a vulnerable *package* present reads the same as a vulnerable *function* actually called | user request | Medium | ✅ P11.12 |
 
 ---
 

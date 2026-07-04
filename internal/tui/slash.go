@@ -238,7 +238,7 @@ func builtinHelp(name string) string {
 	case "sandbox":
 		return "/sandbox [use <target>]\n  No args: show the configured sandbox backend and detected container runtimes (docker, podman, wslc, container).\n  use <local|auto|docker|podman|wslc|container>: set the backend (written to global config; takes effect on restart)."
 	case "security-config":
-		return "/security-config [global]\n  Opens an interactive dialog to configure the security scanners (semgrep, trivy, gitleaks, kubescape, hadolint, grype, dockle) used by /scan and the security_scan tool: toggle enabled, pick host/container/auto, set the install policy, and set a digest-pinned container image.\n  No args: edits the project's .aegis/config.yaml. 'global': edits ~/.config/aegis/config.yaml instead.\n  Written immediately; restart Aegis to apply."
+		return "/security-config [global]\n  Opens an interactive dialog to configure the security scanners (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, kubescape, hadolint, grype, dockle, osv-scanner, syft) used by /scan and the security_scan tool: toggle enabled, pick host/container/auto, set the install policy, and set a digest-pinned container image.\n  No args: edits the project's .aegis/config.yaml. 'global': edits ~/.config/aegis/config.yaml instead.\n  Written immediately; restart Aegis to apply."
 	case "session":
 		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
 	case "rewind":
