@@ -67,3 +67,40 @@ func TestLoad(t *testing.T) {
 		t.Error("expected missing skill to not load")
 	}
 }
+
+func TestLoadBundledDirectorySkill(t *testing.T) {
+	dir := t.TempDir()
+	bundleDir := filepath.Join(dir, ".aegis", "skills", "html-report")
+	writeSkill(t, bundleDir, "SKILL.md", "---\ndescription: Make a report\n---\nUse the template.\n")
+	writeSkill(t, bundleDir, "template.html", "<html></html>\n")
+	writeSkill(t, bundleDir, "validate.py", "print('ok')\n")
+	writeSkill(t, filepath.Join(bundleDir, "references"), "rubric.md", "# Rubric\n")
+
+	sk, ok := Load(dir, "html-report")
+	if !ok {
+		t.Fatal("bundled skill not found")
+	}
+	if sk.Description != "Make a report" {
+		t.Errorf("description = %q", sk.Description)
+	}
+	if sk.Dir == "" {
+		t.Error("expected Dir to be set for a bundled skill")
+	}
+	if !strings.Contains(sk.Content, "Use the template.") {
+		t.Errorf("missing manifest body: %q", sk.Content)
+	}
+	if !strings.Contains(sk.Content, "<skill_assets") || !strings.Contains(sk.Content, "template.html") || !strings.Contains(sk.Content, "validate.py") {
+		t.Errorf("expected asset manifest listing template.html and validate.py, got:\n%s", sk.Content)
+	}
+	if !strings.Contains(sk.Content, "references/rubric.md") {
+		t.Errorf("expected nested asset references/rubric.md to be listed, got:\n%s", sk.Content)
+	}
+	if strings.Contains(sk.Content, "SKILL.md") {
+		t.Errorf("manifest file itself should not be listed as an asset:\n%s", sk.Content)
+	}
+
+	idx := BuildIndex(dir)
+	if !strings.Contains(idx, "html-report: Make a report") {
+		t.Errorf("bundled skill missing from progressive-disclosure index:\n%s", idx)
+	}
+}

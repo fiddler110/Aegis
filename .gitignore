@@ -6,8 +6,9 @@
 # Local test runs and scratch output
 /testrun/
 
-# Local config & data
-/.aegis/
+# Local config & data (project-level skills are shared, so carve those out)
+/.aegis/*
+!/.aegis/skills
 *.db
 *.log
 
