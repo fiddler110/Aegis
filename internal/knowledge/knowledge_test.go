@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/embed"
 )
 
 // fakeEmbedder returns a deterministic vector per text so tests don't need a
@@ -33,6 +35,8 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 	}
 	return out, nil
 }
+
+func (f *fakeEmbedder) Model() string { return "fake-test-model" }
 
 func TestSearchBM25Only(t *testing.T) {
 	dir := t.TempDir()
@@ -87,5 +91,46 @@ func TestSearchHybridSemanticFallback(t *testing.T) {
 	}
 	if len(results) == 0 || results[0].Path != "docs/auth.md" {
 		t.Fatalf("got %+v, want docs/auth.md surfaced via semantic fusion despite no BM25 keyword match", results)
+	}
+}
+
+// TestSemanticRankingIgnoresMismatchedModelVectors is the P9 regression: a
+// vector stored under a different embedding model (e.g. left over from
+// before an embedder swap) must not be compared as if it shared the current
+// model's vector space, even if it happens to have the same dimensionality —
+// Cosine's length check can't detect that case, so the model column must
+// gate it instead.
+func TestSemanticRankingIgnoresMismatchedModelVectors(t *testing.T) {
+	dir := t.TempDir()
+	embedder := &fakeEmbedder{synonymGroups: [][]string{{"credentials", "secrets"}}}
+	s, err := Open(dir, filepath.Join(dir, "knowledge.db"), embedder)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	// A vector planted directly under a different model name, simulating a
+	// stale row left over from before an embedder swap. Its content would
+	// otherwise rank first for this query via the fake embedder's synonym
+	// grouping.
+	vecs, err := embedder.Embed(ctx, []string{"secrets secrets secrets"})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO docs_vec (path, vector, model) VALUES (?, ?, ?)`,
+		"docs/stale.md", embed.EncodeVector(vecs[0]), "some-other-model"); err != nil {
+		t.Fatalf("plant stale vector: %v", err)
+	}
+
+	ranking, _, err := s.semanticRanking(ctx, "secrets", 5)
+	if err != nil {
+		t.Fatalf("semanticRanking: %v", err)
+	}
+	for _, p := range ranking {
+		if p == "docs/stale.md" {
+			t.Errorf("mismatched-model vector should be excluded from semantic ranking, got %v", ranking)
+		}
 	}
 }

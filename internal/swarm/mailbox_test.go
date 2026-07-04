@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestMailboxSendReadMarkRead(t *testing.T) {
@@ -92,6 +93,58 @@ func TestMarkReadEvictsFromInbox(t *testing.T) {
 	// A second MarkRead on the same (now-moved) id must stay a no-op.
 	if err := mb.MarkRead(msgs[0].ID); err != nil {
 		t.Fatalf("MarkRead on already-processed id: %v", err)
+	}
+}
+
+// TestMarkReadEvictsOldProcessedFiles is the P9 regression: MarkRead moves
+// read messages into processed/ instead of deleting them (P8.3), but nothing
+// previously evicted them — a long-running or chatty team accumulated files
+// there indefinitely. MarkRead should now sweep processed/ for entries older
+// than processedRetention on every call.
+func TestMarkReadEvictsOldProcessedFiles(t *testing.T) {
+	root := t.TempDir()
+	id := NewIdentity("worker", "team-a", "sess-1")
+	mb, err := OpenMailbox(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a processed file older than the retention window, as if it had
+	// been sitting there since a much earlier MarkRead call.
+	if err := os.MkdirAll(mb.processedDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(mb.processedDir(), "old.json")
+	if err := os.WriteFile(oldPath, []byte(`{"id":"old"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-processedRetention - time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh message, marked read, lands in processed/ too and should
+	// trigger an eviction sweep as a side effect.
+	if err := mb.Send(Message{Type: MsgResult, Sender: id.AgentID, Text: "fresh"}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := mb.ReadAll(true)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("ReadAll: %v (n=%d)", err, len(msgs))
+	}
+	if err := mb.MarkRead(msgs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("old processed file should have been evicted, stat err = %v", err)
+	}
+	processed, err := os.ReadDir(mb.processedDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processed) != 1 {
+		t.Errorf("processed dir has %d entries after eviction, want 1 (only the fresh, non-evictable message)", len(processed))
 	}
 }
 

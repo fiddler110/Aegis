@@ -107,9 +107,16 @@ CREATE TABLE IF NOT EXISTS mem_vec (
     kind   TEXT NOT NULL,
     key    TEXT NOT NULL,
     vector BLOB NOT NULL,
+    model  TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (kind, key)
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Idempotent addition for existing databases predating the model column
+	// (P9): "duplicate column name" error expected once already applied.
+	_, _ = s.db.Exec(`ALTER TABLE mem_vec ADD COLUMN model TEXT NOT NULL DEFAULT ''`)
+	return nil
 }
 
 // embedTextLimit caps how much text is sent per embedding call.
@@ -134,9 +141,9 @@ func (s *Store) upsertVector(ctx context.Context, kind, key, body string) {
 		return
 	}
 	_, _ = s.db.ExecContext(ctx,
-		`INSERT INTO mem_vec (kind, key, vector) VALUES (?, ?, ?)
-         ON CONFLICT(kind, key) DO UPDATE SET vector=excluded.vector`,
-		kind, key, embed.EncodeVector(vecs[0]))
+		`INSERT INTO mem_vec (kind, key, vector, model) VALUES (?, ?, ?, ?)
+         ON CONFLICT(kind, key) DO UPDATE SET vector=excluded.vector, model=excluded.model`,
+		kind, key, embed.EncodeVector(vecs[0]), s.embedder.Model())
 }
 
 // Close releases the database handle.
@@ -265,7 +272,7 @@ func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([
 	}
 	qv := vecs[0]
 
-	rows, err := s.db.QueryContext(ctx, `SELECT kind, key, vector FROM mem_vec`)
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, key, vector, model FROM mem_vec`)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,10 +284,20 @@ func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([
 	}
 	var all []scored
 	for rows.Next() {
-		var kind, key string
+		var kind, key, model string
 		var raw []byte
-		if err := rows.Scan(&kind, &key, &raw); err != nil {
+		if err := rows.Scan(&kind, &key, &raw, &model); err != nil {
 			return nil, nil, err
+		}
+		// A vector from a different embedding model than the one currently
+		// configured (including a pre-provenance row with model=="") is
+		// skipped rather than compared (P9): same-dimensionality vectors from
+		// two different models are semantically incomparable, but Cosine's
+		// length check can't detect that — it would otherwise silently
+		// return a meaningless similarity score instead of no score at all.
+		// The row self-heals the next time its content is upserted.
+		if model != s.embedder.Model() {
+			continue
 		}
 		all = append(all, scored{kind: kind, key: key, score: embed.Cosine(qv, embed.DecodeVector(raw))})
 	}

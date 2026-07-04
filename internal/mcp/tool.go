@@ -229,6 +229,10 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 			logger.Warn("mcp server connect failed", "server", sc.Name, "err", err)
 			continue
 		}
+		serverNameForLog := sc.Name
+		client.onReadError = func(readErr error) {
+			logger.Warn("mcp connection lost", "server", serverNameForLog, "err", readErr)
+		}
 
 		tools, err := client.ListTools(ctx)
 		if err != nil {

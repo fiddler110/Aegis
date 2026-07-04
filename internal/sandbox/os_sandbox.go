@@ -14,6 +14,14 @@ import (
 // (`bwrap`). Writes are restricted to the workspace (plus temp dirs) and network
 // egress can be denied. This closes the gap where the plain `local` backend
 // offered no isolation and containers required Docker.
+//
+// This is a write/network sandbox only, not a read sandbox: seatbelt's profile
+// is "(allow default)" with just file-write* denied outside the workspace, and
+// bwrap's is "--ro-bind / /", read-only-mounting the entire host filesystem
+// inside the sandbox. A compromised command can still read any host file
+// (SSH keys, cloud credentials) and exfiltrate it unless network is also
+// denied — materially weaker than the container backend, which the host
+// filesystem is never mounted into at all. See docs/security.md.
 type OSBackend struct {
 	workspace  string // absolute workspace root; writes are confined here
 	denyNet    bool   // deny network egress inside the sandbox

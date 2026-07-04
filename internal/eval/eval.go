@@ -38,11 +38,20 @@ type Scenario struct {
 	Turns   []string // user messages, sent one after another on the same conversation
 }
 
+// GuardResult captures one output-guard verdict emitted during a turn (a
+// corrective retry's failure, or the final surfaced-anyway warning after
+// retries are exhausted).
+type GuardResult struct {
+	Passed bool
+	Reason string
+}
+
 // TurnResult captures one user turn's outcome.
 type TurnResult struct {
-	FinalText string
-	ToolCalls []string // tool names invoked this turn, in call order
-	Err       error
+	FinalText   string
+	ToolCalls   []string // tool names invoked this turn, in call order
+	GuardEvents []GuardResult
+	Err         error
 }
 
 // Result is the full outcome of running a Scenario.
@@ -56,6 +65,15 @@ func (r *Result) AllToolCalls() []string {
 	var out []string
 	for _, tr := range r.Turns {
 		out = append(out, tr.ToolCalls...)
+	}
+	return out
+}
+
+// AllGuardEvents flattens guard verdicts across every turn, in order.
+func (r *Result) AllGuardEvents() []GuardResult {
+	var out []GuardResult
+	for _, tr := range r.Turns {
+		out = append(out, tr.GuardEvents...)
 	}
 	return out
 }
@@ -90,6 +108,8 @@ func Run(ctx context.Context, s Scenario) (*Result, error) {
 				tr.FinalText += ev.Text
 			case engine.KindToolCall:
 				tr.ToolCalls = append(tr.ToolCalls, ev.ToolName)
+			case engine.KindGuard:
+				tr.GuardEvents = append(tr.GuardEvents, GuardResult{Passed: ev.GuardPassed, Reason: ev.GuardReason})
 			}
 		})
 		result.Turns = append(result.Turns, tr)
@@ -159,6 +179,34 @@ func ExpectFinalTextContains(substr string) Check {
 	return func(r *Result) error {
 		if ft := r.FinalText(); !strings.Contains(ft, substr) {
 			return fmt.Errorf("final text %q does not contain %q", ft, substr)
+		}
+		return nil
+	}
+}
+
+// ExpectGuardFailureContains requires at least one guard verdict across the
+// run to have failed (Passed == false) with a reason containing substr — used
+// to assert an adversarial injection attempt did not fool the output guard
+// into passing content it shouldn't have.
+func ExpectGuardFailureContains(substr string) Check {
+	return func(r *Result) error {
+		for _, g := range r.AllGuardEvents() {
+			if !g.Passed && strings.Contains(g.Reason, substr) {
+				return nil
+			}
+		}
+		return fmt.Errorf("expected a failed guard verdict containing %q, got: %v", substr, r.AllGuardEvents())
+	}
+}
+
+// ExpectNoGuardFailure requires every guard verdict across the run to have
+// passed — used to assert legitimate content isn't wrongly rejected.
+func ExpectNoGuardFailure() Check {
+	return func(r *Result) error {
+		for _, g := range r.AllGuardEvents() {
+			if !g.Passed {
+				return fmt.Errorf("expected no guard failures, got: %v", r.AllGuardEvents())
+			}
 		}
 		return nil
 	}

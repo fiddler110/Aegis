@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -50,6 +52,14 @@ type Rule struct {
 	// keep the broad re: over-matching on a deny is safe, under-matching on
 	// an allow is not.
 	reExec *regexp.Regexp
+	// rePath is Pattern compiled after path normalization (P7.8), used instead
+	// of re/reExec when matching a Read/Write-capability tool: rule matching
+	// otherwise compares the tool call's raw, unnormalized path string, so a
+	// "deny write(secrets/*)" rule is trivially evaded via "./secrets/x", a
+	// case-insensitive filesystem, or a backslash/forward-slash mismatch on
+	// Windows — the actual write still succeeds because only the sandbox's
+	// root-confinement check runs the real normalization, not rule matching.
+	rePath *regexp.Regexp
 }
 
 var ruleSyntax = regexp.MustCompile(`^(allow|deny)\s+([A-Za-z_*][\w*]*)\s*(?:\(\s*(.*?)\s*\))?$`)
@@ -77,6 +87,7 @@ func ParseRule(s string) (Rule, error) {
 		raw:     trimmed,
 		re:      globToRegexp(pattern),
 		reExec:  globToRegexpExec(pattern),
+		rePath:  globToRegexp(normalizePathLike(pattern)),
 	}, nil
 }
 
@@ -107,10 +118,35 @@ func (r Rule) matches(t tool.Tool, subject string) bool {
 	if !ruleToolMatches(r.Tool, t) {
 		return false
 	}
-	if r.Action == RuleAllow && t.Capability() == tool.CapExecute {
-		return r.reExec.MatchString(subject)
+	switch t.Capability() {
+	case tool.CapRead, tool.CapWrite:
+		return r.rePath.MatchString(normalizePathLike(subject))
+	case tool.CapExecute:
+		if r.Action == RuleAllow {
+			return r.reExec.MatchString(subject)
+		}
 	}
 	return r.re.MatchString(subject)
+}
+
+// normalizePathLike canonicalizes a file-path subject or pattern before a
+// Read/Write-capability rule match (P7.8): separators are unified to "/" and
+// lexically cleaned (collapsing "./" and resolving ".." segments) so a
+// traversal trick like "./secrets/x" can't dodge a "secrets/*" rule, and the
+// result is case-folded on platforms whose default filesystem is
+// case-insensitive (Windows; macOS's HFS+/APFS default) so a case variant
+// can't do the same. Both the extracted subject and the rule's own pattern go
+// through this identically, so the comparison stays symmetric.
+func normalizePathLike(s string) string {
+	if s == "" {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = path.Clean(s)
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		s = strings.ToLower(s)
+	}
+	return s
 }
 
 // ruleToolMatches reports whether a rule's tool selector matches a tool. The

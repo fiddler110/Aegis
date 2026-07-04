@@ -26,16 +26,25 @@ func (t *toolSearchTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"query":{"type":"string","description":"keywords describing the tool capability you need"}},"required":["query"]}`)
 }
 
-func (t *toolSearchTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+func (t *toolSearchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Query string `json:"query"`
 	}
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
-	matches := t.reg.SearchDeferred(args.Query)
+	// Prefer the registry the engine is actually running this call against
+	// (P9): when the caller scopes exposure per session, that's a clone, so
+	// Load below only exposes the match for this session — not the
+	// construction-time registry shared process-wide with every other
+	// session and persona.
+	reg := t.reg
+	if r, ok := tool.RegistryFromContext(ctx); ok && r != nil {
+		reg = r
+	}
+	matches := reg.SearchDeferred(args.Query)
 	if len(matches) == 0 {
-		avail := t.reg.Deferred()
+		avail := reg.Deferred()
 		if len(avail) == 0 {
 			return tool.Result{Content: "no deferred tools match; all available tools are already loaded"}, nil
 		}
@@ -50,7 +59,7 @@ func (t *toolSearchTool) Execute(_ context.Context, input json.RawMessage) (tool
 	for _, m := range matches {
 		names = append(names, m.Name())
 	}
-	t.reg.Load(names...)
+	reg.Load(names...)
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Loaded %d tool(s); they are now callable:\n", len(matches))

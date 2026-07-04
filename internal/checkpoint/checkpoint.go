@@ -255,6 +255,14 @@ func (s *Store) NewSnapshotter(checkpointID string) *Snapshotter {
 	return &Snapshotter{store: s, checkpointID: checkpointID, captured: make(map[string]bool)}
 }
 
+// CheckpointID returns the checkpoint this snapshotter captures file writes
+// into. Exposed so a caller spawning a subprocess-mode sub-agent (which
+// cannot see this Snapshotter directly — it lives in this process's ctx,
+// and a subprocess starts an entirely separate one) can pass the id across
+// that process boundary and have the worker reconstruct an equivalent
+// Snapshotter of its own (P9).
+func (s *Snapshotter) CheckpointID() string { return s.checkpointID }
+
 // Snapshotter captures the pre-modification content of files touched during a
 // single turn. It is safe for concurrent use (parallel tool calls) and captures
 // each path at most once, so the first capture wins — i.e. the pre-turn state.

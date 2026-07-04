@@ -67,6 +67,56 @@ func TestBudgetGateStopsRun(t *testing.T) {
 	}
 }
 
+// TestBudgetGateStopsMaxTokenContinuation is the P9 dead-zone regression: the
+// budget check used to sit only right before a tool round, so a turn that
+// blew the budget while being cut off by the token limit (no tool calls, just
+// a continuation `continue`) skipped it entirely and paid for another full
+// turn before the iteration cap would ever catch it.
+func TestBudgetGateStopsMaxTokenContinuation(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		// Turn 1 is cut off by the token limit; its usage alone blows the budget.
+		{
+			{Type: provider.EventTextDelta, Text: "partial"},
+			{Type: provider.EventDone, Stop: provider.StopMaxTokens, Usage: &provider.Usage{InputTokens: 1_000_000}}, // $15 of opus
+		},
+		// The continuation turn must never run.
+		{
+			{Type: provider.EventTextDelta, Text: "should not reach"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn},
+		},
+	}}
+
+	eng, err := New(Options{
+		Adapter:   adapter,
+		Tools:     tool.NewRegistry(),
+		Cost:      cost.NewTracker(),
+		BudgetUSD: 1.0,
+		Model:     "claude-opus-4-8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotErr error
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+	runErr := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindError {
+			gotErr = ev.Err
+		}
+	})
+
+	if runErr == nil {
+		t.Fatal("expected the run to fail on budget")
+	}
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "budget") {
+		t.Errorf("expected a budget error, got %v", gotErr)
+	}
+	if adapter.calls != 1 {
+		t.Errorf("continuation turn must not run once the budget is blown, calls = %d", adapter.calls)
+	}
+}
+
 // TestCostReportedOnTurnDone verifies cumulative cost rides along on KindTurnDone.
 func TestCostReportedOnTurnDone(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{

@@ -99,12 +99,19 @@ func (t *httpTransport) Close() error {
 }
 
 // listenSSE opens the SSE endpoint and forwards events to the pipe writer.
+// Closing the pipe with the terminal error (rather than a bare Close, which
+// only ever signals plain EOF) lets readLoop's scanner.Err() on the other end
+// see why the connection actually died — an oversized line, a request
+// failure, or the stream simply ending — instead of always looking like a
+// clean disconnect.
 func (t *httpTransport) listenSSE(ctx context.Context, w *io.PipeWriter) {
-	defer w.Close()
+	w.CloseWithError(t.runSSE(ctx, w))
+}
 
+func (t *httpTransport) runSSE(ctx context.Context, w *io.PipeWriter) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", t.endpoint+"/sse", nil)
 	if err != nil {
-		return
+		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	if t.auth != "" {
@@ -113,11 +120,16 @@ func (t *httpTransport) listenSSE(ctx context.Context, w *io.PipeWriter) {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
+	// Raised from bufio's 64KB default (P9): a verbose or malicious server
+	// emitting one SSE data line over that default would otherwise silently
+	// kill this scanner with no indication why, since the failure previously
+	// went unchecked below.
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxMCPScanTokenBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -126,9 +138,12 @@ func (t *httpTransport) listenSSE(ctx context.Context, w *io.PipeWriter) {
 		data := strings.TrimPrefix(line, "data: ")
 		// Verify it's valid JSON before forwarding.
 		if json.Valid([]byte(data)) {
-			w.Write(append([]byte(data), '\n'))
+			if _, err := w.Write(append([]byte(data), '\n')); err != nil {
+				return err
+			}
 		}
 	}
+	return scanner.Err()
 }
 
 // NewHTTPOrStdio tries HTTP first if the config looks like a URL, otherwise

@@ -23,6 +23,13 @@ import (
 // len(texts) and out[i] corresponds to texts[i].
 type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
+	// Model identifies which embedding model produced (or will produce)
+	// vectors, so a caller persisting vectors alongside this string can later
+	// tell whether a stored vector came from the currently configured model
+	// (P9): two different models that happen to produce same-dimensionality
+	// vectors would otherwise be silently compared as if in one vector space
+	// after a model swap, since Cosine's length check can't detect that case.
+	Model() string
 }
 
 // OllamaEmbedder calls a local (or remote) Ollama server's /api/embed endpoint.
@@ -71,6 +78,9 @@ type ollamaEmbedRequest struct {
 type ollamaEmbedResponse struct {
 	Embeddings [][]float32 `json:"embeddings"`
 }
+
+// Model implements Embedder.
+func (e *OllamaEmbedder) Model() string { return e.model }
 
 // Embed implements Embedder against Ollama's /api/embed endpoint.
 func (e *OllamaEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {

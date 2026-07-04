@@ -280,7 +280,11 @@ embeddings:
 # ── Shell sandbox ─────────────────────────────────────────────────────────────
 sandbox:
   # "local"     — run directly on the host (default)
-  # "os"        — OS-level isolation: seatbelt on macOS, bwrap/Landlock on Linux; no container needed
+  # "os"        — OS-level isolation: seatbelt on macOS, bwrap/Landlock on Linux; no container needed.
+  #               Confines WRITES (and network, if configured below) only — the entire host
+  #               filesystem is still readable inside the sandbox. See docs/security.md before
+  #               relying on this for anything that reads sensitive host files (SSH keys, cloud
+  #               credentials); use "container" if you need read confinement too.
   # "container" — run inside a container (requires runtime)
   # "auto"      — detect available runtimes and pick the best one
   backend: local

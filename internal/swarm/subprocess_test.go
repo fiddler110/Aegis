@@ -61,7 +61,7 @@ func newTestSubprocessBackend(t *testing.T) (*SubprocessBackend, *Registry) {
 	t.Helper()
 	t.Setenv("SWARM_TEST_WORKER", "1") // children inherit; marks them as workers
 	reg := NewRegistry()
-	b := NewSubprocessBackend(os.Args[0], "__worker", reg, MailboxRoot(t.TempDir()))
+	b := NewSubprocessBackend(os.Args[0], "__worker", reg, MailboxRoot(t.TempDir()), "")
 	return b, reg
 }
 

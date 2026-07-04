@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/checkpoint"
@@ -154,6 +155,222 @@ func TestCheckpointRewind(t *testing.T) {
 	sess, _ = cl.GetSession(ctx, meta.ID)
 	if len(sess.Messages) != 0 {
 		t.Errorf("after conversation rewind, %d messages remain, want 0", len(sess.Messages))
+	}
+}
+
+// turnBlockingAdapter lets a test control exactly when a scripted turn's model
+// call returns, to deterministically test races against an in-flight run.
+// Calls before blockOnCall proceed immediately; the blockOnCall'th call closes
+// entered (signaling the caller it has started) and waits on release.
+type turnBlockingAdapter struct {
+	mu          sync.Mutex
+	calls       int
+	blockOnCall int
+	entered     chan struct{}
+	release     chan struct{}
+}
+
+func (a *turnBlockingAdapter) Name() string { return "blocking" }
+
+func (a *turnBlockingAdapter) Stream(_ context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	a.mu.Lock()
+	n := a.calls
+	a.calls++
+	a.mu.Unlock()
+
+	if n == a.blockOnCall {
+		close(a.entered)
+		<-a.release
+	}
+
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: fmt.Sprintf("turn%d", n)}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{}}
+	close(ch)
+	return ch, nil
+}
+
+// TestRewindWaitsForInFlightRun is the regression for the rewind/in-flight-turn
+// race: handleRewind must acquire the same per-session semaphore
+// handlePostMessage does, so a rewind can never truncate the message table
+// while a turn is still running and about to append its own tail with a
+// Persisted offset captured before the truncation (which would silently
+// revive content the user just rewound away).
+func TestRewindWaitsForInFlightRun(t *testing.T) {
+	root := t.TempDir()
+	adapter := &turnBlockingAdapter{blockOnCall: 1, entered: make(chan struct{}), release: make(chan struct{})}
+	cl, cleanup := newCheckpointTestServer(t, root, adapter)
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1 (call 0) completes instantly and gives us a checkpoint to rewind to.
+	ch, err := cl.PostMessage(ctx, meta.ID, "first")
+	if err != nil {
+		t.Fatalf("PostMessage 1: %v", err)
+	}
+	for range ch {
+	}
+	cps, err := cl.ListCheckpoints(ctx, meta.ID)
+	if err != nil || len(cps) == 0 {
+		t.Fatalf("ListCheckpoints: %v (n=%d)", err, len(cps))
+	}
+
+	// Turn 2 (call 1) blocks inside the model call, simulating an in-flight run.
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		ch2, err := cl.PostMessage(ctx, meta.ID, "second")
+		if err != nil {
+			t.Errorf("PostMessage 2: %v", err)
+			return
+		}
+		for range ch2 {
+		}
+	}()
+
+	select {
+	case <-adapter.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn 2 never entered the blocking model call")
+	}
+
+	// Rewind, issued while turn 2 holds the session semaphore, must block
+	// rather than truncating messages out from under the in-flight run.
+	rewindDone := make(chan struct{})
+	go func() {
+		defer close(rewindDone)
+		if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "conversation"); err != nil {
+			t.Errorf("Rewind: %v", err)
+		}
+	}()
+
+	select {
+	case <-rewindDone:
+		t.Fatal("rewind returned while a run was still in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(adapter.release)
+
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight run never finished after release")
+	}
+	select {
+	case <-rewindDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rewind never completed after the run finished")
+	}
+
+	// Turn 2 must have finished (and persisted its messages) strictly before
+	// the rewind truncated them: the session should end up with exactly the
+	// checkpoint's pre-turn-1 message count, not turn 2's tail spliced back in.
+	sess, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Messages) != 0 {
+		t.Errorf("after rewind, %d messages remain, want 0 (turn 2's tail must not survive)", len(sess.Messages))
+	}
+}
+
+// incrementalPersistAdapter issues one write_file tool call on its first turn,
+// then blocks before streaming its second (final) turn — so a test can
+// observe session state while one tool round has completed but the overall
+// run has not finished.
+type incrementalPersistAdapter struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+	path    string
+	content string
+}
+
+func (a *incrementalPersistAdapter) Name() string { return "incremental" }
+
+func (a *incrementalPersistAdapter) Stream(_ context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	a.mu.Lock()
+	n := a.calls
+	a.calls++
+	a.mu.Unlock()
+
+	if n == 0 {
+		input := json.RawMessage(fmt.Sprintf(`{"path":%q,"content":%q}`, a.path, a.content))
+		ch := make(chan provider.Event, 2)
+		ch <- provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu1", Name: "write_file", Input: input}}
+		ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{}}
+		close(ch)
+		return ch, nil
+	}
+
+	close(a.entered)
+	<-a.release
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: "done"}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{}}
+	close(ch)
+	return ch, nil
+}
+
+// TestMessagesPersistIncrementallyDuringRun is the regression for "transcript
+// persistence is not actually incremental despite the field name": messages
+// must be saved after each completed tool round, not only once eng.Run fully
+// returns. Otherwise a crash mid-run loses the whole turn's transcript even
+// though the tool's side effects (here, a file write) already happened on
+// disk — history desyncs from real repo state with no record of what ran.
+func TestMessagesPersistIncrementallyDuringRun(t *testing.T) {
+	root := t.TempDir()
+	adapter := &incrementalPersistAdapter{entered: make(chan struct{}), release: make(chan struct{}), path: "out.txt", content: "v2"}
+	cl, cleanup := newCheckpointTestServer(t, root, adapter)
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		ch, err := cl.PostMessage(ctx, meta.ID, "write the file")
+		if err != nil {
+			t.Errorf("PostMessage: %v", err)
+			return
+		}
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-adapter.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second model call never started")
+	}
+
+	// The run is still blocked in its second model call — nothing has been
+	// returned to the client yet — but the first tool round (user prompt,
+	// assistant tool_use, tool_result) must already be durably saved.
+	sess, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Messages) < 3 {
+		t.Errorf("mid-run message count = %d, want >= 3 (tool round should already be flushed)", len(sess.Messages))
+	}
+
+	close(adapter.release)
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run never finished after release")
 	}
 }
 

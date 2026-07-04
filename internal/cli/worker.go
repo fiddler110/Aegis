@@ -2,11 +2,13 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/engine"
@@ -17,6 +19,7 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
+	_ "modernc.org/sqlite"
 )
 
 // newWorkerCmd builds the hidden headless-worker command used by the swarm
@@ -116,6 +119,10 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, error) {
 	}
 
 	ctx = swarm.WithParentMode(ctx, spec.Config.Mode)
+	if snap, closeDB := openCheckpointSnapshotter(spec); snap != nil {
+		defer closeDB()
+		ctx = checkpoint.WithSnapshotter(ctx, snap)
+	}
 	conv := &engine.Conversation{System: spec.Config.SystemPrompt}
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: spec.Config.Prompt}}})
 
@@ -127,4 +134,42 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, error) {
 		}
 	})
 	return strings.TrimSpace(sb.String()), runErr
+}
+
+// openCheckpointSnapshotter reconstructs a Snapshotter for spec's checkpoint
+// (P9), if the parent daemon has checkpointing configured and this worker was
+// spawned mid-turn. The in-process swarm backend gets this for free — its ctx
+// keeps the same Snapshotter value all the way down to a spawned sub-agent —
+// but this worker started an entirely separate process with its own ctx
+// tree, so it opens its own connection to the same session database the
+// daemon uses and records file writes against the same checkpoint id. Errors
+// opening that connection are non-fatal: the worker still runs normally,
+// just without this turn's file writes being restorable by /rewind.
+//
+// Returns (nil, no-op) when spec carries no checkpoint id or db path — the
+// common case for a daemon with checkpointing disabled, or a spawn that
+// wasn't captured with one (e.g. no in-flight Snapshotter on the parent ctx).
+func openCheckpointSnapshotter(spec swarm.WorkerSpec) (*checkpoint.Snapshotter, func()) {
+	if spec.Config.CheckpointID == "" || spec.SessionDBPath == "" {
+		return nil, func() {}
+	}
+	db, err := sql.Open("sqlite", spec.SessionDBPath)
+	if err != nil {
+		return nil, func() {}
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		_ = db.Close()
+		return nil, func() {}
+	}
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		_ = db.Close()
+		return nil, func() {}
+	}
+	store, err := checkpoint.NewStore(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, func() {}
+	}
+	return store.NewSnapshotter(spec.Config.CheckpointID), func() { _ = db.Close() }
 }

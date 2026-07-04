@@ -31,6 +31,67 @@ func TestLoopDetectorRecord(t *testing.T) {
 	}
 }
 
+// TestLoopDetectorCatchesAlternatingPair is the P9 regression: a model
+// alternating between two distinct tool calls (A, B, A, B, …) is just as
+// stuck as one repeating a single call, but the original "last N signatures
+// are all identical" check never fired on it.
+func TestLoopDetectorCatchesAlternatingPair(t *testing.T) {
+	d := newLoopDetector(5)
+	seq := []string{"a", "b", "a", "b", "a", "b"}
+	var tripped bool
+	for i, s := range seq {
+		if d.record(s) {
+			tripped = true
+			if i < 3 {
+				t.Fatalf("tripped too early at index %d, before two full A,B repeats", i)
+			}
+			break
+		}
+	}
+	if !tripped {
+		t.Fatal("alternating A,B,A,B,... should eventually trip the detector")
+	}
+}
+
+// TestLoopDetectorDoesNotFlagVariedWork is the false-positive counterpart: a
+// detector generalized to catch cycles must not start flagging ordinary,
+// non-repeating work (e.g. reading a series of different files).
+func TestLoopDetectorDoesNotFlagVariedWork(t *testing.T) {
+	d := newLoopDetector(5)
+	seq := []string{"read a", "read b", "read c", "read d", "read e", "read f", "read g", "read h"}
+	for _, s := range seq {
+		if d.record(s) {
+			t.Fatalf("varied, non-repeating signatures must not trip the detector (at %q)", s)
+		}
+	}
+}
+
+// TestTurnSignatureIgnoresVolatileNonce is the P9 regression for exact-string
+// matching being defeated by a single varying byte: two otherwise-identical
+// tool calls that differ only in a timestamp/nonce-shaped field must still
+// produce the same loop-detection signature.
+func TestTurnSignatureIgnoresVolatileNonce(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{"timestamp", `{"cmd":"ls","ts":"2026-07-04T10:00:00Z"}`, `{"cmd":"ls","ts":"2026-07-04T10:00:01Z"}`},
+		{"uuid", `{"cmd":"ls","id":"550e8400-e29b-41d4-a716-446655440000"}`, `{"cmd":"ls","id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8"}`},
+		{"epoch", `{"cmd":"ls","nonce":1720094400123}`, `{"cmd":"ls","nonce":1720094401456}`},
+		{"hex_nonce", `{"cmd":"ls","nonce":"a1b2c3d4e5f60718"}`, `{"cmd":"ls","nonce":"0011223344556677"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a := turnSignature([]provider.ToolUseBlock{{Name: "shell", Input: json.RawMessage(tc.first)}})
+			b := turnSignature([]provider.ToolUseBlock{{Name: "shell", Input: json.RawMessage(tc.second)}})
+			if a != b {
+				t.Errorf("signatures should match once the volatile field is normalized, got %q vs %q", a, b)
+			}
+		})
+	}
+}
+
 func TestTurnSignatureDistinguishesInputs(t *testing.T) {
 	a := turnSignature([]provider.ToolUseBlock{{Name: "read", Input: json.RawMessage(`{"p":"a"}`)}})
 	b := turnSignature([]provider.ToolUseBlock{{Name: "read", Input: json.RawMessage(`{"p":"b"}`)}})
