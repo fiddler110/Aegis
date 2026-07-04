@@ -48,6 +48,13 @@ type SpawnConfig struct {
 	Model           string // model override; empty -> daemon default
 	ParentSessionID string
 	Depth           int // spawn depth, for recursion guards
+	// CheckpointID is the parent turn's checkpoint, if any (P9). The
+	// in-process backend already captures a sub-agent's file writes for free
+	// via ctx (checkpoint.WithSnapshotter); the subprocess backend can't —
+	// a subprocess starts a whole separate process with its own ctx tree —
+	// so this id crosses that boundary explicitly, letting the worker
+	// reconstruct an equivalent Snapshotter of its own.
+	CheckpointID string
 }
 
 // Result is a finished teammate's output.
@@ -123,4 +130,24 @@ func ParentModeFromContext(ctx context.Context) string {
 		return m
 	}
 	return ""
+}
+
+type costTrackerKey struct{}
+
+// WithCostTracker returns a context carrying a shared spend ledger. tracker is
+// typed any (rather than a concrete *cost.Tracker) so this package — which
+// deliberately stays decoupled from the engine and its dependencies — need not
+// import internal/cost; the caller that builds sub-agent engines type-asserts
+// it back. Every sub-agent spawned from a context descending from this one
+// (any depth, any workflow mode) shares the same ledger, so a session's
+// BudgetUSD ceiling is checked against the fan-out tree's cumulative spend
+// rather than resetting to a fresh allowance per spawned agent.
+func WithCostTracker(ctx context.Context, tracker any) context.Context {
+	return context.WithValue(ctx, costTrackerKey{}, tracker)
+}
+
+// CostTrackerFromContext returns the shared spend ledger carried by ctx, or
+// nil if none was attached.
+func CostTrackerFromContext(ctx context.Context) any {
+	return ctx.Value(costTrackerKey{})
 }

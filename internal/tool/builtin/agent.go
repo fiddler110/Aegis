@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/fiddler110/aegis/internal/agentdef"
+	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -19,6 +20,28 @@ const maxAgentDuration = 10 * time.Minute
 
 // maxSpawnDepth bounds sub-agent recursion (an agent spawning an agent ...).
 const maxSpawnDepth = 3
+
+// maxParallelAgents bounds how many teammates one 'parallel' workflow call may
+// spawn concurrently (D1). The 'agents' array length is model-controlled JSON
+// with no other limit, so without this a single tool call could fan out
+// arbitrarily wide; paired with the shared cost ledger (subAgentRunner reading
+// swarm.CostTrackerFromContext) this keeps both the concurrency burst and the
+// total spend bounded.
+const maxParallelAgents = 8
+
+// checkpointIDFrom returns the parent turn's checkpoint id, if ctx carries a
+// Snapshotter, or "" otherwise. The in-process swarm backend already
+// captures a sub-agent's file writes for free (its ctx keeps the same
+// Snapshotter value all the way down); the subprocess backend needs this id
+// threaded through SpawnConfig/WorkerSpec explicitly so the worker process —
+// which starts a whole separate ctx tree — can reconstruct an equivalent
+// Snapshotter of its own (P9).
+func checkpointIDFrom(ctx context.Context) string {
+	if snap := checkpoint.SnapshotterFrom(ctx); snap != nil {
+		return snap.CheckpointID()
+	}
+	return ""
+}
 
 // agentTool delegates a task to a sub-agent ("teammate"). By default it spawns
 // the teammate and waits for its result synchronously, returning the teammate's
@@ -119,13 +142,14 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		SystemPrompt: def.SystemPrompt,
 		Mode:         childMode,
 		Depth:        swarm.DepthFromContext(ctx) + 1,
+		CheckpointID: checkpointIDFrom(ctx),
 	}
 
 	if args.Background {
 		if a.mgr == nil {
 			return tool.Result{Content: "agent: background delegation is not available in this context", IsError: true}, nil
 		}
-		return a.spawnBackground(cfg, args.Description, def.Name)
+		return a.spawnBackground(ctx, cfg, args.Description, def.Name)
 	}
 
 	agentCtx, agentCancel := context.WithTimeout(ctx, maxAgentDuration)
@@ -156,6 +180,12 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 	if depth := swarm.DepthFromContext(ctx); depth >= maxSpawnDepth {
 		return tool.Result{Content: fmt.Sprintf("agent: maximum sub-agent depth (%d) reached", maxSpawnDepth), IsError: true}, nil
 	}
+	if mode == "parallel" && len(agents) > maxParallelAgents {
+		return tool.Result{
+			Content: fmt.Sprintf("agent: parallel workflow requested %d agents, exceeding the max of %d; split into smaller batches", len(agents), maxParallelAgents),
+			IsError: true,
+		}, nil
+	}
 
 	spawn := func(agentCtx context.Context, wa workflowAgent, extraContext string) (string, error) {
 		prompt := wa.Prompt
@@ -171,6 +201,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 			SystemPrompt: def.SystemPrompt,
 			Mode:         childMode,
 			Depth:        swarm.DepthFromContext(ctx) + 1,
+			CheckpointID: checkpointIDFrom(ctx),
 		}
 		h, err := a.backend.Spawn(agentCtx, cfg)
 		if err != nil {
@@ -263,7 +294,14 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 // spawnBackground launches the teammate as a detached background task. The
 // spawn happens inside the task's RunFunc so the teammate runs under the task's
 // own (request-independent) context and survives the call that created it.
-func (a *agentTool) spawnBackground(cfg swarm.SpawnConfig, description, agentName string) (tool.Result, error) {
+// task.Manager.Start derives jobCtx from context.Background(), so any shared
+// cost ledger on the caller's ctx would otherwise be silently lost — a
+// background spawn would fall back to its own fresh BudgetUSD allowance,
+// defeating the D1 fan-out fix (internal/server subAgentRunner). Carry it
+// forward explicitly by closing over the tracker read here rather than
+// relying on context propagation across that detach point.
+func (a *agentTool) spawnBackground(ctx context.Context, cfg swarm.SpawnConfig, description, agentName string) (tool.Result, error) {
+	tracker := swarm.CostTrackerFromContext(ctx)
 	title := description
 	if title == "" {
 		title = "sub-agent " + agentName
@@ -271,6 +309,9 @@ func (a *agentTool) spawnBackground(cfg swarm.SpawnConfig, description, agentNam
 	tk, err := a.mgr.Start(task.Spec{Kind: "subagent", Title: title}, func(jobCtx context.Context, emit func(string)) (string, error) {
 		jobCtx, jobCancel := context.WithTimeout(jobCtx, maxAgentDuration)
 		defer jobCancel()
+		if tracker != nil {
+			jobCtx = swarm.WithCostTracker(jobCtx, tracker)
+		}
 		h, err := a.backend.Spawn(jobCtx, cfg)
 		if err != nil {
 			return "", err

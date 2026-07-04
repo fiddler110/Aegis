@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -335,6 +336,94 @@ func TestSamplingHandlerNil(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Error("no response to sampling request")
+	}
+}
+
+// TestReadLoopHandlesLineOverBufioDefault is the P9 regression for the
+// scanner-buffer half of the finding: a single JSON-RPC response line well
+// over bufio's 64KB default (a legitimate large tool result, not just an
+// attack) must not silently kill the read loop the way it would have before
+// maxMCPScanTokenBytes raised the cap.
+func TestReadLoopHandlesLineOverBufioDefault(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	go io.Copy(io.Discard, serverReader) // drain outgoing requests; no responses needed
+	c := newClient("test", clientReader, clientWriter, nil)
+
+	const bigLen = 200 * 1024 // well over bufio's 64KB default token size
+	go func() {
+		big := strings.Repeat("x", bigLen)
+		resp, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result": map[string]any{
+				"content": []map[string]any{{"type": "text", "text": big}},
+				"isError": false,
+			},
+		})
+		serverWriter.Write(append(resp, '\n'))
+	}()
+
+	text, isErr, err := c.CallTool(context.Background(), "big", nil)
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if isErr {
+		t.Error("unexpected isError")
+	}
+	if len(text) != bigLen {
+		t.Errorf("got %d bytes of content, want %d (line may have been silently dropped)", len(text), bigLen)
+	}
+}
+
+// TestReadLoopDeathFailsPendingAndFutureCalls is the P9 regression for the
+// error-handling half of the finding: once the transport dies, a call already
+// in flight must fail promptly instead of blocking on its response channel
+// forever (unless the caller happened to supply its own context deadline),
+// and any call issued afterward must fail immediately too rather than
+// registering into a pending map nothing will ever drain.
+func TestReadLoopDeathFailsPendingAndFutureCalls(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	go io.Copy(io.Discard, serverReader)
+	c := newClient("test", clientReader, clientWriter, nil)
+
+	callErrCh := make(chan error, 1)
+	go func() {
+		_, err := c.call(context.Background(), "tools/call", map[string]any{})
+		callErrCh <- err
+	}()
+
+	// Wait until the call has registered itself as pending, so closing the
+	// connection below races the call being in flight, not before it starts.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c.mu.Lock()
+		n := len(c.pending)
+		c.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("call never registered as pending")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Simulate the connection dying (server process exited, transport closed).
+	serverWriter.Close()
+
+	select {
+	case err := <-callErrCh:
+		if err == nil {
+			t.Error("pending call should fail once the connection dies, not hang")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending call never returned after the connection died — it would hang forever without a caller-supplied context deadline")
+	}
+
+	if _, err := c.call(context.Background(), "tools/call", map[string]any{}); err == nil {
+		t.Error("a call issued after the connection is known dead should fail immediately")
 	}
 }
 

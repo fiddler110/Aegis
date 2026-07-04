@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/tool"
@@ -231,6 +232,58 @@ func TestRuleGateNoRulesFallsThrough(t *testing.T) {
 	read := fakeTool{name: "read_file", cap: tool.CapRead}
 	if ok, _ := gate.Check(ctx, read, json.RawMessage(`{"path":"x"}`)); !ok {
 		t.Error("with no rules, base gate decision should stand")
+	}
+}
+
+// TestRuleGateDenyPathNotEvadedByDotSlash is the P7.8 regression: a deny rule
+// scoping a relative path must still fire when the model prefixes the same
+// path with "./", which is lexically identical but previously bypassed the
+// unnormalized string match.
+func TestRuleGateDenyPathNotEvadedByDotSlash(t *testing.T) {
+	base := New(ModeBuild, AutoApprove{})
+	rules, _ := ParseRules([]string{"deny write(secrets/*)"})
+	gate := NewRuleGate(base, rules)
+	ctx := context.Background()
+	write := fakeTool{name: "write_file", cap: tool.CapWrite}
+
+	for _, p := range []string{"secrets/x", "./secrets/x", "a/../secrets/x"} {
+		if ok, _ := gate.Check(ctx, write, json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); ok {
+			t.Errorf("deny write(secrets/*) should block %q", p)
+		}
+	}
+}
+
+// TestRuleGateDenyPathNotEvadedByCase is the P7.8 regression for
+// case-insensitive filesystems (Windows, macOS default): a deny rule must not
+// be bypassable just by varying the case of the path, since the underlying
+// filesystem itself won't distinguish them.
+func TestRuleGateDenyPathNotEvadedByCase(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("case-insensitive filesystem behavior is platform-specific")
+	}
+	base := New(ModeBuild, AutoApprove{})
+	rules, _ := ParseRules([]string{"deny write(secrets/*)"})
+	gate := NewRuleGate(base, rules)
+	ctx := context.Background()
+	write := fakeTool{name: "write_file", cap: tool.CapWrite}
+
+	if ok, _ := gate.Check(ctx, write, json.RawMessage(`{"path":"SECRETS/x"}`)); ok {
+		t.Error("deny write(secrets/*) should block a case-varied path on a case-insensitive filesystem")
+	}
+}
+
+// TestRuleGateDenyPathNotEvadedBySeparator is the P7.8 regression for a
+// backslash/forward-slash mismatch: a deny rule authored with forward slashes
+// must still block a path the model writes with backslashes (and vice versa).
+func TestRuleGateDenyPathNotEvadedBySeparator(t *testing.T) {
+	base := New(ModeBuild, AutoApprove{})
+	rules, _ := ParseRules([]string{"deny write(secrets/*)"})
+	gate := NewRuleGate(base, rules)
+	ctx := context.Background()
+	write := fakeTool{name: "write_file", cap: tool.CapWrite}
+
+	if ok, _ := gate.Check(ctx, write, json.RawMessage(`{"path":"secrets\\x"}`)); ok {
+		t.Error(`deny write(secrets/*) should block "secrets\x" (backslash separator)`)
 	}
 }
 

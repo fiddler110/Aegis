@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -132,6 +133,57 @@ func TestCustomHeaders(t *testing.T) {
 		t.Fatalf("Stream: %v", err)
 	}
 	for range stream {
+	}
+}
+
+// TestReasoningModelUsesMaxCompletionTokens is the P9 regression: real OpenAI
+// o1/o3-class reasoning models reject the max_tokens field outright (a 400)
+// and require max_completion_tokens instead. A non-reasoning model must keep
+// using max_tokens.
+func TestReasoningModelUsesMaxCompletionTokens(t *testing.T) {
+	tests := []struct {
+		model           string
+		wantField       string
+		wantOtherAbsent string
+	}{
+		{"o1", "max_completion_tokens", "max_tokens"},
+		{"o1-mini", "max_completion_tokens", "max_tokens"},
+		{"o3", "max_completion_tokens", "max_tokens"},
+		{"o3-mini", "max_completion_tokens", "max_tokens"},
+		{"openai/o1-mini", "max_completion_tokens", "max_tokens"}, // vendor-prefixed (OpenRouter-style)
+		{"gpt-4o", "max_tokens", "max_completion_tokens"},
+		{"gpt-4.1-mini", "max_tokens", "max_completion_tokens"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			}))
+			defer srv.Close()
+
+			a := New("k", WithBaseURL(srv.URL))
+			stream, err := a.Stream(context.Background(), provider.Request{
+				Model: tc.model, MaxTokens: 123,
+				Messages: []provider.Message{
+					{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			for range stream {
+			}
+
+			if v, ok := body[tc.wantField]; !ok || v != float64(123) {
+				t.Errorf("model %q: %s = %v (ok=%v), want 123", tc.model, tc.wantField, v, ok)
+			}
+			if _, ok := body[tc.wantOtherAbsent]; ok {
+				t.Errorf("model %q: %s should be absent, got %v", tc.model, tc.wantOtherAbsent, body[tc.wantOtherAbsent])
+			}
+		})
 	}
 }
 

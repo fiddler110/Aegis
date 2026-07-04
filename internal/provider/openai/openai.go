@@ -114,15 +114,39 @@ type wireTool struct {
 }
 
 type wireRequest struct {
-	Model           string         `json:"model"`
-	Messages        []wireMessage  `json:"messages"`
-	Tools           []wireTool     `json:"tools,omitempty"`
-	MaxTokens       int            `json:"max_tokens,omitempty"`
-	Temperature     *float64       `json:"temperature,omitempty"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   map[string]any `json:"stream_options,omitempty"`
-	Think           *bool          `json:"think,omitempty"`            // Ollama extended-thinking control
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"` // OpenAI o1/o3
+	Model     string        `json:"model"`
+	Messages  []wireMessage `json:"messages"`
+	Tools     []wireTool    `json:"tools,omitempty"`
+	// MaxTokens and MaxCompletionTokens are mutually exclusive on the wire:
+	// real OpenAI o1/o3-class reasoning models reject max_tokens outright
+	// (a 400) and require max_completion_tokens instead, while every other
+	// model (and Ollama's OpenAI-compatible endpoint) expects max_tokens.
+	// Stream picks exactly one of these per request via isReasoningModel.
+	MaxTokens           int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64       `json:"temperature,omitempty"`
+	Stream              bool           `json:"stream"`
+	StreamOptions       map[string]any `json:"stream_options,omitempty"`
+	Think               *bool          `json:"think,omitempty"`            // Ollama extended-thinking control
+	ReasoningEffort     string         `json:"reasoning_effort,omitempty"` // OpenAI o1/o3
+}
+
+// isReasoningModel reports whether model is an OpenAI o1/o3-class reasoning
+// model. Matching mirrors the cost package's model-pricing lookup: longest
+// registered prefix, retrying after a vendor prefix like "openai/o1-mini"
+// (OpenRouter-style) if the bare id doesn't match.
+func isReasoningModel(model string) bool {
+	if hasReasoningPrefix(model) {
+		return true
+	}
+	if i := strings.LastIndex(model, "/"); i >= 0 && i+1 < len(model) {
+		return hasReasoningPrefix(model[i+1:])
+	}
+	return false
+}
+
+func hasReasoningPrefix(model string) bool {
+	return strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3")
 }
 
 // translate converts harness messages to chat-completions messages.
@@ -215,17 +239,22 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(wireRequest{
+	wr := wireRequest{
 		Model:           req.Model,
 		Messages:        msgs,
 		Tools:           translateTools(req.Tools),
-		MaxTokens:       req.MaxTokens,
 		Temperature:     req.Temperature,
 		Stream:          true,
 		StreamOptions:   map[string]any{"include_usage": true},
 		Think:           a.think,
 		ReasoningEffort: a.reasoningEffort,
-	})
+	}
+	if isReasoningModel(req.Model) {
+		wr.MaxCompletionTokens = req.MaxTokens
+	} else {
+		wr.MaxTokens = req.MaxTokens
+	}
+	body, err := json.Marshal(wr)
 	if err != nil {
 		return nil, err
 	}

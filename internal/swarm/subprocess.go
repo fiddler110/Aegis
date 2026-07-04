@@ -18,18 +18,26 @@ type WorkerSpec struct {
 	Identity    Identity    `json:"identity"`
 	Config      SpawnConfig `json:"config"`
 	MailboxRoot string      `json:"mailbox_root"`
+	// SessionDBPath is the daemon's session SQLite file, passed through so the
+	// worker can open its own connection to it and record file snapshots
+	// against Config.CheckpointID (P9) — checkpoint capture otherwise misses
+	// subprocess-mode sub-agents entirely, since the in-process Snapshotter
+	// lives in a ctx.Value the worker's separate process can never see.
+	// Empty when checkpointing is disabled or Config.CheckpointID is unset.
+	SessionDBPath string `json:"session_db_path,omitempty"`
 }
 
 // SubprocessBackend runs each teammate as a separate headless process (the
 // harness binary invoked with WorkerArgs), giving real OS-level isolation.
 // Results are read back from the teammate's mailbox after the process exits.
 type SubprocessBackend struct {
-	exePath     string
-	workerArgs  []string
-	registry    *Registry
-	mailboxRoot string
-	onStop      func(Identity, Result)
-	wg          sync.WaitGroup
+	exePath       string
+	workerArgs    []string
+	registry      *Registry
+	mailboxRoot   string
+	sessionDBPath string // passed to workers for checkpoint capture (P9); "" disables it
+	onStop        func(Identity, Result)
+	wg            sync.WaitGroup
 }
 
 // OnStop registers a teammate-completion listener (SUBAGENT_STOP).
@@ -37,12 +45,16 @@ func (b *SubprocessBackend) OnStop(fn func(Identity, Result)) { b.onStop = fn }
 
 // NewSubprocessBackend builds a subprocess backend. exePath is the harness
 // executable; workerCmd is the hidden worker subcommand (e.g. "__worker").
-func NewSubprocessBackend(exePath, workerCmd string, registry *Registry, mailboxRoot string) *SubprocessBackend {
+// sessionDBPath is the daemon's session SQLite file, threaded through to
+// workers so their file writes can be captured against the parent turn's
+// checkpoint (P9); pass "" to disable that (checkpointing not configured).
+func NewSubprocessBackend(exePath, workerCmd string, registry *Registry, mailboxRoot, sessionDBPath string) *SubprocessBackend {
 	return &SubprocessBackend{
-		exePath:     exePath,
-		workerArgs:  []string{workerCmd},
-		registry:    registry,
-		mailboxRoot: mailboxRoot,
+		exePath:       exePath,
+		workerArgs:    []string{workerCmd},
+		registry:      registry,
+		mailboxRoot:   mailboxRoot,
+		sessionDBPath: sessionDBPath,
 	}
 }
 
@@ -51,7 +63,7 @@ func (b *SubprocessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle
 	id := NewIdentity(cfg.Name, cfg.Team, cfg.ParentSessionID)
 	b.registry.Add(id)
 
-	specPath, err := writeSpec(WorkerSpec{Identity: id, Config: cfg, MailboxRoot: b.mailboxRoot})
+	specPath, err := writeSpec(WorkerSpec{Identity: id, Config: cfg, MailboxRoot: b.mailboxRoot, SessionDBPath: b.sessionDBPath})
 	if err != nil {
 		b.registry.Update(id.AgentID, StatusFailed, "spec write failed")
 		return nil, err
@@ -79,9 +91,19 @@ func (b *SubprocessBackend) runWorker(ctx context.Context, id Identity, specPath
 	args := append(append([]string{}, b.workerArgs...), "--spec", specPath)
 	cmd := exec.CommandContext(ctx, b.exePath, args...)
 	cmd.Env = filteredEnv() // inherit only required environment variables
+	// Binds the worker to an OS-level lifecycle guarantee (P9, platform-specific:
+	// see procattr_*.go) so an abnormal daemon death doesn't orphan it running
+	// indefinitely — sysProcAttr governs process-group/Pdeathsig at creation
+	// time; afterStart handles what can only be done once the process exists
+	// (Windows Job Object assignment).
+	cmd.SysProcAttr = sysProcAttr()
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return Result{AgentID: id.AgentID, Err: fmt.Sprintf("worker process failed to start: %v", err)}
+	}
+	afterStart(cmd)
+	runErr := cmd.Wait()
 
 	res := Result{AgentID: id.AgentID}
 	if mb, e := OpenMailbox(b.mailboxRoot, id); e == nil {

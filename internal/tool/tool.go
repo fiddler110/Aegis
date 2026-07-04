@@ -198,6 +198,53 @@ func (r *Registry) SearchDeferred(query string) []Tool {
 	return out
 }
 
+// Clone returns a lightweight copy of the registry for session-scoped tool
+// exposure (P9): the underlying tool set (registration) is shared by
+// reference — a tool registered or dynamically upserted (e.g. MCP's
+// tools/list_changed refresh) on the original is visible through every
+// clone — but the exposed/deferred maps are independent copies. Calling Load
+// (via tool_search) on a clone only exposes a tool for whoever holds that
+// clone, instead of the process-global Registry a session's tool_search call
+// previously mutated permanently for every other concurrent or future
+// session and persona.
+func (r *Registry) Clone() *Registry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	exposed := make(map[string]bool, len(r.exposed))
+	for k, v := range r.exposed {
+		exposed[k] = v
+	}
+	deferred := make(map[string]bool, len(r.deferred))
+	for k, v := range r.deferred {
+		deferred[k] = v
+	}
+	return &Registry{
+		tools:    r.tools,
+		exposed:  exposed,
+		deferred: deferred,
+	}
+}
+
+// registryCtxKey is the context key for the live registry a tool call is
+// executing against.
+type registryCtxKey struct{}
+
+// WithRegistry returns a context carrying the registry a tool call is running
+// against — the same one Schemas() used to build the tool list the model was
+// offered this turn. A meta-tool like tool_search reads this via
+// RegistryFromContext to mutate exposure state on the caller's actual
+// (possibly session-scoped) registry, rather than one fixed at the tool's own
+// construction time.
+func WithRegistry(ctx context.Context, r *Registry) context.Context {
+	return context.WithValue(ctx, registryCtxKey{}, r)
+}
+
+// RegistryFromContext returns the registry carried by ctx, if any.
+func RegistryFromContext(ctx context.Context) (*Registry, bool) {
+	r, ok := ctx.Value(registryCtxKey{}).(*Registry)
+	return r, ok
+}
+
 // Get returns a registered tool by name.
 func (r *Registry) Get(name string) (Tool, bool) {
 	r.mu.RLock()

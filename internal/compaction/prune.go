@@ -40,14 +40,19 @@ func pruneStaleToolResults(msgs []provider.Message, keepRecent int) ([]provider.
 	}
 
 	type toolUse struct {
-		name string
-		path string
+		name   string
+		path   string
+		callID string // canonical name+input key, for search-dump tools
 	}
 	uses := make(map[string]toolUse, len(msgs))
 	for _, m := range msgs {
 		for _, blk := range m.Content {
 			if tu, ok := blk.(provider.ToolUseBlock); ok {
-				uses[tu.ID] = toolUse{name: tu.Name, path: readFilePath(tu)}
+				u := toolUse{name: tu.Name, path: readFilePath(tu)}
+				if searchDumpTools[tu.Name] {
+					u.callID = tu.Name + "\x00" + string(canonicalizeJSON(tu.Input))
+				}
+				uses[tu.ID] = u
 			}
 		}
 	}
@@ -55,6 +60,13 @@ func pruneStaleToolResults(msgs []provider.Message, keepRecent int) ([]provider.
 	// Last index at which each path was read, so only the final read of a
 	// given path is kept verbatim.
 	lastRead := make(map[string]int)
+	// Last index at which the exact same search (tool + canonicalized input)
+	// was issued, so a search dump is only pruned when actually superseded by
+	// an identical later call — not merely because it's old (P9). "Already
+	// acted on" was previously an assumption from turn position alone; a
+	// model that returns to an old search result many turns later without
+	// re-running the search would otherwise find the detail already gone.
+	lastSearchCall := make(map[string]int)
 	for i, m := range msgs {
 		for _, blk := range m.Content {
 			tr, ok := blk.(provider.ToolResultBlock)
@@ -62,10 +74,15 @@ func pruneStaleToolResults(msgs []provider.Message, keepRecent int) ([]provider.
 				continue
 			}
 			u, ok := uses[tr.ToolUseID]
-			if !ok || u.name != "read_file" || u.path == "" {
+			if !ok {
 				continue
 			}
-			lastRead[u.path] = i
+			if u.name == "read_file" && u.path != "" {
+				lastRead[u.path] = i
+			}
+			if u.callID != "" {
+				lastSearchCall[u.callID] = i
+			}
 		}
 	}
 
@@ -91,9 +108,9 @@ func pruneStaleToolResults(msgs []provider.Message, keepRecent int) ([]provider.
 				tr.Content = fmt.Sprintf("[pruned: %s was re-read later in the conversation; stale content dropped]", u.path)
 				newContent[bi] = tr
 				changed = true
-			case searchDumpTools[u.name] && len(tr.Content) > staleSearchDumpThreshold:
+			case searchDumpTools[u.name] && len(tr.Content) > staleSearchDumpThreshold && lastSearchCall[u.callID] > i:
 				removed := len(tr.Content) - staleSearchKeepChars
-				tr.Content = tr.Content[:staleSearchKeepChars] + fmt.Sprintf("\n…[%d chars pruned - stale %s dump, already acted on]", removed, u.name)
+				tr.Content = tr.Content[:staleSearchKeepChars] + fmt.Sprintf("\n…[%d chars pruned - stale %s dump, superseded by an identical later search]", removed, u.name)
 				pruned += removed
 				newContent[bi] = tr
 				changed = true
@@ -120,4 +137,20 @@ func readFilePath(tu provider.ToolUseBlock) string {
 		return ""
 	}
 	return args.Path
+}
+
+// canonicalizeJSON re-marshals a tool call's raw JSON input with map keys in
+// their (Go-guaranteed alphabetical) order, so two calls with the same
+// arguments in a different field order still produce identical dedup keys.
+// Input that isn't valid JSON is returned unchanged.
+func canonicalizeJSON(input json.RawMessage) json.RawMessage {
+	var v any
+	if err := json.Unmarshal(input, &v); err != nil {
+		return input
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return input
+	}
+	return out
 }

@@ -100,10 +100,12 @@ type Client struct {
 	w      io.Writer
 	closer io.Closer
 
-	mu      sync.Mutex
-	enc     *json.Encoder
-	nextID  int
-	pending map[int]chan rpcResponse
+	mu       sync.Mutex
+	enc      *json.Encoder
+	nextID   int
+	pending  map[int]chan rpcResponse
+	closed   bool  // set once readLoop exits; call() fails fast instead of hanging
+	closeErr error // why readLoop exited; the error surfaced to failed/future calls
 
 	closeOnce sync.Once
 
@@ -113,6 +115,12 @@ type Client struct {
 	// onToolsChanged is called when the server sends a tools/list_changed
 	// notification. RegisterServers sets this up to refresh the tool registry.
 	onToolsChanged func()
+
+	// onReadError is called (if set) when readLoop exits abnormally — a
+	// non-EOF scanner error (e.g. an oversized line) or the transport dying
+	// mid-session. RegisterServers wires this to the daemon logger so a dead
+	// MCP connection is visible instead of just silently stopping.
+	onReadError func(error)
 }
 
 // rpcMessage is the unified shape for all incoming JSON-RPC 2.0 messages.
@@ -193,9 +201,15 @@ func NewStdio(ctx context.Context, server, command string, args []string, env []
 // Server returns the configured server name.
 func (c *Client) Server() string { return c.server }
 
+// maxMCPScanTokenBytes caps a single line the JSON-RPC/SSE scanners will
+// accept, raised well above bufio's 64KB default (P9: a verbose or malicious
+// server can otherwise emit one line just over that default, which silently
+// kills the scanner with no indication why).
+const maxMCPScanTokenBytes = 8 << 20 // 8 MiB
+
 func (c *Client) readLoop(r io.Reader) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxMCPScanTokenBytes)
 	for scanner.Scan() {
 		var msg rpcMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
@@ -225,6 +239,40 @@ func (c *Client) readLoop(r io.Reader) {
 		if msg.Method == "sampling/createMessage" {
 			go c.handleSampling(msg)
 		}
+	}
+
+	// The loop above only ends when the transport is gone (EOF, a transport
+	// error, or scanner.Err() from an oversized line) — every request still
+	// in c.pending would otherwise block on its response channel forever,
+	// and every future call would silently hang the same way, unless the
+	// caller happened to supply its own context deadline. Fail loud instead.
+	err := scanner.Err()
+	c.failPending(err)
+	if err != nil && c.onReadError != nil {
+		c.onReadError(err)
+	}
+}
+
+// failPending marks the connection dead and immediately fails every
+// in-flight call with connErr (defaulting to a plain "connection closed" when
+// the read loop ended on ordinary EOF). Future calls fail the same way via
+// the c.closed check in call(), instead of enqueuing into a pending map
+// nothing will ever drain.
+func (c *Client) failPending(readErr error) {
+	if readErr == nil {
+		readErr = io.EOF
+	}
+	connErr := fmt.Errorf("mcp: connection to %q closed: %w", c.server, readErr)
+
+	c.mu.Lock()
+	c.closed = true
+	c.closeErr = connErr
+	pending := c.pending
+	c.pending = map[int]chan rpcResponse{}
+	c.mu.Unlock()
+
+	for _, ch := range pending {
+		ch <- rpcResponse{Error: &rpcError{Code: -1, Message: connErr.Error()}}
 	}
 }
 
@@ -264,6 +312,11 @@ func (c *Client) sendRPCError(id *int, code int, message string) {
 
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
+	if c.closed {
+		err := c.closeErr
+		c.mu.Unlock()
+		return nil, err
+	}
 	c.nextID++
 	id := c.nextID
 	ch := make(chan rpcResponse, 1)

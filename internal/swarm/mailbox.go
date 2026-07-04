@@ -156,10 +156,22 @@ func (m *Mailbox) ReadAll(unreadOnly bool) ([]Message, error) {
 	return out, nil
 }
 
+// processedRetention bounds how long a message stays under processed/ before
+// evictProcessed removes it (P9). MarkRead moves read messages here rather
+// than deleting them outright (P8.3, so an unread-only scan never has to look
+// at them again), but nothing previously evicted them — a long-running or
+// chatty team accumulated files under processed/ indefinitely.
+const processedRetention = 7 * 24 * time.Hour
+
 // MarkRead flips the read flag for the message with the given id and moves it
 // out of the inbox into processed/, so future unread-only scans never have to
-// look at it again (P8.3). It is a no-op if the message is absent.
+// look at it again (P8.3). It is a no-op if the message is absent. Before
+// returning, it opportunistically evicts processed/ entries older than
+// processedRetention — no separate background sweep is needed since MarkRead
+// is the only path that adds to processed/ in the first place.
 func (m *Mailbox) MarkRead(id string) error {
+	defer m.evictProcessed()
+
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
 		return err
@@ -197,6 +209,31 @@ func (m *Mailbox) MarkRead(id string) error {
 		return os.Remove(path)
 	}
 	return nil
+}
+
+// evictProcessed removes processed/ message files older than
+// processedRetention. Best-effort: a listing failure or an individual file
+// that can't be removed is silently skipped rather than failing the calling
+// MarkRead, since eviction is housekeeping, not correctness-critical.
+func (m *Mailbox) evictProcessed() {
+	dir := m.processedDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-processedRetention)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // sanitize makes a string safe for use as a single path segment.

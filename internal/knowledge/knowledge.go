@@ -86,9 +86,16 @@ CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON docs BEGIN
 END;
 CREATE TABLE IF NOT EXISTS docs_vec (
     path   TEXT PRIMARY KEY,
-    vector BLOB NOT NULL
+    vector BLOB NOT NULL,
+    model  TEXT NOT NULL DEFAULT ''
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Idempotent addition for existing databases predating the model column
+	// (P9): "duplicate column name" error expected once already applied.
+	_, _ = s.db.Exec(`ALTER TABLE docs_vec ADD COLUMN model TEXT NOT NULL DEFAULT ''`)
+	return nil
 }
 
 // Close releases the database handle.
@@ -167,9 +174,9 @@ func (s *Store) upsert(ctx context.Context, path, title, body string) error {
 		return nil
 	}
 	_, _ = s.db.ExecContext(ctx,
-		`INSERT INTO docs_vec (path, vector) VALUES (?, ?)
-         ON CONFLICT(path) DO UPDATE SET vector=excluded.vector`,
-		path, embed.EncodeVector(vecs[0]))
+		`INSERT INTO docs_vec (path, vector, model) VALUES (?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET vector=excluded.vector, model=excluded.model`,
+		path, embed.EncodeVector(vecs[0]), s.embedder.Model())
 	return nil
 }
 
@@ -293,7 +300,7 @@ func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([
 	}
 	qv := vecs[0]
 
-	rows, err := s.db.QueryContext(ctx, `SELECT path, vector FROM docs_vec`)
+	rows, err := s.db.QueryContext(ctx, `SELECT path, vector, model FROM docs_vec`)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -304,11 +311,20 @@ func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([
 	}
 	var all []scored
 	for rows.Next() {
-		var path string
+		var path, model string
 		var raw []byte
-		if err := rows.Scan(&path, &raw); err != nil {
+		if err := rows.Scan(&path, &raw, &model); err != nil {
 			rows.Close()
 			return nil, nil, err
+		}
+		// A vector from a different embedding model than the one currently
+		// configured (including a pre-provenance row with model=="") is
+		// skipped rather than compared (P9): same-dimensionality vectors from
+		// two different models are semantically incomparable, but Cosine's
+		// length check can't detect that case. The row self-heals the next
+		// time this path is re-indexed.
+		if model != s.embedder.Model() {
+			continue
 		}
 		all = append(all, scored{path: path, score: embed.Cosine(qv, embed.DecodeVector(raw))})
 	}

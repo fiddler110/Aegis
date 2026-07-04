@@ -116,6 +116,22 @@ type Server struct {
 	// sessionSems serializes runs within a session. Each session maps to a
 	// buffered channel of size 1; acquiring it blocks until the prior run finishes.
 	sessionSems sync.Map // string → chan struct{}
+
+	// sessionTools maps session ID → a *tool.Registry clone of s.tools (P9).
+	// tool_search exposes deferred tools by mutating a registry's exposed map;
+	// without a per-session clone, that mutation was permanent and
+	// process-wide, silently exposing a tool's schema to every other
+	// concurrent or future session and persona sharing the daemon's one
+	// registry. Lazily created on first use per session and reused across
+	// that session's turns so a loaded tool stays loaded turn to turn.
+	sessionTools sync.Map // string → *tool.Registry
+}
+
+// sessionToolRegistry returns the session-scoped tool registry clone for id,
+// creating one from s.tools on first use.
+func (s *Server) sessionToolRegistry(id string) *tool.Registry {
+	v, _ := s.sessionTools.LoadOrStore(id, s.tools.Clone())
+	return v.(*tool.Registry)
 }
 
 // approvalDecision carries the client's answer to an interactive approval prompt.
@@ -523,7 +539,7 @@ func (s *Server) buildSwarmBackend(mailboxRoot string) swarm.Backend {
 	if s.cfg.Swarm.Backend == "subprocess" {
 		if exe, err := os.Executable(); err == nil {
 			s.logger.Info("swarm backend: subprocess", "exe", exe)
-			return swarm.NewSubprocessBackend(exe, "__worker", s.swarmReg, mailboxRoot)
+			return swarm.NewSubprocessBackend(exe, "__worker", s.swarmReg, mailboxRoot, s.cfg.SessionDBPath())
 		}
 		s.logger.Warn("cannot resolve executable path; falling back to in-process swarm backend")
 	}
@@ -532,7 +548,12 @@ func (s *Server) buildSwarmBackend(mailboxRoot string) swarm.Backend {
 
 // subAgentRunner returns a swarm.RunFunc that executes a teammate by building a
 // sub-engine over the daemon's shared adapter and tools. The child runs with its
-// own (clamped) permission mode and a fresh cost tracker.
+// own (clamped) permission mode. Its cost tracker is the same shared ledger the
+// top-level session run attached to ctx (D1): every sub-agent in a fan-out
+// tree, at any depth, draws against one BudgetUSD ceiling instead of each spawn
+// getting a fresh allowance — a background/detached spawn whose context was
+// severed from the request falls back to a fresh tracker since there's no
+// ledger left to share.
 func (s *Server) subAgentRunner() swarm.RunFunc {
 	return func(ctx context.Context, cfg swarm.SpawnConfig) (string, error) {
 		if s.adapter == nil {
@@ -542,6 +563,10 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		if model == "" {
 			model = s.cfg.Provider.Model
 		}
+		tracker, _ := swarm.CostTrackerFromContext(ctx).(*cost.Tracker)
+		if tracker == nil {
+			tracker = cost.NewTracker()
+		}
 		gate := permission.New(permission.ParseMode(cfg.Mode), s.approver())
 		eng, err := engine.New(engine.Options{
 			Adapter:   s.adapter,
@@ -549,7 +574,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			Gate:      gate,
 			Compactor: s.compactor,
 			Hooks:     s.hooks,
-			Cost:      cost.NewTracker(),
+			Cost:      tracker,
 			BudgetUSD: s.cfg.Cost.BudgetUSD,
 			Model:     model,
 			MaxTokens: s.cfg.Provider.MaxTokens,
@@ -759,7 +784,17 @@ func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
 	}
 	if p.Guard != nil {
 		if p.Guard.Disabled {
-			return guard.Config{Disabled: true}
+			// A loaded (non-built-in) persona is untrusted content (P7.5),
+			// the same as its Mode and Rules fields: honoring "output_guard:
+			// none" unconditionally would let a project-level persona.md
+			// silently switch off the last safety net with no warning
+			// surfaced anywhere. Built-in personas are reviewed and shipped
+			// with Aegis, so they remain trusted to disable the guard.
+			if p.Loaded {
+				s.logger.Warn("ignoring output_guard: none from untrusted (loaded) persona", "persona", p.Name)
+			} else {
+				return guard.Config{Disabled: true}
+			}
 		}
 		if p.Guard.Mode != "" {
 			c.Mode = p.Guard.Mode
@@ -777,9 +812,12 @@ func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
 	return c
 }
 
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool) (*engine.Engine, error) {
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, s.providerUnconfiguredErr()
+	}
+	if tools == nil {
+		tools = s.tools
 	}
 	if approver == nil {
 		approver = s.approver()
@@ -814,7 +852,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	s.permMu.Unlock()
 	if len(p.Rules) > 0 {
 		if pr, err := permission.ParseRules(p.Rules); err == nil {
-			rules = append(rules, pr...)
+			rules = append(rules, filterPersonaRules(pr, p, s.logger)...)
 		} else {
 			s.logger.Warn("ignoring invalid persona rules", "persona", p.Name, "err", err)
 		}
@@ -846,13 +884,16 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, s.personaModel(p))
 	}
 
+	if tracker == nil {
+		tracker = cost.NewTracker()
+	}
 	return engine.New(engine.Options{
 		Adapter:               s.adapter,
-		Tools:                 s.tools,
+		Tools:                 tools,
 		Gate:                  gate,
 		Compactor:             s.compactor,
 		Hooks:                 engineHooks,
-		Cost:                  cost.NewTracker(),
+		Cost:                  tracker,
 		BudgetUSD:             s.cfg.Cost.BudgetUSD,
 		Model:                 s.personaModel(p),
 		MaxTokens:             s.cfg.Provider.MaxTokens,
@@ -914,6 +955,34 @@ func (s *Server) resolveSessionMode(reqMode string, p persona.Persona) string {
 		return ""
 	}
 	return p.Mode
+}
+
+// filterPersonaRules strips Allow rules contributed by a loaded (non-built-in)
+// persona before they are merged into a session's rule set. A loaded persona
+// is untrusted content (P7.5) in exactly the same way its Mode field is: an
+// Allow rule short-circuits both the mode gate and the approver (RuleGate.Check),
+// so an unfiltered "allow shell(*)" in a project-level persona.md would grant
+// unattended access regardless of the configured plan/build/auto mode — a
+// strictly bigger hole than the Mode escalation resolveSessionMode already
+// blocks, since it bypasses mode entirely rather than just requesting a more
+// permissive one. Deny rules only narrow access, so they carry none of that
+// risk and pass through unchanged. Built-in personas (Loaded == false) are
+// reviewed and shipped with Aegis, so their rules remain fully trusted.
+func filterPersonaRules(rules []permission.Rule, p persona.Persona, logger *slog.Logger) []permission.Rule {
+	if !p.Loaded {
+		return rules
+	}
+	kept := make([]permission.Rule, 0, len(rules))
+	for _, r := range rules {
+		if r.Action == permission.RuleDeny {
+			kept = append(kept, r)
+			continue
+		}
+		if logger != nil {
+			logger.Warn("ignoring persona allow rule from untrusted (loaded) persona", "persona", p.Name)
+		}
+	}
+	return kept
 }
 
 // refreshPersonas rescans the persona directories so file edits, additions,
@@ -1027,6 +1096,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("delete session checkpoints", "session", id, "err", err)
 		}
 	}
+	s.sessionTools.Delete(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1325,7 +1395,15 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		guardEnabled = *req.GuardEnabled
 	}
 
-	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled)
+	// Shared across this engine and every sub-agent it spawns (D1): embedding
+	// the same tracker in runCtx below means fan-out draws from one ledger
+	// instead of each spawned agent getting its own fresh BudgetUSD allowance.
+	tracker := cost.NewTracker()
+	// Session-scoped tool registry clone (P9): tool_search loads a deferred
+	// tool onto this session's own exposure state, not the daemon-wide
+	// registry every other session and persona shares.
+	sessionTools := s.sessionToolRegistry(id)
+	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
@@ -1383,6 +1461,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		baseRunCtx = context.Background()
 	}
 	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)
+	runCtx = swarm.WithCostTracker(runCtx, tracker)
 	if snap != nil {
 		runCtx = checkpoint.WithSnapshotter(runCtx, snap)
 	}
@@ -1396,6 +1475,34 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		totalCost float64
 		traces    []trace.TurnTrace
 	)
+	// flushMessages durably saves whatever of conv.Messages hasn't been saved
+	// yet. It's called after every tool round (not just once at the very end)
+	// so a crash mid-run loses at most the current turn's in-flight model
+	// call, not the whole turn's transcript — tool side effects (files
+	// written, shell commands executed) already happened on disk by the time
+	// their result messages are appended, so leaving them unpersisted until
+	// eng.Run fully returns let history desync from real repo state with no
+	// record of what actually ran. Safe to call from the emit callback: it
+	// runs on the same goroutine as eng.Run, synchronously between conv
+	// mutations, never concurrently with them.
+	flushMessages := func() {
+		if conv.Persisted < 0 {
+			if err := s.store.SaveMessages(context.Background(), id, conv.Messages); err != nil {
+				s.logger.Error("save messages", "session", id, "err", err)
+				return
+			}
+			conv.Persisted = len(conv.Messages)
+			return
+		}
+		if conv.Persisted >= len(conv.Messages) {
+			return
+		}
+		if err := s.store.AppendMessages(context.Background(), id, conv.Messages[conv.Persisted:]); err != nil {
+			s.logger.Error("append messages", "session", id, "err", err)
+			return
+		}
+		conv.Persisted = len(conv.Messages)
+	}
 	runErr := eng.Run(runCtx, conv, func(ev engine.Event) {
 		// Trace events are server-internal observability records — collect them
 		// for persistence but never forward them to the SSE client.
@@ -1403,14 +1510,18 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			if ev.Trace != nil {
 				traces = append(traces, *ev.Trace)
 			}
+			flushMessages()
 			return
 		}
 		apiEv := toAPIEvent(ev)
 		send(apiEv)
-		if ev.Kind == engine.KindTurnDone && ev.Usage != nil && !ev.Usage.IsEstimated {
-			totalIn += ev.Usage.InputTokens
-			totalOut += ev.Usage.OutputTokens
-			totalCost += apiEv.CostUSD
+		if ev.Kind == engine.KindTurnDone {
+			flushMessages()
+			if ev.Usage != nil && !ev.Usage.IsEstimated {
+				totalIn += ev.Usage.InputTokens
+				totalOut += ev.Usage.OutputTokens
+				totalCost += apiEv.CostUSD
+			}
 		}
 	})
 
@@ -1421,17 +1532,9 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			provider.TextBlock{Text: fmt.Sprintf("[System: run aborted — %v. On your next message, summarize what completed and what still needs to be done.]", runErr)},
 		}})
 	}
-	// Persist whatever was produced, even on partial failure. P8.1: when
-	// earlier history is untouched (the common case), append only the new
-	// tail instead of rewriting the whole transcript; compaction/repair
-	// mark conv.Persisted invalid (-1) to force a full rewrite instead.
-	if conv.Persisted >= 0 {
-		if err := s.store.AppendMessages(context.Background(), id, conv.Messages[conv.Persisted:]); err != nil {
-			s.logger.Error("append messages", "session", id, "err", err)
-		}
-	} else if err := s.store.SaveMessages(context.Background(), id, conv.Messages); err != nil {
-		s.logger.Error("save messages", "session", id, "err", err)
-	}
+	// Final flush: covers the abort note just appended above, plus anything
+	// from the last turn the incremental flushes above hadn't caught yet.
+	flushMessages()
 	if totalIn > 0 || totalOut > 0 {
 		_ = s.store.AddUsage(context.Background(), id, totalIn, totalOut, totalCost)
 	}
@@ -1638,6 +1741,23 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "checkpoint_id is required")
 		return
 	}
+
+	// Serialize against an in-flight run on this session (same semaphore
+	// handlePostMessage acquires): without this, a turn that's already running
+	// finishes after the truncation below and appends its tail using a
+	// Persisted offset captured before the rewind, silently reviving content
+	// the user just rewound away. Waiting here is safe — the alternative queue
+	// order (run first, then rewind) is exactly what handlePostMessage already
+	// imposes on a second concurrent request.
+	sem := s.sessionSemaphore(id)
+	select {
+	case sem <- struct{}{}:
+	case <-r.Context().Done():
+		writeError(w, http.StatusServiceUnavailable, "request cancelled while waiting for active run to finish")
+		return
+	}
+	defer func() { <-sem }()
+
 	scope := req.Scope
 	if scope == "" {
 		scope = "both"

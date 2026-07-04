@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -290,6 +291,22 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		case <-ctx.Done():
 			return ErrInterrupted
 		default:
+		}
+
+		// Budget gate: stop before spending on another paid model call. This
+		// must run before every turn, not just before a tool round (P9 dead
+		// zone) — a guard corrective retry, a max-token continuation, and a
+		// plain text-only turn are all billed the same as any other turn via
+		// cost.Add below, so gating only the tool-round path let a run cycling
+		// through guard failures or token-limit continuations burn all the way
+		// to the iteration cap without the budget ever aborting it. The
+		// tool-round path also re-checks just before runTools further down,
+		// so a turn that itself pushes spend over the cap still stops before
+		// its tool calls (and their side effects) run, not one iteration late.
+		if e.budgetUSD > 0 && e.cost != nil && e.cost.TotalUSD() >= e.budgetUSD {
+			err := fmt.Errorf("engine: cost budget reached: spent $%.4f of $%.2f limit", e.cost.TotalUSD(), e.budgetUSD)
+			emit(Event{Kind: KindError, Err: err})
+			return err
 		}
 
 		// Allow callers to inject dynamic context or refresh tool metadata
@@ -584,6 +601,20 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 		go func(i int, tu provider.ToolUseBlock) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// A panic in one tool call (a buggy MCP tool, malformed builtin
+			// input) must not cross the goroutine boundary: unrecovered, it
+			// takes down the whole daemon process — every concurrent
+			// session, not just the one that triggered it. Recover here and
+			// report it back as an ordinary tool error instead.
+			defer func() {
+				if r := recover(); r != nil {
+					e.logger.Error("recovered panic in tool call", "tool", tu.Name, "panic", r, "stack", string(debug.Stack()))
+					content := fmt.Sprintf("tool %q panicked: %v", tu.Name, r)
+					traces[i] = trace.ToolCall{Name: tu.Name, IsError: true}
+					safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: true})
+					results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: true}
+				}
+			}()
 
 			if e.serializeTool(tu.Name) {
 				execLock.Lock()
@@ -741,6 +772,10 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	if e.tools == nil {
 		return fmt.Sprintf("no tools available (requested %q)", tu.Name), true
 	}
+	// Let a meta-tool (tool_search) discover the registry actually governing
+	// this run — which, when the caller scopes exposure per session, is a
+	// clone rather than the tool's own construction-time reference.
+	ctx = tool.WithRegistry(ctx, e.tools)
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
 		return fmt.Sprintf("unknown tool %q", tu.Name), true
