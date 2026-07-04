@@ -18,7 +18,10 @@ func newScanCmd() *cobra.Command {
 			"given path (default: current directory) and prints a unified findings report. semgrep and the " +
 			"language-targeted engines (gosec/bandit/brakeman/njsscan) are opt-in — enable via " +
 			"security.tools.<name>.enabled: true or `aegis security config`. Falls back to a configured container " +
-			"image (security.tools.<name>.image) for any enabled scanner not installed on PATH.",
+			"image (security.tools.<name>.image) for any enabled scanner not installed on PATH. Findings are " +
+			"deduped across overlapping tools and, where confident, tagged with an OWASP ASVS chapter; an " +
+			"accepted-risk .aegis/security-baseline.yaml (see `aegis security baseline`) can suppress a specific, " +
+			"time-boxed finding.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := "."

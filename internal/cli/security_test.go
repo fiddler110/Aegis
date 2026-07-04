@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -72,5 +74,53 @@ func TestSecurityInstallAbortsWithoutConfirmation(t *testing.T) {
 	}
 	if !strings.Contains(out, "This will run the following command") {
 		t.Errorf("expected the exact command to be shown before the prompt, got %q", out)
+	}
+}
+
+// TestSecurityBaselineNoFile is the P11.8 no-baseline case: most projects
+// have no accepted-risk allowlist, and the command should say so plainly
+// rather than error.
+func TestSecurityBaselineNoFile(t *testing.T) {
+	chdirTemp(t)
+	out, err := runSecurity(t, "", "baseline")
+	if err != nil {
+		t.Fatalf("security baseline: %v", err)
+	}
+	if !strings.Contains(out, "no baseline entries") {
+		t.Errorf("expected a no-entries message, got %q", out)
+	}
+}
+
+// TestSecurityBaselineShowsEntryStatus is the P11.8 status-display
+// regression: active/expired/invalid entries should each render with the
+// right label.
+func TestSecurityBaselineShowsEntryStatus(t *testing.T) {
+	dir := chdirTemp(t)
+	baselineDir := filepath.Join(dir, ".aegis")
+	if err := os.MkdirAll(baselineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `
+suppressions:
+  - rule_id: "CVE-2099-0001"
+    reason: "active accepted risk"
+    expires: "2099-01-01"
+  - rule_id: "CVE-2000-0001"
+    reason: "long past its review date"
+    expires: "2000-01-01"
+  - rule_id: "CVE-2024-0001"
+    reason: "missing expires"
+`
+	if err := os.WriteFile(filepath.Join(baselineDir, "security-baseline.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runSecurity(t, "", "baseline")
+	if err != nil {
+		t.Fatalf("security baseline: %v", err)
+	}
+	for _, want := range []string{"active", "CVE-2099-0001", "expired", "CVE-2000-0001", "invalid", "CVE-2024-0001"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %s", want, out)
+		}
 	}
 }

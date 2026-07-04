@@ -1,5 +1,24 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
+**Updated:** 2026-07-04 (v31 — shipped **P11.8 findings dedup, ASVS mapping, and a
+suppression baseline**: `DedupFindings` (`internal/security/dedup.go`) collapses the same
+CVE/rule flagged at the same location by more than one tool into one finding, tagging
+`SeenBy` with every other tool that also caught it — the concrete case being osv-scanner/
+grype/trivy all matching the same dependency CVE. A CWE-to-OWASP-ASVS table
+(`internal/security/asvs.go`) tags a best-effort ASVS chapter on any SARIF finding whose
+rule carries a CWE (automatic across every SARIF tool with zero per-tool work, P11.2's
+"one ingester" payoff again), plus a small tool-name fallback for gitleaks/kubescape/
+hadolint/trivy-misconfig; known-vulnerable-dependency findings are deliberately left
+unmapped rather than guessed, the same "no claim beats a wrong claim" call as P11.12's
+Reachability. An optional `.aegis/security-baseline.yaml` (`internal/security/baseline.go`)
+lets an operator suppress a specific accepted-risk finding with a **mandatory expiry** —
+expired or malformed entries are flagged rather than silently honored/ignored, and a
+baseline that fails to parse fails safe (suppresses nothing). New view-only
+`aegis security baseline` CLI surface; the built-in `security-audit` skill now instructs
+using the dedup/ASVS/suppression signals in its report and, when asked to fix rather than
+just review, proposing a fix and **re-scanning to confirm it closed** before claiming
+success — the P4.8 close-the-loop posture applied to security remediation. See "Open Work
+— P11" P11.8 and Appendix C row 47. Only P11.9 remains open in the P11 track.)
 **Updated:** 2026-07-04 (v30 — shipped **P11.7 DAST via OWASP ZAP** (v1 scope), the headline
 scan ask: a new `dast_scan` tool / `aegis scan dast <target>` runs ZAP's **Automation
 Framework** (a YAML plan Aegis generates per call — `internal/security/dast.go`) in
@@ -96,7 +115,7 @@ with near-zero bespoke parsing. See "Open Work — P11" P11.2.)
 
 ## Status
 
-P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), and P11's availability layer, SARIF normalization, image security, IaC scanning, SCA depth, reachability analysis, SAST depth, and DAST (P11.1/P11.2/P11.3/P11.4/P11.5/P11.6/P11.7/P11.10/P11.11/P11.12) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
+P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), and P11's availability layer, SARIF normalization, image security, IaC scanning, SCA depth, reachability analysis, SAST depth, DAST, and findings dedup/ASVS/suppression baseline (P11.1/P11.2/P11.3/P11.4/P11.5/P11.6/P11.7/P11.8/P11.10/P11.11/P11.12) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
 
 P9.3, P9.4, and P9.6 remain open with no current trigger. P6 remains long-horizon/exploratory with no forcing function.
 
@@ -113,12 +132,16 @@ security, scoped to host-binary-only — see P11.5), P11.4 (SCA depth: osv-scann
 SBOM-fed grype), P11.12 (reachability: osv-scanner `--call-analysis`, govulncheck-backed
 for Go), P11.3 (SAST depth: opengrep default, semgrep + 4 language engines opt-in), and
 P11.7 (DAST via OWASP ZAP, v1 scope — hard target-allowlist gate, container-only, the one
-documented `--network none` exception) also shipped 2026-07-04. Remaining: P11.8, P11.9.
+documented `--network none` exception) and P11.8 (cross-tool findings dedup, CWE-derived
+OWASP ASVS mapping, and an `.aegis/security-baseline.yaml` accepted-risk suppression
+allowlist with mandatory expiry, plus a `security-audit` skill triage-loop extension) also
+shipped 2026-07-04. Remaining: P11.9 only.
 
 **Recommended priority order:** ~~P10~~ ~~P11 availability layer~~ ~~P11.2 SARIF~~
 ~~P11.5/P11.6 fast wins~~ ~~P11.4 SCA depth~~ ~~P11.12 reachability~~ ~~P11.3 SAST depth~~
-~~P11.7 DAST~~ **all shipped 2026-07-04** → P11.8 (findings dedup/triage) → P11.9 (regression
-evals + pinned provenance) → remaining P9 items only on a concrete trigger → P6.
+~~P11.7 DAST~~ ~~P11.8 dedup/ASVS/baseline~~ **all shipped 2026-07-04** → P11.9 (regression
+evals + pinned provenance — the last P11 item) → remaining P9 items only on a concrete
+trigger → P6.
 
 **Reviewed and found sound, no action needed (from the P7 audit):** SSRF dialer (private-IP check happens at dial time, closing the DNS-rebind window); path traversal / symlink handling in `ValidatePath`; local daemon HTTP API (constant-time bearer token + loopback-origin check); persona YAML parsing (safe library, no unsafe type deserialization); `team_tasks` claim path (properly transactional, no duplicate-claim race).
 
@@ -542,13 +565,79 @@ regressions), `internal/config/write_security_test.go`
 (`TestPatchGlobalSecurityPreservesDASTPolicy`), `internal/tui/securityconfig_test.go`
 (extended `TestSecurityConfigSaveCmdPreservesEgressSettings`).
 
-### P11.8 — Findings dedup, suppression baseline, triage loop
-Dedup by (CVE/rule-id, normalized location) across overlapping tools; a
-`.aegis/security-baseline.yaml` allowlist for accepted risk with an expiry date; and an
-agent triage loop that proposes a fix and **re-scans the affected control to confirm** it
-closed (extends the built-in `security-audit` skill and the P4.8 close-the-loop posture).
-Map findings to **OWASP ASVS** verification requirements in the triage output so a report
-reads against a recognized standard, not just raw tool IDs. Priority: **Medium**, Effort: **M**.
+### P11.8 — ✅ shipped 2026-07-04 — Findings dedup, suppression baseline, triage loop
+**Dedup** (`internal/security/dedup.go`, `DedupFindings`): findings sharing a normalized
+(CVE/rule-id, location) key collapse into one, keeping the highest-severity (then
+highest-reachability) copy and recording every other tool that also flagged it on a new
+`Finding.SeenBy` — rendered as `[also flagged by: ...]`. Normalization pulls a CVE out of
+osv-scanner's comma-joined alias list so it matches trivy/grype's bare `CVE-...` RuleID, and
+extracts the trailing parenthetical path out of SCA-style `pkg@version (path)` locations so
+they compare equal to a SARIF tool's bare path — the concrete case this closes is the same
+CVE independently flagged by osv-scanner, grype, and trivy showing up three times in one
+report. A Finding missing either half of the key never merges (a unique per-index fallback
+key), so nothing is ever wrongly collapsed. Wired into `RunWithOptions` and `ScanImage`
+(and, since it costs nothing extra, `RunDAST` too, ahead of `assignASVS`).
+
+**ASVS mapping** (`internal/security/asvs.go`): a curated CWE → OWASP ASVS 4.0.3
+chapter/requirement table (`cweASVS`, ~35 entries spanning injection, deserialization, path
+traversal, SSRF, secrets/crypto, auth, session, error handling, data protection,
+communications, business logic, and configuration), keyed off a CWE extracted from a SARIF
+rule's tags — or, when absent there, the rule ID itself (njsscan encodes it directly, e.g.
+`CWE-79`) — via `cweFromRule`/`extractCWEFromText` in `sarif.go`. This makes ASVS tagging
+automatic across every SARIF-emitting tool (semgrep/opengrep/gosec/bandit/brakeman/
+njsscan/ZAP) with zero per-tool work, the same "one ingester, no bespoke parsing" payoff
+P11.2 already banked. A small tool-name fallback (`toolASVS`) covers gitleaks (secrets →
+V6.4) and kubescape/hadolint (misconfig → V14); trivy needs its own split since it shares one
+tool name across SCA and IaC — a bare-CVE RuleID stays unmapped, anything else maps to V14.
+Known-vulnerable-dependency findings (osv-scanner/grype/dockle, and trivy's own CVE
+findings) are deliberately left with no ASVS label — ASVS has no clean SCA-equivalent
+chapter, and guessing one would misrepresent the standard, the same "no claim beats a wrong
+claim" call already made for Reachability (P11.12).
+
+**Suppression baseline** (`internal/security/baseline.go`): an optional
+`.aegis/security-baseline.yaml` (`Baseline`/`SuppressionEntry`, loaded via `LoadBaseline`) —
+each entry needs a `rule_id`, a `reason`, and a **mandatory** `expires: YYYY-MM-DD`; an
+optional `location` scopes the suppression to a specific package/path (substring match on
+the normalized location) instead of blanket-suppressing a rule everywhere. `Baseline.Apply`
+partitions findings into kept/suppressed and separately reports which entries were expired
+(past `expires` — the finding it used to cover comes back into `Findings`, not silently
+still hidden) or invalid (missing `rule_id`/`reason`, or an unparseable `expires` — never
+applied at all). A baseline file that fails to parse sets `Report.BaselineError` and
+suppresses nothing — fails safe rather than risking a broken file silently hiding real
+findings. Wired into `RunWithOptions` only: `ScanImage`/`RunDAST` have no natural project
+directory to load a baseline from (an image ref or a scan target URL isn't a project
+checkout), the same scoping call P11.5 already made for image-scan container fallback.
+`Report` gained `Suppressed`/`ExpiredSuppressions`/`InvalidSuppressions`/`BaselineError`,
+all rendered by `Format()` so nothing is ever a silent omission — consistent with P11.1's
+"never a silent skip" posture applied to suppression instead of scanner availability.
+New view-only `aegis security baseline [path]` (mirroring `aegis security config`'s
+edit-the-YAML-directly posture) prints every entry's status (active/expired/invalid);
+mutating the baseline is a hand-edit, deliberately not a CLI-driven write, so an accepted-
+risk decision leaves a real diff/PR trail.
+
+**Triage loop** (`internal/skills/builtin/security-audit/SKILL.md`): extended rather than
+built as new code — the skill now instructs checking the report's dedup/ASVS/suppression
+signals, including an ASVS chapter in the final report when the scan tagged one, and — when
+asked to fix rather than just review — proposing a fix for each critical/high finding,
+applying it, and **re-running `security_scan` scoped to the affected path to confirm it's
+actually gone** before reporting success, rather than asserting an unconfirmed fix (the
+P4.8 close-the-loop posture, applied to security remediation instead of git/PR workflow). It
+also tells the model to propose (not silently add) a baseline entry when a reviewer
+explicitly wants to accept a real finding rather than fix it now, so suppression always
+has a human decision and a paper trail behind it.
+
+Priority: **Medium**, Effort: **M**.
+Tests: `internal/security/dedup_test.go` (normalization, cross-tool merge, severity/
+reachability tiebreak, never-merge-on-empty-key), `internal/security/asvs_test.go` (CWE
+extraction forms, known/unmapped CWE, tool fallbacks, trivy's misconfig/CVE split, SCA
+tools left unmapped), `internal/security/sarif_test.go` (CWE extracted from tags and from
+a bare rule-ID fallback, no CWE inferred for a plain CVE rule ID),
+`internal/security/baseline_test.go` (load missing/valid/malformed, active/expired/invalid
+suppression classification, location scoping, nil-baseline no-op),
+`internal/security/security_test.go` (`RunWithOptions` dedups across fake scanners and
+applies baseline suppression end to end; a malformed baseline fails safe with
+`BaselineError` set and nothing suppressed), `internal/cli/security_test.go`
+(`aegis security baseline` with no file and with active/expired/invalid entries).
 
 ### P11.9 — Scan regression evals + pinned provenance
 Golden-transcript evals over **recorded** scanner outputs (P9.1 harness style — no live
@@ -698,7 +787,7 @@ availability layer (P11.1 + P11.10 provisioning + P11.11 config/CLI) was the nat
 unit of work since it makes every scanner reliably runnable on a clean machine — now shipped.
 Remaining order: ~~P11.2 (SARIF)~~ → ~~P11.5/P11.6 (fast wins reusing trivy/new images)~~ →
 ~~P11.4 (SCA depth + SBOM)~~ → ~~P11.12 (reachability)~~ → ~~P11.3 (SAST depth)~~ →
-~~P11.7 (ZAP)~~ **all shipped** → P11.8 → P11.9.
+~~P11.7 (ZAP)~~ → ~~P11.8 (dedup/ASVS/baseline)~~ **all shipped** → P11.9 (last item).
 
 ---
 
@@ -987,6 +1076,7 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 | 44 | Security scanning | No user configuration for which security tools to enable, run method (host/container/auto), or auto-install policy | user request | High | ✅ P11.11 (CLI + `/security-config` TUI form) |
 | 45 | Security scanning | No SCA breadth beyond trivy (osv-scanner/grype) or SBOM generation | — (scan review) | Medium | ✅ P11.4 |
 | 46 | Security scanning | SCA findings carry no reachability signal — a vulnerable *package* present reads the same as a vulnerable *function* actually called | user request | Medium | ✅ P11.12 |
+| 47 | Security scanning | Overlapping tools re-report the same finding; no accepted-risk allowlist; findings read as raw tool IDs with no recognized-standard mapping | — (scan review) | Medium | ✅ P11.8 |
 
 ---
 

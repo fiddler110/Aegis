@@ -78,3 +78,57 @@ func TestParseSARIFEmptyRuns(t *testing.T) {
 		t.Errorf("expected no findings, got %+v", findings)
 	}
 }
+
+func TestParseSARIFExtractsCWEFromRuleTags(t *testing.T) {
+	data := []byte(`{"runs":[{
+		"tool":{"driver":{"name":"semgrep","rules":[
+			{"id":"sql-injection","properties":{"tags":["security","CWE-89: SQL Injection"]}}
+		]}},
+		"results":[
+			{"ruleId":"sql-injection","level":"error","message":{"text":"sqli"},
+			 "locations":[{"physicalLocation":{"artifactLocation":{"uri":"db.go"}}}]}
+		]
+	}]}`)
+	findings, err := ParseSARIF(data, "semgrep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].CWE != "89" {
+		t.Fatalf("expected CWE 89 extracted from rule tags, got %+v", findings)
+	}
+}
+
+func TestParseSARIFExtractsCWEFromRuleIDFallback(t *testing.T) {
+	// njsscan-style: the CWE is embedded in the rule ID itself, no separate tag.
+	data := []byte(`{"runs":[{
+		"tool":{"driver":{"name":"njsscan","rules":[{"id":"CWE-79"}]}},
+		"results":[
+			{"ruleId":"CWE-79","level":"warning","message":{"text":"xss"},
+			 "locations":[{"physicalLocation":{"artifactLocation":{"uri":"view.js"}}}]}
+		]
+	}]}`)
+	findings, err := ParseSARIF(data, "njsscan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].CWE != "79" {
+		t.Fatalf("expected CWE 79 extracted from rule ID, got %+v", findings)
+	}
+}
+
+func TestParseSARIFNoCWEWhenNoneTagged(t *testing.T) {
+	data := []byte(`{"runs":[{
+		"tool":{"driver":{"name":"trivy","rules":[{"id":"CVE-2024-9999"}]}},
+		"results":[
+			{"ruleId":"CVE-2024-9999","level":"error","message":{"text":"vuln"},
+			 "locations":[{"physicalLocation":{"artifactLocation":{"uri":"go.sum"}}}]}
+		]
+	}]}`)
+	findings, err := ParseSARIF(data, "trivy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].CWE != "" {
+		t.Fatalf("expected no CWE inferred for a bare CVE rule ID, got %+v", findings)
+	}
+}

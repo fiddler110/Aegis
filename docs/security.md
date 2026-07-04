@@ -271,6 +271,48 @@ Message:  Potential API key in example file
 Source:   gitleaks
 ```
 
+### Dedup, ASVS mapping, and the suppression baseline
+
+Every scan report goes through three post-processing passes before it's
+returned (P11.8):
+
+- **Dedup** — the same CVE/rule flagged at the same location by more than
+  one tool (a common SCA case: osv-scanner, grype, and trivy all matching
+  the same vulnerable dependency) collapses into a single finding, keeping
+  the highest-severity copy and tagging it `[also flagged by: <tools>]` so
+  nothing is silently hidden, just not repeated three times.
+- **ASVS mapping** — findings with a recognizable CWE (from SARIF rule tags
+  — semgrep/opengrep/gosec/bandit/brakeman/njsscan/ZAP all tag one when they
+  know it) get a best-effort OWASP ASVS 4.0.3 chapter label (e.g. `asvs: V5.3
+  Output Encoding and Injection Prevention`), plus a small tool-based
+  fallback for gitleaks/kubescape/hadolint/trivy-misconfig. Left blank when
+  there's no confident mapping (in particular, known-vulnerable-dependency
+  findings have no dedicated ASVS chapter and are never guessed at) — a
+  wrong standards claim is worse than none.
+- **Suppression baseline** — an optional `.aegis/security-baseline.yaml`
+  lets an operator accept a specific finding as known risk, with a mandatory
+  expiry:
+
+  ```yaml
+  suppressions:
+    - rule_id: "CVE-2024-12345"      # or any scanner rule ID
+      location: "go.sum"             # optional — omit to suppress this rule everywhere
+      reason: "no fix available upstream; mitigated by network policy"
+      expires: "2026-12-31"          # required — YYYY-MM-DD
+      added_by: "you"                # optional, for your own records
+  ```
+
+  A matched, unexpired entry moves its finding out of the report's main list
+  into a `Suppressed` count (`aegis scan` prints "Suppressed by baseline:
+  N"). An **expired** entry (past `expires`) stops suppressing — the finding
+  comes back into view with a note that the acceptance lapsed. An **invalid**
+  entry (missing `rule_id`/`reason`, or an unparseable `expires`) is never
+  applied at all, also with a note — a malformed baseline fails safe rather
+  than silently hiding something. `aegis security baseline [path]` shows
+  every entry's current status (active/expired/invalid) without needing to
+  run a full scan; the file itself is hand-edited, same as
+  `security.tools`/`security.default_method` in `.aegis/config.yaml`.
+
 ### Combining with personas
 
 Security-focused personas are tuned to work with scanning results:
