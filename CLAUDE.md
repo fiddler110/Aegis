@@ -62,8 +62,8 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/session` | SQLite-backed session store (conversations, turn traces, cost) |
 | `internal/tool` | `Tool` interface + `Registry` (register/expose separation lets permission modes gate capability without unregistering) |
 | `internal/tool/builtin` | All 39+ built-in tools (file ops, git, shell, web, memory, LSP, security scan, diagram, cron, agent spawning, etc.) |
-| `internal/permission` | Three modes: `plan` (read-only), `build` (read+write, execute gated), `auto` (all allowed); text-based allow/deny rules |
-| `internal/persona` | 17 built-in named system prompts (general, security, developer, SRE, etc.); custom personas load from YAML files |
+| `internal/permission` | Three modes: `plan` (read-only), `build` (read+write, execute gated), `auto` (all allowed); text-based allow/deny rules; `PersonaToolGate` advisory (never-enforcing) check on a persona's declared `Tools` |
+| `internal/persona` | 17 built-in named system prompts (general, security, developer, SRE, etc.); custom personas are `.md` files with YAML frontmatter, hot-reloaded via a signature-cached `Refresh` |
 | `internal/swarm` | Multi-agent coordination: spawns sub-agents as goroutines (`in_process`) or subprocesses; file-based mailbox for inter-agent messaging |
 | `internal/compaction` | Context compaction — summarizes old turns when the conversation approaches the model's context window |
 | `internal/checkpoint` | Per-turn restore points for `/rewind` |
@@ -97,4 +97,6 @@ Precedence (lowest → highest): built-in defaults → `~/.config/aegis/config.y
 
 ### Persona system
 
-Personas are defined as Go constants in `internal/persona/persona.go` (built-ins) or as YAML files with frontmatter (`name`, `description`, `model`, `mode`, `tools`, `rules`, `guard`). A persona can pin a model, restrict tool access, and override the output guard rubric.
+Personas are defined as Go constants in `internal/persona/persona.go` (built-ins) or as `.md` files whose YAML frontmatter (`description`, `model`, `mode`, `tools`, `rules`, `output_guard`) carries overrides; the name is the filename stem. A persona can pin a model, declare an advisory tool list, merge permission rules, and override the output guard rubric. The daemon hot-reloads persona files (`persona.Refresh`, called from persona-touching handlers) — no restart needed. Switching persona mid-session (`PATCH /sessions/{id}` with `persona`) applies the full profile, not just the system prompt. `aegis persona list|show|new|use` manages persona files and the project's `default_persona` (config key; falls back to `general`) from the CLI.
+
+Each built-in persona's `Tools` field is **advisory, never enforced**: `permission.PersonaToolGate` (wrapped outermost in `server.newEngine`) logs a call outside the list and routes it through the same `Approver` used for capability decisions — warn-and-allow under a non-interactive approver, a confirmation prompt under the TUI's — but the real security boundary (mode, rules, contextual gates) is untouched and always still applies. `general` deliberately leaves `Tools` empty (no restriction at all).

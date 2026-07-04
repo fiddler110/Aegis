@@ -1,6 +1,6 @@
 # Personas
 
-A persona sets the system prompt and default configuration for a session, tuning the agent's behavior, communication style, and focus area. Personas do not limit which tools are available — they shape *how* the agent approaches problems.
+A persona sets the system prompt and default configuration for a session, tuning the agent's behavior, communication style, and focus area. Most built-in personas also declare a `Tools` list that shapes *which tools it's expected to reach for* — but this is advisory, never enforced as a hard restriction (see [Tool Guidance](#tool-guidance-advisory-not-enforced) below).
 
 ---
 
@@ -13,10 +13,40 @@ aegis --persona developer --mode build
 aegis --persona report-writer
 ```
 
+Without `--persona`, a new session uses the project's or user's configured `default_persona` if one is set (see [Default Persona](#default-persona)), falling back to `general`.
+
 **Inside the TUI:**
 ```
 /persona security          # switch directly
 /persona                   # open interactive picker
+```
+
+Switching persona mid-session applies the **full profile**, not just the system prompt: the persona's model, permission rules, and output-guard overrides take effect on the next message, and its default permission mode is applied unless you've set one explicitly (subject to the trust guard below — a custom persona can't silently escalate past the configured default). The TUI reports a mode change when one happens.
+
+**From the CLI:**
+```bash
+aegis persona list                 # all personas, custom/default markers shown
+aegis persona show security        # profile: source, model, mode, rules, guard, tools, prompt
+aegis persona show my-helper       # for custom personas, prints the file path to edit
+aegis persona new incident-responder   # scaffold a new custom persona (see below)
+aegis persona use developer        # set this project's default persona (see below)
+```
+
+---
+
+## Default Persona
+
+Set which persona a project starts with, so you don't need `--persona` on every launch:
+
+```bash
+aegis persona use developer              # writes default_persona to .aegis/config.yaml
+aegis persona use security --global      # writes to the user-global config instead
+```
+
+Precedence: an explicit `--persona` flag always wins; otherwise the project's `default_persona` is used; otherwise the user-global one; otherwise `general`. `aegis persona list`/`show` mark the currently-configured default. You can also set it directly in either config file:
+
+```yaml
+default_persona: developer
 ```
 
 ---
@@ -27,7 +57,7 @@ aegis --persona report-writer
 |---------|-------------------|-------|
 | General | `general` | Research, documentation, and coding — the default |
 | Security | `security` | Security platform architect: capability research, STRIDE/LINDDUN threat modeling, C4/Mermaid architecture diagrams |
-| Platform Architect | `platform-architect` | System design, technology evaluation, capacity planning |
+| Platform Architect | `platform-architect` | Full architecture lifecycle: system & security design, threat modeling, solution evaluation & PoCs, process development, automation, roadmap planning, documentation & reporting |
 | Security Architect | `security-architect` | Security architecture, threat modeling, design review |
 | Security Engineer | `security-engineer` | Security tooling, vulnerability management, automation, incident response |
 | AppSec Engineer | `appsec-engineer` | Secure code review, OWASP testing, CI/CD security integration |
@@ -68,20 +98,31 @@ Model overrides are model-ID only — they do not switch providers.
 
 ## Custom Personas
 
-Drop a markdown file into either of these directories:
+Scaffold one with the CLI (recommended):
+
+```bash
+aegis persona new incident-responder                     # project: .aegis/personas/
+aegis persona new incident-responder --global            # user:    <data-dir>/personas/
+aegis persona new triage --description "Bug triage lead"
+```
+
+The generated file contains a commented frontmatter template — edit the prompt, delete the options you don't need, and switch to it with `/persona <name>`.
+
+Or drop a markdown file into either of these directories yourself:
 
 | Scope | Directory |
 |-------|-----------|
 | Project | `.aegis/personas/<name>.md` |
 | User (global) | `~/.local/share/aegis/personas/<name>.md` |
 
-Project files take precedence over user files on name collision.
+Project files take precedence over user files on name collision. The persona's name is the **filename stem** (`secure-reviewer.md` → `secure-reviewer`); file personas shadow built-ins of the same name.
+
+**Hot reload:** the daemon rescans these directories whenever personas are listed, switched, or a message is sent — adding, editing, or deleting a persona file takes effect immediately, no restart. One nuance: a session's system prompt is captured when the session is created or the persona is switched, so after editing a persona's *prompt*, run `/persona <name>` again in existing sessions to re-apply it (model, rules, and guard changes apply on the next message automatically).
 
 The file body becomes the system prompt. YAML frontmatter carries optional overrides:
 
 ```markdown
 ---
-name: secure-reviewer
 description: Strict secure code reviewer with remediation focus
 model: claude-opus-4-8       # pin to this model (same provider)
 mode: build                  # default permission mode for sessions using this persona
@@ -112,11 +153,10 @@ sensitive data exposure, insecure deserialization, SSRF.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | string | Persona name (used with `--persona` and `/persona`) |
 | `description` | string | Short description shown in the picker |
 | `model` | string | Model ID override (same provider as global config) |
 | `mode` | string | Default permission mode: `plan`, `build`, or `auto` (see trust note below) |
-| `tools` | list | Informational list of tool names (shown in UI) |
+| `tools` | list | Advisory tool list — see [Tool Guidance](#tool-guidance-advisory-not-enforced) |
 | `rules` | list | Permission rules merged into the session gate |
 | `output_guard` | object | Output validation config (see [Configuration](configuration.md)) |
 
@@ -124,6 +164,21 @@ To disable output validation for a persona:
 ```yaml
 output_guard: none
 ```
+
+---
+
+## Tool Guidance (advisory, not enforced)
+
+A persona can declare `tools:` to describe which tools fit its role. This is guidance, not a restriction — nothing about it is a security boundary, and it never hard-blocks a tool call. When the model calls a tool outside the persona's declared list:
+
+- It's logged as a warning on the daemon.
+- The same approval flow used for permission decisions (e.g. shell execution in build mode) is consulted: in `auto` mode, or wherever the session's approver auto-approves, the call is silently allowed ("warn and allow"); in an interactive TUI session, you get a confirmation prompt ("ask to confirm") before the call proceeds.
+- Approving once (allow-always) is remembered for the rest of the session, same as any other approval — you won't be re-prompted for that tool.
+- If you decline, that specific call is blocked; the underlying capability rules (mode, text-based rules, contextual policies) are otherwise completely unaffected by a persona's tool list — they remain the real security boundary. A tool the persona doesn't list, once approved, is still subject to those rules exactly as if it had been listed.
+
+A persona that omits `tools:` entirely (like the built-in `general` persona) has no restriction of any kind — no warnings, no prompts.
+
+Every built-in persona except `general` declares a curated `Tools` list matching its role (e.g. `data-analyst` doesn't list `git_commit`; `risk-assessor` doesn't list `security_scan`). Calling an off-list tool from a built-in persona still just warns/asks — it's a nudge, not a wall.
 
 **Trust note on `mode` (P7.5):** a persona file — including one from a third-party bundle (`aegis bundle install <git-url>`) — is less trusted than a built-in persona. Its `mode:` is only honored implicitly (i.e. when a session is created without an explicit `--mode`/`mode` request) if it's no more permissive than the daemon's configured default (`permission.mode` in config.yaml). A loaded persona declaring `mode: auto` while the configured default is `plan`/`build` has that request ignored and logged as a warning, instead of silently granting unattended shell execution. Pass `--mode auto` explicitly (or configure `permission.mode: auto`) if you actually want that persona's elevated mode.
 
@@ -134,8 +189,8 @@ output_guard: none
 The output guard is on by default. A custom persona can disable it:
 
 ```markdown
+<!-- code-generator.md -->
 ---
-name: code-generator
 description: Generates boilerplate code quickly
 output_guard: none
 ---
@@ -159,8 +214,8 @@ output_guard:
 ### Security-focused reviewer
 
 ```markdown
+<!-- appsec-strict.md -->
 ---
-name: appsec-strict
 description: OWASP-focused application security reviewer
 model: claude-opus-4-8
 mode: plan
@@ -183,8 +238,8 @@ Always:
 ### Structured output generator
 
 ```markdown
+<!-- json-architect.md -->
 ---
-name: json-architect
 description: Outputs structured architecture assessments as JSON
 output_guard:
   mode: schema
@@ -199,8 +254,8 @@ You are an architecture reviewer. Always respond with valid JSON containing:
 ### LaTeX report writer
 
 ```markdown
+<!-- latex-reporter.md -->
 ---
-name: latex-reporter
 description: Produces LaTeX reports for security assessments
 mode: build
 tools: [read_file, glob, grep, latex_build, latex_new_document, edit_file]

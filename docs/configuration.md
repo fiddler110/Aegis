@@ -344,14 +344,24 @@ output_guard:
   # "schema" — the answer must be valid JSON containing the required keys
   mode: llm
 
-  # Rubric for llm mode. Empty = built-in rubric (fully addresses request,
-  # no placeholders/TODOs, grounded in tool output).
+  # Rubric for llm mode. Empty = built-in rubric (fully addresses request, no
+  # unfinished work like TODOs/stubs, grounded in tool output). Clearly-marked
+  # example/placeholder values in documentation — an illustrative IP address,
+  # a <your-api-key>-style token — are acceptable under the built-in rubric,
+  # since the real value often depends on the reader's own environment and
+  # was never supplied to the model.
   rubric: ""
 
   # Number of corrective retry attempts when the guard fails.
   # Guards fail open: any validator error yields a pass.
   max_retries: 1
 
+
+# ── Default persona ────────────────────────────────────────────────────────────
+# Persona a new session starts with when --persona isn't passed. Set this in
+# .aegis/config.yaml to give a project its own default focus (`aegis persona use
+# <name>` writes this for you). An explicit --persona always overrides it.
+default_persona: ""   # e.g. "developer"; empty falls back to "general"
 
 # ── Per-persona model overrides ───────────────────────────────────────────────
 # Pin specific built-in personas to a different model within the same provider.
@@ -559,6 +569,14 @@ personas:
   developer:          { model: gpt-4o }
   report-writer:      { model: claude-opus-4-8 }
 ```
+
+### Set this project's default persona
+
+```yaml
+default_persona: developer
+```
+
+Or from the CLI: `aegis persona use developer` (add `--global` to set the user-wide default instead).
 
 ### Configure lifecycle hooks
 

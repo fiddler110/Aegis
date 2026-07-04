@@ -217,7 +217,9 @@ output_guard:
   max_retries: 1             # corrective retries before surfacing the raw answer
   # rubric: |                # uncomment to override the built-in generic rubric
   #   The response must directly and completely address the request, contain no
-  #   placeholders or TODOs, and ground factual claims in tool output.
+  #   unfinished work (TODOs, stubbed-out logic), and ground factual claims in
+  #   tool output. Clearly-marked example/placeholder values in documentation
+  #   (e.g. an illustrative IP address) are fine.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
