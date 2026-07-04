@@ -371,6 +371,17 @@ personas:
   developer: { model: "" }   # blank = use global provider.model
 
 
+# ── Built-in skills ───────────────────────────────────────────────────────────
+# Skills embedded in the Aegis binary (content-review, html-report,
+# security-audit, architecture-diagram, debug-investigation — see
+# `aegis skills list`). Empty by default: they stay dormant (no
+# system-prompt cost) until named here, via `aegis skills enable <name>`, or
+# the /skills TUI command. Project/user skill files (.aegis/skills/,
+# ~/.aegis/skills/) are unaffected — those are always active.
+skills:
+  builtin_enabled: []   # e.g. ["security-audit", "architecture-diagram"]
+
+
 # ── LSP servers ───────────────────────────────────────────────────────────────
 # Language servers give the agent IDE-level code intelligence (diagnostics,
 # references). Multiple servers can be listed; each handles its file extensions.
@@ -577,6 +588,15 @@ default_persona: developer
 ```
 
 Or from the CLI: `aegis persona use developer` (add `--global` to set the user-wide default instead).
+
+### Enable a built-in skill for this project
+
+```yaml
+skills:
+  builtin_enabled: ["security-audit", "architecture-diagram"]
+```
+
+Or from the CLI: `aegis skills enable security-audit` (add `--global` for the user-wide default instead), or `/skills enable security-audit` in the TUI.
 
 ### Configure lifecycle hooks
 

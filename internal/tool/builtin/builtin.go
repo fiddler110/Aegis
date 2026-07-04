@@ -63,6 +63,9 @@ type Options struct {
 	// MailboxRoot is the on-disk root for team mailboxes (P5.1); required for
 	// the peer-messaging tools.
 	MailboxRoot string
+	// BuiltinSkills names which embedded built-in skills (shipped in the
+	// binary; see internal/skills) are active. Empty keeps them all dormant.
+	BuiltinSkills []string
 }
 
 // SearchOptions configures the web_search tool's provider.
@@ -107,7 +110,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL},
 		&modelsTool{},
 		&securityScanTool{root: root},
-		&skillTool{root: root},
+		&skillTool{root: root, dataDir: opts.DataDir, builtinEnabled: opts.BuiltinSkills},
 		&toolSearchTool{reg: reg},
 	}
 	// Deferred tools are niche: registered but advertised only as a name+

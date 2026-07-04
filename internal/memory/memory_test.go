@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,6 +34,10 @@ func TestAppendAndLoad(t *testing.T) {
 	}
 }
 
+// TestSaveSkillAndLoad checks that SaveSkill writes the file where
+// internal/skills expects to find it (that package, not this one, is
+// responsible for loading and injecting skill content with progressive
+// disclosure — see skills.Discover/BuildIndex).
 func TestSaveSkillAndLoad(t *testing.T) {
 	s := Sources{ProjectRoot: t.TempDir(), DataDir: t.TempDir()}
 	path, err := s.SaveSkill("Deploy Steps", "1. build\n2. ship")
@@ -42,8 +47,14 @@ func TestSaveSkillAndLoad(t *testing.T) {
 	if filepath.Base(path) != "deploy-steps.md" {
 		t.Errorf("skill filename = %q, want deploy-steps.md", filepath.Base(path))
 	}
-	got := s.Load()
-	if !strings.Contains(got, "Skills") || !strings.Contains(got, "deploy-steps") || !strings.Contains(got, "1. build") {
-		t.Errorf("skill not loaded: %q", got)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "1. build") {
+		t.Errorf("skill content wrong: %q", data)
+	}
+	if got := s.Load(); strings.Contains(got, "1. build") {
+		t.Errorf("Load() should no longer eager-inject skill content (that's internal/skills' job): %q", got)
 	}
 }

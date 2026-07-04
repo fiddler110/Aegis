@@ -36,7 +36,7 @@ func TestBuildIndexProgressiveDisclosure(t *testing.T) {
 	writeSkill(t, sd, "described.md", "---\ndescription: Does a thing\n---\nfull body here\n")
 	writeSkill(t, sd, "legacy.md", "no frontmatter, eager inject\n")
 
-	idx := BuildIndex(dir)
+	idx := BuildIndex(dir, "", nil)
 	if !strings.Contains(idx, "<skills_available>") {
 		t.Errorf("expected skills_available block, got:\n%s", idx)
 	}
@@ -56,14 +56,14 @@ func TestLoad(t *testing.T) {
 	sd := filepath.Join(dir, ".aegis", "skills")
 	writeSkill(t, sd, "deploy.md", "---\ndescription: Ship\n---\nrun make deploy\n")
 
-	sk, ok := Load(dir, "deploy")
+	sk, ok := Load(dir, "", nil, "deploy")
 	if !ok {
 		t.Fatal("skill not found")
 	}
 	if !strings.Contains(sk.Content, "run make deploy") {
 		t.Errorf("wrong body: %q", sk.Content)
 	}
-	if _, ok := Load(dir, "missing"); ok {
+	if _, ok := Load(dir, "", nil, "missing"); ok {
 		t.Error("expected missing skill to not load")
 	}
 }
@@ -76,7 +76,7 @@ func TestLoadBundledDirectorySkill(t *testing.T) {
 	writeSkill(t, bundleDir, "validate.py", "print('ok')\n")
 	writeSkill(t, filepath.Join(bundleDir, "references"), "rubric.md", "# Rubric\n")
 
-	sk, ok := Load(dir, "html-report")
+	sk, ok := Load(dir, "", nil, "html-report")
 	if !ok {
 		t.Fatal("bundled skill not found")
 	}
@@ -99,8 +99,63 @@ func TestLoadBundledDirectorySkill(t *testing.T) {
 		t.Errorf("manifest file itself should not be listed as an asset:\n%s", sk.Content)
 	}
 
-	idx := BuildIndex(dir)
+	idx := BuildIndex(dir, "", nil)
 	if !strings.Contains(idx, "html-report: Make a report") {
 		t.Errorf("bundled skill missing from progressive-disclosure index:\n%s", idx)
+	}
+}
+
+func TestBuiltinsListsEmbeddedSkills(t *testing.T) {
+	names := make(map[string]bool)
+	for _, b := range Builtins() {
+		if b.Description == "" {
+			t.Errorf("builtin %q has no description (won't get progressive disclosure)", b.Name)
+		}
+		names[b.Name] = true
+	}
+	for _, want := range []string{"content-review", "html-report", "security-audit", "architecture-diagram", "debug-investigation"} {
+		if !names[want] {
+			t.Errorf("expected built-in skill %q, got: %v", want, names)
+		}
+	}
+}
+
+func TestDiscoverBuiltinDisabledByDefault(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := MaterializeBuiltins(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+
+	if got := Discover(workDir, dataDir, nil); len(got) != 0 {
+		t.Errorf("expected no skills with no enabled builtins, got %v", got)
+	}
+
+	got := Discover(workDir, dataDir, []string{"security-audit"})
+	if len(got) != 1 || got[0].Name != "security-audit" {
+		t.Errorf("expected only security-audit enabled, got %v", got)
+	}
+
+	idx := BuildIndex(workDir, dataDir, []string{"security-audit"})
+	if !strings.Contains(idx, "security-audit") {
+		t.Errorf("enabled builtin missing from index:\n%s", idx)
+	}
+}
+
+func TestDiscoverProjectOverridesBuiltin(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := MaterializeBuiltins(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	sd := filepath.Join(workDir, ".aegis", "skills", "security-audit")
+	writeSkill(t, sd, "SKILL.md", "---\ndescription: custom override\n---\nlocal version\n")
+
+	got := Discover(workDir, dataDir, []string{"security-audit"})
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one security-audit skill, got %v", got)
+	}
+	if got[0].Description != "custom override" {
+		t.Errorf("expected project skill to override built-in, got description %q", got[0].Description)
 	}
 }

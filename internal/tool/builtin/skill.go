@@ -13,7 +13,11 @@ import (
 // skillTool implements progressive disclosure (P4.3): the system prompt lists
 // only skill names and descriptions; this tool loads a skill's full body on
 // demand.
-type skillTool struct{ root string }
+type skillTool struct {
+	root           string
+	dataDir        string
+	builtinEnabled []string
+}
 
 func (t *skillTool) Name() string                { return "skill" }
 func (t *skillTool) Capability() tool.Capability { return tool.CapRead }
@@ -34,9 +38,9 @@ func (t *skillTool) Execute(_ context.Context, input json.RawMessage) (tool.Resu
 	if args.Name == "" {
 		return tool.Result{Content: "skill name is required", IsError: true}, nil
 	}
-	sk, ok := skills.Load(t.root, args.Name)
+	sk, ok := skills.Load(t.root, t.dataDir, t.builtinEnabled, args.Name)
 	if !ok {
-		avail := skillNames(t.root)
+		avail := skillNames(t.root, t.dataDir, t.builtinEnabled)
 		msg := fmt.Sprintf("no skill named %q", args.Name)
 		if avail != "" {
 			msg += "; available skills: " + avail
@@ -46,9 +50,9 @@ func (t *skillTool) Execute(_ context.Context, input json.RawMessage) (tool.Resu
 	return tool.Result{Content: sk.Content}, nil
 }
 
-func skillNames(root string) string {
+func skillNames(root, dataDir string, enabledBuiltins []string) string {
 	var names []string
-	for _, sk := range skills.Discover(root) {
+	for _, sk := range skills.Discover(root, dataDir, enabledBuiltins) {
 		names = append(names, sk.Name)
 	}
 	return strings.Join(names, ", ")

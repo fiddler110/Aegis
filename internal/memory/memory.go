@@ -1,14 +1,14 @@
-// Package memory provides file-based, persistent memory and skills that are
-// injected into the system prompt, plus helpers to append new memories. This
-// mirrors the file-memory model in Claude Code and the self-written skills in
-// Hermes/OpenClaw.
+// Package memory provides file-based, persistent memory that is injected
+// into the system prompt, plus helpers to append new memories and save
+// skill files (loaded and injected by internal/skills, which handles
+// progressive disclosure). This mirrors the file-memory model in Claude
+// Code and the self-written skills in Hermes/OpenClaw.
 package memory
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -97,38 +97,11 @@ func (s Sources) loadDirect() string {
 	if txt := readIfExists(s.ProjectMemoryPath()); txt != "" {
 		sections = append(sections, "# Project memory\n\n"+txt)
 	}
-	if skills := s.loadSkills(); skills != "" {
-		sections = append(sections, "# Skills\n\n"+skills)
-	}
 
 	if len(sections) == 0 {
 		return ""
 	}
 	return strings.Join(sections, "\n\n")
-}
-
-func (s Sources) loadSkills() string {
-	var parts []string
-	for _, dir := range s.skillDirs() {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
-				names = append(names, e.Name())
-			}
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			if txt := readIfExists(filepath.Join(dir, name)); txt != "" {
-				title := strings.TrimSuffix(name, ".md")
-				parts = append(parts, fmt.Sprintf("## %s\n\n%s", title, txt))
-			}
-		}
-	}
-	return strings.Join(parts, "\n\n")
 }
 
 // Append adds a timestamped entry to the given memory file, creating it (and

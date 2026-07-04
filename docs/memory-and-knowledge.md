@@ -116,6 +116,19 @@ The agent can save skills with `save_skill`:
 /skills
 ```
 
+### Built-in skills
+
+Aegis also ships several skills embedded in the binary — `content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation` — covering common workflows out of the box. They stay **dormant by default** (no system-prompt cost) until enabled, since unlike a project/user skill file a user didn't choose to author them:
+
+```bash
+aegis skills list                          # see all built-ins and their on/off status
+aegis skills enable security-audit          # project config (.aegis/config.yaml)
+aegis skills enable security-audit --global # user config instead
+aegis skills disable security-audit
+```
+
+Or from the TUI: `/skills` (list), `/skills enable <name> [global]`, `/skills disable <name> [global]`. Changes take effect on the next restart. A project or user skill file with the same name always takes precedence over a built-in.
+
 **Example skill file** (`.aegis/skills/security-review.md`):
 ```markdown
 # Security Review Procedure
