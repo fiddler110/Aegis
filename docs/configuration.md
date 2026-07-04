@@ -160,7 +160,20 @@ cost:
   # 0 = unlimited. Set e.g. 5.0 to abort runs that exceed $5 of estimated spend
   # within a single turn. Pricing covers Anthropic, OpenAI, Gemini, Groq,
   # OpenRouter families. Unknown models have tokens counted but no dollar cost.
+  #
+  # NOTE: budget_usd (and session_cap_usd/daily_cap_usd below) are silent
+  # no-ops for local/Ollama models and any model absent from the pricing
+  # catalog — their usage is estimated or unpriced, so it contributes $0
+  # regardless of how much was actually used. Use max_tokens_per_run /
+  # session_token_cap / daily_token_cap (P10.5) as the primary guardrail for a
+  # local-first setup; the dollar caps remain a convenience for cloud models.
   budget_usd: 0.0
+
+  # 0 = unlimited. Aborts a run once its cumulative token count (input +
+  # output + cache, across every turn) reaches this amount. Always
+  # enforceable — token counts are present even when usage was estimated or
+  # the model is unpriced, unlike budget_usd.
+  max_tokens_per_run: 0
 
   # 0 = unlimited. Refuses to start a new turn once a session's cumulative
   # (persisted) cost reaches this amount.
@@ -170,9 +183,17 @@ cost:
   # sessions for the current UTC day reaches this amount.
   daily_cap_usd: 0.0
 
-  # Fraction (0-1) of session_cap_usd/daily_cap_usd at which a "cost_alert"
-  # warning event is surfaced to the client instead of a hard stop. Only
-  # applies to whichever cap above is non-zero.
+  # 0 = unlimited. Token-denominated counterparts to session_cap_usd/
+  # daily_cap_usd — refuse a new turn once cumulative tokens (session or
+  # cross-session daily) reach this amount. Recommended for local models,
+  # where the dollar caps above never fire.
+  session_token_cap: 0
+  daily_token_cap: 0
+
+  # Fraction (0-1) of session_cap_usd/daily_cap_usd/session_token_cap/
+  # daily_token_cap at which a "cost_alert" warning event is surfaced to the
+  # client instead of a hard stop. Only applies to whichever cap above is
+  # non-zero.
   alert_threshold: 0.8
 
 
@@ -336,6 +357,24 @@ security:
   network_allowlist: []
     # - "api.github.com"
     # - "registry.npmjs.org"
+
+  # Security-scanner availability (P11.11): controls `aegis scan`/security_scan.
+  # "auto" (host binary if present, else a configured container image) |
+  # "host" (never fall back to a container) | "container" (always prefer it).
+  default_method: auto
+
+  # Per-tool overrides, keyed by scanner name (semgrep, trivy, gitleaks).
+  # image must be digest-pinned (image@sha256:...) — Aegis ships no built-in
+  # image pin; see docs/security.md for how to obtain and verify one.
+  tools: {}
+    # trivy:
+    #   method: auto
+    #   image: "aquasec/trivy@sha256:<digest-you-verified>"
+    # semgrep:
+    #   enabled: true
+    #   method: host
+    # gitleaks:
+    #   install: prompt   # prompt (default) | always | never
 
 
 # ── Output validation ─────────────────────────────────────────────────────────
@@ -574,6 +613,19 @@ cost:
   session_cap_usd: 10.0   # refuse new turns once a session has spent $10
   daily_cap_usd: 25.0     # refuse new turns once all sessions spend $25 in a UTC day
   alert_threshold: 0.8    # warn at 80% of whichever cap above is set
+```
+
+### Set a token budget (recommended for local/Ollama models)
+
+Dollar caps never fire for local models — their usage is estimated and
+contributes $0 regardless of actual volume. Token caps are always
+enforceable:
+
+```yaml
+cost:
+  max_tokens_per_run: 200000   # abort a single run past 200k cumulative tokens
+  session_token_cap: 1000000   # refuse new turns once a session hits 1M tokens
+  daily_token_cap: 5000000     # refuse new turns once all sessions hit 5M tokens in a UTC day
 ```
 
 ### Configure per-persona models

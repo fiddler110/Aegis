@@ -3,12 +3,21 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/checkpoint"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 	_ "modernc.org/sqlite"
 )
 
@@ -87,5 +96,77 @@ func TestOpenCheckpointSnapshotterNoOpWithoutSpec(t *testing.T) {
 	defer closeDB()
 	if snap != nil {
 		t.Error("expected a nil snapshotter when the spec carries no checkpoint id or db path")
+	}
+}
+
+// envProbeCommand returns a shell command that dumps the process environment,
+// in whichever shell syntax the current OS's shell tool uses.
+func envProbeCommand() string {
+	if runtime.GOOS == "windows" {
+		return "Get-ChildItem Env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" }"
+	}
+	return "env"
+}
+
+func execShellTool(t *testing.T, reg *tool.Registry, command string) string {
+	t.Helper()
+	tl, ok := reg.Get("shell")
+	if !ok {
+		t.Fatal("shell tool not registered")
+	}
+	input, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := tl.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("shell tool execute: %v", err)
+	}
+	return res.Content
+}
+
+// TestExecuteWorkerSandboxHonorsConfiguredStripEnv is the P10.2 regression: a
+// subprocess-mode sub-agent worker used to call builtin.Register with no
+// Sandbox at all, so shell.go's own fallback (bare sandbox.NewLocalBackend())
+// only stripped the hardcoded DefaultStripEnv names — any *extra* secret name
+// an operator configured via sandbox.strip_env (e.g. an MCP token loaded from
+// .aegis/.env) still leaked into a worker's shell calls, and a
+// container/os-configured sandbox was never honored at all for the worker's
+// shell tool. executeWorker now builds its registry with
+// server.SelectSandbox(cfg.Sandbox, ...), which does honor both. This test
+// exercises that same wiring path directly (bypassing executeWorker's
+// config.Load()/provider setup, which needs a real environment) by comparing
+// the pre-fix registration (no Sandbox) against the post-fix one (Sandbox
+// from SelectSandbox) for the same configured extra strip-env name.
+func TestExecuteWorkerSandboxHonorsConfiguredStripEnv(t *testing.T) {
+	t.Setenv("MY_MCP_TOKEN", "sk-mcp-secret-value")
+
+	cwd := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := config.SandboxConfig{StripEnv: []string{"MY_MCP_TOKEN"}}
+
+	// Pre-fix behavior: no Sandbox wired into the registry at all.
+	regNoSandbox := tool.NewRegistry()
+	if err := builtin.Register(regNoSandbox, builtin.Options{Root: cwd}); err != nil {
+		t.Fatal(err)
+	}
+	leaked := execShellTool(t, regNoSandbox, envProbeCommand())
+	if !strings.Contains(leaked, "sk-mcp-secret-value") {
+		t.Fatal("test setup invalid: expected the configured extra secret to leak without a wired sandbox (proves this scenario reproduces the pre-fix bug)")
+	}
+
+	// Post-fix behavior: the registry is built with server.SelectSandbox's
+	// result, exactly as executeWorker now does.
+	sb, _, _, err := server.SelectSandbox(cfg, cwd, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regWithSandbox := tool.NewRegistry()
+	if err := builtin.Register(regWithSandbox, builtin.Options{Root: cwd, Sandbox: sb}); err != nil {
+		t.Fatal(err)
+	}
+	out := execShellTool(t, regWithSandbox, envProbeCommand())
+	if strings.Contains(out, "sk-mcp-secret-value") {
+		t.Errorf("configured extra secret leaked into worker shell env:\n%s", out)
 	}
 }

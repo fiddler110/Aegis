@@ -48,6 +48,7 @@ import (
 	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/swarm"
@@ -233,7 +234,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("getwd: %w", err)
 	}
 
-	sb, sandboxFallback, sandboxFallbackReason, err := selectSandbox(cfg.Sandbox, cwd, logger)
+	sb, sandboxFallback, sandboxFallbackReason, err := SelectSandbox(cfg.Sandbox, cwd, logger)
 	if err != nil {
 		store.Close()
 		return nil, err
@@ -300,7 +301,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
 	todoList := builtin.NewTodoList()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security)}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -454,7 +455,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	return s, nil
 }
 
-// selectSandbox picks the command-execution backend per cfg.Backend:
+// SelectSandbox picks the command-execution backend per cfg.Backend:
 // "container" forces a runtime (or auto-detects one); "auto" detects and
 // picks the best available; "os" uses OS-level isolation without a container
 // runtime; anything else (default) runs commands directly on the host.
@@ -464,7 +465,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 // logged, reported back via the fallback/reason return values (surfaced by
 // the caller via /healthz for clients to warn the user), and — when
 // cfg.Strict is set — turned into a hard error instead of a silent fallback.
-func selectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (sb sandbox.Backend, fallback bool, reason string, err error) {
+//
+// Exported (not just server-internal) so the subprocess swarm worker
+// (internal/cli/worker.go) can reconstruct the same sandbox backend the
+// daemon selected instead of running its shell tool unsandboxed (P10.2).
+func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (sb sandbox.Backend, fallback bool, reason string, err error) {
 	switch cfg.Backend {
 	case "container", "auto":
 		opts := sandbox.ContainerOpts{
@@ -539,7 +544,7 @@ func (s *Server) buildSwarmBackend(mailboxRoot string) swarm.Backend {
 	if s.cfg.Swarm.Backend == "subprocess" {
 		if exe, err := os.Executable(); err == nil {
 			s.logger.Info("swarm backend: subprocess", "exe", exe)
-			return swarm.NewSubprocessBackend(exe, "__worker", s.swarmReg, mailboxRoot, s.cfg.SessionDBPath())
+			return swarm.NewSubprocessBackend(exe, "__worker", s.swarmReg, mailboxRoot, s.cfg.SessionDBPath(), s.cfg.Cost.BudgetUSD, s.cfg.Cost.MaxTokensPerRun)
 		}
 		s.logger.Warn("cannot resolve executable path; falling back to in-process swarm backend")
 	}
@@ -567,18 +572,25 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		if tracker == nil {
 			tracker = cost.NewTracker()
 		}
-		gate := permission.New(permission.ParseMode(cfg.Mode), s.approver())
+		// Sub-agents get the same gate stack a top-level run does (contextual
+		// egress/network policy, text allow/deny rules) — only the mode gate
+		// was ever meaningfully child-specific, and clampMode already confines
+		// that above the swarm layer. A bare mode gate here let a spawned
+		// teammate route straight around an operator's egress-then-write or
+		// deny rule (P10.1).
+		gate, engineHooks := s.buildGate(cfg.Mode, s.approver(), persona.Persona{})
 		eng, err := engine.New(engine.Options{
-			Adapter:   s.adapter,
-			Tools:     s.tools,
-			Gate:      gate,
-			Compactor: s.compactor,
-			Hooks:     s.hooks,
-			Cost:      tracker,
-			BudgetUSD: s.cfg.Cost.BudgetUSD,
-			Model:     model,
-			MaxTokens: s.cfg.Provider.MaxTokens,
-			Logger:    s.logger,
+			Adapter:         s.adapter,
+			Tools:           s.tools,
+			Gate:            gate,
+			Compactor:       s.compactor,
+			Hooks:           engineHooks,
+			Cost:            tracker,
+			BudgetUSD:       s.cfg.Cost.BudgetUSD,
+			MaxTokensPerRun: s.cfg.Cost.MaxTokensPerRun,
+			Model:           model,
+			MaxTokens:       s.cfg.Provider.MaxTokens,
+			Logger:          s.logger,
 		})
 		if err != nil {
 			return "", err
@@ -812,16 +824,15 @@ func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
 	return c
 }
 
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry) (*engine.Engine, error) {
-	if s.adapter == nil {
-		return nil, s.providerUnconfiguredErr()
-	}
-	if tools == nil {
-		tools = s.tools
-	}
-	if approver == nil {
-		approver = s.approver()
-	}
+// buildGate assembles the shared permission gate stack — base mode gate →
+// contextual egress/network policy → text allow/deny rules → persona tool
+// advisory (outermost) — used by every engine run the daemon starts, top-level
+// or sub-agent, so a spawned teammate can't bypass an operator's security
+// posture just because it took a different code path to get an engine (P10.1).
+// Mode clamping happens above this call (resolveSessionMode / clampMode); an
+// empty persona.Persona{} skips the persona-specific layers (rules/tools),
+// which is what sub-agent runs pass since they have no persona of their own.
+func (s *Server) buildGate(mode string, approver permission.Approver, p persona.Persona) (engine.Gate, engine.Hooks) {
 	baseGate := permission.New(permission.ParseMode(mode), approver)
 
 	var gate engine.Gate = baseGate
@@ -878,6 +889,21 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 			})
 	}
 
+	return gate, engineHooks
+}
+
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry) (*engine.Engine, error) {
+	if s.adapter == nil {
+		return nil, s.providerUnconfiguredErr()
+	}
+	if tools == nil {
+		tools = s.tools
+	}
+	if approver == nil {
+		approver = s.approver()
+	}
+	gate, engineHooks := s.buildGate(mode, approver, p)
+
 	var guardFn guard.Func
 	var guardRetries int
 	if guardEnabled {
@@ -895,6 +921,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		Hooks:                 engineHooks,
 		Cost:                  tracker,
 		BudgetUSD:             s.cfg.Cost.BudgetUSD,
+		MaxTokensPerRun:       s.cfg.Cost.MaxTokensPerRun,
 		Model:                 s.personaModel(p),
 		MaxTokens:             s.cfg.Provider.MaxTokens,
 		MaxIterations:         s.cfg.Provider.MaxIterations,
@@ -1301,6 +1328,22 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	sessionTokensBefore := sess.InputTokens + sess.OutputTokens
+	if cap := s.cfg.Cost.SessionTokenCap; cap > 0 && sessionTokensBefore >= cap {
+		writeError(w, http.StatusPaymentRequired, fmt.Sprintf("session token cap reached: %d of %d limit", sessionTokensBefore, cap))
+		return
+	}
+	var dailyTokensBefore int
+	if cap := s.cfg.Cost.DailyTokenCap; cap > 0 {
+		dailyTokensBefore, err = s.store.TodayTokens(r.Context())
+		if err != nil {
+			s.logger.Warn("read daily tokens", "err", err)
+		}
+		if dailyTokensBefore >= cap {
+			writeError(w, http.StatusPaymentRequired, fmt.Sprintf("daily token cap reached: %d of %d limit", dailyTokensBefore, cap))
+			return
+		}
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1517,10 +1560,18 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		send(apiEv)
 		if ev.Kind == engine.KindTurnDone {
 			flushMessages()
-			if ev.Usage != nil && !ev.Usage.IsEstimated {
+			if ev.Usage != nil {
+				// Tokens count even for estimated usage (local/Ollama models
+				// report no real usage) — only the dollar figure is skipped
+				// for those, since pricing an estimate would be misleading
+				// (P10.5). Before this fix, AddUsage/AddDailyTokens never saw
+				// a local model's turns at all, so session/daily token caps
+				// had nothing to check against.
 				totalIn += ev.Usage.InputTokens
 				totalOut += ev.Usage.OutputTokens
-				totalCost += apiEv.CostUSD
+				if !ev.Usage.IsEstimated {
+					totalCost += apiEv.CostUSD
+				}
 			}
 		}
 	})
@@ -1543,7 +1594,14 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("add daily cost", "err", err)
 		}
 	}
+	totalTokens := totalIn + totalOut
+	if totalTokens > 0 && s.cfg.Cost.DailyTokenCap > 0 {
+		if err := s.store.AddDailyTokens(context.Background(), totalTokens); err != nil {
+			s.logger.Warn("add daily tokens", "err", err)
+		}
+	}
 	s.alertOnCostThreshold(send, sess.CostUSD, totalCost, dailyCostBefore)
+	s.alertOnTokenThreshold(send, sessionTokensBefore, totalTokens, dailyTokensBefore)
 	if len(traces) > 0 {
 		if err := s.store.AppendTraces(context.Background(), id, traces); err != nil {
 			s.logger.Warn("save traces", "session", id, "err", err)
@@ -1598,6 +1656,34 @@ func (s *Server) alertOnCostThreshold(send func(api.Event), sessionCostBefore, t
 		after := dailyCostBefore + turnCost
 		if dailyCostBefore < threshold && after >= threshold {
 			send(api.Event{Kind: api.KindCostAlert, Text: fmt.Sprintf("daily spend at $%.4f — %.0f%% of the $%.2f cap", after, after/cap*100, cap)})
+		}
+	}
+}
+
+// alertOnTokenThreshold is the token-denominated counterpart to
+// alertOnCostThreshold (P10.5) — same crossing-edge logic, checked against
+// SessionTokenCap/DailyTokenCap instead of the dollar caps, so it still fires
+// for local/unpriced models whose turnCost is always 0.
+func (s *Server) alertOnTokenThreshold(send func(api.Event), sessionTokensBefore, turnTokens, dailyTokensBefore int) {
+	if turnTokens <= 0 {
+		return
+	}
+	frac := s.cfg.Cost.AlertThreshold
+	if frac <= 0 {
+		return
+	}
+	if cap := s.cfg.Cost.SessionTokenCap; cap > 0 {
+		threshold := float64(cap) * frac
+		after := sessionTokensBefore + turnTokens
+		if float64(sessionTokensBefore) < threshold && float64(after) >= threshold {
+			send(api.Event{Kind: api.KindCostAlert, Text: fmt.Sprintf("session tokens at %d — %.0f%% of the %d cap", after, float64(after)/float64(cap)*100, cap)})
+		}
+	}
+	if cap := s.cfg.Cost.DailyTokenCap; cap > 0 {
+		threshold := float64(cap) * frac
+		after := dailyTokensBefore + turnTokens
+		if float64(dailyTokensBefore) < threshold && float64(after) >= threshold {
+			send(api.Event{Kind: api.KindCostAlert, Text: fmt.Sprintf("daily tokens at %d — %.0f%% of the %d cap", after, float64(after)/float64(cap)*100, cap)})
 		}
 	}
 }

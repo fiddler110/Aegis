@@ -110,11 +110,7 @@ func NewTracker() *Tracker { return &Tracker{} }
 func (t *Tracker) Add(model string, u provider.Usage) float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.turns++
-	t.usage.InputTokens += u.InputTokens
-	t.usage.OutputTokens += u.OutputTokens
-	t.usage.CacheCreationTokens += u.CacheCreationTokens
-	t.usage.CacheReadTokens += u.CacheReadTokens
+	t.addTokensLocked(u)
 	if p, ok := PricingFor(model); ok {
 		t.totalUSD += p.CostUSD(u)
 	} else {
@@ -123,11 +119,59 @@ func (t *Tracker) Add(model string, u provider.Usage) float64 {
 	return t.totalUSD
 }
 
+// AddTokens records one turn's token counts without contributing to the
+// dollar total (P10.5). Used for estimated usage (character-derived counts
+// from providers that report no real usage, e.g. local/Ollama models): the
+// estimate is too rough to price honestly, but it must still count toward
+// TotalTokens or the token budget silently ignores every turn a local model
+// runs — exactly the guardrail gap dollar-only tracking left open for the
+// local-first default posture.
+func (t *Tracker) AddTokens(u provider.Usage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.addTokensLocked(u)
+}
+
+func (t *Tracker) addTokensLocked(u provider.Usage) {
+	t.turns++
+	t.usage.InputTokens += u.InputTokens
+	t.usage.OutputTokens += u.OutputTokens
+	t.usage.CacheCreationTokens += u.CacheCreationTokens
+	t.usage.CacheReadTokens += u.CacheReadTokens
+}
+
+// AddWorkerCost folds a subprocess sub-agent's self-reported cumulative spend
+// into this tracker (P10.3). A subprocess worker runs in a separate process,
+// so it can't share this *Tracker directly the way an in-process sub-agent
+// does via ctx — it tracks its own totals locally and reports them back once
+// it exits, so a sibling spawned afterward sees the updated totals when the
+// parent computes its remaining budget. The token count is lumped into
+// InputTokens since the input/output/cache breakdown isn't preserved across
+// the process boundary; TotalTokens() is unaffected by how the total is
+// distributed.
+func (t *Tracker) AddWorkerCost(costUSD float64, tokens int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.turns++
+	t.totalUSD += costUSD
+	t.usage.InputTokens += tokens
+}
+
 // TotalUSD returns the cumulative estimated cost.
 func (t *Tracker) TotalUSD() float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.totalUSD
+}
+
+// TotalTokens returns the cumulative token count (input + output + cache
+// creation + cache read) across every turn recorded via Add or AddTokens —
+// the always-enforceable budget primitive (P10.5): unlike TotalUSD, it is
+// never zero just because a model is unpriced or its usage was estimated.
+func (t *Tracker) TotalTokens() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.usage.InputTokens + t.usage.OutputTokens + t.usage.CacheCreationTokens + t.usage.CacheReadTokens
 }
 
 // Snapshot is a point-in-time view of accumulated spend.

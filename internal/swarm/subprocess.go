@@ -25,19 +25,70 @@ type WorkerSpec struct {
 	// lives in a ctx.Value the worker's separate process can never see.
 	// Empty when checkpointing is disabled or Config.CheckpointID is unset.
 	SessionDBPath string `json:"session_db_path,omitempty"`
+
+	// RemainingBudgetUSD / RemainingTokens (P10.3) are the parent's own
+	// cost.BudgetUSD / cost.MaxTokensPerRun ceiling minus whatever the shared
+	// fan-out tracker has already spent at spawn time, computed by
+	// SubprocessBackend.Spawn from the ctx-carried tracker (D1/P10.5). A
+	// worker uses these as its own engine budget instead of the daemon's full
+	// configured cap — otherwise every subprocess teammate got a fresh full
+	// allowance, so N concurrent/sequential spawns enforced N times the
+	// intended ceiling instead of one shared one. Zero means "no cap
+	// configured on the parent side" (the worker falls back to its own
+	// cfg.Cost.* value, which is 0/unlimited in that case too — same result).
+	RemainingBudgetUSD float64 `json:"remaining_budget_usd,omitempty"`
+	RemainingTokens    int     `json:"remaining_tokens,omitempty"`
+}
+
+// costTracker is the narrow slice of *cost.Tracker's API this package needs
+// to compute and fold back subprocess-worker spend, kept local so swarm does
+// not need to import internal/cost (mirrors the any-typed context value in
+// WithCostTracker/CostTrackerFromContext).
+type costTracker interface {
+	TotalUSD() float64
+	TotalTokens() int
+	AddWorkerCost(costUSD float64, tokens int)
+}
+
+// minRemainingBudgetUSD/minRemainingTokens are the floor passed to a worker
+// when the parent's cap is already exhausted at spawn time: a literal 0 would
+// be indistinguishable from "no cap configured" (which also serializes as
+// 0/omitted), so a tiny positive floor keeps the override active — the
+// worker's very first budget check still lets one turn through (a fresh
+// tracker starts at 0, which is not >= floor) before tripping on that turn's
+// actual spend, the same one-turn slack the in-process budget gate has.
+const (
+	minRemainingBudgetUSD = 0.000001
+	minRemainingTokens    = 1
+)
+
+func remainingBudget(cap, spent float64) float64 {
+	if r := cap - spent; r > 0 {
+		return r
+	}
+	return minRemainingBudgetUSD
+}
+
+func remainingTokens(cap, spent int) int {
+	if r := cap - spent; r > 0 {
+		return r
+	}
+	return minRemainingTokens
 }
 
 // SubprocessBackend runs each teammate as a separate headless process (the
 // harness binary invoked with WorkerArgs), giving real OS-level isolation.
 // Results are read back from the teammate's mailbox after the process exits.
 type SubprocessBackend struct {
-	exePath       string
-	workerArgs    []string
-	registry      *Registry
-	mailboxRoot   string
-	sessionDBPath string // passed to workers for checkpoint capture (P9); "" disables it
-	onStop        func(Identity, Result)
-	wg            sync.WaitGroup
+	exePath         string
+	workerArgs      []string
+	registry        *Registry
+	mailboxRoot     string
+	sessionDBPath   string // passed to workers for checkpoint capture (P9); "" disables it
+	budgetUSD       float64
+	maxTokensPerRun int
+	onStop          func(Identity, Result)
+	wg              sync.WaitGroup
 }
 
 // OnStop registers a teammate-completion listener (SUBAGENT_STOP).
@@ -48,13 +99,18 @@ func (b *SubprocessBackend) OnStop(fn func(Identity, Result)) { b.onStop = fn }
 // sessionDBPath is the daemon's session SQLite file, threaded through to
 // workers so their file writes can be captured against the parent turn's
 // checkpoint (P9); pass "" to disable that (checkpointing not configured).
-func NewSubprocessBackend(exePath, workerCmd string, registry *Registry, mailboxRoot, sessionDBPath string) *SubprocessBackend {
+// budgetUSD/maxTokensPerRun are the daemon's configured cost.budget_usd/
+// cost.max_tokens_per_run caps (0 = unlimited), used to compute each spawned
+// worker's remaining allowance (P10.3); pass 0 for either to skip that cap.
+func NewSubprocessBackend(exePath, workerCmd string, registry *Registry, mailboxRoot, sessionDBPath string, budgetUSD float64, maxTokensPerRun int) *SubprocessBackend {
 	return &SubprocessBackend{
-		exePath:       exePath,
-		workerArgs:    []string{workerCmd},
-		registry:      registry,
-		mailboxRoot:   mailboxRoot,
-		sessionDBPath: sessionDBPath,
+		exePath:         exePath,
+		workerArgs:      []string{workerCmd},
+		registry:        registry,
+		mailboxRoot:     mailboxRoot,
+		sessionDBPath:   sessionDBPath,
+		budgetUSD:       budgetUSD,
+		maxTokensPerRun: maxTokensPerRun,
 	}
 }
 
@@ -63,7 +119,23 @@ func (b *SubprocessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle
 	id := NewIdentity(cfg.Name, cfg.Team, cfg.ParentSessionID)
 	b.registry.Add(id)
 
-	specPath, err := writeSpec(WorkerSpec{Identity: id, Config: cfg, MailboxRoot: b.mailboxRoot, SessionDBPath: b.sessionDBPath})
+	spec := WorkerSpec{Identity: id, Config: cfg, MailboxRoot: b.mailboxRoot, SessionDBPath: b.sessionDBPath}
+	// P10.3: hand the worker what's left of the fan-out tree's shared budget,
+	// not the daemon's full configured cap — otherwise every subprocess
+	// teammate enforces its own fresh ceiling, so N spawns allow N times the
+	// intended spend. tracker is nil for a spawn whose context was severed
+	// from the top-level request (e.g. some background paths), in which case
+	// the worker just falls back to its own unmodified cfg.Cost.* values.
+	if tracker, ok := CostTrackerFromContext(ctx).(costTracker); ok {
+		if b.budgetUSD > 0 {
+			spec.RemainingBudgetUSD = remainingBudget(b.budgetUSD, tracker.TotalUSD())
+		}
+		if b.maxTokensPerRun > 0 {
+			spec.RemainingTokens = remainingTokens(b.maxTokensPerRun, tracker.TotalTokens())
+		}
+	}
+
+	specPath, err := writeSpec(spec)
 	if err != nil {
 		b.registry.Update(id.AgentID, StatusFailed, "spec write failed")
 		return nil, err
@@ -73,6 +145,12 @@ func (b *SubprocessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle
 	b.wg.Go(func() {
 		defer os.Remove(specPath)
 		res := b.runWorker(ctx, id, specPath)
+		// Fold the worker's self-reported spend back into the shared
+		// tracker so a sibling spawned after this one sees the updated
+		// total when it computes its own remaining allowance above.
+		if tracker, ok := CostTrackerFromContext(ctx).(costTracker); ok {
+			tracker.AddWorkerCost(res.CostUSD, res.Tokens)
+		}
 		status := StatusDone
 		if res.Failed() {
 			status = StatusFailed
@@ -115,6 +193,13 @@ func (b *SubprocessBackend) runWorker(ctx context.Context, id Identity, specPath
 				res.Output = msgs[i].Text
 				if errStr, ok := msgs[i].Payload["error"].(string); ok {
 					res.Err = errStr
+				}
+				// JSON numbers decode as float64 into map[string]any.
+				if v, ok := msgs[i].Payload["cost_usd"].(float64); ok {
+					res.CostUSD = v
+				}
+				if v, ok := msgs[i].Payload["tokens"].(float64); ok {
+					res.Tokens = int(v)
 				}
 				break
 			}

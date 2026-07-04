@@ -413,3 +413,38 @@ func TestAddDailyCostAccumulates(t *testing.T) {
 		t.Errorf("TodayCost = %v, want %v", got, want)
 	}
 }
+
+// TestTodayTokensDefaultsToZero is the P10.5 token-cap counterpart to
+// TestTodayCostDefaultsToZero.
+func TestTodayTokensDefaultsToZero(t *testing.T) {
+	st := newTestStore(t)
+	got, err := st.TodayTokens(context.Background())
+	if err != nil {
+		t.Fatalf("TodayTokens: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("TodayTokens on empty store = %v, want 0", got)
+	}
+}
+
+// TestAddDailyTokensAccumulates verifies repeated calls sum into the same
+// day's row instead of overwriting it (P10.5 daily token cap).
+func TestAddDailyTokensAccumulates(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.AddDailyTokens(ctx, 150); err != nil {
+		t.Fatalf("AddDailyTokens: %v", err)
+	}
+	if err := st.AddDailyTokens(ctx, 225); err != nil {
+		t.Fatalf("AddDailyTokens: %v", err)
+	}
+	got, err := st.TodayTokens(ctx)
+	if err != nil {
+		t.Fatalf("TodayTokens: %v", err)
+	}
+	const want = 375
+	if got != want {
+		t.Errorf("TodayTokens = %v, want %v", got, want)
+	}
+}

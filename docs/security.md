@@ -13,6 +13,7 @@ The `security_scan` tool and `aegis scan` command run available security scanner
 ```bash
 aegis scan .                      # scan current directory
 aegis scan ./src                  # scan a specific path
+aegis scan image alpine:3.20      # scan a container image by reference (see below)
 ```
 
 ### Tool usage
@@ -21,20 +22,99 @@ The agent can call `security_scan` directly:
 
 ```json
 {
-  "path": ".",
-  "tools": ["semgrep", "trivy", "gitleaks"]   // optional: run a subset
+  "path": "."   // optional: workspace-relative subdirectory; defaults to the whole workspace
+}
+```
+
+Or scan a built container image instead of the workspace:
+
+```json
+{
+  "image": "alpine:3.20"   // container image reference; mutually exclusive with path
 }
 ```
 
 ### Scanners
 
-| Scanner | What it finds | Requires |
+| Scanner | What it finds | Host binary |
 |---------|--------------|---------|
-| **Semgrep** | SAST: code patterns, injection, auth issues, insecure APIs | `semgrep` in PATH |
-| **Trivy** | Vulnerabilities in dependencies (Go, npm, pip, etc.) and containers | `trivy` in PATH |
-| **Gitleaks** | Secrets and credentials accidentally committed | `gitleaks` in PATH |
+| **Semgrep** | SAST: code patterns, injection, auth issues, insecure APIs | `semgrep` |
+| **Trivy** | Vulnerabilities in dependencies (Go, npm, pip, etc.), IaC misconfig (Terraform/CloudFormation/K8s/Helm/Dockerfile/ARM), secrets | `trivy` |
+| **Gitleaks** | Secrets and credentials accidentally committed | `gitleaks` |
+| **Kubescape** | Kubernetes manifest/Helm chart misconfigurations, mapped to NSA/MITRE/CIS framework controls with real severity | `kubescape` |
+| **Hadolint** | Dockerfile lint (any `Dockerfile`/`Dockerfile.*`/`*.dockerfile` found in the scanned path) | `hadolint` |
 
-Aegis runs whichever scanners are installed and skips the rest with a note.
+### Container image scanning
+
+`aegis scan image <ref>` / `security_scan {"image": "..."}` run a separate set of
+scanners that analyze a **built image** rather than a source directory:
+
+| Scanner | What it finds | Host binary |
+|---------|--------------|---------|
+| **Trivy** (`image` mode) | OS + application layer CVEs | `trivy` |
+| **Grype** | Layer CVEs (Anchore vulnerability DB) | `grype` |
+| **Dockle** | CIS Docker Benchmark / image best-practice violations | `dockle` |
+
+**Host-binary only for now:** image scanning needs to pull/inspect the target image, which
+means network egress — but the container-fallback runner these scanners would otherwise use
+is deliberately network-isolated (`--network none`, same hardening as every other scanner
+container, see below). Rather than punch a network hole through that posture, image
+scanning simply doesn't offer a container fallback yet: a tool that would resolve to
+`MethodContainer` is reported skipped with an explicit reason instead. Install
+trivy/grype/dockle natively to use image scanning.
+
+### Scanner availability (host binary vs container fallback)
+
+By default each scanner runs its host binary if it's on `PATH`. When it isn't, Aegis
+can fall back to running the scanner's own container image instead of silently
+skipping it — but only once you configure a **digest-pinned** image for that tool.
+Aegis ships no built-in image pin: a scanner container image is itself supply-chain
+attack surface, and a digest baked into the binary would inevitably go stale. Pin one
+yourself once you've verified it:
+
+```bash
+docker pull aquasec/trivy:0.56.2
+docker inspect --format='{{index .RepoDigests 0}}' aquasec/trivy:0.56.2
+# -> aquasec/trivy@sha256:<digest>
+```
+
+```yaml
+security:
+  default_method: auto        # "auto" (host, else container) | "host" | "container"
+  tools:
+    trivy:
+      method: auto
+      image: "aquasec/trivy@sha256:<digest-you-verified>"
+    semgrep:
+      enabled: true
+      method: host             # never fall back to a container for this one
+    gitleaks:
+      install: prompt           # prompt (default) | always | never — see `aegis security install`
+```
+
+Inspect what will actually happen before you run a scan:
+
+```bash
+aegis security status              # host / container / unavailable + why, per scanner
+aegis security config              # print the resolved security.tools configuration
+aegis security install trivy       # guided host install: shows the exact command, asks to confirm
+aegis security install trivy --yes # skip the confirmation prompt (scripted use)
+```
+
+Or configure it interactively in the TUI instead of hand-editing YAML:
+
+```
+/security-config          # edit the project's .aegis/config.yaml
+/security-config global   # edit ~/.config/aegis/config.yaml instead
+```
+
+This opens a form: pick a tool to toggle enabled/method/install policy/image,
+or "Save & exit" to write it out. Changes take effect on the next restart.
+
+`aegis scan`/`security_scan` report which method actually ran each tool ("Scanners run:
+trivy (container), gitleaks (host)"), and any skipped tool's reason (disabled,
+no binary + no image configured, no container runtime available, ...) — never a
+silent skip.
 
 ### Output format
 

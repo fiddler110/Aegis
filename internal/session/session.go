@@ -125,6 +125,10 @@ CREATE TABLE IF NOT EXISTS session_traces (
 CREATE TABLE IF NOT EXISTS daily_cost (
     day      TEXT PRIMARY KEY, -- UTC date, YYYY-MM-DD
     cost_usd REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS daily_tokens (
+    day    TEXT PRIMARY KEY, -- UTC date, YYYY-MM-DD
+    tokens INTEGER NOT NULL DEFAULT 0
 );`); err != nil {
 		return err
 	}
@@ -612,6 +616,31 @@ func (s *Store) TodayCost(ctx context.Context) (float64, error) {
 		return 0, nil
 	}
 	return cost, err
+}
+
+// AddDailyTokens accumulates token counts against the current UTC day, for
+// the cross-session daily token cap (P10.5) — the always-enforceable
+// counterpart to AddDailyCost, since token counts are present even when a
+// turn's usage was estimated or its model unpriced. Safe for concurrent calls.
+func (s *Store) AddDailyTokens(ctx context.Context, tokens int) error {
+	day := time.Now().UTC().Format("2006-01-02")
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO daily_tokens (day, tokens) VALUES (?, ?)
+		 ON CONFLICT(day) DO UPDATE SET tokens = tokens + excluded.tokens`,
+		day, tokens)
+	return err
+}
+
+// TodayTokens returns accumulated tokens across all sessions for the current
+// UTC day (0 if none recorded yet today).
+func (s *Store) TodayTokens(ctx context.Context) (int, error) {
+	day := time.Now().UTC().Format("2006-01-02")
+	var tokens int
+	err := s.db.QueryRowContext(ctx, `SELECT tokens FROM daily_tokens WHERE day = ?`, day).Scan(&tokens)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return tokens, err
 }
 
 // SetSystem updates a session's system prompt.

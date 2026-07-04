@@ -146,6 +146,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newPersonaCmd())
 	cmd.AddCommand(newSkillsCmd())
 	cmd.AddCommand(newScanCmd())
+	cmd.AddCommand(newSecurityCmd())
 	cmd.AddCommand(newSandboxCmd())
 	cmd.AddCommand(newIndexCmd())
 	cmd.AddCommand(newKnowledgeCmd())

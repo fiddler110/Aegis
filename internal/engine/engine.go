@@ -158,6 +158,7 @@ type Options struct {
 	OutputGuard           guard.Func      // optional; validates the final answer (and any files written this turn)
 	OutputGuardMaxRetries int             // corrective retries on guard failure; 0 -> 1 when a guard is set
 	BudgetUSD             float64         // optional; >0 aborts the run past this cost
+	MaxTokensPerRun       int             // optional; >0 aborts the run past this cumulative token count (P10.5) — always enforceable, unlike BudgetUSD which is a no-op for unpriced/estimated usage
 	Model                 string
 	MaxTokens             int
 	Temperature           *float64
@@ -180,6 +181,7 @@ type Engine struct {
 	outputGuard         guard.Func
 	outputGuardMax      int
 	budgetUSD           float64
+	maxTokensPerRun     int
 	model               string
 	maxTokens           int
 	temperature         *float64
@@ -236,6 +238,7 @@ func New(opts Options) (*Engine, error) {
 		outputGuard:         opts.OutputGuard,
 		outputGuardMax:      opts.OutputGuardMaxRetries,
 		budgetUSD:           opts.BudgetUSD,
+		maxTokensPerRun:     opts.MaxTokensPerRun,
 		model:               opts.Model,
 		maxTokens:           maxTok,
 		temperature:         opts.Temperature,
@@ -308,6 +311,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
+		if e.maxTokensPerRun > 0 && e.cost != nil && e.cost.TotalTokens() >= e.maxTokensPerRun {
+			err := fmt.Errorf("engine: token budget reached: used %d of %d token limit", e.cost.TotalTokens(), e.maxTokensPerRun)
+			emit(Event{Kind: KindError, Err: err})
+			return err
+		}
 
 		// Allow callers to inject dynamic context or refresh tool metadata
 		// before each model turn (e.g. re-read a file, update memory state).
@@ -355,8 +363,16 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		conv.Append(assistant)
 
 		var runCost float64
-		if e.cost != nil && usage != nil && !usage.IsEstimated {
-			runCost = e.cost.Add(e.model, *usage)
+		if e.cost != nil && usage != nil {
+			if usage.IsEstimated {
+				// Tokens still count toward MaxTokensPerRun even when the
+				// provider gave no real usage (local/Ollama models) — only the
+				// dollar figure is skipped, since pricing an estimate would be
+				// misleading (P10.5).
+				e.cost.AddTokens(*usage)
+			} else {
+				runCost = e.cost.Add(e.model, *usage)
+			}
 		}
 		emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
 
@@ -425,6 +441,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// Budget gate: stop before launching another (paid) tool round.
 		if e.budgetUSD > 0 && e.cost != nil && e.cost.TotalUSD() >= e.budgetUSD {
 			err := fmt.Errorf("engine: cost budget reached: spent $%.4f of $%.2f limit", e.cost.TotalUSD(), e.budgetUSD)
+			emit(Event{Kind: KindError, Err: err})
+			return err
+		}
+		if e.maxTokensPerRun > 0 && e.cost != nil && e.cost.TotalTokens() >= e.maxTokensPerRun {
+			err := fmt.Errorf("engine: token budget reached: used %d of %d token limit", e.cost.TotalTokens(), e.maxTokensPerRun)
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}

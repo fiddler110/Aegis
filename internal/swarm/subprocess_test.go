@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 )
 
@@ -50,9 +51,28 @@ func fakeWorkerMain() {
 		mb, _ := OpenMailbox(spec.MailboxRoot, spec.Identity)
 		_ = mb.Send(Message{Type: MsgResult, Sender: spec.Identity.AgentID, Payload: map[string]any{"error": "deliberate failure"}})
 		os.Exit(1)
+	case "report-remaining":
+		// Echoes back what Spawn computed for this worker (P10.3), so the
+		// parent test can assert on the exact remaining-budget arithmetic
+		// without needing a real engine run.
+		mb, _ := OpenMailbox(spec.MailboxRoot, spec.Identity)
+		out, _ := json.Marshal(map[string]any{
+			"remaining_budget_usd": spec.RemainingBudgetUSD,
+			"remaining_tokens":     spec.RemainingTokens,
+		})
+		_ = mb.Send(Message{Type: MsgResult, Sender: spec.Identity.AgentID, Text: string(out), Payload: map[string]any{"error": ""}})
+		os.Exit(0)
 	default:
 		mb, _ := OpenMailbox(spec.MailboxRoot, spec.Identity)
-		_ = mb.Send(Message{Type: MsgResult, Sender: spec.Identity.AgentID, Text: "worker handled: " + spec.Config.Prompt, Payload: map[string]any{"error": ""}})
+		_ = mb.Send(Message{
+			Type:   MsgResult,
+			Sender: spec.Identity.AgentID,
+			Text:   "worker handled: " + spec.Config.Prompt,
+			// Simulates a worker self-reporting its own spend (P10.3) so
+			// SubprocessBackend can fold it back into the parent's shared
+			// tracker once this process exits.
+			Payload: map[string]any{"error": "", "cost_usd": 2.5, "tokens": 100},
+		})
 		os.Exit(0)
 	}
 }
@@ -61,7 +81,7 @@ func newTestSubprocessBackend(t *testing.T) (*SubprocessBackend, *Registry) {
 	t.Helper()
 	t.Setenv("SWARM_TEST_WORKER", "1") // children inherit; marks them as workers
 	reg := NewRegistry()
-	b := NewSubprocessBackend(os.Args[0], "__worker", reg, MailboxRoot(t.TempDir()), "")
+	b := NewSubprocessBackend(os.Args[0], "__worker", reg, MailboxRoot(t.TempDir()), "", 0, 0)
 	return b, reg
 }
 
@@ -101,5 +121,91 @@ func TestSubprocessSpawnCrashSynthesizesError(t *testing.T) {
 	}
 	if res.Output != "" {
 		t.Errorf("crash should yield no output, got %q", res.Output)
+	}
+}
+
+// fakeTracker is a minimal costTracker double for tests: NewSubprocessBackend
+// deliberately doesn't import internal/cost, so nothing here needs a real
+// *cost.Tracker either.
+type fakeTracker struct {
+	mu             sync.Mutex
+	usd            float64
+	tokens         int
+	addedCostUSD   float64
+	addedTokens    int
+	addWorkerCosts int
+}
+
+func (f *fakeTracker) TotalUSD() float64 { f.mu.Lock(); defer f.mu.Unlock(); return f.usd }
+func (f *fakeTracker) TotalTokens() int  { f.mu.Lock(); defer f.mu.Unlock(); return f.tokens }
+func (f *fakeTracker) AddWorkerCost(costUSD float64, tokens int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addedCostUSD = costUSD
+	f.addedTokens = tokens
+	f.addWorkerCosts++
+}
+
+// TestSubprocessSpawnComputesRemainingBudget is the P10.3 regression: each
+// subprocess worker used to get a fresh cfg.Cost.BudgetUSD/MaxTokensPerRun
+// allowance regardless of what the fan-out tree had already spent, so N
+// spawns enforced N times the intended ceiling. Spawn must instead pass down
+// what's left of the shared tracker's budget.
+func TestSubprocessSpawnComputesRemainingBudget(t *testing.T) {
+	t.Setenv("SWARM_TEST_WORKER", "1")
+	reg := NewRegistry()
+	b := NewSubprocessBackend(os.Args[0], "__worker", reg, MailboxRoot(t.TempDir()), "", 1.0, 1000)
+
+	tracker := &fakeTracker{usd: 0.4, tokens: 300}
+	ctx := WithCostTracker(context.Background(), tracker)
+
+	h, err := b.Spawn(ctx, SpawnConfig{Name: "w", Prompt: "report-remaining"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		RemainingBudgetUSD float64 `json:"remaining_budget_usd"`
+		RemainingTokens    int     `json:"remaining_tokens"`
+	}
+	if err := json.Unmarshal([]byte(res.Output), &got); err != nil {
+		t.Fatalf("unmarshal worker report: %v (output=%q)", err, res.Output)
+	}
+	if diff := got.RemainingBudgetUSD - 0.6; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("RemainingBudgetUSD = %v, want 0.6 (1.0 cap - 0.4 spent)", got.RemainingBudgetUSD)
+	}
+	if got.RemainingTokens != 700 {
+		t.Errorf("RemainingTokens = %d, want 700 (1000 cap - 300 spent)", got.RemainingTokens)
+	}
+}
+
+// TestSubprocessSpawnFoldsWorkerCostIntoSharedTracker verifies a worker's
+// self-reported spend (cost_usd/tokens in its mailbox result) is folded back
+// into the ctx-carried tracker once it exits, so a sibling spawned
+// afterward sees the updated total (P10.3).
+func TestSubprocessSpawnFoldsWorkerCostIntoSharedTracker(t *testing.T) {
+	b, _ := newTestSubprocessBackend(t)
+	tracker := &fakeTracker{}
+	ctx := WithCostTracker(context.Background(), tracker)
+
+	h, err := b.Spawn(ctx, SpawnConfig{Name: "w", Prompt: "do it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CostUSD != 2.5 || res.Tokens != 100 {
+		t.Fatalf("Result cost/tokens = %v/%d, want 2.5/100 (from the fake worker's reported payload)", res.CostUSD, res.Tokens)
+	}
+	if tracker.addWorkerCosts != 1 {
+		t.Fatalf("AddWorkerCost calls = %d, want 1", tracker.addWorkerCosts)
+	}
+	if tracker.addedCostUSD != 2.5 || tracker.addedTokens != 100 {
+		t.Errorf("folded cost/tokens = %v/%d, want 2.5/100", tracker.addedCostUSD, tracker.addedTokens)
 	}
 }

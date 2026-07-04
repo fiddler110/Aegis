@@ -136,15 +136,30 @@ type SandboxConfig struct {
 type CostConfig struct {
 	BudgetUSD float64 `koanf:"budget_usd"` // abort a run past this estimated cost; 0 = unlimited
 
+	// MaxTokensPerRun aborts a run past this cumulative token count (input +
+	// output + cache, across every turn); 0 = unlimited. The primary spend
+	// guardrail (P10.5): unlike BudgetUSD, it is always enforceable because
+	// token counts are present even for unpriced or local/Ollama models where
+	// BudgetUSD silently never fires (estimated usage carries no dollar cost).
+	MaxTokensPerRun int `koanf:"max_tokens_per_run"`
+
 	// SessionCapUSD refuses to start a new turn once a session's cumulative
 	// (persisted) cost reaches this amount; 0 = unlimited (P9.5).
 	SessionCapUSD float64 `koanf:"session_cap_usd"`
 	// DailyCapUSD refuses to start a new turn once total spend across all
 	// sessions for the current UTC day reaches this amount; 0 = unlimited (P9.5).
 	DailyCapUSD float64 `koanf:"daily_cap_usd"`
-	// AlertThreshold is the fraction (0-1) of SessionCapUSD/DailyCapUSD at which
-	// a warning event is surfaced to the client instead of a hard stop. Only
-	// takes effect for whichever cap is non-zero. Default 0.8 (P9.5).
+	// SessionTokenCap refuses to start a new turn once a session's cumulative
+	// (persisted) token count reaches this amount; 0 = unlimited (P10.5). The
+	// token-denominated counterpart to SessionCapUSD — always enforceable.
+	SessionTokenCap int `koanf:"session_token_cap"`
+	// DailyTokenCap refuses to start a new turn once total tokens across all
+	// sessions for the current UTC day reaches this amount; 0 = unlimited (P10.5).
+	DailyTokenCap int `koanf:"daily_token_cap"`
+	// AlertThreshold is the fraction (0-1) of SessionCapUSD/DailyCapUSD/
+	// SessionTokenCap/DailyTokenCap at which a warning event is surfaced to
+	// the client instead of a hard stop. Only takes effect for whichever cap
+	// is non-zero. Default 0.8 (P9.5).
 	AlertThreshold float64 `koanf:"alert_threshold"`
 }
 
@@ -233,6 +248,44 @@ type PermissionConfig struct {
 type SecurityConfig struct {
 	EgressThenWrite  bool     `koanf:"egress_then_write"` // require approval for writes after network egress
 	NetworkAllowList []string `koanf:"network_allowlist"` // restrict network calls to these domains (empty = no restriction)
+
+	// Tools configures per-scanner behavior for `aegis scan`/the security_scan
+	// tool (P11.11): whether it's enabled, how it runs (host binary vs
+	// container image), and its digest-pinned image override. Keyed by
+	// scanner name (semgrep, trivy, gitleaks, ...); a name with no entry uses
+	// DefaultMethod and runs enabled with no image override.
+	Tools map[string]SecurityToolConfig `koanf:"tools"`
+	// DefaultMethod is the resolver method for any scanner with no entry in
+	// Tools: "host" (never fall back to a container), "container" (always
+	// prefer the container image), or "auto"/"" (host if present, else
+	// container) — the default.
+	DefaultMethod string `koanf:"default_method"`
+}
+
+// SecurityToolConfig configures one security scanner (P11.11).
+type SecurityToolConfig struct {
+	// Enabled defaults to true (the zero value); set false to always skip
+	// this tool. A *bool (not bool) so "unset" is distinguishable from an
+	// explicit false when merging config layers.
+	Enabled *bool `koanf:"enabled"`
+	// Method overrides SecurityConfig.DefaultMethod for this tool: "host",
+	// "container", or "auto".
+	Method string `koanf:"method"`
+	// Install controls whether Aegis may install this tool automatically
+	// when missing (P11.10): "prompt" (default — ask before installing),
+	// "always" (pre-authorized, no prompt), or "never" (use only if already
+	// present, don't offer to install).
+	Install string `koanf:"install"`
+	// Image is a digest-pinned container image reference
+	// (image@sha256:...) used for this tool's container fallback. Required
+	// to enable container execution — see security.ScannerDescriptor's doc
+	// comment for why Aegis ships no built-in default.
+	Image string `koanf:"image"`
+}
+
+// ToolEnabled reports whether c enables the tool (default true).
+func (c SecurityToolConfig) ToolEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // OutputGuardConfig sets the default output-validation behaviour applied to
@@ -299,14 +352,18 @@ func defaults() map[string]any {
 		"permission.auto_approve_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
 		"cost.budget_usd":              0.0,
+		"cost.max_tokens_per_run":      0,
 		"cost.session_cap_usd":         0.0,
 		"cost.daily_cap_usd":           0.0,
+		"cost.session_token_cap":       0,
+		"cost.daily_token_cap":         0,
 		"cost.alert_threshold":         0.8,
 		"swarm.backend":                "in_process",
 		"sandbox.backend":              "local",
 		"sandbox.image":                "ubuntu:22.04",
 		"sandbox.network":              false,
 		"security.egress_then_write":   false,
+		"security.default_method":      "auto",
 		"output_guard.enabled":         true,
 		"output_guard.mode":            "llm",
 		"output_guard.max_retries":     1,

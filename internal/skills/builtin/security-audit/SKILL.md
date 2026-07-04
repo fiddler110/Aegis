@@ -16,7 +16,7 @@ catches). Run both.
 
 Call the `security_scan` tool over the target (whole workspace, or a
 subdirectory if the ask is scoped) before reading anything by hand. It runs
-whatever scanners are installed (semgrep, trivy, gitleaks) and normalizes
+whatever scanners are installed (semgrep, trivy, gitleaks, kubescape, hadolint) and normalizes
 their output to severity + location + rule + remediation, noting any scanner
 that's skipped because it isn't installed — mention skipped scanners in your
 final report so the reader knows what wasn't covered.
