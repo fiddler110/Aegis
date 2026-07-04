@@ -21,9 +21,25 @@ their output to severity + location + rule + remediation, noting any scanner
 that's skipped because it isn't installed — mention skipped scanners in your
 final report so the reader knows what wasn't covered.
 
-Treat scanner findings as a starting list, not a final one: dedupe near
--duplicates, drop anything you can confirm is a false positive (say why), and
-use the flagged locations as a map of where to spend your manual-review time.
+The tool already dedupes the same CVE/rule flagged at the same location by
+more than one scanner into a single finding (tagged `[also flagged by: ...]`
+when that happened), and tags a best-effort OWASP ASVS chapter on findings
+where one is confidently derivable — trust both, but still drop anything you
+can confirm is a false positive yourself (say why), and use the flagged
+locations as a map of where to spend your manual-review time.
+
+Check the report for a `Suppressed by baseline: N` line and any
+`Baseline entry ...` notices. Suppressed findings are accepted risk an
+operator already reviewed (`.aegis/security-baseline.yaml`, each entry with a
+reason and expiry) — don't re-report them as new, but do flag it plainly if
+one shows up as expired (its finding is back in the report — the suppression
+lapsed and needs a fresh decision) or invalid (malformed entry, never
+applied). If you find a real issue that a knowledgeable reviewer explicitly
+wants to accept rather than fix right now, propose adding a baseline entry
+(rule_id, location if it should be scoped, a concrete reason, and a real
+expiry date) instead of just leaving it unaddressed with no paper trail —
+don't add one yourself without that explicit decision, since it silences a
+real finding.
 
 ## 2. Walk trust boundaries by hand
 
@@ -58,10 +74,27 @@ high, medium, low (see the `content-review` skill's severity rubric if it's
 available; otherwise: critical = exploitable now with real impact, high =
 exploitable under specific conditions, medium = real but narrow/low-impact,
 low = hardening/defense-in-depth). For each finding: one-line summary,
-`file:line`, and the concrete exploit scenario ("attacker with X access
-can Y") — not just "this could be a vulnerability."
+`file:line`, the concrete exploit scenario ("attacker with X access can Y")
+— not just "this could be a vulnerability" — and its ASVS chapter when the
+scan report tagged one (e.g. "ASVS V5.3 Output Encoding and Injection
+Prevention"), so the report reads against a recognized standard rather than
+just a raw tool/rule ID. Leave it off rather than guessing one yourself for
+a manual (non-scanner) finding unless you're confident of the mapping.
 
 State plainly which scanners ran and which were skipped (not installed), and
 don't present a hand-wave ("looks fine") as equivalent to a scanner pass that
 didn't run. If nothing significant turned up, say so directly rather than
 padding the report with low-severity nitpicks to look thorough.
+
+## 4. Close the loop (when asked to fix, not just report)
+
+If the ask is "fix this" / "make this safe to ship" rather than just
+"review," don't stop at the report: for each critical/high finding you can
+concretely fix, propose the change, apply it once agreed, and **re-run
+`security_scan` scoped to the affected path** to confirm the finding is
+actually gone — don't just assert the fix worked. If it's still present
+(wrong rule assumed, fix incomplete, a dedup merge hid a second instance),
+say so and iterate rather than reporting success on an unconfirmed fix. This
+mirrors the same close-the-loop posture as `git_pr` pushing and opening a PR
+once code work is done — a fix isn't finished until it's verified, not just
+written.

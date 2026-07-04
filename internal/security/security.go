@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/sandbox"
 )
@@ -92,6 +93,20 @@ type Finding struct {
 	Description  string       `json:"description,omitempty"`
 	Remediation  string       `json:"remediation,omitempty"`
 	Reachability Reachability `json:"reachability,omitempty"`
+	// CWE is the numeric CWE ID (e.g. "79") extracted from a SARIF rule's
+	// tags/description when present (P11.8) — never guessed from a title,
+	// only ever a value the tool itself tagged the rule with. Feeds ASVS.
+	CWE string `json:"cwe,omitempty"`
+	// ASVS is a best-effort OWASP ASVS chapter/requirement label derived
+	// from CWE (or, for a few CWE-less tools, from the tool itself) so a
+	// report reads against a recognized standard instead of raw tool IDs
+	// (P11.8). Left empty whenever there's no confident mapping — a wrong
+	// standards claim is worse than none, same posture as Reachability.
+	ASVS string `json:"asvs,omitempty"`
+	// SeenBy lists every tool that independently reported this same finding
+	// (same normalized rule/CVE + location) when more than one did — set
+	// only on the deduped survivor, by DedupFindings (P11.8).
+	SeenBy []string `json:"seen_by,omitempty"`
 }
 
 // Scanner is one external analysis tool.
@@ -141,6 +156,23 @@ type Report struct {
 	Ran      []string          `json:"ran"`     // scanners that executed
 	RanVia   map[string]string `json:"ran_via"` // scanner -> "host" or "container" (P11.1)
 	Skipped  map[string]string `json:"skipped"` // scanner -> reason (disabled / unavailable / error)
+
+	// Suppressed holds findings matched by an active .aegis/security-baseline.yaml
+	// entry (P11.8) — never dropped outright, so a report always shows what's
+	// being hidden and why rather than a silent omission.
+	Suppressed []Finding `json:"suppressed,omitempty"`
+	// ExpiredSuppressions/InvalidSuppressions describe baseline entries that
+	// did NOT suppress anything this run: expired ones (past their `expires`
+	// date — the finding they used to cover is back in Findings) and invalid
+	// ones (missing rule_id/reason or an unparseable expires date, so they
+	// were never applied at all). Rendered so a stale/malformed baseline is
+	// visible instead of quietly doing nothing.
+	ExpiredSuppressions []string `json:"expired_suppressions,omitempty"`
+	InvalidSuppressions []string `json:"invalid_suppressions,omitempty"`
+	// BaselineError is set if .aegis/security-baseline.yaml exists but failed
+	// to parse; suppression is skipped entirely in that case (fail safe —
+	// nothing is ever hidden by a baseline Aegis couldn't understand).
+	BaselineError string `json:"baseline_error,omitempty"`
 }
 
 // RunAll executes every available scanner over dir (using opts' per-tool
@@ -163,8 +195,39 @@ func RunWithOptions(ctx context.Context, dir string, scanners []Scanner, opts Op
 		findings, err := sc.Scan(ctx, dir, method, rt, image, opts)
 		rep.record(sc.Name(), method, findings, err)
 	}
+	// Dedup and ASVS-tag before baseline matching, so a suppression entry
+	// matches the same (rule/CVE, location) key a reader would see reported
+	// once, not once per tool that happened to flag it (P11.8).
+	rep.Findings = DedupFindings(rep.Findings)
+	assignASVS(rep.Findings)
+	rep.applyBaseline(dir)
 	rep.sortFindings()
 	return rep
+}
+
+// applyBaseline loads dir's .aegis/security-baseline.yaml (if any) and moves
+// findings matched by an active entry into Suppressed (P11.8). A missing
+// file is the common case and does nothing; a malformed one fails safe —
+// BaselineError is set and no findings are suppressed, rather than risking a
+// broken baseline silently hiding real findings.
+func (r *Report) applyBaseline(dir string) {
+	b, err := LoadBaseline(dir)
+	if err != nil {
+		r.BaselineError = err.Error()
+		return
+	}
+	if b == nil {
+		return
+	}
+	kept, suppressed, expired, invalid := b.Apply(r.Findings, time.Now())
+	r.Findings = kept
+	r.Suppressed = suppressed
+	for _, e := range expired {
+		r.ExpiredSuppressions = append(r.ExpiredSuppressions, formatSuppressionEntry(e)+" — EXPIRED, no longer suppressed")
+	}
+	for _, e := range invalid {
+		r.InvalidSuppressions = append(r.InvalidSuppressions, formatSuppressionEntry(e)+" — invalid (needs rule_id, reason, and a valid expires: YYYY-MM-DD), not applied")
+	}
 }
 
 func newReport() Report {
@@ -245,6 +308,14 @@ func ScanImage(ctx context.Context, ref string, scanners []ImageScanner, opts Op
 		findings, err := sc.ScanImage(ctx, ref, method)
 		rep.record(sc.Name(), method, findings, err)
 	}
+	// Image scans have no natural directory root to load a baseline from
+	// (an image reference isn't a project checkout), so P11.8's suppression
+	// baseline is scoped to RunWithOptions only — same scoping call already
+	// made for image scanning's container fallback (see
+	// imageContainerFallbackUnsupported above). Dedup/ASVS still apply: it's
+	// common for trivy/grype/dockle to all flag the same image CVE.
+	rep.Findings = DedupFindings(rep.Findings)
+	assignASVS(rep.Findings)
 	rep.sortFindings()
 	return rep
 }
@@ -273,17 +344,41 @@ func (r Report) Format() string {
 		fmt.Fprintf(&b, "Scanners skipped: %s\n", strings.Join(parts, ", "))
 	}
 	fmt.Fprintf(&b, "Findings: %d\n", len(r.Findings))
+	if r.BaselineError != "" {
+		fmt.Fprintf(&b, "Baseline error (no suppressions applied): %s\n", r.BaselineError)
+	}
+	if len(r.Suppressed) > 0 {
+		fmt.Fprintf(&b, "Suppressed by baseline: %d\n", len(r.Suppressed))
+	}
+	for _, e := range r.ExpiredSuppressions {
+		fmt.Fprintf(&b, "Baseline entry %s\n", e)
+	}
+	for _, e := range r.InvalidSuppressions {
+		fmt.Fprintf(&b, "Baseline entry %s\n", e)
+	}
 	if len(r.Findings) == 0 {
 		return strings.TrimSpace(b.String())
 	}
 	b.WriteString("\n")
 	for _, f := range r.Findings {
-		fmt.Fprintf(&b, "[%s]%s %s — %s\n  %s (%s)\n", f.Severity, reachabilityTag(f.Reachability), f.Tool, f.Title, f.Location, f.RuleID)
+		fmt.Fprintf(&b, "[%s]%s %s — %s\n  %s (%s)%s\n", f.Severity, reachabilityTag(f.Reachability), f.Tool, f.Title, f.Location, f.RuleID, seenByTag(f.SeenBy))
+		if f.ASVS != "" {
+			fmt.Fprintf(&b, "  asvs: %s\n", f.ASVS)
+		}
 		if f.Remediation != "" {
 			fmt.Fprintf(&b, "  fix: %s\n", f.Remediation)
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// seenByTag renders a short suffix noting every other tool that
+// independently flagged the same deduped finding (P11.8), empty otherwise.
+func seenByTag(seenBy []string) string {
+	if len(seenBy) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" [also flagged by: %s]", strings.Join(seenBy, ", "))
 }
 
 // reachabilityTag renders a short suffix for the one severity/tool line in

@@ -104,6 +104,7 @@ func ParseSARIF(data []byte, defaultTool string) ([]Finding, error) {
 				Location:    location,
 				Description: res.Message.Text,
 				Remediation: remediation,
+				CWE:         cweFromRule(rule, ruleID),
 			})
 		}
 	}
@@ -115,6 +116,21 @@ func ruleIDOf(r *sarifRule) string {
 		return ""
 	}
 	return r.ID
+}
+
+// cweFromRule extracts a CWE ID (P11.8) from a SARIF rule's tags — the
+// authoritative source when present — falling back to the rule ID itself
+// (some engines, e.g. njsscan, encode "CWE-79" directly into the rule ID
+// with no separate tag). Returns "" rather than guessing when neither has one.
+func cweFromRule(rule *sarifRule, ruleID string) string {
+	if rule != nil {
+		for _, tag := range rule.Properties.Tags {
+			if c := extractCWEFromText(tag); c != "" {
+				return c
+			}
+		}
+	}
+	return extractCWEFromText(ruleID)
 }
 
 // sarifSeverity resolves a Finding's Severity from most to least specific:

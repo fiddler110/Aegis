@@ -115,6 +115,14 @@ func RunDAST(ctx context.Context, dastOpts DASTOptions, scanOpts Options) (Repor
 		return rep, err
 	}
 	rep.record("zap", method, findings, nil)
+	// A single tool per run, so DedupFindings is a no-op here in practice,
+	// but assignASVS matters: ZAP's SARIF rules commonly carry a CWE tag
+	// (P11.8), and it's the same ingester/tagging path every other scanner
+	// uses. No baseline application — see ScanImage's identical scoping
+	// note: a scan target URL has no natural project directory to load
+	// .aegis/security-baseline.yaml from.
+	rep.Findings = DedupFindings(rep.Findings)
+	assignASVS(rep.Findings)
 	rep.sortFindings()
 	return rep, nil
 }

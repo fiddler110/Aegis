@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/security"
@@ -27,11 +29,13 @@ func newSecurityCmd() *cobra.Command {
 		Long: "Inspects and provisions the scanners behind `aegis scan`/the security_scan tool. " +
 			"`status` reports whether each tool will run via its host binary, a configured " +
 			"container image, or not at all (with the exact reason). `install` walks through " +
-			"a guided, approval-gated host install for one tool.",
+			"a guided, approval-gated host install for one tool. `baseline` shows the accepted-risk " +
+			"suppression allowlist (.aegis/security-baseline.yaml) and each entry's status.",
 	}
 	cmd.AddCommand(newSecurityStatusCmd())
 	cmd.AddCommand(newSecurityInstallCmd())
 	cmd.AddCommand(newSecurityConfigCmd())
+	cmd.AddCommand(newSecurityBaselineCmd())
 	return cmd
 }
 
@@ -172,4 +176,48 @@ func defaultOr(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// newSecurityBaselineCmd is the P11.8 view for a project's accepted-risk
+// allowlist (.aegis/security-baseline.yaml): view-only, same posture as
+// `security config` — hand-edit the YAML directly (see docs/security.md)
+// rather than through a mutating CLI, so an operator's suppression review
+// happens in a real editor/PR, not a one-off command invocation.
+func newSecurityBaselineCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "baseline [path]",
+		Short: "Show the accepted-risk suppression baseline and its status",
+		Long: "Reads <path>/.aegis/security-baseline.yaml (default: current directory) and prints each " +
+			"suppression entry's status: active (currently suppressing its matched finding), expired " +
+			"(past its expires date — the finding it used to cover is back in scan reports), or invalid " +
+			"(missing rule_id/reason, or an unparseable expires date — never applied). View-only: edit " +
+			"the YAML file directly to add, change, or remove entries.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := "."
+			if len(args) == 1 {
+				dir = args[0]
+			}
+			abs, err := filepath.Abs(dir)
+			if err != nil {
+				return err
+			}
+			b, err := security.LoadBaseline(abs)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if b == nil || len(b.Suppressions) == 0 {
+				fmt.Fprintf(out, "no baseline entries (%s not found or empty)\n", security.BaselinePath(abs))
+				return nil
+			}
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "STATUS\tRULE_ID\tLOCATION\tEXPIRES\tREASON")
+			for _, e := range b.Suppressions {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", security.SuppressionStatusLabel(e, time.Now()), e.RuleID, defaultOr(e.Location, "(any)"), defaultOr(e.Expires, "(missing)"), e.Reason)
+			}
+			tw.Flush()
+			return nil
+		},
+	}
 }
