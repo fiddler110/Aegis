@@ -1,0 +1,37 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "semgrep",
+          "rules": [
+            {
+              "id": "sql-injection",
+              "shortDescription": { "text": "SQL query built from unsanitized input" },
+              "help": { "text": "Use parameterized queries instead of string concatenation." },
+              "properties": {
+                "tags": ["security", "CWE-89: SQL Injection"],
+                "security-severity": "8.5"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "sql-injection",
+          "level": "error",
+          "message": { "text": "User input flows into a raw SQL query" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "internal/db/query.go" },
+                "region": { "startLine": 42 }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

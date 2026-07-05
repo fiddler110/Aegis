@@ -1,0 +1,83 @@
+{
+  "findings": [
+    {
+      "tool": "semgrep",
+      "rule_id": "sql-injection",
+      "severity": "HIGH",
+      "title": "User input flows into a raw SQL query",
+      "location": "internal/db/query.go:42",
+      "description": "User input flows into a raw SQL query",
+      "remediation": "Use parameterized queries instead of string concatenation.",
+      "cwe": "89",
+      "asvs": "V5.3 Output Encoding and Injection Prevention"
+    },
+    {
+      "tool": "gitleaks",
+      "rule_id": "generic-api-key",
+      "severity": "HIGH",
+      "title": "Generic API Key",
+      "location": ".env.example:3",
+      "remediation": "rotate the exposed credential and remove it from the codebase",
+      "asvs": "V6.4 Secret Management"
+    },
+    {
+      "tool": "zap",
+      "rule_id": "40012",
+      "severity": "HIGH",
+      "title": "Reflected XSS via the 'q' query parameter",
+      "location": "http://localhost:3000/search?q=",
+      "description": "Reflected XSS via the 'q' query parameter",
+      "remediation": "Encode all user-controllable output before rendering it in HTML.",
+      "cwe": "79",
+      "asvs": "V5.3 Output Encoding and Injection Prevention"
+    },
+    {
+      "tool": "trivy",
+      "rule_id": "AVD-AWS-0001",
+      "severity": "MEDIUM",
+      "title": "S3 bucket \"my-bucket\" has access logging disabled",
+      "location": "infra/main.tf:10",
+      "description": "S3 bucket \"my-bucket\" has access logging disabled",
+      "asvs": "V14 Configuration"
+    }
+  ],
+  "ran": [
+    "semgrep",
+    "trivy-vuln",
+    "trivy-misconfig",
+    "gitleaks",
+    "osv-scanner",
+    "grype",
+    "zap"
+  ],
+  "ran_via": {
+    "gitleaks": "host",
+    "grype": "host",
+    "osv-scanner": "host",
+    "semgrep": "host",
+    "trivy-misconfig": "host",
+    "trivy-vuln": "host",
+    "zap": "host"
+  },
+  "skipped": {},
+  "suppressed": [
+    {
+      "tool": "trivy",
+      "rule_id": "CVE-2021-23337",
+      "severity": "CRITICAL",
+      "title": "lodash 4.17.15 is vulnerable to command injection (CVE-2021-23337)",
+      "location": "package-lock.json",
+      "description": "lodash 4.17.15 is vulnerable to command injection (CVE-2021-23337)",
+      "seen_by": [
+        "grype",
+        "osv-scanner"
+      ]
+    }
+  ],
+  "expired_suppressions": [
+    "generic-api-key (long past its review date on purpose, to exercise the expired path, expires 2000-01-01) — EXPIRED, no longer suppressed"
+  ],
+  "invalid_suppressions": [
+    "sql-injection (missing an expires date on purpose, to exercise the invalid path, expires ) — invalid (needs rule_id, reason, and a valid expires: YYYY-MM-DD), not applied"
+  ]
+}

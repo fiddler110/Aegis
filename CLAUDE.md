@@ -36,6 +36,9 @@ go test -race ./...
 
 # Regenerate an eval golden transcript after an intentional behavior change
 AEGIS_EVAL_UPDATE=1 go test ./internal/eval/... -run TestScenario_ToolRoundTrip
+
+# Regenerate the security-scan regression golden file (same convention, P11.9)
+AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcrossRecordedOutputs
 ```
 
 ## Architecture

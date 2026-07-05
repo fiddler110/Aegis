@@ -1,0 +1,27 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "grype",
+          "rules": [
+            {
+              "id": "CVE-2021-23337",
+              "properties": { "security-severity": "7.5" }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CVE-2021-23337",
+          "level": "warning",
+          "message": { "text": "lodash@4.17.15 is vulnerable to CVE-2021-23337" },
+          "locations": [
+            { "physicalLocation": { "artifactLocation": { "uri": "package-lock.json" } } }
+          ]
+        }
+      ]
+    }
+  ]
+}

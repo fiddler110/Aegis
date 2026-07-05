@@ -1,0 +1,33 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "zap",
+          "rules": [
+            {
+              "id": "40012",
+              "shortDescription": { "text": "Cross Site Scripting (Reflected)" },
+              "help": { "text": "Encode all user-controllable output before rendering it in HTML." },
+              "properties": { "tags": ["CWE-79"] }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "40012",
+          "level": "error",
+          "message": { "text": "Reflected XSS via the 'q' query parameter" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "http://localhost:3000/search?q=" }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

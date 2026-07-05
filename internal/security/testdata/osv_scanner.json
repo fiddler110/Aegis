@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "source": { "path": "package-lock.json" },
+      "packages": [
+        {
+          "package": { "name": "lodash", "version": "4.17.15", "ecosystem": "npm" },
+          "vulnerabilities": [
+            {
+              "id": "CVE-2021-23337",
+              "summary": "Command Injection in lodash",
+              "affected": [
+                { "ranges": [{ "events": [{ "fixed": "4.17.21" }] }] }
+              ]
+            }
+          ],
+          "groups": [
+            { "ids": ["CVE-2021-23337"], "max_severity": "7.5" }
+          ]
+        }
+      ]
+    }
+  ]
+}
