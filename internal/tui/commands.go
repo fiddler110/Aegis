@@ -116,6 +116,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdModels,
 		},
 		{
+			name:         "status",
+			shortDesc:    "Show daemon health, sandbox backend, and cost caps/spend",
+			detailedHelp: "/status\n  Show daemon reachability, provider/model, active sandbox backend and any fallback reason, this session's cumulative spend against its caps, and cross-session today's spend against the daily caps.",
+			handler:      (*SlashDispatcher).cmdStatus,
+		},
+		{
 			name: "sandbox", argHint: "[use <target>]",
 			shortDesc:    "Show or switch the shell-execution sandbox",
 			detailedHelp: "/sandbox [use <target>]\n  No args: show the configured sandbox backend and detected container runtimes (docker, podman, wslc, container).\n  use <local|auto|docker|podman|wslc|container>: set the backend (written to global config; takes effect on restart).",

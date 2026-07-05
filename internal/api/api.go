@@ -41,6 +41,22 @@ type HealthStatus struct {
 	SandboxFallbackReason string `json:"sandbox_fallback_reason,omitempty"`
 }
 
+// StatusInfo is the /status response (P14.5) — richer daemon health info than
+// /healthz, which stays deliberately minimal since waitForDaemon polls it
+// repeatedly during startup. DailyCostUSD/DailyTokens are the cross-session
+// totals the P9.5/P10.5 daily caps already track in the session store; the
+// Cap fields are 0 when the corresponding cap is unconfigured (unlimited).
+type StatusInfo struct {
+	Provider              string  `json:"provider"`
+	Model                 string  `json:"model"`
+	SandboxFallback       bool    `json:"sandbox_fallback,omitempty"`
+	SandboxFallbackReason string  `json:"sandbox_fallback_reason,omitempty"`
+	DailyCostUSD          float64 `json:"daily_cost_usd"`
+	DailyCapUSD           float64 `json:"daily_cap_usd,omitempty"`
+	DailyTokens           int     `json:"daily_tokens"`
+	DailyTokenCap         int     `json:"daily_token_cap,omitempty"`
+}
+
 // PruneResponse reports how many sessions were deleted by a prune operation.
 type PruneResponse struct {
 	Deleted int `json:"deleted"`

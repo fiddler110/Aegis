@@ -189,6 +189,7 @@ Type `/` to open the command completion popup and browse available commands.
 |---------|-------------|
 | `/clear` | Clear the transcript display (session history preserved) |
 | `/models` | Show current model and provider |
+| `/status` | Show daemon health, sandbox backend, and cost caps/spend (session + cross-session daily) |
 | `/tools compact` | Set tool-output display to 10 lines max |
 | `/tools full` | Show complete tool output (no line cap) |
 | `/sidebar` | Toggle the left sidebar on/off (also `Ctrl+B`) |
