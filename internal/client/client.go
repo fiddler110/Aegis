@@ -195,6 +195,18 @@ func (c *Client) Scan(ctx context.Context, req api.ScanRequest) (*api.ScanRespon
 	return &out, nil
 }
 
+// Debate runs a multi-agent debate (P12) over a claim directly against the
+// daemon's configured model and returns the formatted transcript plus the
+// arbiter's parsed verdict — no session involved, though (unlike Scan) it does
+// spend model turns per role per round.
+func (c *Client) Debate(ctx context.Context, req api.DebateRequest) (*api.DebateResponse, error) {
+	var out api.DebateResponse
+	if err := c.do(ctx, http.MethodPost, "/debate", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ListCommands returns custom slash commands from the daemon.
 func (c *Client) ListCommands(ctx context.Context) ([]api.CommandInfo, error) {
 	var out []api.CommandInfo

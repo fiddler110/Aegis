@@ -376,6 +376,12 @@ security:
     # gitleaks:
     #   install: prompt   # prompt (default) | always | never
 
+  # Opt-in P12 debate integration (P12.5): both default false. See
+  # multi-agent.md#debate-p12.
+  debate:
+    threat_model: false   # security-architect: debate each threat/mitigation before writing it down
+    triage: false           # security-audit skill: debate a borderline/disputed finding before suppressing it
+
 
 # ── Output validation ─────────────────────────────────────────────────────────
 output_guard:
@@ -647,6 +653,21 @@ cost:
   session_token_cap: 1000000   # refuse new turns once a session hits 1M tokens
   daily_token_cap: 5000000     # refuse new turns once all sessions hit 5M tokens in a UTC day
 ```
+
+### Route threat-model entries or borderline scan findings through a debate round (P12.5)
+
+Both default off — a debate round is 3+ model calls instead of 1, so this is a deliberate opt-in, not a
+default-on behavior change:
+
+```yaml
+security:
+  debate:
+    threat_model: true   # security-architect debates each threat/mitigation before writing it down
+    triage: true           # security-audit skill debates a borderline/disputed finding before suppressing it
+```
+
+See [multi-agent.md](multi-agent.md#debate-p12) for the debate mechanism itself (`/debate`, `aegis
+debate`, the `agent` tool's `mode:"debate"`).
 
 ### Configure per-persona models
 

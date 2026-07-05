@@ -41,6 +41,15 @@ expiry date) instead of just leaving it unaddressed with no paper trail —
 don't add one yourself without that explicit decision, since it silences a
 real finding.
 
+If your system prompt's "Debate mode (P12)" section marks triage enabled,
+route a borderline or disputed-severity finding (ambiguous impact, a
+severity you're not confident in, or a suggested suppression) through the
+`agent` tool's `mode:"debate"` before deciding to suppress it — call with
+`claim` set to the finding's severity/location/rationale, and only propose
+suppression if the arbiter's verdict upholds the low-risk read. Skip this
+for clear-cut findings (obviously critical or obviously a non-issue); it
+exists for the ones where a single pass could go either way.
+
 ## 2. Walk trust boundaries by hand
 
 Scanners are blind to anything that requires understanding what the code is

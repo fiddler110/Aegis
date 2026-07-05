@@ -286,6 +286,30 @@ type SecurityConfig struct {
 	// advisory permission rules, since an agent pointing an active scanner
 	// at an arbitrary host is an abuse primitive.
 	DAST DASTConfig `koanf:"dast"`
+
+	// Debate gates the two opt-in integration points between the P12
+	// multi-agent-debate mechanism and existing security workflows (P12.5):
+	// threat-model entries and audit-triage findings. Both default false —
+	// debate multiplies model calls per item, so it's a deliberate opt-in,
+	// never a silent behavior change to the existing single-pass workflows.
+	Debate DebateIntegrationConfig `koanf:"debate"`
+}
+
+// DebateIntegrationConfig toggles routing specific existing security
+// workflows through a P12 debate round before they finalize their output.
+// This only controls the instruction text injected into the system prompt
+// (server.effectiveSystem) — the model still decides per-item whether a
+// debate is warranted; the toggle controls whether it's told to consider one
+// at all.
+type DebateIntegrationConfig struct {
+	// ThreatModel enables the security-architect persona's threat-modeling
+	// workflow to route each identified threat/mitigation pair through a
+	// debate round before writing it into the threat model document.
+	ThreatModel bool `koanf:"threat_model"`
+	// Triage enables the security-audit skill's triage loop to route a
+	// borderline or disputed-severity finding through a debate round before
+	// deciding whether to suppress it via the baseline (P11.8).
+	Triage bool `koanf:"triage"`
 }
 
 // DASTConfig is the hard authorization gate for DAST scanning (P11.7): a
@@ -413,6 +437,8 @@ func defaults() map[string]any {
 		"security.egress_then_write":   false,
 		"security.default_method":      "auto",
 		"security.dast.allow_active":   false,
+		"security.debate.threat_model": false,
+		"security.debate.triage":       false,
 		"output_guard.enabled":         true,
 		"output_guard.mode":            "llm",
 		"output_guard.max_retries":     1,

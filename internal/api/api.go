@@ -248,3 +248,28 @@ type ScanRequest struct {
 type ScanResponse struct {
 	Report string `json:"report"`
 }
+
+// DebateRequest runs a multi-agent debate (P12) directly (POST /debate),
+// independent of any session — the same underlying mechanism the `agent`
+// tool's debate mode runs, exposed for `/debate` in the TUI and `aegis debate`
+// so a claim can be adversarially reviewed without spending a conversational
+// turn first to produce it.
+type DebateRequest struct {
+	// Claim is the finding/threat-mitigation/design assertion to debate.
+	Claim string `json:"claim"`
+	// ProposerPersona/CriticPersona/ArbiterPersona override the default debate
+	// role personas (security-researcher/security-critic/security-arbiter).
+	ProposerPersona string `json:"proposer_persona,omitempty"`
+	CriticPersona   string `json:"critic_persona,omitempty"`
+	ArbiterPersona  string `json:"arbiter_persona,omitempty"`
+	// MaxRounds overrides the default critique/rebuttal round bound (2).
+	MaxRounds int `json:"max_rounds,omitempty"`
+}
+
+// DebateResponse carries the formatted transcript and the arbiter's parsed
+// verdict fields (empty if the arbiter's response didn't parse).
+type DebateResponse struct {
+	Report     string `json:"report"`
+	Verdict    string `json:"verdict"`
+	Confidence string `json:"confidence"`
+}
