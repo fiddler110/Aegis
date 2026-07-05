@@ -66,9 +66,10 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/tool` | `Tool` interface + `Registry` (register/expose separation lets permission modes gate capability without unregistering) |
 | `internal/tool/builtin` | All 39+ built-in tools (file ops, git, shell, web, memory, LSP, security scan, diagram, cron, agent spawning, etc.) |
 | `internal/permission` | Three modes: `plan` (read-only), `build` (read+write, execute gated), `auto` (all allowed); text-based allow/deny rules; `PersonaToolGate` advisory (never-enforcing) check on a persona's declared `Tools` |
-| `internal/persona` | 17 built-in named system prompts (general, security, developer, SRE, etc.); custom personas are `.md` files with YAML frontmatter, hot-reloaded via a signature-cached `Refresh` |
+| `internal/persona` | 19 built-in named system prompts (general, security, developer, SRE, security-critic/security-arbiter debate roles, etc.); custom personas are `.md` files with YAML frontmatter, hot-reloaded via a signature-cached `Refresh` |
 | `internal/skills` | Progressive-disclosure skills: project/user `.md`/bundled-directory skill files, plus skills embedded in the binary (`go:embed`) that stay dormant until named in config/CLI/TUI |
 | `internal/swarm` | Multi-agent coordination: spawns sub-agents as goroutines (`in_process`) or subprocesses; file-based mailbox for inter-agent messaging |
+| `internal/debate` | Multi-agent-debate (MAD) primitive (P12): propose/critique/rebut/arbitrate over a claim via a caller-supplied `RunFunc`, decoupled from swarm/engine the same way swarm is decoupled from engine; evidence-citation check (P12.3) and shared-tracker budget bound (P12.6) live here |
 | `internal/compaction` | Context compaction — summarizes old turns when the conversation approaches the model's context window |
 | `internal/checkpoint` | Per-turn restore points for `/rewind` |
 | `internal/memory` | Project-level and user-level persistent memory; relevance scoring for context injection |

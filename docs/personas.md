@@ -72,6 +72,13 @@ default_persona: developer
 | Infrastructure Architect | `infrastructure-architect` | IaC (Terraform/Pulumi), container orchestration, day-2 operations |
 | Cloud Architect | `cloud-architect` | Cloud-native design, migration strategies, multi-cloud/hybrid, cost optimization |
 | Cloud Security Engineer | `cloud-security-engineer` | Cloud security posture (CIS Benchmarks), IAM, cloud-native security controls |
+| Security Critic | `security-critic` | Debate role (P12): adversarially hunts for the weakest part of a claim, grounded in cited evidence, or concedes |
+| Security Arbiter | `security-arbiter` | Debate role (P12): synthesizes a debate transcript into a structured UPHOLD/REVISE/REJECT verdict |
+
+`security-critic` and `security-arbiter` are used as the default critic/arbiter roles by the `agent`
+tool's `mode:"debate"` (see [multi-agent.md](multi-agent.md#debate-p12)) — they're rarely picked
+directly with `--persona`, but are addressable the same way any other persona is (`aegis persona show
+security-critic`), and can be overridden per debate call via `critic_persona`/`arbiter_persona`.
 
 ---
 

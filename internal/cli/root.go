@@ -189,6 +189,7 @@ Use "aegis <command> --help" for details on any command below.`,
 	// Security scanning.
 	cmd.AddCommand(group(newScanCmd(), groupSecure))
 	cmd.AddCommand(group(newSecurityCmd(), groupSecure))
+	cmd.AddCommand(group(newDebateCmd(), groupSecure))
 
 	// Configuration & setup.
 	cmd.AddCommand(group(newConfigCmd(), groupConfig))

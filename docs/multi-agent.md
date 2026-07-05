@@ -99,6 +99,53 @@ Parent:
   ← If tests pass: done
 ```
 
+### Debate (P12)
+
+A claim — a security finding, a threat/mitigation pair, or a design assertion — gets adversarially
+challenged instead of accepted on a single unchallenged pass. Three roles, each a sub-agent spawned
+through the same `agent` tool seam as every other workflow mode:
+
+```json
+{
+  "mode": "debate",
+  "claim": "Token X allows full account takeover.",
+  "max_rounds": 2                 // optional, default 2
+}
+```
+
+```
+Parent:
+  → Critic:   challenges the claim, grounded in cited evidence (a security_scan
+              result, a grep/read_file lookup, a file:line) — or explicitly CONCEDEs
+  → Proposer: rebuts the challenge (skipped if the critic conceded)
+  ← repeat for max_rounds
+  → Arbiter:  issues a final VERDICT (UPHOLD/REVISE/REJECT) + CONFIDENCE, having
+              discounted any round with no cited evidence as [unsubstantiated]
+```
+
+The three roles default to the `security-researcher` (proposer), `security-critic`, and
+`security-arbiter` personas respectively — override with `proposer_persona`/`critic_persona`/
+`arbiter_persona`. A debate also runs directly, without a conversational turn first:
+
+- TUI: `/debate <claim>`
+- CLI: `aegis debate <claim>` (headless, no daemon required — same construction as `aegis chat`)
+- HTTP: `POST /debate` (used by both of the above)
+
+Debate mode checks the run's shared cost tracker before starting each round (`security.debate` config
+doesn't gate this — it's always on) and, once within 90% of the configured `cost.budget_usd`/
+`cost.max_tokens_per_run`, skips straight to arbitration on the transcript gathered so far rather than
+letting the next round's spawn hit the engine's own budget abort with no verdict produced.
+
+Two existing security workflows can optionally route through a debate round before finalizing their
+output — both default off, since debate multiplies model calls per item:
+
+```yaml
+security:
+  debate:
+    threat_model: false   # security-architect: debate each threat/mitigation before writing it down
+    triage: false          # security-audit skill: debate a borderline/disputed finding before suppressing it
+```
+
 ---
 
 ## Parallel User Sessions

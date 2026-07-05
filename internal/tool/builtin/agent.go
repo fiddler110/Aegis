@@ -8,12 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/fiddler110/aegis/internal/agentdef"
 	"github.com/fiddler110/aegis/internal/checkpoint"
+	"github.com/fiddler110/aegis/internal/cost"
+	"github.com/fiddler110/aegis/internal/debate"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/google/uuid"
 )
 
 const maxAgentDuration = 10 * time.Minute
@@ -51,12 +53,36 @@ func checkpointIDFrom(ctx context.Context) string {
 type agentTool struct {
 	backend swarm.Backend
 	mgr     *task.Manager // optional; enables background:true
+
+	// budgetUSD/maxTokensPerRun are the daemon's configured cost caps (P12.6),
+	// threaded through so debate mode can check the shared tracker before
+	// starting each additional round rather than letting a per-round sub-agent
+	// spawn hit the engine's own budget abort mid-critique. Zero means
+	// unlimited, same convention as engine.Options.
+	budgetUSD       float64
+	maxTokensPerRun int
+}
+
+// AgentToolOption configures optional behavior on the `agent` tool.
+type AgentToolOption func(*agentTool)
+
+// WithCostCaps sets the cost caps debate mode checks against (P12.6). Pass the
+// same values as the daemon's configured engine.Options.BudgetUSD/MaxTokensPerRun.
+func WithCostCaps(budgetUSD float64, maxTokensPerRun int) AgentToolOption {
+	return func(a *agentTool) {
+		a.budgetUSD = budgetUSD
+		a.maxTokensPerRun = maxTokensPerRun
+	}
 }
 
 // NewAgentTool builds the `agent` delegation tool over the given backend. mgr
 // may be nil, which disables background delegation.
-func NewAgentTool(backend swarm.Backend, mgr *task.Manager) tool.Tool {
-	return &agentTool{backend: backend, mgr: mgr}
+func NewAgentTool(backend swarm.Backend, mgr *task.Manager, opts ...AgentToolOption) tool.Tool {
+	a := &agentTool{backend: backend, mgr: mgr}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 func (a *agentTool) Name() string { return "agent" }
@@ -68,7 +94,13 @@ func (a *agentTool) Description() string {
 		"explore (read-only search, returns findings), plan (read-only analysis), " +
 		"build (full access). A sub-agent cannot exceed your own permission mode. " +
 		"For multi-agent workflows, set mode to 'sequential', 'parallel', or 'loop' " +
-		"and provide an 'agents' array instead of a single prompt."
+		"and provide an 'agents' array instead of a single prompt. For adversarial " +
+		"review of a security finding, threat/mitigation, or design claim, set mode " +
+		"to 'debate' and provide 'claim': a critic challenges it (grounded in cited " +
+		"evidence or an explicit concession), the proposer rebuts, this repeats for " +
+		"'max_rounds' (default 2), then an arbiter issues a final UPHOLD/REVISE/REJECT " +
+		"verdict. Use this when a claim is borderline, disputed, or high-stakes enough " +
+		"to warrant adversarial pressure instead of a single unchallenged pass."
 }
 
 func (a *agentTool) Capability() tool.Capability { return tool.CapSpawn }
@@ -81,9 +113,14 @@ func (a *agentTool) InputSchema() json.RawMessage {
 			"prompt": {"type": "string", "description": "The full task/instructions for the sub-agent (single-agent mode)."},
 			"subagent_type": {"type": "string", "description": "Which agent to use: general, explore, plan, or build.", "enum": ["general", "explore", "plan", "build"]},
 			"background": {"type": "boolean", "description": "If true, spawn the sub-agent detached and return a task id immediately instead of waiting."},
-			"mode": {"type": "string", "description": "Workflow mode: 'sequential' (agents run in order, each receiving prior output), 'parallel' (agents run concurrently), 'loop' (single agent re-runs until it outputs DONE or max_iterations is reached).", "enum": ["sequential", "parallel", "loop"]},
+			"mode": {"type": "string", "description": "Workflow mode: 'sequential' (agents run in order, each receiving prior output), 'parallel' (agents run concurrently), 'loop' (single agent re-runs until it outputs DONE or max_iterations is reached), 'debate' (adversarial propose/critique/rebut/arbitrate over a claim).", "enum": ["sequential", "parallel", "loop", "debate"]},
 			"agents": {"type": "array", "description": "List of sub-agents for workflow mode.", "items": {"type": "object", "properties": {"description": {"type": "string"}, "prompt": {"type": "string"}, "subagent_type": {"type": "string"}}, "required": ["prompt"]}},
-			"max_iterations": {"type": "integer", "description": "Maximum iterations for loop mode (default 5)."}
+			"max_iterations": {"type": "integer", "description": "Maximum iterations for loop mode (default 5)."},
+			"claim": {"type": "string", "description": "Debate mode only: the claim/finding/design assertion to subject to adversarial critique."},
+			"proposer_persona": {"type": "string", "description": "Debate mode only: persona for the proposer role (default security-researcher)."},
+			"critic_persona": {"type": "string", "description": "Debate mode only: persona for the critic role (default security-critic)."},
+			"arbiter_persona": {"type": "string", "description": "Debate mode only: persona for the arbiter role (default security-arbiter)."},
+			"max_rounds": {"type": "integer", "description": "Debate mode only: maximum critique/rebuttal rounds before arbitration (default 2)."}
 		},
 		"required": []
 	}`)
@@ -98,16 +135,32 @@ type workflowAgent struct {
 
 func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
-		Description   string          `json:"description"`
-		Prompt        string          `json:"prompt"`
-		SubagentType  string          `json:"subagent_type"`
-		Background    bool            `json:"background"`
-		Mode          string          `json:"mode"`
-		Agents        []workflowAgent `json:"agents"`
-		MaxIterations int             `json:"max_iterations"`
+		Description     string          `json:"description"`
+		Prompt          string          `json:"prompt"`
+		SubagentType    string          `json:"subagent_type"`
+		Background      bool            `json:"background"`
+		Mode            string          `json:"mode"`
+		Agents          []workflowAgent `json:"agents"`
+		MaxIterations   int             `json:"max_iterations"`
+		Claim           string          `json:"claim"`
+		ProposerPersona string          `json:"proposer_persona"`
+		CriticPersona   string          `json:"critic_persona"`
+		ArbiterPersona  string          `json:"arbiter_persona"`
+		MaxRounds       int             `json:"max_rounds"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return tool.Result{Content: "agent: invalid input: " + err.Error(), IsError: true}, nil
+	}
+
+	if args.Mode == "debate" {
+		claim := args.Claim
+		if claim == "" {
+			claim = args.Prompt
+		}
+		if claim == "" {
+			return tool.Result{Content: "agent: 'claim' is required for debate mode", IsError: true}, nil
+		}
+		return a.executeDebate(ctx, claim, args.ProposerPersona, args.CriticPersona, args.ArbiterPersona, args.MaxRounds)
 	}
 
 	// Workflow mode: mode field + agents array.
@@ -289,6 +342,69 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 	default:
 		return tool.Result{Content: fmt.Sprintf("agent: unknown mode %q", mode), IsError: true}, nil
 	}
+}
+
+// executeDebate runs a multi-agent debate (P12.1) over claim: a critic
+// challenges it for up to max_rounds (default debate.DefaultMaxRounds),
+// grounded in cited evidence or an explicit concession (P12.3), the proposer
+// rebuts each round, and an arbiter issues a final verdict over the full
+// transcript. Each role runs as a real sub-agent through the existing
+// swarm.Backend seam — no new spawn mechanism — so the critic has the same
+// tool access (grep/read_file/security_scan) any other sub-agent gets under
+// its clamped permission mode.
+func (a *agentTool) executeDebate(ctx context.Context, claim, proposerPersona, criticPersona, arbiterPersona string, maxRounds int) (tool.Result, error) {
+	if depth := swarm.DepthFromContext(ctx); depth >= maxSpawnDepth {
+		return tool.Result{Content: fmt.Sprintf("agent: maximum sub-agent depth (%d) reached; not starting debate", maxSpawnDepth), IsError: true}, nil
+	}
+
+	childMode := clampMode(swarm.ParentModeFromContext(ctx), "build")
+	runRole := func(roleCtx context.Context, systemPrompt, prompt string) (string, error) {
+		cfg := swarm.SpawnConfig{
+			Name:         fmt.Sprintf("debate-%s", uuid.NewString()[:8]),
+			Team:         "debate",
+			Prompt:       prompt,
+			SystemPrompt: systemPrompt,
+			Mode:         childMode,
+			Depth:        swarm.DepthFromContext(ctx) + 1,
+			CheckpointID: checkpointIDFrom(ctx),
+		}
+		h, err := a.backend.Spawn(roleCtx, cfg)
+		if err != nil {
+			return "", err
+		}
+		res, err := h.Wait(roleCtx)
+		if err != nil {
+			return "", err
+		}
+		if res.Failed() {
+			return "", errors.New(res.Err)
+		}
+		return res.Output, nil
+	}
+
+	tracker, _ := swarm.CostTrackerFromContext(ctx).(*cost.Tracker)
+	debateCfg := debate.Config{
+		ProposerPersona: proposerPersona,
+		CriticPersona:   criticPersona,
+		ArbiterPersona:  arbiterPersona,
+		MaxRounds:       maxRounds,
+		Tracker:         tracker,
+		BudgetUSD:       a.budgetUSD,
+		MaxTokens:       a.maxTokensPerRun,
+	}
+
+	debateMaxRounds := debateCfg.MaxRounds
+	if debateMaxRounds <= 0 {
+		debateMaxRounds = debate.DefaultMaxRounds
+	}
+	debateCtx, debateCancel := context.WithTimeout(ctx, maxAgentDuration*time.Duration(2*debateMaxRounds+2))
+	defer debateCancel()
+
+	transcript, err := debate.Run(debateCtx, claim, debateCfg, runRole)
+	if err != nil {
+		return tool.Result{Content: "agent: debate failed: " + err.Error(), IsError: true}, nil
+	}
+	return tool.Result{Content: transcript.Format()}, nil
 }
 
 // spawnBackground launches the teammate as a detached background task. The

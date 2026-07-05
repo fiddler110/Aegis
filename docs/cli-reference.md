@@ -367,6 +367,34 @@ aegis scan .
 
 ---
 
+## `aegis debate`
+
+Adversarially debate a security claim — a finding, threat/mitigation pair, or design assertion — instead
+of trusting a single unchallenged pass. Runs headless, no daemon required (same one-shot construction as
+`aegis chat`): a critic challenges the claim, grounded in cited evidence or an explicit concession, the
+proposer rebuts, this repeats for `--max-rounds` (default 2), then an arbiter issues a final
+UPHOLD/REVISE/REJECT verdict with a confidence label. See [multi-agent.md](multi-agent.md#debate-p12).
+
+```bash
+aegis debate <claim> [flags]
+```
+
+```bash
+aegis debate "The rate limiter fully mitigates the credential-stuffing risk on /login"
+aegis debate "CVE-2024-XXXX in libfoo is exploitable in our usage" --max-rounds 3
+aegis debate "This finding is a false positive" --output-format json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--proposer` | Persona for the proposer role (default `security-researcher`) |
+| `--critic` | Persona for the critic role (default `security-critic`) |
+| `--arbiter` | Persona for the arbiter role (default `security-arbiter`) |
+| `--max-rounds` | Maximum critique/rebuttal rounds before arbitration (default 2) |
+| `--output-format` | `text` (default) or `json` (final transcript + verdict object) |
+
+---
+
 ## `aegis sandbox`
 
 Inspect and configure the shell execution sandbox.

@@ -571,6 +571,34 @@ See [Permission System](permissions.md) for full rule syntax.
 
 ---
 
+## Multi-Agent Debate (P12)
+
+A security claim — a scan finding, a threat/mitigation pair, a "this is a false positive" call — is
+easy to accept on a single unchallenged pass, especially from a small local model. Debate mode runs it
+through adversarial review instead: a critic challenges the claim (grounded in cited evidence — a
+`security_scan` result, a `grep`/`read_file` lookup, a specific `file:line` — or an explicit concession
+if it finds no flaw), the proposer rebuts, this repeats for up to `max_rounds` (default 2), then an
+arbiter issues a final UPHOLD/REVISE/REJECT verdict. A critique with no cited evidence is tagged
+`[unsubstantiated]` in the transcript the arbiter sees and discounted, rather than treated as a real
+rebuttal — this is what keeps one model arguing with itself across personas from just performing
+disagreement.
+
+```bash
+aegis debate "This XSS finding is a false positive because the output is HTML-escaped downstream"
+```
+
+```
+/debate <claim>
+```
+
+Full mechanism, config toggles, and CLI/TUI/HTTP entry points: see
+[multi-agent.md#debate-p12](multi-agent.md#debate-p12). Two existing security workflows can opt into
+routing through a debate round automatically — `security.debate.threat_model` for the security-architect
+persona's threat modeling, and `security.debate.triage` for the security-audit skill's baseline-
+suppression triage — both default off.
+
+---
+
 ## Security-Focused Personas
 
 Several built-in personas are tuned for security work:
@@ -585,6 +613,7 @@ Several built-in personas are tuned for security work:
 | `cloud-security-engineer` | Cloud posture, IAM, CIS Benchmarks, cloud-native security |
 | `network-security-architect` | Network segmentation, zero-trust, threat analysis |
 | `risk-assessor` | NIST RMF, ISO 27005, FAIR risk assessments |
+| `security-critic` / `security-arbiter` | Debate roles (P12) — critic/arbiter, used by default in `mode:"debate"` |
 
 ```bash
 aegis --persona appsec-engineer --mode plan

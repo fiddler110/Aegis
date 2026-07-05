@@ -74,6 +74,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"sandbox":         d.cmdSandbox,
 		"security-config": d.cmdSecurityConfig,
 		"scan":            d.cmdScan,
+		"debate":          d.cmdDebate,
 		"session":         d.cmdSession,
 		"rewind":          d.cmdRewind,
 		"rollback":        d.cmdRollback,
@@ -178,6 +179,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
 		{"security-config [global]", "Interactively configure, enable, and install security scanners"},
 		{"scan [path|image <ref>|sbom [path]]", "Run security scanners now and print the findings report"},
+		{"debate <claim>", "Adversarially debate a claim (propose/critique/rebut/arbitrate) and print the verdict"},
 		{"session [list]", "Show session info or list sessions"},
 		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
 		{"rollback [n]", "Restore checkpoint n and run git reset --hard to pre-turn HEAD"},
@@ -243,6 +245,8 @@ func builtinHelp(name string) string {
 		return "/security-config [global]\n  Opens an interactive dialog to configure the security scanners (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, kubescape, hadolint, grype, dockle, osv-scanner, syft) used by /scan and the security_scan tool: toggle enabled (including the opt-in language-specific SAST engines), pick host/container/auto, set the install policy, and set a digest-pinned container image. Selecting a tool now also offers \"Install now (guided)\" — shows the exact host command and runs it after you confirm, no separate CLI trip required.\n  No args: edits the project's .aegis/config.yaml. 'global': edits ~/.config/aegis/config.yaml instead.\n  Written immediately; restart Aegis to apply."
 	case "scan":
 		return "/scan [path|image <ref>|sbom [path]]\n  Runs the security scanners directly and prints the findings report — no model turn spent, same scan `aegis scan`/the security_scan tool runs.\n  No args: scan the whole workspace.\n  /scan <path>: scan just a workspace-relative subdirectory.\n  /scan image <ref>: scan a container image reference instead (e.g. /scan image alpine:3.20).\n  /scan sbom [path]: generate a CycloneDX SBOM instead of a findings report.\n  Use /security-config first to enable/install the scanners you want included."
+	case "debate":
+		return "/debate <claim>\n  Runs a multi-agent debate directly against the daemon's configured model — a critic challenges the claim (grounded in cited evidence or an explicit CONCEDE), the proposer rebuts, this repeats for up to 2 rounds, then an arbiter issues a final UPHOLD/REVISE/REJECT verdict with a confidence label. Unlike /scan, this does spend model turns (one per role per round) since the debate itself is model-driven.\n  Same underlying mechanism as the `agent` tool's mode:\"debate\", exposed to run directly on a claim you already have in hand without a conversational turn first."
 	case "session":
 		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
 	case "rewind":
@@ -641,6 +645,31 @@ func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
 	resp, err := d.client.Scan(ctx, req)
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Scan failed: %v", err), IsError: true}
+	}
+	return SlashResult{Output: resp.Report}
+}
+
+// cmdDebate runs a multi-agent debate directly against the daemon's
+// configured model and prints the formatted transcript — no session/prior
+// conversational turn needed, same underlying mechanism as the `agent` tool's
+// mode:"debate". Usage:
+//
+//	/debate <claim text>   debate the given claim with the default roles
+//
+// Unlike /scan, a debate spends real model turns (one per role per round), so
+// it uses the same long timeout /scan uses rather than the 5s default other
+// direct-daemon-call commands use.
+func (d *SlashDispatcher) cmdDebate(args []string) SlashResult {
+	claim := strings.TrimSpace(strings.Join(args, " "))
+	if claim == "" {
+		return SlashResult{Output: "usage: /debate <claim>", IsError: true}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	resp, err := d.client.Debate(ctx, api.DebateRequest{Claim: claim})
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Debate failed: %v", err), IsError: true}
 	}
 	return SlashResult{Output: resp.Report}
 }

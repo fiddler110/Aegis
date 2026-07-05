@@ -30,6 +30,7 @@ import (
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/cron"
+	"github.com/fiddler110/aegis/internal/debate"
 	"github.com/fiddler110/aegis/internal/embed"
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/filetracker"
@@ -447,7 +448,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.swarmReg = swarm.NewRegistry()
 	s.swarm = s.buildSwarmBackend(swarm.MailboxRoot(cfg.DataDir))
 	s.swarm.OnStop(s.onSubagentStop)
-	if err := reg.Register(builtin.NewAgentTool(s.swarm, s.tasks)); err != nil {
+	if err := reg.Register(builtin.NewAgentTool(s.swarm, s.tasks, builtin.WithCostCaps(cfg.Cost.BudgetUSD, cfg.Cost.MaxTokensPerRun))); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -656,6 +657,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /memory", s.handleAppendMemory)
 	mux.HandleFunc("GET /personas", s.handleListPersonas)
 	mux.HandleFunc("POST /security/scan", s.handleScan)
+	mux.HandleFunc("POST /debate", s.handleDebate)
 	mux.HandleFunc("GET /ui", s.handleWebUI)
 	mux.HandleFunc("GET /ui/", s.handleWebUI)
 	return s.authMiddleware(s.originMiddleware(mux))
@@ -1316,6 +1318,90 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 
 	report := security.RunWithOptions(r.Context(), dir, security.DefaultScanners(), opts)
 	writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
+}
+
+// handleDebate runs a multi-agent debate (P12) directly against the daemon's
+// configured model, independent of any session — the same underlying
+// mechanism the `agent` tool's debate mode runs, exposed so `/debate` in the
+// TUI (and `aegis debate`) can adversarially review a claim without first
+// spending a conversational turn to produce it. Unlike /security/scan, this
+// does spend model turns (one per role per round) since debate is inherently
+// model-driven; there is no scanner-only equivalent.
+func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	var req api.DebateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Claim == "" {
+		writeError(w, http.StatusBadRequest, "claim is required")
+		return
+	}
+	if s.adapter == nil {
+		writeError(w, http.StatusServiceUnavailable, "no model provider configured")
+		return
+	}
+
+	tracker := cost.NewTracker()
+	cfg := debate.Config{
+		ProposerPersona: req.ProposerPersona,
+		CriticPersona:   req.CriticPersona,
+		ArbiterPersona:  req.ArbiterPersona,
+		MaxRounds:       req.MaxRounds,
+		Tracker:         tracker,
+		BudgetUSD:       s.cfg.Cost.BudgetUSD,
+		MaxTokens:       s.cfg.Cost.MaxTokensPerRun,
+	}
+	transcript, err := debate.Run(r.Context(), req.Claim, cfg, s.debateRoleRunner(tracker))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, api.DebateResponse{
+		Report:     transcript.Format(),
+		Verdict:    transcript.Verdict.Outcome,
+		Confidence: transcript.Verdict.Confidence,
+	})
+}
+
+// debateRoleRunner returns a debate.RunFunc that executes one role turn as a
+// bare, session-less engine call over the daemon's shared adapter and tools —
+// the same construction subAgentRunner uses for a spawned teammate, without
+// the swarm identity/mailbox machinery a direct (non-session) debate call has
+// no use for. Every role call shares tracker, so debate.Run's budget check
+// (P12.6) sees the run's true cumulative spend across rounds.
+func (s *Server) debateRoleRunner(tracker *cost.Tracker) debate.RunFunc {
+	return func(ctx context.Context, systemPrompt, prompt string) (string, error) {
+		gate, engineHooks := s.buildGate("build", s.approver(), persona.Persona{})
+		eng, err := engine.New(engine.Options{
+			Adapter:         s.adapter,
+			Tools:           s.tools,
+			Gate:            gate,
+			Compactor:       s.compactor,
+			Hooks:           engineHooks,
+			Cost:            tracker,
+			BudgetUSD:       s.cfg.Cost.BudgetUSD,
+			MaxTokensPerRun: s.cfg.Cost.MaxTokensPerRun,
+			Model:           s.cfg.Provider.Model,
+			MaxTokens:       s.cfg.Provider.MaxTokens,
+			Logger:          s.logger,
+		})
+		if err != nil {
+			return "", err
+		}
+		conv := &engine.Conversation{System: systemPrompt}
+		conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: prompt}}})
+
+		const maxOutput = 1 << 20 // 1 MiB
+		var sb strings.Builder
+		runErr := eng.Run(ctx, conv, func(ev engine.Event) {
+			if ev.Kind == engine.KindText && sb.Len() < maxOutput {
+				sb.WriteString(ev.Text)
+			}
+		})
+		return strings.TrimSpace(sb.String()), runErr
+	}
 }
 
 func readIfExists(path string) string {
@@ -2105,7 +2191,31 @@ func (s *Server) effectiveSystem(base string) string {
 	if dt := deferredToolsBlock(s.tools); dt != "" {
 		parts = append(parts, dt)
 	}
+	if db := debateIntegrationBlock(s.cfg.Security.Debate); db != "" {
+		parts = append(parts, db)
+	}
 	return strings.Join(parts, "\n\n")
+}
+
+// debateIntegrationBlock returns the P12.5 opt-in instruction text wiring the
+// `agent` tool's debate mode into the two existing security workflows that
+// benefit from adversarial review, or "" if neither toggle is enabled (the
+// default — debate multiplies model calls per item, so this is never
+// injected silently). Both toggles can be on independently; the block only
+// mentions the ones actually enabled.
+func debateIntegrationBlock(cfg config.DebateIntegrationConfig) string {
+	if !cfg.ThreatModel && !cfg.Triage {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Debate mode (P12)\n")
+	if cfg.ThreatModel {
+		b.WriteString("- Threat modeling: before writing an identified threat/mitigation pair into the threat model document, call the `agent` tool with mode:\"debate\" and claim set to that threat/mitigation pair. Adjust the entry's severity/mitigation per the arbiter's verdict before finalizing it.\n")
+	}
+	if cfg.Triage {
+		b.WriteString("- Security-audit triage: before suppressing a borderline or disputed-severity scan finding via the baseline, call the `agent` tool with mode:\"debate\" and claim set to the finding (severity, location, rationale). Only suppress if the verdict upholds the low-risk assessment.\n")
+	}
+	return b.String()
 }
 
 // toExecSpecs converts config hook entries into hooks.ExecSpec values.
