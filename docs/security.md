@@ -17,6 +17,23 @@ aegis scan image alpine:3.20      # scan a container image by reference (see bel
 aegis scan sbom .                 # generate a CycloneDX SBOM via syft (see below)
 ```
 
+### TUI usage
+
+`/scan` runs the same scan directly from inside a session, without spending a model turn — the
+daemon runs it against its own workspace and prints the formatted report straight into the
+transcript:
+
+```
+/scan                    # scan the whole workspace
+/scan src                # scan a workspace-relative subdirectory
+/scan image alpine:3.20  # scan a container image reference instead
+/scan sbom                # generate a CycloneDX SBOM instead of a findings report
+```
+
+A scan can take a while (container fallback pulls, multiple scanner binaries), so give it a
+minute on a cold run. Use `/security-config` first to enable/install the scanners you want
+included — a tool that's off or not installed shows up as "skipped," not scanned.
+
 ### Tool usage
 
 The agent can call `security_scan` directly:
@@ -92,7 +109,11 @@ security:
       enabled: true    # this is a Go project
 ```
 
-Or interactively: `/security-config` (TUI) or `aegis security config`.
+Or interactively: `/security-config` (TUI) or `aegis security config`. The TUI wizard also
+installs a tool for you — pick it from the list, choose "Install now (guided)," and confirm the
+exact host command it's about to run (the same guided install `aegis security install <tool>`
+does from the CLI); the list refreshes afterward so you can see it move from "unavailable" to
+"on PATH" without leaving the dialog.
 
 ### Reachability: is the vulnerable code actually called?
 

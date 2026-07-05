@@ -478,6 +478,26 @@ mcp:
     # capability omitted → defaults to "execute", so calls hit the Ask gate in build mode
 
 
+# ── MCP server mode ────────────────────────────────────────────────────────────
+# `aegis mcp-serve` (P6.3) — the reverse direction of the `mcp:` block above:
+# this daemon acts as an MCP server itself, so other MCP-speaking harnesses
+# (Claude Code, Codex, editors) can drive Aegis sessions as tools. See the CLI
+# reference for the tools it exposes (aegis_prompt, aegis_new_session,
+# aegis_list_sessions).
+mcp_server:
+  # New sessions default to plan mode (read-only) — a lower-trust posture than
+  # the local TUI/CLI's own "build" default, since the caller here is an
+  # external harness. Override per-call with the `mode` tool argument, or here
+  # to change the server-wide default.
+  default_mode: plan
+  # An MCP tools/call is a synchronous request/response with no human in the
+  # loop to ask, so a tool call needing approval (e.g. a session explicitly
+  # requested in build/auto mode) is denied by default. Set true only for a
+  # fully trusted caller/sandbox — equivalent to permission.auto_approve_exec
+  # but scoped to sessions created through mcp-serve.
+  auto_approve: false
+
+
 # ── Process plugins ───────────────────────────────────────────────────────────
 # Register external commands as tools. Aegis pipes tool input as JSON to stdin
 # and captures stdout as the result.

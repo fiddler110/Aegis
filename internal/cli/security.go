@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -92,8 +91,8 @@ func newSecurityInstallCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("unknown scanner %q (known: %s)", name, knownScannerNames())
 			}
-			command, ok := d.Install[runtime.GOOS]
-			if !ok || strings.TrimSpace(command) == "" {
+			command, ok := security.InstallCommand(name)
+			if !ok {
 				return fmt.Errorf("no guided install available for %s on %s — see the tool's own docs, or configure a container image (security.tools.%s.image)", d.Name, runtime.GOOS, d.Name)
 			}
 
@@ -111,12 +110,8 @@ func newSecurityInstallCmd() *cobra.Command {
 				}
 			}
 
-			shell, shellArgs := shellCommand(command)
-			c := exec.CommandContext(cmd.Context(), shell, shellArgs...)
-			c.Stdout = out
-			c.Stderr = cmd.ErrOrStderr()
-			if err := c.Run(); err != nil {
-				return fmt.Errorf("install command failed: %w", err)
+			if err := security.RunGuidedInstall(cmd.Context(), name, out); err != nil {
+				return err
 			}
 			fmt.Fprintf(out, "\n%s installed. Run `aegis security status` to confirm.\n", d.Name)
 			return nil
@@ -124,15 +119,6 @@ func newSecurityInstallCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt (for non-interactive/scripted use)")
 	return cmd
-}
-
-// shellCommand returns the platform shell binary and args to run command
-// through, mirroring the shell tool's own invocation convention.
-func shellCommand(command string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", command}
-	}
-	return "/bin/sh", []string{"-c", command}
 }
 
 func knownScannerNames() string {

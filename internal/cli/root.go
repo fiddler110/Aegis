@@ -35,8 +35,30 @@ func newRootCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:           "aegis",
-		Short:         "Aegis — AI agent harness for security, architecture, research, and development",
+		Use:   "aegis",
+		Short: "Aegis — AI agent harness for security, architecture, research, and development",
+		Long: `Aegis — AI agent harness for security, architecture, research, and development.
+
+Aegis is a daemon + client harness: a single daemon owns sessions, the model adapter, and the
+tool registry over a local HTTP API, and any of several clients (this interactive terminal UI,
+the web UI, ACP editors, MCP-speaking harnesses) can drive it.
+
+Quick start:
+  aegis --first-init              create a global config (Ollama local models by default)
+  export OPENAI_API_KEY=ollama    # or ANTHROPIC_API_KEY / OPENAI_API_KEY for a cloud provider
+  aegis                            start an interactive session
+
+Running "aegis" with no subcommand starts an interactive terminal session, auto-starting an
+embedded daemon if none is already running (see "aegis serve" to run just the daemon). Once
+inside a session, type /help to see slash commands (persona/mode switching, security scanning,
+memory, checkpoints, and more) — those are separate from the subcommands listed below.
+
+Other ways to run Aegis:
+  aegis chat "prompt"              one-shot, non-interactive turn (scriptable, no TUI)
+  aegis ui                          open the browser-based web UI
+  aegis acp / aegis mcp-serve       speak ACP or MCP over stdio for editor/harness integration
+
+Use "aegis <command> --help" for details on any command below.`,
 		Version:       Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -131,28 +153,58 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&firstInit, "first-init", false, "create the global config file with a full provider template (Ollama active by default)")
 	cmd.Flags().BoolVar(&initProject, "init", false, "create a project-level .aegis/config.yaml override in the current directory")
 
-	cmd.AddCommand(newServeCmd())
-	cmd.AddCommand(newACPCmd())
-	cmd.AddCommand(newUICmd())
-	cmd.AddCommand(newParallelCmd())
-	cmd.AddCommand(newRunsCmd())
-	cmd.AddCommand(newWorktreeCmd())
-	cmd.AddCommand(newBundleCmd())
-	cmd.AddCommand(newModelsCmd())
-	cmd.AddCommand(newConfigCmd())
-	cmd.AddCommand(newDryRunCmd())
-	cmd.AddCommand(newChatCmd())
-	cmd.AddCommand(newSessionsCmd())
-	cmd.AddCommand(newPersonaCmd())
-	cmd.AddCommand(newSkillsCmd())
-	cmd.AddCommand(newScanCmd())
-	cmd.AddCommand(newSecurityCmd())
-	cmd.AddCommand(newSandboxCmd())
-	cmd.AddCommand(newIndexCmd())
-	cmd.AddCommand(newKnowledgeCmd())
-	cmd.AddCommand(newDiagramCmd())
-	cmd.AddCommand(newWorkerCmd())
-	cmd.AddCommand(newBGCmd()) // P3.2: background session management
+	const (
+		groupRun     = "run"
+		groupSession = "session"
+		groupSecure  = "security"
+		groupConfig  = "config"
+		groupProject = "project"
+	)
+	cmd.AddGroup(
+		&cobra.Group{ID: groupRun, Title: "Run the agent:"},
+		&cobra.Group{ID: groupSession, Title: "Sessions & runs:"},
+		&cobra.Group{ID: groupSecure, Title: "Security scanning:"},
+		&cobra.Group{ID: groupConfig, Title: "Configuration & setup:"},
+		&cobra.Group{ID: groupProject, Title: "Project tools:"},
+	)
+	cmd.SetHelpCommandGroupID(groupConfig)
+	cmd.SetCompletionCommandGroupID(groupConfig)
+
+	group := func(c *cobra.Command, id string) *cobra.Command { c.GroupID = id; return c }
+
+	// Run the agent — different interfaces onto the same daemon.
+	cmd.AddCommand(group(newServeCmd(), groupRun))
+	cmd.AddCommand(group(newChatCmd(), groupRun))
+	cmd.AddCommand(group(newUICmd(), groupRun))
+	cmd.AddCommand(group(newACPCmd(), groupRun))
+	cmd.AddCommand(group(newMCPServeCmd(), groupRun))
+
+	// Sessions & runs — lifecycle and multi-session management.
+	cmd.AddCommand(group(newSessionsCmd(), groupSession))
+	cmd.AddCommand(group(newBGCmd(), groupSession)) // P3.2: background session management
+	cmd.AddCommand(group(newRunsCmd(), groupSession))
+	cmd.AddCommand(group(newParallelCmd(), groupSession))
+	cmd.AddCommand(group(newWorktreeCmd(), groupSession))
+
+	// Security scanning.
+	cmd.AddCommand(group(newScanCmd(), groupSecure))
+	cmd.AddCommand(group(newSecurityCmd(), groupSecure))
+
+	// Configuration & setup.
+	cmd.AddCommand(group(newConfigCmd(), groupConfig))
+	cmd.AddCommand(group(newPersonaCmd(), groupConfig))
+	cmd.AddCommand(group(newSkillsCmd(), groupConfig))
+	cmd.AddCommand(group(newSandboxCmd(), groupConfig))
+	cmd.AddCommand(group(newModelsCmd(), groupConfig))
+	cmd.AddCommand(group(newBundleCmd(), groupConfig))
+
+	// Project tools.
+	cmd.AddCommand(group(newIndexCmd(), groupProject))
+	cmd.AddCommand(group(newKnowledgeCmd(), groupProject))
+	cmd.AddCommand(group(newDiagramCmd(), groupProject))
+	cmd.AddCommand(group(newDryRunCmd(), groupProject))
+
+	cmd.AddCommand(newWorkerCmd()) // internal, hidden — no group needed
 	return cmd
 }
 

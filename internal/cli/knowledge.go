@@ -13,7 +13,7 @@ import (
 func newKnowledgeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "knowledge",
-		Short: "Manage the project knowledge base (P3.3)",
+		Short: "Manage the project knowledge base used by the project_knowledge tool",
 	}
 	cmd.AddCommand(newKnowledgeIndexCmd())
 	return cmd
@@ -26,7 +26,7 @@ func newKnowledgeIndexCmd() *cobra.Command {
 		Long: "Walks the project, indexing documentation files (*.md, *.txt, *.rst) and Go doc " +
 			"comments into a searchable index used by the project_knowledge tool. When " +
 			"embeddings.enabled is set in config, also computes semantic embeddings for hybrid " +
-			"recall (P5.8).",
+			"recall alongside the default keyword search.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {

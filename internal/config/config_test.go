@@ -69,6 +69,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Provider.MaxTokens != 32768 {
 		t.Errorf("max_tokens = %d, want 32768", cfg.Provider.MaxTokens)
 	}
+	if cfg.MCPServer.AutoApprove {
+		t.Error("mcp_server.auto_approve default = true, want false")
+	}
+	if cfg.MCPServer.DefaultMode != "plan" {
+		t.Errorf("mcp_server.default_mode = %q, want %q", cfg.MCPServer.DefaultMode, "plan")
+	}
 }
 
 func TestEnvOverride(t *testing.T) {
