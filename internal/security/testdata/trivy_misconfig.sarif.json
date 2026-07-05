@@ -1,0 +1,32 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "trivy",
+          "rules": [
+            {
+              "id": "AVD-AWS-0001",
+              "shortDescription": { "text": "S3 bucket does not have logging enabled" }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "AVD-AWS-0001",
+          "level": "warning",
+          "message": { "text": "S3 bucket \"my-bucket\" has access logging disabled" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "infra/main.tf" },
+                "region": { "startLine": 10 }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

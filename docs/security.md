@@ -247,6 +247,12 @@ trivy (container), gitleaks (host)"), and any skipped tool's reason (disabled,
 no binary + no image configured, no container runtime available, ...) — never a
 silent skip.
 
+A configured `security.tools.<name>.image` is **validated**, not just documented, as a
+digest pin (P11.9): a floating tag (`aquasec/trivy:latest`) or a bare image name resolves
+to `MethodNone` with a reason pointing back at this section's `docker pull`/`docker inspect`
+recipe, rather than silently running an image that can be repointed at any time by whoever
+controls the registry.
+
 ### Output format
 
 Findings are normalized across all scanners:
@@ -312,6 +318,24 @@ returned (P11.8):
   every entry's current status (active/expired/invalid) without needing to
   run a full scan; the file itself is hand-edited, same as
   `security.tools`/`security.default_method` in `.aegis/config.yaml`.
+
+### Regression testing (P11.9)
+
+`internal/security/regression_test.go` (`TestScanRegressionAcrossRecordedOutputs`) runs
+the full aggregation pipeline — parse, dedup, ASVS tagging, baseline suppression, sort —
+over **recorded** scanner-output fixtures under `internal/security/testdata/` and compares
+the result to a checked-in golden file. No scanner binary, container runtime, or network
+access is needed to run it, so it exercises the same code path as a live `aegis scan`
+entirely in CI. See `internal/security/testdata/README.md` for what each fixture
+represents (including the one honest gap: the ZAP/DAST fixture is a representative
+synthetic SARIF report, not a live capture, since generating a real one needs Docker and a
+running target — the README documents the exact `aegis scan dast` invocation against
+Juice Shop/VAmPI to replace it once that's available). Regenerate deliberately after a
+fixture or normalization change, reviewing the diff first:
+
+```bash
+AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcrossRecordedOutputs
+```
 
 ### Combining with personas
 

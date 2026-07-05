@@ -153,6 +153,44 @@ func TestResolveContainerFallbackWithConfiguredImage(t *testing.T) {
 	}
 }
 
+// TestResolveRejectsFloatingTagImage is the P11.9 provenance-hardening
+// regression: a configured image with no digest pin (a floating tag, or a
+// bare image name) must resolve to MethodNone with a clear reason, not
+// silently run — closing the gap where "must be digest-pinned" was only
+// ever a doc comment, never enforced.
+func TestResolveRejectsFloatingTagImage(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-floating", Binary: "aegis-does-not-exist-xyz"})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return sandbox.RuntimeDocker, true
+	})
+	opts := Options{Tools: map[string]ToolPolicy{"test-floating": {Enabled: true, Image: "example/image:latest"}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-floating", opts)
+	if method != MethodNone {
+		t.Fatalf("method = %v, want MethodNone for a floating-tag image", method)
+	}
+	if !strings.Contains(reason, "not digest-pinned") {
+		t.Errorf("reason = %q, want mention of digest pinning", reason)
+	}
+}
+
+// TestResolveAcceptsDigestPinnedImage confirms a properly pinned image still
+// resolves to MethodContainer — the enforcement in
+// TestResolveRejectsFloatingTagImage shouldn't have collateral damage on
+// the documented-correct form.
+func TestResolveAcceptsDigestPinnedImage(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-pinned", Binary: "aegis-does-not-exist-xyz"})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return sandbox.RuntimeDocker, true
+	})
+	opts := Options{Tools: map[string]ToolPolicy{"test-pinned": {Enabled: true, Image: "example/image@sha256:deadbeef"}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-pinned", opts)
+	if method != MethodContainer {
+		t.Fatalf("method = %v, reason = %q, want MethodContainer for a digest-pinned image", method, reason)
+	}
+}
+
 func TestResolveContainerMethodNoRuntimeAvailable(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-nort", Binary: "aegis-does-not-exist-xyz"})
 	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {

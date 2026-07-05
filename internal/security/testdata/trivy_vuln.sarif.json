@@ -1,0 +1,28 @@
+{
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "trivy",
+          "rules": [
+            {
+              "id": "CVE-2021-23337",
+              "shortDescription": { "text": "lodash: command injection via template" },
+              "properties": { "tags": ["CRITICAL"] }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CVE-2021-23337",
+          "level": "error",
+          "message": { "text": "lodash 4.17.15 is vulnerable to command injection (CVE-2021-23337)" },
+          "locations": [
+            { "physicalLocation": { "artifactLocation": { "uri": "package-lock.json" } } }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/config"
@@ -363,6 +364,9 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		if image == "" {
 			return MethodNone, "", "", "no container image configured for " + name + "; set security.tools." + name + ".image (digest-pinned) — see docs/security.md"
 		}
+		if reason := digestPinReason(name, image); reason != "" {
+			return MethodNone, "", "", reason
+		}
 		rt, ok := detectRuntime(ctx, nil)
 		if !ok {
 			return MethodNone, "", "", "security.tools." + name + ".method is \"container\" but no container runtime is available (docker/podman) — run `aegis security install " + name + "` for guided setup"
@@ -375,12 +379,34 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		if image == "" {
 			return MethodNone, "", "", d.Binary + " not installed and no container image configured — set security.tools." + name + ".image (digest-pinned) to enable container fallback, or run `aegis security install " + name + "` for a guided host install"
 		}
+		if reason := digestPinReason(name, image); reason != "" {
+			return MethodNone, "", "", reason
+		}
 		rt, ok := detectRuntime(ctx, nil)
 		if !ok {
 			return MethodNone, "", "", d.Binary + " not installed and no container runtime available (docker/podman) — run `aegis security install " + name + "` for guided setup"
 		}
 		return MethodContainer, rt, image, ""
 	}
+}
+
+// digestPinRe matches a container reference's trailing "@sha256:<hex>"
+// digest pin. Deliberately not length-anchored to exactly 64 hex characters
+// — the point is catching a floating tag (image:latest, or a bare image
+// name with no pin at all), not re-validating SHA-256's output length.
+var digestPinRe = regexp.MustCompile(`@sha256:[0-9a-fA-F]+$`)
+
+// digestPinReason returns a non-empty MethodNone reason if image is
+// configured but not digest-pinned (P11.9 provenance hardening) — a
+// floating tag (or bare image name) is real supply-chain risk (P11.1/P7.6's
+// posture: an image is itself attack surface, and a tag can be repointed at
+// any time by whoever controls the registry), so it's rejected the same way
+// a missing image is, rather than silently run.
+func digestPinReason(name, image string) string {
+	if digestPinRe.MatchString(strings.TrimSpace(image)) {
+		return ""
+	}
+	return "security.tools." + name + ".image (" + image + ") is not digest-pinned (need image@sha256:<hex>, not a floating tag) — see docs/security.md's docker pull + docker inspect pin recipe"
 }
 
 // runContainerImage runs image (ideally digest-pinned) against dir

@@ -1,5 +1,21 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
+**Updated:** 2026-07-04 (v32 — shipped **P11.9 scan regression evals + pinned provenance
+enforcement**, the last open P11 item — **the entire P11 track (P11.1–P11.12) is now
+shipped**. A new golden-transcript regression test
+(`internal/security/regression_test.go`) drives the full parse→dedup→ASVS→baseline→sort
+pipeline over recorded fixtures (`internal/security/testdata/`) with no scanner binary,
+container runtime, or network needed — proving P11.8's cross-tool CVE dedup and all three
+baseline states in one checked-in golden file. Also closed a real gap found while
+implementing it: `security.tools.<name>.image` was documented as needing a digest pin
+(P11.1) but never actually validated — `Resolve` now rejects a floating tag or bare image
+name outright (`digestPinReason`, `internal/security/method.go`) instead of silently
+running it. The one piece of the original ask left as documented follow-up rather than
+fabricated: a **live** ZAP capture against Juice Shop/WrongSecrets/VAmPI needs a container
+runtime this environment doesn't have, so the ZAP fixture is an explicitly labeled
+synthetic placeholder with exact replacement commands in `testdata/README.md` — the same
+"no unverifiable claim beats a wrong one" call already made for P11.1's no-baked-digest
+decision and P11.12's Reachability. See "Open Work — P11" P11.9 and Appendix C row 48.)
 **Updated:** 2026-07-04 (v31 — shipped **P11.8 findings dedup, ASVS mapping, and a
 suppression baseline**: `DedupFindings` (`internal/security/dedup.go`) collapses the same
 CVE/rule flagged at the same location by more than one tool into one finding, tagging
@@ -115,33 +131,30 @@ with near-zero bespoke parsing. See "Open Work — P11" P11.2.)
 
 ## Status
 
-P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), and P11's availability layer, SARIF normalization, image security, IaC scanning, SCA depth, reachability analysis, SAST depth, DAST, and findings dedup/ASVS/suppression baseline (P11.1/P11.2/P11.3/P11.4/P11.5/P11.6/P11.7/P11.8/P11.10/P11.11/P11.12) are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
+P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), and **all of P11 (P11.1–P11.12)** are shipped — see [Appendix A](#appendix-a--completed-work) for detail on any item.
 
 P9.3, P9.4, and P9.6 remain open with no current trigger. P6 remains long-horizon/exploratory with no forcing function.
 
-**P11 (security scanning depth)** is a user request to bring the scan functionality up to
-best-in-class OSS coverage across SAST/SCA/container/IaC and add automated OWASP ZAP DAST.
-The availability layer (P11.1/P11.10/P11.11) shipped 2026-07-04: `Scanner.Available()`
-silently skipping any tool whose binary isn't on PATH is fixed, with an availability
-resolver (`security.Resolve`), a config surface (`security.tools`), a CLI
-(`aegis security status|config|install`), and — added same-day on request — the interactive
-`/security-config` TUI form so none of this requires hand-editing YAML. Container fallback
-ships with no built-in image pin by deliberate choice (see P11.1). P11.2 (SARIF-first
-normalization), P11.6 (IaC via trivy misconfig + kubescape), P11.5 (container image
-security, scoped to host-binary-only — see P11.5), P11.4 (SCA depth: osv-scanner +
-SBOM-fed grype), P11.12 (reachability: osv-scanner `--call-analysis`, govulncheck-backed
-for Go), P11.3 (SAST depth: opengrep default, semgrep + 4 language engines opt-in), and
-P11.7 (DAST via OWASP ZAP, v1 scope — hard target-allowlist gate, container-only, the one
-documented `--network none` exception) and P11.8 (cross-tool findings dedup, CWE-derived
-OWASP ASVS mapping, and an `.aegis/security-baseline.yaml` accepted-risk suppression
-allowlist with mandatory expiry, plus a `security-audit` skill triage-loop extension) also
-shipped 2026-07-04. Remaining: P11.9 only.
+**P11 (security scanning depth)** — a user request to bring the scan functionality up to
+best-in-class OSS coverage across SAST/SCA/container/IaC and add automated OWASP ZAP DAST —
+**is now fully shipped (2026-07-04)**: the availability layer (P11.1/P11.10/P11.11 —
+`security.Resolve`, `security.tools` config, `aegis security status|config|install`,
+`/security-config` TUI form), P11.2 (SARIF-first normalization), P11.6 (IaC via trivy
+misconfig + kubescape), P11.5 (container image security, scoped to host-binary-only),
+P11.4 (SCA depth: osv-scanner + SBOM-fed grype), P11.12 (reachability: osv-scanner
+`--call-analysis`), P11.3 (SAST depth: opengrep default + 4 opt-in language engines),
+P11.7 (DAST via OWASP ZAP, v1 scope), P11.8 (cross-tool findings dedup, CWE-derived OWASP
+ASVS mapping, `.aegis/security-baseline.yaml` accepted-risk suppression with mandatory
+expiry, `security-audit` skill triage-loop extension), and P11.9 (a recorded-fixture
+golden-transcript regression test proving the whole pipeline with no live scanners/network,
+plus closing a real gap — configured scanner images are now actually validated as
+digest-pinned, not just documented as needing to be). Container fallback still ships with
+no built-in image pin by deliberate choice (see P11.1); a live ZAP capture against Juice
+Shop/WrongSecrets/VAmPI remains documented follow-up (see P11.9) since this environment has
+no container runtime to run one.
 
-**Recommended priority order:** ~~P10~~ ~~P11 availability layer~~ ~~P11.2 SARIF~~
-~~P11.5/P11.6 fast wins~~ ~~P11.4 SCA depth~~ ~~P11.12 reachability~~ ~~P11.3 SAST depth~~
-~~P11.7 DAST~~ ~~P11.8 dedup/ASVS/baseline~~ **all shipped 2026-07-04** → P11.9 (regression
-evals + pinned provenance — the last P11 item) → remaining P9 items only on a concrete
-trigger → P6.
+**Recommended priority order:** ~~P10~~ ~~P11 (all of it — P11.1–P11.12)~~ **all shipped
+2026-07-04** → remaining P9 items (P9.3/P9.4/P9.6) only on a concrete trigger → P6.
 
 **Reviewed and found sound, no action needed (from the P7 audit):** SSRF dialer (private-IP check happens at dial time, closing the DNS-rebind window); path traversal / symlink handling in `ValidatePath`; local daemon HTTP API (constant-time bearer token + loopback-origin check); persona YAML parsing (safe library, no unsafe type deserialization); `team_tasks` claim path (properly transactional, no duplicate-claim race).
 
@@ -639,13 +652,59 @@ applies baseline suppression end to end; a malformed baseline fails safe with
 `BaselineError` set and nothing suppressed), `internal/cli/security_test.go`
 (`aegis security baseline` with no file and with active/expired/invalid entries).
 
-### P11.9 — Scan regression evals + pinned provenance
-Golden-transcript evals over **recorded** scanner outputs (P9.1 harness style — no live
-tools or network in CI) so a normalization/dedup regression trips a test; every scanner/ZAP
-image pinned by digest with a documented, reviewed update path. Use OWASP deliberately-
-vulnerable apps (**Juice Shop**, **WrongSecrets**, **VAmPI** for the API scan) as the ZAP
-test targets that generate those recorded outputs and prove the P11.7 automation end to end.
-Priority: **Medium**, Effort: **S**. Ship as the regression proof for P11.1–P11.8.
+### P11.9 — ✅ shipped 2026-07-04 (scoped) — Scan regression evals + pinned provenance
+**Golden-transcript regression eval** (`internal/security/regression_test.go`,
+`TestScanRegressionAcrossRecordedOutputs`): drives the full aggregation pipeline (parse →
+`DedupFindings` → `assignASVS` → `Baseline.Apply` → sort — exactly what `RunWithOptions`
+does for a live scan) over **recorded** fixtures under `internal/security/testdata/` —
+SARIF for semgrep/trivy(vuln)/trivy(misconfig)/grype/zap, native JSON for osv-scanner,
+gitleaks' own JSON — and asserts the result against a checked-in golden file
+(`testdata/regression.golden.json`), same `AEGIS_EVAL_UPDATE=1`-to-regenerate convention as
+`internal/eval` (now also documented in `CLAUDE.md`'s Testing section). No scanner binary,
+container runtime, or network access needed, so this runs in CI exactly like every other
+unit test — a P9.1-harness-style proof, just built directly in `internal/security` rather
+than routed through `internal/eval`'s engine-conversation harness, since scanner-output
+normalization has no natural fit there (no model turns, no tool-call transcript — it's a
+pure data pipeline over recorded bytes). The fixture set is authored specifically to
+exercise the cross-tool overlap P11.8 exists for: `trivy_vuln`/`grype_sca`/`osv_scanner` all
+flag the same `CVE-2021-23337` at the same package/location (in each tool's real location-
+string shape — osv-scanner's `pkg@version (path)` vs. the others' bare path) and correctly
+collapse to one `SeenBy`-tagged finding in the golden output; the fixture set also covers
+all three baseline states (active/expired/invalid) and both the CWE-based and tool-name-
+fallback ASVS paths in a single run. See `internal/security/testdata/README.md` for each
+fixture's provenance.
+
+**Pinned provenance — real gap found and closed**: P11.1 documented "images must be
+digest-pinned" but never actually enforced it — `security.tools.<name>.image` accepted a
+floating tag (`aquasec/trivy:latest`) or even a bare image name with no validation at all,
+silently running it as if it were pinned. Fixed in `internal/security/method.go`:
+`Resolve`'s container/auto branches now reject a configured image that doesn't match
+`@sha256:<hex>` (`digestPinReason`) with `MethodNone` and a reason pointing back at
+`docs/security.md`'s existing `docker pull`/`docker inspect` pin recipe — closing the loop
+between the documented invariant and actual enforcement, the same class of fix as P7's
+"validated, not just commented" pattern. Not length-anchored to exactly 64 hex characters
+(SHA-256's real output length) — deliberately loose enough to accept a shortened
+placeholder in tests while still catching the real failure mode (no digest at all).
+
+**Scoped, and said so rather than fabricated**: this environment has no Docker/container
+runtime available, so a **live** ZAP capture against Juice Shop/WrongSecrets/VAmPI (the
+"prove the P11.7 automation end to end" half of the original ask) could not actually be
+run this pass. Rather than claim one happened, `zap_dast.sarif.json` is an explicitly
+labeled **synthetic, representative** fixture (matches ZAP's documented Automation
+Framework `sarif-json` report shape) and `testdata/README.md` documents the exact
+`docker run`/`aegis scan dast` commands to replace it with a real capture once a container
+runtime is available — the same "no unverifiable claim beats a wrong one" discipline
+already applied to Reachability (P11.12) and the no-baked-digest decision (P11.1). Every
+other fixture (semgrep/trivy/grype/osv-scanner/gitleaks) is hand-authored against each
+tool's own documented, versioned output schema, not a live capture either, since none of
+those tools are installed in this environment — the regression test's value (catching a
+normalization/dedup/ASVS regression) holds regardless of live-vs-hand-authored fixture
+provenance; only the "proves ZAP end to end against a real deliberately-vulnerable app"
+claim specifically needed a live run and is the one piece left as documented follow-up.
+Priority: **Medium**, Effort: **S**.
+Tests: `internal/security/regression_test.go` (`TestScanRegressionAcrossRecordedOutputs`),
+`internal/security/method_test.go` (`TestResolveRejectsFloatingTagImage`,
+`TestResolveAcceptsDigestPinnedImage`).
 
 ### P11.10 — Scanner provisioning (guided install, approval-gated)
 Ensure a wanted tool is actually *available*, either by installing it natively or falling
@@ -787,7 +846,8 @@ availability layer (P11.1 + P11.10 provisioning + P11.11 config/CLI) was the nat
 unit of work since it makes every scanner reliably runnable on a clean machine — now shipped.
 Remaining order: ~~P11.2 (SARIF)~~ → ~~P11.5/P11.6 (fast wins reusing trivy/new images)~~ →
 ~~P11.4 (SCA depth + SBOM)~~ → ~~P11.12 (reachability)~~ → ~~P11.3 (SAST depth)~~ →
-~~P11.7 (ZAP)~~ → ~~P11.8 (dedup/ASVS/baseline)~~ **all shipped** → P11.9 (last item).
+~~P11.7 (ZAP)~~ → ~~P11.8 (dedup/ASVS/baseline)~~ → ~~P11.9 (regression evals + pinned
+provenance)~~ **the entire P11 track is shipped.**
 
 ---
 
@@ -1077,6 +1137,7 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 | 45 | Security scanning | No SCA breadth beyond trivy (osv-scanner/grype) or SBOM generation | — (scan review) | Medium | ✅ P11.4 |
 | 46 | Security scanning | SCA findings carry no reachability signal — a vulnerable *package* present reads the same as a vulnerable *function* actually called | user request | Medium | ✅ P11.12 |
 | 47 | Security scanning | Overlapping tools re-report the same finding; no accepted-risk allowlist; findings read as raw tool IDs with no recognized-standard mapping | — (scan review) | Medium | ✅ P11.8 |
+| 48 | Security scanning | No regression coverage over recorded scanner output; a configured `security.tools.<name>.image` was never actually validated as digest-pinned despite being documented as required | — (scan review) | Medium | ✅ P11.9 |
 
 ---
 
