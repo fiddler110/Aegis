@@ -273,3 +273,44 @@ type DebateResponse struct {
 	Verdict    string `json:"verdict"`
 	Confidence string `json:"confidence"`
 }
+
+// KnowledgeRequest indexes or queries the project knowledge base directly
+// (POST /knowledge), independent of any session/model turn — the same
+// project_knowledge tool and `aegis knowledge index` machinery, exposed so
+// `/knowledge` in the TUI can rebuild or search the index without spending a
+// conversational turn first.
+type KnowledgeRequest struct {
+	// Action is "index" (rebuild) or "query" (search). Required.
+	Action string `json:"action"`
+	// Query is the search text; required when Action is "query".
+	Query string `json:"query,omitempty"`
+	// Limit caps query results (default 5, max 20); ignored for "index".
+	Limit int `json:"limit,omitempty"`
+}
+
+// KnowledgeResult is one document matched by a knowledge query.
+type KnowledgeResult struct {
+	Path    string  `json:"path"`
+	Title   string  `json:"title"`
+	Snippet string  `json:"snippet"`
+	Score   float64 `json:"score"`
+}
+
+// KnowledgeResponse carries the outcome of a KnowledgeRequest: DocCount/DBPath/
+// EmbeddingsEnabled after an "index" rebuild, or Results/Count after a "query".
+type KnowledgeResponse struct {
+	DocCount          int               `json:"doc_count,omitempty"`
+	DBPath            string            `json:"db_path,omitempty"`
+	EmbeddingsEnabled bool              `json:"embeddings_enabled,omitempty"`
+	Results           []KnowledgeResult `json:"results,omitempty"`
+	Count             int               `json:"count,omitempty"`
+}
+
+// RepoMapIndexResponse carries the outcome of rebuilding the repository map
+// (POST /repomap/index) — the same underlying build as `aegis index`, exposed
+// so `/index` in the TUI can refresh it (and the daemon's cached system-prompt
+// block) without a restart.
+type RepoMapIndexResponse struct {
+	FileCount int    `json:"file_count"`
+	Path      string `json:"path"`
+}

@@ -207,6 +207,27 @@ func (c *Client) Debate(ctx context.Context, req api.DebateRequest) (*api.Debate
 	return &out, nil
 }
 
+// Knowledge indexes or queries the project knowledge base directly against
+// the daemon's own store — no session or model turn involved.
+func (c *Client) Knowledge(ctx context.Context, req api.KnowledgeRequest) (*api.KnowledgeResponse, error) {
+	var out api.KnowledgeResponse
+	if err := c.do(ctx, http.MethodPost, "/knowledge", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RepoMapIndex rebuilds the repository map directly against the daemon's own
+// workspace, refreshing both the on-disk cache and the daemon's cached
+// system-prompt block — no session or model turn involved.
+func (c *Client) RepoMapIndex(ctx context.Context) (*api.RepoMapIndexResponse, error) {
+	var out api.RepoMapIndexResponse
+	if err := c.do(ctx, http.MethodPost, "/repomap/index", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ListCommands returns custom slash commands from the daemon.
 func (c *Client) ListCommands(ctx context.Context) ([]api.CommandInfo, error) {
 	var out []api.CommandInfo

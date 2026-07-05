@@ -89,7 +89,8 @@ type Server struct {
 	cmdReg      *commands.Registry
 	permRules   []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
 	permMu      sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
-	repoMap     string            // cached repository map block for the system prompt (empty when not indexed)
+	repoMap     string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
+	repoMapMu   sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
 	personaDirs []string          // directories rescanned by refreshPersonas for hot reload
 	workspace   string
 	logger      *slog.Logger
@@ -632,6 +633,16 @@ func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, 
 // Handler exposes the HTTP routes for testing with httptest.
 func (s *Server) Handler() http.Handler { return s.routes() }
 
+// routes registers the daemon's HTTP API.
+//
+// Any handler that spends model tokens (calls engine.Run or otherwise drives
+// an adapter) must call checkDailyCaps before starting and recordDailySpend
+// when it finishes, the same way handlePostMessage and handleDebate do —
+// there is no compiler-enforced guarantee of this (unlike the P14.10
+// commandDefs table for the TUI's command surface), so it was missed once
+// already: /debate shipped without honoring or recording against the
+// cross-session daily cost/token caps until the gap was found and fixed in
+// the same review that caught P14.1's TUI command-surface drift.
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -658,6 +669,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /personas", s.handleListPersonas)
 	mux.HandleFunc("POST /security/scan", s.handleScan)
 	mux.HandleFunc("POST /debate", s.handleDebate)
+	mux.HandleFunc("POST /knowledge", s.handleKnowledge)
+	mux.HandleFunc("POST /repomap/index", s.handleRepoMapIndex)
 	mux.HandleFunc("GET /ui", s.handleWebUI)
 	mux.HandleFunc("GET /ui/", s.handleWebUI)
 	return s.authMiddleware(s.originMiddleware(mux))
@@ -1320,6 +1333,82 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
 }
 
+// handleKnowledge indexes or queries the project knowledge base directly
+// against the daemon's own store (POST /knowledge) — the same
+// project_knowledge tool and `aegis knowledge index` machinery, exposed so
+// `/knowledge` in the TUI (P14.3) can rebuild or search the index without
+// spending a model turn. Goes through the daemon rather than opening a
+// second sqlite connection from the TUI process, since s.knowledge is the
+// one live store instance for this workspace.
+func (s *Server) handleKnowledge(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	var req api.KnowledgeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if s.knowledge == nil {
+		writeError(w, http.StatusServiceUnavailable, "knowledge base unavailable")
+		return
+	}
+
+	switch req.Action {
+	case "index":
+		n, err := s.knowledge.Index(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, api.KnowledgeResponse{
+			DocCount:          n,
+			DBPath:            s.cfg.KnowledgeDBPath(s.workspace),
+			EmbeddingsEnabled: s.cfg.Embeddings.Enabled,
+		})
+	case "query":
+		if strings.TrimSpace(req.Query) == "" {
+			writeError(w, http.StatusBadRequest, "query is required")
+			return
+		}
+		limit := req.Limit
+		if limit <= 0 || limit > 20 {
+			limit = 5
+		}
+		results, err := s.knowledge.Search(r.Context(), req.Query, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out := make([]api.KnowledgeResult, len(results))
+		for i, res := range results {
+			out[i] = api.KnowledgeResult{Path: res.Path, Title: res.Title, Snippet: res.Snippet, Score: res.Score}
+		}
+		writeJSON(w, http.StatusOK, api.KnowledgeResponse{Results: out, Count: len(out)})
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown action %q (want index or query)", req.Action))
+	}
+}
+
+// handleRepoMapIndex rebuilds the repository map against the daemon's own
+// workspace (POST /repomap/index) — the same build `aegis index` runs,
+// exposed so `/index` in the TUI (P14.3) can refresh both the on-disk cache
+// and the daemon's cached system-prompt block without a restart.
+func (s *Server) handleRepoMapIndex(w http.ResponseWriter, r *http.Request) {
+	m, err := repomap.Build(s.workspace, repomap.Options{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	cache := filepath.Join(s.workspace, ".aegis", "repomap.json")
+	if err := m.Save(cache); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.repoMapMu.Lock()
+	s.repoMap = repomap.Block(m.Render())
+	s.repoMapMu.Unlock()
+	writeJSON(w, http.StatusOK, api.RepoMapIndexResponse{FileCount: len(m.Files), Path: cache})
+}
+
 // handleDebate runs a multi-agent debate (P12) directly against the daemon's
 // configured model, independent of any session — the same underlying
 // mechanism the `agent` tool's debate mode runs, exposed so `/debate` in the
@@ -1343,6 +1432,16 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Debate is session-less, so no session cap applies — but it still spends
+	// real model turns (one per role per round), so the cross-session daily
+	// caps (P9.5/P10.5) must gate it exactly like a normal turn does. Before
+	// this check existed, /debate ran even with the daily cap exhausted, and
+	// its spend was never recorded — invisible to every other cap check too.
+	if _, _, dailyCapErr := s.checkDailyCaps(r.Context()); dailyCapErr != nil {
+		writeError(w, http.StatusPaymentRequired, dailyCapErr.Error())
+		return
+	}
+
 	tracker := cost.NewTracker()
 	cfg := debate.Config{
 		ProposerPersona: req.ProposerPersona,
@@ -1354,6 +1453,10 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 		MaxTokens:       s.cfg.Cost.MaxTokensPerRun,
 	}
 	transcript, err := debate.Run(r.Context(), req.Claim, cfg, s.debateRoleRunner(tracker))
+	// Record spend regardless of outcome: debate.Run returns the partial
+	// transcript (and whatever the tracker accumulated) even on error, so an
+	// aborted debate's spend must still count against the daily caps.
+	s.recordDailySpend(tracker.TotalUSD(), tracker.TotalTokens())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1448,36 +1551,19 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var dailyCostBefore float64
 	if cap := s.cfg.Cost.SessionCapUSD; cap > 0 && sess.CostUSD >= cap {
 		writeError(w, http.StatusPaymentRequired, fmt.Sprintf("session spend cap reached: $%.4f of $%.2f limit", sess.CostUSD, cap))
 		return
 	}
-	if cap := s.cfg.Cost.DailyCapUSD; cap > 0 {
-		dailyCostBefore, err = s.store.TodayCost(r.Context())
-		if err != nil {
-			s.logger.Warn("read daily cost", "err", err)
-		}
-		if dailyCostBefore >= cap {
-			writeError(w, http.StatusPaymentRequired, fmt.Sprintf("daily spend cap reached: $%.4f of $%.2f limit", dailyCostBefore, cap))
-			return
-		}
+	dailyCostBefore, dailyTokensBefore, dailyCapErr := s.checkDailyCaps(r.Context())
+	if dailyCapErr != nil {
+		writeError(w, http.StatusPaymentRequired, dailyCapErr.Error())
+		return
 	}
 	sessionTokensBefore := sess.InputTokens + sess.OutputTokens
 	if cap := s.cfg.Cost.SessionTokenCap; cap > 0 && sessionTokensBefore >= cap {
 		writeError(w, http.StatusPaymentRequired, fmt.Sprintf("session token cap reached: %d of %d limit", sessionTokensBefore, cap))
 		return
-	}
-	var dailyTokensBefore int
-	if cap := s.cfg.Cost.DailyTokenCap; cap > 0 {
-		dailyTokensBefore, err = s.store.TodayTokens(r.Context())
-		if err != nil {
-			s.logger.Warn("read daily tokens", "err", err)
-		}
-		if dailyTokensBefore >= cap {
-			writeError(w, http.StatusPaymentRequired, fmt.Sprintf("daily token cap reached: %d of %d limit", dailyTokensBefore, cap))
-			return
-		}
 	}
 
 	flusher, ok := w.(http.Flusher)
@@ -1724,17 +1810,8 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if totalIn > 0 || totalOut > 0 {
 		_ = s.store.AddUsage(context.Background(), id, totalIn, totalOut, totalCost)
 	}
-	if totalCost > 0 && s.cfg.Cost.DailyCapUSD > 0 {
-		if err := s.store.AddDailyCost(context.Background(), totalCost); err != nil {
-			s.logger.Warn("add daily cost", "err", err)
-		}
-	}
 	totalTokens := totalIn + totalOut
-	if totalTokens > 0 && s.cfg.Cost.DailyTokenCap > 0 {
-		if err := s.store.AddDailyTokens(context.Background(), totalTokens); err != nil {
-			s.logger.Warn("add daily tokens", "err", err)
-		}
-	}
+	s.recordDailySpend(totalCost, totalTokens)
 	s.alertOnCostThreshold(send, sess.CostUSD, totalCost, dailyCostBefore)
 	s.alertOnTokenThreshold(send, sessionTokensBefore, totalTokens, dailyTokensBefore)
 	if len(traces) > 0 {
@@ -1764,6 +1841,53 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			ev.Message = fmt.Sprintf("Background session %q failed: %v", displayTitle(sess.Title, id), runErr)
 		}
 		s.notifier.Notify(context.Background(), ev)
+	}
+}
+
+// checkDailyCaps reads the cross-session daily dollar/token totals (P9.5/
+// P10.5) and returns a non-nil error once either configured cap is already
+// reached, so any model-spending entry point — not just handlePostMessage —
+// can refuse to start. A read failure is logged and treated as "not yet
+// exceeded" rather than blocking the caller, matching the prior inline
+// behavior. The before-values are returned so the caller can also feed
+// alertOnCostThreshold/alertOnTokenThreshold.
+func (s *Server) checkDailyCaps(ctx context.Context) (dailyCostBefore float64, dailyTokensBefore int, err error) {
+	if cap := s.cfg.Cost.DailyCapUSD; cap > 0 {
+		dailyCostBefore, err = s.store.TodayCost(ctx)
+		if err != nil {
+			s.logger.Warn("read daily cost", "err", err)
+			dailyCostBefore, err = 0, nil
+		} else if dailyCostBefore >= cap {
+			return dailyCostBefore, dailyTokensBefore, fmt.Errorf("daily spend cap reached: $%.4f of $%.2f limit", dailyCostBefore, cap)
+		}
+	}
+	if cap := s.cfg.Cost.DailyTokenCap; cap > 0 {
+		dailyTokensBefore, err = s.store.TodayTokens(ctx)
+		if err != nil {
+			s.logger.Warn("read daily tokens", "err", err)
+			dailyTokensBefore, err = 0, nil
+		} else if dailyTokensBefore >= cap {
+			return dailyCostBefore, dailyTokensBefore, fmt.Errorf("daily token cap reached: %d of %d limit", dailyTokensBefore, cap)
+		}
+	}
+	return dailyCostBefore, dailyTokensBefore, nil
+}
+
+// recordDailySpend writes a run's accumulated cost/tokens against the current
+// UTC day (P9.5/P10.5 cross-session caps) so a later checkDailyCaps call —
+// from a normal session turn, another /debate call, or any future
+// model-spending endpoint — sees this run's spend. Every entry point that
+// spends model tokens must call this, or its spend is invisible to the caps.
+func (s *Server) recordDailySpend(costUSD float64, tokens int) {
+	if costUSD > 0 && s.cfg.Cost.DailyCapUSD > 0 {
+		if err := s.store.AddDailyCost(context.Background(), costUSD); err != nil {
+			s.logger.Warn("add daily cost", "err", err)
+		}
+	}
+	if tokens > 0 && s.cfg.Cost.DailyTokenCap > 0 {
+		if err := s.store.AddDailyTokens(context.Background(), tokens); err != nil {
+			s.logger.Warn("add daily tokens", "err", err)
+		}
 	}
 }
 
@@ -2185,8 +2309,11 @@ func (s *Server) effectiveSystem(base string) string {
 	if sk := skills.BuildIndex(s.workspace, s.cfg.DataDir, s.cfg.Skills.BuiltinEnabled); sk != "" {
 		parts = append(parts, sk)
 	}
-	if s.repoMap != "" {
-		parts = append(parts, s.repoMap)
+	s.repoMapMu.Lock()
+	repoMap := s.repoMap
+	s.repoMapMu.Unlock()
+	if repoMap != "" {
+		parts = append(parts, repoMap)
 	}
 	if dt := deferredToolsBlock(s.tools); dt != "" {
 		parts = append(parts, dt)

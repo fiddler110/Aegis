@@ -2,6 +2,55 @@ package tui
 
 import "testing"
 
+// TestCommandDefsWellFormed is the P14.10 regression: every entry in the
+// single source-of-truth table has a name, a handler, and detailed help, and
+// no name is duplicated (which would silently shadow one command's dispatch
+// entry with another's in the map built from this table).
+func TestCommandDefsWellFormed(t *testing.T) {
+	seen := make(map[string]bool)
+	for _, c := range commandDefs() {
+		if c.name == "" {
+			t.Error("commandDef with empty name")
+		}
+		if c.handler == nil {
+			t.Errorf("%q has no handler", c.name)
+		}
+		if c.shortDesc == "" {
+			t.Errorf("%q has no shortDesc", c.name)
+		}
+		if c.detailedHelp == "" {
+			t.Errorf("%q has no detailedHelp", c.name)
+		}
+		if seen[c.name] {
+			t.Errorf("%q is duplicated in commandDefs", c.name)
+		}
+		seen[c.name] = true
+	}
+}
+
+// TestBuiltinCommandsCoverDispatchTable guards against the P14.1 drift: a
+// command dispatchable via d.builtins (and listed in /help) but absent from
+// builtinCommands never appears in the completion popup or command palette,
+// so typing "/" + its prefix surfaces nothing — precisely how
+// /security-config, /scan, /debate, /rollback, /detach, /archive, and /humor
+// went silently unreachable. "quit" is a deliberate exception (bare alias for
+// "exit", not listed separately), matching TestSlashCommandsAreListedInHelp.
+func TestBuiltinCommandsCoverDispatchTable(t *testing.T) {
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	listed := make(map[string]bool, len(builtinCommands))
+	for _, e := range builtinCommands {
+		listed[e.name] = true
+	}
+	for name := range d.builtins {
+		if name == "quit" {
+			continue
+		}
+		if !listed[name] {
+			t.Errorf("/%s is dispatchable but missing from builtinCommands (completion popup/palette)", name)
+		}
+	}
+}
+
 func names(items []cmdEntry) []string {
 	out := make([]string, len(items))
 	for i, e := range items {

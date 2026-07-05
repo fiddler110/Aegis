@@ -59,6 +59,10 @@ func newSecurityStatusCmd() *cobra.Command {
 					detail = "on PATH"
 				case security.MethodContainer:
 					detail = fmt.Sprintf("via %s", rt)
+				default:
+					if note := security.AvailabilityNote(d.Name, reason); note != "" {
+						detail = reason + "; " + note
+					}
 				}
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, d.Category, methodLabel(method), detail)
 			}

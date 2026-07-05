@@ -24,45 +24,34 @@ type cmdEntry struct {
 	desc string
 }
 
-// builtinCommands is the single source of truth for built-in slash commands,
-// shared by the inline completion popup and the command palette.
-var builtinCommands = []cmdEntry{
-	{"help", "Show help or detail for a command"},
-	{"persona", "Pick a persona from an interactive list"},
-	{"mode", "Switch permission mode (plan / build / auto)"},
-	{"guard", "Toggle output validation (on / off / status)"},
-	{"tools", "Set tool-output display mode (compact / full)"},
-	{"clear", "Clear the conversation transcript"},
-	{"config", "Open configuration wizard"},
-	{"memory", "Show saved memories"},
-	{"remember", "Save a memory entry"},
-	{"skills", "List skills, or enable/disable a built-in one"},
-	{"commands", "List custom commands"},
-	{"models", "Show current model info"},
-	{"sandbox", "Show or switch the execution sandbox"},
-	{"session", "Show session info or list sessions"},
-	{"rewind", "List or restore checkpoints"},
-	{"timeline", "Jump to a past turn in the conversation"},
-	{"sidebar", "Toggle the sidebar panel on/off"},
-	{"copy", "Copy last assistant message or code block N to clipboard"},
-	{"share", "Export session to a shareable file"},
-	{"exit", "Exit Aegis"},
-}
+// builtinCommands is the completion popup / command palette's view of every
+// built-in slash command, derived from commandDefs (P14.10) — the single
+// source of truth also used by the dispatch table and /help — instead of a
+// fourth hand-maintained list that can drift out of sync with the other
+// three (the exact class of bug P14.1 fixed).
+var builtinCommands = func() []cmdEntry {
+	defs := commandDefs()
+	out := make([]cmdEntry, len(defs))
+	for i, c := range defs {
+		out[i] = cmdEntry{name: c.name, desc: c.shortDesc}
+	}
+	return out
+}()
 
 // commandsNeedingArgs are completed with a trailing space so the user can
-// immediately type arguments rather than running the bare command.
-// "persona" is intentionally absent: Tab/Enter on /persona dispatches it
-// immediately, which opens the interactive picker.
-var commandsNeedingArgs = map[string]bool{
-	"mode":     true,
-	"guard":    true,
-	"tools":    true,
-	"remember": true,
-	"help":     true,
-	"session":  true,
-	"rewind":   true,
-	"share":    true,
-}
+// immediately type arguments rather than running the bare command, derived
+// from each commandDef's needsArgs field. "persona" is intentionally absent:
+// Tab/Enter on /persona dispatches it immediately, which opens the
+// interactive picker.
+var commandsNeedingArgs = func() map[string]bool {
+	out := make(map[string]bool)
+	for _, c := range commandDefs() {
+		if c.needsArgs {
+			out[c.name] = true
+		}
+	}
+	return out
+}()
 
 // allCommandEntries returns built-in commands followed by custom ones.
 func allCommandEntries(customs []api.CommandInfo) []cmdEntry {

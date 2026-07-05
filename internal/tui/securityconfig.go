@@ -150,6 +150,9 @@ func (m *securityConfigModel) resolveCmd() tea.Cmd {
 				statuses[d.Name] = "container (" + string(rt) + ")"
 			default:
 				statuses[d.Name] = "unavailable: " + reason
+				if note := security.AvailabilityNote(d.Name, reason); note != "" {
+					statuses[d.Name] += "; " + note
+				}
 			}
 		}
 		return securityConfigResolvedMsg{statuses: statuses}

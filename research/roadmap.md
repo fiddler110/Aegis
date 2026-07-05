@@ -1,9 +1,20 @@
 # Aegis Capability Roadmap
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-05 — P12 (multi-agent debate mode for security analysis), all 7 items,
-shipped. P6.3 (MCP server mode) shipped; P6.2 (A2A), P9.3 (telemetry export), and P9.6 (bulk
-session/memory export-import) evaluated and dropped, not wanted.
+**Last updated:** 2026-07-05 — cross-feature integration review (roadmap + codebase, focused on
+seams between features rather than individual gaps) found and fixed two items same-day: **P14.1**
+(completion/palette list drift — the reported bug) and **P14.10** (single source-of-truth command
+table, the structural fix for that whole drift class), both shipped. The review also surfaced an
+undocumented instance of the same "new capability skips a shared seam" pattern outside the TUI:
+**/debate bypassed the P9.5/P10.5 daily cost/token caps** entirely and never recorded its spend to
+the ledger — fixed same-day (see Appendix A). **P14.2** (in-session `/security` surface) and
+**P14.3** (in-session `/knowledge`/`/index`) also shipped same-day, registering into the new P14.10
+table. P14.4–P14.9 remain open, building on that table instead of the three-list pattern that caused
+P14.1.
+P12 (multi-agent debate mode for security analysis), all 7 items, shipped. P6.3 (MCP server mode)
+shipped; P6.2 (A2A), P9.3 (telemetry export), and P9.6 (bulk session/memory export-import)
+evaluated and dropped, not wanted. P13 (7 exploratory items) fully researched and scoped into
+concrete sub-items (P13.1 now shipped).
 Full change history and design rationale for every shipped item now lives in
 [Appendix A](#appendix-a--completed-work); this document tracks only genuinely open work.
 
@@ -11,44 +22,394 @@ Full change history and design rationale for every shipped item now lives in
 
 ## Status
 
-Everything is shipped except the items in the two "Open Work" sections below: P9.4 and P6.1/
-P6.5. Every other numbered track — P2, P3, P4, P5 (all sub-items), the TQ TUI-quality track,
-P6.3, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03
-architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), all of P11
-(P11.1–P11.12), and all of P12 (P12.1–P12.7) — is shipped; see
+Everything is shipped except the items in the four "Open Work" sections below: P13, P14 (P14.4–
+P14.9 only), P9.4, and P6.1/P6.5. Every other numbered track — P2, P3, P4, P5 (all sub-items), the
+TQ TUI-quality track, P6.3, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the
+2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), all of
+P11 (P11.1–P11.12), all of P12 (P12.1–P12.7), and P14.1/P14.2/P14.3/P14.10 — is shipped; see
 [Appendix A](#appendix-a--completed-work) for what each shipped and why.
 
-**Nothing is currently in progress.** P9.4 and P6.1/P6.5 are real but explicitly not worth
-building speculatively — see their entries below for why.
+**Nothing is currently in progress.** P13's seven items are researched and scoped (2026-07-05);
+P13.1 is now shipped, the other six not started. P14.1 (completion/palette drift), P14.10
+(single source-of-truth command table), P14.2 (`/security` umbrella), and P14.3 (`/knowledge`/
+`/index`) shipped 2026-07-05; P14.4–P14.9 (the remaining individual `/`-surface additions) are
+scoped but not started — see their entries below. P9.4 and P6.1/P6.5 are real but explicitly not
+worth building speculatively — see their entries below for why.
 
 ---
 
-## Open Work P13 (Security & Capability Enhancements - Exploratory)
+## Open Work — P13 (Security & Capability Enhancements — researched 2026-07-05, none started)
 
-### P13.1 - Trufflehog Secret Scanning Enhancement
+Each item below started as a raw idea; all seven were researched on 2026-07-05 before any
+implementation (five via parallel background review of the named external project/methodology,
+two via direct codebase audit), per instruction to plan and explore before building. **Nothing in
+P13 is implemented yet** — every sub-item below is a scoped proposal, not a shipped feature.
 
-Currently gitleaks is used for secret scanning but is not as comprehensive as using trufflehog https://github.com/trufflesecurity/trufflehog. Explore integrating the use of trufflehog into Aegis for secret scanning in project or directory spaces.
+### P13.1 — Security config TUI/CLI: cross-platform availability gap
 
-### P13.2 - Terminal Enhancements for Aegis
+Audited against the current codebase: `/security-config` (TUI) and `aegis security
+status/install/config` (CLI) already exist and are comprehensive — P11.10/P11.11 shipped live
+per-tool availability (host binary / container / unavailable, with a reason), guided per-OS
+install with confirmation, and method/image/install-policy configuration. The original framing of
+this item ("doesn't currently exist... not working at all") no longer matches the codebase.
 
-Review the Microsoft Intelligent-Terminal for any features that would be worth incorporating into Aegis. https://github.com/microsoft/intelligent-terminal/tree/main
-Intelligent Terminal is built to work with the Agent Client Protocol (ACP)-compatible agent cli. It has certain quality of life features that could be beneficial to use with Aegis. Ensure that anything incorporated into Aegis would be applicable across all operating systems for Windows, Macos and Linux. Focus on identifying any capabilities and features that could be useful and adding those as a new section of roadmap items.
+The one real, concrete gap: neither surface says which *other* platforms a tool supports when it's
+unavailable on yours. `ScannerDescriptor.Install` already carries a `map[string]string` keyed by
+`darwin`/`linux`/`windows` (`internal/security/method.go`) — the data exists, it's just never
+surfaced beyond the current `runtime.GOOS`.
 
-### P13.3 - Nebula AI-Powered Penetration Testing Platform
+- **P13.1.1 — SHIPPED 2026-07-05** — `security.InstallAvailability`/`AvailabilityNote`
+  (`internal/security/install.go`) report which *other* OSes have a guided host install, and both
+  `aegis security status`'s DETAIL column and the `/security-config` status line now append "no
+  native host install for $OS (available on: …) — configure security.tools.&lt;name&gt;.image for a
+  container fallback" when the current OS lacks one. Note-gated to genuine missing-host-binary
+  reasons only (never disabled/opt-in/container reasons). Tests in `install_test.go`. (S)
+- **P13.1.2 — SHIPPED 2026-07-05** — folded into P13.1.1's single note (the "configure a container
+  image" next-step is part of the same `AvailabilityNote` string), rather than a second separate
+  line. (S)
 
-The Nebula project utilizes llms to help with penetration testing. I want you to assess the project and see if there are any valuable capabilities that can be incorporated into Aegis for security scanning and testing of application code or applications during runtime. Focus on identifying any capabilities and features that could be useful and adding those as a new section of roadmap items.
+Priority: Low, Effort: S — **done**. Caveat surfaced during the follow-up review: the new
+cross-platform availability info lives in `aegis security status` (CLI) and the `/security-config`
+dialog, but `aegis security status` itself has **no TUI slash command at all** — so from inside a
+session you can't see it without the config dialog. That stranding is the seed of the P14 track
+below; full in-session reach is **P14.2**.
 
-### P13.4 - Nuclei addition to scanners
+### P13.2 — Trufflehog secret-scanning enhancement
 
-Nuclei is a modern, high-performance vulnerability scanner that leverages simple YAML-based templates. It empowers you to design custom vulnerability detection scenarios that mimic real-world conditions, leading to zero false positives. https://github.com/projectdiscovery/nuclei. Review and look at incorporating Nuclei as one of the capabilities used for scanning. That way I can scan systems on my network via aegis, or have it execute the scan and then analyse the results.
+Researched: trufflehog's differentiator over gitleaks is **live verification** (800+ detectors
+call the real provider API — AWS/GitHub/etc. — to confirm a found credential is still active),
+cutting triage noise sharply. It has no SARIF output (needs a hand-written parser, same as
+gitleaks today) and is AGPL-3.0 licensed (vs. gitleaks' MIT — no code-linking concern given Aegis
+only shells out to a separately-installed binary, but worth disclosing to operators).
 
-### P13.5 - Aegis Threat Modelling
+Recommendation: add **alongside** gitleaks, opt-in (`DefaultEnabled:false`, matching the P11.3
+gosec/bandit/etc. precedent), deduped against gitleaks via the existing P11.8
+`DedupFindings`/`SeenBy` machinery — not a replacement. Verification mode makes real calls to
+third-party services using the actual discovered secret (rate-limit/alerting/misuse-resembling
+risk) and needs a DAST-style hard gate, not a normal scanner toggle.
 
-Create a persona that is strictly for threat modelling. I want it to have a focus on STRIDE, LINDDUN, Trike,, Process for Attack Simulation and Threat Analysis (PASTA), VAST with Visual, Agile and Simple Threat Modeling, and the NIST 800-154 data-centric approach to threat modelling that evaluates how sensitive data flows, stores and might be exposed. I want to create a batch of security documents/instructions/skills/etc for each of the types of threat modeling that the agent can clarify with the user what type of threat model they want to enact and then with a focus on the framework, generate a threat model of an application or system. Also review the blog: https://www.securitycompass.com/blog/top-12-threat-modeling-methodologies-techniques/ to see what other important information or methodology for threat modeling should be incorporated. Take note of when each framework is best used and their use-cases. I don't know if Threat Modeling should be a skill bundle or something that can then be loaded into an aegis session and used so that it's not always in the context.
+- **P13.2.1** — Add `trufflehogScanner` (opt-in) to `internal/security/scanners.go`/`descriptors`,
+  filesystem mode, hand-written JSON parser, default `--no-verification`. (M)
+- **P13.2.2** — `security.tools.trufflehog.verify` config bool (default false); when true, require
+  `MethodHost` only — verification is incompatible with the `--network none` container-hardening
+  posture, same host-only carve-out precedent as image scanning — and have `Resolve` explicitly
+  refuse container mode with `verify:true`. (S)
+- **P13.2.3** — Extend `Finding` with an optional verified/unverified/unknown tri-state; surface it
+  in `Format()` and the security-audit skill's triage loop so verified findings are harder to
+  baseline-suppress. (S)
+- **P13.2.4** — Document AGPL-3.0 licensing in `docs/security.md`'s tool table. (S)
+- **P13.2.5** — Guided-install descriptor entries (brew/curl-script/go install/docker) per the
+  P11.10 pattern. (S)
 
-### P13.6 - Latex Report Writing
+Priority: Medium, Effort: M overall.
 
-I want to incorporate Latex use for writing reports. Using LaTeX to write reports means focusing purely on your text and letting the software handle the layout, formatting, and numbering automatically. It is highly recommended for documents with heavy mathematical notations, consistent sectioning, and professional referencing. I want to use Latex to help standardize report writing. I normally have a large number of Markdown documents for research and planning that I want to then consolidate to create a comprehensive report on a subject, this is where I want to use Aegis to extract the relevant information and generate a latex report for it. Latex documentation and core information can be found here: https://www.latex-project.org/help/documentation/. I don't know if report writing should be a skill bundle or something that can then be loaded into an aegis session and used so that it's not always in the context.
+### P13.3 — Terminal enhancements (Microsoft Intelligent Terminal review)
+
+Researched: Intelligent Terminal is Microsoft's experimental ACP-native fork of Windows Terminal
+(a terminal *emulator*, not a standalone tool) — docked Agent Pane, agent status bar,
+command-failure diagnosis with fix suggestions, a context-injecting command palette, and session
+management. Most of its UX ideas are already shipped in Aegis's TQ track (docked terminal pane,
+sidebar status, session picker/resume, theming, streaming). Aegis's embedded terminal pane already
+shells out via plain `os/exec` (no pty library), so it's already fully cross-platform — that
+constrains what's easy to add without introducing OS-specific pty code.
+
+Genuinely new, worth adding:
+
+- **P13.3.1** — Shell-aware error assist: on a non-zero exit from the `shell` tool or the embedded
+  terminal pane, offer an inline "diagnose this?" affordance that pipes stderr+exit code to the
+  model on request. Cross-platform (exit-code capture only). (S/M)
+- **P13.3.2** — `@shell`/`@last` context token: extend the existing `@file`/`@image:`
+  attachment-token parser to inject the last N lines of embedded-terminal output into the next
+  prompt. (S)
+- **P13.3.3** — ACP `terminal/*` capability passthrough: `internal/acp` implements
+  session/prompt/permission methods but not the optional ACP terminal capability
+  (`terminal/create`, `/output`, `/wait_for_exit`, `/kill`, `/release`). Implementing it lets an
+  ACP host (Zed, a future Intelligent-Terminal-as-client) supply its own pty for agent shell calls
+  — live visibility/Ctrl+C control on the host side — falling back to Aegis's native exec path
+  when the host doesn't advertise the capability. The one item requiring real ACP protocol work;
+  everything else here is TUI-only. (M/L)
+- **P13.3.4** — Background-task attention indicator: extend the existing sidebar agent-count
+  display to flag a failed background sub-agent/cron job. (S)
+- **P13.3.5** — Configurable keybinding remap: `internal/tui/keymap.go` is fully hardcoded; add a
+  `tui.keybindings` config section. Trivial cross-platform (bubbles/key is already OS-agnostic). (S)
+
+Priority: Low-Medium, Effort: S-M per item, no single blocker.
+
+### P13.4 — Nebula (berylliumsec/nebula) AI-pentesting review
+
+Researched and identified: github.com/berylliumsec/nebula (~500 stars, PyPI `nebula-ai`) —
+confirmed as the correct LLM-driven pentesting project (not the unrelated Slack/Defined-Networking
+VPN mesh tool of the same name). Its OSS core is an *advisory copilot*, not an autonomous attack
+engine: `!`-prefixed LLM queries against on-screen terminal output, AI-assisted categorized
+note-taking, real-time next-step suggestions, and ingestion of external recon-tool output — no
+exploit chaining, no autonomous target execution, no report generation in the free tier. A paid
+"Nebula Pro" tier claims an undocumented "autonomous mode"; public docs give no technical detail,
+and this should **not** be a model for anything Aegis adopts.
+
+Genuinely new pattern worth taking: a persistent, session-spanning "engagement notebook" (distinct
+from a single scan `Report`) and an advisory flow that ingests arbitrary external tool output
+(nmap, nikto, gobuster — none of which Aegis wraps) and reasons about next steps.
+
+- **P13.4.1** — Security engagement notebook: persistent structured notes/findings ledger spanning
+  a multi-day review (extends `internal/memory`). (M)
+- **P13.4.2** — `security_advise` tool: ingest pasted external recon-tool output, return
+  AI-suggested next steps, map into the `Finding` model where possible. (M)
+- **P13.4.3** — CVE/exploit-context lookup tool: scoped lookup feeding real citations to the P12
+  debate proposer/critic roles instead of relying on model recall. (S)
+- **P13.4.4** — Engagement status digest: summary of recent scan/session activity (finding counts,
+  deltas, open items). (S)
+- **P13.4.5** — Guarded "suggest next action" layer on top of `RunDAST`: proposes manual next-test
+  steps post-scan, never auto-executed, reusing the exact `allow_active`/`allowed_targets` gate —
+  explicitly excludes autonomous exploit chaining. (M)
+
+Priority: Low (interesting, not urgent), Effort: M overall. P13.4.5 must not adopt Nebula Pro's
+undocumented autonomous-mode pattern.
+
+### P13.5 — Nuclei scanner addition
+
+Researched: Nuclei is a YAML-template-driven scanner (12,000+ community templates: CVEs,
+misconfig, exposed panels, raw TCP/UDP checks) — materially broader than ZAP's web-app-only scope,
+and natively supports scanning a host list (`-l targets.txt`), which is exactly the "scan systems
+on my network" ask. It exports native SARIF (`-sarif-export`), slotting directly into the existing
+`ParseSARIF` ingester with no new parsing code, and ships its own intrusive-template opt-out by
+default (`-include-tags` required to unlock).
+
+The critical piece: Aegis's only existing network-target scanner (ZAP/DAST) gates on
+`isDASTTargetAllowed`, which requires an `http(s)://` URL — Nuclei's bare-host/multi-host/CIDR
+targets don't fit that shape, and the gate needs generalizing *before* wiring Nuclei in, not after.
+
+- **P13.5.1** — Add `nuclei` scanner (`internal/security/nuclei.go`), resolved/run like ZAP,
+  reusing `RunDAST`'s target-authorization gate. (M)
+- **P13.5.2** — Generalize `isDASTTargetAllowed` to accept bare host/host:port targets (not just
+  `http(s)://` URLs); extract a shared target-policy helper used by both ZAP and Nuclei. (M)
+- **P13.5.3** — Multi-host (`-l`) support with per-host allowlist enforcement (every resolved host
+  checked individually, never a single check trusted for the whole list) and a hard cap on
+  hosts-per-call. (M)
+- **P13.5.4** — Default to Nuclei's safe/passive template set; require `security.dast.allow_active`
+  before passing `-include-tags` for intrusive/dos/fuzz templates — mirrors ZAP's active-scan gate
+  exactly. (S)
+- **P13.5.5** — Consume `-sarif-export` via the existing `ParseSARIF` pipeline; map template tags
+  (cve/misconfig/exposed-panel/network) into ASVS assignment. (S)
+- **P13.5.6** — Pin `nuclei-templates` to a specific release instead of always-latest community
+  pull (P11.1/P7.6's "an image/rule pack is itself attack surface" posture applies equally to
+  templates that are executable network-probe logic). (S)
+- **P13.5.7** — New `aegis scan network` / `security_scan {"targets":[...]}` surface with explicit
+  authorized-use-only warning copy, since this explicitly targets other devices on the user's LAN. (M)
+
+Priority: Medium (real user ask — "scan systems on my network"), Effort: L overall, gated on
+P13.5.2 landing first.
+
+### P13.6 — Aegis threat-modeling persona/skill
+
+Researched the six named frameworks (STRIDE, LINDDUN, PASTA, Trike, VAST, NIST 800-154) plus the
+"top 12" blog's other entries. Worth adding as lightweight companions: **Attack Trees** (visual
+attacker-goal/path decomposition), **MITRE ATT&CK mapping** (already gestured at in the
+`security-researcher` persona), and **Evil User Stories** (Agile-native, pairs with VAST). Not
+worth their own artifacts: OCTAVE (org-level, not app-level), Kill Chain Analysis (SOC/IR-oriented,
+not model-generation), Hybrid Threat Modeling (worth a one-paragraph note only — "frameworks can be
+combined").
+
+| Framework | Focus | Best use case |
+|---|---|---|
+| STRIDE | 6-category threat taxonomy per DFD element | General-purpose default |
+| LINDDUN | 7-category privacy threats | PII/regulated privacy contexts |
+| PASTA | Risk-centric, 7-stage, includes attack simulation | Enterprise, business-impact traceability |
+| Trike | Requirements/access-control model, explicit risk acceptance | Governance-heavy, auditable risk decisions |
+| VAST | Scales across many teams, Agile/DevSecOps cadence | Large orgs, many services |
+| NIST 800-154 | Data-centric: flow/storage/exposure of sensitive data | Compliance, data-protection-anchored assessments |
+
+Design recommendation: **one skill bundle, not a new persona, not one skill per framework loaded ad
+hoc.** A single `threat-modeling` skill (mirroring `content-review`'s `references/*.md` bundling
+pattern) whose `SKILL.md` handles "clarify or infer which framework, then load only that
+framework's reference file" — this is inherently a single-entry-point behavior (the user often
+won't already know which framework they want), and keeps token cost to name+description until one
+framework is actually chosen. The existing `security-architect` persona's "Workflow for threat
+modeling" section should name this skill instead of hardcoding STRIDE/LINDDUN.
+
+- **P13.6.1** — New builtin skill `internal/skills/builtin/threat-modeling/SKILL.md`:
+  clarifying-question/framework-selection logic, shared workflow (explore workspace for
+  assets/trust boundaries/data flows → apply chosen framework → write document → optional P12
+  debate-mode routing per finding), pointer to per-framework reference files. (M)
+- **P13.6.2–P13.6.7** — One `references/<framework>.md` per framework (stride, linddun, pasta,
+  trike, vast, nist-800-154): checklist/process steps + output template each. (S each)
+- **P13.6.8** — `references/companion-techniques.md`: Attack Trees, MITRE ATT&CK mapping, Evil User
+  Stories as optional add-ons, plus the Hybrid Threat Modeling note. (S)
+- **P13.6.9** — Update `securityArchitectSystem` (`internal/persona/persona.go`) to name the skill
+  instead of hardcoding STRIDE/LINDDUN, preserving the existing P12 debate-mode routing hook. (S)
+- **P13.6.10** — Update `docs/personas.md`/skills docs. (S)
+
+Priority: Medium, Effort: M overall (mostly content-writing, not code).
+
+### P13.7 — LaTeX report writing: consolidation skill
+
+Audited against the current codebase: `latex_build`/`latex_new_document` tools already exist
+(`internal/tool/builtin/latex.go`) with a built-in "report" document-class style (fancy headers,
+code-listing styling, bibliography support), and the `report-writer` persona already references
+them. The original framing of this item ("incorporate LaTeX use") no longer matches the codebase —
+the capability exists.
+
+The real gap: no skill walks through the specific ask — consolidating a large number of existing
+markdown research/planning docs into one coherent LaTeX report — the way `html-report` bundles a
+template + validator + steps for its narrower single-report case.
+
+- **P13.7.1** — New builtin skill `internal/skills/builtin/latex-report/SKILL.md` (mirrors
+  `html-report`'s pattern): steps for gathering/reading the source markdown docs, synthesizing a
+  section outline, calling `latex_new_document(style="report")`, filling sections from the source
+  material, `latex_build`, and reporting the output PDF path. Skill (progressive disclosure), not
+  always-loaded — triggered on phrases like "consolidate these into a report", "write this up as a
+  LaTeX report". (M)
+
+Priority: Low, Effort: M.
+
+### P13 cross-cutting enhancement — every new capability must ship its in-session TUI surface (2026-07-05 review)
+
+The TUI command-surface review (P14 below) found the recurring failure mode already biting P13:
+a capability ships as a *tool* (model-callable) and a *CLI subcommand*, but never gets an in-session
+`/slash` command — so a user driving the TUI can't reach it, and it feels absent (exactly the
+`/security-config`-invisibility and stranded-`aegis security status` complaints that triggered this
+review). To stop P13 from repeating it, each item above gains an explicit TUI-surface requirement,
+to be delivered *in the same change* and *guarded by the P14.1/P14.10 command-surface sync test*:
+
+- **P13.2 (trufflehog)** — the `verify` opt-in must appear as an explicit, warning-labelled toggle
+  in `/security-config`; the verified/unverified tri-state (P13.2.3) must render in the `/scan`
+  output, not only the CLI.
+- **P13.5 (nuclei)** — the `aegis scan network` capability needs a `/scan network <target>` TUI
+  form, and its target-authorization refusal must render through the TUI approval dialog (TQ6), not
+  just a CLI error string.
+- **P13.6 (threat-modeling)** — add a `/threat-model` slash command as the discoverable entry point
+  that loads the skill and asks the framework-selection clarifying question directly, instead of
+  relying on the model to notice trigger phrases in free text (this also satisfies the item's own
+  "clarify with the user which framework" requirement more reliably).
+- **P13.7 (latex report)** — add a `/report [latex] <sources…>` slash entry point that kicks off the
+  consolidation skill, rather than depending on trigger-phrase detection.
+- **P13.3 (terminal)** — P13.3.2 (`@shell`/`@last` token) and P13.3.5 (configurable keybindings)
+  are TUI-surface work; build them under the P14 command-surface refactor, not as a separate pass.
+- **P13.4 (nebula)** — P13.4.1 (engagement notebook) and P13.4.4 (status digest) each need a slash
+  surface (`/notebook`, folded into the P14.5 `/status`), noted there.
+
+Net effect on the plans: no P13 capability is "done" until it's reachable from the TUI and covered
+by the sync test. This is a requirement addition, not new scope — the underlying features are
+unchanged.
+
+---
+
+## Open Work — P14 (TUI Command-Surface Parity & Discoverability — P14.1/P14.2/P14.3/P14.10 shipped 2026-07-05, P14.4–P14.9 not started)
+
+A review of the TUI's slash-command surface against (a) the actual dispatch table, (b) the CLI
+subcommand tree, and (c) the daemon client API found a real, reported defect plus a broad
+discoverability gap: many daemon/CLI capabilities have no in-session `/slash` command, and the
+lists that *should* agree about which commands exist have silently drifted.
+
+**Root-cause finding (the reported bug), fixed.** A built-in slash command used to be declared in
+*three* hand-maintained places that had to agree: the dispatch table (`d.builtins`,
+`internal/tui/slash.go`), the `/help` listing + detailed help (`cmdHelp`/`builtinHelp`, same file),
+and the completion-popup/command-palette source (`builtinCommands`, `internal/tui/completion.go`).
+`help_test.go` guarded the first two against each other — but nothing guarded `builtinCommands`, so
+`security-config`, `scan`, `debate`, `rollback`, `detach`, `archive`, and `humor` were all fully
+dispatchable and listed in `/help`, yet never appeared in the `/`-autocomplete popup or palette.
+That was precisely why `/security-config` "didn't exist" from the user's point of view: typing
+`/sec` surfaced nothing.
+
+**P14.1 — SHIPPED 2026-07-05** — the seven missing entries were added to `builtinCommands` (and the
+arg-taking ones — `security-config`/`scan`/`debate`/`rollback`/`detach`/`archive`/`humor` — to
+`commandsNeedingArgs`), plus a guard test (`TestBuiltinCommandsCoverDispatchTable`,
+`internal/tui/completion_test.go`) asserting `builtinCommands` covers every `d.builtins` key except
+the `quit` alias, mirroring `TestSlashCommandsAreListedInHelp`. There is still no dedicated
+`/security` umbrella command (only `/security-config`) — that's P14.2, not part of this fix.
+
+**P14.10 — SHIPPED 2026-07-05** — the structural cure, built immediately after P14.1 rather than
+left as a follow-up: `internal/tui/commands.go` (new) defines each built-in command exactly once as
+a `commandDef` struct (name, arg hint, short description, detailed help, whether it needs args, and
+its handler as a method expression `(*SlashDispatcher).cmdX`). `d.builtins` (dispatch), `cmdHelp`'s
+general listing, `builtinHelp` (detailed `/help <name>`), and `completion.go`'s `builtinCommands`/
+`commandsNeedingArgs` are now all derived from this one table — a fourth list can no longer drift
+out of sync with the other three, closing the entire class of bug P14.1 fixed one instance of.
+`commandDefs` is a function rather than a package-level `var`: a `var` initializer that references
+handler values whose bodies range over that same `var` is a compile-time initialization cycle in
+Go, so the table is rebuilt on each lookup instead (cheap — ~26 entries, called only on dispatcher
+construction, `/help`, and popup population). New test `TestCommandDefsWellFormed` guards the table
+itself (no empty/duplicate names, every entry has a handler and help text). All P14.2–P14.9
+`/`-surface additions below should register into this table rather than reintroducing hand-written
+lists.
+
+### P14.2 — SHIPPED 2026-07-05 — In-session security surface (`/security`)
+
+`/security-config` was the only security command in the TUI; `aegis security status` (carrying the
+P13.1 cross-platform availability info), `aegis security install <tool>`, and `aegis security
+baseline` were CLI-only. Added `/security [status|install <tool> [confirm]|baseline [path]|config
+[global]]` (`internal/tui/slash.go`'s `cmdSecurity` and its four sub-handlers) so the whole
+security-tooling surface is reachable in-session — registered as a single new entry in the P14.10
+`commandDefs` table, which is the payoff of building P14.10 first: dispatch, `/help`, and the
+completion popup all picked it up automatically with no separate edits.
+
+- `status`/bare args and `baseline [path]` are read-only local computations (same pattern as the
+  existing `/sandbox` and `/security-config`: read the TUI process's own config/workspace directly,
+  no daemon round trip) mirroring the CLI's tabwriter-formatted output exactly.
+- `config [global]` delegates to the existing `cmdSecurityConfig` handler rather than duplicating
+  its dialog-opening logic.
+- `install <tool> [confirm]` adapts the CLI's interactive y/N approval gate to the slash-command
+  shape, where a command returns one `SlashResult` with no stdin prompt: the first invocation only
+  previews the tool summary and exact host command; a second invocation with a literal trailing
+  `confirm` argument actually runs `security.RunGuidedInstall`. Never installs without that explicit
+  word, preserving the "never install silently" posture from P11.10 without adding new dialog/
+  confirmation-view plumbing.
+- Tests: `internal/tui/security_test.go` (8 cases — status, baseline empty/populated, config
+  delegation to both scopes, install unknown-tool error, install requires explicit confirm, unknown
+  subcommand error).
+
+### P14.3 — SHIPPED 2026-07-05 — Knowledge base & repo index in-session (`/knowledge`, `/index`)
+
+`aegis knowledge index` (P3.3/P5.8 project knowledge base) and `aegis index` (P2.3 repo map) were
+CLI-only; the model has tools for them but the user couldn't drive indexing/query from the TUI. Added
+`/knowledge [index|query <text>]` and `/index`, both routed through the daemon (new `POST /knowledge`
+and `POST /repomap/index` endpoints) rather than opening a second local store, since `/index` also
+needs to refresh the daemon's own cached system-prompt block. See Appendix A for the full writeup.
+
+### P14.4 — Session / run / background lifecycle surface
+
+Today only the Ctrl+R picker and `/archive [off]` touch session lifecycle from the TUI; `aegis
+sessions`, `aegis bg list|events`, `aegis runs`, session pruning, and archived-session listing are
+CLI-only (the client already exposes `ListSessions`/`ListArchivedSessions`/`PruneSessions`/
+`ListRuns`/`GetBGEvents`). Add `/sessions [list]`, `/archive list`, `/prune [days]`, `/runs`, and
+`/bg [list|events]`. Priority: **Medium**, Effort: **M**.
+
+### P14.5 — `/status` daemon/session health
+
+`warnSandboxFallback` prints the sandbox-fallback warning once to stderr *before* the TUI starts,
+then it's gone. Add a `/status` command showing daemon health, active sandbox backend + any
+fallback reason, provider/model, and cost caps + today's spend (all already available via
+`client.Status()` and the cost ledger). Natural home for P13.4.4's engagement/activity digest too.
+Priority: **Medium**, Effort: **S**.
+
+### P14.6 — `/bundle [install|info <url>]`
+
+`aegis bundle install/info <git-url>` (P5.7, with P7.6 content-hash pinning) is CLI-only; installing
+a persona/skill bundle mid-session forces a trip out to the shell. Add a TUI surface that reuses the
+same confirmation + `--expect-sha256` provenance flow. Priority: **Low**, Effort: **S**.
+
+### P14.7 — `/model <id>` direct mid-session model switch
+
+`/models` shows model info but can't switch; changing model mid-session today requires a
+model-pinning persona or a restart. Add `/model <id>` constrained to same-provider model IDs (the
+same constraint the per-persona model override already enforces). Priority: **Low-Medium**,
+Effort: **S**.
+
+### P14.8 — `/theme <dark|light|name>` runtime theme switch
+
+`tui.theme` is config-only and needs a restart, but `colorScheme` (TQ10) already supports runtime
+schemes. Add `/theme` to switch live. Priority: **Low**, Effort: **S**.
+
+### P14.9 — Keybinding discoverability
+
+Several features are keybind-only (Ctrl+B sidebar, Ctrl+X terminal, Ctrl+R sessions, Ctrl+T
+teammates, Ctrl+O expand-thinking, Shift+Enter, Alt+Enter). Fold the keymap into `/help` (or a
+`/keys` command) and mark keybind-only features so they're discoverable without reading the docs.
+Priority: **Low**, Effort: **S**.
+
+**Remaining build order:** P14.4–P14.9 register into the P14.10 `commandDefs` table
+(`internal/tui/commands.go`) rather than re-growing the three-list drift P14.1 fixed — P14.2 and
+P14.3 already did, above. P14.5 is the highest-value of what's left (daemon health) and should land
+next, as demand dictates.
 
 ---
 
@@ -307,6 +668,146 @@ A user request to bring `internal/security`/`aegis scan`/`security_scan` — thr
 **Scope decisions kept deliberately narrow rather than over-built** (each a documented trade-off, not an oversight): no built-in image digest pins (P11.1); image scanning is host-binary only (P11.5); DAST v1 needs an already-running target (P11.7); the ZAP regression fixture is an explicitly labeled synthetic placeholder pending a live capture (P11.9); OWASP Dependency-Check remains opt-in-only with no built integration, no concrete demand yet (P11.4).
 
 Tests: `internal/security/{method,sarif,scanners,sast,sbom,osv,dast,dedup,asvs,baseline,regression,security,install}_test.go`, `internal/cli/security_test.go`, `internal/config/write_security_test.go`, `internal/tui/{securityconfig,scan}_test.go`, `internal/server/scan_test.go`.
+
+</details>
+
+<details>
+<summary><strong>P12 — Multi-Agent Debate Mode for Security Analysis, all 7 items shipped 2026-07-05</strong></summary>
+
+A security task (threat model entry, scan-finding triage, design review) can now run as a multi-agent debate — propose → critique → rebut → arbitrate — over Aegis's existing swarm substrate, with one Ollama model instance playing every role via persona-based differentiation (no cast of distinct models required).
+
+- **P12.1 (debate primitive, keystone):** new `internal/debate` package, decoupled from `internal/swarm`/`internal/engine` the same way swarm stays decoupled from the engine. `debate.Run(ctx, claim, Config, RunFunc)` drives up to `MaxRounds` (default 2) rounds of critique → rebuttal against a caller-supplied `RunFunc` (system+user prompt → text), then always closes with an arbiter call over the full transcript, returning a `Transcript` with a parsed `Verdict` (`OUTCOME` + `CONFIDENCE`).
+- **P12.2 (debate roles as personas):** two new built-in personas, `security-critic` (adversarial, must cite retrievable evidence — `security_scan`/`grep`/`read_file` file:line — or reply `CONCEDE`) and `security-arbiter` (synthesis-only, minimal `Tools: [remember]`, outputs a fixed `VERDICT/CONFIDENCE/REASON` format). Resolved via `persona.Get(name).System` directly (not `internal/agentdef`) so they're addressable like any other persona (`aegis persona show security-critic`) and overridable per call via `critic_persona`/`arbiter_persona`.
+- **P12.3 (evidence grounding):** `debate.hasEvidence` (regex-based citation heuristic — deliberately loose, not a hard verifier) tags each round `[evidence cited]` or `[unsubstantiated]` in the rendered transcript; the arbiter persona is instructed to treat unsubstantiated rounds as noise when reaching a verdict.
+- **P12.6 (budget bounds):** `debate.Config` carries an optional shared `*cost.Tracker` plus `BudgetUSD`/`MaxTokens`; `budgetExhausted` (checked before every round, 90% headroom) short-circuits straight to arbitration over whatever transcript exists so far rather than let a debate silently multiply spend across three role-spawns per round the way plain sub-agent fan-out could before P10.3.
+- **P12.4 (surfacing):** `agent` tool gained `mode:"debate"` (claim/proposer_persona/critic_persona/arbiter_persona/max_rounds args; depth-guarded, spawns each role via the existing `swarm.Backend`); `POST /debate` HTTP endpoint (session-less — builds a bare `engine.New` per role call rather than reusing the swarm-identity-bearing `subAgentRunner`); TUI `/debate <claim>` slash command; `aegis debate <claim>` headless CLI (mirrors `aegis chat`'s direct adapter/registry/engine construction, one shared cost tracker across role calls).
+- **P12.5 (workflow integration, opt-in):** `security.debate.threat_model` / `security.debate.triage` config toggles (both default `false`). When either is on, `effectiveSystem()` injects a small "## Debate mode (P12)" block into the session prompt; the `security-architect` persona's threat-modeling workflow and the `security-audit` skill's triage loop both reference that injected block by name to decide whether to route a threat/finding through `mode:"debate"` before finalizing severity/suppression — keeps the actual gating data-driven (live config) while the instruction text authored in the static persona/skill stays unconditional.
+- **P12.7 (eval coverage, scope decision):** followed the P10.4 precedent — `internal/eval` has no natural seam for a Scenario that triggers a real sub-agent spawn (it scripts one engine's adapter, not tool-triggered spawns). Satisfied via regression tests at three levels instead of a new eval scenario: pure mechanism (`internal/debate`), real swarm-spawn path (`internal/tool/builtin`), real HTTP endpoint + engine (`internal/server`).
+
+**Scope decisions kept deliberately narrow:** exactly three roles (proposer/critic/arbiter), no configurable role count; one model instance drives every role via persona system-prompt differentiation, not a multi-model cast; opt-in per task/config only — debate mode is never a silent default for threat modeling or triage.
+
+Tests: `internal/debate/debate_test.go` (6 cases), `internal/tool/builtin/debate_agent_test.go` (5 cases), `internal/server/debate_test.go` (5 cases), `internal/cli/debate_test.go`, `internal/tui/debate_test.go`, plus `internal/persona/persona_test.go` coverage for the two new personas. Docs: `docs/multi-agent.md` (`#debate-p12`), `docs/personas.md`, `docs/cli-reference.md`, `docs/configuration.md`, `docs/security.md`, `CLAUDE.md`.
+
+</details>
+
+<details>
+<summary><strong>P14.3 — In-session knowledge base & repo index (`/knowledge`, `/index`), shipped 2026-07-05</strong></summary>
+
+`aegis knowledge index` (P3.3 project knowledge base) and `aegis index` (P2.3 repo map) were
+CLI-only; the model already had `project_knowledge` and the injected `<repo_map>` block, but a user
+driving the TUI had no way to trigger a rebuild or run a search without shelling out. Unlike
+`/security`/`/sandbox` (which read the TUI process's own config/workspace directly, no daemon round
+trip), `/knowledge` and `/index` go **through the daemon**: `s.knowledge` is one live `*knowledge.Store`
+instance for the workspace (`sql.DB.SetMaxOpenConns(1)`), and a second connection opened directly from
+the TUI process risks lock contention with the daemon's writer and can't refresh the daemon's cached
+`<repo_map>` system-prompt block anyway — so both commands follow the `/scan`/`/debate` precedent
+(daemon HTTP round trip) instead.
+
+- New `POST /knowledge` (`api.KnowledgeRequest{Action: "index"|"query", Query, Limit}` →
+  `api.KnowledgeResponse`): `"index"` calls `s.knowledge.Index` (same as `aegis knowledge index`) and
+  returns `doc_count`/`db_path`/`embeddings_enabled`; `"query"` calls `s.knowledge.Search` (same as the
+  `project_knowledge` tool) and returns the matched `path`/`title`/`snippet`/`score` results. 503 when
+  `s.knowledge` is nil (store failed to open at startup); 400 for a missing query or an unrecognized
+  action.
+- New `POST /repomap/index` (`api.RepoMapIndexResponse{FileCount, Path}`): rebuilds via
+  `repomap.Build(s.workspace, ...)`, saves the `.aegis/repomap.json` cache (same as `aegis index`), and
+  — the part a bare CLI-equivalent handler wouldn't do — replaces the daemon's own cached
+  `s.repoMap` under a new `repoMapMu` mutex, so the very next turn's system prompt picks up the
+  refreshed map with no restart. `s.repoMap` had been a write-once-at-startup field read without
+  synchronization; making it rebuildable at runtime turned it into genuinely shared mutable state, so
+  `effectiveSystem`'s read was moved under the same mutex (mirroring the existing `permMu` pattern for
+  `permRules`).
+- `client.Client.Knowledge`/`RepoMapIndex` (`internal/client/client.go`) mirror `Scan`/`Debate`.
+- `/knowledge [index|query <text>]` and `/index` (`internal/tui/slash.go`'s `cmdKnowledge`/`cmdIndex`)
+  registered as two new `commandDef` entries (P14.10) — dispatch, `/help`, and the completion popup all
+  picked them up automatically.
+- Tests: `internal/server/knowledge_test.go` (index-then-query round trip against a real store proves
+  an indexed README becomes searchable; missing-query and unknown-action rejection; 503 without a
+  store; repomap rebuild proves both the on-disk cache and `effectiveSystem`'s output change), plus
+  `internal/tui/knowledge_test.go` for the argument-validation fast paths that return before touching
+  the client (bare `/knowledge`, `/knowledge query` with no text, unknown subcommand) — same
+  division of labor as `scan_test.go`/`debate_test.go` (TUI tests cover argument parsing; the server
+  package covers the actual daemon round trip).
+- Verified manually end-to-end: started a real daemon against a scratch git repo with a README and a
+  `.go` file, hit `/knowledge` (index → 9 docs, query "frobnication" → 1 match) and `/repomap/index`
+  (2 files) over HTTP with the daemon's real bearer token, confirmed `.aegis/repomap.json` was written.
+- P14.4–P14.9 remain open, same as before.
+
+</details>
+
+<details>
+<summary><strong>P14.1 + P14.10 — command-surface drift fix and its structural cure, shipped 2026-07-05</strong></summary>
+
+Found during a cross-feature integration review (roadmap + codebase, focused on seams between
+features rather than per-feature gaps) — the review's own hypothesis, that retrofitted capabilities
+reliably miss one of several shared integration seams, was confirmed by this exact bug.
+
+- **P14.1 (completion/palette drift):** `internal/tui/completion.go`'s `builtinCommands` (the
+  completion-popup/command-palette source) was missing seven commands that were fully dispatchable
+  via `d.builtins` and listed in `/help`: `security-config`, `scan`, `debate`, `rollback`, `detach`,
+  `archive`, `humor`. `help_test.go` already guarded `d.builtins` against `/help`, but nothing
+  guarded `builtinCommands` against either — so typing `/sec` surfaced nothing, which is why
+  `/security-config` read as "not existing" to a user driving the TUI. Fixed by adding the seven
+  entries (and to `commandsNeedingArgs`, where a trailing space helps); new guard test
+  `TestBuiltinCommandsCoverDispatchTable` (`internal/tui/completion_test.go`) asserts
+  `builtinCommands` covers every `d.builtins` key except the `quit` alias, mirroring the existing
+  `TestSlashCommandsAreListedInHelp`.
+- **P14.10 (structural cure, built same day rather than deferred):** new `internal/tui/commands.go`
+  defines each built-in command exactly once as a `commandDef` (name, arg hint, short description,
+  detailed help, `needsArgs`, and its handler as a method expression `(*SlashDispatcher).cmdX`).
+  `NewSlashDispatcher`'s `d.builtins`, `cmdHelp`'s general listing, `builtinHelp`'s detailed
+  `/help <name>` text, and `completion.go`'s `builtinCommands`/`commandsNeedingArgs` are all now
+  derived from this one table (`commandDefs()`) instead of four independently hand-maintained
+  lists — closing the entire drift class P14.1 fixed one instance of. `commandDefs` is a function,
+  not a package-level `var`: a `var` whose initializer holds handler values that themselves range
+  over that `var` is a genuine Go compile-time initialization cycle (dependency analysis follows
+  through function bodies referenced in the initializer), so the table is rebuilt per lookup
+  instead — negligible cost at ~26 entries, called only at dispatcher construction, `/help`, and
+  popup population. New test `TestCommandDefsWellFormed` guards the table itself (no empty or
+  duplicate names, every entry has a handler and both help strings).
+- Tests: `internal/tui/completion_test.go` (`TestBuiltinCommandsCoverDispatchTable`,
+  `TestCommandDefsWellFormed`), full existing `internal/tui` suite (`help_test.go`,
+  `completion_test.go`) re-verified green against the refactor.
+
+</details>
+
+<details>
+<summary><strong>Debate daily cost/token cap integration, shipped 2026-07-05</strong></summary>
+
+A second instance of the same "new capability skips a shared seam" pattern P14.1 exemplified,
+found by checking whether P12 (debate, shipped 2026-07-05) actually integrated with the P9.5/P10.5
+cost-guardrail track (shipped 2026-07-03) rather than assuming shipped-and-tested meant
+fully-integrated. It didn't: `handleDebate` (`internal/server/server.go`) built its own bare
+`debate.Config`/tracker and only enforced the per-run `BudgetUSD`/`MaxTokensPerRun` — the
+cross-session daily dollar and token caps (`Cost.DailyCapUSD`/`DailyTokenCap`) and the ledger writes
+that make them work (`store.AddDailyCost`/`AddDailyTokens`) lived entirely inside
+`handlePostMessage`, debate's sibling endpoint, and were never called from the debate path.
+Consequences before the fix: a `/debate` call (up to ~7 model calls per run: proposer + critic/
+rebuttal per round + arbiter) ran even with the daily cap already exhausted, its spend was invisible
+to every later cap check (including the next normal session turn's), and — the case this matters
+most for — the P10.5 token cap (the only *working* guardrail for local/Ollama models, where dollar
+cost is $0) was bypassed entirely for debate runs.
+
+- Extracted `(s *Server) checkDailyCaps(ctx) (dailyCostBefore, dailyTokensBefore, err)` and
+  `(s *Server) recordDailySpend(costUSD, tokens)` out of `handlePostMessage`'s previously inlined
+  daily-cap check/ledger-write logic (behavior unchanged there — same read-failure-is-non-fatal
+  semantics, same "only write if a cap is configured" gating).
+- `handleDebate` now calls `checkDailyCaps` before starting (refusing with 402 if either cap is
+  already reached — no session cap applies, since debate is deliberately session-less) and
+  `recordDailySpend(tracker.TotalUSD(), tracker.TotalTokens())` after `debate.Run` returns,
+  unconditionally (even on error), since `debate.Run` returns the partial transcript — and whatever
+  the tracker accumulated — before failing.
+- Tests: `internal/server/debate_test.go` — `TestHandleDebateBlockedByDailyCostCap` (daily cap
+  already exhausted refuses the call), `TestHandleDebateRecordsDailySpend` (a successful debate's
+  cost lands in the same daily ledger a normal turn writes to, provable via `store.TodayCost`).
+  Full existing `internal/server` cost-cap suite (`TestSessionCostCapBlocksTurn`,
+  `TestDailyCostCapBlocksTurn`, `TestSessionTokenCapBlocksTurn`, `TestDailyTokenCapBlocksTurn`,
+  `TestCostAlertThresholdFires`) re-verified green against the refactor.
+- Not yet done, left as a natural follow-up rather than scope creep here: any *future* model-
+  spending endpoint must remember to call these two helpers itself — there's no compiler-enforced
+  guarantee the way P14.10 enforces the command-surface table, since Go has no "all HTTP handlers
+  that call `engine.Run` must call X" constraint. Worth a comment at the routing table
+  (`server.routes()`) flagging this the next time a spending endpoint is added.
 
 </details>
 
