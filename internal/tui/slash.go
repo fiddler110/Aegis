@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
@@ -15,6 +16,7 @@ import (
 	"github.com/fiddler110/aegis/internal/commands"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/share"
 	"github.com/fiddler110/aegis/internal/skills"
 )
@@ -58,36 +60,17 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		mode:      mode,
 		model:     model,
 	}
-	d.builtins = map[string]func(args []string) SlashResult{
-		"help":            d.cmdHelp,
-		"persona":         d.cmdPersona,
-		"mode":            d.cmdMode,
-		"guard":           d.cmdGuard,
-		"tools":           d.cmdTools,
-		"clear":           d.cmdClear,
-		"config":          d.cmdConfig,
-		"memory":          d.cmdMemory,
-		"remember":        d.cmdRemember,
-		"skills":          d.cmdSkills,
-		"commands":        d.cmdCommands,
-		"models":          d.cmdModels,
-		"sandbox":         d.cmdSandbox,
-		"security-config": d.cmdSecurityConfig,
-		"scan":            d.cmdScan,
-		"debate":          d.cmdDebate,
-		"session":         d.cmdSession,
-		"rewind":          d.cmdRewind,
-		"rollback":        d.cmdRollback,
-		"detach":          d.cmdDetach,
-		"archive":         d.cmdArchive,
-		"humor":           d.cmdHumor,
-		"share":           d.cmdShare,
-		"timeline":        d.cmdTimeline,
-		"sidebar":         d.cmdSidebar,
-		"copy":            d.cmdCopy,
-		"quit":            d.cmdQuit,
-		"exit":            d.cmdQuit,
+	// d.builtins is derived from commandDefs (P14.10) rather than hand-listed,
+	// so a command added to that single table is automatically dispatchable
+	// here, listed in /help, described in the completion popup/palette, and
+	// covered by builtinHelp — no second or third place to remember.
+	defs := commandDefs()
+	d.builtins = make(map[string]func(args []string) SlashResult, len(defs)+1)
+	for _, c := range defs {
+		c := c
+		d.builtins[c.name] = func(args []string) SlashResult { return c.handler(d, args) }
 	}
+	d.builtins["quit"] = d.cmdQuit // bare alias for "exit"; deliberately unlisted
 	return d
 }
 
@@ -163,36 +146,12 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 
 	var b strings.Builder
 	b.WriteString("Available commands:\n")
-	for _, entry := range []struct{ name, desc string }{
-		{"help [cmd]", "Show this help or detail for a command"},
-		{"persona [name]", "Pick persona interactively, or switch directly by name"},
-		{"mode <plan|build|auto>", "Switch permission mode"},
-		{"guard [on|off|status]", "Toggle output validation for this session"},
-		{"tools <compact|full>", "Set tool-output line cap (compact=10 lines, full=unlimited)"},
-		{"clear", "Clear the transcript"},
-		{"config", "Interactive configuration wizard"},
-		{"memory", "Show saved memories"},
-		{"remember <text>", "Save a memory entry"},
-		{"skills [enable|disable <name> [global]]", "List skills, or toggle a built-in skill on/off"},
-		{"commands", "List custom commands"},
-		{"models", "Show current model info"},
-		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
-		{"security-config [global]", "Interactively configure, enable, and install security scanners"},
-		{"scan [path|image <ref>|sbom [path]]", "Run security scanners now and print the findings report"},
-		{"debate <claim>", "Adversarially debate a claim (propose/critique/rebut/arbitrate) and print the verdict"},
-		{"session [list]", "Show session info or list sessions"},
-		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
-		{"rollback [n]", "Restore checkpoint n and run git reset --hard to pre-turn HEAD"},
-		{"detach [on|off]", "Run this session in the background (turn continues after TUI closes)"},
-		{"humor [on|off]", "Toggle D&D-themed thinking phrases in the response area"},
-		{"archive [off]", "Archive this session (hidden from listings; data kept). /archive off to restore"},
-		{"timeline", "Jump to a past turn in the conversation timeline"},
-		{"sidebar", "Toggle the sidebar panel on/off (also ctrl+b)"},
-		{"copy [N]", "Copy last assistant message, or Nth code block, to clipboard"},
-		{"share [html|md|json]", "Export this session to a shareable transcript file"},
-		{"exit", "Exit Aegis"},
-	} {
-		fmt.Fprintf(&b, "  /%-22s %s\n", entry.name, entry.desc)
+	for _, c := range commandDefs() {
+		name := c.name
+		if c.argHint != "" {
+			name = c.name + " " + c.argHint
+		}
+		fmt.Fprintf(&b, "  /%-22s %s\n", name, c.shortDesc)
 	}
 
 	if d.customs == nil {
@@ -211,67 +170,19 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 	return SlashResult{Output: b.String()}
 }
 
+// builtinHelp looks up a command's detailed /help <name> text from
+// commandDefs (P14.10); "quit" resolves to "exit"'s entry since it's a bare
+// alias not separately listed.
 func builtinHelp(name string) string {
-	switch name {
-	case "help":
-		return "/help [command]\n  Show available commands, or detailed help for a specific command."
-	case "persona":
-		return "/persona [name]\n  No args: open an interactive list to pick a persona.\n  With name: switch directly, e.g. /persona security."
-	case "mode":
-		return "/mode <plan|build|auto>\n  Switch the permission mode for the current session.\n  plan = read-only\n  build = file edits allowed, shell execution requires approval\n  auto  = all capabilities allowed without prompting"
-	case "guard":
-		return "/guard [on|off|status]\n  Toggle output validation for the current session.\n  Defaults to the configured output_guard.enabled; resets on restart."
-	case "tools":
-		return "/tools <compact|full>\n  compact: cap multi-line tool output at 10 lines (default).\n  full: show complete tool output without truncation.\n  Applies to new results; toggle resets on TUI restart."
-	case "clear":
-		return "/clear\n  Clear the conversation transcript (session history is preserved)."
-	case "config":
-		return "/config\n  Open the interactive configuration wizard to change provider, model, tokens, and think settings.\n  Changes are written to the global config file and take effect on next restart."
-	case "memory":
-		return "/memory\n  Display saved project and user memory entries."
-	case "remember":
-		return "/remember <text>\n  Save a fact to project memory for future sessions."
-	case "skills":
-		return "/skills\n  List active skills (project/user skill files, plus any enabled built-ins) and the full built-in catalog with on/off status.\n" +
-			"/skills enable <name> [global]\n  Turn on a built-in skill shipped with Aegis. Writes to the project config (.aegis/config.yaml) by default; add 'global' to write to the user config instead. Takes effect on restart.\n" +
-			"/skills disable <name> [global]\n  Turn off a built-in skill the same way."
-	case "commands":
-		return "/commands\n  List custom user-defined commands from .aegis/commands/."
-	case "models":
-		return "/models\n  Show the current model and provider."
-	case "sandbox":
-		return "/sandbox [use <target>]\n  No args: show the configured sandbox backend and detected container runtimes (docker, podman, wslc, container).\n  use <local|auto|docker|podman|wslc|container>: set the backend (written to global config; takes effect on restart)."
-	case "security-config":
-		return "/security-config [global]\n  Opens an interactive dialog to configure the security scanners (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, kubescape, hadolint, grype, dockle, osv-scanner, syft) used by /scan and the security_scan tool: toggle enabled (including the opt-in language-specific SAST engines), pick host/container/auto, set the install policy, and set a digest-pinned container image. Selecting a tool now also offers \"Install now (guided)\" — shows the exact host command and runs it after you confirm, no separate CLI trip required.\n  No args: edits the project's .aegis/config.yaml. 'global': edits ~/.config/aegis/config.yaml instead.\n  Written immediately; restart Aegis to apply."
-	case "scan":
-		return "/scan [path|image <ref>|sbom [path]]\n  Runs the security scanners directly and prints the findings report — no model turn spent, same scan `aegis scan`/the security_scan tool runs.\n  No args: scan the whole workspace.\n  /scan <path>: scan just a workspace-relative subdirectory.\n  /scan image <ref>: scan a container image reference instead (e.g. /scan image alpine:3.20).\n  /scan sbom [path]: generate a CycloneDX SBOM instead of a findings report.\n  Use /security-config first to enable/install the scanners you want included."
-	case "debate":
-		return "/debate <claim>\n  Runs a multi-agent debate directly against the daemon's configured model — a critic challenges the claim (grounded in cited evidence or an explicit CONCEDE), the proposer rebuts, this repeats for up to 2 rounds, then an arbiter issues a final UPHOLD/REVISE/REJECT verdict with a confidence label. Unlike /scan, this does spend model turns (one per role per round) since the debate itself is model-driven.\n  Same underlying mechanism as the `agent` tool's mode:\"debate\", exposed to run directly on a claim you already have in hand without a conversational turn first."
-	case "session":
-		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
-	case "rewind":
-		return "/rewind [n] [code|conversation|both]\n  No args: list checkpoints (rewind points) for this session, newest first.\n  /rewind <n>: restore checkpoint n (both files and conversation by default).\n  Scope: 'code' restores only files, 'conversation' only the transcript, 'both' (default) does both.\n  Each checkpoint is the state just before a user turn; rewinding undoes that turn's file changes and/or messages."
-	case "rollback":
-		return "/rollback [n]\n  No args: list checkpoints (rollback points) for this session, newest first.\n  /rollback <n>: restore checkpoint n's conversation AND run `git reset --hard` to that checkpoint's commit — a harder reset than /rewind's 'both' scope, which restores files by rewriting them rather than resetting git history.\n  Use this when a turn's file changes need to be fully undone at the git level, not just reverted in the working tree."
-	case "detach":
-		return "/detach [on|off]\n  Toggle background (detached) mode for this session.\n  on (default): turns continue running after the TUI closes. Use `aegis bg events <id>` to check progress.\n  off: revert to normal foreground execution."
-	case "humor":
-		return "/humor [on|off]\n  Toggle D&D-themed thinking phrases in the response area.\n  on: show phrases like \"Rolling for Initiative\", \"Consulting the Tome\", etc.\n  off: show plain \"thinking…\" status.\n  No args: toggle current state.\n  Set tui.humor_mode in your config file to make this permanent."
-	case "archive":
-		return "/archive [off]\n  Archive the current session — it is hidden from normal session listings but all data is preserved.\n  /archive off: restore an archived session to active status.\n  To permanently remove a session, use `aegis sessions delete <id>` from the CLI."
-	case "share":
-		return "/share [html|md|json]\n  Export this session as a shareable transcript file in the current directory.\n  html (default): a self-contained page with styling and inline images.\n  md: Markdown. json: the raw session.\n  Use `aegis sessions export <id>` for the same from the CLI."
-	case "timeline":
-		return "/timeline\n  Opens an interactive picker of past turns in this conversation. Selecting one jumps the transcript view to that point — a navigation aid, not a rewind (use /rewind or /rollback to actually restore state)."
-	case "sidebar":
-		return "/sidebar\n  Toggles the sidebar panel (context %, cost, agent count) on/off. Same as pressing ctrl+b. Hidden by default; folds into the status bar when off."
-	case "copy":
-		return "/copy [N]\n  No args: copy the last assistant message to the clipboard.\n  /copy <N>: copy the Nth fenced code block from the last assistant message instead.\n  Uses pbcopy/xclip/clip.exe depending on platform; shows a toast confirming what was copied."
-	case "quit", "exit":
-		return "/quit\n  Exit Aegis."
-	default:
-		return "No help available for /" + name
+	if name == "quit" {
+		name = "exit"
 	}
+	for _, c := range commandDefs() {
+		if c.name == name {
+			return c.detailedHelp
+		}
+	}
+	return "No help available for /" + name
 }
 
 func (d *SlashDispatcher) cmdPersona(args []string) SlashResult {
@@ -611,6 +522,163 @@ func (d *SlashDispatcher) cmdSecurityConfig(args []string) SlashResult {
 	return SlashResult{SecurityConfigGlobal: &global}
 }
 
+// cmdSecurity is the P14.2 in-session umbrella for the security-tooling
+// surface: /security status, /security baseline, and /security install
+// mirror `aegis security status/baseline/install`, which were previously
+// CLI-only even though the model's security_scan tool and /security-config
+// already ran in-session. /security config just delegates to the existing
+// /security-config dialog rather than duplicating it. Like /sandbox and
+// /security-config, this reads the TUI process's own config/workspace
+// directly (no daemon round trip) — consistent with that existing pattern.
+func (d *SlashDispatcher) cmdSecurity(args []string) SlashResult {
+	sub := ""
+	var rest []string
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+		rest = args[1:]
+	}
+	switch sub {
+	case "", "status":
+		return d.cmdSecurityStatus()
+	case "baseline":
+		return d.cmdSecurityBaseline(rest)
+	case "config":
+		return d.cmdSecurityConfig(rest)
+	case "install":
+		return d.cmdSecurityInstall(rest)
+	default:
+		return SlashResult{Output: fmt.Sprintf("Unknown /security subcommand %q.\nUsage: /security [status|install <tool>|baseline [path]|config [global]]", args[0]), IsError: true}
+	}
+}
+
+// securityMethodLabel mirrors the CLI's methodLabel (internal/cli/security.go)
+// — kept as a separate unexported copy rather than shared, since internal/cli
+// isn't (and shouldn't become) an import of internal/tui.
+func securityMethodLabel(m security.Method) string {
+	switch m {
+	case security.MethodHost:
+		return "host"
+	case security.MethodContainer:
+		return "container"
+	default:
+		return "unavailable"
+	}
+}
+
+// cmdSecurityStatus mirrors `aegis security status`: for each known scanner,
+// shows whether it will actually run via host binary, a configured container
+// image, or not at all (with the reason and, per P13.1, which other OSes have
+// a guided host install when this one doesn't).
+func (d *SlashDispatcher) cmdSecurityStatus() SlashResult {
+	cfg, err := config.Load()
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load config: %v", err), IsError: true}
+	}
+	opts := security.OptionsFromConfig(cfg.Security)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "TOOL\tCATEGORY\tMETHOD\tDETAIL")
+	for _, dsc := range security.Descriptors() {
+		method, rt, _, reason := security.Resolve(ctx, dsc.Name, opts)
+		detail := reason
+		switch method {
+		case security.MethodHost:
+			detail = "on PATH"
+		case security.MethodContainer:
+			detail = fmt.Sprintf("via %s", rt)
+		default:
+			if note := security.AvailabilityNote(dsc.Name, reason); note != "" {
+				detail = reason + "; " + note
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", dsc.Name, dsc.Category, securityMethodLabel(method), detail)
+	}
+	tw.Flush()
+	return SlashResult{Output: b.String()}
+}
+
+// cmdSecurityBaseline mirrors `aegis security baseline [path]`: view-only
+// listing of .aegis/security-baseline.yaml's suppression entries and each
+// one's status (active/expired/invalid).
+func (d *SlashDispatcher) cmdSecurityBaseline(args []string) SlashResult {
+	dir := "."
+	if len(args) > 0 {
+		dir = args[0]
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to resolve path: %v", err), IsError: true}
+	}
+	bl, err := security.LoadBaseline(abs)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load baseline: %v", err), IsError: true}
+	}
+	if bl == nil || len(bl.Suppressions) == 0 {
+		return SlashResult{Output: fmt.Sprintf("no baseline entries (%s not found or empty)", security.BaselinePath(abs))}
+	}
+
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "STATUS\tRULE_ID\tLOCATION\tEXPIRES\tREASON")
+	now := time.Now()
+	for _, e := range bl.Suppressions {
+		loc, exp := e.Location, e.Expires
+		if loc == "" {
+			loc = "(any)"
+		}
+		if exp == "" {
+			exp = "(missing)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", security.SuppressionStatusLabel(e, now), e.RuleID, loc, exp, e.Reason)
+	}
+	tw.Flush()
+	return SlashResult{Output: b.String()}
+}
+
+// cmdSecurityInstall mirrors `aegis security install <tool>`'s guided,
+// approval-gated host install, adapted to the slash-command shape: since a
+// slash command returns one SlashResult with no interactive stdin prompt
+// (unlike the CLI's y/N reader), the first invocation only shows the tool
+// summary and exact host command; the caller must re-run with a trailing
+// "confirm" to actually execute it. This keeps the same "never install
+// silently" posture as the CLI/`/security-config` guided-install flow
+// without adding new dialog/confirmation-view plumbing.
+func (d *SlashDispatcher) cmdSecurityInstall(args []string) SlashResult {
+	if len(args) == 0 {
+		return SlashResult{Output: "usage: /security install <tool> [confirm]", IsError: true}
+	}
+	name := args[0]
+	confirmed := len(args) > 1 && strings.ToLower(args[1]) == "confirm"
+
+	dsc, ok := security.DescriptorFor(name)
+	if !ok {
+		return SlashResult{Output: fmt.Sprintf("Unknown scanner %q. Run /security status to see known tools.", name), IsError: true}
+	}
+	command, ok := security.InstallCommand(name)
+	if !ok {
+		return SlashResult{Output: fmt.Sprintf("No guided install available for %s on this OS — configure security.tools.%s.image for a container fallback, or use /security-config.", dsc.Name, dsc.Name), IsError: true}
+	}
+
+	if !confirmed {
+		return SlashResult{Output: fmt.Sprintf(
+			"%s — %s\n\nThis will run the following command on your host:\n\n    %s\n\nRun `/security install %s confirm` to proceed, or use /security-config for the interactive dialog.",
+			dsc.Name, dsc.Summary, command, name,
+		)}
+	}
+
+	var out strings.Builder
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := security.RunGuidedInstall(ctx, name, &out); err != nil {
+		return SlashResult{Output: fmt.Sprintf("%sInstall failed: %v", out.String(), err), IsError: true}
+	}
+	fmt.Fprintf(&out, "\n%s installed. Run /security status to confirm.\n", dsc.Name)
+	return SlashResult{Output: out.String()}
+}
+
 // cmdScan runs the security scanners directly against the daemon's workspace
 // and prints the formatted report — no model turn spent, same underlying scan
 // as `aegis scan`/the security_scan tool. Usage:
@@ -647,6 +715,72 @@ func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
 		return SlashResult{Output: fmt.Sprintf("Scan failed: %v", err), IsError: true}
 	}
 	return SlashResult{Output: resp.Report}
+}
+
+// cmdKnowledge is the P14.3 in-session surface for the project knowledge base
+// (previously only reachable via `aegis knowledge index` and the model's
+// project_knowledge tool): /knowledge rebuilds the FTS5 index the same way
+// `aegis knowledge index` does, and /knowledge query searches it the same way
+// the project_knowledge tool does — both via the daemon's own live store
+// rather than opening a second sqlite connection from the TUI process.
+func (d *SlashDispatcher) cmdKnowledge(args []string) SlashResult {
+	sub := ""
+	var rest []string
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+		rest = args[1:]
+	}
+	switch sub {
+	case "index":
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		resp, err := d.client.Knowledge(ctx, api.KnowledgeRequest{Action: "index"})
+		if err != nil {
+			return SlashResult{Output: fmt.Sprintf("Index failed: %v", err), IsError: true}
+		}
+		out := fmt.Sprintf("Indexed %d documents → %s", resp.DocCount, resp.DBPath)
+		if resp.EmbeddingsEnabled {
+			out += "\nSemantic embeddings: enabled"
+		}
+		return SlashResult{Output: out}
+	case "query":
+		query := strings.TrimSpace(strings.Join(rest, " "))
+		if query == "" {
+			return SlashResult{Output: "usage: /knowledge query <text>", IsError: true}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		resp, err := d.client.Knowledge(ctx, api.KnowledgeRequest{Action: "query", Query: query})
+		if err != nil {
+			return SlashResult{Output: fmt.Sprintf("Query failed: %v", err), IsError: true}
+		}
+		if resp.Count == 0 {
+			return SlashResult{Output: fmt.Sprintf("no results for %q (run /knowledge index to rebuild)", query)}
+		}
+		var b strings.Builder
+		for i, res := range resp.Results {
+			fmt.Fprintf(&b, "%d. %s\n   %s\n   %s\n\n", i+1, res.Path, res.Title, res.Snippet)
+		}
+		return SlashResult{Output: strings.TrimRight(b.String(), "\n")}
+	case "":
+		return SlashResult{Output: "usage: /knowledge [index|query <text>]", IsError: true}
+	default:
+		return SlashResult{Output: fmt.Sprintf("Unknown /knowledge subcommand %q.\nUsage: /knowledge [index|query <text>]", args[0]), IsError: true}
+	}
+}
+
+// cmdIndex rebuilds the repository map (P2.3/P14.3) directly against the
+// daemon's workspace, refreshing both the on-disk cache
+// (.aegis/repomap.json) and the daemon's cached system-prompt block — the
+// same build `aegis index` runs, without needing a restart to pick it up.
+func (d *SlashDispatcher) cmdIndex(_ []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	resp, err := d.client.RepoMapIndex(ctx)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Index failed: %v", err), IsError: true}
+	}
+	return SlashResult{Output: fmt.Sprintf("Indexed %d files → %s", resp.FileCount, resp.Path)}
 }
 
 // cmdDebate runs a multi-agent debate directly against the daemon's
