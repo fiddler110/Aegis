@@ -73,6 +73,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *Slash
 		"models":          d.cmdModels,
 		"sandbox":         d.cmdSandbox,
 		"security-config": d.cmdSecurityConfig,
+		"scan":            d.cmdScan,
 		"session":         d.cmdSession,
 		"rewind":          d.cmdRewind,
 		"rollback":        d.cmdRollback,
@@ -175,7 +176,8 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 		{"commands", "List custom commands"},
 		{"models", "Show current model info"},
 		{"sandbox [use <target>]", "Show or switch the shell-execution sandbox"},
-		{"security-config [global]", "Interactively configure security scanner enable/method/install/image"},
+		{"security-config [global]", "Interactively configure, enable, and install security scanners"},
+		{"scan [path|image <ref>|sbom [path]]", "Run security scanners now and print the findings report"},
 		{"session [list]", "Show session info or list sessions"},
 		{"rewind [n] [scope]", "List or restore checkpoints (code/conversation/both)"},
 		{"rollback [n]", "Restore checkpoint n and run git reset --hard to pre-turn HEAD"},
@@ -238,11 +240,15 @@ func builtinHelp(name string) string {
 	case "sandbox":
 		return "/sandbox [use <target>]\n  No args: show the configured sandbox backend and detected container runtimes (docker, podman, wslc, container).\n  use <local|auto|docker|podman|wslc|container>: set the backend (written to global config; takes effect on restart)."
 	case "security-config":
-		return "/security-config [global]\n  Opens an interactive dialog to configure the security scanners (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, kubescape, hadolint, grype, dockle, osv-scanner, syft) used by /scan and the security_scan tool: toggle enabled, pick host/container/auto, set the install policy, and set a digest-pinned container image.\n  No args: edits the project's .aegis/config.yaml. 'global': edits ~/.config/aegis/config.yaml instead.\n  Written immediately; restart Aegis to apply."
+		return "/security-config [global]\n  Opens an interactive dialog to configure the security scanners (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, kubescape, hadolint, grype, dockle, osv-scanner, syft) used by /scan and the security_scan tool: toggle enabled (including the opt-in language-specific SAST engines), pick host/container/auto, set the install policy, and set a digest-pinned container image. Selecting a tool now also offers \"Install now (guided)\" — shows the exact host command and runs it after you confirm, no separate CLI trip required.\n  No args: edits the project's .aegis/config.yaml. 'global': edits ~/.config/aegis/config.yaml instead.\n  Written immediately; restart Aegis to apply."
+	case "scan":
+		return "/scan [path|image <ref>|sbom [path]]\n  Runs the security scanners directly and prints the findings report — no model turn spent, same scan `aegis scan`/the security_scan tool runs.\n  No args: scan the whole workspace.\n  /scan <path>: scan just a workspace-relative subdirectory.\n  /scan image <ref>: scan a container image reference instead (e.g. /scan image alpine:3.20).\n  /scan sbom [path]: generate a CycloneDX SBOM instead of a findings report.\n  Use /security-config first to enable/install the scanners you want included."
 	case "session":
 		return "/session [list]\n  No args: show current session info.\n  list: show all sessions."
 	case "rewind":
 		return "/rewind [n] [code|conversation|both]\n  No args: list checkpoints (rewind points) for this session, newest first.\n  /rewind <n>: restore checkpoint n (both files and conversation by default).\n  Scope: 'code' restores only files, 'conversation' only the transcript, 'both' (default) does both.\n  Each checkpoint is the state just before a user turn; rewinding undoes that turn's file changes and/or messages."
+	case "rollback":
+		return "/rollback [n]\n  No args: list checkpoints (rollback points) for this session, newest first.\n  /rollback <n>: restore checkpoint n's conversation AND run `git reset --hard` to that checkpoint's commit — a harder reset than /rewind's 'both' scope, which restores files by rewriting them rather than resetting git history.\n  Use this when a turn's file changes need to be fully undone at the git level, not just reverted in the working tree."
 	case "detach":
 		return "/detach [on|off]\n  Toggle background (detached) mode for this session.\n  on (default): turns continue running after the TUI closes. Use `aegis bg events <id>` to check progress.\n  off: revert to normal foreground execution."
 	case "humor":
@@ -251,6 +257,12 @@ func builtinHelp(name string) string {
 		return "/archive [off]\n  Archive the current session — it is hidden from normal session listings but all data is preserved.\n  /archive off: restore an archived session to active status.\n  To permanently remove a session, use `aegis sessions delete <id>` from the CLI."
 	case "share":
 		return "/share [html|md|json]\n  Export this session as a shareable transcript file in the current directory.\n  html (default): a self-contained page with styling and inline images.\n  md: Markdown. json: the raw session.\n  Use `aegis sessions export <id>` for the same from the CLI."
+	case "timeline":
+		return "/timeline\n  Opens an interactive picker of past turns in this conversation. Selecting one jumps the transcript view to that point — a navigation aid, not a rewind (use /rewind or /rollback to actually restore state)."
+	case "sidebar":
+		return "/sidebar\n  Toggles the sidebar panel (context %, cost, agent count) on/off. Same as pressing ctrl+b. Hidden by default; folds into the status bar when off."
+	case "copy":
+		return "/copy [N]\n  No args: copy the last assistant message to the clipboard.\n  /copy <N>: copy the Nth fenced code block from the last assistant message instead.\n  Uses pbcopy/xclip/clip.exe depending on platform; shows a toast confirming what was copied."
 	case "quit", "exit":
 		return "/quit\n  Exit Aegis."
 	default:
@@ -593,6 +605,44 @@ func (d *SlashDispatcher) cmdSecurityConfig(args []string) SlashResult {
 	}
 	global := len(args) > 0 && strings.ToLower(args[0]) == "global"
 	return SlashResult{SecurityConfigGlobal: &global}
+}
+
+// cmdScan runs the security scanners directly against the daemon's workspace
+// and prints the formatted report — no model turn spent, same underlying scan
+// as `aegis scan`/the security_scan tool. Usage:
+//
+//	/scan                run every enabled scanner over the whole workspace
+//	/scan <path>          scan just a workspace-relative subdirectory
+//	/scan image <ref>      scan a container image reference instead
+//	/scan sbom [path]      generate a CycloneDX SBOM instead of a findings report
+//
+// A scan can take a while (container fallback pulls, multiple scanner
+// binaries), so this uses a long timeout rather than the 5s default other
+// direct-daemon-call commands use.
+func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
+	var req api.ScanRequest
+	switch {
+	case len(args) >= 1 && strings.ToLower(args[0]) == "image":
+		if len(args) < 2 {
+			return SlashResult{Output: "usage: /scan image <ref>", IsError: true}
+		}
+		req.Image = args[1]
+	case len(args) >= 1 && strings.ToLower(args[0]) == "sbom":
+		req.SBOM = true
+		if len(args) >= 2 {
+			req.Path = args[1]
+		}
+	case len(args) >= 1:
+		req.Path = args[0]
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	resp, err := d.client.Scan(ctx, req)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Scan failed: %v", err), IsError: true}
+	}
+	return SlashResult{Output: resp.Report}
 }
 
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {

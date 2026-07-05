@@ -123,6 +123,47 @@ Reuses a running daemon if one is up, or starts an embedded one. Protocol frames
 
 ---
 
+## `aegis mcp-serve`
+
+Expose this Aegis daemon as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server — the reverse direction of the `mcp:` client config (which lets Aegis call *out* to external MCP servers). Runs JSON-RPC over stdio, so any MCP-speaking harness (Claude Code, Codex, an editor) can launch this as a subprocess and drive Aegis as a tool.
+
+```bash
+aegis mcp-serve [flags]
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--mode <plan\|build\|auto>` | Default permission mode for new sessions (default: `plan`, or `mcp_server.default_mode` from config) |
+| `--auto-approve` | Auto-approve tool calls that would otherwise need interactive approval |
+
+Reuses a running daemon if one is up, or starts an embedded one. Exposes three tools:
+
+| Tool | Purpose |
+|------|---------|
+| `aegis_prompt` | Delegate a task to an Aegis session and wait for it to finish; returns the final text reply with a trailing `[session: <id>]` marker so the caller can continue the conversation by passing that id back as `session_id`. |
+| `aegis_new_session` | Create a session without sending it a message yet. |
+| `aegis_list_sessions` | List existing sessions (id, title, mode, last updated). |
+
+New sessions default to **plan mode** (read-only) — a materially lower-trust posture than the local TUI/CLI's own default, since the caller is an external harness. A tool call needing approval in a higher mode (`build`/`auto`) is **denied** by default, since an MCP `tools/call` is a synchronous request/response with no human available to ask; pass `--auto-approve` (or set `mcp_server.auto_approve: true`) to allow it instead. See [Configuration Reference](configuration.md#full-config-reference) (`mcp_server:` block) for the config keys.
+
+**v1 scope, deliberately:** individual built-in tools (`security_scan`, `read_file`, etc.) are not exposed 1:1 as MCP tools bypassing the agent loop — every MCP tool call goes through a real Aegis session. `notifications/cancelled` is not propagated to an in-flight `aegis_prompt` call. Both are documented follow-ups, not oversights.
+
+**Claude Code example** (`.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "aegis": {
+      "command": "aegis",
+      "args": ["mcp-serve"]
+    }
+  }
+}
+```
+
+---
+
 ## `aegis ui`
 
 Start a browser-based UI over the daemon API.
@@ -142,7 +183,7 @@ aegis ui             # opens http://127.0.0.1:4127/ui in your browser
 aegis ui --no-open   # just print the URL
 ```
 
-The UI is a single self-contained page embedded in the binary. It lets you list/create sessions, view transcripts with collapsible thinking and tool sections, send messages with live SSE streaming, and approve tool calls inline.
+The UI is a single self-contained page embedded in the binary. It lets you list/create sessions, view transcripts with collapsible thinking and tool sections, send messages with live SSE streaming, and approve tool calls inline. A status pill in the top bar shows what the agent is doing and how long it's been running (`Thinking… 12s`, `Running security_scan…`, `Waiting for your approval`) so a slow model turn never looks like a dead page; the Send button becomes a **Stop** button while a turn is in flight, cancelling it instead of just sitting there disabled.
 
 ---
 

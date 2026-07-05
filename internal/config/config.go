@@ -48,10 +48,30 @@ type Config struct {
 	LSP            []LSPServerConfig          `koanf:"lsp"`
 	Plugins        []ProcessToolConfig        `koanf:"plugins"`
 	MCP            []MCPServerConfig          `koanf:"mcp"`
+	MCPServer      MCPServerModeConfig        `koanf:"mcp_server"`
 	Hooks          []HookConfig               `koanf:"hooks"`
 	Search         SearchConfig               `koanf:"search"`
 	Notify         NotifyConfig               `koanf:"notify"`
 	Embeddings     EmbeddingsConfig           `koanf:"embeddings"`
+}
+
+// MCPServerModeConfig controls `aegis mcp-serve` (P6.3): exposing this
+// daemon's sessions as MCP tools to other MCP-speaking harnesses. This is the
+// reverse direction of MCP (above) — Aegis acting as the server rather than
+// the client.
+type MCPServerModeConfig struct {
+	// AutoApprove lets a tool call needing interactive approval proceed
+	// automatically instead of being denied. Off by default: an MCP
+	// tools/call is a synchronous request/response with no human in the loop
+	// to ask, so the safe default is to deny anything the session's
+	// permission mode doesn't already allow outright, not to silently grant
+	// it. Overridable per-invocation with `aegis mcp-serve --auto-approve`.
+	AutoApprove bool `koanf:"auto_approve"`
+	// DefaultMode is the permission mode a new session gets when a caller
+	// doesn't specify one. Defaults to "plan" (read + network only, nothing
+	// needs approval) rather than the daemon's own configured default, since
+	// an external MCP client is a lower-trust caller than the local TUI/CLI.
+	DefaultMode string `koanf:"default_mode"`
 }
 
 // EmbeddingsConfig enables the optional semantic recall layer (P5.8) over the
@@ -403,6 +423,8 @@ func defaults() map[string]any {
 		"embeddings.provider":          "ollama",
 		"embeddings.model":             "nomic-embed-text",
 		"embeddings.base_url":          "http://localhost:11434",
+		"mcp_server.auto_approve":      false,
+		"mcp_server.default_mode":      "plan",
 	}
 }
 

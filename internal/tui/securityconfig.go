@@ -19,16 +19,24 @@ import (
 
 type securityConfigResolvedMsg struct{ statuses map[string]string }
 type securityConfigSavedMsg struct{ err error }
+type securityInstallDoneMsg struct {
+	name   string
+	output string
+	err    error
+}
 
 // ─── Phases ───────────────────────────────────────────────────────────────────
 
 type securityConfigPhase int
 
 const (
-	scPhaseLoading securityConfigPhase = iota // async: resolve each scanner's live availability
-	scPhaseList                               // huh form: pick a tool to edit, or save/cancel
-	scPhaseEdit                               // huh form: edit one tool's settings
-	scPhaseSaving                             // async: write config
+	scPhaseLoading        securityConfigPhase = iota // async: resolve each scanner's live availability
+	scPhaseList                                      // huh form: pick a tool to edit, or save/cancel
+	scPhaseAction                                    // huh form: a tool was picked — edit settings, install, or back
+	scPhaseEdit                                      // huh form: edit one tool's settings
+	scPhaseInstallConfirm                            // huh form: confirm the exact guided-install command
+	scPhaseInstalling                                // async: run the guided install
+	scPhaseSaving                                    // async: write config
 )
 
 // ─── Model ────────────────────────────────────────────────────────────────────
@@ -65,6 +73,11 @@ type securityConfigModel struct {
 	editMethod  string
 	editInstall string
 	editImage   string
+
+	action           string // action-phase selection: "edit", "install", or "back"
+	installCmd       string // guided-install command shown for confirmation
+	installConfirmed bool
+	notice           string // one-line result banner shown on the list after an install attempt
 
 	done    bool
 	saved   bool
@@ -238,8 +251,14 @@ func (m *securityConfigModel) update(msg tea.Msg) tea.Cmd {
 		return m.updateLoading(msg)
 	case scPhaseList:
 		return m.updateList(msg)
+	case scPhaseAction:
+		return m.updateAction(msg)
 	case scPhaseEdit:
 		return m.updateEdit(msg)
+	case scPhaseInstallConfirm:
+		return m.updateInstallConfirm(msg)
+	case scPhaseInstalling:
+		return m.updateInstalling(msg)
 	case scPhaseSaving:
 		return m.updateSaving(msg)
 	}
@@ -277,11 +296,140 @@ func (m *securityConfigModel) updateList(msg tea.Msg) tea.Cmd {
 			m.phase = scPhaseSaving
 			return tea.Batch(m.sp.Tick, m.saveCmd())
 		default:
-			m.startEdit(m.selected)
+			m.notice = ""
+			m.editingName = m.selected
+			m.phase = scPhaseAction
+			m.form = m.buildActionForm()
 			return m.form.Init()
 		}
 	}
 	return cmd
+}
+
+// buildActionForm lets the user choose what to do with the tool picked from
+// the list: edit its config, run its guided install (only offered when one
+// exists for the current OS), or go back without changing anything.
+func (m *securityConfigModel) buildActionForm() *huh.Form {
+	opts := []huh.Option[string]{
+		huh.NewOption("Edit settings (enabled / method / install policy / image)", "edit"),
+	}
+	if _, ok := security.InstallCommand(m.editingName); ok {
+		opts = append(opts, huh.NewOption("Install now (guided)", "install"))
+	}
+	opts = append(opts, huh.NewOption("← Back to list", "back"))
+
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title(m.editingName).
+				Description(m.statuses[m.editingName]).
+				Options(opts...).
+				Value(&m.action).
+				Height(len(opts)+2),
+		),
+	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
+}
+
+func (m *securityConfigModel) updateAction(msg tea.Msg) tea.Cmd {
+	f, cmd := m.form.Update(msg)
+	if ff, ok := f.(*huh.Form); ok {
+		m.form = ff
+	}
+	switch m.form.State {
+	case huh.StateAborted:
+		m.backToList()
+		return m.form.Init()
+	case huh.StateCompleted:
+		switch m.action {
+		case "edit":
+			m.startEdit(m.editingName)
+			return m.form.Init()
+		case "install":
+			cmdStr, _ := security.InstallCommand(m.editingName)
+			m.installCmd = cmdStr
+			m.installConfirmed = false
+			m.phase = scPhaseInstallConfirm
+			m.form = m.buildInstallConfirmForm()
+			return m.form.Init()
+		default: // "back"
+			m.backToList()
+			return m.form.Init()
+		}
+	}
+	return cmd
+}
+
+// buildInstallConfirmForm shows the exact host command before running it —
+// installing software is a privileged, host-modifying action that must never
+// happen without the operator seeing what will run first (same posture as
+// `aegis security install`).
+func (m *securityConfigModel) buildInstallConfirmForm() *huh.Form {
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().
+				Title("Install "+m.editingName).
+				Description("This will run the following command on your host:\n\n    "+m.installCmd),
+			huh.NewConfirm().
+				Title("Proceed?").
+				Affirmative("Install").
+				Negative("Cancel").
+				Value(&m.installConfirmed),
+		),
+	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
+}
+
+func (m *securityConfigModel) updateInstallConfirm(msg tea.Msg) tea.Cmd {
+	f, cmd := m.form.Update(msg)
+	if ff, ok := f.(*huh.Form); ok {
+		m.form = ff
+	}
+	switch m.form.State {
+	case huh.StateAborted:
+		m.backToList()
+		return m.form.Init()
+	case huh.StateCompleted:
+		if !m.installConfirmed {
+			m.backToList()
+			return m.form.Init()
+		}
+		m.phase = scPhaseInstalling
+		return tea.Batch(m.sp.Tick, m.installCmdFunc())
+	}
+	return cmd
+}
+
+// installCmdFunc runs the confirmed guided install off the main loop —
+// package managers/build steps can take a while — and reports the combined
+// output back as a message.
+func (m *securityConfigModel) installCmdFunc() tea.Cmd {
+	name := m.editingName
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		var buf strings.Builder
+		err := security.RunGuidedInstall(ctx, name, &buf)
+		return securityInstallDoneMsg{name: name, output: buf.String(), err: err}
+	}
+}
+
+func (m *securityConfigModel) updateInstalling(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.sp, cmd = m.sp.Update(msg)
+		return cmd
+	case securityInstallDoneMsg:
+		if msg.err != nil {
+			m.notice = "✗ install failed for " + msg.name + ": " + msg.err.Error()
+		} else {
+			m.notice = "✓ " + msg.name + " installed."
+		}
+		// Re-resolve every tool's live status so the list badge reflects the
+		// newly-installed binary instead of the stale "unavailable" reason.
+		m.phase = scPhaseLoading
+		return tea.Batch(m.sp.Tick, m.resolveCmd())
+	}
+	return nil
 }
 
 func (m *securityConfigModel) startEdit(name string) {
@@ -383,10 +531,19 @@ func (m *securityConfigModel) view() string {
 			m.th.statusDim.Render("  "+m.saveErr)
 	case m.phase == scPhaseLoading:
 		body = m.sp.View() + " Checking scanner availability…"
+	case m.phase == scPhaseInstalling:
+		body = m.sp.View() + " Installing " + m.editingName + "…"
 	case m.phase == scPhaseSaving:
 		body = m.sp.View() + " Saving configuration…"
 	default:
 		body = m.form.View()
+		if m.phase == scPhaseList && m.notice != "" {
+			style := m.th.statusDim
+			if strings.HasPrefix(m.notice, "✗") {
+				style = m.th.errLine
+			}
+			body = style.Render(m.notice) + "\n\n" + body
+		}
 	}
 
 	panel := lipgloss.NewStyle().

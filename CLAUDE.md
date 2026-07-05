@@ -74,7 +74,8 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/memory` | Project-level and user-level persistent memory; relevance scoring for context injection |
 | `internal/tui` | Bubbletea TUI: timeline, streaming, dialog, persona/session pickers, slash commands, cost display |
 | `internal/config` | Layered config (defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` → `AEGIS_*` env vars) |
-| `internal/mcp` | MCP server client (stdio + HTTP/SSE); registered tools appear alongside builtins |
+| `internal/mcp` | MCP client (stdio + HTTP/SSE) — Aegis calling *out* to external MCP servers; registered tools appear alongside builtins |
+| `internal/mcpserver` | MCP server (`aegis mcp-serve`) — the reverse direction: exposes Aegis sessions as MCP tools (`aegis_prompt`, `aegis_new_session`, `aegis_list_sessions`) to other MCP-speaking harnesses |
 | `internal/acp` | ACP JSON-RPC server for editor integrations (Zed, Neovim) |
 | `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers |
 | `internal/cron` | Cron scheduler for background tasks |

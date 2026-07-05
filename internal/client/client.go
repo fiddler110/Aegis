@@ -185,6 +185,16 @@ func (c *Client) UpdateSession(ctx context.Context, id string, req api.UpdateSes
 	return &out, nil
 }
 
+// Scan runs the security scanners directly against the daemon's workspace and
+// returns the formatted report — no session or model turn involved.
+func (c *Client) Scan(ctx context.Context, req api.ScanRequest) (*api.ScanResponse, error) {
+	var out api.ScanResponse
+	if err := c.do(ctx, http.MethodPost, "/security/scan", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ListCommands returns custom slash commands from the daemon.
 func (c *Client) ListCommands(ctx context.Context) ([]api.CommandInfo, error) {
 	var out []api.CommandInfo

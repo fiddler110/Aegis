@@ -655,6 +655,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /memory", s.handleGetMemory)
 	mux.HandleFunc("POST /memory", s.handleAppendMemory)
 	mux.HandleFunc("GET /personas", s.handleListPersonas)
+	mux.HandleFunc("POST /security/scan", s.handleScan)
 	mux.HandleFunc("GET /ui", s.handleWebUI)
 	mux.HandleFunc("GET /ui/", s.handleWebUI)
 	return s.authMiddleware(s.originMiddleware(mux))
@@ -1267,6 +1268,54 @@ func (s *Server) handleListPersonas(w http.ResponseWriter, _ *http.Request) {
 		out = append(out, api.PersonaInfo{Name: p.Name, Description: p.Description})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleScan runs the security scanners directly against the daemon's own
+// workspace and returns the formatted report — the same underlying scan the
+// security_scan tool runs, exposed so `/scan` in the TUI (and other direct
+// callers) gets a deterministic report without spending a model turn. Not
+// tied to any session; a scan isn't conversation state.
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	var req api.ScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	opts := security.OptionsFromConfig(s.cfg.Security)
+
+	if req.Image != "" {
+		report := security.ScanImage(r.Context(), req.Image, security.DefaultImageScanners(), opts)
+		writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
+		return
+	}
+
+	dir := s.workspace
+	if req.Path != "" {
+		resolved, err := sandbox.ValidatePath(s.workspace, req.Path)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		dir = resolved
+	}
+
+	if req.SBOM {
+		sbom, method, err := security.GenerateSBOM(r.Context(), dir, opts)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		security.WriteSBOMArtifact(dir, sbom)
+		writeJSON(w, http.StatusOK, api.ScanResponse{
+			Report: fmt.Sprintf("SBOM generated via %s and written to %s (%d bytes)", method, security.SBOMArtifactPath(dir), len(sbom)),
+		})
+		return
+	}
+
+	report := security.RunWithOptions(r.Context(), dir, security.DefaultScanners(), opts)
+	writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
 }
 
 func readIfExists(path string) string {

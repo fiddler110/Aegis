@@ -1,22 +1,28 @@
 # Aegis Capability Roadmap
 **Date:** 2026-06-29
-**Last updated:** 2026-07-04 — the entire P11 (security scanning depth) track shipped
-(P11.1–P11.12), and P10 (sub-agent security parity) is complete. Full change history and
-design rationale for every shipped item now lives in
+**Last updated:** 2026-07-05 — P6.3 (MCP server mode) shipped; P6.2 (A2A), P9.3 (telemetry
+export), and P9.6 (bulk session/memory export-import) evaluated and dropped, not wanted. P12
+(multi-agent debate mode for security analysis) drafted per user request, not yet started.
+Full change history and design rationale for every shipped item now lives in
 [Appendix A](#appendix-a--completed-work); this document tracks only genuinely open work.
 
 ---
 
 ## Status
 
-Everything is shipped except the items in the two "Open Work" sections below: P2, P3, P4,
-P5 (all sub-items), the TQ TUI-quality track, P6.4, all of P7 (P7.1–P7.7), all of P8
+Everything is shipped except the items in the three "Open Work" sections below: P2, P3, P4,
+P5 (all sub-items), the TQ TUI-quality track, P6.3, P6.4, all of P7 (P7.1–P7.7), all of P8
 (P8.1–P8.6), P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's full 15-item
 punch list, all of P10 (P10.1–P10.5), and all of P11 (P11.1–P11.12) — see
-[Appendix A](#appendix-a--completed-work) for what each shipped and why.
+[Appendix A](#appendix-a--completed-work) for what each shipped and why. P12 (multi-agent
+debate mode) is new, freshly drafted, and not yet built.
 
-**Recommended priority order:** P9.4 only on a concrete trigger → P6, also only on a
-concrete trigger. Not blocking anything.
+**Recommended priority order:** P12.1 first (the debate primitive is the keystone everything
+else in the track hangs off) → P12.2/P12.3 next (roles + evidence-grounding, what makes the
+debate actually rigorous rather than theater) → P12.6 (budget bounds — cheap to add early,
+expensive to retrofit) → P12.4 (surfacing) → P12.5 (threat-model/scan integration) → P12.7
+(eval coverage, once behavior has settled enough to pin). P9.4 and P6 remain low-priority,
+only on a concrete trigger. Nothing here is blocking anything else.
 
 ---
 
@@ -36,16 +42,121 @@ P5.9 only reroutes on failure. Nothing picks a cheaper model for simple turns an
 
 ## Open Work — P6 (Long-Horizon / Exploratory)
 
+P6.3 (MCP server mode) shipped 2026-07-05 — see [Appendix A](#appendix-a--completed-work).
+
 ### P6.1 — Mid-turn state persistence *(was P4.1)*
 Persist partial turn state (accumulated assistant text, received tool calls) to SQLite during streaming so a crash mid-turn loses nothing. High complexity, low-probability failure mode; revisit if crash-during-long-turn becomes a reported pain point.
-
-### P6.3 — MCP server mode
-Expose Aegis itself as an MCP server (`aegis mcp-serve`): sessions and selected tools become MCP tools callable from other harnesses (Claude Code, Codex, editors). The daemon API maps cleanly onto MCP's tool model. Codex already does this and it materially expands where the harness can be embedded.
 
 ### P6.5 — Desktop / IDE surface beyond ACP
 ACP covers Zed and Neovim; the web UI covers browsers. Evaluate: (a) VS Code extension speaking to the daemon API, (b) wrapping the web UI in a lightweight desktop shell. Only worth it if user demand materializes — the TUI is the product.
 
-**None of P6.1/P6.3/P6.5 are blocking.** P6.1 has no reported pain point; P6.3 is an interop bet with no current consumer; P6.5 is speculative. Don't build any of these without a concrete trigger — check with the user first. (P6.2, A2A protocol integration, was evaluated and declined 2026-07-05 — no consumer, not wanted.)
+**Neither P6.1 nor P6.5 is blocking.** P6.1 has no reported pain point; P6.5 is speculative. Don't build either without a concrete trigger — check with the user first. (P6.2, A2A protocol integration, was evaluated and declined 2026-07-05 — no consumer, not wanted.)
+
+---
+
+## Open Work — P12 (Multi-Agent Debate Mode for Security Analysis)
+
+User request 2026-07-05: a mode where a security task (threat model, finding triage, design
+review) runs as a **multi-agent debate (MAD)** — a claim gets proposed, adversarially
+challenged, rebutted, and arbitrated — instead of a single pass producing an unchallenged
+answer. Explicit constraint: Aegis is local-model-first, so this must work with **one Ollama
+model instance playing every role**, not a cast of different models. That's achievable
+because Aegis's existing multi-agent substrate already separates "which model" from "which
+role": `internal/swarm` spawns N agent instances (in-process goroutines or subprocesses) that
+share one model/provider config, and `internal/persona` already differentiates role behavior
+purely through system prompts — 17 built-ins including several adversarial-shaped security
+roles (`security-researcher`, `risk-assessor`, `security-architect`, `appsec-engineer`) that
+map naturally onto proposer/critic/arbiter without inventing a new mechanism. The `agent` tool
+(`internal/tool/builtin/agent.go`) already has a workflow-mode concept — `sequential` /
+`parallel` / `loop`, an `agents` array, and `executeWorkflow` orchestration (P2.9) — which is
+the right extension point for a fourth `debate` mode rather than a parallel new subsystem.
+
+The real risk isn't architectural, it's epistemic: one small local model arguing with itself
+across roles can easily produce *performed* disagreement (a critic persona that just says "I
+disagree" with no new evidence) instead of *real* adversarial pressure. P12.3 exists
+specifically to close that gap — every fixed roadmap item below assumes it, so build order
+matters (see the priority note above).
+
+### P12.1 — Debate workflow primitive (keystone)
+Add `"debate"` to the `agent` tool's `mode` enum alongside `sequential`/`parallel`/`loop`
+(`internal/tool/builtin/agent.go`). Round structure: **propose** (one agent states a claim/
+finding with reasoning) → **critique** (a second agent, given only the claim + shared context,
+must either attack it or explicitly concede) → **rebut** (proposer responds to the critique) →
+repeat for `max_rounds` (default 2) → **arbitrate** (a third agent, seeing the full transcript,
+issues a final verdict: uphold / revise / reject, with a confidence label). All roles run
+through the existing `swarm.Backend`/`RunFunc` seam — no new spawn mechanism, no new model
+plumbing. Effort: **M**, Priority: **High** (blocks everything else in the track).
+
+### P12.2 — Debate roles as personas
+Define the three debate roles as persona profiles rather than hardcoded prompts, so they're
+inspectable/editable the same way every other persona is (`aegis persona show debate-critic`,
+etc.) and can be swapped per-domain later. Proposer reuses an existing security persona
+appropriate to the task (e.g. `security-researcher` for a vuln claim, `security-architect` for
+a threat-model entry). Critic and arbiter are two **new** built-in personas:
+`security-critic` (instructed to actively hunt for the weakest part of the claim — missing
+mitigation, wrong severity, unverified assumption — and required to either name a specific
+flaw or explicitly concede) and `security-arbiter` (instructed to synthesize only, never
+introduce new claims of its own, and to produce a structured verdict, not prose). Effort:
+**S**, Priority: **High**.
+
+### P12.3 — Tool-grounded critique (the part that makes this real, not theater)
+Without this, a single local model playing "critic" tends to either rubber-stamp (persona
+framing alone rarely produces genuine adversarial pressure from a model arguing with its own
+prior output) or hallucinate objections. Require the critic role to ground any challenge in
+retrievable evidence: it must cite a `security_scan` result, a `grep`/`read_file` lookup, or a
+specific line/file — a critique with no cited evidence is auto-downgraded to "unsubstantiated"
+by the arbiter rather than treated as a real rebuttal. This reuses the existing tool-call
+infrastructure (the critic agent just has read/scan tools available, same as any other
+sub-agent) — no new capability, just a prompt+arbiter-rule constraint. Effort: **M**,
+Priority: **High** — this is the difference between a legitimately useful feature and a
+plausible-looking one.
+
+### P12.4 — Debate transcript surfacing (TUI/CLI)
+A debate's value is lost if it's just more scrollback in the normal chat stream. New `/debate`
+TUI command (mirrors `/scan`'s "run directly against the daemon, no free-form model turn"
+pattern from P11's follow-up) and a structured transcript renderer: claim → challenge →
+rebuttal → verdict as a distinct block type (same TQ1 block-based transcript model everything
+else in the TUI already uses), collapsible per round. `aegis debate` CLI entry point for
+headless use, same structured-output convention as `aegis chat --output-format json` (P4.5).
+Effort: **M**, Priority: **Medium** — needed for the feature to be usable, but can trail the
+mechanism itself.
+
+### P12.5 — Threat-model / scan-triage integration
+Wire debate mode into the two places Aegis already produces security claims that benefit from
+challenge: (a) the `security-architect` persona's threat-modeling workflow — each identified
+threat/mitigation pair can optionally route through a debate round before being written into
+the threat model doc; (b) the `security-audit` skill's triage loop (P11.8) — a borderline or
+disputed-severity finding (e.g. a suppressed-vs-real positive) gets debated before the baseline
+suppression decision is made, rather than a single pass deciding unilaterally. Both are
+opt-in (a flag/config toggle, not a default-on behavior change to existing workflows) since
+debate mode multiplies latency/cost per finding. Effort: **M**, Priority: **Medium**,
+depends on P12.1–P12.3.
+
+### P12.6 — Cost and round bounds
+A debate round is 3+ model calls per round instead of 1; unbounded, this defeats the existing
+budget guardrails' intent even though it doesn't bypass them mechanically (P10.5's token
+budget still counts every call). Enforce a hard `max_rounds` config default (2), have the
+orchestrator check remaining budget (`cost.Tracker`) before starting each additional round and
+force early arbitration (skip straight to verdict on the transcript so far) if the budget is
+close to its cap, rather than letting the debate abort mid-critique with no verdict at all.
+Effort: **S**, Priority: **High** — cheap to build alongside P12.1, expensive to retrofit once
+users are relying on debate mode's cost profile being predictable.
+
+### P12.7 — Eval coverage
+A scripted `internal/eval` scenario (deterministic adapter, same convention as P9.1/P10.4) that
+proves: (a) a debate round actually changes the arbiter's verdict when the critic's rebuttal is
+scripted to be valid (i.e. the mechanism isn't a no-op that always upholds the initial claim),
+and (b) an evidence-free critique gets downgraded per P12.3 rather than accepted at face value.
+This is what makes "the debate produces better answers" a checked property instead of a claim.
+Effort: **S**, Priority: **Medium**, naturally comes last — there's nothing stable to pin a
+golden transcript against until P12.1–P12.3 settle.
+
+**Scope kept deliberately narrow for v1:** exactly one model instance/config drives every
+role (no per-role model override, even though the persona/config plumbing would allow one
+later if a user ever *does* have multiple local models loaded — no evidence of that demand
+now); three roles only (proposer/critic/arbiter), not an open-ended N-agent debate graph;
+debate mode is opt-in per task, never a silent replacement for the existing single-pass
+persona behavior.
 
 ---
 
@@ -176,6 +287,20 @@ Not a numbered roadmap item — a follow-through pass closing gaps left by the P
 </details>
 
 <details>
+<summary><strong>P6.3 — MCP server mode, shipped 2026-07-05</strong></summary>
+
+New `internal/mcpserver` package + `aegis mcp-serve`: exposes the Aegis daemon as an MCP server over stdio, the reverse direction of the existing `mcp:` client config (which lets Aegis call *out* to external MCP servers). Rolls its own minimal JSON-RPC 2.0 dispatcher (request/notification, no server-initiated calls needed) rather than sharing `internal/acp`'s — same precedent as `internal/mcp`'s client-side loop already being separate from ACP's.
+
+- Three tools exposed: `aegis_prompt` (delegate a task to a session and block for the full turn, returning the final assistant text plus a `[session: <id>]` marker to continue the conversation), `aegis_new_session`, and `aegis_list_sessions`. All three are thin translations onto the existing daemon HTTP API (`client.Client`), exactly how `internal/acp`'s agent already works — no new server-side session/engine plumbing.
+- Safety posture is deliberately conservative since an MCP `tools/call` is synchronous with no human in the loop: new sessions default to **plan mode** (`mcp_server.default_mode`, not the daemon's own build default) and any approval request that does arise (a caller explicitly asked for build/auto) is **denied** unless `mcp_server.auto_approve` (or `--auto-approve`) is set.
+- **Scope decisions kept deliberately narrow:** individual built-in tools (`security_scan`, `read_file`, etc.) are not exposed 1:1 as MCP tools bypassing the agent loop — undone follow-up, not an oversight. `notifications/cancelled` is not propagated to an in-flight `aegis_prompt` call.
+- Verified end-to-end against a real running daemon (built the binary, drove `aegis mcp-serve` over stdio by hand: `initialize` → `tools/list` → `tools/call aegis_new_session`/`aegis_list_sessions`), not just unit-tested.
+
+Tests: `internal/mcpserver/server_test.go` (14 cases: initialize, tools/list schema shape, prompt session-create vs. reuse, approval deny-by-default vs. auto-approve, error propagation, empty/populated session listing, unknown tool/method, notification-gets-no-response). Docs: `docs/cli-reference.md`, `docs/configuration.md`, `CLAUDE.md`.
+
+</details>
+
+<details>
 <summary><strong>TQ — TUI Quality Track, all 11 items shipped (complete 2026-07-03)</strong></summary>
 
 A code-level review of `internal/tui` against the Claude Code and opencode/Crush TUI experience found the recurring gap: Aegis rendered the conversation as one append-only styled string (`cappedBuffer` + wrap caches), while the streamlined harnesses model it as a list of typed message blocks rendered and cached individually. TQ1 fixed that structural gap; the rest is diff quality, streaming markdown, and interaction polish.
@@ -254,10 +379,11 @@ A user request to bring `internal/security`/`aegis scan`/`security_scan` — thr
 - **P11.10 (guided scanner install):** approval-gated per-tool install (`aegis security install <tool>`) — shows the exact command and requires confirmation before ever touching the host; supply-chain hygiene favors package managers/checksummed binaries over `curl | sh`.
 - **P11.11 (security tool config + `/security-config`):** `security.tools.<name>` config (enabled/method/install/image) plus an interactive TUI form, so none of this requires hand-editing YAML.
 - **P11.12 (reachability analysis):** osv-scanner's `--call-analysis` (govulncheck-backed for Go, on by default) surfaces whether a vulnerable dependency's flagged code is actually *called*, not just present in the dependency tree — never inferred for unsupported ecosystems, since a wrong "unreachable" claim would understate real risk.
+- **Follow-up, 2026-07-05 — install-from-wizard + `/scan`:** `/security-config` gained an action step per tool (Edit settings / **Install now (guided)** / Back) that runs the same confirmed guided install `aegis security install` does (factored into a shared `security.RunGuidedInstall`), then re-resolves availability so the list reflects the newly-installed binary without leaving the dialog. New `/scan [path|image <ref>|sbom [path]]` TUI command runs a scan directly against the daemon's workspace (`POST /security/scan`, new endpoint) and prints the report — no model turn spent, mirroring `aegis scan`.
 
 **Scope decisions kept deliberately narrow rather than over-built** (each a documented trade-off, not an oversight): no built-in image digest pins (P11.1); image scanning is host-binary only (P11.5); DAST v1 needs an already-running target (P11.7); the ZAP regression fixture is an explicitly labeled synthetic placeholder pending a live capture (P11.9); OWASP Dependency-Check remains opt-in-only with no built integration, no concrete demand yet (P11.4).
 
-Tests: `internal/security/{method,sarif,scanners,sast,sbom,osv,dast,dedup,asvs,baseline,regression,security}_test.go`, `internal/cli/security_test.go`, `internal/config/write_security_test.go`, `internal/tui/securityconfig_test.go`.
+Tests: `internal/security/{method,sarif,scanners,sast,sbom,osv,dast,dedup,asvs,baseline,regression,security,install}_test.go`, `internal/cli/security_test.go`, `internal/config/write_security_test.go`, `internal/tui/{securityconfig,scan}_test.go`, `internal/server/scan_test.go`.
 
 </details>
 
@@ -289,7 +415,7 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 
 **Gemini CLI** — 1M context standard; Google Search grounding; 90+ extensions; subagents with parallel delegation (Apr 2026); being folded into the Antigravity platform.
 
-**Convergent themes across all four:** (1) token efficiency as a first-class metric, (2) user-configurable lifecycle hooks, (3) lazy/progressive context loading (skills, tools, docs), (4) headless/programmatic operation with structured output, (5) forge integration that completes the loop (PR out the other end), (6) sandboxing that doesn't require Docker. Aegis has now closed 1, 2, 3, 5, and 6; MCP-server interop (P6.3) is the remaining open convergent theme — A2A (P6.2) was evaluated and declined 2026-07-05 (no consumer, extra protocol surface for no current benefit).
+**Convergent themes across all four:** (1) token efficiency as a first-class metric, (2) user-configurable lifecycle hooks, (3) lazy/progressive context loading (skills, tools, docs), (4) headless/programmatic operation with structured output, (5) forge integration that completes the loop (PR out the other end), (6) sandboxing that doesn't require Docker. Aegis has now closed all six — MCP-server interop shipped 2026-07-05 (P6.3); A2A (P6.2) was evaluated and declined the same day (no consumer, extra protocol surface for no current benefit).
 
 **Where Aegis was already at or ahead of parity** (no action needed): prompt-cache breakpoints in the Anthropic adapter; per-turn structured traces + cost budget enforcement; checkpoints/rewind + git rollback; output validation guard (LLM rubric + schema modes); cron scheduling; container sandbox matrix (Docker/Podman/WSL/Apple); ACP editor protocol; local-LLM-first provider posture; 17 security personas + contextual security policies (egress-then-write); audit trail.
 
@@ -312,7 +438,7 @@ What changed in the top-tier harnesses since the 2026-06-29 competitive analysis
 | 11 | TUI | No `@file#start-end` line-range syntax | opencode | Low | ✅ P5.5 |
 | 12 | TUI | No draft stash across sessions | opencode | Low | ✅ P5.6 |
 | 13 | Persistence | No mid-turn state persistence on crash | Crush, opencode | Low | ⬜ P6.1 |
-| 14 | Interop | Cannot act as an MCP server (A2A protocol evaluated and declined 2026-07-05 — no consumer) | ADK, Codex | Low | ⬜ P6.3 |
+| 14 | Interop | Cannot act as an MCP server (A2A protocol evaluated and declined 2026-07-05 — no consumer) | ADK, Codex | Low | ✅ P6.3 |
 | 15 | Extensibility | Bundles install from local path only | opencode plugin ecosystem | Low | ✅ P5.7 |
 | 16 | Memory | Knowledge/longmem retrieval is BM25-only | Cursor, Devin | Low | ✅ P5.8 |
 | 17 | Reliability | No provider failover | Aider (litellm routing) | Low | ✅ P5.9 |

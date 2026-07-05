@@ -227,3 +227,24 @@ type BGEventItem struct {
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
+
+// ScanRequest runs the security scanners directly (POST /security/scan),
+// independent of any session/model turn — the same underlying scan the
+// security_scan tool runs, exposed for `/scan` in the TUI and other direct
+// callers that want a deterministic report without spending a model turn.
+type ScanRequest struct {
+	// Path is a workspace-relative subdirectory to scan (optional, defaults
+	// to the whole workspace). Mutually exclusive with Image.
+	Path string `json:"path,omitempty"`
+	// Image is a container image reference to scan instead of the workspace
+	// (e.g. "alpine:3.20"). Mutually exclusive with Path/SBOM.
+	Image string `json:"image,omitempty"`
+	// SBOM generates a CycloneDX SBOM via syft instead of scanning for
+	// findings, persisting it under Path. Mutually exclusive with Image.
+	SBOM bool `json:"sbom,omitempty"`
+}
+
+// ScanResponse carries the formatted scan report (or SBOM-generation summary).
+type ScanResponse struct {
+	Report string `json:"report"`
+}

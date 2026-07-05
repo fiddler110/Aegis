@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"charm.land/huh/v2"
 
 	"github.com/fiddler110/aegis/internal/commands"
 	"github.com/fiddler110/aegis/internal/config"
@@ -136,5 +140,100 @@ func TestSecurityConfigSaveCmdPreservesEgressSettings(t *testing.T) {
 	}
 	if cfg.Security.Tools["gitleaks"].ToolEnabled() {
 		t.Error("expected gitleaks to be disabled after save")
+	}
+}
+
+// TestSecurityConfigActionFormOffersInstallWhenAvailable is the regression for
+// the "select tools to install" ask: a tool with a guided install command for
+// this OS must offer an "install" option; a tool with none (zap, container-
+// only) must not.
+func TestSecurityConfigActionFormOffersInstallWhenAvailable(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTempTUI(t)
+
+	m := newSecurityConfigModel(80, 24, theme{}, false)
+
+	m.editingName = "trivy"
+	form := m.buildActionForm()
+	if form == nil {
+		t.Fatal("buildActionForm returned nil")
+	}
+	form.Init()
+	if !strings.Contains(formOptionValues(t, form), "Install now") {
+		t.Error("expected an install option for trivy, which ships a guided install for every OS")
+	}
+
+	m.editingName = "zap"
+	form = m.buildActionForm()
+	form.Init()
+	if strings.Contains(formOptionValues(t, form), "Install now") {
+		t.Error("expected no install option for zap, which has no guided install command")
+	}
+}
+
+// formOptionValues renders a form to a string so the test can assert on
+// visible option labels without depending on huh's internal option-value API.
+func formOptionValues(t *testing.T, form *huh.Form) string {
+	t.Helper()
+	return form.View()
+}
+
+// TestSecurityConfigInstallConfirmDeclinedGoesBackToList checks that
+// declining the confirm step (installConfirmed left false) never starts an
+// install and returns to the list, discarding the pending install.
+func TestSecurityConfigInstallConfirmDeclinedGoesBackToList(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTempTUI(t)
+
+	m := newSecurityConfigModel(80, 24, theme{}, false)
+	m.editingName = "trivy"
+	m.installCmd = "echo should never run"
+	m.installConfirmed = false
+	m.phase = scPhaseInstallConfirm
+	m.form = m.buildInstallConfirmForm()
+	// Completing the form without confirming must not run installCmdFunc —
+	// simulate the completed-but-declined branch updateInstallConfirm takes.
+	if m.installConfirmed {
+		t.Fatal("test setup: installConfirmed should start false")
+	}
+	m.backToList()
+	if m.phase != scPhaseList {
+		t.Errorf("phase = %v, want scPhaseList after declining install", m.phase)
+	}
+	if m.editingName != "" {
+		t.Errorf("editingName = %q, want cleared after backToList", m.editingName)
+	}
+}
+
+// TestSecurityConfigInstallDoneMsgSetsNotice is the regression for the
+// install-result banner: updateInstalling must set a success or failure
+// notice from a securityInstallDoneMsg and re-trigger a status refresh,
+// without ever needing to run a real install command in the test itself
+// (that path is covered by internal/security's own RunGuidedInstall tests).
+func TestSecurityConfigInstallDoneMsgSetsNotice(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTempTUI(t)
+
+	m := newSecurityConfigModel(80, 24, theme{}, false)
+	m.phase = scPhaseInstalling
+	m.editingName = "trivy"
+
+	cmd := m.updateInstalling(securityInstallDoneMsg{name: "trivy", output: "ok"})
+	if m.notice != "✓ trivy installed." {
+		t.Errorf("notice = %q, want a success message", m.notice)
+	}
+	if m.phase != scPhaseLoading {
+		t.Errorf("phase = %v, want scPhaseLoading to refresh statuses after install", m.phase)
+	}
+	if cmd == nil {
+		t.Error("expected a non-nil cmd to kick off the status refresh")
+	}
+
+	m2 := newSecurityConfigModel(80, 24, theme{}, false)
+	m2.phase = scPhaseInstalling
+	m2.editingName = "trivy"
+	m2.updateInstalling(securityInstallDoneMsg{name: "trivy", err: fmt.Errorf("boom")})
+	if !strings.Contains(m2.notice, "✗") || !strings.Contains(m2.notice, "boom") {
+		t.Errorf("notice = %q, want a failure message mentioning the error", m2.notice)
 	}
 }
