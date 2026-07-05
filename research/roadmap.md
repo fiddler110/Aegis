@@ -7,10 +7,12 @@ seams between features rather than individual gaps) found and fixed two items sa
 table, the structural fix for that whole drift class), both shipped. The review also surfaced an
 undocumented instance of the same "new capability skips a shared seam" pattern outside the TUI:
 **/debate bypassed the P9.5/P10.5 daily cost/token caps** entirely and never recorded its spend to
-the ledger — fixed same-day (see Appendix A). **P14.2** (in-session `/security` surface) and
-**P14.3** (in-session `/knowledge`/`/index`) also shipped same-day, registering into the new P14.10
-table. P14.4–P14.9 remain open, building on that table instead of the three-list pattern that caused
-P14.1.
+the ledger — fixed same-day (see Appendix A). **P14.2** (in-session `/security` surface),
+**P14.3** (in-session `/knowledge`/`/index`), and **P14.5** (`/status` daemon/session health,
+including a new `GET /status` daemon endpoint surfacing the P9.5/P10.5 daily-spend totals that
+existed in the store but were never read back out anywhere) also shipped same-day, registering into
+the new P14.10 table. P14.4/P14.6–P14.9 remain open, building on that table instead of the
+three-list pattern that caused P14.1.
 P12 (multi-agent debate mode for security analysis), all 7 items, shipped. P6.3 (MCP server mode)
 shipped; P6.2 (A2A), P9.3 (telemetry export), and P9.6 (bulk session/memory export-import)
 evaluated and dropped, not wanted. P13 (7 exploratory items) fully researched and scoped into
@@ -22,19 +24,19 @@ Full change history and design rationale for every shipped item now lives in
 
 ## Status
 
-Everything is shipped except the items in the four "Open Work" sections below: P13, P14 (P14.4–
-P14.9 only), P9.4, and P6.1/P6.5. Every other numbered track — P2, P3, P4, P5 (all sub-items), the
-TQ TUI-quality track, P6.3, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5, the
-2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), all of
-P11 (P11.1–P11.12), all of P12 (P12.1–P12.7), and P14.1/P14.2/P14.3/P14.10 — is shipped; see
+Everything is shipped except the items in the four "Open Work" sections below: P13, P14 (P14.4/
+P14.6–P14.9 only), P9.4, and P6.1/P6.5. Every other numbered track — P2, P3, P4, P5 (all sub-items),
+the TQ TUI-quality track, P6.3, P6.4, all of P7 (P7.1–P7.7), all of P8 (P8.1–P8.6), P9.1/P9.2/P9.5,
+the 2026-07-03 architecture/security review's full 15-item punch list, all of P10 (P10.1–P10.5), all
+of P11 (P11.1–P11.12), all of P12 (P12.1–P12.7), and P14.1/P14.2/P14.3/P14.5/P14.10 — is shipped; see
 [Appendix A](#appendix-a--completed-work) for what each shipped and why.
 
 **Nothing is currently in progress.** P13's seven items are researched and scoped (2026-07-05);
 P13.1 is now shipped, the other six not started. P14.1 (completion/palette drift), P14.10
-(single source-of-truth command table), P14.2 (`/security` umbrella), and P14.3 (`/knowledge`/
-`/index`) shipped 2026-07-05; P14.4–P14.9 (the remaining individual `/`-surface additions) are
-scoped but not started — see their entries below. P9.4 and P6.1/P6.5 are real but explicitly not
-worth building speculatively — see their entries below for why.
+(single source-of-truth command table), P14.2 (`/security` umbrella), P14.3 (`/knowledge`/
+`/index`), and P14.5 (`/status`) shipped 2026-07-05; P14.4/P14.6–P14.9 (the remaining individual
+`/`-surface additions) are scoped but not started — see their entries below. P9.4 and P6.1/P6.5 are
+real but explicitly not worth building speculatively — see their entries below for why.
 
 ---
 
@@ -293,7 +295,7 @@ unchanged.
 
 ---
 
-## Open Work — P14 (TUI Command-Surface Parity & Discoverability — P14.1/P14.2/P14.3/P14.10 shipped 2026-07-05, P14.4–P14.9 not started)
+## Open Work — P14 (TUI Command-Surface Parity & Discoverability — P14.1/P14.2/P14.3/P14.5/P14.10 shipped 2026-07-05, P14.4/P14.6–P14.9 not started)
 
 A review of the TUI's slash-command surface against (a) the actual dispatch table, (b) the CLI
 subcommand tree, and (c) the daemon client API found a real, reported defect plus a broad
@@ -373,13 +375,27 @@ CLI-only (the client already exposes `ListSessions`/`ListArchivedSessions`/`Prun
 `ListRuns`/`GetBGEvents`). Add `/sessions [list]`, `/archive list`, `/prune [days]`, `/runs`, and
 `/bg [list|events]`. Priority: **Medium**, Effort: **M**.
 
-### P14.5 — `/status` daemon/session health
+### P14.5 — SHIPPED 2026-07-05 — `/status` daemon/session health
 
-`warnSandboxFallback` prints the sandbox-fallback warning once to stderr *before* the TUI starts,
-then it's gone. Add a `/status` command showing daemon health, active sandbox backend + any
-fallback reason, provider/model, and cost caps + today's spend (all already available via
-`client.Status()` and the cost ledger). Natural home for P13.4.4's engagement/activity digest too.
-Priority: **Medium**, Effort: **S**.
+`warnSandboxFallback` printed the sandbox-fallback warning once to stderr *before* the TUI started,
+then it was gone for the rest of the session. Added `/status` (`internal/tui/slash.go`'s
+`cmdStatus`, registered in the P14.10 `commandDefs` table) showing daemon reachability,
+provider/model, the active sandbox backend and any fallback reason, this session's cumulative
+spend against its caps, and cross-session *today's* spend against the P9.5/P10.5 daily caps.
+
+The daily-spend half needed real daemon plumbing, not just a UI: `client.Status()`/`/healthz` never
+carried it (by design — `/healthz` is polled every ~100ms by `waitForDaemon` during startup, so it
+stays minimal), and the actual daily totals only lived in `session.Store.TodayCost`/`TodayTokens`,
+already written by `recordDailySpend` for the P9.5/P10.5 caps but never read back out anywhere. Added
+a new `GET /status` endpoint (`api.StatusInfo`, `Server.handleStatusInfo`, `Client.StatusInfo`)
+distinct from `/healthz` so the frequently-polled path doesn't pay for two extra DB reads per call.
+Sandbox backend *name* (as opposed to the fallback bool/reason, which is daemon-authoritative) is
+read from the local config, matching the existing no-daemon-round-trip convention `/sandbox` and
+`/security` already use. Tests: `TestServerStatusEndpoint` (`internal/server/server_test.go`) for
+the new endpoint; the TUI-side command has no dedicated round-trip test, matching this codebase's
+existing convention of not spinning up an `httptest` server inside `internal/tui` tests — covered by
+the endpoint test plus a manual `/status` run against a live daemon. P13.4.4's engagement/activity
+digest (not started) can extend this command's output rather than adding a separate one.
 
 ### P14.6 — `/bundle [install|info <url>]`
 
@@ -406,10 +422,10 @@ teammates, Ctrl+O expand-thinking, Shift+Enter, Alt+Enter). Fold the keymap into
 `/keys` command) and mark keybind-only features so they're discoverable without reading the docs.
 Priority: **Low**, Effort: **S**.
 
-**Remaining build order:** P14.4–P14.9 register into the P14.10 `commandDefs` table
-(`internal/tui/commands.go`) rather than re-growing the three-list drift P14.1 fixed — P14.2 and
-P14.3 already did, above. P14.5 is the highest-value of what's left (daemon health) and should land
-next, as demand dictates.
+**Remaining build order:** P14.4/P14.6–P14.9 register into the P14.10 `commandDefs` table
+(`internal/tui/commands.go`) rather than re-growing the three-list drift P14.1 fixed — P14.2, P14.3,
+and P14.5 already did, above. No single item among what's left is clearly highest-value; build in
+listed order (P14.4 next) as demand dictates.
 
 ---
 

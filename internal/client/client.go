@@ -228,6 +228,18 @@ func (c *Client) RepoMapIndex(ctx context.Context) (*api.RepoMapIndexResponse, e
 	return &out, nil
 }
 
+// StatusInfo fetches the P14.5 /status surface: daemon/provider identity,
+// sandbox fallback state, and cross-session daily spend against the P9.5/
+// P10.5 caps. Distinct from Status(), which hits the minimal, frequently
+// polled /healthz used for readiness checks.
+func (c *Client) StatusInfo(ctx context.Context) (*api.StatusInfo, error) {
+	var out api.StatusInfo
+	if err := c.do(ctx, http.MethodGet, "/status", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ListCommands returns custom slash commands from the daemon.
 func (c *Client) ListCommands(ctx context.Context) ([]api.CommandInfo, error) {
 	var out []api.CommandInfo

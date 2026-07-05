@@ -415,6 +415,52 @@ func TestServerHealthEndpoint(t *testing.T) {
 	}
 }
 
+// TestServerStatusEndpoint is the P14.5 counterpart to
+// TestServerHealthEndpoint: /status reports provider/model plus the
+// cross-session daily spend the P9.5/P10.5 caps already track, which
+// /healthz deliberately omits.
+func TestServerStatusEndpoint(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Default: "anthropic", Model: "test-model"},
+		Permission: config.PermissionConfig{Mode: "plan"},
+		Cost:       config.CostConfig{DailyCapUSD: 5, DailyTokenCap: 1000},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	if err := store.AddDailyCost(ctx, 1.5); err != nil {
+		t.Fatalf("AddDailyCost: %v", err)
+	}
+	if err := store.AddDailyTokens(ctx, 400); err != nil {
+		t.Fatalf("AddDailyTokens: %v", err)
+	}
+
+	info, err := cl.StatusInfo(ctx)
+	if err != nil {
+		t.Fatalf("StatusInfo: %v", err)
+	}
+	if info.Provider != "anthropic" || info.Model != "test-model" {
+		t.Errorf("provider/model = %q/%q, want anthropic/test-model", info.Provider, info.Model)
+	}
+	if info.DailyCostUSD != 1.5 {
+		t.Errorf("DailyCostUSD = %v, want 1.5", info.DailyCostUSD)
+	}
+	if info.DailyTokens != 400 {
+		t.Errorf("DailyTokens = %d, want 400", info.DailyTokens)
+	}
+	if info.DailyCapUSD != 5 || info.DailyTokenCap != 1000 {
+		t.Errorf("caps = %v/%d, want 5/1000", info.DailyCapUSD, info.DailyTokenCap)
+	}
+}
+
 func TestServerGetSessionNotFound(t *testing.T) {
 	cl, cleanup := newTestServer(t)
 	defer cleanup()

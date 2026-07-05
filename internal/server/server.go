@@ -646,6 +646,7 @@ func (s *Server) Handler() http.Handler { return s.routes() }
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /status", s.handleStatusInfo)
 	mux.HandleFunc("POST /sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /sessions", s.handleListSessions)
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
@@ -958,6 +959,37 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Model:                 s.cfg.Provider.Model,
 		SandboxFallback:       s.sandboxFallback,
 		SandboxFallbackReason: s.sandboxFallbackReason,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleStatusInfo serves the P14.5 /status TUI surface: daemon/provider
+// identity, sandbox fallback state (same fields as /healthz), and the
+// cross-session daily spend the P9.5/P10.5 caps already track in the session
+// store. Kept as a separate endpoint from /healthz rather than growing that
+// one, since /healthz is polled frequently (waitForDaemon) and shouldn't pay
+// for two extra DB reads per call.
+func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	dailyCost, err := s.store.TodayCost(ctx)
+	if err != nil {
+		s.logger.Warn("read daily cost for /status", "err", err)
+		dailyCost = 0
+	}
+	dailyTokens, err := s.store.TodayTokens(ctx)
+	if err != nil {
+		s.logger.Warn("read daily tokens for /status", "err", err)
+		dailyTokens = 0
+	}
+	resp := api.StatusInfo{
+		Provider:              s.cfg.Provider.Default,
+		Model:                 s.cfg.Provider.Model,
+		SandboxFallback:       s.sandboxFallback,
+		SandboxFallbackReason: s.sandboxFallbackReason,
+		DailyCostUSD:          dailyCost,
+		DailyCapUSD:           s.cfg.Cost.DailyCapUSD,
+		DailyTokens:           dailyTokens,
+		DailyTokenCap:         s.cfg.Cost.DailyTokenCap,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -509,6 +509,63 @@ func (d *SlashDispatcher) cmdSandbox(args []string) SlashResult {
 	return SlashResult{Output: b.String()}
 }
 
+// cmdStatus is the P14.5 daemon/session health surface: daemon reachability,
+// provider/model, sandbox backend + any fallback reason (previously only
+// ever shown once, to stderr, before the TUI took over the terminal — see
+// warnSandboxFallback in internal/cli/root.go), this session's cumulative
+// spend against its caps, and cross-session daily spend against the P9.5/
+// P10.5 daily caps. Sandbox backend name comes from the local config (same
+// no-daemon-round-trip convention as /sandbox and /security); everything
+// else is daemon-authoritative via the new GET /status endpoint.
+func (d *SlashDispatcher) cmdStatus(_ []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	info, err := d.client.StatusInfo(ctx)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to reach daemon: %v", err), IsError: true}
+	}
+
+	cfg, cfgErr := config.Load()
+
+	var b strings.Builder
+	b.WriteString("Daemon: ok\n")
+	fmt.Fprintf(&b, "Provider: %s · Model: %s\n", info.Provider, info.Model)
+
+	backend := "local"
+	if cfgErr == nil {
+		if cfg.Sandbox.Backend != "" {
+			backend = cfg.Sandbox.Backend
+		}
+		if cfg.Sandbox.Runtime != "" {
+			backend = fmt.Sprintf("%s (runtime: %s)", backend, cfg.Sandbox.Runtime)
+		}
+	}
+	fmt.Fprintf(&b, "Sandbox: %s\n", backend)
+	if info.SandboxFallback {
+		fmt.Fprintf(&b, "  ⚠ fell back to unsandboxed local execution: %s\n", info.SandboxFallbackReason)
+	}
+
+	if sess, err := d.client.GetSession(ctx, d.sessionID); err == nil {
+		fmt.Fprintf(&b, "Session (%s): %d tokens · $%.4f\n", sess.Mode, sess.InputTokens+sess.OutputTokens, sess.CostUSD)
+	}
+	if cfgErr == nil {
+		if cfg.Cost.SessionCapUSD > 0 || cfg.Cost.SessionTokenCap > 0 {
+			fmt.Fprintf(&b, "  session cap: $%.2f / %d tokens\n", cfg.Cost.SessionCapUSD, cfg.Cost.SessionTokenCap)
+		}
+		if cfg.Cost.BudgetUSD > 0 || cfg.Cost.MaxTokensPerRun > 0 {
+			fmt.Fprintf(&b, "  per-run cap: $%.2f / %d tokens\n", cfg.Cost.BudgetUSD, cfg.Cost.MaxTokensPerRun)
+		}
+	}
+
+	fmt.Fprintf(&b, "Today (all sessions): %d tokens · $%.4f\n", info.DailyTokens, info.DailyCostUSD)
+	if info.DailyCapUSD > 0 || info.DailyTokenCap > 0 {
+		fmt.Fprintf(&b, "  daily cap: $%.2f / %d tokens\n", info.DailyCapUSD, info.DailyTokenCap)
+	}
+
+	return SlashResult{Output: strings.TrimRight(b.String(), "\n")}
+}
+
 // cmdSecurityConfig opens the interactive security-scanner config dialog
 // (P11.11) — lets the user toggle enabled/method/install/image per scanner
 // without hand-editing security.tools in config.yaml. Like /sandbox use and
