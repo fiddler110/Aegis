@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/security"
@@ -12,6 +14,7 @@ import (
 
 func newScanCmd() *cobra.Command {
 	var scanners []string
+	var list bool
 	cmd := &cobra.Command{
 		Use:   "scan [path]",
 		Short: "Run available security scanners and print normalized findings",
@@ -24,13 +27,17 @@ func newScanCmd() *cobra.Command {
 			"run, without needing config, unless you've explicitly enabled/disabled it yourself. Pass --scanner " +
 			"one or more times to run only specific scanners or categories instead (e.g. --scanner trufflehog, " +
 			"--scanner secrets) — this force-enables them for the run regardless of config, the same way " +
-			"`aegis scan image` already runs its own distinct scanner set on request. Falls back to a configured " +
-			"container image (security.tools.<name>.image) for any enabled scanner not installed on PATH. " +
-			"Findings are deduped across overlapping tools and, where confident, tagged with an OWASP ASVS " +
+			"`aegis scan image` already runs its own distinct scanner set on request. Run `aegis scan --list` to " +
+			"see every valid --scanner name and category alias, with live availability. Falls back to a " +
+			"configured container image (security.tools.<name>.image) for any enabled scanner not installed on " +
+			"PATH. Findings are deduped across overlapping tools and, where confident, tagged with an OWASP ASVS " +
 			"chapter; an accepted-risk .aegis/security-baseline.yaml (see `aegis security baseline`) can suppress " +
 			"a specific, time-boxed finding.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if list {
+				return printScannerList(cmd)
+			}
 			dir := "."
 			if len(args) == 1 {
 				dir = args[0]
@@ -63,7 +70,8 @@ func newScanCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVarP(&scanners, "scanner", "s", nil, "run only this scanner or category (repeatable) — e.g. --scanner trufflehog --scanner secrets; see `aegis security status` for valid names")
+	cmd.Flags().StringArrayVarP(&scanners, "scanner", "s", nil, "run only this scanner or category (repeatable) — e.g. --scanner trufflehog --scanner secrets; see --list for valid names")
+	cmd.Flags().BoolVar(&list, "list", false, "list every scanner name and category alias usable with --scanner (with live availability), then exit")
 	cmd.AddCommand(newScanImageCmd())
 	cmd.AddCommand(newScanSBOMCmd())
 	cmd.AddCommand(newScanDASTCmd())
@@ -220,4 +228,52 @@ func newScanImageCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// printScannerList prints every scanner name and category alias usable with
+// `aegis scan --scanner`/`/scan <selector>`, with live availability — the
+// same live-resolved TOOL/CATEGORY/STATUS shape `aegis security status`
+// already prints, plus a DEFAULT column (would this tool run without an
+// explicit --scanner/config change) and the category-alias groupings that
+// `security status` has no reason to know about.
+func printScannerList(cmd *cobra.Command) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	opts := security.OptionsFromConfig(cfg.Security)
+	out := cmd.OutOrStdout()
+
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "SCANNER\tCATEGORY\tDEFAULT\tSTATUS")
+	for _, d := range security.Descriptors() {
+		method, rt, _, reason := security.Resolve(cmd.Context(), d.Name, opts)
+		status := reason
+		switch method {
+		case security.MethodHost:
+			status = "on PATH"
+		case security.MethodContainer:
+			status = fmt.Sprintf("via %s", rt)
+		case security.MethodWSL:
+			status = "via WSL"
+		default:
+			if note := security.AvailabilityNote(d.Name, reason); note != "" {
+				status = reason + "; " + note
+			}
+		}
+		defaultLabel := "opt-in"
+		if d.DefaultEnabled {
+			defaultLabel = "enabled"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, d.Category, defaultLabel, status)
+	}
+	tw.Flush()
+
+	fmt.Fprintln(out, "\nCategory aliases (--scanner <alias> runs every scanner in the group):")
+	catTw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	for _, c := range security.CategoryAliases() {
+		fmt.Fprintf(catTw, "  %s\t-> %s\n", c.Name, strings.Join(c.Scanners, ", "))
+	}
+	catTw.Flush()
+	return nil
 }

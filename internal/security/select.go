@@ -45,6 +45,32 @@ func ResolveSelector(selector string) ([]string, bool) {
 	return nil, false
 }
 
+// CategoryAlias describes one category selector token and the scanner names
+// it expands to (sorted) — for listing purposes (`aegis scan --list`, `/scan
+// list`), separate from ResolveSelector's own internal lookup use.
+type CategoryAlias struct {
+	Name     string
+	Scanners []string
+}
+
+// CategoryAliases returns every recognized category alias, sorted by name,
+// each with its member scanner names sorted.
+func CategoryAliases() []CategoryAlias {
+	names := make([]string, 0, len(categoryAliases))
+	for n := range categoryAliases {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]CategoryAlias, 0, len(names))
+	for _, n := range names {
+		members := make([]string, len(categoryAliases[n]))
+		copy(members, categoryAliases[n])
+		sort.Strings(members)
+		out = append(out, CategoryAlias{Name: n, Scanners: members})
+	}
+	return out
+}
+
 // SelectorNames lists every recognized selector token (every scanner name
 // plus every category alias), sorted — used to build a helpful error message
 // when a selector doesn't resolve.

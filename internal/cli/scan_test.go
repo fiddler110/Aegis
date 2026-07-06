@@ -52,6 +52,22 @@ func TestScanScannerFlagRestrictsSelection(t *testing.T) {
 	}
 }
 
+// TestScanListShowsScannersAndCategories checks `aegis scan --list` prints
+// every scanner name and every category alias, without requiring any path
+// argument or running a scan.
+func TestScanListShowsScannersAndCategories(t *testing.T) {
+	chdirTemp(t)
+	out, err := runScan(t, "--list")
+	if err != nil {
+		t.Fatalf("scan --list: %v", err)
+	}
+	for _, want := range []string{"trufflehog", "gitleaks", "SCANNER", "CATEGORY", "secrets", "sast"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestScanPersistsReportArtifact is the "all security scan results go under
 // .aegis/security/" regression for the CLI surface.
 func TestScanPersistsReportArtifact(t *testing.T) {

@@ -838,6 +838,7 @@ func scanSelectorTokens(raw string) []string {
 //	/scan image <ref>            scan a container image reference instead
 //	/scan sbom [path]            generate a CycloneDX SBOM instead of a findings report
 //	/scan network <target...>    run nmap+nuclei (recon_scan) against a host/IP/CIDR list
+//	/scan list                  list every valid scanner name/category, with live availability
 //
 // A plain path scan (no selector) auto-detects the project's language and
 // auto-enables the matching opt-in SAST engine (gosec/bandit/brakeman/
@@ -864,6 +865,8 @@ func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
 			return SlashResult{Output: "usage: /scan network <target> [target...]", IsError: true}
 		}
 		req.Targets = args[1:]
+	case len(args) >= 1 && strings.ToLower(args[0]) == "list":
+		return d.cmdScanList()
 	case len(args) >= 1 && scanSelectorTokens(args[0]) != nil:
 		req.Scanners = scanSelectorTokens(args[0])
 		if len(args) >= 2 {
@@ -880,6 +883,54 @@ func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
 		return SlashResult{Output: fmt.Sprintf("Scan failed: %v", err), IsError: true}
 	}
 	return SlashResult{Output: resp.Report}
+}
+
+// cmdScanList lists every scanner name and category alias usable with
+// `/scan <selector>` (with live availability) — the same live-resolved
+// TOOL/CATEGORY/METHOD/DETAIL shape cmdSecurityStatus prints, plus a
+// DEFAULT column and the category-alias groupings /security status has no
+// reason to know about. Resolved locally (config.Load + security.Resolve),
+// same as cmdSecurityStatus, not via a daemon round trip.
+func (d *SlashDispatcher) cmdScanList() SlashResult {
+	cfg, err := config.Load()
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load config: %v", err), IsError: true}
+	}
+	opts := security.OptionsFromConfig(cfg.Security)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "SCANNER\tCATEGORY\tDEFAULT\tSTATUS")
+	for _, dsc := range security.Descriptors() {
+		method, rt, _, reason := security.Resolve(ctx, dsc.Name, opts)
+		status := reason
+		switch method {
+		case security.MethodHost:
+			status = "on PATH"
+		case security.MethodContainer:
+			status = fmt.Sprintf("via %s", rt)
+		default:
+			if note := security.AvailabilityNote(dsc.Name, reason); note != "" {
+				status = reason + "; " + note
+			}
+		}
+		defaultLabel := "opt-in"
+		if dsc.DefaultEnabled {
+			defaultLabel = "enabled"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", dsc.Name, dsc.Category, defaultLabel, status)
+	}
+	tw.Flush()
+
+	fmt.Fprintf(&b, "\nCategory aliases (/scan <alias> runs every scanner in the group):\n")
+	catTw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	for _, c := range security.CategoryAliases() {
+		fmt.Fprintf(catTw, "  %s\t-> %s\n", c.Name, strings.Join(c.Scanners, ", "))
+	}
+	catTw.Flush()
+	return SlashResult{Output: b.String()}
 }
 
 // cmdKnowledge is the P14.3 in-session surface for the project knowledge base
