@@ -168,7 +168,8 @@ internal/
   tool/builtin/               39 built-in tools
   permission/                 Plan/Build/Auto gates + approval
   compaction/                 Context summarization
-  memory/                     Project/user memory + skills loader
+  memory/                     Project/user memory + relevance scoring
+  skills/                     Progressive-disclosure skills (project/user/embedded builtins)
   knowledge/                  SQLite FTS5 project knowledge base
   longmem/                    Long-term entity store
   checkpoint/                 Per-turn snapshots for rewind
@@ -187,14 +188,17 @@ internal/
   sandbox/                    Local/container shell execution backends
   filetracker/                File staleness detection (prevents overwrites)
   lsp/                        LSP client manager
-  mcp/                        MCP client (stdio + HTTP/SSE)
+  mcp/                        MCP client (stdio + HTTP/SSE) — Aegis calling out
+  mcpserver/                  MCP server (`aegis mcp-serve`) — Aegis sessions as MCP tools
+  acp/                        ACP JSON-RPC server for editor integrations (Zed, Neovim)
   plugins/                    External process tool plugins
   commands/                   Custom slash command loader
   agentdef/                   Custom agent definition loader
   task/                       Background task manager (SQLite)
   cron/                       Recurring job scheduler
   swarm/                      Multi-agent coordination
-  security/                   Semgrep, Trivy, Gitleaks runners
+  debate/                     Multi-agent-debate (MAD) primitive: propose/critique/rebut/arbitrate
+  security/                   SAST/SCA/secrets/IaC/DAST/recon scanner runners, dedup, ASVS mapping, baseline
   diagram/                    Kroki + local CLI diagram renderers
   repomap/                    Repository structure index
   discover/                   Local model server auto-discovery

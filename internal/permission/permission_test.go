@@ -34,7 +34,7 @@ func TestPolicyDecide(t *testing.T) {
 		want Decision
 	}{
 		{ModePlan, tool.CapRead, Allow},
-		{ModePlan, tool.CapNetwork, Allow},
+		{ModePlan, tool.CapNetwork, Ask},
 		{ModePlan, tool.CapWrite, Deny},
 		{ModePlan, tool.CapExecute, Deny},
 		{ModeBuild, tool.CapRead, Allow},

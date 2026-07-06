@@ -9,7 +9,13 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-06 — **P13.2** (trufflehog secret scanner, opt-in alongside gitleaks,
+**Last updated:** 2026-07-06 — **P15.1** (web UI frontend architecture) shipped: moved `aegis ui`
+off the old dependency-free single-file page to a bundled Vite + Preact + TypeScript frontend
+(`internal/server/webui/frontend/`), built output committed at `internal/server/webui/dist/` and
+embedded via `go:embed` (`internal/server/webui.go`) so `go build`/`go run` still need no Node.js.
+Same session ported the prior page's exact feature set 1:1 onto the new stack — no new panels.
+P15.2–P15.11 (the rest of the web-UI-parity track) are now unblocked but not started.
+**Previously, 2026-07-06:** **P13.2** (trufflehog secret scanner, opt-in alongside gitleaks,
 with a host-only-gated live-verification opt-in) shipped. Only P13.3/P13.4/P13.7 remain open in P13.
 **Also 2026-07-06:** **P13.6** (`threat-modeling` builtin skill covering STRIDE/LINDDUN/
 PASTA/Trike/VAST/NIST 800-154, `/threat-model` TUI command, `security-architect` persona updated to
@@ -96,6 +102,62 @@ Full change history and design rationale for every shipped item lives below in
 [Appendix A](#appendix-a--completed-work).
 
 ---
+
+## Shipped — P15 items (Web UI Parity with the TUI)
+
+The rest of P15 (P15.2–P15.11) is still open — see
+[roadmap.md](roadmap.md#open-work--p15-web-ui-parity-with-the-tui).
+
+### P15.1 — SHIPPED 2026-07-06 — Frontend architecture: bundled Vite + Preact + TypeScript
+
+`aegis ui` was a single 324-line hand-rolled `internal/server/webui/index.html` (inline CSS/JS, no
+build step) embedded via `//go:embed webui/index.html` into a plain `string`. Reaching TUI-depth UI
+(persona pickers, cost displays, findings tables, config editors — the rest of P15) in that style
+would have meant a large single file with no component model. User decision: move to a small
+bundled frontend, keeping `aegis ui` a single self-contained binary with no separate frontend
+server.
+
+New `internal/server/webui/frontend/` (Vite + Preact + TypeScript): `package.json`,
+`vite.config.ts` (`base: "/ui/"`, builds to `../dist`), `src/app.tsx` (top-level session-list ↔
+open-session state), `src/api.ts` (fetch/SSE helpers, reads the auth token from a `data-token`
+attribute on the root div rather than an inline script), `src/components/` (`SessionList`,
+`Transcript`, `Composer`, `Approval`). `src/style.css` is a straight port of the old page's inline
+CSS — no visual redesign.
+
+**Build-artifact handling — the key repo-convention decision:** `internal/server/webui/dist/` (the
+Vite build output: `index.html` + hashed `assets/*.js`/`*.css`) is **committed to git**, not
+gitignored, unlike a typical Node build directory. This was a deliberate call: a missing
+`go:embed` target is a hard compile error (not just staleness), and CLAUDE.md documents
+`go build ./...`/`go run ./cmd/aegis` as first-class flows with zero Node.js dependency today —
+committing `dist/` keeps both working unchanged. `npm run build` (in `frontend/`) is only needed
+when actually editing frontend source, and its output must be committed alongside. A new CI step
+(`ci.yml`, `ubuntu-latest` leg only, since the bundle isn't OS-specific) rebuilds the frontend and
+runs `git diff --exit-code` against `dist/` to catch a commit where source changed but the build
+wasn't regenerated — a drift check, not a build dependency, since every other CI leg and both
+`build-*.sh`/`build-windows.ps1` need no changes at all.
+
+**Go-side wiring** (`internal/server/webui.go`): `//go:embed webui/dist` into an `embed.FS`,
+`fs.Sub`-rooted to strip the `webui/dist` prefix. `handleWebUI` reads `index.html` from that FS and
+does the same `strings.Replace(..., "__AEGIS_TOKEN__", ...)` token injection as before — the
+literal placeholder now lives in a `data-token` attribute in `frontend/index.html` (Vite doesn't
+rewrite arbitrary attribute values, only asset URLs), so `TestWebUIServedAndTokenInjected` needed no
+changes. A new `handleWebUIAssets` (`GET /ui/assets/`, `http.FileServerFS`) serves the hashed
+JS/CSS with `Cache-Control: public, max-age=31536000, immutable` (safe — filenames are
+content-hashed); `authMiddleware`'s existing `/ui`-prefix exemption already covered it with no
+change needed. **CSP tightened as a direct consequence, not a separate effort:** bundled JS/CSS are
+external same-origin files rather than inline, so `script-src`/`style-src` dropped
+`'unsafe-inline'` — a real security improvement that fell out of the architecture change.
+New `TestWebUIAssetsServedWithLongCache` covers the asset route.
+
+Feature scope shipped is a **deliberate 1:1 port, no new behavior**: session list/create, message
+history hydration (text/thinking/tool_use/image/tool_result blocks), streaming a turn over SSE
+(hand-rolled `data:` line parsing, same as the old page), the same six event kinds handled
+(`text`/`thinking`/`tool_call`/`tool_result`/`approval_request`/`error` — `cost_alert`/`guard`/
+`steer`/`turn_done`/`done` remain unhandled no-ops, matching the old page exactly), tool-call
+approval (Allow/Reject only, no "always allow" yet — that's P15.10), stop/abort via
+`AbortController`, and the phase/elapsed-time status indicator. `.github/dependabot.yml` got a new
+`npm` ecosystem entry for `/internal/server/webui/frontend`; CLAUDE.md's Build & Run section notes
+the `npm run build` step for frontend edits.
 
 ## Shipped — P13 items (Security & Capability Enhancements)
 

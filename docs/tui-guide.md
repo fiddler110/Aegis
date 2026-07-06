@@ -183,10 +183,30 @@ Type `/` to open the command completion popup and browse available commands.
 |---------|-------------|
 | `/memory` | Show all saved project and user memories |
 | `/remember <text>` | Save a memory entry (prompts for scope: project or user) |
+| `/knowledge index` | Rebuild the project knowledge base FTS5 index |
+| `/knowledge query <text>` | Search the project knowledge base |
+| `/index` | Rebuild the repository map (top-level symbols per file) in the system prompt |
 | `/skills` | List all saved skills (project + user) |
 | `/commands` | List custom commands loaded from `.aegis/commands/` |
 | `/bundle info <path-or-url>` | Show a bundle's manifest, artifacts, and content hash |
 | `/bundle install <path-or-url> [global] [sha256:<hash>] [confirm]` | Preview or install a bundle's commands/agents/skills; `global` targets the user data dir, `sha256:<hash>` pins provenance, `confirm` actually writes |
+
+### Security & Analysis
+
+| Command | Description |
+|---------|-------------|
+| `/scan [path]` | Scan the workspace (or a subpath) with every enabled scanner, auto-detecting the project language; no model turn spent |
+| `/scan <scanner-or-category>[,<...>] [path]` | Run only the named scanner(s)/category (e.g. `/scan trufflehog`, `/scan secrets`), force-enabled regardless of config |
+| `/scan list` | List every valid scanner name and category alias, with live availability and default-enabled status |
+| `/scan image <ref>` | Scan a container image reference for vulnerabilities and best-practice violations |
+| `/scan sbom [path]` | Generate a CycloneDX SBOM instead of a findings report |
+| `/scan network <target> [target...]` | Run nmap + nuclei against a bare host/IP/CIDR list (attack-surface mapping) |
+| `/security [status]` | Show how each scanner would run right now (host binary, container fallback, or unavailable and why) |
+| `/security install <tool> [confirm]` | Show (or, with `confirm`, run) the guided host-install command for a scanner |
+| `/security baseline [path]` | Show the accepted-risk suppression baseline and each entry's active/expired/invalid status |
+| `/security config [global]` | Open the interactive scanner configuration dialog (same as `/security-config`) |
+| `/debate <claim>` | Adversarially debate any claim (security finding, design assertion, plan) — propose/critique/rebut/arbitrate, ending in an UPHOLD/REVISE/REJECT verdict |
+| `/threat-model [system or feature]` | Threat-model the whole project, or a named system/feature, using STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154 |
 
 ### Display & Session
 
@@ -200,6 +220,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/tools compact` | Set tool-output display to 10 lines max |
 | `/tools full` | Show complete tool output (no line cap) |
 | `/sidebar` | Toggle the left sidebar on/off (also `Ctrl+B`) |
+| `/theme [dark\|light]` | Switch the color scheme live (no restart); no args shows the current theme |
 | `/copy` | Copy the last assistant message to clipboard |
 | `/copy <n>` | Copy the Nth fenced code block from the last response |
 | `/tasks` | Show the live task/todo progress strip (also visible above input) |

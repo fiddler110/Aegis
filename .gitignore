@@ -6,6 +6,10 @@
 # Local test runs and scratch output
 /testrun/
 
+# Web UI frontend (internal/server/webui/frontend) — node_modules only;
+# the built dist/ is committed so `go build`/`go run` need no Node.js.
+internal/server/webui/frontend/node_modules/
+
 # Local config & data (project-level skills are shared, so carve those out)
 /.aegis/*
 !/.aegis/skills

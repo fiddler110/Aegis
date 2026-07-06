@@ -1,8 +1,9 @@
 // Package permission gates tool execution by mode and capability.
 //
 // Three permission postures are supported:
-//   - Plan mode: read-only. The agent may inspect files and the network but
-//     may not mutate the workspace or run commands.
+//   - Plan mode: read-only. The agent may inspect files without prompting;
+//     network access requires approval (defaults to deny in non-interactive
+//     contexts) and the workspace may not be mutated or commands run at all.
 //   - Build mode: the agent may mutate the workspace; shell execution still
 //     requires an approver (defaults to deny in non-interactive contexts).
 //   - Auto mode: all capabilities allowed without approval, including shell
@@ -68,8 +69,18 @@ func (p Policy) Decide(cap tool.Capability) Decision {
 		switch cap {
 		// Spawning is allowed in plan mode: a child inherits the parent's
 		// (read-only) posture via permission sync, so it cannot mutate.
-		case tool.CapRead, tool.CapNetwork, tool.CapSpawn:
+		case tool.CapRead, tool.CapSpawn:
 			return Allow
+		// Plan mode used to allow silent network egress here: a "read-only"
+		// session could still read a sensitive file (CapRead, silently
+		// allowed) and immediately exfiltrate it over CapNetwork (also
+		// silently allowed), with no approval anywhere in the path — the
+		// ContextualGate's egress-then-write rule doesn't help since it only
+		// gates a *write* after egress, and it's opt-in besides. Requiring
+		// approval for network in plan mode closes that silent side channel
+		// while leaving local reads frictionless.
+		case tool.CapNetwork:
+			return Ask
 		default: // write, execute
 			return Deny
 		}

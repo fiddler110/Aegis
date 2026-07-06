@@ -1,0 +1,224 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/hooks"
+	"github.com/fiddler110/aegis/internal/mcp"
+	"github.com/fiddler110/aegis/internal/persona"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/repomap"
+	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/tool"
+)
+
+// effectiveSystem combines the session's base system prompt with platform
+// context, loaded project/user memory, skills, and context files (AGENTS.md,
+// CLAUDE.md).
+func (s *Server) effectiveSystem(base string) string {
+	var parts []string
+	if base != "" {
+		parts = append(parts, base)
+	}
+	parts = append(parts, persona.ToolUseBlock())
+	parts = append(parts, persona.CompletingTasksBlock())
+	parts = append(parts, persona.PlatformBlock())
+	if ctx := s.memory.LoadContext(); ctx != "" {
+		parts = append(parts, ctx)
+	}
+	if mem := s.memory.Load(); mem != "" {
+		parts = append(parts, mem)
+	}
+	if sk := skills.BuildIndex(s.workspace, s.cfg.DataDir, s.cfg.Skills.BuiltinEnabled); sk != "" {
+		parts = append(parts, sk)
+	}
+	s.repoMapMu.Lock()
+	repoMap := s.repoMap
+	s.repoMapMu.Unlock()
+	if repoMap != "" {
+		parts = append(parts, repoMap)
+	}
+	if dt := deferredToolsBlock(s.tools); dt != "" {
+		parts = append(parts, dt)
+	}
+	if db := debateIntegrationBlock(s.cfg.Security.Debate); db != "" {
+		parts = append(parts, db)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// debateIntegrationBlock returns the P12.5 opt-in instruction text wiring the
+// `agent` tool's debate mode into the two existing security workflows that
+// benefit from adversarial review, or "" if neither toggle is enabled (the
+// default — debate multiplies model calls per item, so this is never
+// injected silently). Both toggles can be on independently; the block only
+// mentions the ones actually enabled.
+func debateIntegrationBlock(cfg config.DebateIntegrationConfig) string {
+	if !cfg.ThreatModel && !cfg.Triage {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Debate mode (P12)\n")
+	if cfg.ThreatModel {
+		b.WriteString("- Threat modeling: before writing an identified threat/mitigation pair into the threat model document, call the `agent` tool with mode:\"debate\" and claim set to that threat/mitigation pair. Adjust the entry's severity/mitigation per the arbiter's verdict before finalizing it.\n")
+	}
+	if cfg.Triage {
+		b.WriteString("- Security-audit triage: before suppressing a borderline or disputed-severity scan finding via the baseline, call the `agent` tool with mode:\"debate\" and claim set to the finding (severity, location, rationale). Only suppress if the verdict upholds the low-risk assessment.\n")
+	}
+	return b.String()
+}
+
+// toExecSpecs converts config hook entries into hooks.ExecSpec values.
+func toExecSpecs(cfgHooks []config.HookConfig) []hooks.ExecSpec {
+	specs := make([]hooks.ExecSpec, 0, len(cfgHooks))
+	for _, h := range cfgHooks {
+		specs = append(specs, hooks.ExecSpec{
+			Event:      h.Event,
+			Command:    h.Command,
+			Tools:      h.Tools,
+			TimeoutSec: h.TimeoutSec,
+		})
+	}
+	return specs
+}
+
+// deferredToolsBlock advertises tools that are registered but not exposed by
+// default (P4.6). The model loads them on demand with the tool_search tool.
+func deferredToolsBlock(reg *tool.Registry) string {
+	if reg == nil {
+		return ""
+	}
+	deferred := reg.Deferred()
+	if len(deferred) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("<deferred_tools>\n")
+	sb.WriteString("These tools are not loaded yet. When a task needs one, call `tool_search` with keywords to load it before use.\n")
+	for _, d := range deferred {
+		fmt.Fprintf(&sb, "- %s: %s\n", d.Name, d.Description)
+	}
+	sb.WriteString("</deferred_tools>")
+	return sb.String()
+}
+
+// loadRepoMap loads the cached repository map for cwd, rebuilding it when the
+// cache is stale (a source file changed since the last `aegis index`). The map
+// is opt-in: when no cache exists, this returns an empty string and nothing is
+// injected. Returns a ready-to-inject <repo_map> block, or "" on any failure.
+func loadRepoMap(cwd string, logger *slog.Logger) string {
+	cache := filepath.Join(cwd, ".aegis", "repomap.json")
+	rendered, fresh, err := repomap.Load(cwd, cache, repomap.Options{})
+	if err != nil || rendered == "" {
+		return "" // not indexed, or unreadable cache
+	}
+	if !fresh {
+		// The repo changed since indexing; rebuild so the prompt isn't stale.
+		if m, buildErr := repomap.Build(cwd, repomap.Options{}); buildErr == nil {
+			if saveErr := m.Save(cache); saveErr != nil {
+				logger.Warn("repo map rebuilt but cache not saved", "err", saveErr)
+			}
+			rendered = m.Render()
+		}
+	}
+	return repomap.Block(rendered)
+}
+
+func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, session.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	s.logger.Error("store error", "err", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, api.ErrorResponse{Error: msg})
+}
+
+// buildSamplingHandler returns a mcp.SamplingHandler that calls the provider
+// adapter to fulfil server-initiated sampling/createMessage requests. The
+// response is assembled by collecting all text deltas from the stream.
+func buildSamplingHandler(adapter provider.Adapter, model string, maxTokens int, logger *slog.Logger) mcp.SamplingHandler {
+	return func(ctx context.Context, req mcp.SamplingRequest) (mcp.SamplingResponse, error) {
+		var msgs []provider.Message
+		for _, m := range req.Messages {
+			role := provider.RoleUser
+			if m.Role == "assistant" {
+				role = provider.RoleAssistant
+			}
+			msgs = append(msgs, provider.Message{
+				Role:    role,
+				Content: []provider.Block{provider.TextBlock{Text: m.Content.Text}},
+			})
+		}
+
+		mt := maxTokens
+		if req.MaxTokens > 0 && req.MaxTokens < mt {
+			mt = req.MaxTokens
+		}
+
+		stream, err := adapter.Stream(ctx, provider.Request{
+			Model:     model,
+			System:    req.SystemPrompt,
+			Messages:  msgs,
+			MaxTokens: mt,
+		})
+		if err != nil {
+			return mcp.SamplingResponse{}, fmt.Errorf("mcp sampling: %w", err)
+		}
+
+		var sb strings.Builder
+		var stopReason string
+		for ev := range stream {
+			switch ev.Type {
+			case provider.EventTextDelta:
+				sb.WriteString(ev.Text)
+			case provider.EventDone:
+				stopReason = string(ev.Stop)
+			case provider.EventError:
+				logger.Warn("mcp sampling stream error", "err", ev.Err)
+				return mcp.SamplingResponse{}, ev.Err
+			}
+		}
+
+		return mcp.SamplingResponse{
+			Role:       "assistant",
+			Content:    mcp.SamplingContent{Type: "text", Text: sb.String()},
+			Model:      model,
+			StopReason: stopReason,
+		}, nil
+	}
+}
+
+// cronShellRunner returns a function that runs a cron job's command using the
+// given sandbox backend, streaming output to the task buffer via emit.
+func cronShellRunner(sb sandbox.Backend, cwd string) func(ctx context.Context, command string, emit func(string)) error {
+	const cronJobTimeout = 10 * time.Minute
+	return func(ctx context.Context, command string, emit func(string)) error {
+		ctx, cancel := context.WithTimeout(ctx, cronJobTimeout)
+		defer cancel()
+		return sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: cwd}, emit)
+	}
+}

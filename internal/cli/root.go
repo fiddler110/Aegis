@@ -196,6 +196,7 @@ Use "aegis <command> --help" for details on any command below.`,
 	cmd.AddCommand(group(newPersonaCmd(), groupConfig))
 	cmd.AddCommand(group(newSkillsCmd(), groupConfig))
 	cmd.AddCommand(group(newSandboxCmd(), groupConfig))
+	cmd.AddCommand(group(newHardenCmd(), groupConfig))
 	cmd.AddCommand(group(newModelsCmd(), groupConfig))
 	cmd.AddCommand(group(newBundleCmd(), groupConfig))
 

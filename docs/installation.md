@@ -12,6 +12,8 @@
 
 The recommended way to install Aegis is with the platform build scripts. Each script shows a plan, asks which actions to run, embeds the git version into the binary, installs to your Go bin directory, and optionally adds an `aegis-config` shell helper.
 
+Alternatively, tagged releases (`vX.Y.Z`) publish prebuilt binaries for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64 on the repository's [Releases page](https://github.com/fiddler110/Aegis/releases), built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) with the same version-stamped `-ldflags` the build scripts use.
+
 ### macOS
 
 ```bash

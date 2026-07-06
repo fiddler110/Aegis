@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: build+test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # go-version-file resolves the exact toolchain pinned in go.mod so all
+      # three OSes build against the same compiler version the project
+      # targets; check-latest avoids a stale actions/setup-go cache missing a
+      # recently released patch version.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      # internal/server/webui/dist/ (the go:embed target for `aegis ui`) is
+      # committed to git, not built by this job — go build/vet/test already
+      # work with no Node.js involved. This step only catches drift: a commit
+      # where frontend/src changed but dist/ wasn't regenerated via
+      # `npm run build`. One leg is enough since the output isn't OS-specific.
+      - name: Set up Node (web UI frontend drift check)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: internal/server/webui/frontend/package-lock.json
+
+      - name: Web UI frontend build check (drift only, dist/ is committed)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: internal/server/webui/frontend
+        run: |
+          npm ci
+          npm run build
+          git diff --exit-code -- ../dist
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # No package in this module uses cgo (modernc.org/sqlite is pure Go),
+      # so the race detector's platform-bundled runtime is all -race needs —
+      # no external C toolchain required on any of the three OSes.
+      - name: Test (race)
+        run: go test -race ./...

@@ -309,6 +309,66 @@ func buildSecurityBlock(p SecurityPatch) string {
 	return b.String()
 }
 
+// CostPatch holds the cost: fields to write into a config file (used by
+// `aegis harden`). Zero values are written as-is (0 = unlimited) — callers
+// that only want to tighten caps still explicitly unset should read the
+// current config first and only pass through fields they mean to change.
+type CostPatch struct {
+	BudgetUSD       float64
+	MaxTokensPerRun int
+	SessionCapUSD   float64
+	DailyCapUSD     float64
+	SessionTokenCap int
+	DailyTokenCap   int
+	AlertThreshold  float64
+}
+
+// PatchProjectCost replaces the cost: block in the project-level
+// .aegis/config.yaml, preserving all other sections.
+func PatchProjectCost(p CostPatch) error {
+	return patchCost(ProjectConfigPath(), p)
+}
+
+// PatchGlobalCost replaces the cost: block in the global config file.
+func PatchGlobalCost(p CostPatch) error {
+	return patchCost(GlobalConfigPath(), p)
+}
+
+func patchCost(path string, p CostPatch) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	block := buildCostBlock(p)
+	var out []byte
+	if len(existing) == 0 {
+		out = []byte("# Aegis configuration\n\n" + block + "\n")
+	} else {
+		out = spliceSection(existing, "cost", block)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+func buildCostBlock(p CostPatch) string {
+	var b strings.Builder
+	b.WriteString("cost:\n")
+	fmt.Fprintf(&b, "  budget_usd: %g\n", p.BudgetUSD)
+	fmt.Fprintf(&b, "  max_tokens_per_run: %d\n", p.MaxTokensPerRun)
+	fmt.Fprintf(&b, "  session_cap_usd: %g\n", p.SessionCapUSD)
+	fmt.Fprintf(&b, "  daily_cap_usd: %g\n", p.DailyCapUSD)
+	fmt.Fprintf(&b, "  session_token_cap: %d\n", p.SessionTokenCap)
+	fmt.Fprintf(&b, "  daily_token_cap: %d\n", p.DailyTokenCap)
+	alert := p.AlertThreshold
+	if alert <= 0 {
+		alert = 0.8
+	}
+	fmt.Fprintf(&b, "  alert_threshold: %g\n", alert)
+	return b.String()
+}
+
 // spliceSection replaces the named top-level YAML section with newBlock.
 // Everything from "key:" to the next top-level key is replaced. If the
 // section is not found, newBlock is appended.
