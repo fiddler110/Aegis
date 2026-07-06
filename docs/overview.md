@@ -181,7 +181,7 @@ internal/
   cost/                       Token tracking + budget enforcement
   trace/                      Per-turn observability
   hooks/                      Pre/post tool hooks + JSONL audit
-  persona/                    20 built-in personas
+  persona/                    22 built-in personas
   guard/                      Output validation
   eval/                       Scenario-based agent-behavior regression harness
   sandbox/                    Local/container shell execution backends

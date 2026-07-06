@@ -9,7 +9,10 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-06 — cross-feature integration review of the (then-uncommitted) P13.5/
+**Last updated:** 2026-07-06 — **P13.6** (`threat-modeling` builtin skill covering STRIDE/LINDDUN/
+PASTA/Trike/VAST/NIST 800-154, `/threat-model` TUI command, `security-architect` persona updated to
+name the skill) shipped. Only P13.2/P13.3/P13.4/P13.7 remain open in P13.
+**Also 2026-07-06:** cross-feature integration review of the (then-uncommitted) P13.5/
 P13.8 work, same pattern as the 2026-07-05 review: an adversarial fresh-context pass (not a
 roadmap-prose re-verification) checking whether `recon_scan`/`red-team` actually wired into every
 shared system a comparable feature is expected to. Found and fixed three seam gaps same-day:
@@ -77,7 +80,7 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P13 items (Security & Capability Enhancements)
 
-The other P13 items (P13.2/P13.3/P13.4/P13.6/P13.7) are still open — see
+The other P13 items (P13.2/P13.3/P13.4/P13.7) are still open — see
 [roadmap.md](roadmap.md#open-work--p13-security--capability-enhancements).
 
 ### P13.1 — Security config TUI/CLI: cross-platform availability gap
@@ -203,6 +206,40 @@ posture stays "surface and validate vulnerabilities," matching `dast_scan`'s exi
 design. Also deferred: P13.4's persistent multi-day "engagement notebook" extending
 `internal/memory` — a real idea, separate scoped item in roadmap.md; this ships a per-engagement
 report file (via `write_file`), which is enough for a single red-team exercise.
+
+### P13.6 — SHIPPED 2026-07-06 — Threat-modeling skill (`threat-modeling`) + `/threat-model` command
+
+Researched six named frameworks (STRIDE, LINDDUN, PASTA, Trike, VAST, NIST 800-154) plus three
+companion techniques worth adding as optional add-ons (Attack Trees, MITRE ATT&CK mapping, Evil User
+Stories). Design call per the roadmap's recommendation: one skill bundle
+(`internal/skills/builtin/threat-modeling/`), not a new persona and not one skill loaded per
+framework — the skill's job is to pick the right framework for the system at hand (asking a
+clarifying question when the user hasn't named one, using a focus/best-use-case table to frame the
+choice, defaulting to STRIDE only when there's genuinely no signal and no way to ask) and then follow
+that framework's process exactly.
+
+- One `references/<framework>.md` per framework (`stride.md`, `linddun.md`, `pasta.md`, `trike.md`,
+  `vast.md`, `nist-800-154.md`) — each documents the framework's categories/stages, a step-by-step
+  process grounded in exploring the real workspace first (never an assumed architecture), and a
+  concrete output template, so the model (and a reader wanting to learn the framework) has a written
+  reference to align output against rather than reconstructing the framework from memory each time.
+- `references/companion-techniques.md` covers Attack Trees, MITRE ATT&CK mapping, and Evil User
+  Stories as optional layers on top of a primary framework, plus a short note on when combining
+  frameworks (hybrid modeling) is and isn't worth the added effort.
+- `securityArchitectSystem` (`internal/persona/persona.go`) now names the skill in its threat-modeling
+  workflow instead of hardcoding STRIDE/LINDDUN — the P12 debate-mode routing hook (route each
+  threat/mitigation pair through `agent` `mode:"debate"` when `security.debate.threat_model` is
+  enabled) is preserved unchanged in the skill itself.
+- New `/threat-model [system or feature]` TUI command (`internal/tui/commands.go`'s `commandDefs`
+  table, handler in `internal/tui/slash.go`): sends a message that explicitly invokes the skill and
+  asks the framework-selection question as part of the resulting turn, rather than depending on the
+  model noticing a trigger phrase in free text — the same P13 cross-cutting TUI-surface requirement
+  every other item in this track follows. Covered automatically by the existing P14.1/P14.10
+  command-surface sync tests since it's a `commandDefs` entry, not a separately hand-listed command.
+- `docs/personas.md` (security-architect's row now names the skill and its frameworks),
+  `docs/configuration.md`, `docs/memory-and-knowledge.md`, and `CLAUDE.md`'s built-in-skills lists
+  updated; the pre-existing `redteam-engagement` skill was also missing from those same lists
+  (a stale-docs bug predating this change) and got added at the same time.
 
 ---
 

@@ -78,7 +78,8 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 - **Daemon + client architecture** — durable SQLite-backed sessions survive TUI restarts; resume any session with `aegis --resume <id>`
 - **Plan / Build / Auto modes** — read-only exploration, guided file editing, or fully automatic; fine-grained text-based allow/deny rules per tool and path
 - **50+ built-in tools** — file ops, git (read + commit + push/PR), shell with background jobs, web fetch/search, LaTeX compilation, LSP code intelligence, security scanning, diagram rendering, memory, planning, and more; niche tools load on demand via `tool_search` to keep context lean
-- **20 built-in personas** + custom persona files — security, developer, SRE, cloud architect, risk assessor, red team, and others; each can pin a model, carry its own permission rules, and declare an advisory tool list (warns/asks, never blocks). Scaffold with `aegis persona new`, edit the file, and the daemon hot-reloads it — no restart needed. Set a project's starting persona with `aegis persona use <name>`
+- **22 built-in personas** + custom persona files — security, developer, SRE, cloud architect, risk assessor, red team, and others; each can pin a model, carry its own permission rules, and declare an advisory tool list (warns/asks, never blocks). Scaffold with `aegis persona new`, edit the file, and the daemon hot-reloads it — no restart needed. Set a project's starting persona with `aegis persona use <name>`
+- **Multi-agent debate** — adversarially challenge any claim (a finding, a design decision, a paragraph in a plan) instead of trusting a single unchallenged pass: a critic hunts for the weakest part grounded in cited evidence, the proposer rebuts, an arbiter issues a final verdict. Point it at real files (`--file`) to ground the debate in actual document content; `--domain generic` swaps in non-security personas. `aegis debate`, `/debate`, `POST /debate`, or the `agent` tool's `mode:"debate"`
 - **Output validation** — a lightweight second-model pass checks every answer against a configurable rubric before it's returned
 - **Checkpoints & rewind** — every user turn captures a restore point; `/rewind` reverts files, conversation, or both without `git reset` gymnastics
 - **Multi-agent orchestration** — spawn sub-agents (goroutines or subprocesses) with their own permission scopes; agent teams with a shared task list and peer messaging for coordinated parallel work
@@ -105,13 +106,14 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 | [CLI Reference](docs/cli-reference.md) | Every command and flag |
 | [TUI Guide](docs/tui-guide.md) | Layout, keyboard shortcuts, slash commands, `@` references |
 | [Tools Reference](docs/tools-reference.md) | All 50+ built-in tools with inputs, outputs, and examples |
-| [Personas](docs/personas.md) | All 20 built-in personas, custom persona files, per-persona model overrides |
+| [Personas](docs/personas.md) | All 22 built-in personas, custom persona files, per-persona model overrides |
 | [Permission System](docs/permissions.md) | Plan/Build/Auto modes, text-based rules, contextual security policies |
 | [Session Management](docs/sessions.md) | Checkpoints, rewind, export, archiving |
 | [Providers & Models](docs/providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
 | [Memory & Knowledge](docs/memory-and-knowledge.md) | Project/user memory, skills, knowledge base |
 | [Extensibility](docs/extensibility.md) | Lifecycle hooks, MCP servers, custom commands, agents, process plugins, bundles |
 | [Multi-Agent & Background Tasks](docs/multi-agent.md) | Swarm, parallel sessions, background tasks, cron scheduling |
+| [Multi-Agent Debate](docs/debate.md) | Adversarial claim review: domains, file-grounding, persona overrides, all four entry points |
 | [Security Features](docs/security.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual policies, audit trail |
 
 ---

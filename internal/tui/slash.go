@@ -919,24 +919,92 @@ func (d *SlashDispatcher) cmdIndex(_ []string) SlashResult {
 // conversational turn needed, same underlying mechanism as the `agent` tool's
 // mode:"debate". Usage:
 //
-//	/debate <claim text>   debate the given claim with the default roles
+//	/debate <claim text>                     debate the given claim with the default (security) roles
+//	/debate --domain generic <claim text>    use the general/critic/arbiter personas instead
+//	/debate --file <path> [--file <path>...] <claim text>   ground the debate in specific documents
+//	/debate --proposer/--critic/--arbiter <persona> <claim text>   override individual roles
+//	/debate --max-rounds <n> <claim text>    override the critique/rebuttal round bound (default 2)
+//
+// Leading --flag value pairs are consumed before the remaining args are
+// joined into the claim, mirroring the `aegis debate` CLI's flag names.
 //
 // Unlike /scan, a debate spends real model turns (one per role per round), so
 // it uses the same long timeout /scan uses rather than the 5s default other
 // direct-daemon-call commands use.
 func (d *SlashDispatcher) cmdDebate(args []string) SlashResult {
-	claim := strings.TrimSpace(strings.Join(args, " "))
-	if claim == "" {
-		return SlashResult{Output: "usage: /debate <claim>", IsError: true}
+	req, rest, err := parseDebateArgs(args)
+	if err != nil {
+		return SlashResult{Output: err.Error(), IsError: true}
+	}
+	req.Claim = strings.TrimSpace(strings.Join(rest, " "))
+	if req.Claim == "" {
+		return SlashResult{Output: "usage: /debate [--domain generic] [--file <path>]... [--proposer|--critic|--arbiter <persona>] [--max-rounds <n>] <claim>", IsError: true}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	resp, err := d.client.Debate(ctx, api.DebateRequest{Claim: claim})
+	resp, err := d.client.Debate(ctx, req)
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Debate failed: %v", err), IsError: true}
 	}
 	return SlashResult{Output: resp.Report}
+}
+
+// parseDebateArgs consumes leading --flag value pairs recognized by /debate,
+// returning the populated request (Claim left empty) and the remaining args
+// to be joined as the claim text.
+func parseDebateArgs(args []string) (api.DebateRequest, []string, error) {
+	var req api.DebateRequest
+	i := 0
+	for i < len(args) {
+		flag := args[i]
+		if !strings.HasPrefix(flag, "--") {
+			break
+		}
+		if i+1 >= len(args) {
+			return req, nil, fmt.Errorf("flag %s requires a value", flag)
+		}
+		val := args[i+1]
+		switch flag {
+		case "--domain":
+			req.Domain = val
+		case "--file":
+			req.Files = append(req.Files, val)
+		case "--proposer":
+			req.ProposerPersona = val
+		case "--critic":
+			req.CriticPersona = val
+		case "--arbiter":
+			req.ArbiterPersona = val
+		case "--max-rounds":
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return req, nil, fmt.Errorf("--max-rounds: %v", err)
+			}
+			req.MaxRounds = n
+		default:
+			// Not a recognized flag — treat it and everything after as claim text.
+			return req, args[i:], nil
+		}
+		i += 2
+	}
+	return req, args[i:], nil
+}
+
+// cmdThreatModel sends a message that directly invokes the threat-modeling
+// skill, so its framework-selection clarifying question is asked as part of
+// the resulting turn rather than depending on the model noticing a trigger
+// phrase in free text (P13.6 TUI-surface requirement).
+func (d *SlashDispatcher) cmdThreatModel(args []string) SlashResult {
+	target := strings.TrimSpace(strings.Join(args, " "))
+	prompt := "Load the threat-modeling skill and produce a threat model"
+	if target != "" {
+		prompt += " for " + target
+	} else {
+		prompt += " for this project"
+	}
+	prompt += ". If the framework to use (STRIDE, LINDDUN, PASTA, Trike, VAST, or NIST 800-154) isn't already clear, ask me which one to use before proceeding, per the skill's framework-selection guidance."
+	return SlashResult{Message: prompt}
 }
 
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {

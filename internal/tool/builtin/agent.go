@@ -95,11 +95,15 @@ func (a *agentTool) Description() string {
 		"build (full access). A sub-agent cannot exceed your own permission mode. " +
 		"For multi-agent workflows, set mode to 'sequential', 'parallel', or 'loop' " +
 		"and provide an 'agents' array instead of a single prompt. For adversarial " +
-		"review of a security finding, threat/mitigation, or design claim, set mode " +
-		"to 'debate' and provide 'claim': a critic challenges it (grounded in cited " +
-		"evidence or an explicit concession), the proposer rebuts, this repeats for " +
-		"'max_rounds' (default 2), then an arbiter issues a final UPHOLD/REVISE/REJECT " +
-		"verdict. Use this when a claim is borderline, disputed, or high-stakes enough " +
+		"review of any claim — a security finding, a design assertion, or a claim " +
+		"about a document/plan/decision — set mode to 'debate' and provide 'claim': " +
+		"a critic challenges it (grounded in cited evidence or an explicit concession), " +
+		"the proposer rebuts, this repeats for 'max_rounds' (default 2), then an " +
+		"arbiter issues a final UPHOLD/REVISE/REJECT verdict. Set 'domain' to 'generic' " +
+		"for non-security claims (uses the general/critic/arbiter personas instead of " +
+		"the security-* ones); pass 'files' to point the debate roles at specific " +
+		"documents or source files to ground the debate in instead of relying on " +
+		"recall. Use this when a claim is borderline, disputed, or high-stakes enough " +
 		"to warrant adversarial pressure instead of a single unchallenged pass."
 }
 
@@ -117,9 +121,11 @@ func (a *agentTool) InputSchema() json.RawMessage {
 			"agents": {"type": "array", "description": "List of sub-agents for workflow mode.", "items": {"type": "object", "properties": {"description": {"type": "string"}, "prompt": {"type": "string"}, "subagent_type": {"type": "string"}}, "required": ["prompt"]}},
 			"max_iterations": {"type": "integer", "description": "Maximum iterations for loop mode (default 5)."},
 			"claim": {"type": "string", "description": "Debate mode only: the claim/finding/design assertion to subject to adversarial critique."},
-			"proposer_persona": {"type": "string", "description": "Debate mode only: persona for the proposer role (default security-researcher)."},
-			"critic_persona": {"type": "string", "description": "Debate mode only: persona for the critic role (default security-critic)."},
-			"arbiter_persona": {"type": "string", "description": "Debate mode only: persona for the arbiter role (default security-arbiter)."},
+			"domain": {"type": "string", "description": "Debate mode only: 'security' (default) or 'generic' — selects the default persona trio when proposer/critic/arbiter persona aren't set explicitly.", "enum": ["security", "generic"]},
+			"files": {"type": "array", "description": "Debate mode only: file paths the debate roles should read for grounding before proposing/critiquing/rebutting (e.g. the documents a claim is about).", "items": {"type": "string"}},
+			"proposer_persona": {"type": "string", "description": "Debate mode only: persona for the proposer role (default security-researcher, or general if domain is generic)."},
+			"critic_persona": {"type": "string", "description": "Debate mode only: persona for the critic role (default security-critic, or critic if domain is generic)."},
+			"arbiter_persona": {"type": "string", "description": "Debate mode only: persona for the arbiter role (default security-arbiter, or arbiter if domain is generic)."},
 			"max_rounds": {"type": "integer", "description": "Debate mode only: maximum critique/rebuttal rounds before arbitration (default 2)."}
 		},
 		"required": []
@@ -143,6 +149,8 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		Agents          []workflowAgent `json:"agents"`
 		MaxIterations   int             `json:"max_iterations"`
 		Claim           string          `json:"claim"`
+		Domain          string          `json:"domain"`
+		Files           []string        `json:"files"`
 		ProposerPersona string          `json:"proposer_persona"`
 		CriticPersona   string          `json:"critic_persona"`
 		ArbiterPersona  string          `json:"arbiter_persona"`
@@ -160,7 +168,8 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		if claim == "" {
 			return tool.Result{Content: "agent: 'claim' is required for debate mode", IsError: true}, nil
 		}
-		return a.executeDebate(ctx, claim, args.ProposerPersona, args.CriticPersona, args.ArbiterPersona, args.MaxRounds)
+		claim = debate.WithFiles(claim, args.Files)
+		return a.executeDebate(ctx, claim, args.Domain, args.ProposerPersona, args.CriticPersona, args.ArbiterPersona, args.MaxRounds)
 	}
 
 	// Workflow mode: mode field + agents array.
@@ -352,7 +361,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 // swarm.Backend seam — no new spawn mechanism — so the critic has the same
 // tool access (grep/read_file/security_scan) any other sub-agent gets under
 // its clamped permission mode.
-func (a *agentTool) executeDebate(ctx context.Context, claim, proposerPersona, criticPersona, arbiterPersona string, maxRounds int) (tool.Result, error) {
+func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPersona, criticPersona, arbiterPersona string, maxRounds int) (tool.Result, error) {
 	if depth := swarm.DepthFromContext(ctx); depth >= maxSpawnDepth {
 		return tool.Result{Content: fmt.Sprintf("agent: maximum sub-agent depth (%d) reached; not starting debate", maxSpawnDepth), IsError: true}, nil
 	}
@@ -384,6 +393,7 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, proposerPersona, c
 
 	tracker, _ := swarm.CostTrackerFromContext(ctx).(*cost.Tracker)
 	debateCfg := debate.Config{
+		Domain:          domain,
 		ProposerPersona: proposerPersona,
 		CriticPersona:   criticPersona,
 		ArbiterPersona:  arbiterPersona,

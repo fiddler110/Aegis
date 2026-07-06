@@ -1,11 +1,20 @@
-// Package debate implements a multi-agent-debate (MAD) primitive for security
-// analysis (P12): a claim is proposed, adversarially critiqued, rebutted, and
-// finally arbitrated, instead of a single unchallenged pass producing the
-// answer. It stays decoupled from the engine/swarm the same way internal/swarm
-// stays decoupled from the engine — the caller supplies a RunFunc that knows
-// how to execute one role turn (spawn a sub-agent, call a model directly,
-// whatever the caller's context allows); this package only orchestrates the
-// round structure, evidence-grounding check, and budget bound.
+// Package debate implements a multi-agent-debate (MAD) primitive (originally
+// P12, built for security analysis): a claim is proposed, adversarially
+// critiqued, rebutted, and finally arbitrated, instead of a single
+// unchallenged pass producing the answer. It stays decoupled from the
+// engine/swarm the same way internal/swarm stays decoupled from the engine —
+// the caller supplies a RunFunc that knows how to execute one role turn
+// (spawn a sub-agent, call a model directly, whatever the caller's context
+// allows); this package only orchestrates the round structure,
+// evidence-grounding check, and budget bound.
+//
+// The claim itself is domain-agnostic — a security finding, a design
+// assertion, or a statement about a plain document or plan all work the same
+// way. Config.Domain selects which default persona trio plays the three
+// roles: DomainSecurity (the default, for vulnerability/threat/design
+// claims) or DomainGeneric (for reviewing documents, plans, or any other
+// non-security claim). Either trio can be overridden per-role regardless of
+// Domain.
 package debate
 
 import (
@@ -23,7 +32,17 @@ import (
 // spend well past what a single-pass equivalent task costs.
 const DefaultMaxRounds = 2
 
-// Default persona names for each debate role (P12.2). Proposer defaults to
+// Domain selects which default persona trio Config.withDefaults fills in when
+// a role persona isn't explicitly overridden. DomainSecurity is the zero
+// value so every existing caller that never set Domain keeps its original
+// security-persona defaults.
+const (
+	DomainSecurity = "security"
+	DomainGeneric  = "generic"
+)
+
+// Default persona names for each debate role (P12.2), used when
+// Config.Domain is DomainSecurity (or unset). Proposer defaults to
 // security-researcher since most debated claims start life as a vulnerability
 // finding; callers doing threat-model debate should pass ProposerPersona:
 // "security-architect" explicitly (P12.5).
@@ -31,6 +50,17 @@ const (
 	DefaultProposerPersona = "security-researcher"
 	DefaultCriticPersona   = "security-critic"
 	DefaultArbiterPersona  = "security-arbiter"
+)
+
+// Generic persona names for each debate role, used when Config.Domain is
+// DomainGeneric — for debating claims about documents, plans, or anything
+// else outside the security domain. "general" has no tool restriction, so it
+// doubles as the generic proposer; "critic"/"arbiter" are the non-security
+// counterparts of security-critic/security-arbiter.
+const (
+	GenericProposerPersona = "general"
+	GenericCriticPersona   = "critic"
+	GenericArbiterPersona  = "arbiter"
 )
 
 // RunFunc executes one role turn (a system prompt + a user prompt) and returns
@@ -44,9 +74,13 @@ type RunFunc func(ctx context.Context, systemPrompt, userPrompt string) (string,
 // Config configures a debate run. Zero-valued fields fall back to their
 // documented defaults via withDefaults.
 type Config struct {
-	ProposerPersona string // default DefaultProposerPersona
-	CriticPersona   string // default DefaultCriticPersona
-	ArbiterPersona  string // default DefaultArbiterPersona
+	// Domain selects the default persona trio (DomainSecurity, the zero
+	// value, or DomainGeneric) when the corresponding *Persona field below is
+	// left empty. Individual persona overrides always win regardless of Domain.
+	Domain          string
+	ProposerPersona string // default depends on Domain; see DefaultProposerPersona/GenericProposerPersona
+	CriticPersona   string // default depends on Domain; see DefaultCriticPersona/GenericCriticPersona
+	ArbiterPersona  string // default depends on Domain; see DefaultArbiterPersona/GenericArbiterPersona
 	MaxRounds       int    // default DefaultMaxRounds; always clamped to >= 0
 
 	// Tracker, BudgetUSD, and MaxTokens implement the P12.6 round bound: if set,
@@ -66,14 +100,18 @@ type Config struct {
 const budgetHeadroomFraction = 0.9
 
 func withDefaults(cfg Config) Config {
+	proposer, critic, arbiter := DefaultProposerPersona, DefaultCriticPersona, DefaultArbiterPersona
+	if cfg.Domain == DomainGeneric {
+		proposer, critic, arbiter = GenericProposerPersona, GenericCriticPersona, GenericArbiterPersona
+	}
 	if cfg.ProposerPersona == "" {
-		cfg.ProposerPersona = DefaultProposerPersona
+		cfg.ProposerPersona = proposer
 	}
 	if cfg.CriticPersona == "" {
-		cfg.CriticPersona = DefaultCriticPersona
+		cfg.CriticPersona = critic
 	}
 	if cfg.ArbiterPersona == "" {
-		cfg.ArbiterPersona = DefaultArbiterPersona
+		cfg.ArbiterPersona = arbiter
 	}
 	if cfg.MaxRounds <= 0 {
 		cfg.MaxRounds = DefaultMaxRounds
@@ -145,6 +183,26 @@ func parseVerdict(text string) Verdict {
 		v.Confidence = strings.ToLower(m[1])
 	}
 	return v
+}
+
+// WithFiles appends a reference-material block naming files to claim,
+// instructing the debate roles to read them before proposing, critiquing, or
+// rebutting. It does not read the files itself — the roles do that with their
+// own read_file tool once the debate is running, the same way a critic reads
+// the codebase for a security claim's evidence (P12.3). Passing no files
+// returns claim unchanged. Paths are included verbatim (relative to whatever
+// working directory the debate roles' tools resolve paths against).
+func WithFiles(claim string, files []string) string {
+	if len(files) == 0 {
+		return claim
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(claim))
+	b.WriteString("\n\n## Reference material\nRead these files before proposing, critiquing, or rebutting — ground the debate in their actual content, not assumptions about what they say:\n")
+	for _, f := range files {
+		fmt.Fprintf(&b, "- %s\n", f)
+	}
+	return b.String()
 }
 
 // PersonaSystem resolves a debate role's persona name to its system prompt.

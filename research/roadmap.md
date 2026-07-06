@@ -10,14 +10,14 @@ rationale behind completed items, see [releases.md](releases.md).
 ## Status
 
 Open items: **P13** (P13.2 trufflehog, P13.3 terminal enhancements, P13.4 nebula-inspired
-engagement tooling, P13.6 threat-modeling skill, P13.7 LaTeX report skill), **P9.4** (per-task model
+engagement tooling, P13.7 LaTeX report skill), **P9.4** (per-task model
 routing), **P6.1** (mid-turn state persistence), **P6.5** (desktop/IDE surface beyond ACP).
 
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
-15-item punch list, P10, P11, P12, P13.1/P13.5/P13.8, P14 (all of P14.1–P14.10), and the TQ TUI
+15-item punch list, P10, P11, P12, P13.1/P13.5/P13.6/P13.8, P14 (all of P14.1–P14.10), and the TQ TUI
 track — is shipped. See [releases.md](releases.md) for what each shipped and why.
 
-**Nothing is currently in progress.** P13's five remaining sub-items are researched and scoped
+**Nothing is currently in progress.** P13's remaining sub-items are researched and scoped
 (2026-07-05) but not started. P9.4 and P6.1/P6.5 are real but have no concrete trigger — don't
 build them speculatively; check with the user first.
 
@@ -26,8 +26,8 @@ build them speculatively; check with the user first.
 ## Open Work — P13 (Security & Capability Enhancements)
 
 Researched 2026-07-05 (five items via background review of a named external project/methodology,
-two via direct codebase audit). P13.1, P13.5, and P13.8 shipped — see
-[releases.md](releases.md#shipped--p13-items-security--capability-enhancements). The five below are
+two via direct codebase audit). P13.1, P13.5, P13.6, and P13.8 shipped — see
+[releases.md](releases.md#shipped--p13-items-security--capability-enhancements). The three below are
 scoped proposals, not started.
 
 ### P13.2 — Trufflehog secret-scanning enhancement
@@ -129,51 +129,6 @@ TUI surface requirement: P13.4.1 (notebook) and P13.4.4 (status digest) each nee
 
 Priority: Low (interesting, not urgent), Effort: M overall. P13.4.5 must not adopt Nebula Pro's
 undocumented autonomous-mode pattern.
-
-### P13.6 — Aegis threat-modeling persona/skill
-
-Researched the six named frameworks (STRIDE, LINDDUN, PASTA, Trike, VAST, NIST 800-154) plus the
-"top 12" blog's other entries. Worth adding as lightweight companions: **Attack Trees** (visual
-attacker-goal/path decomposition), **MITRE ATT&CK mapping** (already gestured at in the
-`security-researcher` persona), and **Evil User Stories** (Agile-native, pairs with VAST). Not
-worth their own artifacts: OCTAVE (org-level, not app-level), Kill Chain Analysis (SOC/IR-oriented,
-not model-generation), Hybrid Threat Modeling (worth a one-paragraph note only — "frameworks can be
-combined").
-
-| Framework | Focus | Best use case |
-|---|---|---|
-| STRIDE | 6-category threat taxonomy per DFD element | General-purpose default |
-| LINDDUN | 7-category privacy threats | PII/regulated privacy contexts |
-| PASTA | Risk-centric, 7-stage, includes attack simulation | Enterprise, business-impact traceability |
-| Trike | Requirements/access-control model, explicit risk acceptance | Governance-heavy, auditable risk decisions |
-| VAST | Scales across many teams, Agile/DevSecOps cadence | Large orgs, many services |
-| NIST 800-154 | Data-centric: flow/storage/exposure of sensitive data | Compliance, data-protection-anchored assessments |
-
-Design recommendation: **one skill bundle, not a new persona, not one skill per framework loaded ad
-hoc.** A single `threat-modeling` skill (mirroring `content-review`'s `references/*.md` bundling
-pattern) whose `SKILL.md` handles "clarify or infer which framework, then load only that
-framework's reference file" — this is inherently a single-entry-point behavior (the user often
-won't already know which framework they want), and keeps token cost to name+description until one
-framework is actually chosen. The existing `security-architect` persona's "Workflow for threat
-modeling" section should name this skill instead of hardcoding STRIDE/LINDDUN.
-
-- **P13.6.1** — New builtin skill `internal/skills/builtin/threat-modeling/SKILL.md`:
-  clarifying-question/framework-selection logic, shared workflow (explore workspace for
-  assets/trust boundaries/data flows → apply chosen framework → write document → optional P12
-  debate-mode routing per finding), pointer to per-framework reference files. (M)
-- **P13.6.2–P13.6.7** — One `references/<framework>.md` per framework (stride, linddun, pasta,
-  trike, vast, nist-800-154): checklist/process steps + output template each. (S each)
-- **P13.6.8** — `references/companion-techniques.md`: Attack Trees, MITRE ATT&CK mapping, Evil User
-  Stories as optional add-ons, plus the Hybrid Threat Modeling note. (S)
-- **P13.6.9** — Update `securityArchitectSystem` (`internal/persona/persona.go`) to name the skill
-  instead of hardcoding STRIDE/LINDDUN, preserving the existing P12 debate-mode routing hook. (S)
-- **P13.6.10** — Update `docs/personas.md`/skills docs. (S)
-
-TUI surface requirement: add a `/threat-model` slash command as the discoverable entry point that
-loads the skill and asks the framework-selection clarifying question directly, instead of relying
-on the model to notice trigger phrases in free text.
-
-Priority: Medium, Effort: M overall (mostly content-writing, not code).
 
 ### P13.7 — LaTeX report writing: consolidation skill
 

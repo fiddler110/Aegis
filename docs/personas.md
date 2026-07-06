@@ -56,9 +56,11 @@ default_persona: developer
 | Persona | `--persona` value | Focus |
 |---------|-------------------|-------|
 | General | `general` | Research, documentation, and coding — the default |
+| Critic | `critic` | Debate role (P12, generic domain): adversarially hunts for the weakest part of a non-security claim (a document, plan, or decision), grounded in cited evidence, or concedes |
+| Arbiter | `arbiter` | Debate role (P12, generic domain): synthesizes a generic-domain debate transcript into a structured UPHOLD/REVISE/REJECT verdict |
 | Security | `security` | Security platform architect: capability research, STRIDE/LINDDUN threat modeling, C4/Mermaid architecture diagrams |
 | Platform Architect | `platform-architect` | Full architecture lifecycle: system & security design, threat modeling, solution evaluation & PoCs, process development, automation, roadmap planning, documentation & reporting |
-| Security Architect | `security-architect` | Security architecture, threat modeling, design review |
+| Security Architect | `security-architect` | Security architecture, threat modeling (via the `threat-modeling` skill: STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154), design review |
 | Security Engineer | `security-engineer` | Security tooling, vulnerability management, automation, incident response |
 | AppSec Engineer | `appsec-engineer` | Secure code review, OWASP testing, CI/CD security integration |
 | Developer | `developer` | Implementation, debugging, code review, testing |
@@ -76,10 +78,12 @@ default_persona: developer
 | Security Critic | `security-critic` | Debate role (P12): adversarially hunts for the weakest part of a claim, grounded in cited evidence, or concedes |
 | Security Arbiter | `security-arbiter` | Debate role (P12): synthesizes a debate transcript into a structured UPHOLD/REVISE/REJECT verdict |
 
-`security-critic` and `security-arbiter` are used as the default critic/arbiter roles by the `agent`
-tool's `mode:"debate"` (see [multi-agent.md](multi-agent.md#debate-p12)) — they're rarely picked
-directly with `--persona`, but are addressable the same way any other persona is (`aegis persona show
-security-critic`), and can be overridden per debate call via `critic_persona`/`arbiter_persona`.
+`critic`/`arbiter` and `security-critic`/`security-arbiter` are debate roles (P12) used by the
+`agent` tool's `mode:"debate"` — `security-critic`/`security-arbiter` by default, or `critic`/
+`arbiter` when `domain: "generic"` (see [debate.md](debate.md) and
+[multi-agent.md](multi-agent.md#debate-p12)). They're rarely picked directly with `--persona`, but
+are addressable the same way any other persona is (`aegis persona show critic`), and any of the four
+can be substituted for either role in either domain via `critic_persona`/`arbiter_persona`.
 
 ---
 
