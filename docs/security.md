@@ -49,6 +49,24 @@ bandit, brakeman, njsscan), `sca`/`deps` (osv-scanner, grype), `iac` (kubescape,
 `misconfig` (kubescape, hadolint, trivy). An unrecognized name/category is rejected with the full
 valid list rather than silently running everything or erroring opaquely.
 
+Run `aegis scan --list` (or `/scan list` in the TUI) to see every valid `--scanner` name and
+category alias, each with its category, whether it runs by default, and its live availability
+(on PATH / via a container / unavailable and why) — the reference for what you can pass to
+`--scanner`/`/scan <selector>` right now on this machine:
+
+```
+$ aegis scan --list
+SCANNER      CATEGORY                DEFAULT  STATUS
+gitleaks     Secrets                 enabled  on PATH
+trufflehog   Secrets                 opt-in   trufflehog not installed and no container image configured — ...
+...
+
+Category aliases (--scanner <alias> runs every scanner in the group):
+  secrets    -> gitleaks, trufflehog
+  sast       -> bandit, brakeman, gosec, njsscan, opengrep, semgrep
+  ...
+```
+
 ### TUI usage
 
 `/scan` runs the same scan directly from inside a session, without spending a model turn — the
@@ -61,6 +79,7 @@ transcript:
 /scan trufflehog                # run only trufflehog, force-enabled for this run
 /scan secrets                  # run only the "secrets" category
 /scan gitleaks,trufflehog src   # comma-separated selector list + a path
+/scan list                     # list every valid scanner name/category, with live availability
 /scan image alpine:3.20        # scan a container image reference instead
 /scan sbom                     # generate a CycloneDX SBOM instead of a findings report
 ```

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/commands"
@@ -72,6 +73,22 @@ func TestCmdScanSelectorTokensDoNotMisfireOnOrdinaryPaths(t *testing.T) {
 	for _, p := range []string{".", "..", "src", "internal/security", "cmd/aegis"} {
 		if got := scanSelectorTokens(p); got != nil {
 			t.Errorf("scanSelectorTokens(%q) = %v, want nil (ordinary path, not a selector)", p, got)
+		}
+	}
+}
+
+// TestCmdScanListDoesNotTouchDaemonClient proves `/scan list` is resolved
+// entirely locally (config.Load + security.Resolve, same as /security
+// status) — a nil client would panic if this ever reached d.client.Scan.
+func TestCmdScanListDoesNotTouchDaemonClient(t *testing.T) {
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	res := d.Dispatch(&commands.ParsedCommand{Name: "scan", Args: []string{"list"}})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Output)
+	}
+	for _, want := range []string{"trufflehog", "secrets", "gitleaks", "SCANNER", "CATEGORY"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("output missing %q:\n%s", want, res.Output)
 		}
 	}
 }
