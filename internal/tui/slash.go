@@ -804,15 +804,44 @@ func (d *SlashDispatcher) cmdSecurityInstall(args []string) SlashResult {
 	return SlashResult{Output: out.String()}
 }
 
+// scanSelectorTokens splits raw on commas and resolves every token via
+// security.ResolveSelector (an exact scanner name or a category alias like
+// "secrets"/"sast"); returns the raw (unresolved) tokens if every one of them
+// is recognized, nil otherwise. The tokens are sent as-is to the daemon,
+// which resolves them again via the same security.ResolveSelector — this is
+// purely a "does args[0] look like a scanner selector, or is it a path"
+// dispatch decision, not the actual resolution.
+func scanSelectorTokens(raw string) []string {
+	parts := strings.Split(raw, ",")
+	tokens := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil
+		}
+		if _, ok := security.ResolveSelector(p); !ok {
+			return nil
+		}
+		tokens = append(tokens, p)
+	}
+	return tokens
+}
+
 // cmdScan runs the security scanners directly against the daemon's workspace
 // and prints the formatted report — no model turn spent, same underlying scan
 // as `aegis scan`/the security_scan tool. Usage:
 //
 //	/scan                        run every enabled scanner over the whole workspace
 //	/scan <path>                 scan just a workspace-relative subdirectory
+//	/scan <scanner-or-category>[,<...>] [path]   run only the named scanner(s)/category(ies)
+//	                             e.g. /scan trufflehog, /scan secrets, /scan gitleaks,trufflehog src/
 //	/scan image <ref>            scan a container image reference instead
 //	/scan sbom [path]            generate a CycloneDX SBOM instead of a findings report
 //	/scan network <target...>    run nmap+nuclei (recon_scan) against a host/IP/CIDR list
+//
+// A plain path scan (no selector) auto-detects the project's language and
+// auto-enables the matching opt-in SAST engine (gosec/bandit/brakeman/
+// njsscan) for that run.
 //
 // A scan can take a while (container fallback pulls, multiple scanner
 // binaries), so this uses a long timeout rather than the 5s default other
@@ -835,6 +864,11 @@ func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
 			return SlashResult{Output: "usage: /scan network <target> [target...]", IsError: true}
 		}
 		req.Targets = args[1:]
+	case len(args) >= 1 && scanSelectorTokens(args[0]) != nil:
+		req.Scanners = scanSelectorTokens(args[0])
+		if len(args) >= 2 {
+			req.Path = args[1]
+		}
 	case len(args) >= 1:
 		req.Path = args[0]
 	}

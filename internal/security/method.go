@@ -343,6 +343,12 @@ type ToolPolicy struct {
 	// Meaningless for every other tool. Resolve refuses container mode
 	// whenever this is set — see trufflehogScanner.Resolve.
 	Verify bool
+	// EnabledExplicit is true when Enabled came from an explicit
+	// security.tools.<name>.enabled in config, rather than being defaulted
+	// from ScannerDescriptor.DefaultEnabled. AutoEnableLanguageScanners
+	// checks this so language auto-detection never overrides an operator's
+	// deliberate choice, on or off.
+	EnabledExplicit bool
 }
 
 // Options bundles per-tool policy for a scan run (the P11.11 config surface).
@@ -376,10 +382,11 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 		if d, ok := descriptors[name]; ok {
 			enabled = d.DefaultEnabled
 		}
-		if tc.Enabled != nil {
+		explicit := tc.Enabled != nil
+		if explicit {
 			enabled = *tc.Enabled
 		}
-		tools[name] = ToolPolicy{Enabled: enabled, Method: tc.Method, Image: tc.Image, TemplatesVersion: tc.TemplatesVersion, Verify: tc.Verify}
+		tools[name] = ToolPolicy{Enabled: enabled, EnabledExplicit: explicit, Method: tc.Method, Image: tc.Image, TemplatesVersion: tc.TemplatesVersion, Verify: tc.Verify}
 	}
 	return Options{Tools: tools, DefaultMethod: cfg.DefaultMethod}
 }

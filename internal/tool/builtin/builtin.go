@@ -135,8 +135,8 @@ func Register(reg *tool.Registry, opts Options) error {
 		&diagramTool{root: root, krokiURL: opts.KrokiURL},
 		&latexBuildTool{root: root},
 		&latexNewDocumentTool{root: root},
-		&dastScanTool{opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
-		&reconScanTool{opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
+		&dastScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
+		&reconScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}

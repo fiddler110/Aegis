@@ -17,6 +17,7 @@ import (
 // real, mode-independent gate (see its doc comment) — approval alone would
 // not be enough for a tool that can otherwise be pointed at an arbitrary host.
 type dastScanTool struct {
+	root           string           // workspace root, used only to anchor the persisted .aegis/security/dast.json report
 	opts           security.Options // resolves the zap scanner (host/container/image), same as security_scan
 	allowedTargets []string
 	allowActive    bool
@@ -50,5 +51,6 @@ func (t *dastScanTool) Execute(ctx context.Context, input json.RawMessage) (tool
 	if err != nil {
 		return tool.Result{}, err
 	}
+	security.WriteReportArtifact(t.root, "dast", report)
 	return tool.Result{Content: report.Format()}, nil
 }
