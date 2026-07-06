@@ -1,0 +1,131 @@
+package cli
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/fiddler110/aegis/internal/config"
+)
+
+func runHarden(t *testing.T, stdin string, args ...string) (string, error) {
+	t.Helper()
+	cmd := newHardenCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(stdin))
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+func TestHardenAppliesUnsetCaps(t *testing.T) {
+	redirectConfigDir(t)
+
+	out, err := runHarden(t, "", "--yes")
+	if err != nil {
+		t.Fatalf("harden --yes: %v", err)
+	}
+	if !strings.Contains(out, `"local" -> "auto"`) || !strings.Contains(out, "false -> true") {
+		t.Errorf("expected sandbox/security changes reported, got:\n%s", out)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Sandbox.Backend != "auto" {
+		t.Errorf("sandbox.backend = %q, want auto", cfg.Sandbox.Backend)
+	}
+	if !cfg.Security.EgressThenWrite {
+		t.Error("security.egress_then_write not set")
+	}
+	if cfg.Cost.SessionCapUSD != hardenSessionCapUSD {
+		t.Errorf("cost.session_cap_usd = %v, want %v", cfg.Cost.SessionCapUSD, hardenSessionCapUSD)
+	}
+	if cfg.Cost.DailyCapUSD != hardenDailyCapUSD {
+		t.Errorf("cost.daily_cap_usd = %v, want %v", cfg.Cost.DailyCapUSD, hardenDailyCapUSD)
+	}
+	if cfg.Cost.SessionTokenCap != hardenSessionTokenCap {
+		t.Errorf("cost.session_token_cap = %v, want %v", cfg.Cost.SessionTokenCap, hardenSessionTokenCap)
+	}
+	if cfg.Cost.DailyTokenCap != hardenDailyTokenCap {
+		t.Errorf("cost.daily_token_cap = %v, want %v", cfg.Cost.DailyTokenCap, hardenDailyTokenCap)
+	}
+}
+
+func TestHardenIsIdempotent(t *testing.T) {
+	redirectConfigDir(t)
+
+	if _, err := runHarden(t, "", "--yes"); err != nil {
+		t.Fatalf("first harden: %v", err)
+	}
+	out, err := runHarden(t, "", "--yes")
+	if err != nil {
+		t.Fatalf("second harden: %v", err)
+	}
+	if !strings.Contains(out, "unchanged") {
+		t.Errorf("expected second run to report no changes, got:\n%s", out)
+	}
+	if strings.Contains(out, "->") {
+		t.Errorf("second run should not report any transitions, got:\n%s", out)
+	}
+}
+
+func TestHardenPreservesCustomCaps(t *testing.T) {
+	redirectConfigDir(t)
+
+	if err := config.PatchGlobalCost(config.CostPatch{SessionCapUSD: 1.5}); err != nil {
+		t.Fatalf("pre-seed cost config: %v", err)
+	}
+
+	if _, err := runHarden(t, "", "--yes"); err != nil {
+		t.Fatalf("harden: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Cost.SessionCapUSD != 1.5 {
+		t.Errorf("cost.session_cap_usd = %v, want preserved 1.5", cfg.Cost.SessionCapUSD)
+	}
+	// Untouched caps still get filled in.
+	if cfg.Cost.DailyCapUSD != hardenDailyCapUSD {
+		t.Errorf("cost.daily_cap_usd = %v, want %v", cfg.Cost.DailyCapUSD, hardenDailyCapUSD)
+	}
+}
+
+func TestHardenAbortsWithoutConfirmation(t *testing.T) {
+	redirectConfigDir(t)
+
+	if _, err := runHarden(t, "n\n"); err != nil {
+		t.Fatalf("harden (declined): %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Sandbox.Backend == "auto" {
+		t.Error("sandbox.backend changed despite declined confirmation")
+	}
+}
+
+func TestHardenRespectsContainerBackend(t *testing.T) {
+	redirectConfigDir(t)
+
+	if err := config.PatchGlobalSandbox(config.SandboxPatch{Backend: "container", Runtime: "docker"}); err != nil {
+		t.Fatalf("pre-seed sandbox config: %v", err)
+	}
+	out, err := runHarden(t, "", "--yes")
+	if err != nil {
+		t.Fatalf("harden: %v", err)
+	}
+	if !strings.Contains(out, `already "container"`) {
+		t.Errorf("expected container backend to be left alone, got:\n%s", out)
+	}
+	cfg, _ := config.Load()
+	if cfg.Sandbox.Backend != "container" || cfg.Sandbox.Runtime != "docker" {
+		t.Errorf("sandbox = %+v, want unchanged container/docker", cfg.Sandbox)
+	}
+}

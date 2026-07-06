@@ -36,52 +36,105 @@ type Conversation struct {
 	// back to a full re-save instead of appending.
 	Persisted int
 
-	charCount      int // cached estimatedChars() total (P8.4)
-	charCountValid bool
+	tokenEstimate      int // cached estimatedTokens() total (P8.4)
+	tokenEstimateValid bool
 }
 
 // Append adds a message to the conversation.
 func (c *Conversation) Append(m provider.Message) {
 	c.Messages = append(c.Messages, m)
-	if c.charCountValid {
-		c.charCount += messageChars(m)
+	if c.tokenEstimateValid {
+		c.tokenEstimate += messageTokens(m)
 	}
 }
 
-// invalidate marks the conversation as rewritten in place: cached char
+// invalidate marks the conversation as rewritten in place: cached token
 // totals are stale and Persisted no longer reflects a safe append point.
 func (c *Conversation) invalidate() {
-	c.charCountValid = false
+	c.tokenEstimateValid = false
 	c.Persisted = -1
 }
 
-// estimatedChars returns the total character count across system + messages,
-// recomputing only when the conversation has been rewritten since the last
-// call (P8.4 — avoids double-scanning the full conversation every turn).
-func (c *Conversation) estimatedChars() int {
-	if !c.charCountValid {
-		c.charCount = len(c.System)
+// estimatedTokens returns the total estimated token count across system +
+// messages, recomputing only when the conversation has been rewritten since
+// the last call (P8.4 — avoids double-scanning the full conversation every
+// turn).
+func (c *Conversation) estimatedTokens() int {
+	if !c.tokenEstimateValid {
+		c.tokenEstimate = estimateTokens(c.System)
 		for _, m := range c.Messages {
-			c.charCount += messageChars(m)
+			c.tokenEstimate += messageTokens(m)
 		}
-		c.charCountValid = true
+		c.tokenEstimateValid = true
 	}
-	return c.charCount
+	return c.tokenEstimate
 }
 
-func messageChars(m provider.Message) int {
+func messageTokens(m provider.Message) int {
 	n := 0
 	for _, b := range m.Content {
 		switch v := b.(type) {
 		case provider.TextBlock:
-			n += len(v.Text)
+			n += estimateTokens(v.Text)
 		case provider.ToolUseBlock:
-			n += len(v.Name) + len(v.Input)
+			n += estimateTokens(v.Name) + estimateTokens(string(v.Input))
 		case provider.ToolResultBlock:
-			n += len(v.Content)
+			n += estimateTokens(v.Content)
 		}
 	}
 	return n
+}
+
+// estimateTokens approximates a token count for s with a script-aware
+// heuristic instead of a flat chars/4. Plain ASCII (the common case for code
+// and English prose) is priced at the conventional ~4 characters per token,
+// but CJK (Chinese/Japanese/Korean) text tokenizes far denser than that —
+// often close to one token per character — so a flat chars/4 estimate
+// silently undercounts a CJK-heavy conversation, which matters here because
+// this estimate drives two real decisions: the P2.7 proactive-compaction
+// threshold check (undercounting delays compaction past where it should have
+// fired, risking a hard context-limit error mid-run) and the P10.5 estimated
+// token usage recorded for providers that report none (local/Ollama models),
+// which session/daily token caps are checked against. Other non-ASCII
+// scripts (Cyrillic, Greek, Arabic, emoji, ...) are priced at ~2 characters
+// per token as a middle-ground approximation. Still a cheap heuristic, not a
+// real tokenizer — providers that report real usage never go through this
+// path at all.
+func estimateTokens(s string) int {
+	var ascii, dense, other int
+	for _, r := range s {
+		switch {
+		case r < 0x80:
+			ascii++
+		case isDenseScript(r):
+			dense++
+		default:
+			other++
+		}
+	}
+	return (ascii+3)/4 + dense + (other+1)/2
+}
+
+// isDenseScript reports whether r belongs to a script whose written
+// characters each carry roughly a full token's worth of information (CJK
+// Unified Ideographs and common extensions, Hiragana, Katakana, Hangul
+// syllables) — the scripts responsible for chars/4 most badly
+// underestimating token count.
+func isDenseScript(r rune) bool {
+	switch {
+	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs
+		return true
+	case r >= 0x3400 && r <= 0x4DBF: // CJK Unified Ideographs Extension A
+		return true
+	case r >= 0x3040 && r <= 0x30FF: // Hiragana + Katakana
+		return true
+	case r >= 0xAC00 && r <= 0xD7A3: // Hangul syllables
+		return true
+	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs
+		return true
+	default:
+		return false
+	}
 }
 
 // EventKind classifies engine events delivered to consumers (TUI, CLI, logs).
@@ -329,7 +382,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// P2.7: Proactive per-turn compaction — check token headroom before every
 		// turn so context-limit errors never interrupt a run mid-flight.
 		if e.compactor != nil && e.contextWindowTokens > 0 {
-			est := conv.estimatedChars() / 4
+			est := conv.estimatedTokens()
 			if est > e.contextWindowTokens*85/100 {
 				if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
 					e.logger.Warn("proactive compaction failed", "err", compErr)
@@ -537,11 +590,11 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 	}
 
 	// Providers that don't report usage (common with local/Ollama models) return
-	// zero counts. Estimate from character length so compaction thresholds and
-	// token-count display remain meaningful.
+	// zero counts. Estimate from the script-aware heuristic (estimateTokens)
+	// so compaction thresholds and token-count display remain meaningful.
 	if usage != nil && usage.InputTokens == 0 && usage.OutputTokens == 0 {
-		usage.InputTokens = conv.estimatedChars() / 4
-		usage.OutputTokens = len(text) / 4
+		usage.InputTokens = conv.estimatedTokens()
+		usage.OutputTokens = estimateTokens(string(text))
 		usage.IsEstimated = true
 	}
 

@@ -19,6 +19,17 @@ aegis --first-init
 export OPENAI_API_KEY="ollama"   # or ANTHROPIC_API_KEY for cloud
 ```
 
+The embedded web UI (`aegis ui`, served at `/ui`) is built from
+`internal/server/webui/frontend` (Vite + Preact + TypeScript); its output
+(`internal/server/webui/dist/`) is committed to git and embedded via
+`go:embed`, so `go build`/`go run ./cmd/aegis` need no Node.js. Only rebuild
+it when editing frontend source:
+
+```bash
+npm --prefix internal/server/webui/frontend ci
+npm --prefix internal/server/webui/frontend run build   # regenerates dist/ — commit the result
+```
+
 ## Testing
 
 ```bash
@@ -39,6 +50,13 @@ AEGIS_EVAL_UPDATE=1 go test ./internal/eval/... -run TestScenario_ToolRoundTrip
 
 # Regenerate the security-scan regression golden file (same convention, P11.9)
 AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcrossRecordedOutputs
+
+# Live-model eval tier: rubric-judged prompt/persona quality checks against a
+# real local model (not part of `go test ./...` — needs a reachable model
+# server). Runs nightly in CI (.github/workflows/nightly-eval.yml); to run
+# locally:
+ollama pull llama3.2
+go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v
 ```
 
 ## Architecture

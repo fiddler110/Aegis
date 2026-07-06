@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so `git describe` (used below) sees the tag
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      # modernc.org/sqlite is pure Go (no cgo), so every target below
+      # cross-compiles cleanly from this one Linux runner — no need for a
+      # per-OS build matrix the way ci.yml's test matrix needs one.
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          out="dist/aegis-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/fiddler110/aegis/internal/cli.Version=${GITHUB_REF_NAME}" \
+            -o "$out" ./cmd/aegis
+
+      - name: Archive
+        run: |
+          set -euo pipefail
+          cd dist
+          base="aegis-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "${base}.zip" "${base}${{ matrix.ext }}"
+            rm "${base}${{ matrix.ext }}"
+          else
+            tar -czf "${base}.tar.gz" "${base}"
+            rm "${base}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact directory
+        run: |
+          mkdir -p out
+          find dist -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} out/ \;
+          ls -la out
+
+      # Uses the pre-authenticated gh CLI already on the runner rather than a
+      # third-party release action, matching the same first-party-only
+      # posture as the rest of the workflows in this repo.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" out/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --notes "See [research/releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/research/releases.md) for the full shipped-feature history and design rationale behind this release."

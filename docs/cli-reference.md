@@ -185,6 +185,8 @@ aegis ui --no-open   # just print the URL
 
 The UI is a single self-contained page embedded in the binary. It lets you list/create sessions, view transcripts with collapsible thinking and tool sections, send messages with live SSE streaming, and approve tool calls inline. A status pill in the top bar shows what the agent is doing and how long it's been running (`Thinking… 12s`, `Running security_scan…`, `Waiting for your approval`) so a slow model turn never looks like a dead page; the Send button becomes a **Stop** button while a turn is in flight, cancelling it instead of just sitting there disabled.
 
+**Current scope:** today this covers the core chat loop — sessions, streaming, inline approvals — but not persona/mode switching, cost/token display, checkpoints/rewind, security scanning, skills, or memory management; those all live in the TUI (see [tui-guide.md](tui-guide.md)) and the CLI subcommands documented elsewhere on this page for now. Bringing the web UI to TUI-level depth (for users who'd rather not use a terminal at all) is tracked as `research/roadmap.md`'s P15 item — scoped, not yet started.
+
 ---
 
 ## `aegis parallel`
@@ -338,6 +340,34 @@ aegis persona use security --global
 
 ---
 
+## `aegis skills`
+
+List and toggle the skills built into Aegis (progressive-disclosure playbooks embedded in the binary — code review, security audit, diagramming, debugging, threat modeling, etc.). They stay dormant, costing zero system-prompt tokens, until enabled by name. Project (`.aegis/skills`) and user (`~/.aegis/skills`) skill files are separate and always active regardless of this list.
+
+### `aegis skills list`
+
+```bash
+aegis skills list
+```
+
+Lists every built-in skill and whether it's currently enabled.
+
+### `aegis skills enable` / `aegis skills disable`
+
+```bash
+aegis skills enable security-audit
+aegis skills enable threat-modeling --global
+aegis skills disable html-report
+```
+
+| Flag | Description |
+|------|-------------|
+| `--global` | Write to the user-global config instead of the project |
+
+Restart Aegis (or the daemon) to apply.
+
+---
+
 ## `aegis dry-run`
 
 Preview what Aegis would do — resolved config, tools, memory, and context — without making any model call.
@@ -355,15 +385,95 @@ Useful for verifying config, checking which memory entries are loaded, confirmin
 Run available security scanners against a path.
 
 ```bash
-aegis scan [path]
+aegis scan [path] [flags]
 ```
 
-Default path is the current directory. Runs **semgrep**, **trivy**, and **gitleaks** (whichever are installed) and produces a normalized findings report with severity, location, rule ID, and remediation hint.
+Default path is the current directory. Runs every enabled scanner (**opengrep**, **trivy**, **gitleaks**, **kubescape**, **hadolint**, **osv-scanner**, **grype**, whichever are installed or container-fallback-able) and produces a normalized findings report with severity, location, rule ID, and remediation hint, persisted to `.aegis/security/scan.json`. **semgrep** and the language-targeted engines (**gosec**/**bandit**/**brakeman**/**njsscan**) are opt-in — a plain scan auto-detects the project's language (`go.mod`/`*.go`, `requirements.txt`/`*.py`, `Gemfile`/`*.rb`, `package.json`/`*.js`) and auto-enables the matching one for this run only, without touching config.
 
 ```bash
 aegis scan ./src
 aegis scan .
+aegis scan --scanner trufflehog          # run only trufflehog, force-enabled for this run
+aegis scan --scanner secrets ./src       # category alias: every scanner tagged "secrets"
+aegis scan --list                        # every valid --scanner name/category, with live availability
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--scanner`, `-s` | Run only this scanner or category (repeatable), force-enabled regardless of config — see `--list` for valid names |
+| `--list` | List every scanner name and category alias usable with `--scanner`, with live availability, then exit |
+
+Full scanner reference, category aliases, and details on the container/WSL fallback and dedup/ASVS/baseline pipeline: [docs/security.md](security.md).
+
+### `aegis scan image`
+
+```bash
+aegis scan image <ref>
+```
+
+Runs image-oriented scanners (trivy image, grype, dockle) against a container image reference (e.g. `alpine:3.20`) and prints a unified findings report, persisted to `.aegis/security/image.json`. Host-binary only — an image scanner that would otherwise run via a container is reported skipped, since scanner containers run network-isolated and can't pull the target image.
+
+### `aegis scan sbom`
+
+```bash
+aegis scan sbom [path] [-o output]
+```
+
+Generates a CycloneDX JSON SBOM via syft over the given path (default: current directory), written to `.aegis/sbom.cdx.json` by default (or `-o`/`--output`).
+
+### `aegis scan dast`
+
+```bash
+aegis scan dast <target-url> [--mode baseline|active|api] [--api-definition <path-or-url>]
+```
+
+Crawls (and, in `--mode active`/`api`, actively attacks) a *running* application via OWASP ZAP, persisted to `.aegis/security/dast.json`. Container-only, digest-pinned. The target must be loopback/private or explicitly declared in `security.dast.allowed_targets`; `--mode active`/`api` additionally requires `security.dast.allow_active: true`.
+
+### `aegis scan network`
+
+```bash
+aegis scan network <target> [target...]
+```
+
+Runs nmap + nuclei against a bare host/IP/CIDR list (attack-surface mapping), persisted to `.aegis/security/network.json`. Same target-allowlist gate as `scan dast`.
+
+---
+
+## `aegis security`
+
+Manage security scanner availability (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, trufflehog, kubescape, hadolint, grype, dockle, osv-scanner, syft) — the tools behind `aegis scan`/the `security_scan` tool.
+
+### `aegis security status`
+
+```bash
+aegis security status
+```
+
+Shows how each scanner would run right now: host binary, container fallback, or unavailable (with the exact reason).
+
+### `aegis security install`
+
+```bash
+aegis security install <tool> [--yes]
+```
+
+Guided, approval-gated host install for one scanner — prints the exact command and asks for confirmation before running it (`--yes` skips the prompt for scripted use).
+
+### `aegis security config`
+
+```bash
+aegis security config
+```
+
+View-only: prints the resolved `security.tools`/`security.default_method` configuration. Edit `.aegis/config.yaml` (project) or `~/.config/aegis/config.yaml` (user) directly to change it, or use the interactive `/security-config` TUI dialog.
+
+### `aegis security baseline`
+
+```bash
+aegis security baseline [path]
+```
+
+View-only: prints each entry in `.aegis/security-baseline.yaml` (the accepted-risk suppression allowlist) with its status — active, expired, or invalid.
 
 ---
 
@@ -433,6 +543,24 @@ aegis sandbox test
 ```
 
 Run `uname -a` in the configured sandbox to verify it works.
+
+---
+
+## `aegis harden`
+
+```bash
+aegis harden [--project] [--yes]
+```
+
+Applies a hardened profile in one step, flipping the permissive-by-default knobs a security review is likely to flag:
+
+- `sandbox.backend` → `auto` (containerized execution when a runtime is available, instead of running tool calls on the host)
+- `security.egress_then_write` → `true` (a write after any network egress in the same run requires approval)
+- any cost cap still at its unlimited default (`0`) is set to a conservative starting value (`session_cap_usd: 5`, `daily_cap_usd: 25`, `session_token_cap: 300000`, `daily_token_cap: 2000000`); caps you've already customized are left alone
+
+Not touched: `security.network_allowlist` (empty means no restriction — which domains belong there can't be guessed) and plan-mode network access, which is gated by permission policy rather than config.
+
+Shows the planned changes and prompts for confirmation unless `--yes` is passed. Writes to the global config by default; pass `--project` to write `.aegis/config.yaml` instead. Run `aegis dry-run` afterward to see the result, and hand-edit `config.yaml` to loosen anything too strict for your workflow.
 
 ---
 

@@ -8,10 +8,16 @@
 //
 // Scenarios run against a scripted/deterministic provider.Adapter (see
 // internal/engine's test adapters for the pattern), not a live model, so
-// this suite is part of `go test ./...` and requires no API key. It does not
-// evaluate prompt quality against a real model — that would need a live
-// adapter and a rubric judge (cf. internal/guard), which is a larger,
-// separate investment with no current trigger.
+// this suite is part of `go test ./...` and requires no API key or reachable
+// model server — it verifies mechanism (which tool ran, whether a gate
+// blocked a call, whether an error occurred), not response quality.
+//
+// A separate live-model tier (live_test.go, gated behind the live_eval build
+// tag) covers what a scripted adapter can't: whether the actual text a real
+// model produces satisfies a quality rubric, via ExpectRubric + a live
+// provider.Adapter. It's excluded from `go test ./...` since it needs a
+// reachable model server; see .github/workflows/nightly-eval.yml, which runs
+// it nightly against a freshly pulled local model.
 package eval
 
 import (
@@ -24,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
 )
 
@@ -207,6 +214,27 @@ func ExpectNoGuardFailure() Check {
 			if !g.Passed {
 				return fmt.Errorf("expected no guard failures, got: %v", r.AllGuardEvents())
 			}
+		}
+		return nil
+	}
+}
+
+// ExpectRubric judges the final turn's text against rubric via a live model
+// call (guard.LLMGuard — the same mechanism the engine's output guard uses),
+// closing the gap the package doc calls out: the Check helpers above assert
+// on mechanism (which tool ran, whether an error occurred), which a scripted
+// adapter can verify deterministically, but nothing here could previously
+// catch a persona or prompt-engineering change that makes response quality
+// worse while every mechanism still behaves identically. adapter/model must
+// be a real, reachable provider — pair this with a Scenario whose
+// Options.Adapter is a live adapter, not the scripted test adapters used
+// elsewhere in this package's own tests.
+func ExpectRubric(ctx context.Context, adapter provider.Adapter, model, rubric string) Check {
+	return func(r *Result) error {
+		judge := guard.LLMGuard(adapter, model, rubric)
+		ok, reason := judge(ctx, guard.Input{Text: r.FinalText()})
+		if !ok {
+			return fmt.Errorf("rubric %q failed: %s", rubric, reason)
 		}
 		return nil
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -62,5 +63,39 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("GET /sessions without token = %d, want 401", r2.StatusCode)
+	}
+}
+
+func TestWebUIAssetsServedWithLongCache(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "secret-token"
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	entries, err := fs.ReadDir(webUIAssets, "assets")
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("expected built assets under webui/dist/assets, err=%v entries=%d", err, len(entries))
+	}
+
+	resp, err := http.Get(ts.URL + "/ui/assets/" + entries[0].Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /ui/assets/%s status = %d, want 200", entries[0].Name(), resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Errorf("Cache-Control = %q, want immutable", cc)
 	}
 }

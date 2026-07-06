@@ -10,9 +10,11 @@ Three modes control the default posture:
 
 | Mode | File Read | File Write | Shell/Execute | Network | When to use |
 |------|-----------|------------|---------------|---------|-------------|
-| **plan** | Allow | Deny | Deny | Allow | Safe exploration, read-only analysis |
+| **plan** | Allow | Deny | Deny | Ask | Safe exploration, read-only analysis |
 | **build** | Allow | Allow | Ask | Allow | Default — file edits free, shell prompts |
 | **auto** | Allow | Allow | Allow | Allow | Trusted sandboxes, CI/CD, unattended runs |
+
+Network is **Ask**, not Allow, in plan mode: a "read-only" session can still read a sensitive file (File Read is unconditionally allowed) and could otherwise exfiltrate it over a network-capability tool (`web_fetch`, `web_search`) with no approval anywhere in the path. Requiring approval for network closes that silent side channel while leaving local reads frictionless. In a non-interactive context with no approver wired up (the default is deny), this means plan-mode sessions that need to fetch or search the web must either run with an approver that can say yes, or switch to build mode.
 
 **Set at launch:**
 ```bash

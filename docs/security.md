@@ -854,6 +854,12 @@ aegis --persona appsec-engineer --mode plan
 
 ## Recommended Security Configuration
 
+`aegis harden [--project] [--yes]` sets the `sandbox`/`security`/`cost` portions of this below
+(sandbox backend → `auto`, `egress_then_write` → `true`, and any unset cost cap → a conservative
+default) in one step, without hand-editing YAML — see [cli-reference.md](cli-reference.md#aegis-harden).
+It leaves `permission.rules` and `security.network_allowlist` for you to fill in, since those are
+project-specific.
+
 For a hardened local development setup:
 
 ```yaml
