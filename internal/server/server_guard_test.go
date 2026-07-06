@@ -139,3 +139,20 @@ func TestPersonaModelPrecedence(t *testing.T) {
 		t.Errorf("global model fallback, got %q", m)
 	}
 }
+
+// TestResolveModelSessionOverrideWins is the P14.7 regression: a per-session
+// /model override must outrank everything personaModel would otherwise
+// resolve, including a persona's own config-level pin — the same precedence
+// a config override already has over a persona file's Model.
+func TestResolveModelSessionOverrideWins(t *testing.T) {
+	s := &Server{cfg: &config.Config{
+		Provider: config.ProviderConfig{Model: "global"},
+		Personas: map[string]config.PersonaOverride{"pinned": {Model: "from-config"}},
+	}}
+	if m := s.resolveModel(persona.Persona{Name: "pinned", Model: "from-file"}, "session-override"); m != "session-override" {
+		t.Errorf("session override should win over everything, got %q", m)
+	}
+	if m := s.resolveModel(persona.Persona{Name: "plain"}, ""); m != "global" {
+		t.Errorf("no session override should fall through to personaModel, got %q", m)
+	}
+}

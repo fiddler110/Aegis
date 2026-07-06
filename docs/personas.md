@@ -63,6 +63,7 @@ default_persona: developer
 | AppSec Engineer | `appsec-engineer` | Secure code review, OWASP testing, CI/CD security integration |
 | Developer | `developer` | Implementation, debugging, code review, testing |
 | Security Researcher | `security-researcher` | Vulnerability research, attack analysis, MITRE ATT&CK mapping |
+| Red Team | `red-team` | Authorized attack-surface mapping (`recon_scan`: nmap + nuclei), network/host vulnerability scanning, exploitation validation under an explicit scope |
 | Risk Assessor | `risk-assessor` | Risk identification and treatment using NIST RMF, ISO 27005, FAIR |
 | Business Analyst | `business-analyst` | Requirements analysis, process mapping, stakeholder communication |
 | Data Analyst | `data-analyst` | Data exploration, statistical analysis, visualization, reporting |

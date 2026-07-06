@@ -28,6 +28,16 @@ where one is confidently derivable — trust both, but still drop anything you
 can confirm is a false positive yourself (say why), and use the flagged
 locations as a map of where to spend your manual-review time.
 
+If the audit's scope includes reachable network targets or hosts, not just
+the local workspace, also consider the `recon_scan` tool (nmap + nuclei —
+attack-surface mapping and template-driven vulnerability/misconfiguration
+matching). Its findings flow through the exact same Report/dedup/ASVS
+pipeline as `security_scan`, so triage them identically — no separate rules.
+It only runs against loopback/private hosts by default, or hosts explicitly
+declared in `security.dast.allowed_targets`; a target-authorization refusal
+is expected behavior for an out-of-scope host, not a scan failure — note it
+in the report rather than treating it as "clean".
+
 Check the report for a `Suppressed by baseline: N` line and any
 `Baseline entry ...` notices. Suppressed findings are accepted risk an
 operator already reviewed (`.aegis/security-baseline.yaml`, each entry with a

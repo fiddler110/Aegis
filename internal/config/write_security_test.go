@@ -133,6 +133,32 @@ func TestPatchProjectSecurityPreservesOtherSections(t *testing.T) {
 	}
 }
 
+// TestPatchGlobalSecurityPreservesNucleiTemplatesVersion is the P13.5.6
+// sibling of the DAST/egress preservation tests above: a tool's
+// templates_version must round-trip through the same wholesale-replaced
+// security.tools.<name> block as its enabled/method/image fields.
+func TestPatchGlobalSecurityPreservesNucleiTemplatesVersion(t *testing.T) {
+	redirectConfigDir(t)
+
+	err := PatchGlobalSecurity(SecurityPatch{
+		DefaultMethod: "auto",
+		Tools: map[string]SecurityToolConfig{
+			"nuclei": {TemplatesVersion: "v9.9.0"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := cfg.Security.Tools["nuclei"].TemplatesVersion; got != "v9.9.0" {
+		t.Errorf("templates_version = %q, want v9.9.0", got)
+	}
+}
+
 func TestBuildSecurityBlockEnabledFalseIsExplicit(t *testing.T) {
 	disabled := false
 	block := buildSecurityBlock(SecurityPatch{

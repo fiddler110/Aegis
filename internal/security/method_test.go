@@ -28,6 +28,13 @@ func withDetectRuntime(t *testing.T, fn func(ctx context.Context, priority []san
 	t.Cleanup(func() { detectRuntime = orig })
 }
 
+func withWSLBinaryAvailable(t *testing.T, fn func(ctx context.Context, bin string) bool) {
+	t.Helper()
+	orig := wslBinaryAvailable
+	wslBinaryAvailable = fn
+	t.Cleanup(func() { wslBinaryAvailable = orig })
+}
+
 // TestResolveOptInToolDisabledByDefault is the P11.3 regression: a tool
 // descriptor with DefaultEnabled: false must resolve to MethodNone with a
 // distinct "opt-in" reason (not "disabled by configuration") when the
@@ -204,6 +211,99 @@ func TestResolveContainerMethodNoRuntimeAvailable(t *testing.T) {
 	}
 	if !strings.Contains(reason, "no container runtime is available") {
 		t.Errorf("reason = %q, want mention of no runtime available", reason)
+	}
+}
+
+// TestResolveWSLCapableFallsBackToWSL is the P14.x regression: a
+// WSLCapable tool (opengrep, kubescape — no native Windows build) with no
+// host binary and no container image must fall back to MethodWSL when a
+// distro has the binary, instead of a bare MethodNone.
+func TestResolveWSLCapableFallsBackToWSL(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-wsl", Binary: "aegis-does-not-exist-xyz", WSLCapable: true})
+	withWSLBinaryAvailable(t, func(context.Context, string) bool { return true })
+	opts := Options{Tools: map[string]ToolPolicy{"test-wsl": {Enabled: true}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-wsl", opts)
+	if method != MethodWSL {
+		t.Fatalf("method = %v, reason = %q, want MethodWSL", method, reason)
+	}
+}
+
+// TestResolveWSLCapableTriesWSLAfterContainerRuntimeUnavailable proves the
+// auto path still reaches WSL when a container image is configured but no
+// runtime is running — WSL is a fallback of last resort, not a substitute
+// for a properly configured container.
+func TestResolveWSLCapableTriesWSLAfterContainerRuntimeUnavailable(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-wsl-cfallback", Binary: "aegis-does-not-exist-xyz", WSLCapable: true})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return "", false
+	})
+	withWSLBinaryAvailable(t, func(context.Context, string) bool { return true })
+	opts := Options{Tools: map[string]ToolPolicy{"test-wsl-cfallback": {Enabled: true, Image: "example/image@sha256:deadbeef"}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-wsl-cfallback", opts)
+	if method != MethodWSL {
+		t.Fatalf("method = %v, reason = %q, want MethodWSL", method, reason)
+	}
+}
+
+// TestResolveWSLCapableNoneWhenWSLAlsoUnavailable proves a WSLCapable tool
+// still reports MethodNone (with a reason mentioning WSL) when WSL doesn't
+// have it either — no silent success.
+func TestResolveWSLCapableNoneWhenWSLAlsoUnavailable(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-wsl-none", Binary: "aegis-does-not-exist-xyz", WSLCapable: true})
+	withWSLBinaryAvailable(t, func(context.Context, string) bool { return false })
+	opts := Options{Tools: map[string]ToolPolicy{"test-wsl-none": {Enabled: true}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-wsl-none", opts)
+	if method != MethodNone {
+		t.Fatalf("method = %v, want MethodNone", method)
+	}
+	if !strings.Contains(reason, "WSL") {
+		t.Errorf("reason = %q, want mention of WSL", reason)
+	}
+}
+
+// TestResolveNonWSLCapableNeverConsultsWSL proves a tool without
+// WSLCapable never triggers the WSL check at all (even if it happened to be
+// available) — every scanner except opengrep/kubescape has no Scan-side
+// WSL branch, so offering the method for them would misroute execution.
+func TestResolveNonWSLCapableNeverConsultsWSL(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-not-wsl-capable", Binary: "aegis-does-not-exist-xyz"})
+	called := false
+	withWSLBinaryAvailable(t, func(context.Context, string) bool { called = true; return true })
+	opts := Options{Tools: map[string]ToolPolicy{"test-not-wsl-capable": {Enabled: true}}}
+
+	method, _, _, _ := Resolve(context.Background(), "test-not-wsl-capable", opts)
+	if method != MethodNone {
+		t.Fatalf("method = %v, want MethodNone (no image, no container runtime, WSL not consulted)", method)
+	}
+	if called {
+		t.Error("wslBinaryAvailable was called for a non-WSLCapable descriptor")
+	}
+}
+
+// TestResolveExplicitWSLMethod covers the explicit
+// security.tools.<name>.method: "wsl" knob, both for a capable tool and one
+// with no Scan-side WSL branch wired.
+func TestResolveExplicitWSLMethod(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-explicit-wsl", Binary: "aegis-does-not-exist-xyz", WSLCapable: true})
+	withWSLBinaryAvailable(t, func(context.Context, string) bool { return true })
+	opts := Options{Tools: map[string]ToolPolicy{"test-explicit-wsl": {Enabled: true, Method: "wsl"}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-explicit-wsl", opts)
+	if method != MethodWSL {
+		t.Fatalf("method = %v, reason = %q, want MethodWSL", method, reason)
+	}
+
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-explicit-wsl-incapable", Binary: "aegis-does-not-exist-xyz"})
+	opts = Options{Tools: map[string]ToolPolicy{"test-explicit-wsl-incapable": {Enabled: true, Method: "wsl"}}}
+	method, _, _, reason = Resolve(context.Background(), "test-explicit-wsl-incapable", opts)
+	if method != MethodNone {
+		t.Fatalf("method = %v, want MethodNone for a non-WSLCapable descriptor", method)
+	}
+	if !strings.Contains(reason, "no WSL execution path wired") {
+		t.Errorf("reason = %q, want mention of no WSL execution path wired", reason)
 	}
 }
 

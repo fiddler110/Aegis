@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # build-macos.sh — Build Aegis and set up your shell for first-time use on macOS.
 #
-# Two optional actions:
+# Three actions, [3] is opt-in and not part of "all":
 #   [1] Compile aegis and install it to /usr/local/bin (or ~/go/bin fallback)
 #   [2] Add an aegis-config function to your shell's aliases file so you can
 #       run "aegis-config" to open the Aegis config file in your editor
+#   [3] (opt-in) Install the host security scanner tools aegis scan / the
+#       security_scan tool use (opengrep, trivy, gitleaks, ...) via the
+#       guided `aegis security install` command for each tool
 #
 # Alias file priority (first existing file wins; file is created if none exist):
 #   zsh  : ~/.zsh_aliases  ~/.zshrc_aliases  ~/.aliases  → ~/.zshrc  (macOS default)
@@ -16,7 +19,9 @@
 #   chmod +x build-macos.sh && ./build-macos.sh
 #   ./build-macos.sh 1        # build only
 #   ./build-macos.sh 2        # shell config only
-#   ./build-macos.sh all      # both actions
+#   ./build-macos.sh 3        # security tools only (opt-in)
+#   ./build-macos.sh all      # actions 1 + 2 (never includes 3 — opt-in)
+#   ./build-macos.sh "all 3"  # actions 1 + 2 + 3
 
 set -uo pipefail
 
@@ -35,6 +40,12 @@ detail()  { echo "        ${DIM}$*${RESET}"; }
 ok()      { echo "  ${GREEN}OK${RESET}  $*"; }
 skip()    { echo "  ${DIM}--  $*${RESET}"; }
 warn()    { echo "  ${YELLOW}!!${RESET}  $*"; }
+
+# Every entry in SECURITY_TOOLS has a binary name equal to its scanner name
+# (verified against internal/security/method.go), so a plain PATH lookup is
+# enough to tell whether a tool is already installed before re-running its
+# installer.
+tool_installed() { command -v "$1" &>/dev/null; }
 
 # ─── Locate Go ─────────────────────────────────────────────────────────────────
 if ! command -v go &>/dev/null; then
@@ -127,6 +138,12 @@ fi
 
 AEGIS_CONFIG_PATH="${HOME}/.config/aegis/config.yaml"
 
+# ─── Security scanner tools (opt-in action [3]) ────────────────────────────────
+# Mirrors internal/security/method.go's descriptor list — every scanner that
+# has a guided host install (zap is container-only and has none, so it's
+# handled by container config, not this list).
+SECURITY_TOOLS=(opengrep semgrep gosec bandit brakeman njsscan trivy gitleaks kubescape hadolint grype dockle osv-scanner syft nmap nuclei)
+
 # ─── Show plan ─────────────────────────────────────────────────────────────────
 echo ""
 divider
@@ -159,6 +176,17 @@ else
 fi
 
 echo ""
+
+# Action 3 (opt-in — never implied by "all")
+item "[3] (opt-in) Install security scanner tools"
+detail "Tools  : ${SECURITY_TOOLS[*]}"
+detail "Runs   : aegis security install <tool> --yes  for each, using the binary from [1]"
+detail "Skips  : any tool already found on PATH is left alone, not reinstalled"
+detail "Note   : best-effort — many are language-specific (Go/pipx/gem) and may fail"
+detail "         individually if that language's toolchain isn't installed; failures"
+detail "         are reported but don't stop the run. Not included in 'all'."
+
+echo ""
 divider
 echo ""
 
@@ -166,7 +194,7 @@ echo ""
 if [ -n "${1:-}" ]; then
     SELECTION=$(echo "${1}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${1}")
 else
-    printf "  Run which actions? [all / 1 2 / none]  (default: all): "
+    printf "  Run which actions? [all / 1 2 3 / none]  (default: all — 3 is opt-in): "
     read -r SELECTION || SELECTION="all"
     SELECTION="${SELECTION:-all}"
     SELECTION=$(echo "${SELECTION}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "${SELECTION}")
@@ -174,19 +202,20 @@ fi
 
 RUN_BUILD=false
 RUN_ALIAS=false
+RUN_TOOLS=false
 
-if [ "${SELECTION}" = "all" ]; then
-    RUN_BUILD=true; RUN_ALIAS=true
-elif [ "${SELECTION}" = "none" ]; then
+if [ "${SELECTION}" = "none" ]; then
     echo "  Nothing to do."; exit 0
-else
-    for num in ${SELECTION}; do
-        case "${num}" in
-            1) RUN_BUILD=true ;;
-            2) RUN_ALIAS=true ;;
-        esac
-    done
 fi
+
+for token in ${SELECTION}; do
+    case "${token}" in
+        all) RUN_BUILD=true; RUN_ALIAS=true ;;
+        1) RUN_BUILD=true ;;
+        2) RUN_ALIAS=true ;;
+        3) RUN_TOOLS=true ;;
+    esac
+done
 
 echo ""
 
@@ -400,6 +429,56 @@ SHEOF
     echo ""
 fi
 
+# ─── Action 3 : Install security scanner tools (opt-in) ───────────────────────
+if [ "${RUN_TOOLS}" = true ]; then
+    header "[3] Installing security scanner tools..."
+    echo ""
+
+    AEGIS_BIN=""
+    if [ "${RUN_BUILD}" = true ] && [ -x "${BIN_DEST}" ]; then
+        AEGIS_BIN="${BIN_DEST}"
+    elif command -v aegis &>/dev/null; then
+        AEGIS_BIN="$(command -v aegis)"
+    fi
+
+    if [ -z "${AEGIS_BIN}" ]; then
+        warn "aegis binary not found — run action [1] first (or ensure aegis is on PATH), then re-run with 3."
+    else
+        detail "Using: ${AEGIS_BIN}"
+        echo ""
+        FAILED_TOOLS=()
+        SKIPPED_TOOLS=()
+        for tool in "${SECURITY_TOOLS[@]}"; do
+            item "${tool}"
+            if tool_installed "${tool}"; then
+                skip "${tool} already installed — $(command -v "${tool}")"
+                SKIPPED_TOOLS+=("${tool}")
+                echo ""
+                continue
+            fi
+            if "${AEGIS_BIN}" security install "${tool}" --yes; then
+                ok "${tool} installed"
+            else
+                warn "${tool} failed — see output above"
+                FAILED_TOOLS+=("${tool}")
+            fi
+            echo ""
+        done
+        if [ "${#SKIPPED_TOOLS[@]}" -gt 0 ]; then
+            detail "Already installed (skipped): ${SKIPPED_TOOLS[*]}"
+        fi
+        if [ "${#FAILED_TOOLS[@]}" -gt 0 ]; then
+            warn "Some tools failed to install: ${FAILED_TOOLS[*]}"
+            detail "Often expected — several tools need a specific language toolchain (Go/pipx/gem)"
+            detail "or Homebrew, and only matter for projects that use that language."
+        else
+            ok "All security tools are installed."
+        fi
+        detail "Run 'aegis security status' to confirm what's available."
+    fi
+    echo ""
+fi
+
 # ─── Done ──────────────────────────────────────────────────────────────────────
 divider
 echo ""
@@ -414,7 +493,11 @@ detail "                                  model: auto in config selects it autom
 detail "                                  Aegis starts Ollama itself if it is installed"
 detail "aegis                           start the TUI"
 detail "aegis ui                        open the web UI in your browser"
+detail "aegis security status           check which security scanners are available"
 if [ "${RUN_ALIAS}" = true ] && [ "${ALIAS_EXISTS}" = false ]; then
     detail "aegis-config                    open the config file  (after reloading shell)"
+fi
+if [ "${RUN_TOOLS}" != true ]; then
+    detail "./build-macos.sh 3              install security scanner tools (opt-in, not run yet)"
 fi
 echo ""

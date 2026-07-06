@@ -141,6 +141,69 @@ func TestInstallAvailabilityNoHostInstallAtAll(t *testing.T) {
 	}
 }
 
+func withWSLDistroAvailable(t *testing.T, fn func(ctx context.Context) bool) {
+	t.Helper()
+	orig := wslDistroAvailable
+	wslDistroAvailable = fn
+	t.Cleanup(func() { wslDistroAvailable = orig })
+}
+
+// TestInstallCommandWSLFallback is the P14.x regression: a tool with no
+// Windows install entry (opengrep/kubescape's actual shape) but a Linux one
+// falls back to a `wsl -- bash -lc '<linux cmd>'` invocation when a WSL
+// distro is present — only on Windows, and only when WSL is actually there.
+func TestInstallCommandWSLFallback(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("WSL fallback only applies on windows")
+	}
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:   "test-wsl-install",
+		Binary: "test-wsl-install",
+		Install: map[string]string{
+			"linux": "curl -fsSL https://example.com/install.sh | bash",
+		},
+	})
+
+	withWSLDistroAvailable(t, func(context.Context) bool { return false })
+	if _, ok := InstallCommand("test-wsl-install"); ok {
+		t.Error("expected no install command when WSL isn't available")
+	}
+
+	withWSLDistroAvailable(t, func(context.Context) bool { return true })
+	cmd, ok := InstallCommand("test-wsl-install")
+	if !ok {
+		t.Fatal("expected a WSL-fallback install command")
+	}
+	want := "wsl -- bash -lc 'curl -fsSL https://example.com/install.sh | bash'"
+	if cmd != want {
+		t.Errorf("cmd = %q, want %q", cmd, want)
+	}
+}
+
+// TestInstallCommandNativeWindowsNeverFallsBackToWSL proves a tool that
+// already has a native Windows install entry never gets routed through WSL,
+// even if a distro is available — WSL is strictly a fallback for tools with
+// no native build at all.
+func TestInstallCommandNativeWindowsNeverFallsBackToWSL(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("this proves windows-native takes priority over the windows-only WSL fallback")
+	}
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:   "test-native-win",
+		Binary: "test-native-win",
+		Install: map[string]string{
+			"windows": "scoop install test-native-win",
+			"linux":   "curl -fsSL https://example.com/install.sh | bash",
+		},
+	})
+	withWSLDistroAvailable(t, func(context.Context) bool { return true })
+
+	cmd, ok := InstallCommand("test-native-win")
+	if !ok || cmd != "scoop install test-native-win" {
+		t.Errorf("cmd = %q, ok = %v, want the native windows command unchanged", cmd, ok)
+	}
+}
+
 func TestRunGuidedInstallRunsCommand(t *testing.T) {
 	// A fake descriptor whose "install" command is a trivial, portable
 	// shell/PowerShell one-liner so this test never touches the network or a

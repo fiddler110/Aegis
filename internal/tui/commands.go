@@ -44,7 +44,7 @@ func commandDefs() []commandDef {
 		{
 			name: "help", argHint: "[cmd]", needsArgs: true,
 			shortDesc:    "Show this help or detail for a command",
-			detailedHelp: "/help [command]\n  Show available commands, or detailed help for a specific command.",
+			detailedHelp: "/help [command]\n  Show available commands, or detailed help for a specific command.\n  No args: also lists keyboard shortcuts, including keybind-only features that have no slash-command equivalent (e.g. ctrl+x terminal pane, ctrl+t sub-agent list, ctrl+r session switcher).",
 			handler:      (*SlashDispatcher).cmdHelp,
 		},
 		{
@@ -116,6 +116,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdModels,
 		},
 		{
+			name: "model", argHint: "<model-id|default>", needsArgs: true,
+			shortDesc:    "Switch this session's model mid-session",
+			detailedHelp: "/model <model-id>\n  Switch this session's model. Persisted as a per-session override that outranks the active persona's own model and the global default on every subsequent turn.\n  Must be an id for your currently configured provider (see /status) — a cross-provider id fails on the next turn, not at switch time.\n  /model default: clear the override, reverting to the persona/global default.\n  No args: show the current model.",
+			handler:      (*SlashDispatcher).cmdModel,
+		},
+		{
 			name:         "status",
 			shortDesc:    "Show daemon health, sandbox backend, and cost caps/spend",
 			detailedHelp: "/status\n  Show daemon reachability, provider/model, active sandbox backend and any fallback reason, this session's cumulative spend against its caps, and cross-session today's spend against the daily caps.",
@@ -140,9 +146,9 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdSecurityConfig,
 		},
 		{
-			name: "scan", argHint: "[path|image <ref>|sbom [path]]", needsArgs: true,
+			name: "scan", argHint: "[path|image <ref>|sbom [path]|network <target...>]", needsArgs: true,
 			shortDesc:    "Run security scanners now and print the findings report",
-			detailedHelp: "/scan [path|image <ref>|sbom [path]]\n  Runs the security scanners directly and prints the findings report — no model turn spent, same scan `aegis scan`/the security_scan tool runs.\n  No args: scan the whole workspace.\n  /scan <path>: scan just a workspace-relative subdirectory.\n  /scan image <ref>: scan a container image reference instead (e.g. /scan image alpine:3.20).\n  /scan sbom [path]: generate a CycloneDX SBOM instead of a findings report.\n  Use /security-config first to enable/install the scanners you want included.",
+			detailedHelp: "/scan [path|image <ref>|sbom [path]|network <target...>]\n  Runs the security scanners directly and prints the findings report — no model turn spent, same scan `aegis scan`/the security_scan tool runs.\n  No args: scan the whole workspace.\n  /scan <path>: scan just a workspace-relative subdirectory.\n  /scan image <ref>: scan a container image reference instead (e.g. /scan image alpine:3.20).\n  /scan sbom [path]: generate a CycloneDX SBOM instead of a findings report.\n  /scan network <target> [target...]: run nmap+nuclei (recon_scan) against a bare host/IP/CIDR list — same shared security.dast.allowed_targets gate as /scan and dast_scan; a disallowed target is rejected before either scanner runs.\n  Use /security-config first to enable/install the scanners you want included.",
 			handler:      (*SlashDispatcher).cmdScan,
 		},
 		{
@@ -194,10 +200,34 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdHumor,
 		},
 		{
-			name: "archive", argHint: "[off]", needsArgs: true,
+			name: "archive", argHint: "[off|list]", needsArgs: true,
 			shortDesc:    "Archive this session (hidden from listings; data kept). /archive off to restore",
-			detailedHelp: "/archive [off]\n  Archive the current session — it is hidden from normal session listings but all data is preserved.\n  /archive off: restore an archived session to active status.\n  To permanently remove a session, use `aegis sessions delete <id>` from the CLI.",
+			detailedHelp: "/archive [off|list]\n  Archive the current session — it is hidden from normal session listings but all data is preserved.\n  /archive off: restore an archived session to active status.\n  /archive list: list all archived sessions.\n  To permanently remove a session, use `aegis sessions delete <id>` from the CLI.",
 			handler:      (*SlashDispatcher).cmdArchive,
+		},
+		{
+			name: "prune", argHint: "[days]", needsArgs: true,
+			shortDesc:    "Delete non-archived sessions older than N days",
+			detailedHelp: "/prune [days]\n  Delete non-archived sessions not updated in the last N days.\n  No args: use the server's configured TTL.\n  Same operation as `aegis sessions prune`.",
+			handler:      (*SlashDispatcher).cmdPrune,
+		},
+		{
+			name: "bundle", argHint: "[install|info <path-or-url>]", needsArgs: true,
+			shortDesc:    "Install or inspect a persona/skill/command bundle",
+			detailedHelp: "/bundle [install|info <path-or-url>]\n  'info <path-or-url>': show a bundle's manifest, artifacts, and content hash — same as `aegis bundle info`. A git URL (https/git@/ssh) is shallow-cloned to a temp dir first.\n  'install <path-or-url> [global] [sha256:<hash>] [confirm]': install a bundle's commands/agents/skills. No 'confirm': preview only (manifest, artifacts, target scope, hash) — nothing is written. 'global' installs into the user data dir instead of the project's .aegis/ (default). 'sha256:<hash>' pins the P7.6 content-hash provenance check (see /bundle info) and aborts if it doesn't match — same as the CLI's --expect-sha256.\n  Same underlying package as `aegis bundle install/info`.",
+			handler:      (*SlashDispatcher).cmdBundle,
+		},
+		{
+			name:         "runs",
+			shortDesc:    "List message runs currently in flight across all sessions",
+			detailedHelp: "/runs\n  List message runs currently in flight across all sessions (session id, elapsed time, tool-call count, last event kind, title) — same data as `aegis runs`.",
+			handler:      (*SlashDispatcher).cmdRuns,
+		},
+		{
+			name: "bg", argHint: "[list|events [session-id]]",
+			shortDesc:    "List background (detached) sessions, or print one's buffered events",
+			detailedHelp: "/bg [list|events [session-id]]\n  No args or 'list': list sessions currently running in background (detached) mode.\n  'events [session-id]': print buffered engine events from a background session (defaults to the current session) — same data as `aegis bg events`.",
+			handler:      (*SlashDispatcher).cmdBG,
 		},
 		{
 			name:         "timeline",
@@ -210,6 +240,12 @@ func commandDefs() []commandDef {
 			shortDesc:    "Toggle the sidebar panel on/off (also ctrl+b)",
 			detailedHelp: "/sidebar\n  Toggles the sidebar panel (context %, cost, agent count) on/off. Same as pressing ctrl+b. Hidden by default; folds into the status bar when off.",
 			handler:      (*SlashDispatcher).cmdSidebar,
+		},
+		{
+			name: "theme", argHint: "<dark|light>", needsArgs: true,
+			shortDesc:    "Switch the color scheme live, no restart needed",
+			detailedHelp: "/theme <dark|light>\n  Switch the TUI color scheme immediately — no restart needed.\n  No args: show the current theme.\n  This session only; set tui.theme: <name> in config (project or global) to make it the default on restart.",
+			handler:      (*SlashDispatcher).cmdTheme,
 		},
 		{
 			name: "copy", argHint: "[N]",

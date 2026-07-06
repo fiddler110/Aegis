@@ -113,7 +113,7 @@ func TestRegisterAll(t *testing.T) {
 	if err := Register(reg, Options{Root: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"read_file", "write_file", "edit_file", "glob", "grep", "shell", "web_fetch", "web_search", "latex_build", "latex_new_document"} {
+	for _, name := range []string{"read_file", "write_file", "edit_file", "glob", "grep", "shell", "web_fetch", "web_search", "latex_build", "latex_new_document", "dast_scan", "recon_scan"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("tool %q not registered", name)
 		}
@@ -235,6 +235,33 @@ func TestSecurityScanToolRegistered(t *testing.T) {
 	s := &securityScanTool{root: t.TempDir()}
 	if s.Name() != "security_scan" {
 		t.Errorf("name = %q", s.Name())
+	}
+}
+
+func TestReconScanToolRegistered(t *testing.T) {
+	rs := &reconScanTool{}
+	if rs.Name() != "recon_scan" {
+		t.Errorf("name = %q", rs.Name())
+	}
+	if rs.Capability() != tool.CapExecute {
+		t.Errorf("capability = %q, want execute", rs.Capability())
+	}
+}
+
+// TestReconScanToolRejectsDisallowedTargetBeforeAnyScanner proves the tool
+// wiring surfaces security.RunRecon's hard target-authorization gate as an
+// error (P13.5) rather than swallowing it — no nmap/nuclei binary needs to
+// exist for this rejection to happen deterministically.
+func TestReconScanToolRejectsDisallowedTargetBeforeAnyScanner(t *testing.T) {
+	rs := &reconScanTool{}
+	_, err := rs.Execute(context.Background(), mustJSON(t, map[string]any{
+		"targets": []string{"evil.example.com"},
+	}))
+	if err == nil {
+		t.Fatal("expected an error for a disallowed target")
+	}
+	if !strings.Contains(err.Error(), "evil.example.com") {
+		t.Errorf("err = %q, want it to name the disallowed target", err)
 	}
 }
 

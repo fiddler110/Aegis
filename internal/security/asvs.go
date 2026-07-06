@@ -70,12 +70,14 @@ var cweASVS = map[string]string{
 
 // toolASVS is a fallback for the handful of scanners that flag real
 // findings with no CWE to key off: gitleaks (secrets have no CWE tag in its
-// own report format) and the IaC/Dockerfile linters, whose findings are
-// misconfiguration by definition.
+// own report format), the IaC/Dockerfile linters (misconfiguration by
+// definition), and nmap (an open/exposed service is a configuration issue,
+// not a CWE-tagged vulnerability).
 var toolASVS = map[string]string{
 	"gitleaks":  "V6.4 Secret Management",
 	"kubescape": "V14 Configuration",
 	"hadolint":  "V14 Configuration",
+	"nmap":      "V14 Configuration",
 }
 
 // asvsFor derives a best-effort ASVS label for f: CWE-based mapping first

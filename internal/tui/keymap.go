@@ -47,3 +47,35 @@ func defaultKeyMap() keyMap {
 		SidebarToggle: key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "toggle sidebar")),
 	}
 }
+
+// keyHelpEntry is one row of a rendered keybinding list: the key label and
+// its description.
+type keyHelpEntry struct{ Key, Desc string }
+
+// helpEntries is the single list of every keybinding's (key, description)
+// pair — backing both the F1 overlay (renderHelpOverlay in tui.go) and
+// /help's "Keyboard shortcuts" section (cmdHelp in slash.go, P14.9) so a new
+// binding only needs to be added here once, the same single-source-of-truth
+// approach commandDefs (P14.10) uses for slash commands.
+func (km keyMap) helpEntries() []keyHelpEntry {
+	return []keyHelpEntry{
+		{km.Send.Help().Key, km.Send.Help().Desc},
+		{km.Queue.Help().Key, km.Queue.Help().Desc},
+		{km.Newline.Help().Key, km.Newline.Help().Desc},
+		{km.Thinking.Help().Key, km.Thinking.Help().Desc},
+		{km.Interrupt.Help().Key, km.Interrupt.Help().Desc},
+		{km.Complete.Help().Key, km.Complete.Help().Desc},
+		{km.Palette.Help().Key, km.Palette.Help().Desc},
+		{km.Cancel.Help().Key, km.Cancel.Help().Desc},
+		{km.Help.Help().Key, km.Help.Help().Desc},
+		{km.Clear.Help().Key, km.Clear.Help().Desc},
+		{km.Editor.Help().Key, km.Editor.Help().Desc},
+		{km.CycleMode.Help().Key, km.CycleMode.Help().Desc},
+		{km.Teammates.Help().Key, km.Teammates.Help().Desc},
+		{km.Sessions.Help().Key, km.Sessions.Help().Desc},
+		{km.Terminal.Help().Key, km.Terminal.Help().Desc},
+		{km.SidebarToggle.Help().Key, km.SidebarToggle.Help().Desc},
+		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
+		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
+	}
+}

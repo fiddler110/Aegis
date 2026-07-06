@@ -685,6 +685,50 @@ func TestPatchSession(t *testing.T) {
 	}
 }
 
+// TestPatchSessionModel is the P14.7 regression: a per-session model override
+// round-trips through PATCH /sessions/{id} and GET /sessions/{id} (both the
+// full Session and the SessionMeta returned by the patch itself), and an
+// empty string clears it back to "".
+func TestPatchSessionModel(t *testing.T) {
+	cl, cleanup := newTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Model != "" {
+		t.Errorf("new session model = %q, want empty", meta.Model)
+	}
+
+	model := "claude-opus-4-8"
+	updated, err := cl.UpdateSession(ctx, meta.ID, api.UpdateSessionRequest{Model: &model})
+	if err != nil {
+		t.Fatalf("UpdateSession model: %v", err)
+	}
+	if updated.Model != model {
+		t.Errorf("patch response model = %q, want %q", updated.Model, model)
+	}
+	sess, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Model != model {
+		t.Errorf("GetSession model = %q, want %q", sess.Model, model)
+	}
+
+	// Clearing back to "" reverts to the persona/global default.
+	empty := ""
+	updated, err = cl.UpdateSession(ctx, meta.ID, api.UpdateSessionRequest{Model: &empty})
+	if err != nil {
+		t.Fatalf("UpdateSession clear model: %v", err)
+	}
+	if updated.Model != "" {
+		t.Errorf("cleared model = %q, want empty", updated.Model)
+	}
+}
+
 // TestPersonaHotReload verifies persona files added while the daemon runs
 // become visible without a restart, and that switching to one carries its
 // full profile (persona name persisted on the session).

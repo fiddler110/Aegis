@@ -170,7 +170,7 @@ var knownToolNames = map[string]bool{
 	"ls": true, "glob": true, "grep": true,
 	"git": true, "git_commit": true, "git_pr": true,
 	"shell": true, "web_fetch": true, "web_search": true, "list_models": true,
-	"security_scan": true, "skill": true, "tool_search": true,
+	"security_scan": true, "dast_scan": true, "recon_scan": true, "skill": true, "tool_search": true,
 	"render_diagram": true, "latex_build": true, "latex_new_document": true,
 	"remember": true, "save_skill": true,
 	"task_create": true, "task_list": true, "task_get": true, "task_update": true, "task_output": true, "task_stop": true,

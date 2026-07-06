@@ -741,18 +741,63 @@ Uses [Kroki](https://kroki.io) by default (configurable via `diagram.kroki_url`)
 
 ### `security_scan`
 
-**Capability:** read
+**Capability:** execute
 
-Run security scanners against a path and return a normalized findings report.
+Run available static/dependency/secrets scanners (opengrep, trivy, gitleaks, kubescape, hadolint, osv-scanner, grype, and opt-in engines) against a path — or a built container image, or generate an SBOM instead — and return a normalized findings report. See [Security Features](security.md) for the full scanner list and config.
 
 ```json
 {
-  "path": ".",               // path to scan
-  "tools": ["semgrep", "trivy", "gitleaks"]  // optional: subset of tools
+  "path": "."                 // optional: workspace-relative subdirectory; defaults to the whole workspace
 }
 ```
 
-Runs whichever of semgrep, trivy, and gitleaks are installed. Returns findings with: severity (critical/high/medium/low/info), location (file:line), rule ID, message, and remediation hint.
+```json
+{
+  "image": "alpine:3.20"      // scan a built container image instead of the workspace; mutually exclusive with path
+}
+```
+
+```json
+{
+  "sbom": true                // generate a CycloneDX SBOM via syft instead of scanning for findings; mutually exclusive with image
+}
+```
+
+Returns findings with: severity (critical/high/medium/low/info), location (file:line), rule ID, message, and remediation hint; deduped across overlapping tools and tagged with an OWASP ASVS chapter where confidently derivable.
+
+---
+
+### `dast_scan` (deferred)
+
+**Capability:** execute
+
+Dynamic Application Security Testing via OWASP ZAP: crawls (and, in `active`/`api` mode, actively attacks) a *running* web application to find real, exploitable vulnerabilities. Container-only (`security.tools.zap.image`, digest-pinned).
+
+```json
+{
+  "target": "http://localhost:3000",
+  "mode": "baseline",          // "baseline" (passive, default), "active", or "api"
+  "api_definition": ""         // OpenAPI spec URL/path; required when mode is "api"
+}
+```
+
+The target must be loopback/private (allowed by default) or explicitly declared in `security.dast.allowed_targets` — checked unconditionally, independent of permission mode. `active`/`api` modes additionally require `security.dast.allow_active: true`. See [Security Features](security.md#dynamic-application-security-testing-dast) for the full gating.
+
+---
+
+### `recon_scan` (deferred)
+
+**Capability:** execute
+
+Network/host reconnaissance for attack-surface mapping: nmap discovers live hosts, open ports, and service/version banners across a target host list or CIDR range; nuclei then matches its community template library (CVEs, misconfigurations, exposed panels) against whatever nmap found alive.
+
+```json
+{
+  "targets": ["192.168.1.0/24", "db.lan"]   // bare hosts, IPs, or CIDR ranges — no http(s):// scheme
+}
+```
+
+Shares its target-authorization gate with `dast_scan` (loopback/private allowed by default, else must be declared in `security.dast.allowed_targets`), checked individually per target with a 256-target cap per call. `nuclei` additionally requires `security.tools.nuclei.templates_version` (a pinned `nuclei-templates` release tag). Host-binary only — no container fallback. `security.dast.allow_active: true` unlocks nmap's OS-detection/full-port-range/default-script mode and nuclei's full template set. See [Security Features](security.md#network--host-reconnaissance-nmap--nuclei).
 
 ---
 

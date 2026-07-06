@@ -20,6 +20,7 @@ type SessionMeta struct {
 	ID           string     `json:"id"`
 	Title        string     `json:"title"`
 	Mode         string     `json:"mode"`
+	Model        string     `json:"model,omitempty"` // P14.7: per-session override; "" = persona/global default
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
 	InputTokens  int        `json:"input_tokens,omitempty"`
@@ -148,15 +149,21 @@ type Teammate struct {
 	EndedAt   time.Time `json:"ended_at,omitzero"`
 }
 
-// UpdateSessionRequest patches a session's system prompt, mode, or persona.
-// Setting Persona switches the session's full behavioral profile: system
-// prompt, persisted persona name (which carries model, permission rules, and
-// output-guard overrides on subsequent turns), and — unless Mode is also set —
-// the persona's permission mode.
+// UpdateSessionRequest patches a session's system prompt, mode, persona, or
+// model. Setting Persona switches the session's full behavioral profile:
+// system prompt, persisted persona name (which carries model, permission
+// rules, and output-guard overrides on subsequent turns), and — unless Mode
+// is also set — the persona's permission mode. Model (P14.7) sets a
+// per-session override that takes precedence over the persona's own Model on
+// every subsequent turn; an empty string clears it back to the persona/global
+// default. Neither Model nor the persona-level override is validated against
+// the configured provider's actual model list — an unrecognized id surfaces
+// as a provider error on the next turn, not at switch time.
 type UpdateSessionRequest struct {
 	System  *string `json:"system,omitempty"`
 	Mode    *string `json:"mode,omitempty"`
 	Persona *string `json:"persona,omitempty"`
+	Model   *string `json:"model,omitempty"`
 }
 
 // MemoryResponse describes the current memory and skills state.
@@ -258,6 +265,12 @@ type ScanRequest struct {
 	// SBOM generates a CycloneDX SBOM via syft instead of scanning for
 	// findings, persisting it under Path. Mutually exclusive with Image.
 	SBOM bool `json:"sbom,omitempty"`
+	// Targets runs network/host recon (nmap + nuclei, the recon_scan tool's
+	// underlying scan) against a bare host/IP/CIDR list instead of scanning
+	// the workspace. Mutually exclusive with Path/Image/SBOM. Every target is
+	// checked against the shared security.dast.allowed_targets gate before
+	// either scanner runs (P13.5).
+	Targets []string `json:"targets,omitempty"`
 }
 
 // ScanResponse carries the formatted scan report (or SBOM-generation summary).

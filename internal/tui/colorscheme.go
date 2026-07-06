@@ -253,11 +253,23 @@ var (
 
 func init() { applyScheme(darkScheme()) }
 
+// normalizeThemeName maps any input to a canonical scheme name — "light", or
+// "dark" as the fallback for anything unrecognized (including empty/unset).
+func normalizeThemeName(name string) string {
+	if strings.ToLower(strings.TrimSpace(name)) == "light" {
+		return "light"
+	}
+	return "dark"
+}
+
 // applyTheme selects the active color scheme by config name (tui.theme).
 // Unknown names fall back to dark. Must run before newModel, since lipgloss
-// styles capture colors at creation.
+// styles capture colors at creation. Also called at runtime by /theme
+// (P14.8): rebinding the package-level col* vars here is only half of a live
+// switch — the caller must also rebuild m.th (newTheme) and m.renderer
+// (newGlamourRenderer), which capture colors/style at creation time too.
 func applyTheme(name string) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	switch normalizeThemeName(name) {
 	case "light":
 		applyScheme(lightScheme())
 	default:

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -59,6 +58,8 @@ func newSecurityStatusCmd() *cobra.Command {
 					detail = "on PATH"
 				case security.MethodContainer:
 					detail = fmt.Sprintf("via %s", rt)
+				case security.MethodWSL:
+					detail = "via WSL"
 				default:
 					if note := security.AvailabilityNote(d.Name, reason); note != "" {
 						detail = reason + "; " + note
@@ -78,6 +79,8 @@ func methodLabel(m security.Method) string {
 		return "host"
 	case security.MethodContainer:
 		return "container"
+	case security.MethodWSL:
+		return "wsl"
 	default:
 		return "unavailable"
 	}
@@ -97,7 +100,7 @@ func newSecurityInstallCmd() *cobra.Command {
 			}
 			command, ok := security.InstallCommand(name)
 			if !ok {
-				return fmt.Errorf("no guided install available for %s on %s — see the tool's own docs, or configure a container image (security.tools.%s.image)", d.Name, runtime.GOOS, d.Name)
+				return fmt.Errorf("%s", security.NoGuidedInstallReason(d.Name))
 			}
 
 			out := cmd.OutOrStdout()

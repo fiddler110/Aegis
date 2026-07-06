@@ -158,7 +158,10 @@ Type `/` to open the command completion popup and browse available commands.
 | `/rollback [n]` | Restore checkpoint n and run `git reset --hard` |
 | `/timeline` | Jump to a past turn in the conversation |
 | `/detach [on\|off]` | Run session in background (survives TUI close) |
-| `/archive [off]` | Archive session (hidden from listings, data kept); `/archive off` to restore |
+| `/archive [off\|list]` | Archive session (hidden from listings, data kept); `/archive off` to restore; `/archive list` to list archived sessions |
+| `/prune [days]` | Delete non-archived sessions older than N days (server TTL if omitted) |
+| `/runs` | List message runs currently in flight across all sessions |
+| `/bg [list\|events [session-id]]` | List background (detached) sessions, or print one's buffered events |
 
 ### Permission & Mode
 
@@ -182,6 +185,8 @@ Type `/` to open the command completion popup and browse available commands.
 | `/remember <text>` | Save a memory entry (prompts for scope: project or user) |
 | `/skills` | List all saved skills (project + user) |
 | `/commands` | List custom commands loaded from `.aegis/commands/` |
+| `/bundle info <path-or-url>` | Show a bundle's manifest, artifacts, and content hash |
+| `/bundle install <path-or-url> [global] [sha256:<hash>] [confirm]` | Preview or install a bundle's commands/agents/skills; `global` targets the user data dir, `sha256:<hash>` pins provenance, `confirm` actually writes |
 
 ### Display & Session
 
@@ -189,6 +194,8 @@ Type `/` to open the command completion popup and browse available commands.
 |---------|-------------|
 | `/clear` | Clear the transcript display (session history preserved) |
 | `/models` | Show current model and provider |
+| `/model <model-id>` | Switch this session's model mid-session (persisted as a per-session override; must belong to the currently configured provider) |
+| `/model default` | Clear the session model override, reverting to the persona/global default |
 | `/status` | Show daemon health, sandbox backend, and cost caps/spend (session + cross-session daily) |
 | `/tools compact` | Set tool-output display to 10 lines max |
 | `/tools full` | Show complete tool output (no line cap) |
