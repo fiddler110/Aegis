@@ -161,6 +161,18 @@ var descriptors = map[string]ScannerDescriptor{
 			"windows": "scoop install gitleaks",
 		},
 	},
+	"trufflehog": {
+		Name:           "trufflehog",
+		Binary:         "trufflehog",
+		Category:       "Secrets",
+		Summary:        "Scans the working tree for hardcoded credentials using 800+ detectors that can optionally live-verify a match against the real provider API (AWS/GitHub/etc.) to confirm it's still active, cutting triage noise sharply versus pattern-only detection. Opt-in, alongside gitleaks rather than replacing it — deduped against gitleaks findings at the same location (P11.8). AGPL-3.0 licensed (vs. gitleaks' MIT); Aegis only shells out to a separately-installed binary, so this is a disclosure, not a code-linking concern. Verification (security.tools.trufflehog.verify) is a separate, host-only opt-in — see docs/security.md.",
+		DefaultEnabled: false,
+		Install: map[string]string{
+			"darwin":  "brew install trufflehog",
+			"linux":   "curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin",
+			"windows": "go install github.com/trufflesecurity/trufflehog/v3@latest",
+		},
+	},
 	"kubescape": {
 		Name:           "kubescape",
 		Binary:         "kubescape",
@@ -327,6 +339,10 @@ type ToolPolicy struct {
 	// the way a scanner container image is never used unpinned (P7.6).
 	// Meaningless for every other tool.
 	TemplatesVersion string
+	// Verify enables trufflehog's live credential verification (P13.2).
+	// Meaningless for every other tool. Resolve refuses container mode
+	// whenever this is set — see trufflehogScanner.Resolve.
+	Verify bool
 }
 
 // Options bundles per-tool policy for a scan run (the P11.11 config surface).
@@ -363,7 +379,7 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 		if tc.Enabled != nil {
 			enabled = *tc.Enabled
 		}
-		tools[name] = ToolPolicy{Enabled: enabled, Method: tc.Method, Image: tc.Image, TemplatesVersion: tc.TemplatesVersion}
+		tools[name] = ToolPolicy{Enabled: enabled, Method: tc.Method, Image: tc.Image, TemplatesVersion: tc.TemplatesVersion, Verify: tc.Verify}
 	}
 	return Options{Tools: tools, DefaultMethod: cfg.DefaultMethod}
 }

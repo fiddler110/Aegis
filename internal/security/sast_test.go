@@ -23,6 +23,7 @@ func TestScannerDefaultEnabledSplit(t *testing.T) {
 		{"njsscan", false},
 		{"trivy", true},
 		{"gitleaks", true},
+		{"trufflehog", false},
 		{"kubescape", true},
 		{"hadolint", true},
 		{"grype", true},

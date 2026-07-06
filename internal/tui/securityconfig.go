@@ -73,6 +73,7 @@ type securityConfigModel struct {
 	editMethod  string
 	editInstall string
 	editImage   string
+	editVerify  bool // trufflehog only (P13.2): live credential verification, off by default
 
 	action           string // action-phase selection: "edit", "install", or "back"
 	installCmd       string // guided-install command shown for confirmation
@@ -195,6 +196,9 @@ func (m *securityConfigModel) toolBadge(name string) string {
 		if tc.Method != "" {
 			method = tc.Method
 		}
+		if name == "trufflehog" && tc.Verify {
+			return fmt.Sprintf("[%3s %-9s verify:ON]", state, method)
+		}
 	}
 	return fmt.Sprintf("[%3s %-9s]", state, method)
 }
@@ -213,33 +217,47 @@ func (m *securityConfigModel) buildEditForm() *huh.Form {
 		huh.NewOption("Never (use only if already present)", "never"),
 	}
 
+	fields := []huh.Field{
+		huh.NewNote().
+			Title(m.editingName).
+			Description(d.Summary),
+		huh.NewConfirm().
+			Title("Enabled").
+			Affirmative("Yes").
+			Negative("No").
+			Value(&m.editEnabled),
+		huh.NewSelect[string]().
+			Title("Run method").
+			Options(methodOpts...).
+			Value(&m.editMethod).
+			Height(5),
+		huh.NewSelect[string]().
+			Title("Install policy").
+			Description("Only affects `aegis security install "+m.editingName+"`.").
+			Options(installOpts...).
+			Value(&m.editInstall).
+			Height(5),
+		huh.NewInput().
+			Title("Container image (digest-pinned)").
+			Description("Required to enable container fallback, e.g. name@sha256:... — leave empty to disable it. Aegis ships no built-in pin; see docs/security.md.").
+			Placeholder("(none)").
+			Value(&m.editImage),
+	}
+	// trufflehog-only (P13.2): live credential verification is a distinct,
+	// explicitly warning-labelled opt-in — it makes real calls to third-party
+	// provider APIs using the actual discovered secret, and forces host-only
+	// execution (Resolve refuses container mode when this is set).
+	if m.editingName == "trufflehog" {
+		fields = append(fields, huh.NewConfirm().
+			Title("⚠ Verify (live credential check)").
+			Description("Confirms each detected secret against the real provider API (AWS/GitHub/etc.) using the actual discovered credential — a real outbound call, not a local check. Forces host-only execution (no container fallback). Off by default.").
+			Affirmative("Yes, enable verification").
+			Negative("No").
+			Value(&m.editVerify))
+	}
+
 	return huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title(m.editingName).
-				Description(d.Summary),
-			huh.NewConfirm().
-				Title("Enabled").
-				Affirmative("Yes").
-				Negative("No").
-				Value(&m.editEnabled),
-			huh.NewSelect[string]().
-				Title("Run method").
-				Options(methodOpts...).
-				Value(&m.editMethod).
-				Height(5),
-			huh.NewSelect[string]().
-				Title("Install policy").
-				Description("Only affects `aegis security install "+m.editingName+"`.").
-				Options(installOpts...).
-				Value(&m.editInstall).
-				Height(5),
-			huh.NewInput().
-				Title("Container image (digest-pinned)").
-				Description("Required to enable container fallback, e.g. name@sha256:... — leave empty to disable it. Aegis ships no built-in pin; see docs/security.md.").
-				Placeholder("(none)").
-				Value(&m.editImage),
-		),
+		huh.NewGroup(fields...),
 	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
 }
 
@@ -444,6 +462,7 @@ func (m *securityConfigModel) startEdit(name string) {
 	m.editMethod = strOrDefault(tc.Method, "auto")
 	m.editInstall = strOrDefault(tc.Install, "prompt")
 	m.editImage = tc.Image
+	m.editVerify = tc.Verify
 	m.phase = scPhaseEdit
 	m.form = m.buildEditForm()
 }
@@ -467,12 +486,16 @@ func (m *securityConfigModel) updateEdit(msg tea.Msg) tea.Cmd {
 
 func (m *securityConfigModel) applyEdit() {
 	enabled := m.editEnabled
-	m.tools[m.editingName] = config.SecurityToolConfig{
+	tc := config.SecurityToolConfig{
 		Enabled: &enabled,
 		Method:  m.editMethod,
 		Install: m.editInstall,
 		Image:   strings.TrimSpace(m.editImage),
 	}
+	if m.editingName == "trufflehog" {
+		tc.Verify = m.editVerify
+	}
+	m.tools[m.editingName] = tc
 }
 
 func (m *securityConfigModel) backToList() {
