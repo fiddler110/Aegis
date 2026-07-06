@@ -289,6 +289,9 @@ func buildSecurityBlock(p SecurityPatch) string {
 			if tc.TemplatesVersion != "" {
 				fmt.Fprintf(&b, "      templates_version: %q\n", tc.TemplatesVersion)
 			}
+			if tc.Verify {
+				fmt.Fprintf(&b, "      verify: %t\n", tc.Verify)
+			}
 		}
 	}
 

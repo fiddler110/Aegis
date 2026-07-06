@@ -83,6 +83,20 @@ func (r Reachability) weight() int {
 	}
 }
 
+// Verification classifies whether a detected secret was confirmed still
+// active via a live provider-API check (P13.2: currently only trufflehog,
+// gated behind security.tools.trufflehog.verify since it makes real calls to
+// third-party services using the discovered credential). Left at
+// VerificationUnknown for every other tool/finding rather than guessed —
+// same posture as Reachability: a wrong claim either way is worse than none.
+type Verification string
+
+const (
+	VerificationUnknown    Verification = ""           // not checked — every tool except trufflehog with verify:true
+	VerificationVerified   Verification = "verified"   // confirmed active against the real provider API
+	VerificationUnverified Verification = "unverified" // checked and confirmed inactive/invalid
+)
+
 // Finding is a single normalized security issue.
 type Finding struct {
 	Tool         string       `json:"tool"`
@@ -93,6 +107,10 @@ type Finding struct {
 	Description  string       `json:"description,omitempty"`
 	Remediation  string       `json:"remediation,omitempty"`
 	Reachability Reachability `json:"reachability,omitempty"`
+	// Verification is set only for a secret-detection finding whose tool
+	// performed live verification (P13.2) — empty (VerificationUnknown) for
+	// every other finding, never guessed.
+	Verification Verification `json:"verification,omitempty"`
 	// CWE is the numeric CWE ID (e.g. "79") extracted from a SARIF rule's
 	// tags/description when present (P11.8) — never guessed from a title,
 	// only ever a value the tool itself tagged the rule with. Feeds ASVS.
@@ -143,6 +161,7 @@ func DefaultScanners() []Scanner {
 		njsscanScanner{},
 		trivyScanner{},
 		gitleaksScanner{},
+		trufflehogScanner{},
 		kubescapeScanner{},
 		hadolintScanner{},
 		osvScanner{},
@@ -361,7 +380,7 @@ func (r Report) Format() string {
 	}
 	b.WriteString("\n")
 	for _, f := range r.Findings {
-		fmt.Fprintf(&b, "[%s]%s %s — %s\n  %s (%s)%s\n", f.Severity, reachabilityTag(f.Reachability), f.Tool, f.Title, f.Location, f.RuleID, seenByTag(f.SeenBy))
+		fmt.Fprintf(&b, "[%s]%s%s %s — %s\n  %s (%s)%s\n", f.Severity, reachabilityTag(f.Reachability), verificationTag(f.Verification), f.Tool, f.Title, f.Location, f.RuleID, seenByTag(f.SeenBy))
 		if f.ASVS != "" {
 			fmt.Fprintf(&b, "  asvs: %s\n", f.ASVS)
 		}
@@ -390,6 +409,22 @@ func reachabilityTag(r Reachability) string {
 		return " [reachable: called by this project]"
 	case ReachabilityUnreachable:
 		return " [not reachable: present but never called]"
+	default:
+		return ""
+	}
+}
+
+// verificationTag renders a short suffix for a secret finding that was
+// checked against the real provider API (P13.2); empty (VerificationUnknown)
+// for every finding that wasn't — no tag, no implied claim either way. A
+// [VERIFIED] tag is meant to be visually hard to miss: it's the signal an
+// operator should weigh heavily before baseline-suppressing the finding.
+func verificationTag(v Verification) string {
+	switch v {
+	case VerificationVerified:
+		return " [VERIFIED: confirmed active credential]"
+	case VerificationUnverified:
+		return " [checked: not currently active]"
 	default:
 		return ""
 	}

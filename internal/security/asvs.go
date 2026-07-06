@@ -74,10 +74,11 @@ var cweASVS = map[string]string{
 // definition), and nmap (an open/exposed service is a configuration issue,
 // not a CWE-tagged vulnerability).
 var toolASVS = map[string]string{
-	"gitleaks":  "V6.4 Secret Management",
-	"kubescape": "V14 Configuration",
-	"hadolint":  "V14 Configuration",
-	"nmap":      "V14 Configuration",
+	"gitleaks":   "V6.4 Secret Management",
+	"trufflehog": "V6.4 Secret Management",
+	"kubescape":  "V14 Configuration",
+	"hadolint":   "V14 Configuration",
+	"nmap":       "V14 Configuration",
 }
 
 // asvsFor derives a best-effort ASVS label for f: CWE-based mapping first

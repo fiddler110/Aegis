@@ -23,7 +23,7 @@ import (
 func newSecurityCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "security",
-		Short: "Manage security scanner availability (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, kubescape, hadolint, grype, dockle, osv-scanner, syft)",
+		Short: "Manage security scanner availability (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, trufflehog, kubescape, hadolint, grype, dockle, osv-scanner, syft)",
 		Long: "Inspects and provisions the scanners behind `aegis scan`/the security_scan tool. " +
 			"`status` reports whether each tool will run via its host binary, a configured " +
 			"container image, or not at all (with the exact reason). `install` walks through " +

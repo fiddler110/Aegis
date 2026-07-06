@@ -9,9 +9,11 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-06 — **P13.6** (`threat-modeling` builtin skill covering STRIDE/LINDDUN/
+**Last updated:** 2026-07-06 — **P13.2** (trufflehog secret scanner, opt-in alongside gitleaks,
+with a host-only-gated live-verification opt-in) shipped. Only P13.3/P13.4/P13.7 remain open in P13.
+**Also 2026-07-06:** **P13.6** (`threat-modeling` builtin skill covering STRIDE/LINDDUN/
 PASTA/Trike/VAST/NIST 800-154, `/threat-model` TUI command, `security-architect` persona updated to
-name the skill) shipped. Only P13.2/P13.3/P13.4/P13.7 remain open in P13.
+name the skill) shipped.
 **Also 2026-07-06:** cross-feature integration review of the (then-uncommitted) P13.5/
 P13.8 work, same pattern as the 2026-07-05 review: an adversarial fresh-context pass (not a
 roadmap-prose re-verification) checking whether `recon_scan`/`red-team` actually wired into every
@@ -80,8 +82,50 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P13 items (Security & Capability Enhancements)
 
-The other P13 items (P13.2/P13.3/P13.4/P13.7) are still open — see
+The other P13 items (P13.3/P13.4/P13.7) are still open — see
 [roadmap.md](roadmap.md#open-work--p13-security--capability-enhancements).
+
+### P13.2 — SHIPPED 2026-07-06 — trufflehog secret scanner with opt-in live verification
+
+Added `trufflehogScanner` (`internal/security/scanners.go`) alongside gitleaks rather than
+replacing it — opt-in (`DefaultEnabled: false`, same posture as the P11.3 language-targeted SAST
+engines), filesystem mode, hand-written JSON-lines parser (trufflehog streams one JSON object per
+result, not a single array/report file the way gitleaks or kubescape write). Findings dedupe
+against gitleaks through the existing P11.8 machinery when both flag the same location, and get
+the same `V6.4 Secret Management` ASVS fallback label gitleaks gets (`internal/security/asvs.go`).
+
+**Live verification** (trufflehog's differentiator: 800+ detectors can call the real provider API
+— AWS/GitHub/etc. — to confirm a found credential is still active) is a second, separate opt-in:
+`security.tools.trufflehog.verify` (default false). Because it makes real outbound calls using the
+actual discovered secret, and the scanner-container runner is network-isolated (`--network none`,
+every scanner container's hardening posture), `verify: true` is **host-only by construction** —
+`trufflehogScanner.Resolve` wraps the generic resolver and forces `MethodNone` (with an explanatory
+reason) rather than `MethodContainer` whenever verification is requested, the same host-only carve-
+out image scanning already has, instead of punching a network hole through the isolation posture or
+silently dropping verification.
+
+Added a `Verification` tri-state to `Finding` (`internal/security/security.go`), modeled directly on
+the existing `Reachability` tri-state's "never guessed" posture: a finding is `VerificationUnknown`
+unless verification was actually attempted (parseTrufflehog takes a `verifyAttempted` bool — trufflehog's
+own `Verified` JSON field is always `false` when `--no-verification` ran, which is a different claim
+from "checked and confirmed inactive" and must not render as one), `VerificationVerified` when the
+live check confirmed the credential is active, `VerificationUnverified` when checked and found
+inactive. `Format()` renders a hard-to-miss `[VERIFIED: confirmed active credential]` tag on a
+verified finding; the security-audit skill's triage loop now calls out that a verified finding
+should never be baseline-suppressed without an explicit, specific reviewer reason.
+
+TUI surface: `/security-config`'s per-tool edit form conditionally adds a warning-labelled
+"⚠ Verify (live credential check)" confirm field only when editing trufflehog, describing exactly
+what it does before the operator turns it on; the list view's tool badge shows `verify:ON` when
+set. The verified/unverified tag renders in `/scan` output automatically since both the TUI and CLI
+render through the same `Report.Format()`.
+
+Also documented AGPL-3.0 licensing (`docs/security.md`) — trufflehog is AGPL-3.0 vs. gitleaks' MIT;
+Aegis only shells out to a separately-installed binary so it's a disclosure, not a code-linking
+concern for Aegis itself, but worth knowing before an operator installs and runs it. Added a
+recorded-fixture regression case (`internal/security/testdata/trufflehog.jsonl`,
+`regression.golden.json`) exercising the verified tag end to end through the full
+parse→dedup→ASVS→sort pipeline, per the existing P11.9 convention.
 
 ### P13.1 — Security config TUI/CLI: cross-platform availability gap
 

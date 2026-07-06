@@ -39,8 +39,8 @@ func sarifFixture(name, file, tool string) fixtureScanner {
 // TestScanRegressionAcrossRecordedOutputs is the P11.9 regression proof: it
 // drives the full aggregation pipeline (parse -> dedup -> ASVS -> baseline
 // -> sort, exactly what RunWithOptions does for a live scan) over recorded
-// fixtures for every parser Aegis has (SARIF-based, gitleaks, osv-scanner),
-// including a three-way cross-tool CVE overlap and all three baseline
+// fixtures for every parser Aegis has (SARIF-based, gitleaks, trufflehog,
+// osv-scanner), including a three-way cross-tool CVE overlap and all three baseline
 // entry states (active/expired/invalid), and compares the aggregated
 // Report against a checked-in golden file. A change to any parser,
 // DedupFindings, assignASVS, or Baseline.Apply that alters real-world
@@ -65,6 +65,7 @@ suppressions:
 		sarifFixture("trivy-vuln", "trivy_vuln.sarif.json", "trivy"),
 		sarifFixture("trivy-misconfig", "trivy_misconfig.sarif.json", "trivy"),
 		fixtureScanner{name: "gitleaks", file: "gitleaks.json", parse: parseGitleaks},
+		fixtureScanner{name: "trufflehog", file: "trufflehog.jsonl", parse: func(b []byte) ([]Finding, error) { return parseTrufflehog(b, true) }},
 		fixtureScanner{name: "osv-scanner", file: "osv_scanner.json", parse: parseOSVScanner},
 		sarifFixture("grype", "grype_sca.sarif.json", "grype"),
 		sarifFixture("zap", "zap_dast.sarif.json", "zap"),

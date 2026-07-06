@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-06
+**Last updated:** 2026-07-06 (P13.2 shipped)
 
 This document tracks only **open** work — what's next. For shipped-feature history and full design
 rationale behind completed items, see [releases.md](releases.md).
@@ -9,13 +9,13 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P13** (P13.2 trufflehog, P13.3 terminal enhancements, P13.4 nebula-inspired
+Open items: **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
 engagement tooling, P13.7 LaTeX report skill), **P9.4** (per-task model
 routing), **P6.1** (mid-turn state persistence), **P6.5** (desktop/IDE surface beyond ACP).
 
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
-15-item punch list, P10, P11, P12, P13.1/P13.5/P13.6/P13.8, P14 (all of P14.1–P14.10), and the TQ TUI
-track — is shipped. See [releases.md](releases.md) for what each shipped and why.
+15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.8, P14 (all of P14.1–P14.10), and the
+TQ TUI track — is shipped. See [releases.md](releases.md) for what each shipped and why.
 
 **Nothing is currently in progress.** P13's remaining sub-items are researched and scoped
 (2026-07-05) but not started. P9.4 and P6.1/P6.5 are real but have no concrete trigger — don't
@@ -26,42 +26,9 @@ build them speculatively; check with the user first.
 ## Open Work — P13 (Security & Capability Enhancements)
 
 Researched 2026-07-05 (five items via background review of a named external project/methodology,
-two via direct codebase audit). P13.1, P13.5, P13.6, and P13.8 shipped — see
+two via direct codebase audit). P13.1, P13.2, P13.5, P13.6, and P13.8 shipped — see
 [releases.md](releases.md#shipped--p13-items-security--capability-enhancements). The three below are
 scoped proposals, not started.
-
-### P13.2 — Trufflehog secret-scanning enhancement
-
-Researched: trufflehog's differentiator over gitleaks is **live verification** (800+ detectors
-call the real provider API — AWS/GitHub/etc. — to confirm a found credential is still active),
-cutting triage noise sharply. It has no SARIF output (needs a hand-written parser, same as
-gitleaks today) and is AGPL-3.0 licensed (vs. gitleaks' MIT — no code-linking concern given Aegis
-only shells out to a separately-installed binary, but worth disclosing to operators).
-
-Recommendation: add **alongside** gitleaks, opt-in (`DefaultEnabled:false`, matching the P11.3
-gosec/bandit/etc. precedent), deduped against gitleaks via the existing P11.8
-`DedupFindings`/`SeenBy` machinery — not a replacement. Verification mode makes real calls to
-third-party services using the actual discovered secret (rate-limit/alerting/misuse-resembling
-risk) and needs a DAST-style hard gate, not a normal scanner toggle.
-
-- **P13.2.1** — Add `trufflehogScanner` (opt-in) to `internal/security/scanners.go`/`descriptors`,
-  filesystem mode, hand-written JSON parser, default `--no-verification`. (M)
-- **P13.2.2** — `security.tools.trufflehog.verify` config bool (default false); when true, require
-  `MethodHost` only — verification is incompatible with the `--network none` container-hardening
-  posture, same host-only carve-out precedent as image scanning — and have `Resolve` explicitly
-  refuse container mode with `verify:true`. (S)
-- **P13.2.3** — Extend `Finding` with an optional verified/unverified/unknown tri-state; surface it
-  in `Format()` and the security-audit skill's triage loop so verified findings are harder to
-  baseline-suppress. (S)
-- **P13.2.4** — Document AGPL-3.0 licensing in `docs/security.md`'s tool table. (S)
-- **P13.2.5** — Guided-install descriptor entries (brew/curl-script/go install/docker) per the
-  P11.10 pattern. (S)
-
-TUI surface requirement (see the cross-cutting note below): the `verify` opt-in must appear as an
-explicit, warning-labelled toggle in `/security-config`; the verified/unverified tri-state
-(P13.2.3) must render in the `/scan` output, not only the CLI.
-
-Priority: Medium, Effort: M overall.
 
 ### P13.3 — Terminal enhancements (Microsoft Intelligent Terminal review)
 

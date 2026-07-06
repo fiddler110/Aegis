@@ -359,6 +359,14 @@ type SecurityToolConfig struct {
 	// template set the same way a scanner container image is never used
 	// without a digest pin.
 	TemplatesVersion string `koanf:"templates_version"`
+	// Verify enables trufflehog's live credential verification (P13.2):
+	// each detected secret is confirmed against the real provider API
+	// (AWS/GitHub/etc.) instead of just pattern/entropy-matched. Meaningless
+	// for every other tool. Default false — verification makes real calls to
+	// third-party services using the actual discovered secret, and is
+	// host-only (security.Resolve refuses container mode when this is set,
+	// the same host-only carve-out image scanning already has).
+	Verify bool `koanf:"verify"`
 }
 
 // ToolEnabled reports whether c enables the tool (default true).

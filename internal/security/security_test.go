@@ -108,6 +108,98 @@ func TestParseGitleaksEmpty(t *testing.T) {
 	}
 }
 
+// TestParseTrufflehog covers the JSON-lines shape (one object per line, not
+// a single array the way gitleaks writes) and the verifyAttempted split: the
+// same raw line ("Verified": true/false) means something different depending
+// on whether --no-verification was passed.
+func TestParseTrufflehog(t *testing.T) {
+	data := []byte(`{"DetectorName":"AWS","Verified":true,"Redacted":"AKIA****","SourceMetadata":{"Data":{"Filesystem":{"file":"app\\secrets.go","line":12}}}}
+{"DetectorName":"GitHub","Verified":false,"Redacted":"ghp_****","SourceMetadata":{"Data":{"Filesystem":{"file":"config.yaml","line":3}}}}`)
+
+	findings, err := parseTrufflehog(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("got %d findings, want 2", len(findings))
+	}
+	if findings[0].Severity != SevHigh {
+		t.Errorf("severity = %s, want HIGH", findings[0].Severity)
+	}
+	if findings[0].Location != "app/secrets.go:12" {
+		t.Errorf("location = %q (should use forward slashes)", findings[0].Location)
+	}
+	if findings[0].Verification != VerificationVerified {
+		t.Errorf("finding[0].Verification = %q, want %q", findings[0].Verification, VerificationVerified)
+	}
+	if findings[1].Verification != VerificationUnverified {
+		t.Errorf("finding[1].Verification = %q, want %q", findings[1].Verification, VerificationUnverified)
+	}
+}
+
+// TestParseTrufflehogNotAttempted is the "not guessed" requirement (mirrors
+// Reachability's posture): when verification was never attempted
+// (--no-verification, the default), a finding must render as
+// VerificationUnknown, never VerificationUnverified — trufflehog's own
+// "Verified" field is always false in that mode, which is not the same claim
+// as "checked and confirmed inactive".
+func TestParseTrufflehogNotAttempted(t *testing.T) {
+	data := []byte(`{"DetectorName":"AWS","Verified":false,"Redacted":"AKIA****","SourceMetadata":{"Data":{"Filesystem":{"file":"secrets.go","line":1}}}}`)
+	findings, err := parseTrufflehog(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("got %d findings, want 1", len(findings))
+	}
+	if findings[0].Verification != VerificationUnknown {
+		t.Errorf("Verification = %q, want %q (unknown, not unverified) when verification wasn't attempted", findings[0].Verification, VerificationUnknown)
+	}
+}
+
+func TestParseTrufflehogEmpty(t *testing.T) {
+	findings, err := parseTrufflehog([]byte("  \n"), false)
+	if err != nil || findings != nil {
+		t.Errorf("empty trufflehog output should yield no findings, got %v %v", findings, err)
+	}
+}
+
+// TestTrufflehogResolveRefusesContainerWithVerify is the P13.2.2 requirement:
+// verify:true must force host-only, never silently drop verification or run
+// it through the network-isolated scanner-container path.
+func TestTrufflehogResolveRefusesContainerWithVerify(t *testing.T) {
+	withDetectRuntime(t, func(ctx context.Context, priority []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return sandbox.RuntimeDocker, true
+	})
+
+	opts := Options{Tools: map[string]ToolPolicy{
+		"trufflehog": {Enabled: true, Method: "container", Image: "trufflesecurity/trufflehog@sha256:" + strings.Repeat("a", 64), Verify: true},
+	}}
+	method, _, _, reason := trufflehogScanner{}.Resolve(context.Background(), opts)
+	if method != MethodNone {
+		t.Errorf("method = %v, want MethodNone when verify:true forces container away", method)
+	}
+	if !strings.Contains(reason, "verify") || !strings.Contains(reason, "host") {
+		t.Errorf("reason = %q, want it to mention verify + host requirement", reason)
+	}
+}
+
+// TestTrufflehogResolveAllowsContainerWithoutVerify confirms the refusal
+// above is specific to verify:true, not a blanket ban on container mode.
+func TestTrufflehogResolveAllowsContainerWithoutVerify(t *testing.T) {
+	withDetectRuntime(t, func(ctx context.Context, priority []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return sandbox.RuntimeDocker, true
+	})
+
+	opts := Options{Tools: map[string]ToolPolicy{
+		"trufflehog": {Enabled: true, Method: "container", Image: "trufflesecurity/trufflehog@sha256:" + strings.Repeat("a", 64)},
+	}}
+	method, _, _, reason := trufflehogScanner{}.Resolve(context.Background(), opts)
+	if method != MethodContainer {
+		t.Errorf("method = %v, reason = %q; want MethodContainer when verify is unset", method, reason)
+	}
+}
+
 // fakeScanner lets us test RunAll without external binaries.
 type fakeScanner struct {
 	name      string

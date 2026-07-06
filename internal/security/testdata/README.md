@@ -15,6 +15,7 @@ container runtime, or network access in CI.
 | `grype_sca.sarif.json` | SARIF | grype directory/SBOM scan | hand-authored, `security-severity` CVSS-score form |
 | `osv_scanner.json` | native JSON | osv-scanner | hand-authored, matches `--format json` schema (`pkg/models` shape confirmed against upstream source for P11.12) |
 | `gitleaks.json` | gitleaks JSON | gitleaks secret detection | hand-authored, matches gitleaks' own report array shape |
+| `trufflehog.jsonl` | trufflehog JSON Lines | trufflehog secret detection with live verification (P13.2) | hand-authored, matches trufflehog's `--json` shape (one object per line, not an array); `"Verified":true` exercises the `[VERIFIED: confirmed active credential]` tag end to end |
 | `zap_dast.sarif.json` | SARIF | OWASP ZAP DAST (P11.7) | **synthetic placeholder** — representative of ZAP's Automation Framework `sarif-json` report template, not a live capture (see below) |
 
 `trivy_vuln.sarif.json`, `grype_sca.sarif.json`, and `osv_scanner.json` deliberately all

@@ -199,6 +199,113 @@ func parseGitleaks(data []byte) ([]Finding, error) {
 	return out, nil
 }
 
+// --- trufflehog (P13.2) ---
+//
+// trufflehog's differentiator over gitleaks is live verification: 800+
+// detectors can call the real provider API to confirm a found credential is
+// still active. It runs alongside gitleaks (deduped via P11.8's
+// DedupFindings), not as a replacement, and defaults to --no-verification —
+// verification is a separate, explicit, host-only opt-in
+// (security.tools.trufflehog.verify) since it makes real calls to
+// third-party services using the actual discovered secret.
+
+type trufflehogScanner struct{}
+
+func (trufflehogScanner) Name() string { return "trufflehog" }
+
+// Resolve wraps the generic resolver to add one hard constraint beyond what
+// Resolve itself knows: verify:true must never run via a container. The
+// container-scanner runner is network-isolated (--network none, matching
+// every other scanner container's hardening posture), but verification's
+// entire point is calling out to a live provider API — so rather than punch
+// a network hole through that posture (the same call already made for image
+// scanning, see imageContainerFallbackUnsupported), verify:true simply
+// forces MethodHost or nothing.
+func (trufflehogScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	method, rt, image, reason := Resolve(ctx, "trufflehog", opts)
+	if method != MethodContainer {
+		return method, rt, image, reason
+	}
+	if !opts.policyFor("trufflehog", false).Verify {
+		return method, rt, image, reason
+	}
+	return MethodNone, "", "", "security.tools.trufflehog.verify is true, which requires host execution (verification calls real provider APIs and the scanner container runs with --network none) — set security.tools.trufflehog.method: host and install trufflehog natively, or disable verify"
+}
+
+func (trufflehogScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
+	verify := method == MethodHost && opts.policyFor("trufflehog", false).Verify
+
+	args := []string{"filesystem", "--json"}
+	if !verify {
+		args = append(args, "--no-verification")
+	}
+
+	if method == MethodContainer {
+		out, err := runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
+		if err != nil {
+			return nil, err
+		}
+		return parseTrufflehog(out, verify)
+	}
+
+	out, err := runJSON(ctx, dir, "trufflehog", append(args, ".")...)
+	if err != nil {
+		return nil, err
+	}
+	return parseTrufflehog(out, verify)
+}
+
+// parseTrufflehog parses trufflehog's `--json` output: one JSON object per
+// line (JSON Lines), not a single array/report file the way gitleaks/
+// kubescape write — trufflehog streams a result the moment it's found.
+// verifyAttempted must reflect whether the scan actually ran without
+// --no-verification: trufflehog's own "Verified" field is always false when
+// verification was never attempted, which is a different thing from "checked
+// and confirmed inactive" — conflating the two would be a guessed claim the
+// same way an unanalyzed Reachability must never render as "unreachable".
+func parseTrufflehog(data []byte, verifyAttempted bool) ([]Finding, error) {
+	var out []Finding
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var d struct {
+			DetectorName   string `json:"DetectorName"`
+			Verified       bool   `json:"Verified"`
+			Redacted       string `json:"Redacted"`
+			SourceMetadata struct {
+				Data struct {
+					Filesystem struct {
+						File string `json:"file"`
+						Line int    `json:"line"`
+					} `json:"Filesystem"`
+				} `json:"Data"`
+			} `json:"SourceMetadata"`
+		}
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			return nil, fmt.Errorf("parse trufflehog output: %w", err)
+		}
+		verification := VerificationUnknown
+		if verifyAttempted {
+			verification = VerificationUnverified
+			if d.Verified {
+				verification = VerificationVerified
+			}
+		}
+		out = append(out, Finding{
+			Tool:         "trufflehog",
+			RuleID:       d.DetectorName,
+			Severity:     SevHigh, // leaked secrets are high severity by default, same as gitleaks
+			Title:        firstNonEmpty(d.DetectorName, "potential secret") + " (" + d.Redacted + ")",
+			Location:     fmt.Sprintf("%s:%d", filepath.ToSlash(d.SourceMetadata.Data.Filesystem.File), d.SourceMetadata.Data.Filesystem.Line),
+			Remediation:  "rotate the exposed credential and remove it from the codebase",
+			Verification: verification,
+		})
+	}
+	return out, nil
+}
+
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {

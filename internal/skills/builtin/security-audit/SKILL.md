@@ -51,6 +51,14 @@ expiry date) instead of just leaving it unaddressed with no paper trail —
 don't add one yourself without that explicit decision, since it silences a
 real finding.
 
+A secret finding tagged `[VERIFIED: confirmed active credential]` (trufflehog,
+when `security.tools.trufflehog.verify` is enabled) has been confirmed live
+against the real provider API — treat rotating it as urgent, and never
+propose a baseline suppression for a verified finding without an explicit,
+specific reason from the reviewer (e.g. "known test fixture, provider account
+already deactivated"). An unverified or unchecked secret finding still needs
+triage, just without that same live-credential certainty.
+
 If your system prompt's "Debate mode (P12)" section marks triage enabled,
 route a borderline or disputed-severity finding (ambiguous impact, a
 severity you're not confident in, or a suggested suppression) through the

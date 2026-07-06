@@ -72,6 +72,7 @@ Or generate an SBOM instead of scanning for findings:
 | **njsscan** | Node.js-specific SAST | `njsscan` | No — opt-in |
 | **Trivy** | Vulnerabilities in dependencies (Go, npm, pip, etc.), IaC misconfig (Terraform/CloudFormation/K8s/Helm/Dockerfile/ARM), secrets | `trivy` | Yes |
 | **Gitleaks** | Secrets and credentials accidentally committed | `gitleaks` | Yes |
+| **trufflehog** | Secrets and credentials, with optional live verification against the real provider API — see below | `trufflehog` | No — opt-in |
 | **Kubescape** | Kubernetes manifest/Helm chart misconfigurations, mapped to NSA/MITRE/CIS framework controls with real severity | `kubescape` | Yes |
 | **Hadolint** | Dockerfile lint (any `Dockerfile`/`Dockerfile.*`/`*.dockerfile` found in the scanned path) | `hadolint` | Yes |
 | **osv-scanner** | Dependency CVEs across lockfiles/manifests, backed by OSV.dev; also the only reachability-aware scanner (below) | `osv-scanner` | Yes |
@@ -114,6 +115,49 @@ installs a tool for you — pick it from the list, choose "Install now (guided),
 exact host command it's about to run (the same guided install `aegis security install <tool>`
 does from the CLI); the list refreshes afterward so you can see it move from "unavailable" to
 "on PATH" without leaving the dialog.
+
+### trufflehog: live secret verification (opt-in)
+
+**trufflehog** runs alongside gitleaks, not instead of it — the same (rule/CVE, location)
+finding flagged by both is deduped into one (P11.8), tagged `[also flagged by: ...]`. Its
+differentiator is **live verification**: 800+ detectors can call the real provider API
+(AWS, GitHub, Slack, etc.) to confirm a found credential is still active, which cuts triage
+noise sharply versus pattern/entropy matching alone — a verified AWS key is unambiguously
+urgent; an unverified one might be a fixture, a revoked credential, or a false positive.
+
+Verification is a separate, explicit, host-only opt-in — **off by default**, and trufflehog
+itself always runs with `--no-verification` unless you turn it on:
+
+```yaml
+security:
+  tools:
+    trufflehog:
+      enabled: true    # opt-in, like gitleaks' predecessor pattern-matchers
+      verify: true     # opt-in: makes real calls to third-party provider APIs
+```
+
+**Read this before enabling `verify`:**
+
+- It sends the actual discovered secret to the credential's own provider (AWS STS, GitHub's
+  token-introspection endpoint, etc.) to check whether it's live — this is a real network call
+  using real (if compromised) credentials, not a local check. Treat it with the same care as
+  any other outbound call using sensitive material.
+- It is **host-only**: the scanner-container runner is network-isolated (`--network none`,
+  the same hardening every scanner container gets), so `verify: true` forces
+  `security.tools.trufflehog.method: host` — `Resolve` refuses container mode outright rather
+  than silently dropping verification or punching a network hole through that isolation.
+- `/security-config` (TUI) and `aegis security config` show `verify` as its own explicitly
+  warning-labelled toggle, separate from the tool's regular enabled/method/image settings.
+- A finding trufflehog verified renders with a `[VERIFIED: confirmed active credential]` tag
+  in the report (`verification: "verified"` in JSON) — treat this as the strongest possible
+  signal to rotate the credential immediately, and don't baseline-suppress a verified finding
+  without a very good reason.
+
+**Licensing:** trufflehog is **AGPL-3.0** licensed, unlike gitleaks' MIT license. Aegis only
+shells out to a separately-installed trufflehog binary (no code linking), so this isn't a
+license-compatibility concern for Aegis itself — but it's worth knowing before you install and
+run it, since AGPL's network-use copyleft terms may matter for how *you* distribute or operate
+software that bundles it.
 
 ### Reachability: is the vulnerable code actually called?
 
