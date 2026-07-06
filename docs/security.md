@@ -1,6 +1,6 @@
 # Security Features
 
-Aegis includes several security-focused capabilities: a security scanning tool, pluggable sandbox backends for shell execution isolation, and contextual policies that control tool behavior at runtime.
+Aegis includes several security-focused capabilities: static/dependency/secrets scanning (`security_scan`), dynamic web-app testing (`dast_scan`, OWASP ZAP), network/host reconnaissance (`recon_scan`, nmap + Nuclei), pluggable sandbox backends for shell execution isolation, and contextual policies that control tool behavior at runtime.
 
 ---
 
@@ -215,6 +215,77 @@ app running on the host, or one it can reach on your Docker network). Composing 
 target + scan it, with no external exposure" on one ephemeral network is real follow-up work,
 not done here.
 
+### Network / Host Reconnaissance (nmap + Nuclei)
+
+DAST tests one already-known web application. `aegis scan network <target> [<target>...]` /
+`security_scan` (via the standalone `recon_scan` tool) works the other direction — attack-surface
+*mapping*: given a bare host, IP, or CIDR range (no `http(s)://` needed), it discovers what's
+actually there. Two scanners run per call:
+
+- **nmap** finds live hosts, open ports, and service/version banners.
+- **nuclei** matches ProjectDiscovery's community template library (CVEs, misconfigurations,
+  exposed panels, raw network checks) against whatever nmap found alive.
+
+```bash
+aegis scan network 192.168.1.0/24                 # baseline: top-100-port scan + safe nuclei templates
+aegis scan network 192.168.1.10 db.lan             # multiple targets in one call
+```
+
+In-session: `/scan network <target> [target...]` runs the same scan through the daemon
+(`POST /security/scan` with `targets`) without spending a model turn — same shared
+`security.dast.allowed_targets` gate; a disallowed target is rejected before either scanner runs.
+
+This reaches out to real network hosts — attack-surface mapping against something you don't own
+would be reconnaissance for an attack. `recon_scan` shares its target-authorization gate with
+`dast_scan` (they're the same policy, `internal/security/target.go`'s `isHostAllowed`, not two
+gates to keep in sync) and adds its own multi-host and template-pinning checks — all running
+**unconditionally, independent of permission mode**:
+
+1. **Target authorization (`security.dast.allowed_targets`)** — every target's host must be
+   loopback/RFC-1918 private (allowed by default — the common "scan my home lab" case needs no
+   config) or explicitly declared, exactly like DAST's gate above. **Every target in the list is
+   checked individually** — one undeclared host in an otherwise-authorized list fails the whole
+   call, not a partial silent skip.
+2. **Target count cap** — a single call accepts at most 256 targets; a longer list is rejected
+   outright rather than silently truncated.
+3. **Active-mode opt-in (`security.dast.allow_active`)** — the same flag DAST's `--mode active/api`
+   requires. Baseline (default): nmap runs a top-100-port version-detection scan with no OS
+   fingerprinting or scripts, and nuclei excludes `dos`/`fuzz`/`intrusive`-tagged templates. Active:
+   nmap adds OS detection, the full port range, and its default-safe NSE script category; nuclei
+   runs its full template set.
+4. **Nuclei template pinning (`security.tools.nuclei.templates_version`)** — templates are
+   executable network-probe logic, so nuclei never runs against an implicit "latest" pull (P7.6's
+   posture: a rule/template pack is itself supply-chain attack surface). Set this to a
+   `nuclei-templates` release tag (e.g. `"v9.9.0"`); the tag is shallow-cloned once into a local
+   cache and reused after that. Missing this config reports nuclei skipped with that exact reason.
+5. **Normal execute-tool approval** — `recon_scan`'s capability is `execute`, same as
+   `dast_scan`/`security_scan`/shell: blocked outright in `plan` mode, prompts for approval in
+   `build` mode.
+
+```yaml
+security:
+  tools:
+    nuclei:
+      enabled: true
+      templates_version: "v9.9.0"   # a real nuclei-templates release tag
+  dast:
+    allowed_targets:
+      - staging.example.com    # shared with DAST — see above
+    allow_active: false
+```
+
+Nmap's open-port findings beyond plain "port is open": a small curated table of commonly-risky
+services (Telnet, FTP, unauthenticated Redis, an exposed Docker API, SMB, RDP, VNC, Elasticsearch,
+etc.) is flagged `MEDIUM`/`HIGH` with a specific remediation rather than left at `INFO` — the
+concrete "identify weaknesses" step beyond a bare port list.
+
+**Host-binary only, both scanners, for v1** — no container fallback. Reaching LAN targets needs
+real network egress, which the source-scanning container runner deliberately denies
+(`--network none`, the same hardening every other scanner container gets); punching a network hole
+through that posture for two more tools isn't done here (same reasoning DAST's ZAP container
+already documents, and the same "host-binary only for now" precedent as image scanning below).
+Install `nmap`/`nuclei` natively to use `recon_scan`.
+
 ### Scanner availability (host binary vs container fallback)
 
 By default each scanner runs its host binary if it's on `PATH`. When it isn't, Aegis
@@ -253,6 +324,12 @@ aegis security install trivy       # guided host install: shows the exact comman
 aegis security install trivy --yes # skip the confirmation prompt (scripted use)
 ```
 
+To install every scanner at once instead of one at a time, run the opt-in action 3 in the platform
+build script (`./build-linux.sh 3`, `./build-macos.sh 3`, `.\build-windows.ps1 3`) — it loops this
+same `aegis security install <tool> --yes` over every scanner descriptor using the binary the
+script just built. It's never included in the scripts' `all` selection since it's a privileged,
+host-modifying action across many tools; see [installation.md](installation.md#what-the-build-script-does).
+
 Or configure it interactively in the TUI instead of hand-editing YAML:
 
 ```
@@ -273,6 +350,37 @@ digest pin (P11.9): a floating tag (`aquasec/trivy:latest`) or a bare image name
 to `MethodNone` with a reason pointing back at this section's `docker pull`/`docker inspect`
 recipe, rather than silently running an image that can be repointed at any time by whoever
 controls the registry.
+
+### WSL fallback for tools with no native Windows build
+
+**opengrep** and **kubescape** ship no Windows build at all — only `darwin`/`linux` install
+commands. On Windows, if a Linux distro is registered under the **Windows Subsystem for
+Linux** (`wsl -l -q` lists at least one), Aegis uses it as an automatic fallback instead of
+reporting the tool unavailable:
+
+- `aegis security install opengrep` (and the `/security-config` "Install now" action) detects
+  there's no native Windows entry, checks for a WSL distro, and — if present — runs the
+  tool's own Linux install command inside it: the guided-install command you're shown and
+  asked to confirm becomes `wsl -- bash -lc '<the same linux install script>'`.
+- `aegis security status`/`aegis scan` resolve these two tools to a third method,
+  `MethodWSL` ("via WSL" in `status`'s output), whenever the binary is found inside WSL's
+  default distro but not on the Windows host — checked after the host binary and container
+  fallback, so a native install or configured container image always takes priority.
+- Execution shares the host filesystem directly (`/mnt/<drive>/...`, via `wslpath`) rather
+  than a bind mount — no container runtime involved.
+
+This is deliberately scoped to just these two tools (`ScannerDescriptor.WSLCapable`): every
+other built-in scanner already has a native Windows install path (even when that path's own
+package manager has unrelated problems — see
+[installation.md](installation.md#windows-scoop-installs-failing) for the `Get-FileHash`/scoop
+issue), so there's no WSL execution branch wired for them, and offering one would silently
+misroute execution back to a host binary that doesn't exist. Explicitly forcing WSL for a tool
+that doesn't support it (`security.tools.<name>.method: wsl`) reports a clear `MethodNone`
+reason instead. If a Linux install script doesn't add its own binary to the WSL distro's
+`PATH` (kubescape's doesn't; opengrep's does) `aegis security status` will keep reporting it
+unavailable until you add it yourself (`export PATH=$PATH:~/.kubescape/bin` in `~/.bashrc`,
+per that installer's own instructions) — the same "installed but not on PATH" situation a
+native `go install`/`pipx` install can also leave you in.
 
 ### Output format
 

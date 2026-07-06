@@ -7,6 +7,7 @@ package sandbox
 
 import (
 	"context"
+	"os/exec"
 	"runtime"
 	"time"
 )
@@ -34,9 +35,28 @@ type ExecOpts struct {
 // a command string.
 func shellCommand(command string) (string, []string) {
 	if runtime.GOOS == "windows" {
-		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", command}
+		return WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", command}
 	}
 	return "/bin/sh", []string{"-c", command}
+}
+
+// WindowsShellBinary prefers "pwsh" (PowerShell 7+) over "powershell"
+// (Windows PowerShell 5.1) when it's on PATH. Machines that installed
+// PowerShell 7 via winget/Microsoft Store commonly end up with its
+// Core-edition-only module directory ordered ahead of the system32
+// Windows PowerShell module directory in PSModulePath; a spawned
+// "powershell.exe" process inherits that ordering and autoloads the
+// Core-only Microsoft.PowerShell.Utility module instead of the Desktop
+// one, silently losing Desktop-only cmdlets like Get-FileHash (which
+// scoop's own install scripts depend on). "pwsh" doesn't hit this since
+// it only ever loads its own Core-compatible modules. Exported so other
+// packages that shell out on Windows (e.g. internal/security's guided
+// installer) use the same fallback instead of hardcoding "powershell".
+func WindowsShellBinary() string {
+	if _, err := exec.LookPath("pwsh"); err == nil {
+		return "pwsh"
+	}
+	return "powershell"
 }
 
 // execWithTimeout wraps ctx with a timeout if opts.Timeout > 0.

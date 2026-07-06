@@ -8,23 +8,41 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
+
+// wslDistroAvailable is a seam over sandbox.WSLDistroAvailable so tests can
+// inject a deterministic result without needing a real WSL install.
+var wslDistroAvailable = sandbox.WSLDistroAvailable
 
 // InstallCommand returns the guided host-install shell command for name on
 // the current OS, and whether one exists. Callers (the `aegis security
 // install` CLI and the `/security-config` TUI wizard) show this to the
 // operator before running it — installing software is a privileged,
 // host-modifying action that must never happen silently.
+//
+// On Windows, a tool with no native Windows install entry falls back to
+// running its Linux install command inside WSL when a distro is registered
+// (P14.x) — opengrep and kubescape ship no Windows build at all, but their
+// Linux curl|bash installer works unmodified there. The returned command is
+// the literal `wsl -- bash -lc '...'` invocation, so it's simultaneously an
+// accurate thing to show the operator and something RunGuidedInstall can
+// execute unchanged.
 func InstallCommand(name string) (string, bool) {
 	d, ok := DescriptorFor(name)
 	if !ok {
 		return "", false
 	}
-	cmd, ok := d.Install[runtime.GOOS]
-	if !ok || strings.TrimSpace(cmd) == "" {
-		return "", false
+	if cmd, ok := d.Install[runtime.GOOS]; ok && strings.TrimSpace(cmd) != "" {
+		return cmd, true
 	}
-	return cmd, true
+	if runtime.GOOS == "windows" {
+		if linuxCmd, ok := d.Install["linux"]; ok && strings.TrimSpace(linuxCmd) != "" && wslDistroAvailable(context.Background()) {
+			return sandbox.WSLInstallCommand(linuxCmd), true
+		}
+	}
+	return "", false
 }
 
 // PlatformAvailability summarizes, for one scanner, which OSes have a guided
@@ -79,9 +97,28 @@ func AvailabilityNote(name, reason string) string {
 // through, mirroring the shell tool's own invocation convention.
 func shellInvocation(command string) (string, []string) {
 	if runtime.GOOS == "windows" {
-		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command", command}
+		return sandbox.WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", command}
 	}
 	return "/bin/sh", []string{"-c", command}
+}
+
+// NoGuidedInstallReason builds the explanatory error shown when
+// InstallCommand has nothing to offer for name on this OS — shared by
+// RunGuidedInstall and the `aegis security install` CLI so the wording (and
+// the WSL guidance it adds when relevant) never drifts between the two.
+func NoGuidedInstallReason(name string) string {
+	msg := fmt.Sprintf("no guided install available for %s on %s — see the tool's own docs, or configure a container image (security.tools.%s.image)", name, runtime.GOOS, name)
+	if runtime.GOOS != "windows" {
+		return msg
+	}
+	d, ok := DescriptorFor(name)
+	if !ok {
+		return msg
+	}
+	if linuxCmd, ok := d.Install["linux"]; ok && strings.TrimSpace(linuxCmd) != "" {
+		return msg + ", or install a Linux distro under WSL (`wsl --install`) so its Linux install command can run there"
+	}
+	return msg
 }
 
 // RunGuidedInstall runs name's guided host-install command for the current
@@ -91,7 +128,7 @@ func shellInvocation(command string) (string, []string) {
 func RunGuidedInstall(ctx context.Context, name string, out io.Writer) error {
 	command, ok := InstallCommand(name)
 	if !ok {
-		return fmt.Errorf("no guided install available for %s on %s — see the tool's own docs, or configure a container image (security.tools.%s.image)", name, runtime.GOOS, name)
+		return fmt.Errorf("%s", NoGuidedInstallReason(name))
 	}
 	shell, args := shellInvocation(command)
 	c := exec.CommandContext(ctx, shell, args...)

@@ -286,6 +286,9 @@ func buildSecurityBlock(p SecurityPatch) string {
 			if tc.Image != "" {
 				fmt.Fprintf(&b, "      image: %q\n", tc.Image)
 			}
+			if tc.TemplatesVersion != "" {
+				fmt.Fprintf(&b, "      templates_version: %q\n", tc.TemplatesVersion)
+			}
 		}
 	}
 

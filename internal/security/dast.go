@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -230,83 +229,15 @@ func buildZAPPlan(mode DASTMode, target, apiDefinition string) ([]byte, error) {
 	return yaml.Marshal(plan)
 }
 
-// isDASTTargetAllowed is the P11.7 hard authorization gate: loopback and
-// RFC-1918 private addresses are always allowed (the common "scan my
-// locally running app" case needs no config); any other host must be
-// explicitly declared in allowedTargets. Hostnames are matched as literal
-// strings — never DNS-resolved — so a declared target's identity can't be
-// silently changed by whatever it happens to resolve to at scan time (ZAP
-// does its own resolution inside the container, outside this check's
-// visibility).
+// isDASTTargetAllowed is the P11.7 hard authorization gate: parses the
+// target as an http(s) URL, then delegates the actual host-level policy
+// (loopback/private auto-allow, else explicit allowlist) to the shared
+// isHostAllowed (internal/security/target.go, P13.5.2) — the same policy the
+// recon scanners (nmap/nuclei) use for their bare-host/CIDR targets.
 func isDASTTargetAllowed(rawTarget string, allowedTargets []string) (allowed bool, reason string) {
 	u, err := url.Parse(strings.TrimSpace(rawTarget))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return false, "target must be a valid http:// or https:// URL"
 	}
-	host := u.Hostname()
-	if isLoopbackOrPrivateHost(host) {
-		return true, ""
-	}
-	for _, entry := range allowedTargets {
-		if hostMatchesDASTAllowEntry(host, entry) {
-			return true, ""
-		}
-	}
-	return false, fmt.Sprintf("target host %q is not loopback/private and is not declared in security.dast.allowed_targets", host)
-}
-
-func isLoopbackOrPrivateHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		// A non-IP, non-"localhost" hostname is never auto-allowed: DNS
-		// resolution is deliberately not performed here (see doc comment).
-		return false
-	}
-	for _, r := range dastPrivateRanges {
-		if r.Contains(ip) {
-			return true
-		}
-	}
-	return ip.IsLoopback() || ip.IsLinkLocalUnicast()
-}
-
-func hostMatchesDASTAllowEntry(host, entry string) bool {
-	entry = strings.TrimSpace(entry)
-	if entry == "" {
-		return false
-	}
-	if _, cidr, err := net.ParseCIDR(entry); err == nil {
-		ip := net.ParseIP(host)
-		return ip != nil && cidr.Contains(ip)
-	}
-	if strings.HasPrefix(entry, ".") {
-		return strings.HasSuffix(strings.ToLower(host), strings.ToLower(entry))
-	}
-	return strings.EqualFold(host, entry)
-}
-
-// dastPrivateRanges is the loopback/RFC-1918/link-local table used only for
-// DAST's default-allow policy — a small, deliberate duplicate of the
-// equivalent table in internal/tool/builtin's SSRF dialer (which uses the
-// opposite polarity: it *blocks* these ranges for outbound web_fetch calls)
-// rather than a cross-package dependency, matching how internal/sandbox is
-// already kept decoupled from internal/config elsewhere in this package.
-var dastPrivateRanges = mustParseCIDRs(
-	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
-	"::1/128", "fc00::/7", "fe80::/10",
-)
-
-func mustParseCIDRs(cidrs ...string) []*net.IPNet {
-	out := make([]*net.IPNet, 0, len(cidrs))
-	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
-		if err != nil {
-			panic("security: invalid built-in CIDR " + c + ": " + err.Error())
-		}
-		out = append(out, n)
-	}
-	return out
+	return isHostAllowed(u.Hostname(), allowedTargets)
 }

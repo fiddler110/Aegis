@@ -26,7 +26,7 @@ git clone https://github.com/fiddler110/Aegis.git; cd Aegis
 .\build-windows.ps1
 ```
 
-The script prompts you to: (1) compile and install `aegis` to your Go bin directory, and (2) optionally add an `aegis-config` shell helper that opens the config file in your editor.
+The script prompts you to: (1) compile and install `aegis` to your Go bin directory, (2) optionally add an `aegis-config` shell helper that opens the config file in your editor, and (3) optionally (opt-in — pass `3` explicitly, e.g. `./build-linux.sh "all 3"`) install every security scanner tool `aegis scan` uses (trivy, gitleaks, opengrep, ...). See [docs/installation.md](docs/installation.md#what-the-build-script-does).
 
 **2. Generate config and set the API key**
 
@@ -78,7 +78,7 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 - **Daemon + client architecture** — durable SQLite-backed sessions survive TUI restarts; resume any session with `aegis --resume <id>`
 - **Plan / Build / Auto modes** — read-only exploration, guided file editing, or fully automatic; fine-grained text-based allow/deny rules per tool and path
 - **50+ built-in tools** — file ops, git (read + commit + push/PR), shell with background jobs, web fetch/search, LaTeX compilation, LSP code intelligence, security scanning, diagram rendering, memory, planning, and more; niche tools load on demand via `tool_search` to keep context lean
-- **17 built-in personas** + custom persona files — security, developer, SRE, cloud architect, risk assessor, and others; each can pin a model, carry its own permission rules, and declare an advisory tool list (warns/asks, never blocks). Scaffold with `aegis persona new`, edit the file, and the daemon hot-reloads it — no restart needed. Set a project's starting persona with `aegis persona use <name>`
+- **20 built-in personas** + custom persona files — security, developer, SRE, cloud architect, risk assessor, red team, and others; each can pin a model, carry its own permission rules, and declare an advisory tool list (warns/asks, never blocks). Scaffold with `aegis persona new`, edit the file, and the daemon hot-reloads it — no restart needed. Set a project's starting persona with `aegis persona use <name>`
 - **Output validation** — a lightweight second-model pass checks every answer against a configurable rubric before it's returned
 - **Checkpoints & rewind** — every user turn captures a restore point; `/rewind` reverts files, conversation, or both without `git reset` gymnastics
 - **Multi-agent orchestration** — spawn sub-agents (goroutines or subprocesses) with their own permission scopes; agent teams with a shared task list and peer messaging for coordinated parallel work
@@ -105,14 +105,14 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 | [CLI Reference](docs/cli-reference.md) | Every command and flag |
 | [TUI Guide](docs/tui-guide.md) | Layout, keyboard shortcuts, slash commands, `@` references |
 | [Tools Reference](docs/tools-reference.md) | All 50+ built-in tools with inputs, outputs, and examples |
-| [Personas](docs/personas.md) | All 17 built-in personas, custom persona files, per-persona model overrides |
+| [Personas](docs/personas.md) | All 20 built-in personas, custom persona files, per-persona model overrides |
 | [Permission System](docs/permissions.md) | Plan/Build/Auto modes, text-based rules, contextual security policies |
 | [Session Management](docs/sessions.md) | Checkpoints, rewind, export, archiving |
 | [Providers & Models](docs/providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
 | [Memory & Knowledge](docs/memory-and-knowledge.md) | Project/user memory, skills, knowledge base |
 | [Extensibility](docs/extensibility.md) | Lifecycle hooks, MCP servers, custom commands, agents, process plugins, bundles |
 | [Multi-Agent & Background Tasks](docs/multi-agent.md) | Swarm, parallel sessions, background tasks, cron scheduling |
-| [Security Features](docs/security.md) | Security scanning, sandbox backends, contextual policies, audit trail |
+| [Security Features](docs/security.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual policies, audit trail |
 
 ---
 

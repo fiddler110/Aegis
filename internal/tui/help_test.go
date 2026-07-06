@@ -40,3 +40,18 @@ func TestSlashCommandsHaveDetailedHelp(t *testing.T) {
 		}
 	}
 }
+
+// TestHelpListsKeyboardShortcuts guards P14.9: several features (terminal
+// pane, sub-agent list, session switcher, thinking expand/collapse) are
+// keybind-only with no slash-command equivalent, so /help's general listing
+// must also surface the keymap, not just slash commands.
+func TestHelpListsKeyboardShortcuts(t *testing.T) {
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d.customs = []api.CommandInfo{}
+	res := d.cmdHelp(nil)
+	for _, e := range defaultKeyMap().helpEntries() {
+		if !strings.Contains(res.Output, e.Key) {
+			t.Errorf("expected keybinding %q in /help output", e.Key)
+		}
+	}
+}

@@ -22,7 +22,7 @@ func newScanCmd() *cobra.Command {
 			"deduped across overlapping tools and, where confident, tagged with an OWASP ASVS chapter; an " +
 			"accepted-risk .aegis/security-baseline.yaml (see `aegis security baseline`) can suppress a specific, " +
 			"time-boxed finding.",
-		Args:  cobra.MaximumNArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := "."
 			if len(args) == 1 {
@@ -47,6 +47,41 @@ func newScanCmd() *cobra.Command {
 	cmd.AddCommand(newScanImageCmd())
 	cmd.AddCommand(newScanSBOMCmd())
 	cmd.AddCommand(newScanDASTCmd())
+	cmd.AddCommand(newScanNetworkCmd())
+	return cmd
+}
+
+func newScanNetworkCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "network <target> [target...]",
+		Short: "Run nmap + nuclei against a network target host list (attack-surface mapping)",
+		Long: "Runs nmap (port/service/version discovery) and nuclei (template-driven vulnerability/misconfiguration " +
+			"matching) against a bare host/IP/CIDR list and prints a unified findings report — same underlying scan as " +
+			"the standalone recon_scan tool (P13.5). Each target must be loopback/private (allowed by default) or " +
+			"explicitly declared in security.dast.allowed_targets — the same shared gate `aegis scan dast` uses; " +
+			"anything else is rejected before either scanner runs. security.dast.allow_active (the same flag `scan " +
+			"dast`'s --mode active/api requires) unlocks more aggressive probes: nmap's OS detection/full port " +
+			"range/default scripts, and nuclei's full template set (dos/fuzz/intrusive templates excluded " +
+			"otherwise). nuclei also requires security.tools.nuclei.templates_version (a pinned nuclei-templates " +
+			"release tag) — see docs/security.md.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			report, err := security.RunRecon(cmd.Context(), security.ReconOptions{
+				Targets:        args,
+				AllowedTargets: cfg.Security.DAST.AllowedTargets,
+				AllowActive:    cfg.Security.DAST.AllowActive,
+			}, security.OptionsFromConfig(cfg.Security))
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), report.Format())
+			return nil
+		},
+	}
 	return cmd
 }
 

@@ -4,23 +4,29 @@
     Build Aegis and set up your shell for first-time use on Windows.
 
 .DESCRIPTION
-    Two optional actions:
+    Three actions; [3] is opt-in and never implied by "all":
       [1] Compile aegis.exe and install it to your Go bin directory
       [2] Add an aegis-config function to your PowerShell profile so you can
           run "aegis-config" to open the Aegis config file in your editor
+      [3] (opt-in) Install the host security scanner tools aegis scan / the
+          security_scan tool use (opengrep, trivy, gitleaks, ...) via the
+          guided `aegis security install` command for each tool
 
     The script shows exactly what it will do and asks you to confirm before
     taking any action.
 
 .PARAMETER Action
-    Which actions to run without prompting: 1, 2, all, or none.
-    When omitted the script prompts interactively.
+    Which actions to run without prompting: any of 1, 2, 3, all, or none
+    (space-separated, e.g. "all 3"). When omitted the script prompts
+    interactively.
 
 .EXAMPLE
     .\build-windows.ps1          # interactive
     .\build-windows.ps1 1        # build only
     .\build-windows.ps1 2        # profile only
-    .\build-windows.ps1 all      # both actions
+    .\build-windows.ps1 3        # security tools only (opt-in)
+    .\build-windows.ps1 all      # actions 1 + 2 (never 3 — opt-in)
+    .\build-windows.ps1 "all 3"  # actions 1 + 2 + 3
 #>
 param(
     [string]$Action = ""
@@ -36,6 +42,20 @@ function Write-Ok      ($t) { Write-Host "  OK  $t" -ForegroundColor Green }
 function Write-Skip    ($t) { Write-Host "  --  $t" -ForegroundColor DarkGray }
 function Write-Warn    ($t) { Write-Host "  !!  $t" -ForegroundColor Yellow }
 function Write-Divider     { Write-Host ("  " + ("─" * 66)) -ForegroundColor DarkGray }
+
+# Every entry in $SecurityTools has a binary name equal to its scanner name
+# (verified against internal/security/method.go), so Get-Command is enough to
+# tell whether a tool is already installed before re-running its installer.
+# opengrep/kubescape ship no native Windows build and fall back to a WSL
+# install (see internal/security/install.go), so they're also checked there.
+function Test-ToolInstalled ($Tool) {
+    if (Get-Command $Tool -ErrorAction SilentlyContinue) { return $true }
+    if (($Tool -eq "opengrep" -or $Tool -eq "kubescape") -and (Get-Command wsl -ErrorAction SilentlyContinue)) {
+        wsl -- bash -lc "command -v $Tool" *>$null
+        if ($LASTEXITCODE -eq 0) { return $true }
+    }
+    return $false
+}
 
 # ─── Locate Go ─────────────────────────────────────────────────────────────────
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
@@ -71,6 +91,12 @@ $ProfileExists = Test-Path $ProfilePath
 $AliasExists   = $ProfileExists -and ((Get-Content $ProfilePath -Raw -ErrorAction SilentlyContinue) -match 'aegis-config')
 $ConfigPath    = Join-Path $env:APPDATA "aegis\config.yaml"
 
+# ─── Security scanner tools (opt-in action [3]) ───────────────────────────────
+# Mirrors internal/security/method.go's descriptor list — every scanner that
+# has a guided host install (zap is container-only and has none, so it's
+# handled by container config, not this list).
+$SecurityTools = @("opengrep","semgrep","gosec","bandit","brakeman","njsscan","trivy","gitleaks","kubescape","hadolint","grype","dockle","osv-scanner","syft","nmap","nuclei")
+
 # ─── Show plan ─────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Divider
@@ -101,22 +127,43 @@ if ($AliasExists) {
 }
 
 Write-Host ""
+
+# Action 3 (opt-in — never implied by "all")
+Write-Item "[3] (opt-in) Install security scanner tools"
+Write-Detail ("Tools  : " + ($SecurityTools -join ", "))
+Write-Detail "Runs   : aegis security install <tool> --yes  for each, using the binary from [1]"
+Write-Detail "Skips  : any tool already found on PATH (or in WSL, for opengrep/kubescape) is left alone"
+Write-Detail "Note   : best-effort — several tools need Go/pipx/scoop and may fail individually"
+Write-Detail "         if that toolchain isn't installed; failures are reported but don't stop"
+Write-Detail "         the run. Not included in 'all'."
+
+Write-Host ""
 Write-Divider
 Write-Host ""
 
 # ─── Prompt (or use supplied argument) ────────────────────────────────────────
 $raw = $Action.Trim().ToLower()
 if ($raw -eq "") {
-    $raw = (Read-Host "  Run which actions? [all / 1 2 / none]  (default: all)").Trim().ToLower()
+    $raw = (Read-Host "  Run which actions? [all / 1 2 3 / none]  (default: all - 3 is opt-in)").Trim().ToLower()
 }
-if ($raw -eq "" -or $raw -eq "all") {
-    $RunBuild = $true; $RunAlias = $true
-} elseif ($raw -eq "none") {
+if ($raw -eq "") { $raw = "all" }
+
+$RunBuild = $false
+$RunAlias = $false
+$RunTools = $false
+
+if ($raw -eq "none") {
     Write-Host "  Nothing to do." -ForegroundColor DarkGray; exit 0
-} else {
-    $parts = $raw -split '\s+'
-    $RunBuild = $parts -contains "1"
-    $RunAlias = $parts -contains "2"
+}
+
+$parts = $raw -split '\s+'
+foreach ($tok in $parts) {
+    switch ($tok) {
+        "all" { $RunBuild = $true; $RunAlias = $true }
+        "1"   { $RunBuild = $true }
+        "2"   { $RunAlias = $true }
+        "3"   { $RunTools = $true }
+    }
 }
 
 Write-Host ""
@@ -245,6 +292,58 @@ $editorBlock}
     Write-Host ""
 }
 
+# ─── Action 3 : Install security scanner tools (opt-in) ──────────────────────
+if ($RunTools) {
+    Write-Header "[3] Installing security scanner tools..."
+    Write-Host ""
+
+    $AegisBin = $null
+    if ($RunBuild -and (Test-Path $BinDest)) {
+        $AegisBin = $BinDest
+    } else {
+        $existing = Get-Command aegis -ErrorAction SilentlyContinue
+        if ($existing) { $AegisBin = $existing.Source }
+    }
+
+    if (-not $AegisBin) {
+        Write-Warn "aegis binary not found - run action [1] first (or ensure aegis is on PATH), then re-run with 3."
+    } else {
+        Write-Detail "Using: $AegisBin"
+        Write-Host ""
+        $FailedTools = @()
+        $SkippedTools = @()
+        foreach ($tool in $SecurityTools) {
+            Write-Item $tool
+            if (Test-ToolInstalled $tool) {
+                Write-Skip "$tool already installed - skipping"
+                $SkippedTools += $tool
+                Write-Host ""
+                continue
+            }
+            & $AegisBin security install $tool --yes
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "$tool installed"
+            } else {
+                Write-Warn "$tool failed - see output above"
+                $FailedTools += $tool
+            }
+            Write-Host ""
+        }
+        if ($SkippedTools.Count -gt 0) {
+            Write-Detail ("Already installed (skipped): " + ($SkippedTools -join ", "))
+        }
+        if ($FailedTools.Count -gt 0) {
+            Write-Warn ("Some tools failed to install: " + ($FailedTools -join ", "))
+            Write-Detail "Often expected - several tools need Go/pipx/scoop, and only matter for"
+            Write-Detail "projects that use that language/toolchain."
+        } else {
+            Write-Ok "All security tools are installed."
+        }
+        Write-Detail "Run 'aegis security status' to confirm what's available."
+    }
+    Write-Host ""
+}
+
 # ─── Done ──────────────────────────────────────────────────────────────────────
 Write-Divider
 Write-Host ""
@@ -259,7 +358,11 @@ Write-Host "                                        model: auto in config select
 Write-Host "                                        Aegis starts Ollama itself if it is installed" -ForegroundColor DarkGray
 Write-Host "    aegis                             start the TUI" -ForegroundColor DarkGray
 Write-Host "    aegis ui                          open the web UI in your browser" -ForegroundColor DarkGray
+Write-Host "    aegis security status             check which security scanners are available" -ForegroundColor DarkGray
 if ($RunAlias -and -not $AliasExists) {
     Write-Host "    aegis-config                      open the config file  (after '. `$PROFILE')" -ForegroundColor DarkGray
+}
+if (-not $RunTools) {
+    Write-Host "    .\build-windows.ps1 3             install security scanner tools (opt-in, not run yet)" -ForegroundColor DarkGray
 }
 Write-Host ""

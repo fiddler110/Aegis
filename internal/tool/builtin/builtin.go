@@ -74,10 +74,11 @@ type Options struct {
 	// "auto" mode (host binary if present, else skip — no container image
 	// configured by default).
 	SecurityScan security.Options
-	// DASTAllowedTargets and DASTAllowActive configure the dast_scan tool's
-	// hard, mode-independent target-authorization gate (P11.7) —
-	// config.SecurityConfig.DAST, translated by the caller. Zero value only
-	// permits loopback/private targets and passive (baseline) scans.
+	// DASTAllowedTargets and DASTAllowActive configure the hard,
+	// mode-independent target-authorization gate (P11.7) shared by both
+	// dast_scan and recon_scan (P13.5.1/.2) — config.SecurityConfig.DAST,
+	// translated by the caller. Zero value only permits loopback/private
+	// targets and passive (baseline) scans.
 	DASTAllowedTargets []string
 	DASTAllowActive    bool
 }
@@ -135,6 +136,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&latexBuildTool{root: root},
 		&latexNewDocumentTool{root: root},
 		&dastScanTool{opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
+		&reconScanTool{opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}

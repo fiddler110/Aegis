@@ -49,6 +49,7 @@ func Run(cfg Config) error {
 	// Bind the configured color scheme before any styles are built — lipgloss
 	// styles capture colors at creation time (TQ10).
 	applyTheme(cfg.Theme)
+	cfg.Theme = normalizeThemeName(cfg.Theme) // so /theme's "current theme" display is always "dark" or "light", never blank/unrecognized
 	m := newModel(cfg)
 	p := tea.NewProgram(m)
 	_, err := p.Run()
@@ -1215,6 +1216,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Output == "\x00sidebar-toggle" {
 			m.sidebarOpen = !m.sidebarOpen
 			m.layout()
+			m.refresh()
+			return m, nil
+		}
+		if msg.Output == "\x00theme-show" {
+			m.transcript.append(m.th.statusText.Render(fmt.Sprintf("Current theme: %s", m.cfg.Theme)) + "\n\n")
+			m.refresh()
+			return m, nil
+		}
+		if strings.HasPrefix(msg.Output, "\x00theme ") {
+			// P14.8: applyTheme only rebinds the package-level col* vars —
+			// m.th and m.renderer were built from those vars at creation time
+			// (lipgloss styles and the glamour renderer both capture colors
+			// once) and must be explicitly rebuilt to actually change what's
+			// on screen. Already-rendered transcript content keeps its old
+			// colors, same limitation /humor and /sidebar already have for
+			// past output.
+			name := strings.TrimPrefix(msg.Output, "\x00theme ")
+			applyTheme(name)
+			m.cfg.Theme = name
+			m.th = newTheme()
+			m.renderer = newGlamourRenderer(m.rendererW)
+			m.transcript.append(m.th.statusText.Render(fmt.Sprintf("Theme switched to %s. This session only — set tui.theme: %s in config to persist.", name, name)) + "\n\n")
 			m.refresh()
 			return m, nil
 		}
@@ -2551,34 +2574,14 @@ func saveStash(path, draft string) {
 // --- help overlay ---
 
 func (m model) renderHelpOverlay() string {
-	km := m.keys
-	entries := []struct{ k, d string }{
-		{km.Send.Help().Key, km.Send.Help().Desc},
-		{km.Queue.Help().Key, km.Queue.Help().Desc},
-		{km.Newline.Help().Key, km.Newline.Help().Desc},
-		{km.Thinking.Help().Key, km.Thinking.Help().Desc},
-		{km.Interrupt.Help().Key, km.Interrupt.Help().Desc},
-		{km.Complete.Help().Key, km.Complete.Help().Desc},
-		{km.Palette.Help().Key, km.Palette.Help().Desc},
-		{km.Cancel.Help().Key, km.Cancel.Help().Desc},
-		{km.Help.Help().Key, km.Help.Help().Desc},
-		{km.Clear.Help().Key, km.Clear.Help().Desc},
-		{km.Editor.Help().Key, km.Editor.Help().Desc},
-		{km.CycleMode.Help().Key, km.CycleMode.Help().Desc},
-		{km.Teammates.Help().Key, km.Teammates.Help().Desc},
-		{km.Sessions.Help().Key, km.Sessions.Help().Desc},
-		{km.Terminal.Help().Key, km.Terminal.Help().Desc},
-		{km.SidebarToggle.Help().Key, km.SidebarToggle.Help().Desc},
-		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
-		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
-	}
+	entries := m.keys.helpEntries()
 
 	keyStyle := lipgloss.NewStyle().Foreground(colAccent).Bold(true).Width(14)
 	descStyle := lipgloss.NewStyle().Foreground(colTextDim)
 
 	var rows strings.Builder
 	for _, e := range entries {
-		rows.WriteString(keyStyle.Render(e.k) + "  " + descStyle.Render(e.d) + "\n")
+		rows.WriteString(keyStyle.Render(e.Key) + "  " + descStyle.Render(e.Desc) + "\n")
 	}
 
 	heading := lipgloss.NewStyle().Foreground(colBrandFg).Bold(true).Render("Keyboard Shortcuts")

@@ -44,10 +44,26 @@ Installs `aegis.exe` to `%GOPATH%\bin` (default `%USERPROFILE%\go\bin`).
 
 ### What the build script does
 
-Each script presents two optional actions:
+Each script presents three actions — pass a selection non-interactively (e.g. `./build-linux.sh 1`, `./build-windows.ps1 "all 3"`) or answer the prompt:
 
 1. **[1] Build and install** — compiles with version info embedded, installs binary, detects and removes any stale binary at a different PATH location
 2. **[2] Add `aegis-config` helper** — adds a shell function/alias that opens your global config file in `$EDITOR`
+3. **[3] Install security scanner tools** *(opt-in — never included in `all`)* — runs `aegis security install <tool> --yes` for every scanner Aegis knows about (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, kubescape, hadolint, grype, dockle, osv-scanner, syft, nmap, nuclei), using the binary from action 1. Best-effort: several tools need a specific language toolchain (Go/pipx/gem) or package manager (Homebrew/scoop), so an individual failure is reported in a summary rather than aborting the run. Requires action 1 to have run first (or `aegis` already on `PATH`). See [security.md](security.md) for what each tool does and how per-tool installs/container fallbacks work outside the build script.
+
+`all` always means "actions 1 + 2" — action 3 is opt-in on purpose (it's a privileged, host-modifying action across many tools at once) and must be selected explicitly, e.g. `3` alone or `"all 3"` together.
+
+#### Windows scoop installs failing
+
+If a `scoop install <tool>` guided install fails with `The term 'Get-FileHash' is not
+recognized...`, it's a PATH-ordering conflict on machines that installed PowerShell 7 via
+winget/the Microsoft Store: that installer commonly prepends its own Core-edition-only module
+directory ahead of the system32 Windows PowerShell one in `PSModulePath`. A spawned
+`powershell.exe` (5.1) process inherits that ordering and autoloads the wrong
+`Microsoft.PowerShell.Utility` module — one that doesn't export `Get-FileHash`, which scoop's
+own install scripts use to verify downloads. Aegis works around this by preferring `pwsh`
+(PowerShell 7, which only ever loads its own Core-compatible modules) over `powershell` for
+every guided install and shell-tool command on Windows, falling back to `powershell` only when
+`pwsh` isn't on `PATH`.
 
 ### Manual build (without the scripts)
 

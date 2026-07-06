@@ -803,6 +803,17 @@ func (s *Server) personaModel(p persona.Persona) string {
 	return s.cfg.Provider.Model
 }
 
+// resolveModel is personaModel with the P14.7 per-session /model override
+// layered on top: sessionModel, when non-empty, outranks everything —
+// including a persona's own config-level pin — the same way a config
+// override already outranks a persona file's Model.
+func (s *Server) resolveModel(p persona.Persona, sessionModel string) string {
+	if sessionModel != "" {
+		return sessionModel
+	}
+	return s.personaModel(p)
+}
+
 // outputGuardConfig merges the global output-guard default with a persona's
 // override into a guard.Config.
 func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
@@ -909,7 +920,11 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 	return gate, engineHooks
 }
 
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry) (*engine.Engine, error) {
+// newEngine builds an engine for one turn. modelOverride, when non-empty, is
+// a per-session model pin (P14.7 /model) that takes precedence over the
+// persona's own Model and the global provider.model — same precedence a
+// persona-level override already has over the global default.
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride string) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, s.providerUnconfiguredErr()
 	}
@@ -921,10 +936,12 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	}
 	gate, engineHooks := s.buildGate(mode, approver, p)
 
+	model := s.resolveModel(p, modelOverride)
+
 	var guardFn guard.Func
 	var guardRetries int
 	if guardEnabled {
-		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, s.personaModel(p))
+		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, model)
 	}
 
 	if tracker == nil {
@@ -939,7 +956,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		Cost:                  tracker,
 		BudgetUSD:             s.cfg.Cost.BudgetUSD,
 		MaxTokensPerRun:       s.cfg.Cost.MaxTokensPerRun,
-		Model:                 s.personaModel(p),
+		Model:                 model,
 		MaxTokens:             s.cfg.Provider.MaxTokens,
 		MaxIterations:         s.cfg.Provider.MaxIterations,
 		LoopThreshold:         s.cfg.Provider.LoopThreshold,
@@ -1183,7 +1200,7 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if req.System == nil && req.Mode == nil && req.Persona == nil {
+	if req.System == nil && req.Mode == nil && req.Persona == nil && req.Model == nil {
 		writeError(w, http.StatusBadRequest, "nothing to update")
 		return
 	}
@@ -1249,12 +1266,23 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// P14.7: a per-session model override. Not validated against the
+	// configured provider's actual model list (same posture as a persona's
+	// own Model field) — an unrecognized id surfaces as a provider error on
+	// the next turn rather than at switch time.
+	if req.Model != nil {
+		if err := s.store.SetModel(r.Context(), id, strings.TrimSpace(*req.Model)); err != nil {
+			s.logger.Error("set model", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
 	sess, err := s.store.Get(r.Context(), id)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, InputTokens: sess.InputTokens, OutputTokens: sess.OutputTokens, CostUSD: sess.CostUSD, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
+	writeJSON(w, http.StatusOK, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, Model: sess.Model, InputTokens: sess.InputTokens, OutputTokens: sess.OutputTokens, CostUSD: sess.CostUSD, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
 }
 
 func (s *Server) handleListCommands(w http.ResponseWriter, _ *http.Request) {
@@ -1334,6 +1362,20 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 
 	if req.Image != "" {
 		report := security.ScanImage(r.Context(), req.Image, security.DefaultImageScanners(), opts)
+		writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
+		return
+	}
+
+	if len(req.Targets) > 0 {
+		report, err := security.RunRecon(r.Context(), security.ReconOptions{
+			Targets:        req.Targets,
+			AllowedTargets: s.cfg.Security.DAST.AllowedTargets,
+			AllowActive:    s.cfg.Security.DAST.AllowActive,
+		}, opts)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
 		return
 	}
@@ -1699,7 +1741,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// tool onto this session's own exposure state, not the daemon-wide
 	// registry every other session and persona shares.
 	sessionTools := s.sessionToolRegistry(id)
-	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools)
+	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools, sess.Model)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
@@ -2475,6 +2517,7 @@ func toMeta(m session.Meta) api.SessionMeta {
 		ID:           m.ID,
 		Title:        m.Title,
 		Mode:         m.Mode,
+		Model:        m.Model,
 		Background:   m.Background,
 		Archived:     m.Archived,
 		ArchivedAt:   m.ArchivedAt,

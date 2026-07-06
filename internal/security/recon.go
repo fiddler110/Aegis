@@ -1,0 +1,398 @@
+package security
+
+import (
+	"context"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
+)
+
+// ReconOptions is one recon_scan call's parameters (P13.5): network-target
+// reconnaissance and vulnerability scanning across a host/CIDR list, for
+// attack-surface mapping against an authorized target (e.g. a home lab).
+type ReconOptions struct {
+	// Targets are bare hosts, IPs, or CIDRs — no http(s):// scheme required
+	// (unlike DASTOptions.Target). "192.168.1.0/24", "10.0.0.5", "db.lan".
+	Targets []string
+	// AllowedTargets and AllowActive deliberately reuse
+	// config.DASTConfig.AllowedTargets/AllowActive (P13.5.1/P13.5.2) — one
+	// shared network-target authorization policy for every tool that reaches
+	// out to a network target (ZAP, nmap, nuclei), not a second gate to keep
+	// in sync.
+	AllowedTargets []string
+	AllowActive    bool
+}
+
+// maxReconTargets caps how many hosts a single recon_scan call may target
+// (P13.5.3) — a hard ceiling, not a silent truncation, so a runaway or
+// mistaken host list fails loudly instead of scanning a partial list.
+const maxReconTargets = 256
+
+// reconContainerFallbackUnsupported mirrors imageContainerFallbackUnsupported's
+// reasoning: nmap/nuclei need to reach a LAN target directly, which the
+// network-isolated (--network none) scanner-container runner can't do, and
+// punching a network hole through that hardening isn't done for v1.
+const reconContainerFallbackUnsupported = "container fallback for network recon is not yet supported (it would need a network-egress exception to the scanner-container hardening posture) — install this tool natively instead"
+
+// ReconScanner is one network-target scanning tool (nmap, nuclei) — the
+// recon_scan analogue of Scanner (which analyzes a source directory) and
+// ImageScanner (which analyzes a container image by reference).
+type ReconScanner interface {
+	Name() string
+	Resolve(ctx context.Context, opts Options) (method Method, runtime sandbox.ContainerRuntime, image string, reason string)
+	// Scan runs against targets (already validated by RunRecon's target-
+	// authorization gate — see isHostAllowed). active mirrors DASTOptions'
+	// baseline/active split: false runs the safe/passive default, true
+	// unlocks more aggressive checks, gated by the same
+	// security.dast.allow_active flag as ZAP.
+	Scan(ctx context.Context, targets []string, active bool, method Method, runtime sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error)
+}
+
+// DefaultReconScanners returns the built-in network recon scanners: nmap
+// (port/service/version discovery — the attack-surface-mapping step) and
+// nuclei (template-driven vulnerability/misconfiguration matching against
+// whatever nmap found alive).
+func DefaultReconScanners() []ReconScanner {
+	return []ReconScanner{nmapScanner{}, nucleiScanner{}}
+}
+
+// RunRecon is the P13.5 entry point: validates every target individually
+// against the shared network-target authorization gate (P13.5.3 — a single
+// bad host fails the whole call, never a partial silent skip), then runs
+// every resolvable ReconScanner and aggregates findings the same way
+// RunWithOptions aggregates the file-based Scanner interface. Every policy
+// check here runs unconditionally, independent of the caller's permission
+// mode — same posture as RunDAST.
+func RunRecon(ctx context.Context, opts ReconOptions, scanOpts Options) (Report, error) {
+	rep := newReport()
+
+	if len(opts.Targets) == 0 {
+		return rep, errors.New("recon_scan requires at least one target")
+	}
+	if len(opts.Targets) > maxReconTargets {
+		return rep, fmt.Errorf("recon_scan supports at most %d targets per call, got %d", maxReconTargets, len(opts.Targets))
+	}
+
+	var disallowed []string
+	for _, target := range opts.Targets {
+		host, err := targetHost(target)
+		if err != nil {
+			disallowed = append(disallowed, fmt.Sprintf("%q (%v)", target, err))
+			continue
+		}
+		if allowed, reason := isHostAllowed(host, opts.AllowedTargets); !allowed {
+			disallowed = append(disallowed, fmt.Sprintf("%q (%s)", target, reason))
+		}
+	}
+	if len(disallowed) > 0 {
+		return rep, fmt.Errorf("target authorization failed for: %s", strings.Join(disallowed, "; "))
+	}
+
+	for _, sc := range DefaultReconScanners() {
+		method, rt, image, reason := sc.Resolve(ctx, scanOpts)
+		if method == MethodNone {
+			rep.Skipped[sc.Name()] = reason
+			continue
+		}
+		if method == MethodContainer {
+			rep.Skipped[sc.Name()] = reconContainerFallbackUnsupported
+			continue
+		}
+		findings, err := sc.Scan(ctx, opts.Targets, opts.AllowActive, method, rt, image, scanOpts)
+		rep.record(sc.Name(), method, findings, err)
+	}
+
+	rep.Findings = DedupFindings(rep.Findings)
+	assignASVS(rep.Findings)
+	rep.sortFindings()
+	return rep, nil
+}
+
+// targetHost extracts the bare host/IP isHostAllowed should gate on from one
+// recon target: a CIDR's network address, a host:port pair's host, or the
+// target itself when it's already a bare host/IP.
+func targetHost(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", errors.New("empty target")
+	}
+	if strings.Contains(target, "/") {
+		ip, _, err := net.ParseCIDR(target)
+		if err != nil {
+			return "", fmt.Errorf("invalid CIDR: %w", err)
+		}
+		return ip.String(), nil
+	}
+	if host, _, err := net.SplitHostPort(target); err == nil {
+		return host, nil
+	}
+	return target, nil
+}
+
+// ---- nmap: port/service/version discovery ----
+
+type nmapScanner struct{}
+
+func (nmapScanner) Name() string { return "nmap" }
+
+func (nmapScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return Resolve(ctx, "nmap", opts)
+}
+
+// Scan runs nmap against targets and parses its XML output into Findings.
+// No shell string-building: exec.CommandContext takes an explicit argv
+// slice built only from already-validated targets, never a concatenated
+// command string.
+func (nmapScanner) Scan(ctx context.Context, targets []string, active bool, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
+	tmpFile, err := os.CreateTemp("", "aegis-nmap-*.xml")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	args := nmapArgs(targets, active, tmpPath)
+	cmd := exec.CommandContext(ctx, "nmap", args...)
+	out, _ := cmd.CombinedOutput()
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, fmt.Errorf("nmap did not produce xml output (output: %s): %w", strings.TrimSpace(string(out)), err)
+	}
+	return parseNmapXML(data)
+}
+
+// nmapArgs builds nmap's argv slice for one Scan call, split out from Scan
+// so it's directly unit-testable without invoking a real nmap binary.
+// Baseline: version-detection scan of the top 100 ports, no OS fingerprinting
+// or NSE scripts. Active (security.dast.allow_active): adds OS detection,
+// the full port range, and nmap's default-safe NSE script category — gated
+// by the same flag ZAP's active mode uses.
+func nmapArgs(targets []string, active bool, xmlOutPath string) []string {
+	args := []string{"-sV", "--top-ports", "100", "-T4", "-Pn", "-oX", xmlOutPath}
+	if active {
+		args = append(args, "-sC", "-O", "-p-")
+	}
+	return append(args, targets...)
+}
+
+type nmapRun struct {
+	Hosts []nmapHost `xml:"host"`
+}
+
+type nmapHost struct {
+	Addresses []nmapAddress `xml:"address"`
+	Ports     nmapPorts     `xml:"ports"`
+}
+
+type nmapAddress struct {
+	Addr     string `xml:"addr,attr"`
+	AddrType string `xml:"addrtype,attr"`
+}
+
+type nmapPorts struct {
+	Port []nmapPort `xml:"port"`
+}
+
+type nmapPort struct {
+	Protocol string      `xml:"protocol,attr"`
+	PortID   string      `xml:"portid,attr"`
+	State    nmapState   `xml:"state"`
+	Service  nmapService `xml:"service"`
+}
+
+type nmapState struct {
+	State string `xml:"state,attr"`
+}
+
+type nmapService struct {
+	Name    string `xml:"name,attr"`
+	Product string `xml:"product,attr"`
+	Version string `xml:"version,attr"`
+}
+
+func parseNmapXML(data []byte) ([]Finding, error) {
+	var run nmapRun
+	if err := xml.Unmarshal(data, &run); err != nil {
+		return nil, fmt.Errorf("parse nmap xml: %w", err)
+	}
+	var findings []Finding
+	for _, h := range run.Hosts {
+		host := nmapHostAddress(h)
+		for _, p := range h.Ports.Port {
+			if p.State.State != "open" {
+				continue
+			}
+			findings = append(findings, buildNmapFinding(host, p))
+		}
+	}
+	return findings, nil
+}
+
+func nmapHostAddress(h nmapHost) string {
+	for _, a := range h.Addresses {
+		if a.AddrType == "ipv4" || a.AddrType == "ipv6" {
+			return a.Addr
+		}
+	}
+	if len(h.Addresses) > 0 {
+		return h.Addresses[0].Addr
+	}
+	return "unknown"
+}
+
+// riskyService documents one port/protocol combination worth flagging above
+// plain informational "port is open" — the concrete "identify weaknesses"
+// value nmap's recon adds beyond a bare port list.
+type riskyService struct {
+	severity    Severity
+	remediation string
+}
+
+// riskyPorts is keyed by "<port>/<protocol>". Deliberately a short, common
+// list (not exhaustive) — services frequently found unintentionally exposed
+// on a home lab / internal network and worth calling out above INFO.
+var riskyPorts = map[string]riskyService{
+	"23/tcp":   {SevHigh, "Telnet transmits credentials in plaintext and is largely obsolete — disable it or replace with SSH."},
+	"21/tcp":   {SevMedium, "FTP transmits credentials in plaintext by default — disable if unused, or require FTPS/SFTP."},
+	"512/tcp":  {SevHigh, "rexec is unauthenticated/plaintext — disable unless explicitly required."},
+	"513/tcp":  {SevHigh, "rlogin is unauthenticated/plaintext — disable unless explicitly required."},
+	"514/tcp":  {SevHigh, "rsh is unauthenticated/plaintext — disable unless explicitly required."},
+	"6379/tcp": {SevHigh, "Redis has no authentication by default — confirm requirepass/ACLs are set, or bind to loopback/private only."},
+	"2375/tcp": {SevCritical, "Unencrypted Docker API grants full host control to anyone who can reach it — bind to loopback, require TLS on 2376, or disable remote access."},
+	"445/tcp":  {SevMedium, "SMB exposure is a common lateral-movement vector — restrict to trusted networks and confirm SMBv1 is disabled."},
+	"139/tcp":  {SevMedium, "NetBIOS/SMB exposure is a common lateral-movement vector — restrict to trusted networks."},
+	"3389/tcp": {SevMedium, "RDP exposed beyond a trusted network is a common ransomware entry point — restrict via VPN/firewall and enforce NLA plus strong auth."},
+	"5900/tcp": {SevMedium, "VNC is often unauthenticated or weakly authenticated — restrict access and confirm a strong password/tunnel is in place."},
+	"9200/tcp": {SevHigh, "Elasticsearch has no authentication by default — confirm security features are enabled, or bind to loopback/private only."},
+}
+
+func buildNmapFinding(host string, p nmapPort) Finding {
+	service := p.Service.Name
+	if service == "" {
+		service = "unknown"
+	}
+	sev := SevInfo
+	remediation := "Informational — confirm this service is intentionally exposed on this network."
+	if risky, ok := riskyPorts[p.PortID+"/"+p.Protocol]; ok {
+		sev = risky.severity
+		remediation = risky.remediation
+	}
+	desc := "Port is open and accepting connections."
+	if productVersion := strings.TrimSpace(p.Service.Product + " " + p.Service.Version); productVersion != "" {
+		desc = fmt.Sprintf("%s Detected: %s.", desc, productVersion)
+	}
+	return Finding{
+		Tool:        "nmap",
+		RuleID:      fmt.Sprintf("open-port-%s-%s", p.PortID, p.Protocol),
+		Severity:    sev,
+		Title:       fmt.Sprintf("Open port: %s (%s/%s)", service, p.PortID, p.Protocol),
+		Location:    fmt.Sprintf("%s:%s/%s", host, p.PortID, p.Protocol),
+		Description: desc,
+		Remediation: remediation,
+	}
+}
+
+// ---- nuclei: template-driven vulnerability/misconfiguration scanning ----
+
+type nucleiScanner struct{}
+
+func (nucleiScanner) Name() string { return "nuclei" }
+
+func (nucleiScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return Resolve(ctx, "nuclei", opts)
+}
+
+func (nucleiScanner) Scan(ctx context.Context, targets []string, active bool, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
+	templatesDir, err := resolveNucleiTemplates(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	tmpFile, err := os.CreateTemp("", "aegis-nuclei-*.sarif")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	args := nucleiArgs(targets, active, templatesDir, tmpPath)
+
+	cmd := exec.CommandContext(ctx, "nuclei", args...)
+	out, _ := cmd.CombinedOutput()
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, fmt.Errorf("nuclei did not produce a sarif report (output: %s): %w", strings.TrimSpace(string(out)), err)
+	}
+	return ParseSARIF(data, "nuclei")
+}
+
+// nucleiArgs builds nuclei's argv slice for one Scan call, split out from
+// Scan so it's directly unit-testable without invoking a real nuclei binary.
+func nucleiArgs(targets []string, active bool, templatesDir, sarifOutPath string) []string {
+	args := []string{"-t", templatesDir, "-duc", "-silent"}
+	if !active {
+		// Safe-by-default (P13.5.4): exclude dos/fuzz/intrusive-tagged
+		// templates unless the same security.dast.allow_active flag ZAP
+		// uses is set.
+		args = append(args, "-etags", "dos,fuzz,intrusive")
+	}
+	for _, t := range targets {
+		args = append(args, "-target", t)
+	}
+	return append(args, "-sarif-export", sarifOutPath)
+}
+
+// resolveNucleiTemplates enforces P13.5.6's template pinning: nuclei never
+// runs against an implicit "latest" template pull. security.tools.nuclei.
+// templates_version must name a nuclei-templates release tag; the tag is
+// shallow-cloned once into a per-version cache directory and reused after
+// that (a version already present on disk is never re-cloned/updated).
+func resolveNucleiTemplates(ctx context.Context, opts Options) (string, error) {
+	version := strings.TrimSpace(opts.Tools["nuclei"].TemplatesVersion)
+	if version == "" {
+		return "", errors.New("nuclei requires a pinned template set — set security.tools.nuclei.templates_version to a nuclei-templates release tag (e.g. \"v9.9.0\"); templates are executable network-probe logic and are never pulled at an unpinned \"latest\"")
+	}
+	dir := filepath.Join(nucleiTemplatesBaseDir(), version)
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return dir, nil
+	}
+	if err := cloneNucleiTemplates(ctx, version, dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// nucleiTemplatesCacheDir is a seam for tests.
+var nucleiTemplatesCacheDir = func() (string, error) { return os.UserCacheDir() }
+
+func nucleiTemplatesBaseDir() string {
+	base, err := nucleiTemplatesCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "aegis", "nuclei-templates")
+}
+
+func cloneNucleiTemplates(ctx context.Context, version, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--branch", version,
+		"https://github.com/projectdiscovery/nuclei-templates.git", dest)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("clone nuclei-templates@%s: %w (output: %s)", version, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}

@@ -64,9 +64,12 @@ func (opengrepScanner) Scan(ctx context.Context, dir string, method Method, rt s
 	var out []byte
 	var err error
 	args := sastScanArgs()
-	if method == MethodContainer {
+	switch method {
+	case MethodContainer:
 		out, err = runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
-	} else {
+	case MethodWSL:
+		out, err = sandbox.RunWSLCommand(ctx, dir, "opengrep", append(args, ".")...)
+	default:
 		out, err = runJSON(ctx, dir, "opengrep", append(args, ".")...)
 	}
 	if err != nil {
@@ -221,6 +224,13 @@ func (kubescapeScanner) Resolve(ctx context.Context, opts Options) (Method, sand
 func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
 	if method == MethodContainer {
 		out, err := runContainerImage(ctx, rt, image, dir, "scan", "--format", "sarif", "--output", "/dev/stdout", "/src")
+		if err != nil {
+			return nil, err
+		}
+		return ParseSARIF(out, "kubescape")
+	}
+	if method == MethodWSL {
+		out, err := sandbox.RunWSLCommand(ctx, dir, "kubescape", "scan", "--format", "sarif", "--output", "/dev/stdout", ".")
 		if err != nil {
 			return nil, err
 		}

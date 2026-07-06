@@ -148,6 +148,8 @@ func (m *securityConfigModel) resolveCmd() tea.Cmd {
 				statuses[d.Name] = "on PATH"
 			case security.MethodContainer:
 				statuses[d.Name] = "container (" + string(rt) + ")"
+			case security.MethodWSL:
+				statuses[d.Name] = "via WSL"
 			default:
 				statuses[d.Name] = "unavailable: " + reason
 				if note := security.AvailabilityNote(d.Name, reason); note != "" {

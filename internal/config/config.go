@@ -353,6 +353,12 @@ type SecurityToolConfig struct {
 	// to enable container execution — see security.ScannerDescriptor's doc
 	// comment for why Aegis ships no built-in default.
 	Image string `koanf:"image"`
+	// TemplatesVersion pins the nuclei scanner's nuclei-templates release tag
+	// (P13.5.6) — meaningless for every other tool. Templates are executable
+	// network-probe logic, so nuclei never runs against an unpinned "latest"
+	// template set the same way a scanner container image is never used
+	// without a digest pin.
+	TemplatesVersion string `koanf:"templates_version"`
 }
 
 // ToolEnabled reports whether c enables the tool (default true).

@@ -124,3 +124,30 @@ func TestHandleScanImageRoutesToImageScan(t *testing.T) {
 		t.Error("expected a non-empty report even with no image scanners installed")
 	}
 }
+
+// TestHandleScanNetworkRejectsDisallowedTarget is the P13.5/`/scan network`
+// regression: a target outside the default loopback/private allowance (and
+// not declared in security.dast.allowed_targets, which this test server
+// leaves empty) must be rejected before either scanner runs, same shared
+// gate dast_scan uses — not silently scanned or 500'd.
+func TestHandleScanNetworkRejectsDisallowedTarget(t *testing.T) {
+	cl, _, _ := newScanTestServer(t)
+	_, err := cl.Scan(context.Background(), api.ScanRequest{Targets: []string{"8.8.8.8"}})
+	if err == nil {
+		t.Fatal("expected an error for a disallowed public network target")
+	}
+}
+
+// TestHandleScanNetworkRoutesToRecon checks the Targets branch is taken
+// instead of a directory scan, and an allowed (loopback) target passes the
+// authorization gate even with no nmap/nuclei binaries installed.
+func TestHandleScanNetworkRoutesToRecon(t *testing.T) {
+	cl, _, _ := newScanTestServer(t)
+	resp, err := cl.Scan(context.Background(), api.ScanRequest{Targets: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if strings.TrimSpace(resp.Report) == "" {
+		t.Error("expected a non-empty report even with no recon scanners installed")
+	}
+}

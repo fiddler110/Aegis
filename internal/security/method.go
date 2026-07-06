@@ -17,6 +17,7 @@ type Method string
 const (
 	MethodHost      Method = "host"      // native binary on PATH
 	MethodContainer Method = "container" // via a pinned image on a detected container runtime
+	MethodWSL       Method = "wsl"       // via a Linux distro under the Windows Subsystem for Linux
 	MethodNone      Method = ""          // unavailable — see the reason string returned alongside it
 )
 
@@ -52,6 +53,13 @@ type ScannerDescriptor struct {
 	// language-targeted SAST engines (gosec/bandit/brakeman/njsscan), which
 	// only make sense for a project in that specific language.
 	DefaultEnabled bool
+	// WSLCapable marks scanners whose Scan implementation has a MethodWSL
+	// execution branch — i.e. tools that ship no native Windows build at all
+	// (opengrep, kubescape). Resolve only ever offers MethodWSL for these;
+	// every other tool already has a native Windows install path, and no
+	// Scan-side WSL branch is wired for them, so offering the method would
+	// silently misroute execution back to a nonexistent host binary.
+	WSLCapable bool
 }
 
 // descriptors is keyed by scanner name so provisioning/config code (P11.10,
@@ -63,6 +71,7 @@ var descriptors = map[string]ScannerDescriptor{
 		Category:       "SAST",
 		Summary:        "Static analysis — scans source code for security bugs and anti-patterns using pattern-based rules across 30+ languages. Community-governed semgrep fork: no login/telemetry, openly-licensed rules. Default SAST engine (P11.3); semgrep remains selectable.",
 		DefaultEnabled: true,
+		WSLCapable:     true, // no native Windows build; runs under WSL there (P14.x)
 		Install: map[string]string{
 			"darwin": "curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash",
 			"linux":  "curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash",
@@ -158,6 +167,7 @@ var descriptors = map[string]ScannerDescriptor{
 		Category:       "IaC / Kubernetes",
 		Summary:        "Scans Kubernetes manifests/Helm charts for misconfigurations against NSA/MITRE/CIS framework controls, with proper severity (unlike lint-style tools such as kube-linter).",
 		DefaultEnabled: true,
+		WSLCapable:     true, // no native Windows build; runs under WSL there (P14.x)
 		Install: map[string]string{
 			"darwin": "brew install kubescape",
 			"linux":  "curl -s https://raw.githubusercontent.com/kubescape/kubescape/master/install.sh | /bin/bash",
@@ -223,6 +233,34 @@ var descriptors = map[string]ScannerDescriptor{
 			"windows": "scoop install syft",
 		},
 	},
+	"nmap": {
+		Name:     "nmap",
+		Binary:   "nmap",
+		Category: "Network / port & service discovery",
+		Summary:  "Discovers live hosts, open ports, and running service/version banners across a target host list or CIDR range — the attack-surface-mapping step of a network recon run (`recon_scan`). Baseline mode is a top-100-port version-detection scan with no OS fingerprinting or scripts; active mode (security.dast.allow_active) adds OS detection, the full port range, and nmap's default-safe NSE script category.",
+		// No DefaultEnabled: true — network-facing, opt-in like zap: an
+		// operator must both install nmap and pass the recon_scan tool's
+		// target-authorization gate (shared with DAST, see
+		// internal/security/target.go) before it ever runs.
+		DefaultEnabled: false,
+		Install: map[string]string{
+			"darwin":  "brew install nmap",
+			"linux":   "install via your distro's package manager, e.g. apt install nmap / dnf install nmap",
+			"windows": "winget install Insecure.Nmap",
+		},
+	},
+	"nuclei": {
+		Name:           "nuclei",
+		Binary:         "nuclei",
+		Category:       "Network / host vulnerability scanning",
+		Summary:        "Runs ProjectDiscovery's community template library (CVEs, misconfigurations, exposed panels, raw network checks) against a target host list to find known, template-matched vulnerabilities — the vulnerability-scanning half of a network recon run (`recon_scan`), complementing nmap's port/service discovery. Requires security.tools.nuclei.templates_version (a pinned nuclei-templates release) — templates are executable network-probe logic and are never pulled at an unpinned \"latest\" (same posture as a scanner container image, P7.6). Baseline mode excludes dos/fuzz/intrusive-tagged templates; active mode (security.dast.allow_active) includes them.",
+		DefaultEnabled: false,
+		Install: map[string]string{
+			"darwin":  "brew install nuclei",
+			"linux":   "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+			"windows": "scoop install nuclei",
+		},
+	},
 	"zap": {
 		Name:     "zap",
 		Binary:   "", // container-only — OWASP ZAP has no relevant host CLI in this workflow; lookPath("") always fails, so Resolve only ever considers the container path for it
@@ -283,6 +321,12 @@ type ToolPolicy struct {
 	// reference (image@sha256:...) for the same reason DefaultImage is never
 	// baked in — see ScannerDescriptor's doc comment.
 	Image string
+	// TemplatesVersion pins the nuclei scanner's template set to a specific
+	// nuclei-templates release tag (P13.5.6) — templates are executable
+	// network-probe logic, so they're never pulled at an unpinned "latest"
+	// the way a scanner container image is never used unpinned (P7.6).
+	// Meaningless for every other tool.
+	TemplatesVersion string
 }
 
 // Options bundles per-tool policy for a scan run (the P11.11 config surface).
@@ -319,7 +363,7 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 		if tc.Enabled != nil {
 			enabled = *tc.Enabled
 		}
-		tools[name] = ToolPolicy{Enabled: enabled, Method: tc.Method, Image: tc.Image}
+		tools[name] = ToolPolicy{Enabled: enabled, Method: tc.Method, Image: tc.Image, TemplatesVersion: tc.TemplatesVersion}
 	}
 	return Options{Tools: tools, DefaultMethod: cfg.DefaultMethod}
 }
@@ -328,6 +372,12 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 // deterministic container-runtime result without needing a real docker/
 // podman install.
 var detectRuntime = sandbox.DetectBest
+
+// wslBinaryAvailable is a seam over sandbox.WSLBinaryAvailable so tests can
+// inject a deterministic WSL-availability result without needing a real WSL
+// install. Always false off Windows (sandbox.WSLDistroAvailable itself
+// short-circuits on GOOS), so callers never need their own OS check.
+var wslBinaryAvailable = sandbox.WSLBinaryAvailable
 
 // Resolve is the availability resolver every scanner calls (P11.11's
 // unifying seam): given a scanner's binary name and image, and the caller's
@@ -372,21 +422,37 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 			return MethodNone, "", "", "security.tools." + name + ".method is \"container\" but no container runtime is available (docker/podman) — run `aegis security install " + name + "` for guided setup"
 		}
 		return MethodContainer, rt, image, ""
+	case "wsl":
+		if !d.WSLCapable {
+			return MethodNone, "", "", name + " has no WSL execution path wired (security.tools." + name + ".method is \"wsl\")"
+		}
+		if wslBinaryAvailable(ctx, d.Binary) {
+			return MethodWSL, "", "", ""
+		}
+		return MethodNone, "", "", d.Binary + " not found inside WSL (security.tools." + name + ".method is \"wsl\") — run `aegis security install " + name + "` to install it there"
 	default: // "auto" or unset
 		if hostAvailable {
 			return MethodHost, "", "", ""
 		}
+		if image != "" {
+			if reason := digestPinReason(name, image); reason != "" {
+				return MethodNone, "", "", reason
+			}
+			if rt, ok := detectRuntime(ctx, nil); ok {
+				return MethodContainer, rt, image, ""
+			}
+		}
+		if d.WSLCapable && wslBinaryAvailable(ctx, d.Binary) {
+			return MethodWSL, "", "", ""
+		}
 		if image == "" {
-			return MethodNone, "", "", d.Binary + " not installed and no container image configured — set security.tools." + name + ".image (digest-pinned) to enable container fallback, or run `aegis security install " + name + "` for a guided host install"
+			msg := d.Binary + " not installed and no container image configured — set security.tools." + name + ".image (digest-pinned) to enable container fallback, or run `aegis security install " + name + "` for a guided host install"
+			if d.WSLCapable {
+				msg = d.Binary + " not installed (no native Windows build) and not found inside WSL either — run `aegis security install " + name + "` for a guided install, or set security.tools." + name + ".image (digest-pinned) for a container fallback"
+			}
+			return MethodNone, "", "", msg
 		}
-		if reason := digestPinReason(name, image); reason != "" {
-			return MethodNone, "", "", reason
-		}
-		rt, ok := detectRuntime(ctx, nil)
-		if !ok {
-			return MethodNone, "", "", d.Binary + " not installed and no container runtime available (docker/podman) — run `aegis security install " + name + "` for guided setup"
-		}
-		return MethodContainer, rt, image, ""
+		return MethodNone, "", "", d.Binary + " not installed and no container runtime available (docker/podman) — run `aegis security install " + name + "` for guided setup"
 	}
 }
 
