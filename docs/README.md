@@ -12,13 +12,14 @@ Welcome to the Aegis documentation. These guides cover every aspect of using, co
 | [CLI Reference](cli-reference.md) | Every command and flag (`aegis`, `aegis serve`, `aegis chat`, `aegis sessions`, …) |
 | [TUI Guide](tui-guide.md) | Terminal interface layout, keyboard shortcuts, all slash commands |
 | [Tools Reference](tools-reference.md) | All 50+ built-in tools with inputs, outputs, and examples |
-| [Personas](personas.md) | All 20 built-in personas, custom persona files, per-persona model overrides |
+| [Personas](personas.md) | All 22 built-in personas, custom persona files, per-persona model overrides |
 | [Permission System](permissions.md) | Plan/Build/Auto modes, text-based rules, contextual security policies |
 | [Session Management](sessions.md) | Durable sessions, checkpoints, rewind, export, archiving |
 | [Providers & Models](providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
 | [Memory & Knowledge](memory-and-knowledge.md) | Project/user memory, skills, project knowledge base, long-term entity store |
 | [Extensibility](extensibility.md) | Lifecycle hooks, MCP servers, custom commands, custom agents, process plugins, bundles |
 | [Multi-Agent & Background Tasks](multi-agent.md) | Swarm, sub-agents, parallel sessions, background tasks, cron scheduling |
+| [Multi-Agent Debate](debate.md) | Adversarial claim review: domains, file-grounding, persona overrides, all four entry points |
 | [Security Features](security.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual security policies |
 
 ## Quick Navigation

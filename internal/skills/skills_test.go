@@ -113,7 +113,7 @@ func TestBuiltinsListsEmbeddedSkills(t *testing.T) {
 		}
 		names[b.Name] = true
 	}
-	for _, want := range []string{"content-review", "html-report", "security-audit", "architecture-diagram", "debug-investigation", "redteam-engagement"} {
+	for _, want := range []string{"content-review", "html-report", "security-audit", "architecture-diagram", "debug-investigation", "redteam-engagement", "threat-modeling"} {
 		if !names[want] {
 			t.Errorf("expected built-in skill %q, got: %v", want, names)
 		}

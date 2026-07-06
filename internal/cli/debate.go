@@ -34,6 +34,8 @@ type debateCLIResult struct {
 
 func newDebateCmd() *cobra.Command {
 	var (
+		domain          string
+		files           []string
 		proposerPersona string
 		criticPersona   string
 		arbiterPersona  string
@@ -43,13 +45,16 @@ func newDebateCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "debate <claim>",
-		Short: "Adversarially debate a security claim (propose/critique/rebut/arbitrate)",
+		Short: "Adversarially debate any claim (propose/critique/rebut/arbitrate)",
 		Long: "Runs a multi-agent debate (P12) over the given claim — a security finding, threat/mitigation " +
-			"pair, or design assertion — instead of trusting a single unchallenged pass: a critic (grounded " +
-			"in cited evidence from grep/read_file/security_scan, or an explicit concession) challenges the " +
-			"claim, the proposer rebuts, this repeats for --max-rounds (default 2), then an arbiter issues a " +
-			"final UPHOLD/REVISE/REJECT verdict with a confidence label. Runs headless, no daemon required — " +
-			"same one-shot construction as `aegis chat`.",
+			"pair, design assertion, or a claim about any document/plan/decision — instead of trusting a " +
+			"single unchallenged pass: a critic (grounded in cited evidence from grep/read_file/web_fetch, " +
+			"or an explicit concession) challenges the claim, the proposer rebuts, this repeats for " +
+			"--max-rounds (default 2), then an arbiter issues a final UPHOLD/REVISE/REJECT verdict with a " +
+			"confidence label. --domain generic swaps the default security-researcher/security-critic/" +
+			"security-arbiter personas for general/critic/arbiter, for debating non-security claims; --file " +
+			"points the roles at specific documents to ground the debate in instead of relying on recall. " +
+			"Runs headless, no daemon required — same one-shot construction as `aegis chat`.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			claim := strings.TrimSpace(strings.Join(args, " "))
@@ -116,7 +121,9 @@ func newDebateCmd() *cobra.Command {
 				return strings.TrimSpace(sb.String()), runErr
 			}
 
+			claim = debate.WithFiles(claim, files)
 			transcript, runErr := debate.Run(ctx, claim, debate.Config{
+				Domain:          domain,
 				ProposerPersona: proposerPersona,
 				CriticPersona:   criticPersona,
 				ArbiterPersona:  arbiterPersona,
@@ -150,9 +157,11 @@ func newDebateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&proposerPersona, "proposer", "", "persona for the proposer role (default security-researcher)")
-	cmd.Flags().StringVar(&criticPersona, "critic", "", "persona for the critic role (default security-critic)")
-	cmd.Flags().StringVar(&arbiterPersona, "arbiter", "", "persona for the arbiter role (default security-arbiter)")
+	cmd.Flags().StringVar(&domain, "domain", "", "default persona trio: security (default) or generic, for non-security claims")
+	cmd.Flags().StringArrayVar(&files, "file", nil, "file path the debate roles should read for grounding (repeatable)")
+	cmd.Flags().StringVar(&proposerPersona, "proposer", "", "persona for the proposer role (default security-researcher, or general if --domain generic)")
+	cmd.Flags().StringVar(&criticPersona, "critic", "", "persona for the critic role (default security-critic, or critic if --domain generic)")
+	cmd.Flags().StringVar(&arbiterPersona, "arbiter", "", "persona for the arbiter role (default security-arbiter, or arbiter if --domain generic)")
 	cmd.Flags().IntVar(&maxRounds, "max-rounds", 0, "maximum critique/rebuttal rounds before arbitration (default 2)")
 	cmd.Flags().StringVar(&outputFormat, "output-format", "text", "output format: text or json (final transcript + verdict object)")
 	return cmd

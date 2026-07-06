@@ -101,15 +101,18 @@ Parent:
 
 ### Debate (P12)
 
-A claim — a security finding, a threat/mitigation pair, or a design assertion — gets adversarially
-challenged instead of accepted on a single unchallenged pass. Three roles, each a sub-agent spawned
-through the same `agent` tool seam as every other workflow mode:
+A claim — a security finding, a threat/mitigation pair, a design assertion, or a claim about any
+document/plan/decision — gets adversarially challenged instead of accepted on a single unchallenged
+pass. Three roles, each a sub-agent spawned through the same `agent` tool seam as every other
+workflow mode:
 
 ```json
 {
   "mode": "debate",
   "claim": "Token X allows full account takeover.",
-  "max_rounds": 2                 // optional, default 2
+  "max_rounds": 2,                 // optional, default 2
+  "domain": "security",            // optional: "security" (default) or "generic"
+  "files": ["docs/auth-design.md"] // optional: files the roles should read for grounding
 }
 ```
 
@@ -123,13 +126,21 @@ Parent:
               discounted any round with no cited evidence as [unsubstantiated]
 ```
 
-The three roles default to the `security-researcher` (proposer), `security-critic`, and
-`security-arbiter` personas respectively — override with `proposer_persona`/`critic_persona`/
-`arbiter_persona`. A debate also runs directly, without a conversational turn first:
+The three roles default to `security-researcher` (proposer)/`security-critic`/`security-arbiter`
+when `domain` is `security` (the default), or `general`/`critic`/`arbiter` when `domain` is
+`generic` — for debating claims about documents, plans, or anything else outside the security
+domain. Either trio can be overridden per-role with `proposer_persona`/`critic_persona`/
+`arbiter_persona` regardless of `domain`. `files` extends the claim with a reference-material block
+instructing every role to read those files with its own `read_file` tool before proposing,
+critiquing, or rebutting, so the debate is grounded in their actual content instead of recall.
 
-- TUI: `/debate <claim>`
-- CLI: `aegis debate <claim>` (headless, no daemon required — same construction as `aegis chat`)
+A debate also runs directly, without a conversational turn first:
+
+- TUI: `/debate [--domain generic] [--file <path>]... <claim>`
+- CLI: `aegis debate <claim> [flags]` (headless, no daemon required — same construction as `aegis chat`)
 - HTTP: `POST /debate` (used by both of the above)
+
+Full guide with worked examples (including document/plan review): [debate.md](debate.md).
 
 Debate mode checks the run's shared cost tracker before starting each round (`security.debate` config
 doesn't gate this — it's always on) and, once within 90% of the configured `cost.budget_usd`/

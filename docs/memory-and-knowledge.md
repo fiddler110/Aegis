@@ -118,7 +118,7 @@ The agent can save skills with `save_skill`:
 
 ### Built-in skills
 
-Aegis also ships several skills embedded in the binary — `content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation` — covering common workflows out of the box. They stay **dormant by default** (no system-prompt cost) until enabled, since unlike a project/user skill file a user didn't choose to author them:
+Aegis also ships several skills embedded in the binary — `content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation`, `redteam-engagement`, `threat-modeling` — covering common workflows out of the box. They stay **dormant by default** (no system-prompt cost) until enabled, since unlike a project/user skill file a user didn't choose to author them:
 
 ```bash
 aegis skills list                          # see all built-ins and their on/off status

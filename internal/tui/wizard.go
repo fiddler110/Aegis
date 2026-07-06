@@ -29,17 +29,17 @@ type wPreset struct {
 }
 
 var wPresets = []wPreset{
-	{"Anthropic (Claude)", "anthropic", "", 16384, "curated:anthropic"},
 	{"Ollama (local)", "openai", "http://localhost:11434/v1", 8192, "discover:ollama"},
-	{"OpenAI", "openai", "", 16384, "curated:openai"},
 	{"LM Studio (local)", "openai", "http://localhost:1234/v1", 4096, "discover:lmstudio"},
-	{"Groq", "openai", "https://api.groq.com/openai/v1", 8192, "curated:groq"},
+	{"Anthropic (Claude)", "anthropic", "", 16384, "curated:anthropic"},
+	{"OpenAI", "openai", "", 16384, "curated:openai"},
 	{"OpenRouter", "openai", "https://openrouter.ai/api/v1", 16384, "curated:openrouter"},
+	{"Groq", "openai", "https://api.groq.com/openai/v1", 8192, "curated:groq"},
 	{"Custom", "openai", "", 8192, "input"},
 }
 
 var wCurated = map[string][]string{
-	"anthropic":  {"claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
+	"anthropic":  {"claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"},
 	"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3", "o3-mini", "o1", "o1-mini"},
 	"groq":       {"llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"},
 	"openrouter": {"anthropic/claude-opus-4", "openai/gpt-4o", "google/gemini-2.0-flash-001", "meta-llama/llama-3.3-70b-instruct"},

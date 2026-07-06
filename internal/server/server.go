@@ -1518,6 +1518,7 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 
 	tracker := cost.NewTracker()
 	cfg := debate.Config{
+		Domain:          req.Domain,
 		ProposerPersona: req.ProposerPersona,
 		CriticPersona:   req.CriticPersona,
 		ArbiterPersona:  req.ArbiterPersona,
@@ -1526,7 +1527,8 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 		BudgetUSD:       s.cfg.Cost.BudgetUSD,
 		MaxTokens:       s.cfg.Cost.MaxTokensPerRun,
 	}
-	transcript, err := debate.Run(r.Context(), req.Claim, cfg, s.debateRoleRunner(tracker))
+	claim := debate.WithFiles(req.Claim, req.Files)
+	transcript, err := debate.Run(r.Context(), claim, cfg, s.debateRoleRunner(tracker))
 	// Record spend regardless of outcome: debate.Run returns the partial
 	// transcript (and whatever the tracker accumulated) even on error, so an
 	// aborted debate's spend must still count against the daily caps.

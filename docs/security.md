@@ -699,7 +699,9 @@ aegis debate "This XSS finding is a false positive because the output is HTML-es
 /debate <claim>
 ```
 
-Full mechanism, config toggles, and CLI/TUI/HTTP entry points: see
+Debate isn't limited to security claims — `--domain generic` swaps in non-security roles for
+debating documents, plans, or decisions. Full guide with worked examples: [debate.md](debate.md).
+Mechanism, config toggles, and CLI/TUI/HTTP entry points: see
 [multi-agent.md#debate-p12](multi-agent.md#debate-p12). Two existing security workflows can opt into
 routing through a debate round automatically — `security.debate.threat_model` for the security-architect
 persona's threat modeling, and `security.debate.triage` for the security-audit skill's baseline-

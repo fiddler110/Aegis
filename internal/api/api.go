@@ -284,10 +284,19 @@ type ScanResponse struct {
 // so a claim can be adversarially reviewed without spending a conversational
 // turn first to produce it.
 type DebateRequest struct {
-	// Claim is the finding/threat-mitigation/design assertion to debate.
+	// Claim is the finding/threat-mitigation/design assertion — or any other
+	// claim, e.g. about a document or plan — to debate.
 	Claim string `json:"claim"`
+	// Domain selects the default persona trio: "security" (default) or
+	// "generic" for non-security claims (documents, plans, decisions).
+	// Ignored for any role whose persona is explicitly overridden below.
+	Domain string `json:"domain,omitempty"`
+	// Files are paths the debate roles should read for grounding before
+	// proposing/critiquing/rebutting, e.g. the documents a claim is about.
+	Files []string `json:"files,omitempty"`
 	// ProposerPersona/CriticPersona/ArbiterPersona override the default debate
-	// role personas (security-researcher/security-critic/security-arbiter).
+	// role personas (security-researcher/security-critic/security-arbiter, or
+	// general/critic/arbiter when Domain is "generic").
 	ProposerPersona string `json:"proposer_persona,omitempty"`
 	CriticPersona   string `json:"critic_persona,omitempty"`
 	ArbiterPersona  string `json:"arbiter_persona,omitempty"`

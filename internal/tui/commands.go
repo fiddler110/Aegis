@@ -164,10 +164,16 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdIndex,
 		},
 		{
-			name: "debate", argHint: "<claim>", needsArgs: true,
-			shortDesc:    "Adversarially debate a claim (propose/critique/rebut/arbitrate) and print the verdict",
-			detailedHelp: "/debate <claim>\n  Runs a multi-agent debate directly against the daemon's configured model — a critic challenges the claim (grounded in cited evidence or an explicit CONCEDE), the proposer rebuts, this repeats for up to 2 rounds, then an arbiter issues a final UPHOLD/REVISE/REJECT verdict with a confidence label. Unlike /scan, this does spend model turns (one per role per round) since the debate itself is model-driven.\n  Same underlying mechanism as the `agent` tool's mode:\"debate\", exposed to run directly on a claim you already have in hand without a conversational turn first.",
+			name: "debate", argHint: "[--domain generic] [--file <path>]... <claim>", needsArgs: true,
+			shortDesc:    "Adversarially debate any claim (propose/critique/rebut/arbitrate) and print the verdict",
+			detailedHelp: "/debate [--domain generic] [--file <path>]... [--proposer|--critic|--arbiter <persona>] [--max-rounds <n>] <claim>\n  Runs a multi-agent debate directly against the daemon's configured model — a critic challenges the claim (grounded in cited evidence or an explicit CONCEDE), the proposer rebuts, this repeats for up to 2 rounds (or --max-rounds), then an arbiter issues a final UPHOLD/REVISE/REJECT verdict with a confidence label. Unlike /scan, this does spend model turns (one per role per round) since the debate itself is model-driven.\n  Defaults to the security-researcher/security-critic/security-arbiter personas; pass --domain generic to use general/critic/arbiter instead for non-security claims (documents, plans, decisions). --file points the roles at specific files to read for grounding instead of relying on recall — useful for debating the accuracy of a document or implementation plan. --proposer/--critic/--arbiter override individual role personas regardless of --domain.\n  Same underlying mechanism as the `agent` tool's mode:\"debate\", exposed to run directly on a claim you already have in hand without a conversational turn first.",
 			handler:      (*SlashDispatcher).cmdDebate,
+		},
+		{
+			name: "threat-model", argHint: "[system or feature]",
+			shortDesc:    "Threat-model a system or feature (STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154)",
+			detailedHelp: "/threat-model [system or feature]\n  Loads the threat-modeling skill and starts a threat model. Asks which framework to use (STRIDE, LINDDUN, PASTA, Trike, VAST, or NIST 800-154) if it isn't already clear from context, then explores the workspace and applies it.\n  No args: threat-models the whole project.\n  With args: scopes to the named system/feature, e.g. /threat-model the auth service.\n  Spends a model turn, same as /debate — a discoverable entry point into the skill instead of relying on the model noticing a trigger phrase in free text.",
+			handler:      (*SlashDispatcher).cmdThreatModel,
 		},
 		{
 			name: "session", argHint: "[list]", needsArgs: true,
