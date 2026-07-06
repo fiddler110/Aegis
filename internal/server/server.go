@@ -1362,6 +1362,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 
 	if req.Image != "" {
 		report := security.ScanImage(r.Context(), req.Image, security.DefaultImageScanners(), opts)
+		security.WriteReportArtifact(s.workspace, "image", report)
 		writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
 		return
 	}
@@ -1376,6 +1377,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		security.WriteReportArtifact(s.workspace, "network", report)
 		writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
 		return
 	}
@@ -1403,7 +1405,20 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	report := security.RunWithOptions(r.Context(), dir, security.DefaultScanners(), opts)
+	scanners := security.DefaultScanners()
+	if len(req.Scanners) > 0 {
+		var err error
+		scanners, opts, err = security.SelectScanners(scanners, opts, req.Scanners)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else {
+		opts = security.AutoEnableLanguageScanners(dir, opts)
+	}
+
+	report := security.RunWithOptions(r.Context(), dir, scanners, opts)
+	security.WriteReportArtifact(dir, "scan", report)
 	writeJSON(w, http.StatusOK, api.ScanResponse{Report: report.Format()})
 }
 

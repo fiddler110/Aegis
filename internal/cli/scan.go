@@ -11,17 +11,24 @@ import (
 )
 
 func newScanCmd() *cobra.Command {
+	var scanners []string
 	cmd := &cobra.Command{
 		Use:   "scan [path]",
 		Short: "Run available security scanners and print normalized findings",
 		Long: "Runs every enabled scanner (opengrep, trivy, gitleaks, kubescape, hadolint, osv-scanner, grype) over the " +
-			"given path (default: current directory) and prints a unified findings report. semgrep and the " +
-			"language-targeted engines (gosec/bandit/brakeman/njsscan) are opt-in — enable via " +
-			"security.tools.<name>.enabled: true or `aegis security config`. Falls back to a configured container " +
-			"image (security.tools.<name>.image) for any enabled scanner not installed on PATH. Findings are " +
-			"deduped across overlapping tools and, where confident, tagged with an OWASP ASVS chapter; an " +
-			"accepted-risk .aegis/security-baseline.yaml (see `aegis security baseline`) can suppress a specific, " +
-			"time-boxed finding.",
+			"given path (default: current directory) and prints a unified findings report, persisted to " +
+			".aegis/security/scan.json under it. semgrep and the language-targeted engines (gosec/bandit/brakeman/" +
+			"njsscan) are opt-in — enable via security.tools.<name>.enabled: true or `aegis security config` — but " +
+			"a plain scan with no --scanner filter auto-detects the project's language (go.mod/*.go, " +
+			"requirements.txt/*.py, Gemfile/*.rb, package.json/*.js) and auto-enables the matching one for this " +
+			"run, without needing config, unless you've explicitly enabled/disabled it yourself. Pass --scanner " +
+			"one or more times to run only specific scanners or categories instead (e.g. --scanner trufflehog, " +
+			"--scanner secrets) — this force-enables them for the run regardless of config, the same way " +
+			"`aegis scan image` already runs its own distinct scanner set on request. Falls back to a configured " +
+			"container image (security.tools.<name>.image) for any enabled scanner not installed on PATH. " +
+			"Findings are deduped across overlapping tools and, where confident, tagged with an OWASP ASVS " +
+			"chapter; an accepted-risk .aegis/security-baseline.yaml (see `aegis security baseline`) can suppress " +
+			"a specific, time-boxed finding.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := "."
@@ -39,11 +46,24 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			report := security.RunWithOptions(cmd.Context(), abs, security.DefaultScanners(), security.OptionsFromConfig(cfg.Security))
+			opts := security.OptionsFromConfig(cfg.Security)
+			selected := security.DefaultScanners()
+			if len(scanners) > 0 {
+				selected, opts, err = security.SelectScanners(selected, opts, scanners)
+				if err != nil {
+					return err
+				}
+			} else {
+				opts = security.AutoEnableLanguageScanners(abs, opts)
+			}
+			report := security.RunWithOptions(cmd.Context(), abs, selected, opts)
+			security.WriteReportArtifact(abs, "scan", report)
 			fmt.Fprintln(cmd.OutOrStdout(), report.Format())
+			fmt.Fprintf(cmd.OutOrStdout(), "\nReport written to %s\n", security.ReportArtifactPath(abs, "scan"))
 			return nil
 		},
 	}
+	cmd.Flags().StringArrayVarP(&scanners, "scanner", "s", nil, "run only this scanner or category (repeatable) — e.g. --scanner trufflehog --scanner secrets; see `aegis security status` for valid names")
 	cmd.AddCommand(newScanImageCmd())
 	cmd.AddCommand(newScanSBOMCmd())
 	cmd.AddCommand(newScanDASTCmd())
@@ -78,6 +98,10 @@ func newScanNetworkCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cwd, err := filepath.Abs(".")
+			if err == nil {
+				security.WriteReportArtifact(cwd, "network", report)
+			}
 			fmt.Fprintln(cmd.OutOrStdout(), report.Format())
 			return nil
 		},
@@ -110,6 +134,10 @@ func newScanDASTCmd() *cobra.Command {
 			}, security.OptionsFromConfig(cfg.Security))
 			if err != nil {
 				return err
+			}
+			cwd, err := filepath.Abs(".")
+			if err == nil {
+				security.WriteReportArtifact(cwd, "dast", report)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), report.Format())
 			return nil
@@ -184,6 +212,10 @@ func newScanImageCmd() *cobra.Command {
 				return err
 			}
 			report := security.ScanImage(cmd.Context(), ref, security.DefaultImageScanners(), security.OptionsFromConfig(cfg.Security))
+			cwd, err := filepath.Abs(".")
+			if err == nil {
+				security.WriteReportArtifact(cwd, "image", report)
+			}
 			fmt.Fprintln(cmd.OutOrStdout(), report.Format())
 			return nil
 		},

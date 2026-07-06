@@ -11,11 +11,43 @@ The `security_scan` tool and `aegis scan` command run available security scanner
 ### CLI usage
 
 ```bash
-aegis scan .                      # scan current directory
-aegis scan ./src                  # scan a specific path
-aegis scan image alpine:3.20      # scan a container image by reference (see below)
-aegis scan sbom .                 # generate a CycloneDX SBOM via syft (see below)
+aegis scan .                                  # scan current directory
+aegis scan ./src                              # scan a specific path
+aegis scan --scanner trufflehog               # run only trufflehog, force-enabled for this run
+aegis scan --scanner secrets ./src             # run only the "secrets" category (gitleaks + trufflehog)
+aegis scan image alpine:3.20                  # scan a container image by reference (see below)
+aegis scan sbom .                             # generate a CycloneDX SBOM via syft (see below)
 ```
+
+Every findings scan (plain path or `--scanner`-filtered) is written to
+`.aegis/security/scan.json` under the scanned path — see [Persisted reports](#persisted-reports)
+below.
+
+### Picking specific scanners, or letting Aegis pick for you
+
+A plain scan with no `--scanner` filter does two things beyond "run every enabled scanner":
+
+1. **Language auto-detection** — it looks for `go.mod`/`*.go`, `requirements.txt`/`*.py`,
+   `Gemfile`/`*.rb`, or `package.json`/`*.js`/`*.ts` under the scanned path and auto-enables the
+   matching opt-in language-specific SAST engine (gosec/bandit/brakeman/njsscan) for that run —
+   no config change needed. This never overrides an explicit
+   `security.tools.<name>.enabled` you've already set, in either direction.
+2. Everything already enabled by default or via config still runs, as before.
+
+Pass `--scanner <name-or-category>` (repeatable, or comma-separated in the TUI) to instead run
+**only** specific scanners, force-enabled for this run regardless of config — the same way
+`aegis scan image` already runs its own distinct, explicitly-requested scanner set:
+
+```bash
+aegis scan --scanner trufflehog          # exact scanner name
+aegis scan --scanner secrets             # category alias: gitleaks + trufflehog
+aegis scan --scanner gitleaks --scanner trufflehog   # equivalent to --scanner secrets
+```
+
+Recognized category aliases: `secrets` (gitleaks, trufflehog), `sast` (opengrep, semgrep, gosec,
+bandit, brakeman, njsscan), `sca`/`deps` (osv-scanner, grype), `iac` (kubescape, hadolint),
+`misconfig` (kubescape, hadolint, trivy). An unrecognized name/category is rejected with the full
+valid list rather than silently running everything or erroring opaquely.
 
 ### TUI usage
 
@@ -24,11 +56,19 @@ daemon runs it against its own workspace and prints the formatted report straigh
 transcript:
 
 ```
-/scan                    # scan the whole workspace
-/scan src                # scan a workspace-relative subdirectory
-/scan image alpine:3.20  # scan a container image reference instead
-/scan sbom                # generate a CycloneDX SBOM instead of a findings report
+/scan                          # scan the whole workspace (language auto-detection applies)
+/scan src                      # scan a workspace-relative subdirectory
+/scan trufflehog                # run only trufflehog, force-enabled for this run
+/scan secrets                  # run only the "secrets" category
+/scan gitleaks,trufflehog src   # comma-separated selector list + a path
+/scan image alpine:3.20        # scan a container image reference instead
+/scan sbom                     # generate a CycloneDX SBOM instead of a findings report
 ```
+
+`/scan`'s first argument is treated as a scanner/category selector only when *every*
+comma-separated token in it resolves to a known scanner name or category — otherwise it's treated
+as a literal path, so `/scan src` still means "scan the src directory," not "run the (nonexistent)
+src scanner."
 
 A scan can take a while (container fallback pulls, multiple scanner binaries), so give it a
 minute on a cold run. Use `/security-config` first to enable/install the scanners you want
@@ -41,6 +81,14 @@ The agent can call `security_scan` directly:
 ```json
 {
   "path": "."   // optional: workspace-relative subdirectory; defaults to the whole workspace
+}
+```
+
+Restrict it to specific scanners or categories:
+
+```json
+{
+  "scanners": ["trufflehog"]   // or ["secrets"], ["sast"], etc. — force-enabled for this run
 }
 ```
 
@@ -59,6 +107,16 @@ Or generate an SBOM instead of scanning for findings:
   "sbom": true   // generates via syft, persists to .aegis/sbom.cdx.json; mutually exclusive with image
 }
 ```
+
+### Persisted reports
+
+Every findings scan (path, image, or network) persists its report as JSON under
+`.aegis/security/` — `scan.json` for a path scan, `image.json` for `aegis scan image`/`/scan
+image`, `network.json` for `aegis scan network`/`/scan network`/`recon_scan`, `dast.json` for
+`aegis scan dast`/`dast_scan`. Each file is overwritten on every run (the latest result, not a
+growing history) — the same posture `.aegis/sbom.cdx.json` already uses for SBOMs. This means a
+scan's findings survive past whatever ephemeral output captured them (terminal scrollback, a
+model turn) and are diffable/greppable/scriptable afterward.
 
 ### Scanners
 

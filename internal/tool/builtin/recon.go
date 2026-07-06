@@ -17,6 +17,7 @@ import (
 // dast_scan, see internal/security/target.go) — approval alone would not be
 // enough for a tool that can otherwise be pointed at an arbitrary host.
 type reconScanTool struct {
+	root           string           // workspace root, used only to anchor the persisted .aegis/security/network.json report
 	opts           security.Options // resolves nmap/nuclei (host binary only for v1), same as security_scan/dast_scan
 	allowedTargets []string
 	allowActive    bool
@@ -45,5 +46,6 @@ func (t *reconScanTool) Execute(ctx context.Context, input json.RawMessage) (too
 	if err != nil {
 		return tool.Result{}, err
 	}
+	security.WriteReportArtifact(t.root, "network", report)
 	return tool.Result{Content: report.Format()}, nil
 }

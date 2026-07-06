@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/tool"
 )
@@ -22,7 +24,7 @@ import (
 // whatever the test process's cwd happens to be. Returns both the typed
 // client and the raw base URL + token, since one test needs to send a
 // deliberately malformed body the typed client can't produce.
-func newScanTestServer(t *testing.T) (cl *client.Client, baseURL, token string) {
+func newScanTestServer(t *testing.T) (cl *client.Client, baseURL, token, workspace string) {
 	t.Helper()
 	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {
@@ -30,7 +32,7 @@ func newScanTestServer(t *testing.T) (cl *client.Client, baseURL, token string) 
 	}
 	t.Cleanup(func() { store.Close() })
 
-	workspace := t.TempDir()
+	workspace = t.TempDir()
 	cfg := &config.Config{
 		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
 		Permission: config.PermissionConfig{Mode: "plan"},
@@ -41,7 +43,7 @@ func newScanTestServer(t *testing.T) (cl *client.Client, baseURL, token string) 
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return client.New(ts.URL).WithToken("test-token"), ts.URL, "test-token"
+	return client.New(ts.URL).WithToken("test-token"), ts.URL, "test-token", workspace
 }
 
 // TestHandleScanDefaultsToWholeWorkspace is the core /scan regression: no
@@ -50,7 +52,7 @@ func newScanTestServer(t *testing.T) (cl *client.Client, baseURL, token string) 
 // installed in this test environment, RunWithOptions reports each as skipped
 // rather than failing (same behavior `aegis scan` already relies on).
 func TestHandleScanDefaultsToWholeWorkspace(t *testing.T) {
-	cl, _, _ := newScanTestServer(t)
+	cl, _, _, _ := newScanTestServer(t)
 	resp, err := cl.Scan(context.Background(), api.ScanRequest{})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -63,7 +65,7 @@ func TestHandleScanDefaultsToWholeWorkspace(t *testing.T) {
 // TestHandleScanRejectsPathEscapingWorkspace is the security regression: a
 // path that escapes the workspace root must be rejected (400), not scanned.
 func TestHandleScanRejectsPathEscapingWorkspace(t *testing.T) {
-	cl, _, _ := newScanTestServer(t)
+	cl, _, _, _ := newScanTestServer(t)
 	_, err := cl.Scan(context.Background(), api.ScanRequest{Path: "../../etc"})
 	if err == nil {
 		t.Fatal("expected an error for a path escaping the workspace")
@@ -75,7 +77,7 @@ func TestHandleScanRejectsPathEscapingWorkspace(t *testing.T) {
 // request is routed to the SBOM path (a distinct error/report shape from a
 // findings scan) rather than asserting a real SBOM was written.
 func TestHandleScanSBOMGeneratesArtifact(t *testing.T) {
-	cl, _, _ := newScanTestServer(t)
+	cl, _, _, _ := newScanTestServer(t)
 	resp, err := cl.Scan(context.Background(), api.ScanRequest{SBOM: true})
 	if err != nil {
 		// syft not installed: GenerateSBOM surfaces that as an error rather
@@ -95,7 +97,7 @@ func TestHandleScanSBOMGeneratesArtifact(t *testing.T) {
 // and validated rather than ignored — client.Scan always marshals valid
 // JSON, so this drives the raw HTTP endpoint directly to send a malformed one.
 func TestHandleScanRejectsBadJSON(t *testing.T) {
-	_, baseURL, token := newScanTestServer(t)
+	_, baseURL, token, _ := newScanTestServer(t)
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/security/scan", strings.NewReader("{not valid json"))
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +117,7 @@ func TestHandleScanRejectsBadJSON(t *testing.T) {
 // TestHandleScanImageRoutesToImageScan checks the image branch is taken
 // instead of a directory scan when Image is set.
 func TestHandleScanImageRoutesToImageScan(t *testing.T) {
-	cl, _, _ := newScanTestServer(t)
+	cl, _, _, _ := newScanTestServer(t)
 	resp, err := cl.Scan(context.Background(), api.ScanRequest{Image: "alpine:3.20"})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -131,7 +133,7 @@ func TestHandleScanImageRoutesToImageScan(t *testing.T) {
 // leaves empty) must be rejected before either scanner runs, same shared
 // gate dast_scan uses — not silently scanned or 500'd.
 func TestHandleScanNetworkRejectsDisallowedTarget(t *testing.T) {
-	cl, _, _ := newScanTestServer(t)
+	cl, _, _, _ := newScanTestServer(t)
 	_, err := cl.Scan(context.Background(), api.ScanRequest{Targets: []string{"8.8.8.8"}})
 	if err == nil {
 		t.Fatal("expected an error for a disallowed public network target")
@@ -142,12 +144,78 @@ func TestHandleScanNetworkRejectsDisallowedTarget(t *testing.T) {
 // instead of a directory scan, and an allowed (loopback) target passes the
 // authorization gate even with no nmap/nuclei binaries installed.
 func TestHandleScanNetworkRoutesToRecon(t *testing.T) {
-	cl, _, _ := newScanTestServer(t)
+	cl, _, _, _ := newScanTestServer(t)
 	resp, err := cl.Scan(context.Background(), api.ScanRequest{Targets: []string{"127.0.0.1"}})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 	if strings.TrimSpace(resp.Report) == "" {
 		t.Error("expected a non-empty report even with no recon scanners installed")
+	}
+}
+
+// TestHandleScanScannersFieldRestrictsSelection is the scanner-selection
+// regression: Scanners: ["trufflehog"] must run only trufflehog (reported
+// skipped in this environment, since it isn't installed) and never mention
+// scanners outside the selection — trufflehog resolves to MethodNone
+// immediately with no exec call, so this stays fast regardless of what other
+// scanner binaries happen to be installed on the machine running the test.
+func TestHandleScanScannersFieldRestrictsSelection(t *testing.T) {
+	cl, _, _, _ := newScanTestServer(t)
+	resp, err := cl.Scan(context.Background(), api.ScanRequest{Scanners: []string{"trufflehog"}})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !strings.Contains(resp.Report, "trufflehog") {
+		t.Errorf("report = %q, want it to mention trufflehog", resp.Report)
+	}
+	for _, other := range []string{"opengrep", "kubescape", "hadolint", "osv-scanner"} {
+		if strings.Contains(resp.Report, other) {
+			t.Errorf("report = %q, should not mention %q outside the selection", resp.Report, other)
+		}
+	}
+}
+
+// TestHandleScanScannersFieldCategoryAlias checks a category token
+// ("secrets") expands to its group (gitleaks + trufflehog) rather than being
+// treated as a literal (nonexistent) scanner name.
+func TestHandleScanScannersFieldCategoryAlias(t *testing.T) {
+	cl, _, _, _ := newScanTestServer(t)
+	resp, err := cl.Scan(context.Background(), api.ScanRequest{Scanners: []string{"secrets"}})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !strings.Contains(resp.Report, "trufflehog") {
+		t.Errorf("report = %q, want the \"secrets\" category to include trufflehog", resp.Report)
+	}
+}
+
+// TestHandleScanUnknownScannerSelectorIsBadRequest checks an unrecognized
+// selector token is rejected (400) rather than silently running every
+// scanner or panicking.
+func TestHandleScanUnknownScannerSelectorIsBadRequest(t *testing.T) {
+	cl, _, _, _ := newScanTestServer(t)
+	_, err := cl.Scan(context.Background(), api.ScanRequest{Scanners: []string{"not-a-real-scanner"}})
+	if err == nil {
+		t.Fatal("expected an error for an unrecognized scanner selector")
+	}
+}
+
+// TestHandleScanPersistsReportArtifact is the "all security scan results go
+// under .aegis/security/" regression: a findings scan must leave scan.json
+// behind under the scanned directory, matching the report the caller got
+// back over the wire.
+func TestHandleScanPersistsReportArtifact(t *testing.T) {
+	cl, _, _, workspace := newScanTestServer(t)
+	if _, err := cl.Scan(context.Background(), api.ScanRequest{Scanners: []string{"trufflehog"}}); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	path := security.ReportArtifactPath(workspace, "scan")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected report artifact at %s: %v", path, err)
+	}
+	if len(data) == 0 {
+		t.Error("report artifact is empty")
 	}
 }

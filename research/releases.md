@@ -14,6 +14,23 @@ with a host-only-gated live-verification opt-in) shipped. Only P13.3/P13.4/P13.7
 **Also 2026-07-06:** **P13.6** (`threat-modeling` builtin skill covering STRIDE/LINDDUN/
 PASTA/Trike/VAST/NIST 800-154, `/threat-model` TUI command, `security-architect` persona updated to
 name the skill) shipped.
+**Also 2026-07-06 (user-requested, not a roadmap item):** per-scanner selection + language
+auto-detection + persisted reports for `/scan`/`aegis scan`/`security_scan`. `--scanner
+<name-or-category>` (CLI, repeatable) / `scanners` (tool JSON) / a `/scan <selector>[,<...>]
+[path]` TUI arg now restrict a scan to specific scanners (exact name, e.g. "trufflehog") or a
+category alias ("secrets" → gitleaks+trufflehog, "sast", "sca"/"deps", "iac", "misconfig"),
+force-enabling the selection for that run regardless of config — same posture `/scan image`
+already had for its own distinct scanner set. A plain scan with no selector now also
+auto-detects the project's language (go.mod/*.go, requirements.txt/*.py, Gemfile/*.rb,
+package.json/*.js) and auto-enables the matching opt-in SAST engine (gosec/bandit/brakeman/
+njsscan) for that run — `AutoEnableLanguageScanners` never overrides an explicit
+`security.tools.<name>.enabled` either direction, tracked via a new `ToolPolicy.EnabledExplicit`
+bit set in `OptionsFromConfig`. Every findings scan (path/image/network/dast, across CLI/TUI/
+tool surfaces) is now also persisted as JSON under `.aegis/security/` (`scan.json`/`image.json`/
+`network.json`/`dast.json`, overwritten each run — same posture as `.aegis/sbom.cdx.json`),
+per an explicit ask that scan results survive past terminal scrollback/a model turn. New
+`internal/security/select.go` (`ResolveSelector`/`SelectScanners`/`DetectLanguages`/
+`AutoEnableLanguageScanners`) and `report_artifact.go` (`WriteReportArtifact`).
 **Also 2026-07-06:** cross-feature integration review of the (then-uncommitted) P13.5/
 P13.8 work, same pattern as the 2026-07-05 review: an adversarial fresh-context pass (not a
 roadmap-prose re-verification) checking whether `recon_scan`/`red-team` actually wired into every

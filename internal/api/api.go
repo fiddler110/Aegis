@@ -20,7 +20,7 @@ type SessionMeta struct {
 	ID           string     `json:"id"`
 	Title        string     `json:"title"`
 	Mode         string     `json:"mode"`
-	Model        string     `json:"model,omitempty"` // P14.7: per-session override; "" = persona/global default
+	Model        string     `json:"model,omitempty"`      // P14.7: per-session override; "" = persona/global default
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
 	InputTokens  int        `json:"input_tokens,omitempty"`
@@ -271,6 +271,16 @@ type ScanRequest struct {
 	// checked against the shared security.dast.allowed_targets gate before
 	// either scanner runs (P13.5).
 	Targets []string `json:"targets,omitempty"`
+	// Scanners restricts a Path scan to specific scanner names and/or
+	// category aliases (e.g. "trufflehog", "secrets") instead of every
+	// enabled scanner — resolved via security.ResolveSelector and
+	// force-enabled for this run regardless of config. Only meaningful
+	// alongside Path (or neither Path/Image/SBOM/Targets, i.e. the default
+	// whole-workspace scan); ignored for Image/SBOM/Targets requests, which
+	// already run their own fixed scanner set. Empty means "every enabled
+	// scanner," and also triggers language auto-detection (P13.2 follow-up)
+	// to auto-enable a matching opt-in language-specific SAST engine.
+	Scanners []string `json:"scanners,omitempty"`
 }
 
 // ScanResponse carries the formatted scan report (or SBOM-generation summary).
