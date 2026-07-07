@@ -1,12 +1,13 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P13.3.1 + P13.3.5 shipped — shell-aware "diagnose this?" error assist
-for the embedded terminal pane and `!` bang commands, plus a `tui.keybindings` config remap with
-startup validation and help-text sync; P13.3.2/P13.3.3 deliberately left open as the lower-value
-remainder. Also shipped the same day: P13.7 — `latex-report` builtin skill + `/report` command,
-closing out the last P13 item with a real gap; P16.9 — in-terminal half-block image thumbnails,
-closing out the P16 TUI polish & interaction parity track from the crush/opencode/Claude Code gap
-analysis)
+**Last updated:** 2026-07-07 (P18 and P19 added — TUI streaming/scroll polish and a docs/command
+misc bucket, researched and scoped from a user report, not started. Earlier the same day: P13.3.1 +
+P13.3.5 shipped — shell-aware "diagnose this?" error assist for the embedded terminal pane and `!`
+bang commands, plus a `tui.keybindings` config remap with startup validation and help-text sync;
+P13.3.2/P13.3.3 deliberately left open as the lower-value remainder. Also shipped the same day:
+P13.7 — `latex-report` builtin skill + `/report` command, closing out the last P13 item with a real
+gap; P16.9 — in-terminal half-block image thumbnails, closing out the P16 TUI polish & interaction
+parity track from the crush/opencode/Claude Code gap analysis)
 
 This document tracks only **open** work — what's next. For shipped-feature history and full design
 rationale behind completed items, see [releases.md](releases.md).
@@ -18,8 +19,9 @@ rationale behind completed items, see [releases.md](releases.md).
 Open items: **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
-engagement tooling), **P9.4** (per-task model routing), **P6.1** (mid-turn
-state persistence).
+engagement tooling), **P18** (streaming-thinking display, scroll smoothness, auto-follow
+reliability), **P19** (skill/script authoring guide, manual `/compact`), **P9.4** (per-task model
+routing), **P6.1** (mid-turn state persistence).
 
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
 15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.7/P13.8, P14 (all of P14.1–P14.10), the
@@ -236,6 +238,100 @@ Each open P13 item above already carries its own TUI-surface requirement inline;
 going forward is that no P13 capability is "done" until it's reachable from the TUI and covered by
 the P14.1/P14.10 command-surface sync test (`TestBuiltinCommandsCoverDispatchTable`,
 `TestCommandDefsWellFormed`). This is a requirement addition, not new scope.
+
+---
+
+## Open Work — P18 (TUI Streaming & Scroll Polish)
+
+Requested 2026-07-07: three related complaints about the transcript pane during a streaming turn —
+extended-thinking collapses instead of staying visible while it's being generated, scrolling feels
+non-smooth, and the viewport doesn't reliably auto-follow a streaming response or resume following
+when the user scrolls back to the bottom mid-stream. Researched 2026-07-07 (code-read only — no
+real terminal available in this environment to reproduce interactively, per prior sessions); all
+three below are scoped but **not started**, and should ship as one incremental pass since P18.1 and
+P18.3 share the same root cause.
+
+- **P18.1 — Full live extended-thinking display.** Today (`internal/tui/tui.go`), streaming
+  `KindThinking` events accumulate into `m.thinkText` and `refresh()` re-renders the *entire*
+  accumulated buffer dim above the answer on every frame (tui.go:1677-1679) — nothing is
+  code-truncated while a turn is actively streaming. What actually shortens the reasoning is
+  `flushThinking`/`appendThinkingBlock` (tui.go:1727-1762): once the turn moves on to the answer or
+  a tool call, the block collapses to a one-line `✻ thought for Ns  (ctrl+o to expand)` summary by
+  default (`m.thinkExpanded` starts `false`) — the full text is retained, just hidden until ctrl+o.
+  Combined with P18.3 below, a user watching a long reasoning pass in a short terminal window sees
+  only whatever fraction of the growing dim block currently fits above the fold and never catches
+  up, which reads as truncation even though no text is discarded. Needs a product decision before
+  implementing: (a) leave collapse-on-flush as the resting state (matches the "fold once done"
+  convention TQ9 was built around) and rely on the P18.3 auto-follow fix to make the *live* portion
+  actually trackable while it's being generated — plausibly sufficient on its own; or (b) add a
+  config/session default so `m.thinkExpanded` starts `true`, keeping reasoning visible through the
+  whole turn and only collapsing retroactively once scrolled past. (S once the default is chosen —
+  this is a display-policy question, not a missing-data bug.)
+- **P18.2 — Smooth scrolling.** Keyboard scroll (`transcriptPane.HandleKey`) moves one line at a
+  time; mouse wheel (`HandleMouseWheel`, transcript.go:627+) reproduces bubbles/viewport's default
+  3-line-per-tick delta. Neither is obviously wrong, so "not smooth" needs a profiling pass before
+  a fix is chosen: candidates are (a) per-tick render cost — `refresh()`/`View()` cost scales with
+  visible segment count and re-wraps on every call rather than reusing a wrapped-line cache across
+  scroll-only updates (no content change), which could show up as visible jank under rapid wheel
+  events or held-down j/k; (b) coalescing bursts of `tea.MouseWheelMsg` that arrive faster than a
+  frame can render, so each tick doesn't force a full synchronous redraw; (c) the fixed 3-line delta
+  itself feeling coarse compared to other TUIs' finer step. Start by instrumenting scroll-to-render
+  latency before picking between these — don't guess. (M — needs measurement first, fix itself is
+  likely S.)
+- **P18.3 — Auto-follow reliability + resume-on-return-to-bottom.** `m.followBottom` is meant to
+  auto-scroll during streaming and re-arm the moment the user scrolls back to the bottom (already
+  partly implemented: `sendUserMessage` sets it `true` on send, `refresh()` calls `GotoBottom()`
+  when it's `true`, and a catch-all `m.followBottom = m.transcript.AtBottom()` re-derivation runs at
+  tui.go:1504). The likely bug, found by code reading, not yet reproduced live: that catch-all sits
+  after a *second*, separate `switch` statement reached only when the *first* `switch msg.(type)`
+  (starting ~tui.go:837) falls through without an early `return`. `eventMsg` — the case that fires
+  for every streamed token, including thinking/text deltas — always `return`s early (tui.go:1153)
+  and so never reaches the re-derivation. Meanwhile `spinner.TickMsg` (tui.go:844-861) *does* fall
+  through to it, but only calls `refresh()`/`GotoBottom()` itself when `followBottom` is already
+  `true` (a P3.7 redraw-suppression guard) — so once `followBottom` flips `false` for any reason,
+  nothing streamed by `eventMsg` in between ever nudges the viewport, and only a subsequent spinner
+  tick or an explicit user scroll can re-arm it. Needs verification against a real terminal (flagged
+  in every prior TUI session as unavailable in this dev environment) before landing a fix; the fix
+  itself is likely small — e.g. re-deriving `followBottom` (or unconditionally following when it's
+  already `true`) from inside the `eventMsg` branch too, not just the tick/key/mouse paths. (S once
+  verified.)
+
+TUI surface requirement: none of these are new capabilities, so no new `/slash` command — existing
+scroll keys/mouse wheel and the ctrl+o thinking toggle are the surface.
+
+Priority: Medium (direct usability complaint, not exploratory), Effort: S-M per item once P18.2 is
+profiled. Ship as one pass — P18.1's chosen option and P18.3 are coupled.
+
+---
+
+## Open Work — P19 (Docs & Session-Command Misc)
+
+Two unrelated small items requested alongside P18 on 2026-07-07; grouped here as a no-blocker
+bucket the same way P13.3's leftovers are, not because they share a theme.
+
+- **P19.1 — Skill + companion-script authoring guide.** `internal/skills` (bundled `SKILL.md` +
+  companion assets like `internal/skills/builtin/latex-report/analyze_sources.py` or
+  `html-report/validate_report.py`) has no user-facing walkthrough today — `docs/extensibility.md`
+  covers lifecycle hooks, MCP servers, custom commands/agents, process plugins, and plugin bundles,
+  but never mentions skills at all, even though the mechanism (frontmatter `name:`/`description:`,
+  progressive disclosure via the `skill` tool, the generated `<skill_assets>` manifest for bundled
+  files, project vs. user vs. embedded-builtin precedence, `aegis skills enable/disable`) is fully
+  built and documented in code comments only. Scope: a new `docs/skills.md` (sibling to
+  `docs/personas.md`/`docs/debate.md`, not folded into `extensibility.md`, since skills are already
+  their own documented subsystem in CLAUDE.md) covering: minimal single-file skill, bundled
+  directory skill with a companion script and how `<skill_assets>` exposes it to the model,
+  frontmatter fields, project/user/builtin precedence and name collisions, and a worked example
+  (e.g. a small skill that ships a Python validation script, mirroring `html-report`). (S)
+- **P19.2 — Manual `/compact` command.** `internal/compaction` only ever triggers automatically
+  when a turn's estimated token count crosses budget (`Summarizer.shouldCompact`); there is no way
+  for a user to force it early (e.g. before a long tool-heavy stretch they know is coming). Note:
+  `/tools compact` (`internal/tui/slash.go:325`) is an unrelated existing command — it toggles
+  tool-*output* display width, not conversation compaction — so naming the new command needs to
+  avoid that collision (`/compact` is likely still fine since `/tools compact` is a subcommand of
+  `/tools`, but confirm no ambiguity in the palette/autocomplete before shipping). Needs a daemon
+  entry point (`Summarizer.Compact` is already callable directly, sidestepping the budget check) and
+  a thin slash command wired to it, following the same dispatch-table pattern as every other command
+  in `internal/tui/slash.go`. (S)
 
 ---
 
