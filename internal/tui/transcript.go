@@ -340,6 +340,17 @@ func (p *transcriptPane) AtTop() bool {
 	return p.offsetIdx == 0 && p.offsetLine == 0
 }
 
+// offsetLines returns the total number of content lines scrolled past above
+// the viewport top — the same quantity ScrollPercent and ScrollbarThumb both
+// need, factored out so they can't drift apart.
+func (p *transcriptPane) offsetLines() int {
+	offset := 0
+	for i := 0; i < p.offsetIdx; i++ {
+		offset += p.segmentAt(i).height(p.width)
+	}
+	return offset + p.offsetLine
+}
+
 // ScrollPercent mirrors bubbles/viewport's: how far the current offset is
 // through the total scrollable range.
 func (p *transcriptPane) ScrollPercent() float64 {
@@ -347,16 +358,46 @@ func (p *transcriptPane) ScrollPercent() float64 {
 	if total <= p.height {
 		return 1
 	}
-	offset := 0
-	for i := 0; i < p.offsetIdx; i++ {
-		offset += p.segmentAt(i).height(p.width)
-	}
-	offset += p.offsetLine
 	maxOffset := total - p.height
 	if maxOffset <= 0 {
 		return 1
 	}
-	return float64(offset) / float64(maxOffset)
+	return float64(p.offsetLines()) / float64(maxOffset)
+}
+
+// ScrollbarThumb returns the [start, end) row range (within [0, height)) that
+// a scrollbar thumb should occupy for the current scroll position, sized
+// proportionally to the visible fraction of the total content. ok is false
+// when everything fits without scrolling — callers should draw no thumb (and
+// typically no track) in that case, mirroring the old title-bar indicator's
+// "only shown when content overflows" behavior.
+func (p *transcriptPane) ScrollbarThumb() (start, end int, ok bool) {
+	total := p.TotalHeight()
+	if total <= p.height || p.height <= 0 {
+		return 0, 0, false
+	}
+	thumbH := max(1, p.height*p.height/total)
+	thumbH = min(thumbH, p.height)
+	track := p.height - thumbH
+	maxOffset := total - p.height
+	frac := 0.0
+	if maxOffset > 0 {
+		frac = float64(p.offsetLines()) / float64(maxOffset)
+	}
+	start = int(frac * float64(track))
+	start = max(0, min(start, track))
+	return start, start + thumbH, true
+}
+
+// VisibleLines splits the current View() into per-row strings (still
+// ANSI-styled), used by mouse selection to hit-test and extract text without
+// recomputing View() once per row.
+func (p *transcriptPane) VisibleLines() []string {
+	v := p.View()
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, "\n")
 }
 
 func (p *transcriptPane) GotoTop() {

@@ -58,6 +58,54 @@ func TestTranscriptAppendEmptyIsNoop(t *testing.T) {
 	}
 }
 
+func TestScrollbarThumbNoScrollWhenContentFits(t *testing.T) {
+	tr := newTranscriptPane(80, 10)
+	tr.Append("one\ntwo\nthree\n")
+	if _, _, ok := tr.ScrollbarThumb(); ok {
+		t.Fatalf("expected no thumb when content fits within the viewport")
+	}
+}
+
+func TestScrollbarThumbTracksScrollPosition(t *testing.T) {
+	tr := newTranscriptPane(80, 10)
+	for i := 0; i < 50; i++ {
+		tr.Append("line\n")
+	}
+	tr.GotoTop()
+	topStart, topEnd, ok := tr.ScrollbarThumb()
+	if !ok {
+		t.Fatalf("expected a thumb once content overflows the viewport")
+	}
+	if topStart != 0 {
+		t.Fatalf("expected thumb to start at row 0 when scrolled to top, got %d", topStart)
+	}
+	if topEnd <= topStart {
+		t.Fatalf("expected a non-empty thumb range, got [%d,%d)", topStart, topEnd)
+	}
+
+	tr.GotoBottom()
+	botStart, botEnd, ok := tr.ScrollbarThumb()
+	if !ok {
+		t.Fatalf("expected a thumb at the bottom too")
+	}
+	if botEnd != tr.Height() {
+		t.Fatalf("expected thumb to reach the last row (%d) when scrolled to bottom, got end %d", tr.Height(), botEnd)
+	}
+	if botStart <= topStart {
+		t.Fatalf("expected thumb to move down between top (%d) and bottom (%d)", topStart, botStart)
+	}
+}
+
+func TestVisibleLinesMatchesView(t *testing.T) {
+	tr := newTranscriptPane(80, 100)
+	tr.Append("hello\n")
+	tr.Append("world\n")
+	lines := tr.VisibleLines()
+	if strings.Join(lines, "\n") != tr.View() {
+		t.Fatalf("expected VisibleLines joined with \\n to equal View(), got %q vs %q", strings.Join(lines, "\n"), tr.View())
+	}
+}
+
 func TestTranscriptReset(t *testing.T) {
 	tr := newTranscriptPane(80, 100)
 	tr.Append("some content")

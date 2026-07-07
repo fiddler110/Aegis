@@ -200,6 +200,13 @@ type model struct {
 	notifyMode    notify.Mode
 	focused       bool
 	pendingNotify *notify.Event // set by applyEvent, consumed by the eventMsg handler
+
+	// P16.5 mouse selection & click-to-focus: sel is documented on the
+	// selection type; focusedIdx is the transcript segment index most
+	// recently single-clicked (-1 for none) and drives the left accent bar
+	// in renderTranscriptContent — purely a visual affordance, gates nothing.
+	sel        selection
+	focusedIdx int
 }
 
 // approvalState holds the details of a pending tool-execution approval request
@@ -333,6 +340,7 @@ func newModel(cfg Config) model {
 		status:       "ready",
 		slash:        NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model, cfg.WorkDir),
 		histIdx:      -1,
+		focusedIdx:   -1,
 		workDir:      workDir,
 		transcript:   newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
 		liveText:     &strings.Builder{},
@@ -1378,6 +1386,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transcript.HandleKey(tmsg)
 	case tea.MouseWheelMsg:
 		m.transcript.HandleMouseWheel(tmsg)
+	case tea.MouseClickMsg:
+		cmds = append(cmds, m.handleMouseClick(tmsg))
+	case tea.MouseMotionMsg:
+		m.handleMouseMotion(tmsg)
+	case tea.MouseReleaseMsg:
+		cmds = append(cmds, m.handleMouseRelease(tmsg))
 	}
 	// Re-derive scroll-follow state: auto-scroll resumes once the user returns
 	// to the bottom and pauses the moment they scroll up.
@@ -1413,6 +1427,7 @@ func (m *model) layout() {
 	if m.termOpen {
 		vpW -= termPaneTotalW
 	}
+	vpW -= 1 // scrollbar column (P16.5), rendered to the right of the transcript
 	vpW = max(vpW, 10)
 
 	m.transcript.SetSize(vpW, m.transcript.Height())
@@ -2189,7 +2204,10 @@ func (m model) render() string {
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
 
-	main := lipgloss.NewStyle().PaddingLeft(1).Render(m.transcript.View())
+	main := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().PaddingLeft(1).Render(m.renderTranscriptContent()),
+		m.renderScrollbar(),
+	)
 	var content string
 	if m.sidebarOpen && m.width >= sidebarMinTermW {
 		sidebar := m.renderSidebar(m.transcript.Height())
@@ -2227,23 +2245,16 @@ func (m model) renderTitleBar() string {
 	brand := renderBrandMark()
 	brandW := lipgloss.Width(brand)
 
-	// Scroll indicator: shown whenever transcript content overflows the viewport.
-	scroll := ""
-	if m.transcript.TotalLineCount() > m.transcript.Height() {
-		if m.transcript.AtBottom() {
-			scroll = "end · "
-		} else {
-			scroll = fmt.Sprintf("%d%% · ", int(m.transcript.ScrollPercent()*100))
-		}
-	}
-
+	// P16.5: the scroll-position indicator moved to a rendered scrollbar
+	// glyph column beside the transcript (see renderScrollbar) — this bar no
+	// longer carries scroll state.
 	rightW := max(m.width-brandW, 0)
 	right := lipgloss.NewStyle().
 		Background(colSurface).
 		Foreground(colTextMuted).
 		Width(rightW).
 		Align(lipgloss.Right).
-		Render(scroll + m.cfg.Model + " ")
+		Render(m.cfg.Model + " ")
 
 	return brand + right
 }
