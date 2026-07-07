@@ -94,6 +94,12 @@ type Server struct {
 	sandboxFallback       bool
 	sandboxFallbackReason string
 
+	// agentLimiter throttles how many sub-agents a 'parallel' workflow batch
+	// runs simultaneously (P17), adapting from observed batch behavior. One
+	// instance per daemon process, shared by every session's agent tool calls;
+	// in-memory only, does not persist across restarts. Surfaced on GET /status.
+	agentLimiter *swarm.AdaptiveLimiter
+
 	// pendingApprovals maps run ID → chan approvalDecision for interactive approval.
 	// The channel is written by handleApprove and read by sseApprover.Approve.
 	pendingApprovals sync.Map
@@ -439,7 +445,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.swarmReg = swarm.NewRegistry()
 	s.swarm = s.buildSwarmBackend(swarm.MailboxRoot(cfg.DataDir))
 	s.swarm.OnStop(s.onSubagentStop)
-	if err := reg.Register(builtin.NewAgentTool(s.swarm, s.tasks, builtin.WithCostCaps(cfg.Cost.BudgetUSD, cfg.Cost.MaxTokensPerRun))); err != nil {
+	s.agentLimiter = swarm.NewAdaptiveLimiter(builtin.MaxParallelAgents)
+	if err := reg.Register(builtin.NewAgentTool(s.swarm, s.tasks,
+		builtin.WithCostCaps(cfg.Cost.BudgetUSD, cfg.Cost.MaxTokensPerRun),
+		builtin.WithConcurrencyLimiter(s.agentLimiter),
+	)); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -608,6 +618,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 // used by tests to inject a mock adapter and an in-memory store.
 func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, adapter provider.Adapter, tools *tool.Registry) *Server {
 	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry()}
+	s.agentLimiter = swarm.NewAdaptiveLimiter(builtin.MaxParallelAgents)
 	s.http = &http.Server{
 		Addr:              cfg.Server.Addr,
 		Handler:           s.routes(),
@@ -804,6 +815,8 @@ func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
 		DailyCapUSD:           s.cfg.Cost.DailyCapUSD,
 		DailyTokens:           dailyTokens,
 		DailyTokenCap:         s.cfg.Cost.DailyTokenCap,
+		AgentConcurrency:      s.agentLimiter.Cap(),
+		AgentConcurrencyMax:   builtin.MaxParallelAgents,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

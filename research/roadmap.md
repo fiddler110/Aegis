@@ -20,7 +20,7 @@ state persistence).
 
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
 15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.7/P13.8, P14 (all of P14.1–P14.10), the
-TQ TUI track, P15.1, P16 (all of P16.1–P16.9), and the 2026-07-06 fable-review.md remediation
+TQ TUI track, P15.1, P16 (all of P16.1–P16.9), P17 (all of P17.1–P17.5), and the 2026-07-06 fable-review.md remediation
 (CI/CodeQL/Dependabot, Windows token ACL, compiler-enforced daily-cap guard, `aegis harden`,
 plan-mode network gating, release workflow, server/TUI file splits, fuzz coverage, live-model eval
 tier, script-aware token estimation) — is shipped. See [releases.md](releases.md) for what each

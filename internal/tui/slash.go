@@ -677,6 +677,8 @@ func (d *SlashDispatcher) cmdStatus(_ []string) SlashResult {
 		fmt.Fprintf(&b, "  daily cap: $%.2f / %d tokens\n", info.DailyCapUSD, info.DailyTokenCap)
 	}
 
+	fmt.Fprintf(&b, "Sub-agent concurrency: %d (adaptive, max %d)\n", info.AgentConcurrency, info.AgentConcurrencyMax)
+
 	return SlashResult{Output: strings.TrimRight(b.String(), "\n")}
 }
 

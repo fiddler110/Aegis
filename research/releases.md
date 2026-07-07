@@ -9,7 +9,27 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P16.9** (in-terminal image rendering) shipped, closing out the
+**Last updated:** 2026-07-07 — **P17** (adaptive sub-agent concurrency, all 5 items) shipped: new
+`internal/swarm/adaptive.go` (`AdaptiveLimiter`) throttles how many agents in a `parallel` workflow
+batch run *simultaneously*, separate from the existing `MaxParallelAgents` (8) hard ceiling on how
+many an `agents` array may *request*. Starts conservative at the floor (2) and adjusts with an AIMD
+scheme driven by measured wall-clock speedup within each batch (`sum(individual durations) /
+batch elapsed`) rather than static config or host/GPU introspection — evaluated and rejected
+introspecting Ollama's own `OLLAMA_NUM_PARALLEL` heuristic since it isn't exposed via the API and
+would mean reimplementing it blind from a fragile `nvidia-smi`/`rocm-smi` proxy signal.
+`executeWorkflow`'s `"parallel"` case in `internal/tool/builtin/agent.go` now acquires a limiter slot
+per spawn instead of firing every goroutine at once; a spawn error consistent with resource
+exhaustion (timeout, connection refused, connection reset, 429) also triggers the same
+multiplicative-decrease path as a low-speedup batch. One `AdaptiveLimiter` instance per daemon
+process (`Server.agentLimiter`, threaded through a new `WithConcurrencyLimiter` `AgentToolOption`,
+constructed alongside `NewAgentTool` in `server.go`) — in-memory only, does not persist across
+restarts, since re-converging from the floor costs only a couple of batches. Current cap surfaced on
+the existing `GET /status` / `/status` TUI surface (`api.StatusInfo.AgentConcurrency`) rather than a
+new endpoint. Tested with deterministic unit tests against injected/synthetic durations (no real
+sleeps) for the AIMD transitions, channel-synchronized (not sleep-based) concurrency-gating tests for
+`Acquire`/`Release`, and an integration test confirming the `parallel` dispatch itself respects the
+cap.
+**Previously, 2026-07-07:** **P16.9** (in-terminal image rendering) shipped, closing out the
 entire P16 track: new `internal/tui/imagerender.go` renders a half-block ANSI truecolor thumbnail
 (upper-half-block trick — each cell's foreground is its top source pixel, background the pixel
 below) in the transcript whenever an image attachment is sent, live or replayed from session
@@ -150,6 +170,70 @@ evaluated and dropped, not wanted. P13 (7 exploratory items) fully researched an
 concrete sub-items; P13.1, P13.5, and P13.8 (added after initial scoping) now shipped.
 Full change history and design rationale for every shipped item lives below in
 [Appendix A](#appendix-a--completed-work).
+
+---
+
+## Shipped — P17 items (Adaptive Sub-Agent Concurrency)
+
+Requested 2026-07-07, following a discussion of whether Aegis should offload research-style work to
+sub-agents the way Claude Code's Task tool does. Conclusion of that discussion: the `agent` tool's
+existing `parallel` workflow mode (`internal/tool/builtin/agent.go`) already covers the mechanism —
+synchronous fan-out/fan-in, no polling — so there was nothing to build there. The real value for a
+single local Ollama instance running one model isn't wall-clock speedup (concurrent requests against
+one model server typically contend/serialize rather than parallelize the way cloud provider capacity
+does) but **context isolation**: a sub-agent burns its own context digging through search results or
+files and only a condensed summary returns to the parent, which is a win even with concurrency 1.
+Given that, the old flat `maxParallelAgents = 8` upfront reject (unchanged, just renamed exported
+`MaxParallelAgents`) was the wrong lever to tune by hand per host/model — this track added an
+adaptive limiter, all 5 items shipped 2026-07-07:
+
+- **P17.1 — Concurrency limiter primitive.** `internal/swarm/adaptive.go`'s `AdaptiveLimiter` wraps a
+  mutex/`sync.Cond`-guarded `Acquire`/`Release` pair (not a fixed-size channel, since the cap changes
+  at runtime). Floor 2, ceiling `MaxParallelAgents` (8), starts at the floor.
+- **P17.2 — Bounded worker pool in parallel dispatch.** `executeWorkflow`'s `"parallel"` case in
+  `agent.go` now has each spawn goroutine `Acquire` a limiter slot before calling `spawn()` and
+  `Release` on completion (deferred), so agents beyond the current adaptive cap queue instead of all
+  firing at once. The upfront `len(agents) > MaxParallelAgents` reject is untouched — still the hard
+  ceiling on what one tool call may request; the limiter governs how many of those actually run
+  simultaneously. Sequential/loop/debate modes were untouched, having at most one in-flight spawn by
+  construction already.
+- **P17.3 — Latency-based AIMD adjustment.** After each parallel batch, `AdaptiveLimiter.RecordBatch`
+  computes `speedup = sum(individual spawn durations) / batch wall-clock elapsed` and compares it to
+  the midpoint between fully-serial (1) and fully-concurrent (n) — `(1+n)/2` rather than `n/2`, since
+  `n/2` degenerates at the floor (n=2 gives threshold 1, indistinguishable from fully serial).
+  `speedup` above the midpoint raises the cap by 1 (up to the ceiling); at or below it halves the cap
+  (down to the floor). Batches smaller than the current cap (`n < cap`) are ignored — they carry no
+  concurrency signal. A spawn error consistent with resource exhaustion (`context.DeadlineExceeded`,
+  or a message containing "connection refused"/"timeout"/"timed out"/"connection reset"/"too many
+  requests") triggers the same halving via `RecordExhaustion`.
+- **P17.4 — Daemon wiring and lifetime.** New `WithConcurrencyLimiter` `AgentToolOption`; `Server`
+  gained an `agentLimiter *swarm.AdaptiveLimiter` field constructed once alongside `NewAgentTool` in
+  `server.go` (both the full `NewServer` path and the lighter `newWithDeps` test constructor — the
+  latter was missed on the first pass and caused a nil-pointer panic in `handleStatusInfo` under
+  `go test`, caught immediately by the existing `TestServerStatusEndpoint` regression test rather than
+  shipping broken). `NewAgentTool` falls back to a fresh floor-2 limiter when the option is omitted,
+  so no pre-existing test call site (`agent_test.go`, `debate_agent_test.go`) needed to change.
+  In-memory only, does not persist across restarts — re-converging from the floor costs only a couple
+  of batches, a deliberate simplification.
+- **P17.5 — Visibility.** `api.StatusInfo` gained `AgentConcurrency`/`AgentConcurrencyMax`, populated
+  in `handleStatusInfo` and printed by the TUI's `/status` command, rather than a new endpoint or
+  command (same fold-into-existing-surface precedent as P13.4.4/P14.5).
+
+**Explicit non-goals (unchanged from the original scoping):** no VRAM/GPU/host introspection — Ollama
+doesn't expose its own computed `OLLAMA_NUM_PARALLEL` concurrency via the API, so Aegis would be
+reimplementing that heuristic blind from a fragile, platform-specific proxy signal; measuring actual
+batch speedup is more direct and portable. No per-model or per-endpoint keying of the limiter — a
+single process-wide limiter is sufficient while one daemon talks to one loaded model; revisit only if
+P9.4 (per-task model routing) ships. No cross-restart persistence.
+
+**Testing:** `internal/swarm/adaptive_test.go` — deterministic unit tests for every AIMD transition
+(raise on high speedup, lower on low speedup, ignore batches smaller than the cap, ignore zero
+wall-clock, clamp to `[2, 8]`, `RecordExhaustion`) using injected/synthetic `time.Duration` values,
+no real sleeps; plus channel-synchronized (not sleep-based) tests that `Acquire`/`Release` actually
+gate concurrency and that `Acquire` returns promptly on a cancelled context. `agent_test.go` gained
+`TestAgentToolParallelWorkflowRespectsConcurrencyCap`, a `gatingBackend`-based integration test
+confirming the real `parallel` dispatch path — not just the limiter in isolation — never lets more
+than the floor (2) spawns run at once. All new tests pass under `-race`.
 
 ---
 
