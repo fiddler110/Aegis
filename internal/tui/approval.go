@@ -136,11 +136,10 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Let viewport scroll keys fall through so the transcript stays reviewable.
-	var vpCmd tea.Cmd
-	m.vp, vpCmd = m.vp.Update(msg)
-	m.followBottom = m.vp.AtBottom()
-	return m, vpCmd
+	// Let transcript scroll keys fall through so the transcript stays reviewable.
+	m.transcript.HandleKey(msg)
+	m.followBottom = m.transcript.AtBottom()
+	return m, nil
 }
 
 // answerApproval resolves the pending approval with the chosen option and

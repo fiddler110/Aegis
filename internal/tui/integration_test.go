@@ -93,8 +93,8 @@ func TestTUIFullTurn_NoPTY(t *testing.T) {
 	if collapsed := plainView(m); strings.Contains(collapsed, "considering the code path") {
 		t.Errorf("expected second toggle to re-collapse thinking text, got:\n%s", collapsed)
 	}
-	if m.transcript.len() == 0 {
-		t.Fatal("expected the transcript to have accumulated blocks after a full turn")
+	if m.transcript.Len() == 0 {
+		t.Fatal("expected the transcript to have accumulated items after a full turn")
 	}
 
 	// End of stream, mirroring streamClosedMsg's handling.
@@ -175,14 +175,15 @@ func TestTUITimelineSeek_NoPTY(t *testing.T) {
 		t.Fatalf("expected 2 timeline entries, got %d", len(m.timelineEntries))
 	}
 	first := m.timelineEntries[0]
-	if first.blockIndex < 0 || first.blockIndex > m.transcript.len() {
-		t.Fatalf("first entry's blockIndex %d out of range [0, %d]", first.blockIndex, m.transcript.len())
+	if first.blockIndex < 0 || first.blockIndex > m.transcript.Len() {
+		t.Fatalf("first entry's blockIndex %d out of range [0, %d]", first.blockIndex, m.transcript.Len())
 	}
-	// The recorded position for turn 1 must render only content up through
-	// (not including) turn 1's own text — it's captured before anything for
-	// that turn is appended.
-	prefix := m.transcript.renderUpTo(first.blockIndex, m.vp.Width())
-	if strings.Contains(prefix, "first turn") {
-		t.Fatalf("expected renderUpTo(blockIndex) to precede turn 1's own content, got:\n%s", prefix)
+	// The recorded position for turn 1 is captured before anything for that
+	// turn is appended, so scrolling to it must land exactly on turn 1's own
+	// content, not before or after it.
+	m.transcript.ScrollToItem(first.blockIndex)
+	view := m.transcript.View()
+	if !strings.Contains(view, "first turn") {
+		t.Fatalf("expected ScrollToItem(blockIndex) to land on turn 1's own content, got:\n%s", view)
 	}
 }

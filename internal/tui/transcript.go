@@ -1,161 +1,573 @@
 package tui
 
-import "strings"
+import (
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+)
 
 // maxTranscriptBytes bounds the transcript's total raw (pre-wrap) size.
-// Trimming drops whole blocks from the front rather than severing content
+// Trimming drops whole items from the front rather than severing content
 // mid-line (TQ1) — the previous cappedBuffer implementation trimmed at the
 // byte level and could truncate inside a styled ANSI run.
 const maxTranscriptBytes = 1 << 20
 
 const trimmedMarker = "[earlier output trimmed]\n\n"
 
-// transcriptBlock is one independently-wrapped unit of the conversation: a
-// user turn, an assistant reply, a tool call, a tool result, a system
-// notice, and so on. raw is pre-styled ANSI content (the existing renderX
-// helpers already produce this); render() lazily word-wraps it to the
-// current viewport width and caches the result until the width changes.
+// transcriptItem is one independently-cached, independently-addressable unit
+// of the conversation: a user turn, an assistant reply, a tool call, a tool
+// result, a system notice, and so on. raw is pre-styled ANSI content (the
+// existing renderX helpers already produce this); rendered() lazily
+// word-wraps it to the current pane width and caches the result — along with
+// its terminated-line count — until the width changes.
 //
-// Per-block caching is what makes resize, theme change, and future
+// Per-item caching is what makes resize, theme change, and future
 // retroactive re-render (e.g. /tools full applying to history) cheap: only
-// the blocks whose wrapped output is stale get redone, instead of the whole
-// transcript.
-type transcriptBlock struct {
+// the items whose wrapped output is stale get redone, instead of the whole
+// transcript. Callers must end each item's raw content on a line boundary
+// (trailing "\n" or "\n\n") — every call site in this package already writes
+// complete lines, which is what makes concatenation across item boundaries
+// safe (see transcriptPane.View).
+type transcriptItem struct {
 	raw string
 
-	cacheW   int
-	cacheOut string
-	cached   bool
+	cacheW      int
+	cacheOut    string
+	cacheHeight int
+	cached      bool
 }
 
-func newBlock(raw string) *transcriptBlock { return &transcriptBlock{raw: raw} }
+func newItem(raw string) *transcriptItem { return &transcriptItem{raw: raw} }
 
-func (b *transcriptBlock) render(w int) string {
-	if !b.cached || b.cacheW != w {
-		b.cacheOut = wrap(b.raw, w)
-		b.cacheW = w
-		b.cached = true
+// rendered returns the wrapped ANSI string for width w, from cache when the
+// width hasn't changed since the last call.
+func (it *transcriptItem) rendered(w int) string {
+	if !it.cached || it.cacheW != w {
+		it.cacheOut = wrap(it.raw, w)
+		it.cacheHeight = strings.Count(it.cacheOut, "\n")
+		it.cacheW = w
+		it.cached = true
 	}
-	return b.cacheOut
+	return it.cacheOut
 }
 
-// transcript is an ordered, size-capped list of blocks. It replaces the old
-// cappedBuffer + whole-buffer wrapCache pair: appends are O(1), a resize or
-// theme change invalidates lazily (each block notices its cached width no
-// longer matches on next render), and trimming never cuts a block in half.
+// height is the item's terminated-line count at width w (i.e. the number of
+// "\n" in its wrapped output), used for scroll bookkeeping without needing to
+// split the string into a line slice.
+func (it *transcriptItem) height(w int) int {
+	it.rendered(w)
+	return it.cacheHeight
+}
+
+func (it *transcriptItem) invalidate() { it.cached = false }
+
+// transcriptPane is the transcript's content store AND its scroll/display
+// engine in one: a virtualized list of transcriptItems (crush's
+// internal/ui/list/list.go model — see research/roadmap.md P16.4) that
+// renders only the segments needed to fill the visible window, instead of
+// concatenating the entire history on every frame. It replaces both the old
+// transcript (content) and the bubbles/viewport.Model (scroll/display) that
+// used to sit in front of it.
 //
-// Callers must end each appended block's raw content on a line boundary
-// (trailing "\n" or "\n\n") unless it is the very last thing appended before
-// the next block starts a new visual line anyway. Blocks are wrapped
-// independently and then concatenated, so a block left mid-line would have
-// its continuation padded onto its own line instead of joining the next
-// block's text — every call site in this package already writes complete
-// lines, which is what makes this safe.
-type transcript struct {
-	blocks   []*transcriptBlock
+// Addressable "segments" are, in order: the non-evictable trim marker (if
+// any), the real items, and an ephemeral trailing "tail" segment (streaming
+// preview text set fresh every refresh() via SetTail — never cached,
+// addressable, or evictable). Segment indexing lets scroll position be
+// expressed as (segment index, line offset within that segment) rather than
+// a byte/line offset into a flat buffer, which is what makes both
+// ScrollToItem and the O(visible) View() possible.
+type transcriptPane struct {
+	items    []*transcriptItem
 	rawBytes int
 
-	// trimmed is true once old blocks have been evicted. The marker block
-	// lives outside blocks so trim() can never evict it in a later pass.
+	// trimmed is true once old items have been evicted. The marker item
+	// lives outside items so trim() can never evict it in a later pass.
 	trimmed bool
-	marker  *transcriptBlock
+	marker  *transcriptItem
+
+	// tailRaw is the ephemeral trailing content (streaming thinking preview,
+	// live assistant tail, queued-message previews) rebuilt by refresh()
+	// every frame. tailCache avoids re-allocating a transcriptItem when the
+	// text hasn't changed since the last View()/TotalHeight() call.
+	tailRaw   string
+	tailCache *transcriptItem
+
+	width, height int
+
+	// offsetIdx/offsetLine is the scroll position: offsetIdx is the segment
+	// index of the first (possibly partially) visible segment, offsetLine is
+	// how many of its lines are scrolled past above the viewport top.
+	offsetIdx  int
+	offsetLine int
+
+	totalHeightCache int
+	totalHeightValid bool
 }
 
-// append adds one rendered block. Empty strings are ignored (mirrors the old
+func newTranscriptPane(width, height int) *transcriptPane {
+	return &transcriptPane{width: width, height: height}
+}
+
+func (p *transcriptPane) invalidateTotal() { p.totalHeightValid = false }
+
+// Append adds one rendered item. Empty strings are ignored (mirrors the old
 // WriteString("") no-op behavior).
-func (t *transcript) append(raw string) {
+func (p *transcriptPane) Append(raw string) {
 	if raw == "" {
 		return
 	}
-	t.blocks = append(t.blocks, newBlock(raw))
-	t.rawBytes += len(raw)
-	t.trim()
+	p.items = append(p.items, newItem(raw))
+	p.rawBytes += len(raw)
+	p.invalidateTotal()
+	p.trim()
 }
 
-// appendBlock is append, but returns the created block so the caller can
+// AppendBlock is Append, but returns the created item so the caller can
 // later swap its content in place (collapsible thinking blocks, TQ9).
 // Returns nil for an empty raw string.
-func (t *transcript) appendBlock(raw string) *transcriptBlock {
+func (p *transcriptPane) AppendBlock(raw string) *transcriptItem {
 	if raw == "" {
 		return nil
 	}
-	b := newBlock(raw)
-	t.blocks = append(t.blocks, b)
-	t.rawBytes += len(raw)
-	t.trim()
-	// trim may have evicted the block we just appended (pathological budget);
+	it := newItem(raw)
+	p.items = append(p.items, it)
+	p.rawBytes += len(raw)
+	p.invalidateTotal()
+	p.trim()
+	// trim may have evicted the item we just appended (pathological budget);
 	// report it only if it survived.
-	if len(t.blocks) > 0 && t.blocks[len(t.blocks)-1] == b {
-		return b
+	if len(p.items) > 0 && p.items[len(p.items)-1] == it {
+		return it
 	}
 	return nil
 }
 
-// setBlockRaw replaces a live block's content, keeping the byte accounting
-// exact and invalidating its wrap cache. The caller must ensure b is still
-// part of this transcript.
-func (t *transcript) setBlockRaw(b *transcriptBlock, raw string) {
-	t.rawBytes += len(raw) - len(b.raw)
-	b.raw = raw
-	b.cached = false
-	t.trim()
+// SetItemRaw replaces a live item's content, keeping the byte accounting
+// exact and invalidating its render cache. The caller must ensure it is
+// still part of this pane.
+func (p *transcriptPane) SetItemRaw(it *transcriptItem, raw string) {
+	p.rawBytes += len(raw) - len(it.raw)
+	it.raw = raw
+	it.invalidate()
+	p.invalidateTotal()
+	p.trim()
 }
 
-// trim drops the oldest blocks until the transcript is back under budget.
-// The first time this happens, a "[earlier output trimmed]" marker is
-// recorded (rendered ahead of the remaining blocks) — it is never itself
-// subject to eviction, unlike the old cappedBuffer's inline byte-trim.
-func (t *transcript) trim() {
-	for t.rawBytes > maxTranscriptBytes && len(t.blocks) > 1 {
-		t.rawBytes -= len(t.blocks[0].raw)
-		t.blocks = t.blocks[1:]
-		t.trimmed = true
+// trim drops the oldest items until the pane is back under budget. The first
+// time this happens, a "[earlier output trimmed]" marker is recorded
+// (rendered ahead of the remaining items) — it is never itself subject to
+// eviction, unlike the old cappedBuffer's inline byte-trim.
+func (p *transcriptPane) trim() {
+	for p.rawBytes > maxTranscriptBytes && len(p.items) > 1 {
+		p.rawBytes -= len(p.items[0].raw)
+		p.items = p.items[1:]
+		p.trimmed = true
+		// Item 0 has been evicted from underneath the current scroll
+		// position; shift the offset back so it still refers to the same
+		// logical item (clamped by the segment walk elsewhere if it
+		// overshoots).
+		if p.offsetIdx > 0 {
+			p.offsetIdx--
+		}
 	}
-	if t.trimmed && t.marker == nil {
-		t.marker = newBlock(trimmedMarker)
+	if p.trimmed && p.marker == nil {
+		p.marker = newItem(trimmedMarker)
+		p.offsetIdx++ // keep pointing at the same item now that marker occupies segment 0
+	}
+	p.invalidateTotal()
+}
+
+// Reset clears the pane (session switch, /clear).
+func (p *transcriptPane) Reset() {
+	p.items = nil
+	p.rawBytes = 0
+	p.trimmed = false
+	p.marker = nil
+	p.tailRaw = ""
+	p.tailCache = nil
+	p.offsetIdx = 0
+	p.offsetLine = 0
+	p.invalidateTotal()
+}
+
+// Len returns the current item count (excluding the trim marker and the
+// ephemeral tail), used as a stable position marker (the timeline picker's
+// scroll-to-turn) instead of a byte/line offset into a flat buffer.
+func (p *transcriptPane) Len() int { return len(p.items) }
+
+// SetSize updates the pane's viewport dimensions. Item render caches
+// self-invalidate lazily on next access when their cached width no longer
+// matches (transcriptItem.rendered), so no global invalidation is needed
+// here — only the cached total-height sum, which depends on every item's
+// height at the current width.
+func (p *transcriptPane) SetSize(w, h int) {
+	if p.width != w {
+		p.invalidateTotal()
+	}
+	p.width = w
+	p.height = h
+}
+
+func (p *transcriptPane) Width() int  { return p.width }
+func (p *transcriptPane) Height() int { return p.height }
+
+// SetTail sets the ephemeral trailing content (streaming thinking preview,
+// live assistant tail, queued-message previews) rendered after every real
+// item — the caller builds this by direct string concatenation exactly like
+// refresh() used to build the whole viewport content, just scoped to the
+// non-persisted trailing pieces. Called fresh every refresh(); never cached
+// per-item since it changes every frame during streaming. A trailing
+// newline is enforced (if raw is non-empty) so this segment's last visual
+// line isn't silently dropped by View's height accounting, which — like
+// every other segment — counts newlines to know how many lines a segment
+// contributes.
+func (p *transcriptPane) SetTail(raw string) {
+	if raw != "" && !strings.HasSuffix(raw, "\n") {
+		raw += "\n"
+	}
+	if raw == p.tailRaw {
+		return
+	}
+	p.tailRaw = raw
+	p.tailCache = nil
+	p.invalidateTotal()
+}
+
+// segmentCount is the number of addressable segments: marker (if any) +
+// items + ephemeral tail (if any).
+func (p *transcriptPane) segmentCount() int {
+	n := len(p.items)
+	if p.marker != nil {
+		n++
+	}
+	if p.tailRaw != "" {
+		n++
+	}
+	return n
+}
+
+// segmentAt returns the segment at logical index idx in O(1), without ever
+// materializing a combined slice.
+func (p *transcriptPane) segmentAt(idx int) *transcriptItem {
+	if idx < 0 {
+		return nil
+	}
+	if p.marker != nil {
+		if idx == 0 {
+			return p.marker
+		}
+		idx--
+	}
+	if idx < len(p.items) {
+		return p.items[idx]
+	}
+	idx -= len(p.items)
+	if idx == 0 && p.tailRaw != "" {
+		if p.tailCache == nil {
+			p.tailCache = newItem(p.tailRaw)
+		}
+		return p.tailCache
+	}
+	return nil
+}
+
+// markerOffset is 1 if a trim marker occupies segment 0, else 0 — the
+// translation between the public "item index" address space (Len/
+// ScrollToItem, unaware of the marker, matching the old blockIndex
+// semantics) and the internal segment address space.
+func (p *transcriptPane) markerOffset() int {
+	if p.marker != nil {
+		return 1
+	}
+	return 0
+}
+
+// TotalHeight returns the total number of rendered lines across every
+// segment at the current width. Cached and invalidated on any mutation that
+// could change it (append, trim, SetItemRaw, SetSize, SetTail, Reset).
+func (p *transcriptPane) TotalHeight() int {
+	if !p.totalHeightValid {
+		total := 0
+		n := p.segmentCount()
+		for i := 0; i < n; i++ {
+			total += p.segmentAt(i).height(p.width)
+		}
+		p.totalHeightCache = total
+		p.totalHeightValid = true
+	}
+	return p.totalHeightCache
+}
+
+func (p *transcriptPane) TotalLineCount() int   { return p.TotalHeight() }
+func (p *transcriptPane) VisibleLineCount() int { return p.height }
+
+// lastOffsetSegment returns the segment index and line offset that puts the
+// last segment's last line at the bottom of the viewport (crush's
+// lastOffsetItem, list.go:203-225, generalized over segments).
+func (p *transcriptPane) lastOffsetSegment() (idx, lineOffset int) {
+	n := p.segmentCount()
+	var totalHeight int
+	for idx = n - 1; idx >= 0; idx-- {
+		totalHeight += p.segmentAt(idx).height(p.width)
+		if totalHeight > p.height {
+			break
+		}
+	}
+	lineOffset = max(totalHeight-p.height, 0)
+	idx = max(idx, 0)
+	return idx, lineOffset
+}
+
+// AtBottom reports whether the pane is showing the last segment at the
+// bottom. Bounded by the number of segments between the current offset and
+// the end, not the whole history (crush's AtBottom, list.go:123-144).
+func (p *transcriptPane) AtBottom() bool {
+	n := p.segmentCount()
+	if n == 0 {
+		return true
+	}
+	var totalHeight int
+	for idx := p.offsetIdx; idx < n; idx++ {
+		if totalHeight > p.height {
+			return false
+		}
+		totalHeight += p.segmentAt(idx).height(p.width)
+	}
+	return totalHeight-p.offsetLine <= p.height
+}
+
+func (p *transcriptPane) AtTop() bool {
+	return p.offsetIdx == 0 && p.offsetLine == 0
+}
+
+// ScrollPercent mirrors bubbles/viewport's: how far the current offset is
+// through the total scrollable range.
+func (p *transcriptPane) ScrollPercent() float64 {
+	total := p.TotalHeight()
+	if total <= p.height {
+		return 1
+	}
+	offset := 0
+	for i := 0; i < p.offsetIdx; i++ {
+		offset += p.segmentAt(i).height(p.width)
+	}
+	offset += p.offsetLine
+	maxOffset := total - p.height
+	if maxOffset <= 0 {
+		return 1
+	}
+	return float64(offset) / float64(maxOffset)
+}
+
+func (p *transcriptPane) GotoTop() {
+	p.offsetIdx = 0
+	p.offsetLine = 0
+}
+
+func (p *transcriptPane) GotoBottom() {
+	if p.segmentCount() == 0 {
+		return
+	}
+	p.offsetIdx, p.offsetLine = p.lastOffsetSegment()
+}
+
+// ScrollToItem scrolls so that the item recorded via Len() at index idx
+// becomes the first visible segment (replaces the old renderUpTo +
+// SetYOffset(strings.Count(prefix, "\n")) dance with an O(1) index set).
+func (p *transcriptPane) ScrollToItem(idx int) {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > len(p.items) {
+		idx = len(p.items)
+	}
+	p.offsetIdx = idx + p.markerOffset()
+	p.offsetLine = 0
+}
+
+// ScrollBy scrolls the pane by the given number of lines; positive scrolls
+// down, negative scrolls up (crush's ScrollBy, list.go:414-474).
+func (p *transcriptPane) ScrollBy(lines int) {
+	n := p.segmentCount()
+	if n == 0 || lines == 0 {
+		return
+	}
+	if lines > 0 {
+		if p.AtBottom() {
+			return
+		}
+		p.offsetLine += lines
+		current := p.segmentAt(p.offsetIdx)
+		for current != nil && p.offsetLine >= current.height(p.width) {
+			p.offsetLine -= current.height(p.width)
+			p.offsetIdx++
+			if p.offsetIdx > n-1 {
+				p.GotoBottom()
+				return
+			}
+			current = p.segmentAt(p.offsetIdx)
+		}
+		lastIdx, lastLine := p.lastOffsetSegment()
+		if p.offsetIdx > lastIdx || (p.offsetIdx == lastIdx && p.offsetLine > lastLine) {
+			p.offsetIdx, p.offsetLine = lastIdx, lastLine
+		}
+	} else {
+		p.offsetLine += lines // lines is negative
+		for p.offsetLine < 0 {
+			p.offsetIdx--
+			if p.offsetIdx < 0 {
+				p.GotoTop()
+				return
+			}
+			p.offsetLine += p.segmentAt(p.offsetIdx).height(p.width)
+		}
 	}
 }
 
-// reset clears the transcript (session switch, /clear).
-func (t *transcript) reset() {
-	t.blocks = nil
-	t.rawBytes = 0
-	t.trimmed = false
-	t.marker = nil
-}
+func (p *transcriptPane) ScrollDown(n int) { p.ScrollBy(n) }
+func (p *transcriptPane) ScrollUp(n int)   { p.ScrollBy(-n) }
 
-// len returns the current block count, used as a stable position marker
-// (e.g. the timeline picker's scroll-to-turn) instead of a byte offset into
-// a flat buffer.
-func (t *transcript) len() int { return len(t.blocks) }
-
-// render joins the trim marker (if any) and every block's wrapped output for
-// width w.
-func (t *transcript) render(w int) string {
-	return t.renderUpTo(len(t.blocks), w)
-}
-
-// renderUpTo joins the trim marker (if any) and the first n blocks' wrapped
-// output for width w, used to compute a scroll position for a turn recorded
-// at block index n.
-func (t *transcript) renderUpTo(n, w int) string {
-	if n > len(t.blocks) {
-		n = len(t.blocks)
+func (p *transcriptPane) PageDown() {
+	if p.AtBottom() {
+		return
 	}
-	if n == 0 && t.marker == nil {
+	p.ScrollDown(p.height)
+}
+
+func (p *transcriptPane) PageUp() {
+	if p.AtTop() {
+		return
+	}
+	p.ScrollUp(p.height)
+}
+
+func (p *transcriptPane) HalfPageDown() {
+	if p.AtBottom() {
+		return
+	}
+	p.ScrollDown(p.height / 2)
+}
+
+func (p *transcriptPane) HalfPageUp() {
+	if p.AtTop() {
+		return
+	}
+	p.ScrollUp(p.height / 2)
+}
+
+// ItemIndexAtY returns the segment at viewport-relative line y and the line
+// offset within it, or (-1, -1) if y falls outside the visible range. Ported
+// from crush's findItemAtY (list.go:880-908); not wired to any input
+// handling yet — P16.5 will use this for mouse click/drag hit-testing — but
+// exercised directly by tests now since it's cheap to get right while the
+// windowing code is fresh.
+func (p *transcriptPane) ItemIndexAtY(y int) (idx, lineWithin int) {
+	if y < 0 || y >= p.height {
+		return -1, -1
+	}
+	n := p.segmentCount()
+	currentIdx := p.offsetIdx
+	currentLine := -p.offsetLine
+	for currentIdx < n && currentLine < p.height {
+		seg := p.segmentAt(currentIdx)
+		segEnd := currentLine + seg.height(p.width)
+		if y >= currentLine && y < segEnd {
+			return currentIdx, y - currentLine
+		}
+		currentLine = segEnd
+		currentIdx++
+	}
+	return -1, -1
+}
+
+// View renders the visible window: it walks segments from offsetIdx/
+// offsetLine, accumulating just enough wrapped content to fill height, then
+// slices exactly the visible lines out of that (bounded) buffer. Cost is
+// O(segments touching the viewport), not O(total transcript) — crush's
+// list.go:517-587, generalized over segments and adapted to reuse each
+// item's existing whole-string wrap cache (rendered) instead of a per-item
+// line-slice cache, since every item's raw content is documented to end on a
+// line boundary (see transcriptItem's doc comment) and concatenating whole
+// wrapped strings is exactly what the old flat-transcript render did —
+// bounding it to a small window preserves that proven-correct behavior
+// instead of reassembling from split line arrays, which would double-count
+// or drop item-boundary blank lines depending on trailing-newline count.
+func (p *transcriptPane) View() string {
+	budget := max(p.height, 0)
+	n := p.segmentCount()
+	if budget == 0 || n == 0 {
 		return ""
 	}
-	var b strings.Builder
-	if t.marker != nil {
-		b.WriteString(t.marker.render(w))
+
+	var buf strings.Builder
+	linesBuffered := 0
+	idx := p.offsetIdx
+	for idx < n && linesBuffered-p.offsetLine < budget {
+		seg := p.segmentAt(idx)
+		buf.WriteString(seg.rendered(p.width))
+		linesBuffered += seg.height(p.width)
+		idx++
 	}
-	for _, blk := range t.blocks[:n] {
-		b.WriteString(blk.render(w))
+	if linesBuffered <= p.offsetLine {
+		return ""
 	}
-	return b.String()
+
+	all := strings.Split(buf.String(), "\n")
+	// Every segment's wrapped output ends in "\n" (documented invariant), so
+	// the element after the last counted newline is always the empty
+	// artifact of that trailing terminator, not a real line — drop it.
+	content := all
+	if len(content) > linesBuffered {
+		content = content[:linesBuffered]
+	}
+	start := min(p.offsetLine, len(content))
+	end := min(start+budget, len(content))
+	return strings.Join(content[start:end], "\n")
 }
 
-// liveBlock renders actively-streaming text. Unlike transcriptBlock it keeps
+// HandleKey reproduces bubbles/viewport's DefaultKeyMap scroll bindings
+// (viewport/keymap.go:23-58): pgup/b, pgdown/space/f, u/ctrl+u, d/ctrl+d,
+// up/k, down/j. Left/right/horizontal scrolling are dropped — SoftWrap
+// already made horizontal scrolling dead code for this pane. Returns true if
+// the key was consumed as a scroll command (informational only; callers keep
+// forwarding every key to the textarea regardless, matching today's
+// behavior — see the "known existing quirk" note in transcript.go's package
+// docs / research/roadmap.md P16.4 plan notes).
+func (p *transcriptPane) HandleKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "pgdown", "space", "f":
+		p.PageDown()
+	case "pgup", "b":
+		p.PageUp()
+	case "u", "ctrl+u":
+		p.HalfPageUp()
+	case "d", "ctrl+d":
+		p.HalfPageDown()
+	case "down", "j":
+		p.ScrollDown(1)
+	case "up", "k":
+		p.ScrollUp(1)
+	default:
+		return false
+	}
+	return true
+}
+
+// HandleMouseWheel reproduces bubbles/viewport's mouse-wheel handling
+// (viewport.go:696-722) at its default MouseWheelDelta of 3.
+func (p *transcriptPane) HandleMouseWheel(msg tea.MouseWheelMsg) bool {
+	switch msg.Button {
+	case tea.MouseWheelDown:
+		p.ScrollDown(3)
+	case tea.MouseWheelUp:
+		p.ScrollUp(3)
+	default:
+		return false
+	}
+	return true
+}
+
+// liveBlock renders actively-streaming text. Unlike transcriptItem it keeps
 // a boundary-caching trick: only the "settled" prefix up to the last safe
 // markdown paragraph break is cached, and the short growing suffix is
 // re-rendered every token. This keeps a long streaming reply O(tail) per

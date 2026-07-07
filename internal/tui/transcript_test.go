@@ -3,75 +3,101 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
-func TestTranscriptAppendAndRender(t *testing.T) {
-	var tr transcript
-	// Each block ends on its own line — the invariant documented on
-	// transcript.append — so per-block width padding never merges into the
-	// next block's content.
-	tr.append("hello\n")
-	tr.append("world\n")
+// testKeyMsg builds a tea.KeyMsg whose String() matches the given key
+// string, for the small fixed set of keys transcriptPane.HandleKey matches.
+func testKeyMsg(s string) tea.KeyMsg {
+	switch s {
+	case "pgdown":
+		return tea.KeyPressMsg{Code: tea.KeyPgDown}
+	case "pgup":
+		return tea.KeyPressMsg{Code: tea.KeyPgUp}
+	case "space":
+		return tea.KeyPressMsg{Code: tea.KeySpace}
+	case "up":
+		return tea.KeyPressMsg{Code: tea.KeyUp}
+	case "down":
+		return tea.KeyPressMsg{Code: tea.KeyDown}
+	case "ctrl+u":
+		return tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
+	case "ctrl+d":
+		return tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}
+	default:
+		r := []rune(s)[0]
+		return tea.KeyPressMsg{Code: r, Text: s}
+	}
+}
 
-	got := tr.render(80)
+func TestTranscriptAppendAndRender(t *testing.T) {
+	tr := newTranscriptPane(80, 100)
+	// Each item ends on its own line — the invariant documented on
+	// transcriptPane.Append — so per-item width padding never merges into the
+	// next item's content.
+	tr.Append("hello\n")
+	tr.Append("world\n")
+
+	got := tr.View()
 	helloAt := strings.Index(got, "hello")
 	worldAt := strings.Index(got, "world")
 	if helloAt < 0 || worldAt < 0 || helloAt > worldAt {
 		t.Fatalf("expected %q then %q in order, got %q", "hello", "world", got)
 	}
-	if tr.len() != 2 {
-		t.Fatalf("got %d blocks, want 2", tr.len())
+	if tr.Len() != 2 {
+		t.Fatalf("got %d items, want 2", tr.Len())
 	}
 }
 
 func TestTranscriptAppendEmptyIsNoop(t *testing.T) {
-	var tr transcript
-	tr.append("")
-	if tr.len() != 0 {
-		t.Fatalf("expected empty append to be a no-op, got %d blocks", tr.len())
+	tr := newTranscriptPane(80, 100)
+	tr.Append("")
+	if tr.Len() != 0 {
+		t.Fatalf("expected empty append to be a no-op, got %d items", tr.Len())
 	}
 }
 
 func TestTranscriptReset(t *testing.T) {
-	var tr transcript
-	tr.append("some content")
-	tr.reset()
-	if tr.len() != 0 || tr.rawBytes != 0 || tr.render(80) != "" {
-		t.Fatalf("expected reset transcript to be empty, got len=%d rawBytes=%d render=%q",
-			tr.len(), tr.rawBytes, tr.render(80))
+	tr := newTranscriptPane(80, 100)
+	tr.Append("some content")
+	tr.Reset()
+	if tr.Len() != 0 || tr.rawBytes != 0 || tr.View() != "" {
+		t.Fatalf("expected reset pane to be empty, got len=%d rawBytes=%d view=%q",
+			tr.Len(), tr.rawBytes, tr.View())
 	}
 }
 
-func TestTranscriptRenderCachesPerBlockWidth(t *testing.T) {
-	var tr transcript
-	tr.append("first block content that is reasonably long for wrapping purposes")
+func TestTranscriptRenderCachesPerItemWidth(t *testing.T) {
+	tr := newTranscriptPane(80, 100)
+	tr.Append("first item content that is reasonably long for wrapping purposes")
 
-	out80 := tr.blocks[0].render(80)
-	if !tr.blocks[0].cached || tr.blocks[0].cacheW != 80 {
-		t.Fatalf("expected block to cache at width 80")
+	out80 := tr.items[0].rendered(80)
+	if !tr.items[0].cached || tr.items[0].cacheW != 80 {
+		t.Fatalf("expected item to cache at width 80")
 	}
 	// Re-rendering at the same width must reuse the cache (same output, no panic/mutation issue).
-	if again := tr.blocks[0].render(80); again != out80 {
+	if again := tr.items[0].rendered(80); again != out80 {
 		t.Fatalf("expected identical cached output, got %q vs %q", again, out80)
 	}
 	// A different width must invalidate and rewrap.
-	out40 := tr.blocks[0].render(40)
-	if tr.blocks[0].cacheW != 40 {
-		t.Fatalf("expected cache to track the new width 40, got %d", tr.blocks[0].cacheW)
+	out40 := tr.items[0].rendered(40)
+	if tr.items[0].cacheW != 40 {
+		t.Fatalf("expected cache to track the new width 40, got %d", tr.items[0].cacheW)
 	}
 	if out40 == out80 && len(out80) > 40 {
 		t.Fatalf("expected rewrap at a narrower width to change output")
 	}
 }
 
-func TestTranscriptTrimDropsWholeBlocksNotMidLine(t *testing.T) {
-	var tr transcript
-	// Push well past the budget with many distinct blocks, each terminated by
-	// a newline, so we can assert no block is ever cut mid-content.
-	block := strings.Repeat("x", 1024) + "\n"
-	blocksNeeded := (maxTranscriptBytes / len(block)) + 10
-	for i := 0; i < blocksNeeded; i++ {
-		tr.append(block)
+func TestTranscriptTrimDropsWholeItemsNotMidLine(t *testing.T) {
+	tr := newTranscriptPane(80, 100)
+	// Push well past the budget with many distinct items, each terminated by
+	// a newline, so we can assert no item is ever cut mid-content.
+	item := strings.Repeat("x", 1024) + "\n"
+	itemsNeeded := (maxTranscriptBytes / len(item)) + 10
+	for i := 0; i < itemsNeeded; i++ {
+		tr.Append(item)
 	}
 
 	if tr.rawBytes > maxTranscriptBytes {
@@ -83,54 +109,179 @@ func TestTranscriptTrimDropsWholeBlocksNotMidLine(t *testing.T) {
 	if tr.marker == nil || tr.marker.raw != trimmedMarker {
 		t.Fatalf("expected a trimmed marker, got %+v", tr.marker)
 	}
-	// Every remaining block must be byte-identical to the original unit —
-	// i.e. trimming dropped whole blocks, never sliced one.
-	for _, b := range tr.blocks {
-		if b.raw != block {
-			t.Fatalf("expected an untouched whole block, got %q", b.raw)
+	// Every remaining item must be byte-identical to the original unit —
+	// i.e. trimming dropped whole items, never sliced one.
+	for _, it := range tr.items {
+		if it.raw != item {
+			t.Fatalf("expected an untouched whole item, got %q", it.raw)
 		}
 	}
 }
 
 func TestTranscriptTrimMarkerInsertedOnce(t *testing.T) {
-	var tr transcript
-	block := strings.Repeat("y", 1024) + "\n"
-	blocksNeeded := (maxTranscriptBytes / len(block)) + 10
-	for i := 0; i < blocksNeeded; i++ {
-		tr.append(block)
+	tr := newTranscriptPane(80, 100)
+	item := strings.Repeat("y", 1024) + "\n"
+	itemsNeeded := (maxTranscriptBytes / len(item)) + 10
+	for i := 0; i < itemsNeeded; i++ {
+		tr.Append(item)
 	}
 	if tr.marker == nil {
 		t.Fatal("expected a trimmed marker after repeated trims")
 	}
-	// The marker itself is never part of the evictable blocks slice, so it
+	// The marker itself is never part of the evictable items slice, so it
 	// can't be duplicated or dropped by a later trim pass.
-	for _, b := range tr.blocks {
-		if b.raw == trimmedMarker {
-			t.Fatal("the trimmed marker must not appear inside the evictable blocks slice")
+	for _, it := range tr.items {
+		if it.raw == trimmedMarker {
+			t.Fatal("the trimmed marker must not appear inside the evictable items slice")
 		}
 	}
 }
 
-func TestTranscriptRenderUpTo(t *testing.T) {
-	var tr transcript
-	tr.append("a\n")
-	tr.append("b\n")
-	tr.append("c\n")
+func TestTranscriptScrollToItem(t *testing.T) {
+	tr := newTranscriptPane(80, 100)
+	tr.Append("a\n")
+	tr.Append("b\n")
+	tr.Append("c\n")
 
-	got2 := tr.renderUpTo(2, 80)
-	if strings.Contains(got2, "c") {
-		t.Fatalf("renderUpTo(2, ...) must not include block 3's content, got %q", got2)
+	tr.ScrollToItem(2)
+	got := tr.View()
+	if strings.Contains(got, "a") || strings.Contains(got, "b") {
+		t.Fatalf("ScrollToItem(2) should skip items a,b, got %q", got)
 	}
-	if !strings.Contains(got2, "a") || !strings.Contains(got2, "b") {
-		t.Fatalf("renderUpTo(2, ...) missing expected content, got %q", got2)
+	if !strings.Contains(got, "c") {
+		t.Fatalf("ScrollToItem(2) missing expected content, got %q", got)
 	}
-	if got := tr.renderUpTo(0, 80); got != "" {
-		t.Fatalf("got %q, want empty", got)
+
+	tr.ScrollToItem(0)
+	got0 := tr.View()
+	if !strings.Contains(got0, "a") || !strings.Contains(got0, "b") || !strings.Contains(got0, "c") {
+		t.Fatalf("ScrollToItem(0) should show everything, got %q", got0)
 	}
-	// n beyond the block count clamps to everything.
-	got99 := tr.renderUpTo(99, 80)
-	if !strings.Contains(got99, "a") || !strings.Contains(got99, "b") || !strings.Contains(got99, "c") {
-		t.Fatalf("renderUpTo clamped beyond block count missing content, got %q", got99)
+
+	// An index beyond the item count clamps rather than panicking.
+	tr.ScrollToItem(99)
+	_ = tr.View()
+}
+
+func TestTranscriptPaneViewIsWindowed(t *testing.T) {
+	tr := newTranscriptPane(80, 10)
+	for i := 0; i < 5000; i++ {
+		tr.Append("line\n")
+	}
+	tr.GotoBottom()
+	_ = tr.View()
+
+	// Item 0 sits far outside the visible window at the bottom of a 5000-item
+	// pane with a 10-line viewport; if View() were still O(total) it would have
+	// touched (and cached) item 0 along the way. It shouldn't have.
+	if tr.items[0].cached {
+		t.Fatal("expected View() to leave far-off-screen items uncached (O(visible), not O(total))")
+	}
+}
+
+func TestTranscriptItemIndexAtY(t *testing.T) {
+	tr := newTranscriptPane(80, 10)
+	tr.Append("one\n")       // item 0: 1 line
+	tr.Append("two\ntwo2\n") // item 1: 2 lines
+	tr.Append("three\n")     // item 2: 1 line
+	tr.GotoTop()
+
+	cases := []struct {
+		y            int
+		wantIdx      int
+		wantLineWith int
+	}{
+		{0, 0, 0}, // first line of item 0
+		{1, 1, 0}, // first line of item 1
+		{2, 1, 1}, // second line of item 1
+		{3, 2, 0}, // item 2
+		{99, -1, -1},
+	}
+	for _, c := range cases {
+		idx, lineWith := tr.ItemIndexAtY(c.y)
+		if idx != c.wantIdx || lineWith != c.wantLineWith {
+			t.Fatalf("ItemIndexAtY(%d) = (%d, %d), want (%d, %d)", c.y, idx, lineWith, c.wantIdx, c.wantLineWith)
+		}
+	}
+}
+
+func TestTranscriptHandleKeyMatchesViewportDefaults(t *testing.T) {
+	newPane := func() *transcriptPane {
+		tr := newTranscriptPane(80, 5)
+		for i := 0; i < 50; i++ {
+			tr.Append("line\n")
+		}
+		tr.GotoTop()
+		return tr
+	}
+
+	cases := []struct {
+		key    string
+		action func(tr *transcriptPane) // expected equivalent direct call
+	}{
+		{"pgdown", func(tr *transcriptPane) { tr.PageDown() }},
+		{"space", func(tr *transcriptPane) { tr.PageDown() }},
+		{"f", func(tr *transcriptPane) { tr.PageDown() }},
+		{"pgup", func(tr *transcriptPane) { tr.PageUp() }},
+		{"b", func(tr *transcriptPane) { tr.PageUp() }},
+		{"u", func(tr *transcriptPane) { tr.HalfPageUp() }},
+		{"ctrl+u", func(tr *transcriptPane) { tr.HalfPageUp() }},
+		{"d", func(tr *transcriptPane) { tr.HalfPageDown() }},
+		{"ctrl+d", func(tr *transcriptPane) { tr.HalfPageDown() }},
+		{"down", func(tr *transcriptPane) { tr.ScrollDown(1) }},
+		{"j", func(tr *transcriptPane) { tr.ScrollDown(1) }},
+		{"up", func(tr *transcriptPane) { tr.ScrollUp(1) }},
+		{"k", func(tr *transcriptPane) { tr.ScrollUp(1) }},
+	}
+	for _, c := range cases {
+		viaKey := newPane()
+		if !viaKey.HandleKey(testKeyMsg(c.key)) {
+			t.Fatalf("HandleKey(%q) returned false, want true (consumed)", c.key)
+		}
+		viaDirect := newPane()
+		c.action(viaDirect)
+		if viaKey.offsetIdx != viaDirect.offsetIdx || viaKey.offsetLine != viaDirect.offsetLine {
+			t.Fatalf("key %q: offset (%d,%d), want (%d,%d) matching direct call",
+				c.key, viaKey.offsetIdx, viaKey.offsetLine, viaDirect.offsetIdx, viaDirect.offsetLine)
+		}
+	}
+
+	unmatched := newPane()
+	if unmatched.HandleKey(testKeyMsg("x")) {
+		t.Fatal("HandleKey should report false for a key it doesn't consume")
+	}
+}
+
+func TestTranscriptHandleMouseWheelMatchesViewportDefaults(t *testing.T) {
+	newPane := func() *transcriptPane {
+		tr := newTranscriptPane(80, 5)
+		for i := 0; i < 50; i++ {
+			tr.Append("line\n")
+		}
+		tr.GotoTop()
+		return tr
+	}
+
+	down := newPane()
+	if !down.HandleMouseWheel(tea.MouseWheelMsg{Button: tea.MouseWheelDown}) {
+		t.Fatal("expected wheel-down to be consumed")
+	}
+	wantDown := newPane()
+	wantDown.ScrollDown(3)
+	if down.offsetIdx != wantDown.offsetIdx || down.offsetLine != wantDown.offsetLine {
+		t.Fatalf("wheel-down offset (%d,%d), want (%d,%d)", down.offsetIdx, down.offsetLine, wantDown.offsetIdx, wantDown.offsetLine)
+	}
+
+	up := newPane()
+	up.GotoBottom()
+	if !up.HandleMouseWheel(tea.MouseWheelMsg{Button: tea.MouseWheelUp}) {
+		t.Fatal("expected wheel-up to be consumed")
+	}
+	wantUp := newPane()
+	wantUp.GotoBottom()
+	wantUp.ScrollUp(3)
+	if up.offsetIdx != wantUp.offsetIdx || up.offsetLine != wantUp.offsetLine {
+		t.Fatalf("wheel-up offset (%d,%d), want (%d,%d)", up.offsetIdx, up.offsetLine, wantUp.offsetIdx, wantUp.offsetLine)
 	}
 }
 
