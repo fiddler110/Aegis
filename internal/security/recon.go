@@ -147,9 +147,15 @@ func (nmapScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.C
 }
 
 // Scan runs nmap against targets and parses its XML output into Findings.
-// No shell string-building: exec.CommandContext takes an explicit argv
-// slice built only from already-validated targets, never a concatenated
-// command string.
+// No shell string-building for the host path: exec.CommandContext takes an
+// explicit argv slice built only from already-validated targets, never a
+// concatenated command string. The MethodWSL path (P14.x) runs the same argv
+// inside a WSL distro instead — recommended on Windows, where the native
+// build commonly fails without Npcap set up correctly / admin rights for
+// OS-detection scans: the XML output path is translated to its WSL mount
+// form via sandbox.WSLPath so nmap-inside-WSL writes to the exact same NTFS
+// file this function reads back below, with no cross-boundary file copy
+// needed.
 func (nmapScanner) Scan(ctx context.Context, targets []string, active bool, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	tmpFile, err := os.CreateTemp("", "aegis-nmap-*.xml")
 	if err != nil {
@@ -159,9 +165,17 @@ func (nmapScanner) Scan(ctx context.Context, targets []string, active bool, meth
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
 
-	args := nmapArgs(targets, active, tmpPath)
-	cmd := exec.CommandContext(ctx, "nmap", args...)
-	out, _ := cmd.CombinedOutput()
+	var out []byte
+	if method == MethodWSL {
+		wslOutPath, werr := sandbox.WSLPath(ctx, tmpPath, opts.WSLDistro)
+		if werr != nil {
+			return nil, werr
+		}
+		out, _ = sandbox.RunWSLScript(ctx, opts.WSLDistro, "nmap", nmapArgs(targets, active, wslOutPath)...)
+	} else {
+		cmd := exec.CommandContext(ctx, "nmap", nmapArgs(targets, active, tmpPath)...)
+		out, _ = cmd.CombinedOutput()
+	}
 
 	data, err := os.ReadFile(tmpPath)
 	if err != nil {
@@ -311,6 +325,10 @@ func (nucleiScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox
 	return Resolve(ctx, "nuclei", opts)
 }
 
+// Scan mirrors nmapScanner.Scan's MethodWSL handling: both the pinned
+// templates directory and the SARIF output path are translated to their WSL
+// mount form via sandbox.WSLPath so nuclei-inside-WSL reads/writes the exact
+// same files this function already has open on the host side.
 func (nucleiScanner) Scan(ctx context.Context, targets []string, active bool, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	templatesDir, err := resolveNucleiTemplates(ctx, opts)
 	if err != nil {
@@ -325,10 +343,21 @@ func (nucleiScanner) Scan(ctx context.Context, targets []string, active bool, me
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
 
-	args := nucleiArgs(targets, active, templatesDir, tmpPath)
-
-	cmd := exec.CommandContext(ctx, "nuclei", args...)
-	out, _ := cmd.CombinedOutput()
+	var out []byte
+	if method == MethodWSL {
+		wslTemplatesDir, werr := sandbox.WSLPath(ctx, templatesDir, opts.WSLDistro)
+		if werr != nil {
+			return nil, werr
+		}
+		wslOutPath, werr := sandbox.WSLPath(ctx, tmpPath, opts.WSLDistro)
+		if werr != nil {
+			return nil, werr
+		}
+		out, _ = sandbox.RunWSLScript(ctx, opts.WSLDistro, "nuclei", nucleiArgs(targets, active, wslTemplatesDir, wslOutPath)...)
+	} else {
+		cmd := exec.CommandContext(ctx, "nuclei", nucleiArgs(targets, active, templatesDir, tmpPath)...)
+		out, _ = cmd.CombinedOutput()
+	}
 
 	data, err := os.ReadFile(tmpPath)
 	if err != nil {

@@ -400,12 +400,34 @@ services (Telnet, FTP, unauthenticated Redis, an exposed Docker API, SMB, RDP, V
 etc.) is flagged `MEDIUM`/`HIGH` with a specific remediation rather than left at `INFO` — the
 concrete "identify weaknesses" step beyond a bare port list.
 
-**Host-binary only, both scanners, for v1** — no container fallback. Reaching LAN targets needs
-real network egress, which the source-scanning container runner deliberately denies
-(`--network none`, the same hardening every other scanner container gets); punching a network hole
-through that posture for two more tools isn't done here (same reasoning DAST's ZAP container
-already documents, and the same "host-binary only for now" precedent as image scanning below).
-Install `nmap`/`nuclei` natively to use `recon_scan`.
+**No container fallback for either scanner.** Reaching LAN targets needs real network egress,
+which the source-scanning container runner deliberately denies (`--network none`, the same
+hardening every other scanner container gets); punching a network hole through that posture for
+two more tools isn't done here (same reasoning DAST's ZAP container already documents, and the
+same "host-binary only for now" precedent as image scanning below).
+
+**On Windows, prefer a Kali WSL distro over the native install.** Native Windows nmap needs Npcap
+installed and running as a service, plus admin rights for `-O`/SYN-style scans — exactly the
+"all kinds of errors" territory Windows operators commonly hit. `nmap` and `nuclei` are both
+`WSLCapable` (see [WSL fallback](#wsl-fallback-for-tools-with-no-native-windows-build-or-an-unreliable-one)
+below): install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) with a
+security-focused distro —
+[Kali Linux](https://www.kali.org/docs/wsl/win-kex/) (`wsl --install -d kali-linux`) ships nmap,
+nuclei, and a broader red-team toolkit (metasploit, hydra, nikto, sqlmap) already installed — then
+point Aegis at it and force the WSL method:
+
+```yaml
+security:
+  wsl_distro: kali-linux        # target this distro instead of the WSL default
+  tools:
+    nmap:   { enabled: true, method: wsl }
+    nuclei: { enabled: true, method: wsl, templates_version: "v9.9.4" }
+```
+
+`aegis security status` reports `wsl` in its METHOD column ("via WSL") once this resolves
+correctly. A bare Ubuntu WSL default distro has neither tool installed by default — either
+install them there (`apt install nmap`, per nuclei's own install docs) or set `wsl_distro` to a
+distro that already has them, like Kali.
 
 ### Scanner availability (host binary vs container fallback)
 
@@ -472,27 +494,55 @@ to `MethodNone` with a reason pointing back at this section's `docker pull`/`doc
 recipe, rather than silently running an image that can be repointed at any time by whoever
 controls the registry.
 
-### WSL fallback for tools with no native Windows build
+### WSL fallback for tools with no native Windows build (or an unreliable one)
 
-**opengrep** and **kubescape** ship no Windows build at all — only `darwin`/`linux` install
-commands. On Windows, if a Linux distro is registered under the **Windows Subsystem for
-Linux** (`wsl -l -q` lists at least one), Aegis uses it as an automatic fallback instead of
-reporting the tool unavailable:
+Four built-in scanners are `WSLCapable` — Aegis can run them inside the **Windows Subsystem for
+Linux** instead of reporting them unavailable, or instead of a native Windows install that's
+known to be unreliable in practice:
+
+- **opengrep** and **kubescape** ship no Windows build at all — only `darwin`/`linux` install
+  commands.
+- **nmap** and **nuclei** *do* have a native Windows install (`winget`/`scoop`), but nmap in
+  particular needs Npcap installed and running as a service plus admin rights for `-O`/SYN-style
+  scans — the most common source of the failures that send Windows operators looking for an
+  alternative in the first place.
+
+On Windows, if a Linux distro is registered under WSL (`wsl -l -q` lists at least one), Aegis
+uses it as a fallback:
 
 - `aegis security install opengrep` (and the `/security-config` "Install now" action) detects
   there's no native Windows entry, checks for a WSL distro, and — if present — runs the
   tool's own Linux install command inside it: the guided-install command you're shown and
-  asked to confirm becomes `wsl -- bash -lc '<the same linux install script>'`.
-- `aegis security status`/`aegis scan` resolve these two tools to a third method,
-  `MethodWSL` ("via WSL" in `status`'s output), whenever the binary is found inside WSL's
-  default distro but not on the Windows host — checked after the host binary and container
-  fallback, so a native install or configured container image always takes priority.
+  asked to confirm becomes `wsl -- bash -lc '<the same linux install script>'`. (nmap/nuclei
+  already have a native Windows entry, so this guided-install path doesn't apply to them —
+  install them inside your chosen WSL distro yourself, e.g. `apt install nmap` on Kali/Ubuntu.)
+- `aegis security status`/`aegis scan` resolve a `WSLCapable` tool to a third method,
+  `MethodWSL` ("via WSL" in `status`'s output), whenever the binary is found inside WSL but not
+  on the Windows host — checked after the host binary and container fallback in `auto` mode, so
+  a native install or configured container image always takes priority. Set
+  `security.tools.<name>.method: wsl` to force it even when a (flaky) native binary is present —
+  this is the recommended override for nmap on Windows.
 - Execution shares the host filesystem directly (`/mnt/<drive>/...`, via `wslpath`) rather
   than a bind mount — no container runtime involved.
 
-This is deliberately scoped to just these two tools (`ScannerDescriptor.WSLCapable`): every
-other built-in scanner already has a native Windows install path (even when that path's own
-package manager has unrelated problems — see
+**Targeting a specific distro (`security.wsl_distro`).** By default, Aegis runs these tools
+against whatever distro `wsl --set-default` currently points at. Set `security.wsl_distro` to
+name a different registered distro instead — the recommended setup on Windows is a distro
+purpose-built for security tooling:
+
+```yaml
+security:
+  wsl_distro: kali-linux   # wsl --install -d kali-linux
+```
+
+This applies to every `WSLCapable` tool at once (nmap, nuclei, opengrep, kubescape) — there's no
+per-tool distro override. If you split tooling across distros (e.g. Kali for nmap/nuclei, a bare
+Ubuntu default for opengrep/kubescape), install every `WSLCapable` tool you use into whichever
+single distro `wsl_distro` names, so none of them silently regress to unavailable.
+
+This WSL path is deliberately scoped to just these four tools (`ScannerDescriptor.WSLCapable`):
+every other built-in scanner already has a working native Windows install path (even when that
+path's own package manager has unrelated problems — see
 [installation.md](installation.md#windows-scoop-installs-failing) for the `Get-FileHash`/scoop
 issue), so there's no WSL execution branch wired for them, and offering one would silently
 misroute execution back to a host binary that doesn't exist. Explicitly forcing WSL for a tool

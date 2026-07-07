@@ -8,7 +8,7 @@ import (
 )
 
 func newConfigCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Print the resolved configuration (API keys redacted)",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -24,4 +24,6 @@ func newConfigCmd() *cobra.Command {
 			return enc.Encode(cfg)
 		},
 	}
+	cmd.AddCommand(newConfigUpdateCmd())
+	return cmd
 }

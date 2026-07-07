@@ -38,8 +38,8 @@ func InstallCommand(name string) (string, bool) {
 		return cmd, true
 	}
 	if runtime.GOOS == "windows" {
-		if linuxCmd, ok := d.Install["linux"]; ok && strings.TrimSpace(linuxCmd) != "" && wslDistroAvailable(context.Background()) {
-			return sandbox.WSLInstallCommand(linuxCmd), true
+		if linuxCmd, ok := d.Install["linux"]; ok && strings.TrimSpace(linuxCmd) != "" && wslDistroAvailable(context.Background(), "") {
+			return sandbox.WSLInstallCommand(linuxCmd, ""), true
 		}
 	}
 	return "", false

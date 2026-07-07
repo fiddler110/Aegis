@@ -137,6 +137,20 @@ func parsePersonaFile(path string) (Persona, error) {
 	if err != nil {
 		return Persona{}, err
 	}
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	p, err := parsePersonaBytes(name, data)
+	if err != nil {
+		return Persona{}, err
+	}
+	p.Loaded = true
+	p.Path = path
+	return p, nil
+}
+
+// parsePersonaBytes parses a persona's *.md content (YAML frontmatter + body)
+// into a Persona. The caller sets Loaded/Path since those differ between
+// disk-loaded custom personas and embedded built-ins.
+func parsePersonaBytes(name string, data []byte) (Persona, error) {
 	fmText, body := splitFrontmatter(string(data))
 	var fm frontmatter
 	if fmText != "" {
@@ -144,8 +158,8 @@ func parsePersonaFile(path string) (Persona, error) {
 			return Persona{}, err
 		}
 	}
-	p := Persona{
-		Name:        strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+	return Persona{
+		Name:        name,
 		Description: fm.Description,
 		System:      strings.TrimSpace(body),
 		Model:       fm.Model,
@@ -153,10 +167,7 @@ func parsePersonaFile(path string) (Persona, error) {
 		Tools:       fm.Tools,
 		Rules:       fm.Rules,
 		Guard:       parseGuard(fm.OutputGuard),
-		Loaded:      true,
-		Path:        path,
-	}
-	return p, nil
+	}, nil
 }
 
 // parseGuard interprets the output_guard node: a scalar "none"/"false" disables
