@@ -41,7 +41,7 @@ func TestCmdSecurityConfigDefaultsToProjectScope(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security-config"})
 	if res.SecurityConfigGlobal == nil {
 		t.Fatal("expected SecurityConfigGlobal to be set")
@@ -55,7 +55,7 @@ func TestCmdSecurityConfigGlobalArg(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security-config", Args: []string{"global"}})
 	if res.SecurityConfigGlobal == nil || !*res.SecurityConfigGlobal {
 		t.Fatal("expected global scope (true) with 'global' arg")

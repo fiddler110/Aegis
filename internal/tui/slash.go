@@ -48,18 +48,20 @@ type SlashDispatcher struct {
 	sessionID    string
 	mode         string
 	model        string
-	guardEnabled *bool // per-session output-guard toggle; nil = server default
+	workDir      string // project root, used to validate/list project-local theme files (P16.7)
+	guardEnabled *bool  // per-session output-guard toggle; nil = server default
 	builtins     map[string]func(args []string) SlashResult
 	customs      []api.CommandInfo
 }
 
 // NewSlashDispatcher creates a dispatcher for the given session.
-func NewSlashDispatcher(cl *client.Client, sessionID, mode, model string) *SlashDispatcher {
+func NewSlashDispatcher(cl *client.Client, sessionID, mode, model, workDir string) *SlashDispatcher {
 	d := &SlashDispatcher{
 		client:    cl,
 		sessionID: sessionID,
 		mode:      mode,
 		model:     model,
+		workDir:   workDir,
 	}
 	// d.builtins is derived from commandDefs (P14.10) rather than hand-listed,
 	// so a command added to that single table is automatically dispatchable
@@ -555,22 +557,33 @@ func (d *SlashDispatcher) cmdSandbox(args []string) SlashResult {
 	return SlashResult{Output: b.String()}
 }
 
-// cmdTheme switches the TUI color scheme live (P14.8). Unlike /sandbox and
-// /model, there's no daemon round trip: the theme is purely a TUI rendering
-// concern, so the dispatcher only validates the name and hands off to the
-// model via the same "\x00"-prefixed sentinel Output convention /humor and
-// /sidebar use for local (non-server) UI state changes — the model is the
-// one that actually rebinds the package-level colors, rebuilds m.th, and
-// recreates the markdown renderer (see the slashResultMsg case in tui.go).
-// This session only: set tui.theme in config to persist across restarts,
-// same as the config-only /sandbox use.
+// cmdTheme switches the TUI color scheme live (P14.8; generalized beyond
+// dark/light to any loaded theme by P16.7). Unlike /sandbox and /model,
+// there's no daemon round trip: the theme is purely a TUI rendering concern,
+// so the dispatcher only validates the name and hands off to the model via
+// the same "\x00"-prefixed sentinel Output convention /humor and /sidebar
+// use for local (non-server) UI state changes — the model is the one that
+// actually rebinds the package-level colors, rebuilds m.th, and recreates
+// the markdown renderer (see the slashResultMsg case in tui.go). Validation
+// here checks d.workDir's project theme directory plus the user's and the
+// embedded builtins (availableThemeNames) — a name valid here is guaranteed
+// to load in tui.go's actual switch. This session only: set tui.theme in
+// config to persist across restarts, same as the config-only /sandbox use.
 func (d *SlashDispatcher) cmdTheme(args []string) SlashResult {
 	if len(args) == 0 {
 		return SlashResult{Output: "\x00theme-show"}
 	}
 	name := strings.ToLower(strings.TrimSpace(args[0]))
-	if name != "dark" && name != "light" {
-		return SlashResult{Output: fmt.Sprintf("Unknown theme %q (want dark or light).", args[0]), IsError: true}
+	valid := availableThemeNames(d.workDir)
+	found := false
+	for _, v := range valid {
+		if v == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return SlashResult{Output: fmt.Sprintf("Unknown theme %q (want one of: %s).", args[0], strings.Join(valid, ", ")), IsError: true}
 	}
 	return SlashResult{Output: "\x00theme " + name}
 }

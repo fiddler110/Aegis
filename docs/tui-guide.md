@@ -220,7 +220,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/tools compact` | Set tool-output display to 10 lines max |
 | `/tools full` | Show complete tool output (no line cap) |
 | `/sidebar` | Toggle the left sidebar on/off (also `Ctrl+B`) |
-| `/theme [dark\|light]` | Switch the color scheme live (no restart); no args shows the current theme |
+| `/theme [name]` | Switch the color scheme live (no restart); built in: dark, light, catppuccin, dracula, gruvbox, tokyonight — or a custom `<name>.json` in `.aegis/themes/`/`~/.aegis/themes/`; no args shows the current theme |
 | `/copy` | Copy the last assistant message to clipboard |
 | `/copy <n>` | Copy the Nth fenced code block from the last response |
 | `/tasks` | Show the live task/todo progress strip (also visible above input) |

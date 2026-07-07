@@ -10,7 +10,7 @@ import (
 // returns a usage error before ever touching the daemon client — the client
 // is nil here specifically to prove this branch never calls it.
 func TestCmdKnowledgeBareArgsIsUsageError(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "knowledge"})
 	if !res.IsError {
 		t.Fatal("expected an error result for bare `/knowledge`")
@@ -20,7 +20,7 @@ func TestCmdKnowledgeBareArgsIsUsageError(t *testing.T) {
 // TestCmdKnowledgeQueryMissingTextIsUsageError checks `/knowledge query` with
 // no search text is rejected before calling the daemon client.
 func TestCmdKnowledgeQueryMissingTextIsUsageError(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "knowledge", Args: []string{"query"}})
 	if !res.IsError {
 		t.Fatal("expected an error result for `/knowledge query` with no text")
@@ -30,7 +30,7 @@ func TestCmdKnowledgeQueryMissingTextIsUsageError(t *testing.T) {
 // TestCmdKnowledgeUnknownSubcommand checks an unrecognized subcommand is
 // rejected before calling the daemon client.
 func TestCmdKnowledgeUnknownSubcommand(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "knowledge", Args: []string{"bogus"}})
 	if !res.IsError {
 		t.Fatal("expected an error result for an unknown /knowledge subcommand")

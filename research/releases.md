@@ -9,7 +9,17 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P16.2** (chroma syntax highlighting) and **P16.3** (diff
+**Last updated:** 2026-07-07 — **P16.7** (runtime-loadable themes) shipped: new
+`internal/tui/theme_loader.go` derives a full `colorScheme` from a `themeFile` JSON schema
+(background/foreground + the standard 16-color ANSI palette — the shape most published terminal
+color schemes already ship in) by blending, reusing P16.3's `blend()` helper. Four embedded
+built-ins (catppuccin, dracula, gruvbox, tokyonight) ship the same way builtin skills do, plus a
+loader for project `.aegis/themes/<name>.json` and user `~/.aegis/themes/<name>.json` (project
+wins). `/theme` and `tui.theme` now accept any of dark/light/builtin/custom name; an unknown name
+lists everything currently resolvable instead of a fixed "want dark or light". See
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.4–P16.6 and
+P16.8–P16.9 remain open.
+**Previously, 2026-07-07:** **P16.2** (chroma syntax highlighting) and **P16.3** (diff
 presentation upgrade) shipped together, as the roadmap's suggested sequencing called for ("one
 visual unit"). New `internal/tui/highlight.go`: a `chroma.Style` built from the existing
 colorscheme palette (P16.2), applied to diff added/removed/context lines, `read_file` result
@@ -23,8 +33,7 @@ word granularity rather than a new diff algorithm). P16.2/P16.3 also fixed a sam
 caught before commit: the first hunk-header implementation computed the header only once its hunk's
 full extent was known, i.e. *after* emitting that hunk's lines — headers must precede their
 content, so hunk boundaries are now precomputed before the render pass. See
-[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.4–P16.9
-remain open.
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below.
 **Previously, 2026-07-07:** **P16.1** (TUI notifications & attention system) shipped: terminal
 bell + OSC 9/777 desktop notification on stream-end/approval-pending/error (suppressed while the
 terminal is focused, via bubbletea v2's `tea.FocusMsg`/`BlurMsg`), OSC 0/2 window-title updates
@@ -125,8 +134,54 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P16 items (TUI Polish & Interaction Parity)
 
-The rest of P16 (P16.4–P16.9) is still open — see
+The rest of P16 (P16.4–P16.6, P16.8–P16.9) is still open — see
 [roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
+
+### P16.7 — SHIPPED 2026-07-07 — Runtime-loadable themes
+
+The gap: only two hardcoded schemes (dark/light) existed, versus opencode's ~30 JSON theme assets
+plus user themes. `colorscheme.go` already centralized every color the TUI uses, so the missing
+piece was a loader, not a redesign.
+
+New `internal/tui/theme_loader.go`:
+
+- **`themeFile`** — a JSON schema of background/foreground plus the standard 16-color ANSI
+  palette (black/red/green/yellow/blue/magenta/cyan/white, each with a bright variant). This is
+  the same shape most published terminal color schemes already ship in (Alacritty, iTerm2, Windows
+  Terminal presets), so popular themes like catppuccin/dracula/gruvbox/tokyonight needed no bespoke
+  authoring — their well-known 18-color palettes dropped straight in.
+- **`(themeFile).toScheme()`** derives every `colorScheme` role from those 18 colors: foreground/
+  background tiers and separators are blended from the base pair via `blend()` (the same helper
+  P16.3 introduced for diff tints) rather than requiring a theme author to hand-pick a dozen extra
+  shades. `primary`/`secondary`/`keyword`/`accentAlt` map from bright-magenta/bright-blue/magenta/
+  green; status roles (destructive/warn/success/info/...) map from the matching ANSI color and its
+  bright variant. All 18 hex strings are validated (`parseHexColor`, `#rgb`/`#rrggbb`) and required
+  — a malformed or incomplete theme file fails to load with a specific field-level error rather
+  than silently applying partial colors.
+- **Four embedded built-ins** (`internal/tui/themes/builtin/*.json`: catppuccin, dracula, gruvbox,
+  tokyonight) ship via `//go:embed`, the same mechanism `internal/skills/embedded.go` uses for
+  builtin skills — no materialization to disk needed since themes are consumed directly by the TUI
+  process, not read by the model's file tools.
+- **`loadNamedScheme(name, workDir)`** resolves a name in precedence order: the two hardcoded Go
+  structs (`dark`/`light`) first, then project `.aegis/themes/<name>.json`, then user
+  `~/.aegis/themes/<name>.json`, then an embedded builtin — mirroring the project-overrides-user-
+  overrides-builtin precedence `internal/skills` and `internal/persona` already use.
+- **`applyTheme(name, workDir)`** now returns the resolved name (the input, lowercased, on success;
+  `"dark"` on any failure) instead of the old two-name `normalizeThemeName` pass, so `cfg.Theme`
+  always reflects what actually loaded. The TQ10/P14.8 constraint is unchanged: lipgloss styles and
+  the glamour renderer capture colors at creation, so both `tui.Run` (before `newModel`) and the
+  live `/theme` switch (which also rebuilds `m.th` and `m.renderer`) still apply the scheme first.
+- **`/theme`** validation (`cmdTheme`, `slash.go`) now checks `availableThemeNames(d.workDir)`
+  instead of a hardcoded dark/light check, so an unknown name's error message lists every name
+  currently resolvable (dark, light, any project/user theme files, the four builtins) rather than
+  a fixed "want dark or light". This required threading `workDir` into `SlashDispatcher` (a new
+  constructor parameter — every existing call site, tests included, only needed a trailing `""` or
+  `cfg.WorkDir` added).
+
+Tests: `internal/tui/theme_loader_test.go` (builtin listing, resolution precedence — project beats
+user beats embedded, invalid-hex and missing-field rejection, `availableThemeNames` completeness)
+and additions to `theme_test.go`/`colorscheme_test.go` (embedded builtins load and apply live
+end-to-end through the same `/theme` slash-command path the dark/light pair already had covered).
 
 ### P16.2 + P16.3 — SHIPPED 2026-07-07 — Chroma syntax highlighting + diff presentation upgrade
 

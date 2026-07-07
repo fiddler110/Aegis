@@ -217,9 +217,11 @@ tui:
   # in flight (read/write/execute/network/spawn respectively).
   humor_mode: false
 
-  # Color scheme: "dark" (default) or "light". Applied to the sidebar,
-  # status bar, glamour markdown rendering, and the ANSI-16 remap used for
-  # shell tool output.
+  # Color scheme: "dark" (default), "light", an embedded builtin (catppuccin,
+  # dracula, gruvbox, tokyonight), or a custom name loaded from
+  # .aegis/themes/<name>.json (project) or ~/.aegis/themes/<name>.json
+  # (user). Applied to the sidebar, status bar, glamour markdown rendering,
+  # and the ANSI-16 remap used for shell tool output.
   theme: dark
 
   # Attention system (P16.1): fires on stream-end, approval-pending, and

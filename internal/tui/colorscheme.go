@@ -260,28 +260,28 @@ var (
 
 func init() { applyScheme(darkScheme()) }
 
-// normalizeThemeName maps any input to a canonical scheme name — "light", or
-// "dark" as the fallback for anything unrecognized (including empty/unset).
-func normalizeThemeName(name string) string {
-	if strings.ToLower(strings.TrimSpace(name)) == "light" {
-		return "light"
+// applyTheme selects the active color scheme by name (tui.theme config, or
+// /theme). Beyond the two hardcoded originals ("dark"/"light"), name is
+// resolved via loadNamedScheme (P16.7): project .aegis/themes/<name>.json,
+// then user ~/.aegis/themes/<name>.json, then an embedded builtin
+// (catppuccin, dracula, gruvbox, tokyonight). Unknown/unparseable names fall
+// back to dark. Returns the name actually applied — the resolved (lowercased)
+// input name on success, else "dark" — so callers can keep cfg.Theme in sync
+// without a separate normalization pass.
+//
+// Must run before newModel, since lipgloss styles capture colors at
+// creation. Also called at runtime by /theme: rebinding the package-level
+// col* vars here is only half of a live switch — the caller must also
+// rebuild m.th (newTheme) and m.renderer (newGlamourRenderer), which capture
+// colors/style at creation time too.
+func applyTheme(name, workDir string) string {
+	resolved := strings.ToLower(strings.TrimSpace(name))
+	if s, ok := loadNamedScheme(resolved, workDir); ok {
+		applyScheme(s)
+		return resolved
 	}
+	applyScheme(darkScheme())
 	return "dark"
-}
-
-// applyTheme selects the active color scheme by config name (tui.theme).
-// Unknown names fall back to dark. Must run before newModel, since lipgloss
-// styles capture colors at creation. Also called at runtime by /theme
-// (P14.8): rebinding the package-level col* vars here is only half of a live
-// switch — the caller must also rebuild m.th (newTheme) and m.renderer
-// (newGlamourRenderer), which capture colors/style at creation time too.
-func applyTheme(name string) {
-	switch normalizeThemeName(name) {
-	case "light":
-		applyScheme(lightScheme())
-	default:
-		applyScheme(darkScheme())
-	}
 }
 
 // applyScheme rebinds every package-level color role, the derived aliases,

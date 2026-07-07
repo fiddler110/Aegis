@@ -30,7 +30,7 @@ func makeTestBundleDir(t *testing.T) string {
 // TestCmdBundleBareArgsIsUsageError checks the no-subcommand fast path
 // returns a usage error without touching the filesystem.
 func TestCmdBundleBareArgsIsUsageError(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle"})
 	if !res.IsError {
 		t.Fatal("expected an error result for bare `/bundle`")
@@ -40,7 +40,7 @@ func TestCmdBundleBareArgsIsUsageError(t *testing.T) {
 // TestCmdBundleUnknownSubcommand checks an unrecognized subcommand is
 // rejected before touching the filesystem.
 func TestCmdBundleUnknownSubcommand(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle", Args: []string{"bogus"}})
 	if !res.IsError {
 		t.Fatal("expected an error result for an unknown /bundle subcommand")
@@ -50,7 +50,7 @@ func TestCmdBundleUnknownSubcommand(t *testing.T) {
 // TestCmdBundleInfoMissingPathIsUsageError checks `/bundle info` with no path
 // is rejected before touching the filesystem.
 func TestCmdBundleInfoMissingPathIsUsageError(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle", Args: []string{"info"}})
 	if !res.IsError {
 		t.Fatal("expected an error result for `/bundle info` with no path")
@@ -61,7 +61,7 @@ func TestCmdBundleInfoMissingPathIsUsageError(t *testing.T) {
 // (internal/cli/bundle_test.go) for the TUI's /bundle info.
 func TestCmdBundleInfoShowsContentHash(t *testing.T) {
 	dir := makeTestBundleDir(t)
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle", Args: []string{"info", dir}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -78,7 +78,7 @@ func TestCmdBundleInstallPreviewDoesNotWrite(t *testing.T) {
 	dir := makeTestBundleDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle", Args: []string{"install", dir}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -97,7 +97,7 @@ func TestCmdBundleInstallConfirmWrites(t *testing.T) {
 	dir := makeTestBundleDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle", Args: []string{"install", dir, "confirm"}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -114,7 +114,7 @@ func TestCmdBundleInstallHashMismatchAborts(t *testing.T) {
 	dir := makeTestBundleDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle", Args: []string{
 		"install", dir, "sha256:0000000000000000000000000000000000000000000000000000000000000000", "confirm",
 	}})
@@ -136,7 +136,7 @@ func TestCmdBundleInstallGlobalScope(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "bundle", Args: []string{"install", dir, "global", "confirm"}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)

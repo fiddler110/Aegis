@@ -36,7 +36,7 @@ func TestCommandDefsWellFormed(t *testing.T) {
 // went silently unreachable. "quit" is a deliberate exception (bare alias for
 // "exit", not listed separately), matching TestSlashCommandsAreListedInHelp.
 func TestBuiltinCommandsCoverDispatchTable(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	listed := make(map[string]bool, len(builtinCommands))
 	for _, e := range builtinCommands {
 		listed[e.name] = true
