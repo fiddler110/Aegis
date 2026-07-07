@@ -272,6 +272,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdShare,
 		},
 		{
+			name:         "paste-image",
+			shortDesc:    "Attach an image from the OS clipboard (also ctrl+v)",
+			detailedHelp: "/paste-image\n  Read an image directly off the OS clipboard (not a pasted file path) and attach it to the draft — same as pressing ctrl+v. Useful when the terminal itself intercepts ctrl+v for its own paste binding.\n  Windows/macOS/Linux clipboard access differs: macOS requires pngpaste (brew install pngpaste), Linux requires wl-clipboard or xclip.",
+			handler:      (*SlashDispatcher).cmdPasteImage,
+		},
+		{
 			name:         "exit",
 			shortDesc:    "Exit Aegis",
 			detailedHelp: "/quit\n  Exit Aegis.",

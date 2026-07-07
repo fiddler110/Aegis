@@ -1,7 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P16.6 shipped — unified dialog overlay + shared filterable list
-component, plus a new model picker and quit-confirm-while-streaming; new P16 track added the same
+**Last updated:** 2026-07-07 (P16.8 shipped — clipboard image paste; new P16 track added the same
 day — TUI polish & interaction parity, from the crush/opencode/Claude Code gap analysis)
 
 This document tracks only **open** work — what's next. For shipped-feature history and full design
@@ -11,8 +10,8 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
-crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.7 shipped 2026-07-07**, see
+Open items: **P16.9** (TUI polish & interaction parity — gap analysis vs
+crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.8 shipped 2026-07-07**, see
 below), **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
@@ -156,12 +155,18 @@ reference the shipped ones by number.
   only when `/quit`/`/exit` fires while a turn is streaming (previously silently discarded it).
   File-picker dialog stays deferred (@ completion covers the case). See
   [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.8 — Clipboard image paste.** `PasteMsg` handling only recognizes pasted *file paths* with
-  image extensions; pasting actual image data from the clipboard (screenshot workflows — Claude
-  Code and crush both support this) does nothing. Read image bytes from the OS clipboard on a paste
-  keybinding, write to a temp file, and reuse the existing `@image:` attachment-token path.
-  Windows/macOS/Linux clipboard-image access differs enough that this needs the same
-  per-OS treatment `copyToClipboard` already has. (S/M)
+- **P16.8 — SHIPPED 2026-07-07 — Clipboard image paste.** New `internal/tui/clipboard_image.go`:
+  `pasteClipboardImage` reads an image directly off the OS clipboard (not a pasted file path) into a
+  new temp PNG, per-OS the same way `copyToClipboard` already is — `System.Windows.Forms.Clipboard`
+  + `System.Drawing.Bitmap.Save` via an `-Sta` PowerShell call on Windows (verified end-to-end
+  against a real clipboard image and against clipboard text with no image, both correct), `pngpaste`
+  on macOS (external tool required, same as `copyToClipboard`'s Linux xclip/xsel/wl-copy pattern —
+  no stdlib path to clipboard image bytes exists on any of the three), `wl-paste`/`xclip -t
+  image/png` on Linux. Wired to a new `ctrl+v` keybinding (`keyMap.PasteImage`) and, since some
+  terminals bind ctrl+v to their own native paste before Aegis ever sees the keystroke, a `/paste-image`
+  slash-command fallback — both converge on the same `pasteClipboardImageCmd` and reuse the existing
+  `attachTokenFor`/`@image:` path P16.8 was scoped to reuse, so the daemon-side image handling needed
+  no changes. See [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
 - **P16.9 — In-terminal image rendering.** Attached images are sent to the model but never shown;
   crush renders them inline (kitty graphics / iTerm2 inline-image protocols, half-block fallback).
   Render a thumbnail in the transcript when an image attachment is sent, gated on terminal
@@ -173,8 +178,8 @@ reference the shipped ones by number.
 polish track exists. Sound/audio cues (opencode-style) — rejected as out of character for the tool.
 A which-key pending-keybind popup — revisit only if P13.3.5 ships chord bindings.
 
-**Sequencing:** P16.1–P16.7 shipped 2026-07-07 (see above). Only P16.8/P16.9 remain, as
-gap-fillers whenever convenient.
+**Sequencing:** P16.1–P16.8 shipped 2026-07-07 (see above). Only P16.9 remains, as a
+gap-filler whenever convenient.
 
 Priority: **High** (explicit user request, 2026-07-07 — this is the TUI-side counterpart of P15's
 web-UI push; the TUI remains the primary surface). Effort: **L overall** — smaller than P15, larger

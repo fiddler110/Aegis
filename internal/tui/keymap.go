@@ -23,6 +23,7 @@ type keyMap struct {
 	Sessions      key.Binding
 	Terminal      key.Binding
 	SidebarToggle key.Binding
+	PasteImage    key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -45,6 +46,7 @@ func defaultKeyMap() keyMap {
 		Sessions:      key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "switch session")),
 		Terminal:      key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "toggle terminal pane")),
 		SidebarToggle: key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "toggle sidebar")),
+		PasteImage:    key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste image from clipboard")),
 	}
 }
 
@@ -75,6 +77,7 @@ func (km keyMap) helpEntries() []keyHelpEntry {
 		{km.Sessions.Help().Key, km.Sessions.Help().Desc},
 		{km.Terminal.Help().Key, km.Terminal.Help().Desc},
 		{km.SidebarToggle.Help().Key, km.SidebarToggle.Help().Desc},
+		{km.PasteImage.Help().Key, km.PasteImage.Help().Desc},
 		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
 		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
 	}
