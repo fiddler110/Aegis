@@ -1,6 +1,12 @@
 package tui
 
-import "charm.land/bubbles/v2/key"
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"charm.land/bubbles/v2/key"
+)
 
 // keyMap holds all named key bindings for the TUI. Using key.Binding means
 // each binding carries its own help text, which the help overlay aggregates.
@@ -24,6 +30,7 @@ type keyMap struct {
 	Terminal      key.Binding
 	SidebarToggle key.Binding
 	PasteImage    key.Binding
+	Diagnose      key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -47,7 +54,94 @@ func defaultKeyMap() keyMap {
 		Terminal:      key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "toggle terminal pane")),
 		SidebarToggle: key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "toggle sidebar")),
 		PasteImage:    key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste image from clipboard")),
+		Diagnose:      key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "diagnose last failed shell/terminal command")),
 	}
+}
+
+// bindingsByName maps the lowercase action names used by the tui.keybindings
+// config section (P13.3.5) to their field in km, so overrides can be applied
+// generically instead of via a giant switch that must be kept in sync by hand.
+func (km *keyMap) bindingsByName() map[string]*key.Binding {
+	return map[string]*key.Binding{
+		"send":          &km.Send,
+		"queue":         &km.Queue,
+		"newline":       &km.Newline,
+		"thinking":      &km.Thinking,
+		"complete":      &km.Complete,
+		"help":          &km.Help,
+		"palette":       &km.Palette,
+		"cancel":        &km.Cancel,
+		"interrupt":     &km.Interrupt,
+		"clear":         &km.Clear,
+		"editor":        &km.Editor,
+		"cyclemode":     &km.CycleMode,
+		"histup":        &km.HistUp,
+		"histdown":      &km.HistDown,
+		"teammates":     &km.Teammates,
+		"sessions":      &km.Sessions,
+		"terminal":      &km.Terminal,
+		"sidebartoggle": &km.SidebarToggle,
+		"pasteimage":    &km.PasteImage,
+		"diagnose":      &km.Diagnose,
+	}
+}
+
+// applyKeybindings overrides named bindings' key sequences from config
+// (P13.3.5). The help label is regenerated from the new primary key so
+// help text (F1 overlay, /help) reflects what's actually bound rather than
+// the hardcoded default. Returns an error naming every unknown action so a
+// typo in tui.keybindings fails fast instead of silently doing nothing.
+func (km *keyMap) applyKeybindings(overrides map[string][]string) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	byName := km.bindingsByName()
+	names := make([]string, 0, len(overrides))
+	for name := range overrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var unknown []string
+	for _, name := range names {
+		keys := overrides[name]
+		b, ok := byName[strings.ToLower(name)]
+		if !ok {
+			unknown = append(unknown, name)
+			continue
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		desc := b.Help().Desc
+		*b = key.NewBinding(key.WithKeys(keys...), key.WithHelp(keys[0], desc))
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("tui.keybindings: unknown action(s): %s", strings.Join(unknown, ", "))
+	}
+	return nil
+}
+
+// buildKeyMap starts from the hardcoded defaults and applies any
+// tui.keybindings overrides (P13.3.5).
+func buildKeyMap(overrides map[string][]string) (keyMap, error) {
+	km := defaultKeyMap()
+	if err := km.applyKeybindings(overrides); err != nil {
+		return keyMap{}, err
+	}
+	return km, nil
+}
+
+// mustKeyMap builds the keyMap for overrides, falling back to the hardcoded
+// defaults on error. Run() validates overrides up front and surfaces the
+// error there; this fallback only matters for callers (tests) that
+// construct a model directly without going through Run().
+func mustKeyMap(overrides map[string][]string) keyMap {
+	km, err := buildKeyMap(overrides)
+	if err != nil {
+		return defaultKeyMap()
+	}
+	return km
 }
 
 // keyHelpEntry is one row of a rendered keybinding list: the key label and
@@ -78,6 +172,7 @@ func (km keyMap) helpEntries() []keyHelpEntry {
 		{km.Terminal.Help().Key, km.Terminal.Help().Desc},
 		{km.SidebarToggle.Help().Key, km.SidebarToggle.Help().Desc},
 		{km.PasteImage.Help().Key, km.PasteImage.Help().Desc},
+		{km.Diagnose.Help().Key, km.Diagnose.Help().Desc},
 		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
 		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
 	}

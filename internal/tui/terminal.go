@@ -3,7 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -87,6 +89,39 @@ type termPane struct {
 	workDir string          // cwd for shell commands (updated by cd)
 	running bool
 	height  int // full pane height passed to lipgloss Height()
+
+	// P13.3.1: the terminal pane runs commands the model never automatically
+	// sees (unlike the shell tool, whose result flows back to the model on
+	// its next turn) — these fields let a "diagnose" action bridge a failed
+	// command's output to the model on request.
+	runOutput    strings.Builder // output of the in-flight/most recent run only
+	lastCmd      string          // command text of the most recent run
+	lastOutput   string          // its combined stdout/stderr
+	lastExitCode int
+	lastFailed   bool
+}
+
+// beginRun records cmd as the in-flight command and resets per-run output
+// tracking (P13.3.1).
+func (tp *termPane) beginRun(cmd string) {
+	tp.lastCmd = cmd
+	tp.runOutput.Reset()
+	tp.lastFailed = false
+	tp.running = true
+}
+
+// exitCodeFromErr extracts a process exit code from an error returned by the
+// sandbox backend, which wraps the underlying *exec.ExitError. Any other
+// non-nil error (e.g. a timeout) reports 1 since no specific code applies.
+func exitCodeFromErr(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return 1
 }
 
 func newTermPane(workDir string, h int) termPane {
@@ -195,11 +230,16 @@ func (tp *termPane) handleCD(cmd string) bool {
 }
 
 // handleOutput appends streaming command output.
-func (tp *termPane) handleOutput(text string) { tp.appendText(text) }
+func (tp *termPane) handleOutput(text string) {
+	tp.runOutput.WriteString(text)
+	tp.appendText(text)
+}
 
-// handleDone marks the command finished and shows any error.
+// handleDone marks the command finished, shows any error, and records
+// whether it failed so the diagnose action (P13.3.1) has something to send.
 func (tp *termPane) handleDone(err error) {
 	tp.running = false
+	tp.lastOutput = tp.runOutput.String()
 	if err == nil {
 		return
 	}
@@ -207,11 +247,15 @@ func (tp *termPane) handleDone(err error) {
 		tp.appendText("[interrupted]\n")
 		return
 	}
+	tp.lastExitCode = exitCodeFromErr(err)
+	tp.lastFailed = true
 	tp.appendText("[exit: " + err.Error() + "]\n")
 }
 
 // view renders the terminal pane at its configured width and height.
-func (tp termPane) view(th theme, focused bool) string {
+// diagnoseKey labels the P13.3.1 "diagnose" affordance shown after a failed
+// command, reflecting whatever key it's actually bound to (P13.3.5).
+func (tp termPane) view(th theme, focused bool, diagnoseKey string) string {
 	// Header row: focus indicator + directory / running status.
 	var indicator string
 	if focused {
@@ -220,9 +264,13 @@ func (tp termPane) view(th theme, focused bool) string {
 		indicator = lipgloss.NewStyle().Foreground(colTextMuted).Render("○ TERMINAL")
 	}
 	var statusRight string
-	if tp.running {
+	switch {
+	case tp.running:
 		statusRight = lipgloss.NewStyle().Foreground(colAccent).Render("running…")
-	} else {
+	case tp.lastFailed:
+		statusRight = lipgloss.NewStyle().Foreground(colDanger).Render(
+			truncate(fmt.Sprintf("exit %d · %s diagnose", tp.lastExitCode, diagnoseKey), termPaneVpW-12))
+	default:
 		statusRight = lipgloss.NewStyle().Foreground(colTextMuted).Render(
 			truncate(shortenPath(tp.workDir), termPaneVpW-12))
 	}

@@ -9,7 +9,28 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P17** (adaptive sub-agent concurrency, all 5 items) shipped: new
+**Last updated:** 2026-07-07 — **P13.3.1** (shell-aware error assist) and **P13.3.5** (configurable
+keybinding remap) shipped, picked as the two genuinely-valuable P13.3 items (over P13.3.2/P13.3.3,
+judged lower-leverage — see [roadmap.md](roadmap.md#p133--terminal-enhancements-microsoft
+-intelligent-terminal-review)). P13.3.1 deliberately excludes the `shell` tool itself: a tool call
+the model makes already sees its own result on the next turn, so only the two surfaces where the
+model has *no* automatic visibility needed a bridge — the embedded terminal pane and `!` bang
+commands. New `termPane.beginRun`/`runOutput`/`lastCmd`/`lastOutput`/`lastExitCode`/`lastFailed`
+(`internal/tui/terminal.go`) track a run's own output separately from the pane's full scrollback
+buffer; `model.lastFailure` (`internal/tui/tui.go`) holds whichever of the two surfaces failed most
+recently. `ctrl+g` (the new `Diagnose` binding) sends the failed command + its output as a new user
+turn asking the model to diagnose and fix it, via the existing `sendUserMessage` path — same as
+typing it by hand, just pre-filled. The terminal pane's status line and the bang-command transcript
+entry both show a `<key> diagnose` hint when a command fails, reading the actual bound key rather
+than a hardcoded one. P13.3.5 added a `tui.keybindings` config map (action name -> one or more
+`bubbles/key` sequences, e.g. `terminal: ["alt+t"]`), applied via a new
+`keyMap.applyKeybindings`/`bindingsByName` (`internal/tui/keymap.go`) that regenerates each
+overridden binding's help label from its new primary key — so the F1 overlay and `/help` (which
+previously always rendered `defaultKeyMap()`, ignoring any override; `SlashDispatcher` now carries
+its own `keys` field, set from the model's actual keymap) both stay accurate after a remap. An
+unknown action name in `tui.keybindings` is validated at TUI startup (`tui.Run`) and fails with a
+named error rather than silently doing nothing.
+**Previously, 2026-07-07:** **P17** (adaptive sub-agent concurrency, all 5 items) shipped: new
 `internal/swarm/adaptive.go` (`AdaptiveLimiter`) throttles how many agents in a `parallel` workflow
 batch run *simultaneously*, separate from the existing `MaxParallelAgents` (8) hard ceiling on how
 many an `agents` array may *request*. Starts conservative at the floor (2) and adjusts with an AIMD

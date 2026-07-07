@@ -64,6 +64,10 @@ type SlashDispatcher struct {
 	guardEnabled *bool  // per-session output-guard toggle; nil = server default
 	builtins     map[string]func(args []string) SlashResult
 	customs      []api.CommandInfo
+	// keys backs /help's keyboard-shortcuts section (P13.3.5): defaults to
+	// defaultKeyMap() here but is overwritten with the model's actual (possibly
+	// remapped) keys by newModel, so /help matches the real bindings.
+	keys keyMap
 }
 
 // NewSlashDispatcher creates a dispatcher for the given session.
@@ -74,6 +78,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model, workDir strin
 		mode:      mode,
 		model:     model,
 		workDir:   workDir,
+		keys:      defaultKeyMap(),
 	}
 	// d.builtins is derived from commandDefs (P14.10) rather than hand-listed,
 	// so a command added to that single table is automatically dispatchable
@@ -190,7 +195,7 @@ func (d *SlashDispatcher) cmdHelp(args []string) SlashResult {
 	// the docs. Reusing keyMap.helpEntries() keeps this in sync with the F1
 	// overlay (renderHelpOverlay in tui.go) — one list, not two.
 	b.WriteString("\nKeyboard shortcuts (also shown via f1):\n")
-	for _, e := range defaultKeyMap().helpEntries() {
+	for _, e := range d.keys.helpEntries() {
 		fmt.Fprintf(&b, "  %-14s %s\n", e.Key, e.Desc)
 	}
 	return SlashResult{Output: b.String()}
