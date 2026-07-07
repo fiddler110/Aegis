@@ -124,6 +124,10 @@ type TUIConfig struct {
 	// approval-pending, and error while the terminal isn't focused: "off",
 	// "bell", "desktop", or "both" (default).
 	Notifications string `koanf:"notifications"`
+	// ImageRendering controls the P16.9 inline thumbnail shown in the
+	// transcript when an image is attached: "auto" (default — rendered when
+	// the terminal's detected color profile supports it) or "off".
+	ImageRendering string `koanf:"image_rendering"`
 }
 
 // CleanupConfig controls automatic pruning of old sessions.
@@ -475,6 +479,7 @@ func defaults() map[string]any {
 		"tui.humor_mode":               true,
 		"tui.theme":                    "dark",
 		"tui.notifications":            "both",
+		"tui.image_rendering":          "auto",
 		"embeddings.enabled":           false,
 		"embeddings.provider":          "ollama",
 		"embeddings.model":             "nomic-embed-text",

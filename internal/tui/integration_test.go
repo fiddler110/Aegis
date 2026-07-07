@@ -52,7 +52,7 @@ func TestTUIFullTurn_NoPTY(t *testing.T) {
 	}
 
 	// Send a user message (mirrors the "enter" key path in Update).
-	m.appendUser("what does this function do?")
+	m.appendUser("what does this function do?", nil)
 	m.streaming = true
 	m.refresh()
 	if got := plainView(m); !strings.Contains(got, "what does this function do?") {
@@ -126,7 +126,7 @@ func TestTUIQueuedMessageDrain_NoPTY(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
-	m.appendUser("first question")
+	m.appendUser("first question", nil)
 	m.streaming = true
 	m.applyEvent(api.Event{Kind: api.KindText, Text: "answering…"})
 	m.queued = append(m.queued, "follow-up question")
@@ -162,11 +162,11 @@ func TestTUITimelineSeek_NoPTY(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
-	m.appendUser("first turn")
+	m.appendUser("first turn", nil)
 	m.applyEvent(api.Event{Kind: api.KindText, Text: "first reply"})
 	m.applyEvent(api.Event{Kind: api.KindTurnDone})
 
-	m.appendUser("second turn")
+	m.appendUser("second turn", nil)
 	m.applyEvent(api.Event{Kind: api.KindText, Text: "second reply"})
 	m.applyEvent(api.Event{Kind: api.KindTurnDone})
 	m.refresh()

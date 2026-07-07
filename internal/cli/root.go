@@ -134,14 +134,15 @@ Use "aegis <command> --help" for details on any command below.`,
 
 			cwd, _ := os.Getwd()
 			runErr := tui.Run(tui.Config{
-				Client:        cl,
-				SessionID:     sessionID,
-				Mode:          resolvedMode,
-				Model:         cfg.Provider.Model,
-				WorkDir:       cwd,
-				HumorMode:     cfg.TUI.HumorMode,
-				Theme:         cfg.TUI.Theme,
-				Notifications: cfg.TUI.Notifications,
+				Client:         cl,
+				SessionID:      sessionID,
+				Mode:           resolvedMode,
+				Model:          cfg.Provider.Model,
+				WorkDir:        cwd,
+				HumorMode:      cfg.TUI.HumorMode,
+				Theme:          cfg.TUI.Theme,
+				Notifications:  cfg.TUI.Notifications,
+				ImageRendering: cfg.TUI.ImageRendering,
 			})
 			unloadOllamaModel(cfg)
 			return runErr
