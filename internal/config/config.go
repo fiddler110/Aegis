@@ -281,6 +281,14 @@ type SecurityConfig struct {
 	// container) — the default.
 	DefaultMethod string `koanf:"default_method"`
 
+	// WSLDistro names a specific registered WSL distro (e.g. "kali-linux") to
+	// target for every WSLCapable scanner (nmap, nuclei, opengrep, kubescape;
+	// P14.x), instead of whatever `wsl --set-default` currently points at.
+	// Empty uses WSL's own default-distro selection. On Windows, a Linux
+	// distro purpose-built for security tooling (Kali) is the recommended
+	// target for red-team/recon work — see docs/security.md.
+	WSLDistro string `koanf:"wsl_distro"`
+
 	// DAST configures the dast_scan tool's target-authorization policy
 	// (P11.7) — enforced unconditionally inside the tool itself, not just
 	// advisory permission rules, since an agent pointing an active scanner

@@ -54,11 +54,15 @@ type ScannerDescriptor struct {
 	// only make sense for a project in that specific language.
 	DefaultEnabled bool
 	// WSLCapable marks scanners whose Scan implementation has a MethodWSL
-	// execution branch — i.e. tools that ship no native Windows build at all
-	// (opengrep, kubescape). Resolve only ever offers MethodWSL for these;
-	// every other tool already has a native Windows install path, and no
-	// Scan-side WSL branch is wired for them, so offering the method would
-	// silently misroute execution back to a nonexistent host binary.
+	// execution branch: tools with no native Windows build at all (opengrep,
+	// kubescape), or whose native Windows build exists but is unreliable in
+	// practice — nmap needs Npcap installed/running plus admin rights for
+	// OS-detection scans, both common failure points reported on Windows.
+	// Resolve only ever offers MethodWSL for these; every other tool has no
+	// Scan-side WSL branch wired, so offering the method would silently
+	// misroute execution back to a nonexistent host binary. A Linux distro
+	// purpose-built for security tooling (Kali) is the recommended WSL
+	// target — see security.wsl_distro in docs/security.md.
 	WSLCapable bool
 }
 
@@ -255,6 +259,13 @@ var descriptors = map[string]ScannerDescriptor{
 		// target-authorization gate (shared with DAST, see
 		// internal/security/target.go) before it ever runs.
 		DefaultEnabled: false,
+		// WSLCapable despite having a native Windows install: Windows nmap
+		// needs Npcap installed and running plus admin rights for -O/SYN
+		// scans, a common source of exactly the failures that send Windows
+		// operators to WSL instead — set security.tools.nmap.method: wsl (and
+		// security.wsl_distro to a distro with nmap installed, e.g. Kali) to
+		// force it.
+		WSLCapable: true,
 		Install: map[string]string{
 			"darwin":  "brew install nmap",
 			"linux":   "install via your distro's package manager, e.g. apt install nmap / dnf install nmap",
@@ -267,6 +278,9 @@ var descriptors = map[string]ScannerDescriptor{
 		Category:       "Network / host vulnerability scanning",
 		Summary:        "Runs ProjectDiscovery's community template library (CVEs, misconfigurations, exposed panels, raw network checks) against a target host list to find known, template-matched vulnerabilities — the vulnerability-scanning half of a network recon run (`recon_scan`), complementing nmap's port/service discovery. Requires security.tools.nuclei.templates_version (a pinned nuclei-templates release) — templates are executable network-probe logic and are never pulled at an unpinned \"latest\" (same posture as a scanner container image, P7.6). Baseline mode excludes dos/fuzz/intrusive-tagged templates; active mode (security.dast.allow_active) includes them.",
 		DefaultEnabled: false,
+		// WSLCapable for the same reason as nmap — see nmap's comment. Set
+		// security.tools.nuclei.method: wsl to force it.
+		WSLCapable: true,
 		Install: map[string]string{
 			"darwin":  "brew install nuclei",
 			"linux":   "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
@@ -356,6 +370,12 @@ type Options struct {
 	Tools map[string]ToolPolicy // keyed by scanner name; a missing entry uses DefaultMethod
 	// DefaultMethod applies to any tool with no entry in Tools; "" means "auto".
 	DefaultMethod string
+	// WSLDistro names a specific registered WSL distro (e.g. "kali-linux") to
+	// target for every WSLCapable scanner (P14.x), instead of whatever `wsl
+	// --set-default` currently points at. Empty uses WSL's own default-distro
+	// selection. A distro purpose-built for security tooling (Kali) is the
+	// recommended target on Windows — see docs/security.md.
+	WSLDistro string
 }
 
 func (o Options) policyFor(name string, defaultEnabled bool) ToolPolicy {
@@ -388,7 +408,7 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 		}
 		tools[name] = ToolPolicy{Enabled: enabled, EnabledExplicit: explicit, Method: tc.Method, Image: tc.Image, TemplatesVersion: tc.TemplatesVersion, Verify: tc.Verify}
 	}
-	return Options{Tools: tools, DefaultMethod: cfg.DefaultMethod}
+	return Options{Tools: tools, DefaultMethod: cfg.DefaultMethod, WSLDistro: cfg.WSLDistro}
 }
 
 // detectRuntime is a seam over sandbox.DetectBest so tests can inject a
@@ -449,7 +469,7 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		if !d.WSLCapable {
 			return MethodNone, "", "", name + " has no WSL execution path wired (security.tools." + name + ".method is \"wsl\")"
 		}
-		if wslBinaryAvailable(ctx, d.Binary) {
+		if wslBinaryAvailable(ctx, d.Binary, opts.WSLDistro) {
 			return MethodWSL, "", "", ""
 		}
 		return MethodNone, "", "", d.Binary + " not found inside WSL (security.tools." + name + ".method is \"wsl\") — run `aegis security install " + name + "` to install it there"
@@ -465,7 +485,7 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 				return MethodContainer, rt, image, ""
 			}
 		}
-		if d.WSLCapable && wslBinaryAvailable(ctx, d.Binary) {
+		if d.WSLCapable && wslBinaryAvailable(ctx, d.Binary, opts.WSLDistro) {
 			return MethodWSL, "", "", ""
 		}
 		if image == "" {

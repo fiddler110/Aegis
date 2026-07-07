@@ -60,7 +60,7 @@ func (opengrepScanner) Name() string { return "opengrep" }
 func (opengrepScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "opengrep", opts)
 }
-func (opengrepScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (opengrepScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	var out []byte
 	var err error
 	args := sastScanArgs()
@@ -68,7 +68,7 @@ func (opengrepScanner) Scan(ctx context.Context, dir string, method Method, rt s
 	case MethodContainer:
 		out, err = runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
 	case MethodWSL:
-		out, err = sandbox.RunWSLCommand(ctx, dir, "opengrep", append(args, ".")...)
+		out, err = sandbox.RunWSLCommand(ctx, dir, opts.WSLDistro, "opengrep", append(args, ".")...)
 	default:
 		out, err = runJSON(ctx, dir, "opengrep", append(args, ".")...)
 	}
@@ -328,7 +328,7 @@ func (kubescapeScanner) Resolve(ctx context.Context, opts Options) (Method, sand
 // semgrep/trivy, whose SARIF flag writes directly to stdout), so this
 // mirrors gitleaks' report-file pattern: a real temp file on the host,
 // /dev/stdout inside the container (every scanner container is Linux).
-func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
 		out, err := runContainerImage(ctx, rt, image, dir, "scan", "--format", "sarif", "--output", "/dev/stdout", "/src")
 		if err != nil {
@@ -337,7 +337,7 @@ func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt 
 		return ParseSARIF(out, "kubescape")
 	}
 	if method == MethodWSL {
-		out, err := sandbox.RunWSLCommand(ctx, dir, "kubescape", "scan", "--format", "sarif", "--output", "/dev/stdout", ".")
+		out, err := sandbox.RunWSLCommand(ctx, dir, opts.WSLDistro, "kubescape", "scan", "--format", "sarif", "--output", "/dev/stdout", ".")
 		if err != nil {
 			return nil, err
 		}

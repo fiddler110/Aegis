@@ -28,7 +28,7 @@ func withDetectRuntime(t *testing.T, fn func(ctx context.Context, priority []san
 	t.Cleanup(func() { detectRuntime = orig })
 }
 
-func withWSLBinaryAvailable(t *testing.T, fn func(ctx context.Context, bin string) bool) {
+func withWSLBinaryAvailable(t *testing.T, fn func(ctx context.Context, bin, distro string) bool) {
 	t.Helper()
 	orig := wslBinaryAvailable
 	wslBinaryAvailable = fn
@@ -220,7 +220,7 @@ func TestResolveContainerMethodNoRuntimeAvailable(t *testing.T) {
 // distro has the binary, instead of a bare MethodNone.
 func TestResolveWSLCapableFallsBackToWSL(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-wsl", Binary: "aegis-does-not-exist-xyz", WSLCapable: true})
-	withWSLBinaryAvailable(t, func(context.Context, string) bool { return true })
+	withWSLBinaryAvailable(t, func(context.Context, string, string) bool { return true })
 	opts := Options{Tools: map[string]ToolPolicy{"test-wsl": {Enabled: true}}}
 
 	method, _, _, reason := Resolve(context.Background(), "test-wsl", opts)
@@ -238,7 +238,7 @@ func TestResolveWSLCapableTriesWSLAfterContainerRuntimeUnavailable(t *testing.T)
 	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
 		return "", false
 	})
-	withWSLBinaryAvailable(t, func(context.Context, string) bool { return true })
+	withWSLBinaryAvailable(t, func(context.Context, string, string) bool { return true })
 	opts := Options{Tools: map[string]ToolPolicy{"test-wsl-cfallback": {Enabled: true, Image: "example/image@sha256:deadbeef"}}}
 
 	method, _, _, reason := Resolve(context.Background(), "test-wsl-cfallback", opts)
@@ -252,7 +252,7 @@ func TestResolveWSLCapableTriesWSLAfterContainerRuntimeUnavailable(t *testing.T)
 // have it either — no silent success.
 func TestResolveWSLCapableNoneWhenWSLAlsoUnavailable(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-wsl-none", Binary: "aegis-does-not-exist-xyz", WSLCapable: true})
-	withWSLBinaryAvailable(t, func(context.Context, string) bool { return false })
+	withWSLBinaryAvailable(t, func(context.Context, string, string) bool { return false })
 	opts := Options{Tools: map[string]ToolPolicy{"test-wsl-none": {Enabled: true}}}
 
 	method, _, _, reason := Resolve(context.Background(), "test-wsl-none", opts)
@@ -271,7 +271,7 @@ func TestResolveWSLCapableNoneWhenWSLAlsoUnavailable(t *testing.T) {
 func TestResolveNonWSLCapableNeverConsultsWSL(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-not-wsl-capable", Binary: "aegis-does-not-exist-xyz"})
 	called := false
-	withWSLBinaryAvailable(t, func(context.Context, string) bool { called = true; return true })
+	withWSLBinaryAvailable(t, func(context.Context, string, string) bool { called = true; return true })
 	opts := Options{Tools: map[string]ToolPolicy{"test-not-wsl-capable": {Enabled: true}}}
 
 	method, _, _, _ := Resolve(context.Background(), "test-not-wsl-capable", opts)
@@ -288,7 +288,7 @@ func TestResolveNonWSLCapableNeverConsultsWSL(t *testing.T) {
 // with no Scan-side WSL branch wired.
 func TestResolveExplicitWSLMethod(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-explicit-wsl", Binary: "aegis-does-not-exist-xyz", WSLCapable: true})
-	withWSLBinaryAvailable(t, func(context.Context, string) bool { return true })
+	withWSLBinaryAvailable(t, func(context.Context, string, string) bool { return true })
 	opts := Options{Tools: map[string]ToolPolicy{"test-explicit-wsl": {Enabled: true, Method: "wsl"}}}
 
 	method, _, _, reason := Resolve(context.Background(), "test-explicit-wsl", opts)

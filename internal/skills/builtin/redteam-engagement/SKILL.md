@@ -36,6 +36,15 @@ Run `recon_scan` with the confirmed target list:
 - **nuclei** matches its community template library (CVEs, misconfigurations,
   exposed panels) against whatever nmap found alive.
 
+On Windows, if `recon_scan`/`aegis security status` reports nmap or nuclei
+unavailable (or the operator describes errors running them natively — Npcap
+or admin-rights issues are the common cause), don't just report the failure:
+point them at `docs/security.md`'s WSL fallback section. Both tools are
+`WSLCapable` — `security.tools.nmap.method: wsl` (and the same for nuclei)
+routes execution through WSL instead, and `security.wsl_distro: kali-linux`
+targets a distro with these tools (and a broader red-team toolkit) already
+installed, if the operator has one registered (`wsl -l -v`).
+
 For any in-scope running web application, follow up with `dast_scan`
 (baseline mode first — passive spider + passive scan). For any in-scope
 source repository, run `security_scan` (SAST/SCA/secrets/IaC). Read

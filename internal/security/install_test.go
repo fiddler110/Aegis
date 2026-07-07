@@ -141,7 +141,7 @@ func TestInstallAvailabilityNoHostInstallAtAll(t *testing.T) {
 	}
 }
 
-func withWSLDistroAvailable(t *testing.T, fn func(ctx context.Context) bool) {
+func withWSLDistroAvailable(t *testing.T, fn func(ctx context.Context, distro string) bool) {
 	t.Helper()
 	orig := wslDistroAvailable
 	wslDistroAvailable = fn
@@ -164,12 +164,12 @@ func TestInstallCommandWSLFallback(t *testing.T) {
 		},
 	})
 
-	withWSLDistroAvailable(t, func(context.Context) bool { return false })
+	withWSLDistroAvailable(t, func(context.Context, string) bool { return false })
 	if _, ok := InstallCommand("test-wsl-install"); ok {
 		t.Error("expected no install command when WSL isn't available")
 	}
 
-	withWSLDistroAvailable(t, func(context.Context) bool { return true })
+	withWSLDistroAvailable(t, func(context.Context, string) bool { return true })
 	cmd, ok := InstallCommand("test-wsl-install")
 	if !ok {
 		t.Fatal("expected a WSL-fallback install command")
@@ -196,7 +196,7 @@ func TestInstallCommandNativeWindowsNeverFallsBackToWSL(t *testing.T) {
 			"linux":   "curl -fsSL https://example.com/install.sh | bash",
 		},
 	})
-	withWSLDistroAvailable(t, func(context.Context) bool { return true })
+	withWSLDistroAvailable(t, func(context.Context, string) bool { return true })
 
 	cmd, ok := InstallCommand("test-native-win")
 	if !ok || cmd != "scoop install test-native-win" {
