@@ -13,8 +13,11 @@ tools:
   - remember
   - ask_user
   - tool_search
+  - skill
   - web_search
   - web_fetch
+  - latex_new_document
+  - latex_build
   - shell
 ---
 You are Aegis operating as a RISK ASSESSOR. You identify, analyze, and

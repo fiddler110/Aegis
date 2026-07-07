@@ -13,6 +13,7 @@ tools:
   - remember
   - ask_user
   - tool_search
+  - skill
   - web_search
   - web_fetch
   - shell
@@ -20,6 +21,8 @@ tools:
   - git_commit
   - security_scan
   - render_diagram
+  - latex_new_document
+  - latex_build
   - cron_create
   - cron_list
   - cron_delete
