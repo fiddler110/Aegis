@@ -234,6 +234,13 @@ var (
 	colCwd      color.Color // working directory
 	colInputSep color.Color // input border separator
 
+	// colDiffAddBg / colDiffDelBg (P16.3) are subtle background tints for
+	// added/removed diff lines — colSuccessRole/colDestructive blended low
+	// into colBgBase so a tinted line still reads as "this theme's
+	// background", not an unrelated highlighter colour.
+	colDiffAddBg color.Color
+	colDiffDelBg color.Color
+
 	// Gradient ramp endpoints for the shield art and AEGIS wordmark.
 	colGradFrom color.Color
 	colGradTo   color.Color
@@ -314,6 +321,21 @@ func applyScheme(s colorScheme) {
 	colGradFrom, colGradTo = s.gradFrom, s.gradTo
 	colWordFrom, colWordTo = s.wordFrom, s.wordTo
 
+	colDiffAddBg = blend(colBgBase, colSuccessRole, 0.16)
+	colDiffDelBg = blend(colBgBase, colDestructive, 0.16)
+
 	ansiPalette = s.ansi
 	glamourStyleName = s.glamourStyle
+}
+
+// blend linearly interpolates from base toward tint by t (0 = base, 1 =
+// tint), used to derive on-theme background tints (e.g. diff add/del rows)
+// from existing role colors instead of hardcoding new hexes per scheme.
+func blend(base, tint color.Color, t float64) color.Color {
+	br, bg, bb, _ := base.RGBA()
+	tr, tg, tb, _ := tint.RGBA()
+	lerp := func(a, b uint32) uint8 {
+		return uint8(float64(a>>8)*(1-t) + float64(b>>8)*t)
+	}
+	return color.RGBA{R: lerp(br, tr), G: lerp(bg, tg), B: lerp(bb, tb), A: 0xff}
 }
