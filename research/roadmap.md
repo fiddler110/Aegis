@@ -10,8 +10,8 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P16.4–P16.6, P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
-crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.3 and P16.7 shipped 2026-07-07**, see
+Open items: **P16.5, P16.6, P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
+crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.4 and P16.7 shipped 2026-07-07**, see
 below), **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
@@ -101,7 +101,7 @@ bubbletea v2), and the rest of the charm stack.
   notes, including a same-session hunk-header ordering bug caught before commit.
 
 Remaining open items are listed below **in priority/sequencing order** (not numeric order — P16.7
-shipped before P16.4 despite the lower number, since it was small and independent while P16.4 is
+shipped before P16.4 despite the lower number, since it was small and independent while P16.4 was
 the track's biggest single effort). The P-numbers themselves are stable identifiers, not a reading
 order; don't renumber them to match position, since releases.md and prior session history already
 reference the shipped ones by number.
@@ -116,19 +116,15 @@ reference the shipped ones by number.
   `/theme` + `tui.theme` accept any of dark/light/builtin/custom name — `/theme` with an unknown
   name lists everything currently resolvable. See
   [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.4 — Transcript as a cached per-message item list (architecture investment).** The transcript
-  is one big string re-joined into a `bubbles/viewport` on every refresh; streaming cost is tamed by
-  the safe-boundary rewrap, but the monolith blocks per-message interaction and degrades on very
-  long sessions. Restructure to crush's documented model: the chat view becomes a **virtualized list
-  of per-message item renderers that cache their rendered output and invalidate individually** (on
-  width change, theme change, or their own data change), with the existing `followBottom` flag
-  driving auto-scroll. Sub-items stay imperative structs (render methods, no nested Elm models) per
-  crush's `AGENTS.md` guidance — which matches how `internal/tui` already treats its pickers.
-  `charmbracelet/ultraviolet` (already in go.mod as an indirect dep) offers the screen-buffer/
-  rectangle layer if needed, but the item-list + cache refactor is the required core; ultraviolet
-  adoption is optional follow-on, not a prerequisite. This is the enabler for P16.5 (mouse
-  hit-testing needs line→message mapping) and for future per-message focus/expand/copy. Biggest
-  single effort in the track; do not start it in the same session as anything else. (L)
+- **P16.4 — SHIPPED 2026-07-07 — Transcript as a cached per-message item list.** Replaced
+  `bubbles/viewport` plus the flat `transcriptBlock` buffer with `transcriptPane`: a virtualized,
+  segment-addressable list of `transcriptItem`s (crush's `list.go` model) that renders only the
+  visible window (`View()`) instead of concatenating the whole history every frame. Per-item wrap
+  caching carries over from the old design; new is O(1) `ScrollToItem` (replaces the old
+  `renderUpTo` + `SetYOffset(strings.Count(...))` dance used by the timeline picker) and
+  `ItemIndexAtY`, line→message hit-testing ported from crush's `findItemAtY` and already covered by
+  tests even though nothing calls it yet — it's the seam P16.5 consumes for mouse click/drag. See
+  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
 - **P16.5 — Mouse selection, click interactions, and scrollbar.** `MouseModeCellMotion` is enabled
   but only the viewport's built-in wheel scroll does anything — there is no `tea.MouseMsg` handling
   at all, and because alt-screen + mouse mode disables the terminal's native selection, users
@@ -166,9 +162,9 @@ reference the shipped ones by number.
 polish track exists. Sound/audio cues (opencode-style) — rejected as out of character for the tool.
 A which-key pending-keybind popup — revisit only if P13.3.5 ships chord bindings.
 
-**Sequencing:** P16.1–P16.3 and P16.7 shipped 2026-07-07 (see above). The remaining items are
-listed above in sequencing order already — P16.4 next (own session(s), don't combine with anything
-else), then P16.5 (unlocked by P16.4), P16.6, and P16.8/P16.9 as gap-fillers whenever convenient.
+**Sequencing:** P16.1–P16.4 and P16.7 shipped 2026-07-07 (see above). The remaining items are
+listed above in sequencing order already — P16.5 next (now unlocked by P16.4), then P16.6, and
+P16.8/P16.9 as gap-fillers whenever convenient.
 
 Priority: **High** (explicit user request, 2026-07-07 — this is the TUI-side counterpart of P15's
 web-UI push; the TUI remains the primary surface). Effort: **L overall** — smaller than P15, larger
