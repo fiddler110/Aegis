@@ -248,9 +248,9 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdSidebar,
 		},
 		{
-			name: "theme", argHint: "<dark|light>", needsArgs: true,
+			name: "theme", argHint: "<name>", needsArgs: true,
 			shortDesc:    "Switch the color scheme live, no restart needed",
-			detailedHelp: "/theme <dark|light>\n  Switch the TUI color scheme immediately — no restart needed.\n  No args: show the current theme.\n  This session only; set tui.theme: <name> in config (project or global) to make it the default on restart.",
+			detailedHelp: "/theme <name>\n  Switch the TUI color scheme immediately — no restart needed.\n  Built in: dark, light, catppuccin, dracula, gruvbox, tokyonight.\n  Custom: drop a <name>.json file (background/foreground + the 16 ANSI colors) in .aegis/themes/ (project) or ~/.aegis/themes/ (user).\n  No args: show the current theme.\n  This session only; set tui.theme: <name> in config (project or global) to make it the default on restart.",
 			handler:      (*SlashDispatcher).cmdTheme,
 		},
 		{

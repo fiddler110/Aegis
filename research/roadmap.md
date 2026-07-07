@@ -10,8 +10,9 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P16.4–P16.9** (TUI polish & interaction parity — gap analysis vs crush/opencode/
-Claude Code, added 2026-07-07; **P16.1–P16.3 shipped 2026-07-07**, see below), **P15.2–P15.11** (web UI
+Open items: **P16.4–P16.6, P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
+crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.3 and P16.7 shipped 2026-07-07**, see
+below), **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
 engagement tooling, P13.7 LaTeX report skill), **P9.4** (per-task model routing), **P6.1** (mid-turn
@@ -100,20 +101,21 @@ bubbletea v2), and the rest of the charm stack.
   notes, including a same-session hunk-header ordering bug caught before commit.
 
 Remaining open items are listed below **in priority/sequencing order** (not numeric order — P16.7
-ships before P16.4 despite the lower number, since it's small and independent while P16.4 is the
-track's biggest single effort). The P-numbers themselves are stable identifiers, not a reading
+shipped before P16.4 despite the lower number, since it was small and independent while P16.4 is
+the track's biggest single effort). The P-numbers themselves are stable identifiers, not a reading
 order; don't renumber them to match position, since releases.md and prior session history already
 reference the shipped ones by number.
 
-- **P16.7 — Runtime-loadable themes.** Two hardcoded schemes (dark/light) vs opencode's ~30 JSON
-  theme assets + user themes. `colorscheme.go` already centralizes every color: add a loader for
-  named theme files (JSON or YAML to match config conventions) from `~/.aegis/themes/` and project
-  `.aegis/themes/`, ship 4–6 popular built-ins (catppuccin, dracula, gruvbox, tokyonight) embedded
-  the same way builtin skills are, and extend `/theme` + `tui.theme` to accept any loaded name.
-  Constraint from TQ10 still applies: lipgloss styles capture colors at creation time, so theme
-  switching keeps the existing apply-before-styles-build path (mid-session switch = rebuild styles,
-  which P16.4's cache invalidation must account for). No dependency on any other open P16 item —
-  **next up**. (S/M)
+- **P16.7 — SHIPPED 2026-07-07 — Runtime-loadable themes.** New `internal/tui/theme_loader.go`: a
+  `themeFile` JSON schema (background/foreground + the standard 16-color ANSI palette — the same
+  shape most published terminal color schemes already ship in) from which every `colorScheme` role
+  is derived by blending, reusing P16.3's `blend()` helper. Four embedded built-ins (catppuccin,
+  dracula, gruvbox, tokyonight) ship the same way builtin skills do (`//go:embed`), plus a loader
+  for project `.aegis/themes/<name>.json` and user `~/.aegis/themes/<name>.json` (project wins).
+  `applyTheme` now returns the resolved name instead of the old normalize-to-dark/light pass, and
+  `/theme` + `tui.theme` accept any of dark/light/builtin/custom name — `/theme` with an unknown
+  name lists everything currently resolvable. See
+  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
 - **P16.4 — Transcript as a cached per-message item list (architecture investment).** The transcript
   is one big string re-joined into a `bubbles/viewport` on every refresh; streaming cost is tamed by
   the safe-boundary rewrap, but the monolith blocks per-message interaction and degrades on very
@@ -164,8 +166,8 @@ reference the shipped ones by number.
 polish track exists. Sound/audio cues (opencode-style) — rejected as out of character for the tool.
 A which-key pending-keybind popup — revisit only if P13.3.5 ships chord bindings.
 
-**Sequencing:** P16.1–P16.3 shipped 2026-07-07 (see above). The remaining items are listed above in
-sequencing order already — P16.7 next, then P16.4 (own session(s), don't combine with anything
+**Sequencing:** P16.1–P16.3 and P16.7 shipped 2026-07-07 (see above). The remaining items are
+listed above in sequencing order already — P16.4 next (own session(s), don't combine with anything
 else), then P16.5 (unlocked by P16.4), P16.6, and P16.8/P16.9 as gap-fillers whenever convenient.
 
 Priority: **High** (explicit user request, 2026-07-07 — this is the TUI-side counterpart of P15's

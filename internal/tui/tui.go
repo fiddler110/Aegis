@@ -50,8 +50,7 @@ type Config struct {
 func Run(cfg Config) error {
 	// Bind the configured color scheme before any styles are built — lipgloss
 	// styles capture colors at creation time (TQ10).
-	applyTheme(cfg.Theme)
-	cfg.Theme = normalizeThemeName(cfg.Theme) // so /theme's "current theme" display is always "dark" or "light", never blank/unrecognized
+	cfg.Theme = applyTheme(cfg.Theme, cfg.WorkDir)
 	m := newModel(cfg)
 	p := tea.NewProgram(m)
 	_, err := p.Run()
@@ -334,7 +333,7 @@ func newModel(cfg Config) model {
 		sp:           sp,
 		th:           th,
 		status:       "ready",
-		slash:        NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model),
+		slash:        NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model, cfg.WorkDir),
 		histIdx:      -1,
 		workDir:      workDir,
 		liveText:     &strings.Builder{},
@@ -1269,7 +1268,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// colors, same limitation /humor and /sidebar already have for
 			// past output.
 			name := strings.TrimPrefix(msg.Output, "\x00theme ")
-			applyTheme(name)
+			name = applyTheme(name, m.cfg.WorkDir)
 			m.cfg.Theme = name
 			m.th = newTheme()
 			m.renderer = newGlamourRenderer(m.rendererW)

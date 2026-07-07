@@ -14,7 +14,7 @@ import (
 // dispatcher has no model reference, so the actual current-theme text is
 // filled in by tui.go's Update handler, not cmdTheme itself.
 func TestCmdThemeBareArgsShowsSentinel(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "theme"})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -28,7 +28,7 @@ func TestCmdThemeBareArgsShowsSentinel(t *testing.T) {
 // precedent: an invalid theme name is rejected at the dispatcher level, never
 // reaching the "\x00theme " sentinel tui.go would otherwise act on.
 func TestCmdThemeRejectsUnknownName(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "theme", Args: []string{"solarized"}})
 	if !res.IsError {
 		t.Fatalf("expected an error for an unknown theme name, got: %s", res.Output)
@@ -38,7 +38,7 @@ func TestCmdThemeRejectsUnknownName(t *testing.T) {
 // TestCmdThemeAcceptsKnownNames checks both valid names (any case) produce
 // the switch sentinel cmdTheme's contract with tui.go's Update handler.
 func TestCmdThemeAcceptsKnownNames(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	for _, name := range []string{"dark", "Light", "LIGHT"} {
 		res := d.Dispatch(&commands.ParsedCommand{Name: "theme", Args: []string{name}})
 		if res.IsError {
@@ -55,7 +55,7 @@ func TestCmdThemeAcceptsKnownNames(t *testing.T) {
 // effect: the active color scheme, m.th, and the glamour renderer's style all
 // flip without a restart.
 func TestThemeSwitchLive(t *testing.T) {
-	defer applyTheme("dark") // restore for other tests: styles read package vars
+	defer applyTheme("dark", "") // restore for other tests: styles read package vars
 
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir(), Theme: "dark"})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -78,5 +78,30 @@ func TestThemeSwitchLive(t *testing.T) {
 	m = driveUpdate(t, m, slashResultMsg{Output: "\x00theme-show"})
 	if got := plainView(m); !strings.Contains(got, "Current theme: light") {
 		t.Errorf("expected current-theme message in transcript, got:\n%s", got)
+	}
+}
+
+// TestThemeSwitchLiveEmbeddedBuiltin exercises the same live-switch path as
+// TestThemeSwitchLive but for an embedded builtin theme (P16.7) rather than
+// the hardcoded dark/light pair, to confirm the generalized loader is wired
+// all the way through the slash command dispatch.
+func TestThemeSwitchLiveEmbeddedBuiltin(t *testing.T) {
+	defer applyTheme("dark", "") // restore for other tests: styles read package vars
+
+	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir(), Theme: "dark"})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", m.cfg.WorkDir)
+	res := d.Dispatch(&commands.ParsedCommand{Name: "theme", Args: []string{"dracula"}})
+	if res.IsError {
+		t.Fatalf("unexpected error switching to dracula: %s", res.Output)
+	}
+
+	m = driveUpdate(t, m, slashResultMsg{Output: res.Output})
+	if m.cfg.Theme != "dracula" {
+		t.Errorf("expected m.cfg.Theme to switch to %q, got %q", "dracula", m.cfg.Theme)
+	}
+	if glamourStyleName != "dark" {
+		t.Errorf("expected dracula's glamour style to be %q, got %q", "dark", glamourStyleName)
 	}
 }

@@ -16,7 +16,7 @@ func TestCmdSecurityDefaultsToStatus(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security"})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -32,7 +32,7 @@ func TestCmdSecurityStatusExplicit(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security", Args: []string{"status"}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -48,7 +48,7 @@ func TestCmdSecurityBaselineEmpty(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security", Args: []string{"baseline"}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -77,7 +77,7 @@ func TestCmdSecurityBaselineWithEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security", Args: []string{"baseline"}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -97,7 +97,7 @@ func TestCmdSecurityConfigSubcommandDelegates(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security", Args: []string{"config"}})
 	if res.SecurityConfigGlobal == nil || *res.SecurityConfigGlobal {
 		t.Fatalf("expected project scope (false) with no args, got %+v", res.SecurityConfigGlobal)
@@ -115,7 +115,7 @@ func TestCmdSecurityInstallUnknownTool(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security", Args: []string{"install", "not-a-real-scanner"}})
 	if !res.IsError {
 		t.Fatal("expected an error for an unknown scanner name")
@@ -133,7 +133,7 @@ func TestCmdSecurityInstallRequiresExplicitConfirm(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security", Args: []string{"install", "gitleaks"}})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -152,7 +152,7 @@ func TestCmdSecurityUnknownSubcommand(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
 
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "security", Args: []string{"bogus"}})
 	if !res.IsError {
 		t.Fatal("expected an error for an unknown /security subcommand")

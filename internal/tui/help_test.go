@@ -16,7 +16,7 @@ import (
 // documented and listed only under that name to avoid a duplicate line.
 
 func TestSlashCommandsAreListedInHelp(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	d.customs = []api.CommandInfo{} // skip refreshCustoms' daemon call (nil client here)
 	res := d.cmdHelp(nil)
 	for name := range d.builtins {
@@ -30,7 +30,7 @@ func TestSlashCommandsAreListedInHelp(t *testing.T) {
 }
 
 func TestSlashCommandsHaveDetailedHelp(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	for name := range d.builtins {
 		if name == "quit" {
 			continue
@@ -46,7 +46,7 @@ func TestSlashCommandsHaveDetailedHelp(t *testing.T) {
 // keybind-only with no slash-command equivalent, so /help's general listing
 // must also surface the keymap, not just slash commands.
 func TestHelpListsKeyboardShortcuts(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	d.customs = []api.CommandInfo{}
 	res := d.cmdHelp(nil)
 	for _, e := range defaultKeyMap().helpEntries() {

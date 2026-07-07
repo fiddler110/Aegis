@@ -12,7 +12,7 @@ import (
 
 // TestCmdNotifyBareArgsShowsSentinel mirrors /theme's no-args fast path.
 func TestCmdNotifyBareArgsShowsSentinel(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "notify"})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
@@ -23,7 +23,7 @@ func TestCmdNotifyBareArgsShowsSentinel(t *testing.T) {
 }
 
 func TestCmdNotifyRejectsUnknownMode(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "notify", Args: []string{"loud"}})
 	if !res.IsError {
 		t.Fatalf("expected an error for an unknown mode, got: %s", res.Output)
@@ -31,7 +31,7 @@ func TestCmdNotifyRejectsUnknownMode(t *testing.T) {
 }
 
 func TestCmdNotifyAcceptsKnownModes(t *testing.T) {
-	d := NewSlashDispatcher(nil, "sess", "build", "test-model")
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	for _, mode := range []string{"off", "bell", "Desktop", "BOTH"} {
 		res := d.Dispatch(&commands.ParsedCommand{Name: "notify", Args: []string{mode}})
 		if res.IsError {
