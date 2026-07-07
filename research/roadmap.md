@@ -1,7 +1,8 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (new P16 track added — TUI polish & interaction parity, from the
-crush/opencode/Claude Code gap analysis)
+**Last updated:** 2026-07-07 (P16.6 shipped — unified dialog overlay + shared filterable list
+component, plus a new model picker and quit-confirm-while-streaming; new P16 track added the same
+day — TUI polish & interaction parity, from the crush/opencode/Claude Code gap analysis)
 
 This document tracks only **open** work — what's next. For shipped-feature history and full design
 rationale behind completed items, see [releases.md](releases.md).
@@ -10,8 +11,8 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P16.6, P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
-crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.5 and P16.7 shipped 2026-07-07**, see
+Open items: **P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
+crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.7 shipped 2026-07-07**, see
 below), **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
@@ -140,16 +141,21 @@ reference the shipped ones by number.
   out to avoid touching the already-carefully-tuned double-tap ESC/interrupt logic elsewhere in
   `Update()`). See
   [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.6 — Unified dialog overlay + shared filterable list component.** Six ad-hoc modal fields
-  (`palette`, `personaPicker`, `sessionPicker`, `timelinePicker`, `securityConfig`, `wizard`) each
-  render full-screen via early returns in `render()` — no layering over the dimmed chat, and each
-  picker re-implements its own filtering/key-handling/styles. Build (a) a `dialog` overlay stack
-  (open/close/esc semantics in one place, dialogs composited over the chat with `lipgloss.Place`
-  rather than replacing it) and (b) one reusable filterable-list component (crush's `ui/list`:
-  filterable + focus + match-highlight) that palette/persona/session/timeline all migrate onto.
-  Then add the dialogs users notice are missing: **model picker** (grouped by provider, current
-  model marked — today model choice is config/CLI-only mid-session), and **quit confirmation** when
-  a stream is active. File-picker dialog is deferred (@ completion covers the case). (M/L)
+- **P16.6 — SHIPPED 2026-07-07 — Unified dialog overlay + shared filterable list component.** New
+  `listDialog` (`internal/tui/dialog.go`) collapses the four near-identical picker types (palette,
+  persona/session/timeline) into one generic type tagged by a `dialogKind` enum, plus a real
+  compositing `renderOverlay` (lipgloss v2 `Layer`/`Compositor`/`Canvas`, promoting
+  `charmbracelet/ultraviolet` from indirect to direct) that draws a dialog centered over the actual
+  rendered chat frame and dims everything outside it to the terminal's faint attribute — no more
+  full-screen replacement for these four dialogs, help, or the new quit-confirm. `securityConfig`/
+  `wizard` deliberately keep replacing the frame outright (large multi-step forms, still the right
+  call), a scope narrowing from the original wording's "six ad-hoc modal fields". Added the two
+  missing dialogs: a **model picker** (`/models`, grouped by provider via `internal/modelcatalog`,
+  current model marked, dispatches through the existing `/model <id>` — also fixed a latent gap
+  where a model switch never updated the TUI's own display copy) and **quit confirmation** shown
+  only when `/quit`/`/exit` fires while a turn is streaming (previously silently discarded it).
+  File-picker dialog stays deferred (@ completion covers the case). See
+  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
 - **P16.8 — Clipboard image paste.** `PasteMsg` handling only recognizes pasted *file paths* with
   image extensions; pasting actual image data from the clipboard (screenshot workflows — Claude
   Code and crush both support this) does nothing. Read image bytes from the OS clipboard on a paste
@@ -167,9 +173,8 @@ reference the shipped ones by number.
 polish track exists. Sound/audio cues (opencode-style) — rejected as out of character for the tool.
 A which-key pending-keybind popup — revisit only if P13.3.5 ships chord bindings.
 
-**Sequencing:** P16.1–P16.5 and P16.7 shipped 2026-07-07 (see above). The remaining items are
-listed above in sequencing order already — P16.6 next, then P16.8/P16.9 as gap-fillers whenever
-convenient.
+**Sequencing:** P16.1–P16.7 shipped 2026-07-07 (see above). Only P16.8/P16.9 remain, as
+gap-fillers whenever convenient.
 
 Priority: **High** (explicit user request, 2026-07-07 — this is the TUI-side counterpart of P15's
 web-UI push; the TUI remains the primary surface). Effort: **L overall** — smaller than P15, larger

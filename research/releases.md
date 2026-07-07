@@ -17,8 +17,8 @@ built-ins (catppuccin, dracula, gruvbox, tokyonight) ship the same way builtin s
 loader for project `.aegis/themes/<name>.json` and user `~/.aegis/themes/<name>.json` (project
 wins). `/theme` and `tui.theme` now accept any of dark/light/builtin/custom name; an unknown name
 lists everything currently resolvable instead of a fixed "want dark or light". See
-[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.4–P16.6 and
-P16.8–P16.9 remain open.
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.4–P16.6 have
+since also shipped (see that section); only P16.8–P16.9 remain open.
 **Previously, 2026-07-07:** **P16.2** (chroma syntax highlighting) and **P16.3** (diff
 presentation upgrade) shipped together, as the roadmap's suggested sequencing called for ("one
 visual unit"). New `internal/tui/highlight.go`: a `chroma.Style` built from the existing
@@ -134,8 +134,68 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P16 items (TUI Polish & Interaction Parity)
 
-The rest of P16 (P16.6, P16.8–P16.9) is still open — see
+The rest of P16 (P16.8–P16.9) is still open — see
 [roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
+
+### P16.6 — SHIPPED 2026-07-07 — Unified dialog overlay + shared filterable list component
+
+The gap: six ad-hoc modal fields (`palette`, `personaPicker`, `sessionPicker`, `timelinePicker`,
+`securityConfig`, `wizard`) each rendered full-screen via early returns in `render()` — no layering
+over the dimmed chat, and the four list-backed pickers each re-implemented an almost identical
+`Update`/`View` around a `bubbles/list.Model` (already sharing `aegisListDelegate`/
+`configureDialogList`/`dialogFrame` chrome, but not the surrounding type).
+
+**(b) One shared filterable-list component.** New `listDialog` (`internal/tui/dialog.go`) replaces
+the four near-identical types (`paletteModel`, `personaPickerModel`, `sessionPickerModel`,
+`timelinePickerModel`) with one, tagged by a `dialogKind` enum (`dialogPalette`/
+`dialogPersonaPicker`/`dialogSessionPicker`/`dialogTimelinePicker`/`dialogModelPicker`). Selection/
+cancel are generic messages (`dialogSelectedMsg{kind, item list.Item}` / `dialogCancelMsg{kind}`);
+each item type (`paletteItem`, `personaItem`, etc.) still owns its own `FilterValue`/`Title`/
+`Description`, and the model's `Update` has a single dialog-routing block with a `switch kind`
+instead of four separate near-duplicate blocks — same for the four construction call sites and the
+four `View()` branches. `model.dialog *listDialog` replaces the four separate pointer fields.
+
+**(a) Real compositing instead of full-screen replacement.** New `renderOverlay(bg, fg, w, h)`
+uses lipgloss v2's `Layer`/`Compositor`/`Canvas` (backed by `charmbracelet/ultraviolet`, previously
+only an indirect dependency) to draw the dialog centered over the *actual* rendered chat frame
+rather than a blank background, then `dimOutside` walks the canvas's cells outside the dialog's
+rectangle and sets the terminal "faint" attribute on each (`uv.AttrFaint`) so the dialog reads as
+foreground against a visibly receded chat — a real dim, not a `lipgloss.Style` wrapper (which
+can't reliably override colors already baked into the chat's ANSI spans). `render()` now builds the
+chat frame once (extracted into `renderChat()`) and layers whichever of help/quit-confirm/dialog is
+open on top via `renderOverlay`; `renderHelpOverlay` split into `renderHelpBox` (content only) for
+the same reason. The wizard and security-config dialogs deliberately keep replacing the frame
+outright — they're large multi-step forms where full-screen still reads as the right choice, not an
+ad-hoc gap — so this item's compositing covers the four pickers, the model picker below, help, and
+quit-confirm, not all six original modal fields.
+
+**New: model picker.** `/models` (previously a bare "current model + mode" printout) now opens an
+interactive picker (`internal/tui/modelpicker.go`) over `internal/modelcatalog`'s existing curated
+list, sorted by provider with the session's current model marked (`●` prefix) and pinned first in
+its group; a model not in the catalog (a custom override) gets its own synthetic "current (custom)"
+entry so the picker always reflects what's active. Selecting an entry dispatches through the
+existing `/model <id>` command — same path as typing it — rather than duplicating the switch logic.
+`/model <id>` and bare `/model` (prints the current model without opening anything) are unchanged
+and still covered by their existing test. Fixed a small latent gap while wiring this up: a
+successful `/model` switch updated the daemon-side per-session override but never touched
+`m.cfg.Model` (the TUI's own display copy driving the title bar, sidebar, and context-window sizing)
+— `SlashResult` gained a `Model *string` field, set on a successful switch (not on `/model default`,
+which stays a pre-existing, unworsened gap), that `slashResultMsg` handling now applies.
+
+**New: quit confirmation while streaming.** `/quit`/`/exit` used to cancel an in-flight stream and
+exit unconditionally, silently discarding a response mid-generation. `slashResultMsg{Quit: true}`
+now opens a `quitConfirm` overlay (`internal/tui/quitconfirm.go`) instead, when `m.streaming` — y/
+enter confirms (cancels the run, saves the draft stash, quits), n/esc backs out. Quitting when
+nothing is streaming is unchanged (nothing at risk, no reason to ask). `ctrl+c`'s own double-tap
+interrupt-then-quit behavior was not touched — it already avoided quitting mid-stream by cancelling
+the run on the first press.
+
+Tests: new `internal/tui/dialog_test.go` — `listDialog` select/cancel round-trip through the real
+`tea.Cmd` messages, `renderOverlay` proves the composited frame still contains chat content behind
+the dialog (not just the dialog on a blank background), `dimOutside` leaves the dialog's own
+rectangle untouched, quit-confirm gates a streaming quit but not an idle one, and the model picker's
+provider grouping/current-marking/synthetic-entry logic. All prior dialog/picker tests
+(`palette`/persona/session/timeline call sites, `/model` bare-args) pass unmodified.
 
 ### P16.4 — SHIPPED 2026-07-07 — Transcript as a cached per-message item list
 

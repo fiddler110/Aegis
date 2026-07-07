@@ -111,8 +111,8 @@ func commandDefs() []commandDef {
 		},
 		{
 			name:         "models",
-			shortDesc:    "Show current model info",
-			detailedHelp: "/models\n  Show the current model and provider.",
+			shortDesc:    "Interactively pick a model, grouped by provider (current one marked)",
+			detailedHelp: "/models\n  Open an interactive picker of curated models grouped by provider, with the session's current model marked. Selecting one is equivalent to running /model <id>.\n  Use /model <id> directly if you already know the exact id, or /model with no args to print the current model without opening the picker.",
 			handler:      (*SlashDispatcher).cmdModels,
 		},
 		{

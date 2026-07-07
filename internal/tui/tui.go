@@ -180,13 +180,14 @@ type model struct {
 	timelineEntries []timelineEntry
 
 	// overlay / modals
-	keys           keyMap
-	palette        *paletteModel
-	personaPicker  *personaPickerModel
-	sessionPicker  *sessionPickerModel
-	timelinePicker *timelinePickerModel
+	keys keyMap
+	// dialog is the single active filterable-list overlay (command palette,
+	// persona/session/timeline/model picker) — P16.6 collapsed four
+	// near-identical dialog types into one, tagged by dialog.kind.
+	dialog         *listDialog
 	securityConfig *securityConfigModel
 	helpOpen       bool
+	quitConfirm    bool // P16.6: confirm before quitting while a turn is streaming
 	activeToast    *toast
 	completion     completionState
 	approval       *approvalState // non-nil while engine is blocked waiting for user approval
@@ -666,110 +667,89 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Command palette overlay: route all input to the palette.
-	// Result messages are handled here so they are not re-intercepted by this
-	// same block on the next tick (the overlay would swallow them otherwise).
-	if m.palette != nil {
+	// Dialog overlay (command palette, persona/session/timeline/model picker):
+	// route all input to it. Result messages are handled here so they are not
+	// re-intercepted by this same block on the next tick (the overlay would
+	// swallow them otherwise). P16.6 collapsed four near-identical blocks
+	// into one, dispatching by dialog.kind.
+	if m.dialog != nil {
 		if ws, ok := msg.(tea.WindowSizeMsg); ok {
 			m.width, m.height = ws.Width, ws.Height
 			m.layout()
 			return m, nil
 		}
-		if _, ok := msg.(paletteCancelMsg); ok {
-			m.palette = nil
+		if c, ok := msg.(dialogCancelMsg); ok && c.kind == m.dialog.kind {
+			m.dialog = nil
 			m.ta.Focus()
+			if c.kind == dialogPersonaPicker {
+				m.refresh()
+			}
 			return m, nil
 		}
-		if sel, ok := msg.(paletteSelectedMsg); ok {
-			m.palette = nil
+		if sel, ok := msg.(dialogSelectedMsg); ok && sel.kind == m.dialog.kind {
+			kind := m.dialog.kind
+			m.dialog = nil
 			m.ta.Focus()
-			needsArgs := map[string]bool{"mode": true, "remember": true}
-			if needsArgs[sel.name] {
-				m.ta.SetValue("/" + sel.name + " ")
+			switch kind {
+			case dialogPalette:
+				item := sel.item.(paletteItem)
+				needsArgs := map[string]bool{"mode": true, "remember": true}
+				if needsArgs[item.name] {
+					m.ta.SetValue("/" + item.name + " ")
+					return m, nil
+				}
+				parsed := &commands.ParsedCommand{Name: item.name, Raw: "/" + item.name}
+				return m, m.handleSlashCommand(parsed)
+			case dialogPersonaPicker:
+				item := sel.item.(personaItem)
+				parsed := &commands.ParsedCommand{Name: "persona", Args: []string{item.name}, Raw: "/persona " + item.name}
+				return m, m.handleSlashCommand(parsed)
+			case dialogSessionPicker:
+				item := sel.item.(sessionItem)
+				if item.id == m.cfg.SessionID {
+					return m, nil // already on this session
+				}
+				return m, m.switchSessionCmd(item.id)
+			case dialogTimelinePicker:
+				item := sel.item.(timelineItem)
+				// Scroll to the selected turn's recorded item position.
+				m.transcript.ScrollToItem(item.e.blockIndex)
+				m.followBottom = false
+				m.refresh()
 				return m, nil
+			case dialogModelPicker:
+				item := sel.item.(modelItem)
+				parsed := &commands.ParsedCommand{Name: "model", Args: []string{item.id}, Raw: "/model " + item.id}
+				return m, m.handleSlashCommand(parsed)
 			}
-			parsed := &commands.ParsedCommand{Name: sel.name, Raw: "/" + sel.name}
-			return m, m.handleSlashCommand(parsed)
+			return m, nil
 		}
-		updated, cmd := m.palette.Update(msg)
-		m.palette = &updated
+		updated, cmd := m.dialog.Update(msg)
+		m.dialog = &updated
 		return m, cmd
 	}
 
-	// Persona picker overlay: route all input to the picker.
-	// Result messages are handled here for the same reason as the palette above.
-	if m.personaPicker != nil {
+	// Quit-confirmation overlay: shown instead of quitting outright when a
+	// turn is streaming (ctrl+c / /quit / /exit) — P16.6.
+	if m.quitConfirm {
 		if ws, ok := msg.(tea.WindowSizeMsg); ok {
 			m.width, m.height = ws.Width, ws.Height
 			m.layout()
 			return m, nil
 		}
-		if _, ok := msg.(personaPickerCancelMsg); ok {
-			m.personaPicker = nil
-			m.ta.Focus()
-			m.refresh()
-			return m, nil
-		}
-		if sel, ok := msg.(personaPickerSelectedMsg); ok {
-			m.personaPicker = nil
-			m.ta.Focus()
-			parsed := &commands.ParsedCommand{Name: "persona", Args: []string{sel.name}, Raw: "/persona " + sel.name}
-			return m, m.handleSlashCommand(parsed)
-		}
-		updated, cmd := m.personaPicker.Update(msg)
-		m.personaPicker = &updated
-		return m, cmd
-	}
-
-	// Session picker overlay: route all input to the picker.
-	if m.sessionPicker != nil {
-		if ws, ok := msg.(tea.WindowSizeMsg); ok {
-			m.width, m.height = ws.Width, ws.Height
-			m.layout()
-			return m, nil
-		}
-		if _, ok := msg.(sessionPickerCancelMsg); ok {
-			m.sessionPicker = nil
-			m.ta.Focus()
-			return m, nil
-		}
-		if sel, ok := msg.(sessionPickerSelectedMsg); ok {
-			m.sessionPicker = nil
-			m.ta.Focus()
-			if sel.id == m.cfg.SessionID {
-				return m, nil // already on this session
+		if k, ok := msg.(tea.KeyMsg); ok {
+			switch k.String() {
+			case "y", "enter":
+				if m.cancel != nil {
+					m.cancel()
+				}
+				saveStash(m.stashPath, m.ta.Value())
+				return m, tea.Quit
+			case "n", "esc":
+				m.quitConfirm = false
 			}
-			return m, m.switchSessionCmd(sel.id)
 		}
-		updated, cmd := m.sessionPicker.Update(msg)
-		m.sessionPicker = &updated
-		return m, cmd
-	}
-
-	// Timeline picker overlay (P2.8).
-	if m.timelinePicker != nil {
-		if ws, ok := msg.(tea.WindowSizeMsg); ok {
-			m.width, m.height = ws.Width, ws.Height
-			m.layout()
-			return m, nil
-		}
-		if _, ok := msg.(timelinePickerCancelMsg); ok {
-			m.timelinePicker = nil
-			m.ta.Focus()
-			return m, nil
-		}
-		if sel, ok := msg.(timelinePickerSelectedMsg); ok {
-			m.timelinePicker = nil
-			m.ta.Focus()
-			// Scroll to the selected turn's recorded item position.
-			m.transcript.ScrollToItem(sel.entry.blockIndex)
-			m.followBottom = false
-			m.refresh()
-			return m, nil
-		}
-		updated, cmd := m.timelinePicker.Update(msg)
-		m.timelinePicker = &updated
-		return m, cmd
+		return m, nil
 	}
 
 	// Help overlay: only Escape or F1 closes it.
@@ -781,6 +761,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if ws, ok := msg.(tea.WindowSizeMsg); ok {
 			m.width, m.height = ws.Width, ws.Height
+			m.layout()
 		}
 		return m, nil
 	}
@@ -962,7 +943,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.completion = completionState{}
 				m.applyViewportHeight()
 				pal := newPalette(m.width, m.height, m.commandEntries())
-				m.palette = &pal
+				m.dialog = &pal
 				return m, nil
 			}
 		case "f1":
@@ -1152,7 +1133,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		picker := newSessionPicker(m.width, m.height, msg.items, m.cfg.SessionID)
-		m.sessionPicker = &picker
+		m.dialog = &picker
 		return m, nil
 
 	case sessionSwitchedMsg:
@@ -1182,15 +1163,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case slashResultMsg:
 		if msg.Quit {
+			// P16.6: confirm before discarding an in-flight stream instead of
+			// quitting silently — /quit and /exit used to cancel and exit
+			// unconditionally even mid-response.
+			if m.streaming {
+				m.quitConfirm = true
+				return m, nil
+			}
 			if m.cancel != nil {
 				m.cancel()
 			}
 			saveStash(m.stashPath, m.ta.Value())
 			return m, tea.Quit
 		}
+		if msg.Model != nil {
+			m.cfg.Model = *msg.Model
+		}
 		if msg.Personas != nil {
 			picker := newPersonaPicker(m.width, m.height, msg.Personas)
-			m.personaPicker = &picker
+			m.dialog = &picker
+			return m, nil
+		}
+		if msg.Models != nil {
+			picker := newModelPicker(m.width, m.height, msg.Models, m.cfg.Model)
+			m.dialog = &picker
 			return m, nil
 		}
 		if msg.Output == "\x00wizard" {
@@ -1210,7 +1206,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			picker := newTimelinePicker(m.width, m.height, m.timelineEntries)
-			m.timelinePicker = &picker
+			m.dialog = &picker
 			return m, nil
 		}
 		if msg.ReloadSession {
@@ -2175,6 +2171,12 @@ func (m model) notifyCmd(ev notify.Event) tea.Cmd {
 	return tea.Raw(seq)
 }
 
+// render dispatches to whichever overlay is active. The wizard and
+// security-config dialogs are large multi-step forms that still replace the
+// frame outright (full-screen makes sense for a form you're filling in);
+// everything else — the filterable-list dialogs, help, and quit-confirm — is
+// composited over the live chat view via renderOverlay (P16.6) so closing
+// them doesn't lose your place.
 func (m model) render() string {
 	if !m.ready {
 		return "initializing…"
@@ -2185,22 +2187,24 @@ func (m model) render() string {
 	if m.securityConfig != nil {
 		return m.securityConfig.view()
 	}
-	if m.helpOpen {
-		return m.renderHelpOverlay()
-	}
-	if m.palette != nil {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.palette.View())
-	}
-	if m.personaPicker != nil {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.personaPicker.View())
-	}
-	if m.sessionPicker != nil {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.sessionPicker.View())
-	}
-	if m.timelinePicker != nil {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.timelinePicker.View())
-	}
 
+	base := m.renderChat()
+	switch {
+	case m.helpOpen:
+		return renderOverlay(base, renderHelpBox(m.keys), m.width, m.height)
+	case m.quitConfirm:
+		return renderOverlay(base, renderQuitConfirmBox(), m.width, m.height)
+	case m.dialog != nil:
+		return renderOverlay(base, m.dialog.View(), m.width, m.height)
+	}
+	return base
+}
+
+// renderChat renders the normal chat frame: title bar, transcript/sidebar/
+// terminal pane, completion popup, approval dialog, todo strip, and input
+// area. Split out of render() so overlay dialogs can composite over it
+// instead of replacing it (P16.6).
+func (m model) renderChat() string {
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
 
@@ -2687,8 +2691,11 @@ func saveStash(path, draft string) {
 
 // --- help overlay ---
 
-func (m model) renderHelpOverlay() string {
-	entries := m.keys.helpEntries()
+// renderHelpBox renders just the keyboard-shortcuts box; render() composites
+// it over the chat via renderOverlay (P16.6) rather than placing it on a
+// blank frame.
+func renderHelpBox(keys keyMap) string {
+	entries := keys.helpEntries()
 
 	keyStyle := lipgloss.NewStyle().Foreground(colAccent).Bold(true).Width(14)
 	descStyle := lipgloss.NewStyle().Foreground(colTextDim)
@@ -2701,15 +2708,13 @@ func (m model) renderHelpOverlay() string {
 	heading := lipgloss.NewStyle().Foreground(colBrandFg).Bold(true).Render("Keyboard Shortcuts")
 	footer := lipgloss.NewStyle().Foreground(colTextMuted).Render("press f1 or esc to close")
 
-	box := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colAccent).
 		Background(colSurface).
 		Padding(1, 3).
 		Width(50).
 		Render(heading + "\n\n" + rows.String() + "\n" + footer)
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // --- external editor ---
