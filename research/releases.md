@@ -9,7 +9,20 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P16.8** (clipboard image paste) shipped: new
+**Last updated:** 2026-07-07 — **P16.9** (in-terminal image rendering) shipped, closing out the
+entire P16 track: new `internal/tui/imagerender.go` renders a half-block ANSI truecolor thumbnail
+(upper-half-block trick — each cell's foreground is its top source pixel, background the pixel
+below) in the transcript whenever an image attachment is sent, live or replayed from session
+history. Gated on terminal capability via `charmbracelet/colorprofile`'s env/`NO_COLOR`/`CLICOLOR`
+detection (256-color-or-better only), configurable with new `tui.image_rendering: auto|off`.
+Decoding is best-effort — an unreadable path or unsupported format (notably WebP) silently falls
+back to the pre-existing text notice. True kitty-graphics/iTerm2-inline-image protocol support was
+deliberately descoped: bubbletea/ultraviolet's cell-diffed redraw model has no primitive for opaque
+out-of-band terminal state (unlike its OSC-8-hyperlink `Cell.Link` support), and there was no real
+kitty/iTerm2 terminal available to verify escape-sequence behavior against — the half-block
+fallback needed none of that risk. See
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below.
+**Previously, 2026-07-07:** **P16.8** (clipboard image paste) shipped: new
 `internal/tui/clipboard_image.go` reads an image directly off the OS clipboard (not a pasted file
 path) into a temp PNG, per-OS the same way `copyToClipboard` already is — `System.Windows.Forms.
 Clipboard` + `Bitmap.Save` via an `-Sta` PowerShell call on Windows (verified end-to-end against a
@@ -17,8 +30,7 @@ real clipboard image and against clipboard text with no image), `pngpaste` on ma
 `xclip -t image/png` on Linux. New `ctrl+v` keybinding plus a `/paste-image` slash-command fallback
 for terminals that intercept ctrl+v themselves; both feed the existing `@image:` attachment-token
 path, so no daemon-side changes were needed. See
-[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. Only P16.9
-remains open in the P16 track.
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below.
 **Previously, 2026-07-07:** **P16.7** (runtime-loadable themes) shipped: new
 `internal/tui/theme_loader.go` derives a full `colorScheme` from a `themeFile` JSON schema
 (background/foreground + the standard 16-color ANSI palette — the shape most published terminal
@@ -143,8 +155,81 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P16 items (TUI Polish & Interaction Parity)
 
-The rest of P16 (P16.9) is still open — see
-[roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
+The whole P16 track (P16.1–P16.9) is now shipped.
+
+### P16.9 — SHIPPED 2026-07-07 — In-terminal image rendering
+
+The gap: an attached image is sent to the model but never shown — the transcript only ever printed
+a "(N images attached)" text notice. crush renders attachments inline; the roadmap item asked for
+the same via kitty-graphics/iTerm2-inline-image protocols with a half-block fallback.
+
+**Scope decision, made before writing any rendering code:** only the half-block fallback was
+implemented. True kitty-graphics/iTerm2-inline-image protocol support was descoped. Both protocols
+place image content via raw APC (`ESC _G ... ESC \`) or OSC (`ESC ]1337;File=... BEL`) escape
+sequences that the *physical terminal* interprets at the moment they're written. But this TUI's
+screen isn't written to directly — bubbletea v2 renders through `charmbracelet/ultraviolet`, a cell
+grid that gets diffed and selectively redrawn every frame (streaming tokens, spinner ticks, cursor
+blink all trigger redraws). Ultraviolet has no primitive for "this span is opaque, out-of-band
+terminal state that must not be re-diffed or retransmitted" — the closest analogous case it *does*
+solve, OSC 8 hyperlinks, gets first-class support via a `Cell.Link` field precisely because a
+hyperlink is idempotent to re-emit and cheap. An image placement is neither: kitty's protocol
+requires careful placement-ID and chunked-transmission bookkeeping to avoid duplicating or
+re-uploading the image on every redraw, and there was no kitty or iTerm2 terminal available in this
+environment to verify any of that behavior against. Shipping unverified raw-escape-sequence
+injection into a TUI's redraw path — with a real risk of visible terminal corruption if the framing
+is wrong — wasn't a responsible trade for a feature the roadmap itself flagged as "lowest priority
+in the track — cosmetic." The half-block fallback carries none of that risk: it's ordinary
+SGR-styled Unicode text, which ultraviolet already knows how to diff and redraw correctly. Richer
+protocol support remains a candidate follow-up if/when it can be verified against real terminals.
+
+**Implementation**, new `internal/tui/imagerender.go`:
+
+- `detectImageProtocol(environ []string) imageProtocol` — reuses
+  `charmbracelet/colorprofile.Env` (already an indirect dependency, promoted to direct) for its
+  existing `NO_COLOR`/`CLICOLOR`/`TERM` handling rather than re-implementing terminal capability
+  sniffing; returns `protocolHalfBlock` at ANSI256-or-better, `protocolNone` otherwise. Called once
+  at TUI startup and cached on `model.imageProto`; a new `tui.image_rendering: auto|off` config key
+  (default `auto`) can force it off.
+- `thumbnailBox(w, h int) (cols, rows int)` fits the source image into a fixed 32×16-cell box
+  (`cellAspect = 2.0` approximates a monospace cell's height:width pixel ratio), independent of the
+  live transcript pane width — so a mid-session terminal resize never needs to re-lay-out an
+  already-appended thumbnail.
+- `resizeBoxAvg` downsamples via box averaging (every source pixel mapped into a destination cell is
+  averaged), not nearest-neighbor — meaningfully less noisy than picking one sample pixel when
+  shrinking a multi-megapixel photo to a few dozen cells, for about the same code.
+- `renderHalfBlocks` renders the upper-half-block trick: each output row samples two source pixel
+  rows, one becomes the cell's foreground color (`▀`), the other its background — doubling vertical
+  resolution relative to one flat color per cell.
+- `renderImageThumbnail` is the single best-effort entry point: any decode failure (corrupt data, or
+  a format the stdlib `image` package can't decode — notably WebP, which has no stdlib decoder)
+  returns `""` rather than an error, so callers transparently keep today's text-only notice instead
+  of surfacing a rendering failure.
+
+**Transcript integration** required one small architectural addition. `transcriptItem.rendered(w)`
+normally pipes content through `wrap()` (`lipgloss.NewStyle().Width(w).Render(...)`) to reflow it to
+the pane's current width — safe for prose, but a thumbnail's SGR-styled rows are already sized to a
+fixed cell box and must reach the screen byte-for-byte. New `transcriptItem.noWrap` flag (set via
+`newRawItem`/`transcriptPane.AppendRaw`) skips `wrap()` entirely while still participating in the
+pane's normal per-item height caching, scroll math, and trim eviction — no changes needed anywhere
+else in `transcript.go`.
+
+Wired into both places an attachment can appear: `sendUserMessage` (live sends, reading the
+attached file's bytes from disk via its resolved path) and `loadHistory` (session replay, decoding
+the base64 `provider.ImageBlock.Data` already held in memory — no disk access needed). Both funnel
+through `model.renderImageThumbnails`/`renderImageThumbnailsFromBlocks`, appended between the "You"
+bar/text and the "Assistant" bar that follows (`appendUser` gained a `thumbnails []string`
+parameter).
+
+Tests: `internal/tui/imagerender_test.go` (protocol detection across dumb/ANSI/256-color/truecolor/
+kitty `$TERM` combinations, `NO_COLOR`, box sizing edge cases including zero-size input, a decode
+round-trip against a solid-color PNG fixture verifying exact SGR truecolor codes and a trailing
+reset on every row, garbage-input decode failure, and the box-average resize's color purity across a
+hard color boundary); `internal/tui/transcript_test.go` (`AppendRaw` bypasses `wrap()`, is a no-op
+on empty input, and its rendered output is stable across a pane width change — the specific
+regression `noWrap` exists to prevent); `internal/tui/image_thumbnail_integration_test.go` (a full
+`sendUserMessage` call produces a `noWrap` transcript item with half-block styling when
+`imageProto` is forced on, produces none when forced off, and the two `renderImageThumbnails*`
+helpers degrade to `nil` — no panic — for an unreadable path or undecodable base64 data).
 
 ### P16.8 — SHIPPED 2026-07-07 — Clipboard image paste
 

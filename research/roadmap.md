@@ -1,7 +1,8 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P16.8 shipped — clipboard image paste; new P16 track added the same
-day — TUI polish & interaction parity, from the crush/opencode/Claude Code gap analysis)
+**Last updated:** 2026-07-07 (P16.9 shipped — in-terminal half-block image thumbnails, closing out
+the P16 TUI polish & interaction parity track added the same day, from the crush/opencode/Claude
+Code gap analysis)
 
 This document tracks only **open** work — what's next. For shipped-feature history and full design
 rationale behind completed items, see [releases.md](releases.md).
@@ -10,9 +11,7 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P16.9** (TUI polish & interaction parity — gap analysis vs
-crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.8 shipped 2026-07-07**, see
-below), **P15.2–P15.11** (web UI
+Open items: **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
 engagement tooling, P13.7 LaTeX report skill), **P9.4** (per-task model routing), **P6.1** (mid-turn
@@ -20,10 +19,11 @@ state persistence).
 
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
 15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.8, P14 (all of P14.1–P14.10), the
-TQ TUI track, P15.1, and the 2026-07-06 fable-review.md remediation (CI/CodeQL/Dependabot, Windows
-token ACL, compiler-enforced daily-cap guard, `aegis harden`, plan-mode network gating, release
-workflow, server/TUI file splits, fuzz coverage, live-model eval tier, script-aware token
-estimation) — is shipped. See [releases.md](releases.md) for what each shipped and why.
+TQ TUI track, P15.1, P16 (all of P16.1–P16.9), and the 2026-07-06 fable-review.md remediation
+(CI/CodeQL/Dependabot, Windows token ACL, compiler-enforced daily-cap guard, `aegis harden`,
+plan-mode network gating, release workflow, server/TUI file splits, fuzz coverage, live-model eval
+tier, script-aware token estimation) — is shipped. See [releases.md](releases.md) for what each
+shipped and why.
 
 **P15.1 resolved 2026-07-06:** bundled frontend (Vite + Preact + TypeScript), building to a static
 bundle committed at `internal/server/webui/dist/` and embedded via `go:embed` — `aegis ui` stays
@@ -36,154 +36,6 @@ P6.1 are real but have no concrete trigger — don't build them speculatively; c
 first. (P6.5, "desktop/IDE surface beyond ACP," previously covered this exact web-UI question and
 concluded "only worth it if user demand materializes... the TUI is the product" — that demand is
 now explicit, so P6.5 is superseded by P15 rather than still open on its own.)
-
----
-
-## Open Work — P16 (TUI Polish & Interaction Parity)
-
-Requested 2026-07-07: "my TUI doesn't feel as polished and streamlined as claude code, opencode or
-crush." Researched the same day by direct comparison of `internal/tui` (~10,600 lines) against
-crush's `internal/ui` (charmbracelet/crush, ~100 source files across `chat/`, `dialog/`,
-`diffview/`, `list/`, `notification/`, `completions/`), opencode's `packages/tui` (sst/opencode —
-now a TypeScript rewrite on Bun using their own `@opentui` + SolidJS framework), and Claude Code's
-interaction patterns.
-
-**Headline finding:** Aegis's *feature checklist* is near-parity (queued messages, steering,
-collapsible thinking, todo strip, sidebar, terminal pane, @file frecency completion, `!` commands,
-draft stash, $EDITOR, esc-esc interrupt, mode cycling, palette, pickers all match or beat crush).
-The "unpolished" perception comes from six specific presentation/interaction areas, itemized below.
-
-**Language decision (resolved 2026-07-07, don't reopen):** stay on Go/bubbletea v2. Crush is pure
-Go on the exact stack Aegis already uses and is the most polished TUI of the three — the ceiling is
-architecture and component investment, not language. opencode's TypeScript rewrite required building
-an entire terminal UI framework (`@opentui`) and ships ~60–100 MB Bun-compiled per-platform binaries;
-adopting it would sacrifice Aegis's single-static-binary property (the same property P15.1
-deliberately protected by committing `dist/`). Because the daemon/client split already exists, a
-TS/other-language TUI could be added later as just another HTTP/SSE client — staying Go now is not a
-one-way door.
-
-**License caution (applies to every item below):** crush is FSL-licensed — study its patterns and
-package boundaries (its `internal/ui/AGENTS.md` is effectively an architecture how-to), but **do not
-vendor or translate its source**. Everything needed is available under MIT: `alecthomas/chroma`
-(syntax highlighting), `charmbracelet/ultraviolet` (screen buffer — already an indirect dep via
-bubbletea v2), and the rest of the charm stack.
-
-### The items
-
-- **P16.1 — SHIPPED 2026-07-07 — Notifications & attention system.** New `internal/tui/notify`
-  package: OSC 0/2 window-title updates reflecting session state (via bubbletea v2's native
-  `tea.View.WindowTitle`, no hand-rolled sequence needed), BEL + OSC 9 (with OSC 777 fallback) on
-  stream-end/approval-pending/error, focus tracking via `tea.FocusMsg`/`tea.BlurMsg` to suppress
-  notifications while focused (defaulting to "notify" when a terminal never reports focus, rather
-  than silently suppressing forever), and a `tui.notifications` config knob (off/bell/desktop/both,
-  default both) plus a live `/notify <mode>` command. Raw sequences go through bubbletea v2's
-  `tea.Raw`/`RawMsg` (the sanctioned synchronized-output path) rather than writing to stdout
-  directly. **Subsumes P13.3.4** (background-task attention indicator) — not implemented
-  separately; deferred until a concrete failed-background-agent trigger exists, to route through
-  this same seam then. See [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.2 — SHIPPED 2026-07-07 — Syntax highlighting via chroma.** New `internal/tui/highlight.go`:
-  a `chroma.Style` built from the existing `colorscheme.go` palette (not an unrelated built-in
-  theme), lexer matched by file extension via `lexers.Match(path)`, applied to diff added/removed/
-  context lines (P16.3), `read_file` result blocks (its own "N\t" line-number prefix stripped and
-  re-derived as a gutter), and shell-command previews. Highlighting happens once per tool-call/
-  result event, when the transcript block's raw string is built — the pre-existing per-block cache
-  (TQ1) already keeps that from re-running on resize/redraw, so no separate highlight cache was
-  needed. See [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.3 — SHIPPED 2026-07-07 — Diff presentation upgrade.** Shipped together with P16.2 per this
-  section's sequencing note, since the chroma coloring depends on it. `diffLines` kept its LCS core
-  (`buildEdits`/`lcsIndices` unchanged) and gained a line-number gutter (old/new), hunk headers with
-  real `@@ -a,b +c,d @@` ranges, tinted add/removed backgrounds (`colDiffAddBg`/`colDiffDelBg`,
-  blended from the theme's own success/destructive roles) with chroma coloring layered under the
-  tint, and word-level intraline emphasis for singleton line replacements (reusing `buildEdits`
-  generically at word granularity — no new diff algorithm). Side-by-side split view remains
-  explicitly deferred, as scoped. See
-  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity) for the full design
-  notes, including a same-session hunk-header ordering bug caught before commit.
-
-Remaining open items are listed below **in priority/sequencing order** (not numeric order — P16.7
-shipped before P16.4 despite the lower number, since it was small and independent while P16.4 was
-the track's biggest single effort). The P-numbers themselves are stable identifiers, not a reading
-order; don't renumber them to match position, since releases.md and prior session history already
-reference the shipped ones by number.
-
-- **P16.7 — SHIPPED 2026-07-07 — Runtime-loadable themes.** New `internal/tui/theme_loader.go`: a
-  `themeFile` JSON schema (background/foreground + the standard 16-color ANSI palette — the same
-  shape most published terminal color schemes already ship in) from which every `colorScheme` role
-  is derived by blending, reusing P16.3's `blend()` helper. Four embedded built-ins (catppuccin,
-  dracula, gruvbox, tokyonight) ship the same way builtin skills do (`//go:embed`), plus a loader
-  for project `.aegis/themes/<name>.json` and user `~/.aegis/themes/<name>.json` (project wins).
-  `applyTheme` now returns the resolved name instead of the old normalize-to-dark/light pass, and
-  `/theme` + `tui.theme` accept any of dark/light/builtin/custom name — `/theme` with an unknown
-  name lists everything currently resolvable. See
-  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.4 — SHIPPED 2026-07-07 — Transcript as a cached per-message item list.** Replaced
-  `bubbles/viewport` plus the flat `transcriptBlock` buffer with `transcriptPane`: a virtualized,
-  segment-addressable list of `transcriptItem`s (crush's `list.go` model) that renders only the
-  visible window (`View()`) instead of concatenating the whole history every frame. Per-item wrap
-  caching carries over from the old design; new is O(1) `ScrollToItem` (replaces the old
-  `renderUpTo` + `SetYOffset(strings.Count(...))` dance used by the timeline picker) and
-  `ItemIndexAtY`, line→message hit-testing ported from crush's `findItemAtY` and already covered by
-  tests even though nothing calls it yet — it's the seam P16.5 consumes for mouse click/drag. See
-  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.5 — SHIPPED 2026-07-07 — Mouse selection, click interactions, and scrollbar.** New
-  `internal/tui/selection.go`: drag selection with copy-on-release (reusing the existing
-  `copyToClipboard` native-clipboard path), double-click word / triple-click line selection with
-  click-counting + timeout, click-to-focus a message (left accent bar via `renderTranscriptContent`),
-  and a rendered scrollbar glyph column (`renderScrollbar`, backed by `transcriptPane.ScrollbarThumb`)
-  replacing the title-bar "62% ·" text. Selection state is kept in screen-space (pane-relative
-  row/col), not persistent item/offset coordinates — matches real terminal selection semantics
-  (doesn't survive a scroll mid-drag) and is far simpler than mapping onto the virtualized item
-  model. Built on P16.4's `ItemIndexAtY` for line→message hit-testing, as scoped. Two scope
-  narrowings from the original wording: no OSC-52 path exists in the codebase (only the native
-  per-OS clipboard tool path, which is what's reused — "OSC-52/native" in the original item overstated
-  what "existing path" meant), and there's no Esc-key clearing of an active selection/focus (left
-  out to avoid touching the already-carefully-tuned double-tap ESC/interrupt logic elsewhere in
-  `Update()`). See
-  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.6 — SHIPPED 2026-07-07 — Unified dialog overlay + shared filterable list component.** New
-  `listDialog` (`internal/tui/dialog.go`) collapses the four near-identical picker types (palette,
-  persona/session/timeline) into one generic type tagged by a `dialogKind` enum, plus a real
-  compositing `renderOverlay` (lipgloss v2 `Layer`/`Compositor`/`Canvas`, promoting
-  `charmbracelet/ultraviolet` from indirect to direct) that draws a dialog centered over the actual
-  rendered chat frame and dims everything outside it to the terminal's faint attribute — no more
-  full-screen replacement for these four dialogs, help, or the new quit-confirm. `securityConfig`/
-  `wizard` deliberately keep replacing the frame outright (large multi-step forms, still the right
-  call), a scope narrowing from the original wording's "six ad-hoc modal fields". Added the two
-  missing dialogs: a **model picker** (`/models`, grouped by provider via `internal/modelcatalog`,
-  current model marked, dispatches through the existing `/model <id>` — also fixed a latent gap
-  where a model switch never updated the TUI's own display copy) and **quit confirmation** shown
-  only when `/quit`/`/exit` fires while a turn is streaming (previously silently discarded it).
-  File-picker dialog stays deferred (@ completion covers the case). See
-  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.8 — SHIPPED 2026-07-07 — Clipboard image paste.** New `internal/tui/clipboard_image.go`:
-  `pasteClipboardImage` reads an image directly off the OS clipboard (not a pasted file path) into a
-  new temp PNG, per-OS the same way `copyToClipboard` already is — `System.Windows.Forms.Clipboard`
-  + `System.Drawing.Bitmap.Save` via an `-Sta` PowerShell call on Windows (verified end-to-end
-  against a real clipboard image and against clipboard text with no image, both correct), `pngpaste`
-  on macOS (external tool required, same as `copyToClipboard`'s Linux xclip/xsel/wl-copy pattern —
-  no stdlib path to clipboard image bytes exists on any of the three), `wl-paste`/`xclip -t
-  image/png` on Linux. Wired to a new `ctrl+v` keybinding (`keyMap.PasteImage`) and, since some
-  terminals bind ctrl+v to their own native paste before Aegis ever sees the keystroke, a `/paste-image`
-  slash-command fallback — both converge on the same `pasteClipboardImageCmd` and reuse the existing
-  `attachTokenFor`/`@image:` path P16.8 was scoped to reuse, so the daemon-side image handling needed
-  no changes. See [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.9 — In-terminal image rendering.** Attached images are sent to the model but never shown;
-  crush renders them inline (kitty graphics / iTerm2 inline-image protocols, half-block fallback).
-  Render a thumbnail in the transcript when an image attachment is sent, gated on terminal
-  capability detection. Lowest priority in the track — cosmetic, benefits only image workflows. (M,
-  nice-to-have)
-
-**Explicitly not in this track:** configurable keybindings — already scoped as **P13.3.5** (add a
-`tui.keybindings` config section); don't duplicate it here, but its priority rises now that the
-polish track exists. Sound/audio cues (opencode-style) — rejected as out of character for the tool.
-A which-key pending-keybind popup — revisit only if P13.3.5 ships chord bindings.
-
-**Sequencing:** P16.1–P16.8 shipped 2026-07-07 (see above). Only P16.9 remains, as a
-gap-filler whenever convenient.
-
-Priority: **High** (explicit user request, 2026-07-07 — this is the TUI-side counterpart of P15's
-web-UI push; the TUI remains the primary surface). Effort: **L overall** — smaller than P15, larger
-than any single P13 item; P16.4 alone is L and should be treated as its own multi-session effort.
 
 ---
 

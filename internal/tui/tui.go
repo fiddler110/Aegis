@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image/color"
@@ -35,14 +36,15 @@ import (
 
 // Config configures the TUI.
 type Config struct {
-	Client        *client.Client
-	SessionID     string
-	Mode          string
-	Model         string
-	WorkDir       string
-	HumorMode     bool   // D&D-themed thinking phrases; false = plain "thinking…"
-	Theme         string // color scheme name: "dark" (default) or "light" (TQ10)
-	Notifications string // attention-system mode (P16.1): off/bell/desktop/both
+	Client         *client.Client
+	SessionID      string
+	Mode           string
+	Model          string
+	WorkDir        string
+	HumorMode      bool   // D&D-themed thinking phrases; false = plain "thinking…"
+	Theme          string // color scheme name: "dark" (default) or "light" (TQ10)
+	Notifications  string // attention-system mode (P16.1): off/bell/desktop/both
+	ImageRendering string // inline image thumbnails (P16.9): "auto" (default) or "off"
 }
 
 // Run starts the TUI event loop and blocks until the user quits.
@@ -93,6 +95,7 @@ type model struct {
 	th         theme
 	wizard     *wizardModel
 	workDir    string
+	imageProto imageProtocol // inline image thumbnail capability (P16.9)
 
 	toolCompact         bool // when true, tool results are capped at toolMaxLinesCompact lines
 	tools               []toolEntry
@@ -373,6 +376,7 @@ func newModel(cfg Config) model {
 		term:         newTermPane(workDir, 10), // height recalculated on first resize
 		stashPath:    stashPath,
 		notifyMode:   notify.ParseMode(cfg.Notifications),
+		imageProto:   imageProtoFor(cfg.ImageRendering),
 	}
 	// P5.6: restore an unsent draft if one was saved from the previous session.
 	if draft := loadStash(stashPath); draft != "" {
@@ -592,7 +596,7 @@ func (m *model) sendUserMessage(text string) tea.Cmd {
 		}
 		displayText = fmt.Sprintf("(%d image%s attached)", len(images), suffix)
 	}
-	m.appendUser(displayText)
+	m.appendUser(displayText, m.renderImageThumbnails(images))
 	m.streaming = true
 	m.status = "thinking…"
 	m.followBottom = true // jump to the freshly sent message
@@ -1384,7 +1388,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript.Append(style.Render(msg.Output) + "\n\n")
 		}
 		if msg.Message != "" {
-			m.appendUser(msg.Message)
+			m.appendUser(msg.Message, nil)
 			m.streaming = true
 			m.status = "thinking…"
 			m.followBottom = true
@@ -1882,7 +1886,7 @@ func (m *model) loadHistory(msgs []provider.Message) {
 		case provider.RoleUser:
 			var text string
 			var results []provider.ToolResultBlock
-			var images int
+			var imageBlocks []provider.ImageBlock
 			for _, b := range msg.Content {
 				switch v := b.(type) {
 				case provider.TextBlock:
@@ -1890,16 +1894,16 @@ func (m *model) loadHistory(msgs []provider.Message) {
 				case provider.ToolResultBlock:
 					results = append(results, v)
 				case provider.ImageBlock:
-					images++
+					imageBlocks = append(imageBlocks, v)
 				}
 			}
 			if len(results) == 0 {
-				if images > 0 {
+				if len(imageBlocks) > 0 {
 					suffix := ""
-					if images != 1 {
+					if len(imageBlocks) != 1 {
 						suffix = "s"
 					}
-					note := fmt.Sprintf("🖼 %d image%s", images, suffix)
+					note := fmt.Sprintf("🖼 %d image%s", len(imageBlocks), suffix)
 					if text != "" {
 						text += "  " + note
 					} else {
@@ -1907,7 +1911,7 @@ func (m *model) loadHistory(msgs []provider.Message) {
 					}
 				}
 				if text != "" {
-					m.appendUser(text)
+					m.appendUser(text, m.renderImageThumbnailsFromBlocks(imageBlocks))
 				}
 			}
 			for _, r := range results {
@@ -1946,7 +1950,53 @@ func (m *model) loadHistory(msgs []provider.Message) {
 	}
 }
 
-func (m *model) appendUser(text string) {
+// renderImageThumbnails reads each attached image's local file and renders
+// an inline thumbnail (P16.9) for the ones that decode successfully;
+// unreadable paths and unsupported formats (e.g. WebP) are skipped rather
+// than surfaced as an error — the existing "(N images attached)" text notice
+// already covers that case.
+func (m *model) renderImageThumbnails(images []api.ImageInput) []string {
+	if m.imageProto == protocolNone || len(images) == 0 {
+		return nil
+	}
+	var out []string
+	for _, img := range images {
+		data, err := os.ReadFile(img.Path)
+		if err != nil {
+			continue
+		}
+		if raw := renderImageThumbnail(data, m.imageProto); raw != "" {
+			out = append(out, raw)
+		}
+	}
+	return out
+}
+
+// renderImageThumbnailsFromBlocks is renderImageThumbnails for replayed
+// session history (loadHistory), where images arrive as base64-encoded
+// provider.ImageBlock content rather than local file paths.
+func (m *model) renderImageThumbnailsFromBlocks(blocks []provider.ImageBlock) []string {
+	if m.imageProto == protocolNone || len(blocks) == 0 {
+		return nil
+	}
+	var out []string
+	for _, b := range blocks {
+		data, err := base64.StdEncoding.DecodeString(b.Data)
+		if err != nil {
+			continue
+		}
+		if raw := renderImageThumbnail(data, m.imageProto); raw != "" {
+			out = append(out, raw)
+		}
+	}
+	return out
+}
+
+// appendUser appends a user turn, followed by any rendered image thumbnails
+// (P16.9, already-rendered ANSI blocks — see renderImageThumbnails /
+// renderImageThumbnailsFromBlocks) and the "Assistant" bar that opens the
+// reply.
+func (m *model) appendUser(text string, thumbnails []string) {
 	// P2.8: record this turn in the timeline before writing anything.
 	m.timelineEntries = append(m.timelineEntries, timelineEntry{
 		text:       oneLine(text),
@@ -1963,6 +2013,9 @@ func (m *model) appendUser(text string) {
 	}
 	m.turnCount++
 	m.transcript.Append(barLabel("You", colUserFg) + "\n" + text + "\n\n")
+	for _, thumb := range thumbnails {
+		m.transcript.AppendRaw(thumb)
+	}
 	m.transcript.Append(barLabel("Assistant", colAssistFg) + "\n")
 }
 

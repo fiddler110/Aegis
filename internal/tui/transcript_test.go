@@ -58,6 +58,45 @@ func TestTranscriptAppendEmptyIsNoop(t *testing.T) {
 	}
 }
 
+func TestTranscriptAppendRawBypassesWrap(t *testing.T) {
+	tr := newTranscriptPane(10, 100)
+	// A line far wider than the pane — wrap() would reflow this at width 10,
+	// but AppendRaw content (P16.9 image thumbnails) must reach View()
+	// byte-for-byte since it's pre-sized to a fixed cell box.
+	wide := strings.Repeat("x", 40) + "\n"
+	tr.AppendRaw(wide)
+
+	got := tr.View()
+	if !strings.Contains(got, strings.Repeat("x", 40)) {
+		t.Fatalf("expected unwrapped 40-char run in output, got %q", got)
+	}
+	if got := tr.items[0].height(tr.width); got != 1 {
+		t.Fatalf("expected the item to report height 1, got %d", got)
+	}
+}
+
+func TestTranscriptAppendRawEmptyIsNoop(t *testing.T) {
+	tr := newTranscriptPane(80, 100)
+	tr.AppendRaw("")
+	if tr.Len() != 0 {
+		t.Fatalf("expected empty AppendRaw to be a no-op, got %d items", tr.Len())
+	}
+}
+
+func TestTranscriptAppendRawStableAcrossWidthChange(t *testing.T) {
+	tr := newTranscriptPane(10, 100)
+	raw := strings.Repeat("y", 40) + "\n"
+	tr.AppendRaw(raw)
+	before := tr.View()
+
+	tr.SetSize(5, 100)
+	after := tr.View()
+
+	if before != after {
+		t.Fatalf("noWrap item content changed across a width resize:\nbefore: %q\nafter:  %q", before, after)
+	}
+}
+
 func TestScrollbarThumbNoScrollWhenContentFits(t *testing.T) {
 	tr := newTranscriptPane(80, 10)
 	tr.Append("one\ntwo\nthree\n")

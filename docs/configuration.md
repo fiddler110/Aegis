@@ -232,6 +232,13 @@ tui:
   # /notify <mode>, for that session only.
   notifications: both
 
+  # Inline image thumbnails (P16.9): render a small half-block ANSI preview
+  # in the transcript when an image is attached, instead of only sending it
+  # to the model. "auto" (default): rendered when the terminal's detected
+  # color profile supports at least 256 colors, skipped otherwise (dumb
+  # terminals, NO_COLOR). "off": never render, text-only notice as before.
+  image_rendering: auto
+
 
 # ── Diagrams ──────────────────────────────────────────────────────────────────
 diagram:

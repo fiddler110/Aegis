@@ -31,6 +31,12 @@ const trimmedMarker = "[earlier output trimmed]\n\n"
 type transcriptItem struct {
 	raw string
 
+	// noWrap marks content that must reach the terminal byte-for-byte
+	// instead of going through wrap()'s lipgloss word-wrap — image
+	// thumbnails (P16.9), whose SGR-styled lines are already sized to a
+	// fixed cell box and must not be reflowed at an arbitrary pane width.
+	noWrap bool
+
 	cacheW      int
 	cacheOut    string
 	cacheHeight int
@@ -39,9 +45,20 @@ type transcriptItem struct {
 
 func newItem(raw string) *transcriptItem { return &transcriptItem{raw: raw} }
 
+func newRawItem(raw string) *transcriptItem { return &transcriptItem{raw: raw, noWrap: true} }
+
 // rendered returns the wrapped ANSI string for width w, from cache when the
-// width hasn't changed since the last call.
+// width hasn't changed since the last call. noWrap items are returned as-is
+// (still cached, since they need no per-width recomputation).
 func (it *transcriptItem) rendered(w int) string {
+	if it.noWrap {
+		if !it.cached {
+			it.cacheOut = it.raw
+			it.cacheHeight = strings.Count(it.cacheOut, "\n")
+			it.cached = true
+		}
+		return it.cacheOut
+	}
 	if !it.cached || it.cacheW != w {
 		it.cacheOut = wrap(it.raw, w)
 		it.cacheHeight = strings.Count(it.cacheOut, "\n")
@@ -117,6 +134,19 @@ func (p *transcriptPane) Append(raw string) {
 		return
 	}
 	p.items = append(p.items, newItem(raw))
+	p.rawBytes += len(raw)
+	p.invalidateTotal()
+	p.trim()
+}
+
+// AppendRaw is Append, but the item bypasses wrap() entirely (see
+// transcriptItem.noWrap) — for content, like image thumbnails (P16.9),
+// that is already laid out to a fixed size and must not be reflowed.
+func (p *transcriptPane) AppendRaw(raw string) {
+	if raw == "" {
+		return
+	}
+	p.items = append(p.items, newRawItem(raw))
 	p.rawBytes += len(raw)
 	p.invalidateTotal()
 	p.trim()
