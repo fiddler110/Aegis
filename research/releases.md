@@ -134,8 +134,54 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P16 items (TUI Polish & Interaction Parity)
 
-The rest of P16 (P16.4–P16.6, P16.8–P16.9) is still open — see
+The rest of P16 (P16.5, P16.6, P16.8–P16.9) is still open — see
 [roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
+
+### P16.4 — SHIPPED 2026-07-07 — Transcript as a cached per-message item list
+
+The gap: the transcript was one big string re-joined into a `bubbles/viewport` on every refresh.
+Per-block wrap caching (TQ1) kept resize/redraw cheap, but the monolith blocked per-message
+interaction (no way to address "the 40th message" without re-deriving it from a byte offset) and
+had no path to mouse hit-testing.
+
+New `internal/tui/transcript.go` model, replacing both `transcript` (content) and
+`bubbles/viewport.Model` (scroll/display) with one type:
+
+- **`transcriptItem`** — same role as the old `transcriptBlock` (one independently-wrapped,
+  independently-cached unit: a user turn, assistant reply, tool call/result, system notice), plus a
+  cached line-height (`cacheHeight`, `strings.Count` of the wrapped output) so scroll math never
+  needs to split a string into a line slice just to count it.
+- **`transcriptPane`** — the virtualized list itself (crush's `internal/ui/list/list.go` model).
+  Content is addressed as **segments**: the non-evictable trim marker (if any), the real items in
+  order, then an ephemeral trailing "tail" segment for streaming preview text (rebuilt every
+  `refresh()`, never cached or evictable). Scroll position is `(offsetIdx, offsetLine)` — a segment
+  index plus a line offset within it — rather than a flat byte/line offset, which is what makes
+  both `ScrollToItem` and an O(visible) `View()` possible.
+- **`View()`** walks segments from the current offset, accumulating only enough wrapped content to
+  fill the viewport height, then slices exactly the visible lines out of that bounded buffer — cost
+  is O(segments touching the viewport), not O(total transcript). Reuses each item's whole-string
+  wrap cache rather than a per-item line-slice cache, relying on the pre-existing invariant that
+  every item's raw content ends on a line boundary.
+- **`ScrollToItem(idx)`** replaces the timeline picker's old `renderUpTo(idx, width)` +
+  `SetYOffset(strings.Count(prefix, "\n"))` dance (re-wrapping every item up to the target on every
+  seek) with an O(1) segment-index set.
+- **`HandleKey`/`HandleMouseWheel`** reproduce `bubbles/viewport`'s default scroll keymap and wheel
+  delta (3 lines/notch) exactly, so removing the dependency changed no observable scroll behavior.
+- **`ItemIndexAtY(y)`** — line→message hit-testing ported from crush's `findItemAtY`
+  (`list.go:880-908`). Not wired to any input handling yet — nothing calls it — but implemented and
+  covered by tests now while the windowing code is fresh in mind. This is the seam **P16.5** (mouse
+  selection/click) consumes.
+
+`tui.go`/`approval.go` updated every `m.vp.*` call site to the equivalent `m.transcript.*` method
+(`Append`/`Reset`/`Width`/`Height`/`AtBottom`/`ScrollPercent`/`TotalLineCount`); the `viewport`
+import is gone from `tui.go` entirely. `ultraviolet` adoption (the roadmap's optional follow-on) was
+not needed — the segment/cache model above was sufficient on its own.
+
+Tests: `transcript_test.go` rewritten against the new `Append`/`View`/`HandleKey`/`ItemIndexAtY`
+API (including a `testKeyMsg` helper building `tea.KeyPressMsg`s for the fixed set of keys
+`HandleKey` matches); `integration_test.go`'s timeline-seek test now asserts `ScrollToItem` +
+`View()` lands exactly on the target turn's own content instead of checking a rendered prefix
+string.
 
 ### P16.7 — SHIPPED 2026-07-07 — Runtime-loadable themes
 
