@@ -10,8 +10,8 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P16.5, P16.6, P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
-crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.4 and P16.7 shipped 2026-07-07**, see
+Open items: **P16.6, P16.8–P16.9** (TUI polish & interaction parity — gap analysis vs
+crush/opencode/Claude Code, added 2026-07-07; **P16.1–P16.5 and P16.7 shipped 2026-07-07**, see
 below), **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
@@ -125,16 +125,21 @@ reference the shipped ones by number.
   `ItemIndexAtY`, line→message hit-testing ported from crush's `findItemAtY` and already covered by
   tests even though nothing calls it yet — it's the seam P16.5 consumes for mouse click/drag. See
   [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.5 — Mouse selection, click interactions, and scrollbar.** `MouseModeCellMotion` is enabled
-  but only the viewport's built-in wheel scroll does anything — there is no `tea.MouseMsg` handling
-  at all, and because alt-screen + mouse mode disables the terminal's native selection, users
-  currently **can't even select/copy text without shift-click**: enabling mouse mode without
-  offering selection is worse than not enabling it. Add: drag selection with copy-on-release (reuse
-  the existing `copyToClipboard` OSC-52/native path), double-click word / triple-click line
-  selection, click-to-focus a message, and a rendered scrollbar glyph column replacing the
-  title-bar "62% ·" text. Depends on P16.4 for line→message hit-testing. Interim mitigation if
-  P16.4 is far off: a `/mouse` toggle that drops mouse mode so native terminal selection works. (M/L,
-  depends on P16.4)
+- **P16.5 — SHIPPED 2026-07-07 — Mouse selection, click interactions, and scrollbar.** New
+  `internal/tui/selection.go`: drag selection with copy-on-release (reusing the existing
+  `copyToClipboard` native-clipboard path), double-click word / triple-click line selection with
+  click-counting + timeout, click-to-focus a message (left accent bar via `renderTranscriptContent`),
+  and a rendered scrollbar glyph column (`renderScrollbar`, backed by `transcriptPane.ScrollbarThumb`)
+  replacing the title-bar "62% ·" text. Selection state is kept in screen-space (pane-relative
+  row/col), not persistent item/offset coordinates — matches real terminal selection semantics
+  (doesn't survive a scroll mid-drag) and is far simpler than mapping onto the virtualized item
+  model. Built on P16.4's `ItemIndexAtY` for line→message hit-testing, as scoped. Two scope
+  narrowings from the original wording: no OSC-52 path exists in the codebase (only the native
+  per-OS clipboard tool path, which is what's reused — "OSC-52/native" in the original item overstated
+  what "existing path" meant), and there's no Esc-key clearing of an active selection/focus (left
+  out to avoid touching the already-carefully-tuned double-tap ESC/interrupt logic elsewhere in
+  `Update()`). See
+  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
 - **P16.6 — Unified dialog overlay + shared filterable list component.** Six ad-hoc modal fields
   (`palette`, `personaPicker`, `sessionPicker`, `timelinePicker`, `securityConfig`, `wizard`) each
   render full-screen via early returns in `render()` — no layering over the dimmed chat, and each
@@ -162,9 +167,9 @@ reference the shipped ones by number.
 polish track exists. Sound/audio cues (opencode-style) — rejected as out of character for the tool.
 A which-key pending-keybind popup — revisit only if P13.3.5 ships chord bindings.
 
-**Sequencing:** P16.1–P16.4 and P16.7 shipped 2026-07-07 (see above). The remaining items are
-listed above in sequencing order already — P16.5 next (now unlocked by P16.4), then P16.6, and
-P16.8/P16.9 as gap-fillers whenever convenient.
+**Sequencing:** P16.1–P16.5 and P16.7 shipped 2026-07-07 (see above). The remaining items are
+listed above in sequencing order already — P16.6 next, then P16.8/P16.9 as gap-fillers whenever
+convenient.
 
 Priority: **High** (explicit user request, 2026-07-07 — this is the TUI-side counterpart of P15's
 web-UI push; the TUI remains the primary surface). Effort: **L overall** — smaller than P15, larger
