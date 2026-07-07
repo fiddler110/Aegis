@@ -150,6 +150,11 @@ type model struct {
 	todoItems       []todoStripItem
 	pendingTodoText string // captured from todo_add call input, matched to result
 
+	// pendingReadPaths is a FIFO queue of read_file paths awaiting their
+	// KindToolResult (which carries no path/ID, only the tool name) — used to
+	// chroma-highlight the result body by file extension (P16.2).
+	pendingReadPaths []string
+
 	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
 	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
 	// every block between the two in place.
@@ -1804,6 +1809,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.changedFiles = nil
 	m.teammates = nil
 	m.timelineEntries = nil
+	m.pendingReadPaths = nil
 	m.streaming = false
 	m.status = "ready"
 
@@ -1817,6 +1823,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 // activity) using the same rendering as a live run.
 func (m *model) loadHistory(msgs []provider.Message) {
 	toolNames := map[string]string{} // tool_use ID → name, for labelling results
+	toolPaths := map[string]string{} // tool_use ID → path, for read_file highlighting (P16.2)
 	for _, msg := range msgs {
 		switch msg.Role {
 		case provider.RoleUser:
@@ -1855,7 +1862,7 @@ func (m *model) loadHistory(msgs []provider.Message) {
 				if name == "" {
 					name = "tool"
 				}
-				m.transcript.append(renderToolResult(m.th, name, r.Content, r.IsError, m.vp.Width(), m.toolMaxLines()) + "\n")
+				m.transcript.append(renderToolResult(m.th, name, r.Content, r.IsError, m.vp.Width(), m.toolMaxLines(), toolPaths[r.ToolUseID]) + "\n")
 			}
 		case provider.RoleAssistant:
 			for _, b := range msg.Content {
@@ -1871,6 +1878,14 @@ func (m *model) loadHistory(msgs []provider.Message) {
 					}
 				case provider.ToolUseBlock:
 					toolNames[v.ID] = v.Name
+					if v.Name == "read_file" {
+						var inp struct {
+							Path string `json:"path"`
+						}
+						if json.Unmarshal(v.Input, &inp) == nil {
+							toolPaths[v.ID] = inp.Path
+						}
+					}
 					m.transcript.append("\n" + renderToolCall(m.th, v.Name, v.Input, m.vp.Width()) + "\n")
 				}
 			}
@@ -1933,7 +1948,12 @@ func (m *model) applyEvent(ev api.Event) {
 					m.fileFrecency = make(map[string]int)
 				}
 				m.fileFrecency[inp.Path]++
-				if ev.Tool != "read_file" {
+				if ev.Tool == "read_file" {
+					// FIFO queue matched by KindToolResult below (P16.2): that
+					// event carries no path/ID, only the tool name, so pairing
+					// relies on call/result ordering per tool name.
+					m.pendingReadPaths = append(m.pendingReadPaths, inp.Path)
+				} else {
 					m.recordChangedFile(inp.Path)
 				}
 			}
@@ -1948,7 +1968,12 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindToolResult:
-		m.transcript.append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width(), m.toolMaxLines()) + "\n")
+		path := ""
+		if ev.Tool == "read_file" && len(m.pendingReadPaths) > 0 {
+			path = m.pendingReadPaths[0]
+			m.pendingReadPaths = m.pendingReadPaths[1:]
+		}
+		m.transcript.append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.vp.Width(), m.toolMaxLines(), path) + "\n")
 		for i := len(m.tools) - 1; i >= 0; i-- {
 			if m.tools[i].name == ev.Tool && m.tools[i].status == "pending" {
 				if ev.ToolIsError {

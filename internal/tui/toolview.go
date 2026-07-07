@@ -3,7 +3,13 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
+	"regexp"
+	"strconv"
 	"strings"
+
+	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 )
 
 // toolMaxLinesCompact is the default line cap for tool results in compact mode.
@@ -62,8 +68,10 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 // shown inline; multi-line output (shell, read, search) is shown as a capped,
 // gutter-marked block instead of being collapsed to one truncated line.
 // maxBodyLines controls the cap for multi-line output; pass a very large number
-// (e.g. 9999) to disable truncation (full mode).
-func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyLines int) string {
+// (e.g. 9999) to disable truncation (full mode). path is the file path
+// associated with the call that produced this result (read_file only, for
+// chroma syntax highlighting — P16.2); empty when unknown or not applicable.
+func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyLines int, path string) string {
 	tag, style := "✓", th.tool
 	if isErr {
 		tag, style = "×", th.toolErr
@@ -82,6 +90,13 @@ func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyL
 	if name == "web_search" && maxLines < maxSearchResultLines {
 		maxLines = maxSearchResultLines
 	}
+
+	if !isErr && name == "read_file" && path != "" {
+		if body, ok := renderReadFileResult(th, path, result, maxLines, width); ok {
+			return strings.TrimRight(style.Render(fmt.Sprintf("%s %s", tag, name))+"\n"+body, "\n")
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString(style.Render(fmt.Sprintf("%s %s", tag, name)) + "\n")
 	b.WriteString(renderBlock(th, result, maxLines, width))
@@ -99,6 +114,15 @@ func renderBlock(th theme, text string, maxLines, width int) string {
 		text = remapANSI16(text, ansiPalette)
 	}
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	return renderLinesBlock(th, lines, maxLines, width, !colored)
+}
+
+// renderLinesBlock renders pre-split lines as an indented, gutter-marked
+// block capped at maxLines, with a "… N more lines" footer when truncated.
+// styleBody applies the uniform toolBody foreground; pass false when lines
+// already carry their own styling (ANSI passthrough or chroma highlighting,
+// P16.2).
+func renderLinesBlock(th theme, lines []string, maxLines, width int, styleBody bool) string {
 	hidden := 0
 	if len(lines) > maxLines {
 		hidden = len(lines) - maxLines
@@ -108,7 +132,7 @@ func renderBlock(th theme, text string, maxLines, width int) string {
 	var b strings.Builder
 	for _, ln := range lines {
 		body := truncate(ln, max(width-6, 16))
-		if !colored {
+		if styleBody {
 			body = th.toolBody.Render(body)
 		}
 		b.WriteString("  " + gutter + body + "\n")
@@ -119,12 +143,66 @@ func renderBlock(th theme, text string, maxLines, width int) string {
 	return b.String()
 }
 
+// renderReadFileResult renders a read_file tool result — content lines
+// carrying the tool's own "N\t<code>" line-number prefix — as a chroma
+// syntax-highlighted, gutter-numbered block (P16.2). ok is false when the
+// result doesn't match that format or no lexer matches path, so the caller
+// falls back to the generic renderBlock path unchanged.
+func renderReadFileResult(th theme, path, result string, maxLines, width int) (string, bool) {
+	raw := strings.Split(strings.TrimRight(result, "\n"), "\n")
+	nums := make([]string, len(raw))
+	codes := make([]string, len(raw))
+	for i, ln := range raw {
+		n, rest, ok := strings.Cut(ln, "\t")
+		if !ok {
+			return "", false
+		}
+		nums[i] = n
+		codes[i] = rest
+	}
+
+	var hi []string
+	if lexers.Match(path) != nil {
+		hi, _ = highlightSource(th, path, strings.Join(codes, "\n"), nil)
+	}
+
+	numW := 0
+	for _, n := range nums {
+		if len(n) > numW {
+			numW = len(n)
+		}
+	}
+	hidden := 0
+	if len(raw) > maxLines {
+		hidden = len(raw) - maxLines
+		nums = nums[:maxLines]
+		codes = codes[:maxLines]
+	}
+
+	bodyW := max(width-numW-9, 12)
+	var b strings.Builder
+	for i, code := range codes {
+		body := th.toolBody.Render(code)
+		if i < len(hi) {
+			body = hi[i]
+		}
+		b.WriteString("  " + th.toolGut.Render(fmt.Sprintf("%*s │ ", numW, nums[i])) + truncate(body, bodyW) + "\n")
+	}
+	if hidden > 0 {
+		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("▶ %d more lines  (/tools full to expand)", hidden)) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n"), true
+}
+
 // diffLines computes a proper unified diff between oldS and newS and returns a
-// list of styled lines (context + removed + added) capped at budget. Hidden
-// reports how many lines were omitted. The algorithm uses a standard LCS DP
-// table so small edits appear as small diffs rather than delete-all/add-all.
-func diffLines(th theme, oldS, newS string, width, budget int) (lines []string, hidden int) {
-	maxW := max(width-4, 8)
+// list of pre-styled, ready-to-print lines (line-number gutter + context/
+// removed/added rows, hunk headers with real ranges) capped at budget. Hidden
+// reports how many lines were omitted. The LCS core is unchanged from the
+// original implementation; P16.3 adds the gutter, real hunk ranges, and
+// word-level intraline emphasis for single-line replacements, and P16.2
+// layers chroma syntax coloring under the +/- background tint wherever path's
+// extension matches a lexer.
+func diffLines(th theme, path, oldS, newS string, width, budget int) (lines []string, hidden int) {
 	oldL := splitDiffLines(oldS)
 	newL := splitDiffLines(newS)
 	edits := buildEdits(oldL, newL)
@@ -145,32 +223,208 @@ func diffLines(th theme, oldS, newS string, width, budget int) (lines []string, 
 		return nil, 0
 	}
 
-	// Emit styled lines; insert @@ separator between non-adjacent spans.
-	prevShown := false
+	// 1-based old/new line numbers per edit, for the gutter and hunk ranges.
+	// onBefore/nnBefore snapshot the running counters *before* each edit, so a
+	// hunk that opens with a pure addition (no old-numbered line of its own)
+	// can still fall back to "old line right before this hunk, plus one".
+	oldNos := make([]int, len(edits))
+	newNos := make([]int, len(edits))
+	onBefore := make([]int, len(edits))
+	nnBefore := make([]int, len(edits))
+	on, nn := 0, 0
 	for i, e := range edits {
-		if !show[i] {
-			prevShown = false
-			continue
-		}
-		if !prevShown && len(lines) > 0 {
-			lines = append(lines, th.diffMeta.Render("  @@ ... @@"))
-		}
-		prevShown = true
-		txt := truncate(e.text, maxW)
+		onBefore[i], nnBefore[i] = on, nn
 		switch e.op {
+		case opEqual:
+			on++
+			nn++
+			oldNos[i], newNos[i] = on, nn
 		case opDel:
-			lines = append(lines, th.diffDel.Render("- "+txt))
+			on++
+			oldNos[i] = on
 		case opAdd:
-			lines = append(lines, th.diffAdd.Render("+ "+txt))
-		default:
-			lines = append(lines, th.diffMeta.Render("  "+txt))
+			nn++
+			newNos[i] = nn
 		}
 	}
+	numW := len(strconv.Itoa(max(on, max(nn, 1))))
+
+	// Detect singleton del→add "replace" pairs (not part of a longer run) for
+	// word-level intraline emphasis instead of whole-line chroma coloring.
+	isPair := make([]bool, len(edits))
+	for i := 0; i+1 < len(edits); i++ {
+		if edits[i].op == opDel && edits[i+1].op == opAdd &&
+			(i == 0 || edits[i-1].op != opDel) &&
+			(i+2 >= len(edits) || edits[i+2].op != opAdd) {
+			isPair[i], isPair[i+1] = true, true
+		}
+	}
+
+	var newBg, oldBg []color.Color
+	if len(newL) > 0 {
+		newBg = make([]color.Color, len(newL))
+	}
+	if len(oldL) > 0 {
+		oldBg = make([]color.Color, len(oldL))
+	}
+	for i, e := range edits {
+		switch e.op {
+		case opAdd:
+			if !isPair[i] {
+				newBg[newNos[i]-1] = colDiffAddBg
+			}
+		case opDel:
+			if !isPair[i] {
+				oldBg[oldNos[i]-1] = colDiffDelBg
+			}
+		}
+	}
+
+	var newHi, oldHi []string
+	if lexers.Match(path) != nil {
+		newHi, _ = highlightSource(th, path, newS, func(l int) color.Color {
+			if l >= 0 && l < len(newBg) {
+				return newBg[l]
+			}
+			return nil
+		})
+		oldHi, _ = highlightSource(th, path, oldS, func(l int) color.Color {
+			if l >= 0 && l < len(oldBg) {
+				return oldBg[l]
+			}
+			return nil
+		})
+	}
+
+	gutter := func(oldNo, newNo int) string {
+		o, n := "", ""
+		if oldNo > 0 {
+			o = strconv.Itoa(oldNo)
+		}
+		if newNo > 0 {
+			n = strconv.Itoa(newNo)
+		}
+		return th.diffGutter.Render(fmt.Sprintf("%*s %*s", numW, o, numW, n))
+	}
+	// plainOr picks the chroma-highlighted line at idx from hi if available,
+	// else renders raw text with the given fallback (tint) style.
+	plainOr := func(hi []string, idx int, raw string, fallback lipgloss.Style) string {
+		if idx >= 0 && idx < len(hi) {
+			return hi[idx]
+		}
+		return fallback.Render(raw)
+	}
+	contentW := max(width-2*numW-6, 8)
+
+	// Precompute contiguous shown ranges (hunks) so each header — which needs
+	// the hunk's full old/new line-count span — can be emitted *before* its
+	// content instead of after (the original single-pass version got this
+	// backwards: it only knew a hunk's extent once the loop reached its end).
+	type hunkRange struct{ start, end int }
+	var hunks []hunkRange
+	for i := 0; i < len(edits); {
+		if !show[i] {
+			i++
+			continue
+		}
+		start := i
+		for i < len(edits) && show[i] {
+			i++
+		}
+		hunks = append(hunks, hunkRange{start, i})
+	}
+	hunkHeader := make(map[int]string, len(hunks))
+	for _, h := range hunks {
+		oStart, nStart, oCount, nCount := 0, 0, 0, 0
+		for i := h.start; i < h.end; i++ {
+			if edits[i].op != opAdd {
+				if oStart == 0 {
+					oStart = oldNos[i]
+				}
+				oCount++
+			}
+			if edits[i].op != opDel {
+				if nStart == 0 {
+					nStart = newNos[i]
+				}
+				nCount++
+			}
+		}
+		if oStart == 0 {
+			oStart = onBefore[h.start] + 1
+		}
+		if nStart == 0 {
+			nStart = nnBefore[h.start] + 1
+		}
+		hunkHeader[h.start] = fmt.Sprintf("@@ -%d,%d +%d,%d @@", oStart, oCount, nStart, nCount)
+	}
+
+	for i := 0; i < len(edits); i++ {
+		if !show[i] {
+			continue
+		}
+		if hdr, ok := hunkHeader[i]; ok {
+			lines = append(lines, th.diffMeta.Render(hdr))
+		}
+
+		e := edits[i]
+		if isPair[i] && e.op == opDel {
+			addI := i + 1
+			oldSeg, newSeg := intralineDiff(th, e.text, edits[addI].text)
+			lines = append(lines, gutter(oldNos[i], 0)+" "+th.diffMarkDel.Render("- ")+truncate(oldSeg, contentW))
+			lines = append(lines, gutter(0, newNos[addI])+" "+th.diffMarkAdd.Render("+ ")+truncate(newSeg, contentW))
+			i++ // consumed the paired opAdd too
+			continue
+		}
+
+		switch e.op {
+		case opDel:
+			body := plainOr(oldHi, oldNos[i]-1, e.text, th.diffDelBg)
+			lines = append(lines, gutter(oldNos[i], 0)+" "+th.diffMarkDel.Render("- ")+truncate(body, contentW))
+		case opAdd:
+			body := plainOr(newHi, newNos[i]-1, e.text, th.diffAddBg)
+			lines = append(lines, gutter(0, newNos[i])+" "+th.diffMarkAdd.Render("+ ")+truncate(body, contentW))
+		default:
+			body := plainOr(newHi, newNos[i]-1, e.text, th.diffMeta)
+			lines = append(lines, gutter(oldNos[i], newNos[i])+"   "+truncate(body, contentW))
+		}
+	}
+
 	if len(lines) > budget {
 		hidden = len(lines) - budget
 		lines = lines[:budget]
 	}
 	return lines, hidden
+}
+
+// wordSplitRe splits text into alternating whitespace/non-whitespace runs so
+// intralineDiff can rejoin them without losing the original spacing.
+var wordSplitRe = regexp.MustCompile(`\s+|\S+`)
+
+// intralineDiff computes a word-level diff between a replaced line pair and
+// renders each side with the changed span emphasized (bold+underline) and
+// the unchanged span in the softer tinted tone — "this word changed" rather
+// than a wholesale red/green line swap (P16.3). Chroma coloring is
+// intentionally not layered on these two lines: token boundaries and word-diff
+// boundaries don't align, so combining them accurately isn't worth the
+// complexity for a single-line emphasis feature.
+func intralineDiff(th theme, oldText, newText string) (oldRendered, newRendered string) {
+	oldW := wordSplitRe.FindAllString(oldText, -1)
+	newW := wordSplitRe.FindAllString(newText, -1)
+	wedits := buildEdits(oldW, newW)
+	var ob, nb strings.Builder
+	for _, we := range wedits {
+		switch we.op {
+		case opEqual:
+			ob.WriteString(th.diffDelBg.Render(we.text))
+			nb.WriteString(th.diffAddBg.Render(we.text))
+		case opDel:
+			ob.WriteString(th.diffIntraDel.Render(we.text))
+		case opAdd:
+			nb.WriteString(th.diffIntraAdd.Render(we.text))
+		}
+	}
+	return ob.String(), nb.String()
 }
 
 // splitDiffLines splits s into trimmed lines without a trailing newline.
@@ -280,7 +534,7 @@ func renderEditDiff(th theme, name string, input json.RawMessage, width int) (st
 	if json.Unmarshal(input, &a) != nil || a.Path == "" {
 		return "", false
 	}
-	lines, hidden := diffLines(th, a.OldString, a.NewString, width, maxDiffLines)
+	lines, hidden := diffLines(th, a.Path, a.OldString, a.NewString, width, maxDiffLines)
 	return assembleDiff(th, name, a.Path, lines, hidden), true
 }
 
@@ -302,7 +556,7 @@ func renderMultiEditDiff(th theme, name string, input json.RawMessage, width int
 			b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("… %d more edit(s)", len(a.Edits)-i)) + "\n")
 			break
 		}
-		lines, hidden := diffLines(th, e.OldString, e.NewString, width, budget)
+		lines, hidden := diffLines(th, e.Path, e.OldString, e.NewString, width, budget)
 		budget -= len(lines)
 		if i == 0 {
 			b.WriteString(th.tool.Render("● "+name+" ") + th.diffMeta.Render(e.Path) + "\n")
@@ -327,7 +581,7 @@ func renderWriteDiff(th theme, name string, input json.RawMessage, width int) (s
 	if json.Unmarshal(input, &a) != nil || a.Path == "" {
 		return "", false
 	}
-	lines, hidden := diffLines(th, "", a.Content, width, maxDiffLines)
+	lines, hidden := diffLines(th, a.Path, "", a.Content, width, maxDiffLines)
 	return assembleDiff(th, name, a.Path, lines, hidden), true
 }
 
@@ -345,7 +599,19 @@ func renderShellCall(th theme, name string, input json.RawMessage, width int) (s
 	}
 	var b strings.Builder
 	b.WriteString(header + "\n")
-	b.WriteString(renderBlock(th, a.Command, maxToolResultLines, width))
+	// P16.2: highlight the command as shell syntax ("fenced code in tool
+	// output") — a fake ".sh" filename is enough to steer chroma's
+	// extension-based lexer match, since the command itself carries no path.
+	if hi, ok := highlightSource(th, "cmd.sh", a.Command, nil); ok {
+		lines := strings.Split(strings.TrimRight(a.Command, "\n"), "\n")
+		if len(hi) == len(lines) {
+			b.WriteString(renderLinesBlock(th, hi, maxToolResultLines, width, false))
+		} else {
+			b.WriteString(renderBlock(th, a.Command, maxToolResultLines, width))
+		}
+	} else {
+		b.WriteString(renderBlock(th, a.Command, maxToolResultLines, width))
+	}
 	return strings.TrimRight(b.String(), "\n"), true
 }
 

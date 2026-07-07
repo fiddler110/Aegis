@@ -9,12 +9,26 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P16.1** (TUI notifications & attention system) shipped: terminal
+**Last updated:** 2026-07-07 — **P16.2** (chroma syntax highlighting) and **P16.3** (diff
+presentation upgrade) shipped together, as the roadmap's suggested sequencing called for ("one
+visual unit"). New `internal/tui/highlight.go`: a `chroma.Style` built from the existing
+colorscheme palette (P16.2), applied to diff added/removed/context lines, `read_file` result
+blocks (stripping and re-deriving the gutter from the tool's own "N\t" line-number prefix), and
+shell-command previews. `diffLines` (`toolview.go`) was rewritten for P16.3: a real line-number
+gutter, hunk headers with actual `@@ -a,b +c,d @@` ranges (previously a bare placeholder), tinted
+add/removed row backgrounds (`colDiffAddBg`/`colDiffDelBg`, derived by blending the theme's
+success/destructive roles into the background so the tint stays on-theme), and word-level
+intraline emphasis for single-line replacements (reusing the existing generic LCS `buildEdits` at
+word granularity rather than a new diff algorithm). P16.2/P16.3 also fixed a same-session bug
+caught before commit: the first hunk-header implementation computed the header only once its hunk's
+full extent was known, i.e. *after* emitting that hunk's lines — headers must precede their
+content, so hunk boundaries are now precomputed before the render pass. See
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.4–P16.9
+remain open.
+**Previously, 2026-07-07:** **P16.1** (TUI notifications & attention system) shipped: terminal
 bell + OSC 9/777 desktop notification on stream-end/approval-pending/error (suppressed while the
 terminal is focused, via bubbletea v2's `tea.FocusMsg`/`BlurMsg`), OSC 0/2 window-title updates
-reflecting streaming/ready/approval state, new `tui.notifications` config + `/notify` command. See
-[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.2–P16.9
-remain open.
+reflecting streaming/ready/approval state, new `tui.notifications` config + `/notify` command.
 **Previously, 2026-07-06:** **P15.1** (web UI frontend architecture) shipped: moved `aegis ui`
 off the old dependency-free single-file page to a bundled Vite + Preact + TypeScript frontend
 (`internal/server/webui/frontend/`), built output committed at `internal/server/webui/dist/` and
@@ -111,8 +125,78 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P16 items (TUI Polish & Interaction Parity)
 
-The rest of P16 (P16.2–P16.9) is still open — see
+The rest of P16 (P16.4–P16.9) is still open — see
 [roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
+
+### P16.2 + P16.3 — SHIPPED 2026-07-07 — Chroma syntax highlighting + diff presentation upgrade
+
+Shipped together per the roadmap's suggested sequencing — P16.3's chroma coloring depends on
+P16.2, and the roadmap called them "one visual unit."
+
+**P16.2 — chroma highlighting.** No code highlighting existed outside glamour's assistant-markdown
+fences: tool results, `read_file` excerpts, and diff bodies were flat single-color text. New
+`internal/tui/highlight.go`:
+
+- `buildChromaStyle()` builds a `chroma.Style` from the *existing* colorscheme roles (keyword →
+  `colKeyword`, strings → `colSuccessRole`, comments → `colFgMost` italic, etc. — the same TQ10
+  palette that already backs glamour and the ANSI-16 remap) rather than picking an unrelated
+  built-in chroma theme, so highlighted code reads as part of one coherent theme in both dark and
+  light mode. Built fresh in `newTheme()`, so `/theme` switching rebuilds it like every other
+  theme-derived style.
+- `highlightSource(th, path, source, bgForLine)` matches a lexer via `lexers.Match(path)` (chroma's
+  filename/extension matcher), tokenizes the *whole* source in one pass (not line-by-line — that
+  keeps multi-line constructs like block comments correctly lexed), and renders each token through
+  lipgloss, splitting on embedded newlines into one pre-styled string per line. Returns
+  `ok = false` on no lexer match / empty source, so every call site has a plain-text fallback for
+  free. `bgForLine` is the seam P16.3 uses to bake a per-line background tint into each token's
+  style at render time (necessary because raw ANSI resets can't be "stacked" — a background applied
+  by wrapping an already-rendered, already-reset string afterward doesn't survive).
+- Applied to: diff added/removed/context lines (P16.3, below); `read_file` result bodies — the
+  read tool's own `"N\t<code>"` line-number prefix is stripped before tokenizing and a matching
+  gutter re-derived, so the code content chroma sees is clean; and shell-command previews in
+  `renderShellCall` (a synthetic `"cmd.sh"` filename steers the lexer match since the command
+  itself carries no path).
+- Highlighting happens once, when a tool call/result event builds its transcript block's `raw`
+  string — `transcriptBlock` (P16.4's predecessor, TQ1) already caches that raw string across
+  resize/redraw, only re-wrapping for width, so no separate highlight cache was needed to satisfy
+  the roadmap's "chroma on every re-render would fight the P8 render-cost work" concern.
+
+**P16.3 — diff presentation upgrade.** `diffLines` (`toolview.go`) kept its LCS core (`buildEdits`/
+`lcsIndices`, both untouched) but the presentation layer was rewritten:
+
+- **Line-number gutter** — old/new columns (`%*d %*d`), width sized to the largest line number in
+  the diff.
+- **Hunk headers with real ranges** — `@@ -oldStart,oldCount +newStart,newCount @@` replacing the
+  old bare `@@ ... @@` placeholder. Computing a header requires knowing its hunk's full extent
+  first, so hunk boundaries (`show[]` windowing, unchanged from before) are precomputed into
+  contiguous ranges *before* the render pass, and each header is emitted at its hunk's first line.
+  (The first implementation got this backwards — it only knew a hunk's line-count span once the
+  loop reached the hunk's *end*, so headers rendered after their content; caught by a manual
+  preview render before commit, fixed by precomputing ranges instead of tracking state through a
+  single forward pass.)
+- **Chroma coloring under the +/- tint** — `colDiffAddBg`/`colDiffDelBg` (new `colorscheme.go`
+  roles, `blend(colBgBase, colSuccessRole/colDestructive, 0.16)` — linear RGB interpolation so the
+  tint is derived from the active theme's own roles rather than a hardcoded hex per scheme) are
+  passed as `highlightSource`'s `bgForLine` for pure-add/pure-del lines; context lines get chroma
+  coloring with no tint. Falls back to the old flat green/red (now on a tinted background
+  unconditionally, chroma or not) when no lexer matches the path.
+- **Word-level intraline emphasis** — a singleton del→add pair (one removed line immediately
+  followed by one added line, not part of a longer run) is detected and diffed at word granularity
+  by reusing `buildEdits` generically (it was already `[]string`-typed, not line-specific) on a
+  whitespace/non-whitespace token split. The changed span renders bold+underline; the unchanged
+  span renders in the softer tinted tone — chroma coloring is intentionally skipped for these two
+  lines, since token boundaries and word-diff boundaries don't align and reconciling them wasn't
+  worth the complexity for a single-line emphasis feature.
+- Split side-by-side view remains explicitly deferred per the roadmap (unified-with-line-numbers
+  covers the transcript case).
+
+Tests: `internal/tui/highlight_test.go` (lexer match/no-match/empty-source, `bgForLine` threading)
+and `internal/tui/toolview_test.go` (hunk header ordering and real ranges, singleton-pair intraline
+emphasis, no-op diff returns empty, unknown-extension fallback, whole-file write-diff addition,
+`read_file` prefix parsing + fallback on malformed input, end-to-end `renderToolResult` with/without
+a path). The roadmap's suggested golden-file-matrix convention (render at a width matrix, snapshot,
+`AEGIS_EVAL_UPDATE=1` regen) was not adopted this round — scoped out to keep this change to the
+render logic itself; worth revisiting if diff-rendering regressions become a recurring problem.
 
 ### P16.1 — SHIPPED 2026-07-07 — Notifications & attention system
 

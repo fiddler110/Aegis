@@ -10,8 +10,8 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P16.2–P16.9** (TUI polish & interaction parity — gap analysis vs crush/opencode/
-Claude Code, added 2026-07-07; **P16.1 shipped 2026-07-07**, see below), **P15.2–P15.11** (web UI
+Open items: **P16.4–P16.9** (TUI polish & interaction parity — gap analysis vs crush/opencode/
+Claude Code, added 2026-07-07; **P16.1–P16.3 shipped 2026-07-07**, see below), **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
 engagement tooling, P13.7 LaTeX report skill), **P9.4** (per-task model routing), **P6.1** (mid-turn
@@ -80,24 +80,40 @@ bubbletea v2), and the rest of the charm stack.
   directly. **Subsumes P13.3.4** (background-task attention indicator) — not implemented
   separately; deferred until a concrete failed-background-agent trigger exists, to route through
   this same seam then. See [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
-- **P16.2 — Syntax highlighting via chroma.** No code highlighting exists outside glamour's
-  assistant-markdown fences: tool results, shell output (ANSI-16 remap only), read_file excerpts,
-  and diff bodies are all flat single-color text. Add `alecthomas/chroma/v2` (MIT) with a lexer
-  keyed off file extension (edit/write/read tools already carry `path`), styled from the existing
-  `colorscheme.go` palette so both themes stay coherent. Applies to: diff added/removed/context
-  lines (see P16.3), `read_file` result blocks, and fenced code in tool output. Cache highlighted
-  output per block — chroma on every re-render would fight the P8 render-cost work. (M)
-- **P16.3 — Diff presentation upgrade.** `toolview.go`'s LCS diff is correct but visually minimal:
-  no line numbers, no intraline (word-level) change emphasis, flat +/- coloring, hard 24-line cap.
-  Keep the existing `diffLines` LCS core and add a presentation layer: line-number gutter (old/new),
-  intraline diff within changed line pairs (highlight the changed span, not the whole line), chroma
-  syntax coloring under the +/- tint (depends on P16.2), and hunk headers with real line ranges
-  instead of the bare `@@ ... @@`. Side-by-side split view (crush `diffview` has one, golden-tested
-  per width/height) is explicitly **deferred** — unified-with-line-numbers covers the transcript
-  case; split view only pays off in a dedicated review surface Aegis doesn't have. Since edit diffs
-  dominate an agent transcript, this is the highest-visibility per-message polish item. Adopt
-  crush's golden-file testing *convention* (render at a matrix of widths, snapshot) using the
-  existing `AEGIS_EVAL_UPDATE=1` regen pattern. (M)
+- **P16.2 — SHIPPED 2026-07-07 — Syntax highlighting via chroma.** New `internal/tui/highlight.go`:
+  a `chroma.Style` built from the existing `colorscheme.go` palette (not an unrelated built-in
+  theme), lexer matched by file extension via `lexers.Match(path)`, applied to diff added/removed/
+  context lines (P16.3), `read_file` result blocks (its own "N\t" line-number prefix stripped and
+  re-derived as a gutter), and shell-command previews. Highlighting happens once per tool-call/
+  result event, when the transcript block's raw string is built — the pre-existing per-block cache
+  (TQ1) already keeps that from re-running on resize/redraw, so no separate highlight cache was
+  needed. See [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity).
+- **P16.3 — SHIPPED 2026-07-07 — Diff presentation upgrade.** Shipped together with P16.2 per this
+  section's sequencing note, since the chroma coloring depends on it. `diffLines` kept its LCS core
+  (`buildEdits`/`lcsIndices` unchanged) and gained a line-number gutter (old/new), hunk headers with
+  real `@@ -a,b +c,d @@` ranges, tinted add/removed backgrounds (`colDiffAddBg`/`colDiffDelBg`,
+  blended from the theme's own success/destructive roles) with chroma coloring layered under the
+  tint, and word-level intraline emphasis for singleton line replacements (reusing `buildEdits`
+  generically at word granularity — no new diff algorithm). Side-by-side split view remains
+  explicitly deferred, as scoped. See
+  [releases.md](releases.md#shipped--p16-items-tui-polish--interaction-parity) for the full design
+  notes, including a same-session hunk-header ordering bug caught before commit.
+
+Remaining open items are listed below **in priority/sequencing order** (not numeric order — P16.7
+ships before P16.4 despite the lower number, since it's small and independent while P16.4 is the
+track's biggest single effort). The P-numbers themselves are stable identifiers, not a reading
+order; don't renumber them to match position, since releases.md and prior session history already
+reference the shipped ones by number.
+
+- **P16.7 — Runtime-loadable themes.** Two hardcoded schemes (dark/light) vs opencode's ~30 JSON
+  theme assets + user themes. `colorscheme.go` already centralizes every color: add a loader for
+  named theme files (JSON or YAML to match config conventions) from `~/.aegis/themes/` and project
+  `.aegis/themes/`, ship 4–6 popular built-ins (catppuccin, dracula, gruvbox, tokyonight) embedded
+  the same way builtin skills are, and extend `/theme` + `tui.theme` to accept any loaded name.
+  Constraint from TQ10 still applies: lipgloss styles capture colors at creation time, so theme
+  switching keeps the existing apply-before-styles-build path (mid-session switch = rebuild styles,
+  which P16.4's cache invalidation must account for). No dependency on any other open P16 item —
+  **next up**. (S/M)
 - **P16.4 — Transcript as a cached per-message item list (architecture investment).** The transcript
   is one big string re-joined into a `bubbles/viewport` on every refresh; streaming cost is tamed by
   the safe-boundary rewrap, but the monolith blocks per-message interaction and degrades on very
@@ -131,14 +147,6 @@ bubbletea v2), and the rest of the charm stack.
   Then add the dialogs users notice are missing: **model picker** (grouped by provider, current
   model marked — today model choice is config/CLI-only mid-session), and **quit confirmation** when
   a stream is active. File-picker dialog is deferred (@ completion covers the case). (M/L)
-- **P16.7 — Runtime-loadable themes.** Two hardcoded schemes (dark/light) vs opencode's ~30 JSON
-  theme assets + user themes. `colorscheme.go` already centralizes every color: add a loader for
-  named theme files (JSON or YAML to match config conventions) from `~/.aegis/themes/` and project
-  `.aegis/themes/`, ship 4–6 popular built-ins (catppuccin, dracula, gruvbox, tokyonight) embedded
-  the same way builtin skills are, and extend `/theme` + `tui.theme` to accept any loaded name.
-  Constraint from TQ10 still applies: lipgloss styles capture colors at creation time, so theme
-  switching keeps the existing apply-before-styles-build path (mid-session switch = rebuild styles,
-  which P16.4's cache invalidation must account for). (S/M)
 - **P16.8 — Clipboard image paste.** `PasteMsg` handling only recognizes pasted *file paths* with
   image extensions; pasting actual image data from the clipboard (screenshot workflows — Claude
   Code and crush both support this) does nothing. Read image bytes from the OS clipboard on a paste
@@ -156,10 +164,9 @@ bubbletea v2), and the rest of the charm stack.
 polish track exists. Sound/audio cues (opencode-style) — rejected as out of character for the tool.
 A which-key pending-keybind popup — revisit only if P13.3.5 ships chord bindings.
 
-**Suggested sequencing:** ~~P16.1 first~~ **shipped 2026-07-07** → P16.2 + P16.3 together (one
-visual unit) → P16.7 (independent, small) → P16.4 (the architecture investment, own session(s)) →
-P16.5 (unlocked by P16.4) → P16.6 → P16.8/P16.9 as gap-fillers. P16.2/P16.3/P16.7/P16.8 have no
-dependency on each other and can each ship standalone.
+**Sequencing:** P16.1–P16.3 shipped 2026-07-07 (see above). The remaining items are listed above in
+sequencing order already — P16.7 next, then P16.4 (own session(s), don't combine with anything
+else), then P16.5 (unlocked by P16.4), P16.6, and P16.8/P16.9 as gap-fillers whenever convenient.
 
 Priority: **High** (explicit user request, 2026-07-07 — this is the TUI-side counterpart of P15's
 web-UI push; the TUI remains the primary surface). Effort: **L overall** — smaller than P15, larger

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 )
 
 // The semantic color roles this file's styles are built from live in
@@ -44,8 +45,25 @@ type theme struct {
 	toolBody lipgloss.Style // multi-line tool output body
 	toolGut  lipgloss.Style // gutter rule beside tool output
 
+	// P16.3: diff presentation upgrade — line-number gutter, tinted
+	// add/removed row backgrounds (chroma tokens render "under" these, see
+	// highlight.go), and word-level intraline emphasis for replaced lines.
+	diffGutter   lipgloss.Style
+	diffAddBg    lipgloss.Style
+	diffDelBg    lipgloss.Style
+	diffMarkAdd  lipgloss.Style
+	diffMarkDel  lipgloss.Style
+	diffIntraAdd lipgloss.Style
+	diffIntraDel lipgloss.Style
+
 	thinking    lipgloss.Style // "✻ thinking" header
 	thinkingDim lipgloss.Style // extended-thinking body
+
+	// chroma is the token-type → colour mapping (P16.2) built from the
+	// active scheme's palette so highlighted code, diffs, and read_file
+	// output stay coherent with the rest of the theme. Rebuilt whenever
+	// newTheme runs (theme switch, TQ10).
+	chroma *chroma.Style
 }
 
 func newTheme() theme {
@@ -82,7 +100,17 @@ func newTheme() theme {
 		toolBody: lipgloss.NewStyle().Foreground(colTextDim),
 		toolGut:  lipgloss.NewStyle().Foreground(colSeparator),
 
+		diffGutter:   lipgloss.NewStyle().Foreground(colTextMuted),
+		diffAddBg:    lipgloss.NewStyle().Background(colDiffAddBg).Foreground(colSuccess),
+		diffDelBg:    lipgloss.NewStyle().Background(colDiffDelBg).Foreground(colDanger),
+		diffMarkAdd:  lipgloss.NewStyle().Background(colDiffAddBg).Foreground(colSuccess).Bold(true),
+		diffMarkDel:  lipgloss.NewStyle().Background(colDiffDelBg).Foreground(colDanger).Bold(true),
+		diffIntraAdd: lipgloss.NewStyle().Background(colDiffAddBg).Foreground(colSuccess).Bold(true).Underline(true),
+		diffIntraDel: lipgloss.NewStyle().Background(colDiffDelBg).Foreground(colDanger).Bold(true).Underline(true),
+
 		thinking:    lipgloss.NewStyle().Foreground(colTextMuted).Bold(true),
 		thinkingDim: lipgloss.NewStyle().Foreground(colTextMuted).Italic(true),
+
+		chroma: buildChromaStyle(),
 	}
 }
