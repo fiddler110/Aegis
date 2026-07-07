@@ -290,4 +290,3 @@ func newSessionsPruneCmd() *cobra.Command {
 	cmd.Flags().IntVar(&days, "days", 0, "delete sessions not updated in this many days (overrides server config)")
 	return cmd
 }
-

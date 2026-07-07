@@ -56,12 +56,12 @@ type ripgrepInstalledMsg struct{ err error }
 type wizardPhase int
 
 const (
-	wPhaseProvider           wizardPhase = iota // huh form: provider select
-	wPhaseDiscovery                             // async model discovery
-	wPhaseConfig                                // huh form: settings
-	wPhaseSaving                                // async config save
-	wPhaseRipgrep                               // huh confirm: install ripgrep?
-	wPhaseRipgrepInstalling                     // async ripgrep install (brew only)
+	wPhaseProvider          wizardPhase = iota // huh form: provider select
+	wPhaseDiscovery                            // async model discovery
+	wPhaseConfig                               // huh form: settings
+	wPhaseSaving                               // async config save
+	wPhaseRipgrep                              // huh confirm: install ripgrep?
+	wPhaseRipgrepInstalling                    // async ripgrep install (brew only)
 )
 
 // ─── Model ────────────────────────────────────────────────────────────────────
@@ -86,11 +86,11 @@ type wizardModel struct {
 	// Discovered / curated model options
 	modelOpts []huh.Option[string]
 
-	done          bool
-	saved         bool
-	saveErr       string
+	done           bool
+	saved          bool
+	saveErr        string
 	confirmRipgrep bool
-	ripgrepMsg    string // shown after install attempt (info or error)
+	ripgrepMsg     string // shown after install attempt (info or error)
 
 	width  int
 	height int

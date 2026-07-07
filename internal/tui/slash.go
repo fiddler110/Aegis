@@ -575,6 +575,23 @@ func (d *SlashDispatcher) cmdTheme(args []string) SlashResult {
 	return SlashResult{Output: "\x00theme " + name}
 }
 
+// cmdNotify sets the P16.1 attention-system mode live, same pattern as
+// cmdTheme: purely local TUI state, validated here and applied via the
+// "\x00notify "-prefixed sentinel (see the slashResultMsg case in tui.go).
+// This session only: set tui.notifications in config to persist.
+func (d *SlashDispatcher) cmdNotify(args []string) SlashResult {
+	if len(args) == 0 {
+		return SlashResult{Output: "\x00notify-show"}
+	}
+	name := strings.ToLower(strings.TrimSpace(args[0]))
+	switch name {
+	case "off", "bell", "desktop", "both":
+		return SlashResult{Output: "\x00notify " + name}
+	default:
+		return SlashResult{Output: fmt.Sprintf("Unknown notify mode %q (want off, bell, desktop, or both).", args[0]), IsError: true}
+	}
+}
+
 // cmdStatus is the P14.5 daemon/session health surface: daemon reachability,
 // provider/model, sandbox backend + any fallback reason (previously only
 // ever shown once, to stderr, before the TUI took over the terminal — see
