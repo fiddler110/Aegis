@@ -1,8 +1,9 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P16.9 shipped — in-terminal half-block image thumbnails, closing out
-the P16 TUI polish & interaction parity track added the same day, from the crush/opencode/Claude
-Code gap analysis)
+**Last updated:** 2026-07-07 (P13.7 shipped — `latex-report` builtin skill + `/report` command,
+closing out the last P13 item with a real gap; P16.9 shipped earlier the same day — in-terminal
+half-block image thumbnails, closing out the P16 TUI polish & interaction parity track from the
+crush/opencode/Claude Code gap analysis)
 
 This document tracks only **open** work — what's next. For shipped-feature history and full design
 rationale behind completed items, see [releases.md](releases.md).
@@ -14,11 +15,11 @@ rationale behind completed items, see [releases.md](releases.md).
 Open items: **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
-engagement tooling, P13.7 LaTeX report skill), **P9.4** (per-task model routing), **P6.1** (mid-turn
+engagement tooling), **P9.4** (per-task model routing), **P6.1** (mid-turn
 state persistence).
 
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
-15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.8, P14 (all of P14.1–P14.10), the
+15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.7/P13.8, P14 (all of P14.1–P14.10), the
 TQ TUI track, P15.1, P16 (all of P16.1–P16.9), and the 2026-07-06 fable-review.md remediation
 (CI/CodeQL/Dependabot, Windows token ACL, compiler-enforced daily-cap guard, `aegis harden`,
 plan-mode network gating, release workflow, server/TUI file splits, fuzz coverage, live-model eval
@@ -212,30 +213,6 @@ TUI surface requirement: P13.4.1 (notebook) and P13.4.4 (status digest) each nee
 
 Priority: Low (interesting, not urgent), Effort: M overall. P13.4.5 must not adopt Nebula Pro's
 undocumented autonomous-mode pattern.
-
-### P13.7 — LaTeX report writing: consolidation skill
-
-Audited against the current codebase: `latex_build`/`latex_new_document` tools already exist
-(`internal/tool/builtin/latex.go`) with a built-in "report" document-class style (fancy headers,
-code-listing styling, bibliography support), and the `report-writer` persona already references
-them. The original framing of this item ("incorporate LaTeX use") no longer matches the codebase —
-the capability exists.
-
-The real gap: no skill walks through the specific ask — consolidating a large number of existing
-markdown research/planning docs into one coherent LaTeX report — the way `html-report` bundles a
-template + validator + steps for its narrower single-report case.
-
-- **P13.7.1** — New builtin skill `internal/skills/builtin/latex-report/SKILL.md` (mirrors
-  `html-report`'s pattern): steps for gathering/reading the source markdown docs, synthesizing a
-  section outline, calling `latex_new_document(style="report")`, filling sections from the source
-  material, `latex_build`, and reporting the output PDF path. Skill (progressive disclosure), not
-  always-loaded — triggered on phrases like "consolidate these into a report", "write this up as a
-  LaTeX report". (M)
-
-TUI surface requirement: add a `/report [latex] <sources…>` slash entry point that kicks off the
-consolidation skill, rather than depending on trigger-phrase detection.
-
-Priority: Low, Effort: M.
 
 ### P13 cross-cutting requirement — every new capability must ship its in-session TUI surface
 

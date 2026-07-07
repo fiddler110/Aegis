@@ -844,6 +844,28 @@ func (d *SlashDispatcher) cmdThreatModel(args []string) SlashResult {
 	return SlashResult{Message: prompt}
 }
 
+// cmdReport sends a message that directly invokes the html-report or
+// latex-report skill (P13.7 TUI-surface requirement), so a user driving the
+// TUI has a discoverable entry point into report consolidation instead of
+// depending on the model noticing a trigger phrase in free text.
+func (d *SlashDispatcher) cmdReport(args []string) SlashResult {
+	skill := "html-report"
+	if len(args) > 0 && strings.EqualFold(args[0], "latex") {
+		skill = "latex-report"
+		args = args[1:]
+	}
+	sources := strings.TrimSpace(strings.Join(args, " "))
+
+	var prompt strings.Builder
+	fmt.Fprintf(&prompt, "Load the %s skill and consolidate ", skill)
+	if sources != "" {
+		fmt.Fprintf(&prompt, "the following source docs into one coherent report: %s.", sources)
+	} else {
+		prompt.WriteString("the relevant existing markdown docs in this project into one coherent report. Ask me which docs to include if it isn't already clear from context.")
+	}
+	return SlashResult{Message: prompt.String()}
+}
+
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

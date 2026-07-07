@@ -176,6 +176,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdThreatModel,
 		},
 		{
+			name: "report", argHint: "[latex] <sources…>", needsArgs: true,
+			shortDesc:    "Consolidate markdown docs into a report (html or latex/PDF)",
+			detailedHelp: "/report [latex] <sources…>\n  Loads a report-consolidation skill and starts writing. Names the source markdown docs (files, globs, or a directory) to synthesize into one coherent report.\n  No 'latex': loads the html-report skill — a single self-contained, shareable .html file.\n  With 'latex': loads the latex-report skill instead — a formally structured LaTeX document built via latex_new_document/latex_build, output as PDF.\n  e.g. /report research/*.md  or  /report latex research/roadmap.md research/releases.md\n  Spends a model turn, same as /debate and /threat-model — a discoverable entry point instead of relying on the model noticing a trigger phrase in free text.",
+			handler:      (*SlashDispatcher).cmdReport,
+		},
+		{
 			name: "session", argHint: "[list]", needsArgs: true,
 			shortDesc:    "Show session info or list sessions",
 			detailedHelp: "/session [list]\n  No args: show current session info.\n  list: show all sessions.",

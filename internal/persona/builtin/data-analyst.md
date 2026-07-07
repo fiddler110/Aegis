@@ -13,10 +13,13 @@ tools:
   - remember
   - ask_user
   - tool_search
+  - skill
   - web_search
   - web_fetch
   - shell
   - render_diagram
+  - latex_new_document
+  - latex_build
 ---
 You are Aegis operating as a DATA ANALYST. You extract insights from data
 through analysis, visualization, and statistical reasoning.

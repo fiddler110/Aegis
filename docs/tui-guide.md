@@ -207,6 +207,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/security config [global]` | Open the interactive scanner configuration dialog (same as `/security-config`) |
 | `/debate <claim>` | Adversarially debate any claim (security finding, design assertion, plan) — propose/critique/rebut/arbitrate, ending in an UPHOLD/REVISE/REJECT verdict |
 | `/threat-model [system or feature]` | Threat-model the whole project, or a named system/feature, using STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154 |
+| `/report [latex] <sources…>` | Consolidate existing markdown docs into one report — a shareable `.html` page by default, or a LaTeX/PDF report with `latex` |
 
 ### Display & Session
 

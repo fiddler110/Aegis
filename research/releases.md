@@ -667,7 +667,7 @@ the `npm run build` step for frontend edits.
 
 ## Shipped — P13 items (Security & Capability Enhancements)
 
-The other P13 items (P13.3/P13.4/P13.7) are still open — see
+The other P13 items (P13.3/P13.4) are still open — see
 [roadmap.md](roadmap.md#open-work--p13-security--capability-enhancements).
 
 ### P13.2 — SHIPPED 2026-07-06 — trufflehog secret scanner with opt-in live verification
@@ -869,6 +869,48 @@ that framework's process exactly.
   `docs/configuration.md`, `docs/memory-and-knowledge.md`, and `CLAUDE.md`'s built-in-skills lists
   updated; the pre-existing `redteam-engagement` skill was also missing from those same lists
   (a stale-docs bug predating this change) and got added at the same time.
+
+### P13.7 — SHIPPED 2026-07-07 — LaTeX report consolidation skill (`latex-report`) + `/report` command
+
+Closed the last open P13 item. Audited before building: `latex_new_document`/`latex_build`
+(`internal/tool/builtin/latex.go`) and the `report-writer` persona already existed — the original
+roadmap framing ("incorporate LaTeX use") no longer matched the codebase. The real gap was the same
+shape as `threat-modeling` filled for `security-architect`: no skill walked through the specific ask
+of consolidating a number of existing markdown docs into one coherent LaTeX report, the way
+`html-report` bundles a template + validator + steps for its narrower single-report case.
+
+- New `internal/skills/builtin/latex-report/SKILL.md`, mirroring `html-report`'s pattern: gather and
+  fully read the source markdown docs, synthesize a section outline (merge overlapping material,
+  flag unresolved contradictions rather than silently picking one), scaffold with
+  `latex_new_document(style="report", sections=[...])`, fill each section from the source material
+  (converting markdown tables/code fences/lists/callouts to their LaTeX equivalents, escaping LaTeX
+  special characters), `latex_build`, then report the output PDF path.
+- New `/report [latex] <sources…>` TUI command (`commandDefs` in `internal/tui/commands.go`, handler
+  `cmdReport` in `internal/tui/slash.go`) — the P13 cross-cutting TUI-surface requirement. No `latex`
+  arg loads `html-report` (already existed as a skill but had no dedicated slash entry point either);
+  `latex` loads the new skill instead. Automatically covered by the existing P14.1/P14.10
+  command-surface sync tests since it's a `commandDefs` entry.
+- Two bundled companion scripts (Python 3, stdlib only, same pattern as `html-report`'s
+  `validate_report.py`): `analyze_sources.py` prints each source doc's heading tree, word/table/
+  code-block counts, and open TODO/FIXME markers, so the section-outline step starts from an
+  accurate structural map instead of whatever the model happened to notice while skimming;
+  `escape_latex.py` escapes LaTeX special characters (`# $ % & _ { } ~ ^ \`) in prose spans pulled
+  from markdown, since a missed `_` or `%` copied verbatim is a reliable way to fail `latex_build`.
+- User-requested follow-up in the same session: made the skill (and skill-loading generally) usable
+  from any persona, not just `report-writer`. The skill index itself was already persona-agnostic
+  (`skills.BuildIndex` isn't filtered by active persona) — the actual gap was that the `skill` tool
+  wasn't in *any* built-in persona's advisory `Tools` list (only `general`, which leaves `Tools`
+  empty/unrestricted, was unaffected), so loading any skill under most personas triggered
+  `PersonaToolGate`'s confirmation prompt in the TUI every time. Added `skill` to the 17 non-debate-
+  role personas' `Tools` lists (debate roles — `critic`/`arbiter`/`security-critic`/
+  `security-arbiter` — are deliberately minimal and untouched), plus `latex_new_document`/
+  `latex_build` to the 16 of those that didn't already carry them (`report-writer` already had both).
+- `docs/tui-guide.md`, `docs/configuration.md`, `docs/memory-and-knowledge.md`, and `CLAUDE.md`'s
+  built-in-skills lists updated to include `latex-report`.
+
+All P13 items (P13.1–P13.8) are now shipped except P13.3 (terminal enhancements) and P13.4
+(nebula-inspired engagement tooling), both still open — see
+[roadmap.md](roadmap.md#open-work--p13-security--capability-enhancements).
 
 ---
 

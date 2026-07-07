@@ -440,7 +440,8 @@ personas:
 # ── Built-in skills ───────────────────────────────────────────────────────────
 # Skills embedded in the Aegis binary (content-review, html-report,
 # security-audit, architecture-diagram, debug-investigation,
-# redteam-engagement, threat-modeling — see `aegis skills list`). Empty by
+# redteam-engagement, threat-modeling, latex-report — see `aegis skills
+# list`). Empty by
 # default: they stay dormant (no system-prompt cost) until named here, via
 # `aegis skills enable <name>`, or
 # the /skills TUI command. Project/user skill files (.aegis/skills/,
