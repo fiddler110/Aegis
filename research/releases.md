@@ -9,7 +9,17 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P16.7** (runtime-loadable themes) shipped: new
+**Last updated:** 2026-07-07 — **P16.8** (clipboard image paste) shipped: new
+`internal/tui/clipboard_image.go` reads an image directly off the OS clipboard (not a pasted file
+path) into a temp PNG, per-OS the same way `copyToClipboard` already is — `System.Windows.Forms.
+Clipboard` + `Bitmap.Save` via an `-Sta` PowerShell call on Windows (verified end-to-end against a
+real clipboard image and against clipboard text with no image), `pngpaste` on macOS, `wl-paste`/
+`xclip -t image/png` on Linux. New `ctrl+v` keybinding plus a `/paste-image` slash-command fallback
+for terminals that intercept ctrl+v themselves; both feed the existing `@image:` attachment-token
+path, so no daemon-side changes were needed. See
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. Only P16.9
+remains open in the P16 track.
+**Previously, 2026-07-07:** **P16.7** (runtime-loadable themes) shipped: new
 `internal/tui/theme_loader.go` derives a full `colorScheme` from a `themeFile` JSON schema
 (background/foreground + the standard 16-color ANSI palette — the shape most published terminal
 color schemes already ship in) by blending, reusing P16.3's `blend()` helper. Four embedded
@@ -17,8 +27,7 @@ built-ins (catppuccin, dracula, gruvbox, tokyonight) ship the same way builtin s
 loader for project `.aegis/themes/<name>.json` and user `~/.aegis/themes/<name>.json` (project
 wins). `/theme` and `tui.theme` now accept any of dark/light/builtin/custom name; an unknown name
 lists everything currently resolvable instead of a fixed "want dark or light". See
-[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.4–P16.6 have
-since also shipped (see that section); only P16.8–P16.9 remain open.
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below.
 **Previously, 2026-07-07:** **P16.2** (chroma syntax highlighting) and **P16.3** (diff
 presentation upgrade) shipped together, as the roadmap's suggested sequencing called for ("one
 visual unit"). New `internal/tui/highlight.go`: a `chroma.Style` built from the existing
@@ -134,8 +143,52 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P16 items (TUI Polish & Interaction Parity)
 
-The rest of P16 (P16.8–P16.9) is still open — see
+The rest of P16 (P16.9) is still open — see
 [roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
+
+### P16.8 — SHIPPED 2026-07-07 — Clipboard image paste
+
+The gap: `tea.PasteMsg` handling only recognized pasted *file paths* with an image extension (TQ9)
+— pasting actual image bytes off the clipboard (the screenshot-then-paste workflow Claude Code and
+crush both support) did nothing, because bracketed paste is a text-only terminal protocol; a
+terminal has no way to forward binary clipboard image data through it even in principle. Reaching
+the OS clipboard's image data at all requires bypassing the terminal's paste mechanism entirely and
+talking to the platform clipboard API directly.
+
+New `internal/tui/clipboard_image.go`, `pasteClipboardImage() (path string, ok bool, err error)`
+dispatches per `runtime.GOOS` — the same per-OS split `copyToClipboard` already uses, since none of
+the three platforms expose clipboard image access through the Go stdlib:
+
+- **Windows:** `System.Windows.Forms.Clipboard.GetImage()` + `Bitmap.Save(..., ImageFormat.Png)` via
+  a `powershell -Sta -Command` call (Clipboard/Bitmap access requires an STA thread; PowerShell
+  defaults to MTA). Verified end-to-end against a real 4×4 test bitmap placed on the clipboard
+  (round-tripped through `pasteClipboardImage` to a valid non-empty PNG file) and against clipboard
+  *text* with no image present (correctly returns `ok=false`, no error).
+- **macOS:** `pngpaste` (external tool, `brew install pngpaste`) — mirrors `copyToClipboard`'s Linux
+  xclip/xsel/wl-copy pattern of requiring an installed tool rather than reimplementing NSPasteboard
+  access; a missing-tool error names the install command.
+- **Linux:** `wl-paste --type image/png` or `xclip -selection clipboard -t image/png -o`, whichever
+  is on `PATH` (same preference order as `copyToClipboard`'s write side).
+
+`ok=false, err=nil` (not an error) means the clipboard held no image — the caller shows an info
+toast ("clipboard has no image") rather than an error one.
+
+Wired to a new `ctrl+v` keybinding (`keyMap.PasteImage`) in the same `KeyMsg` switch arm as the
+existing `ctrl+e` ($EDITOR) binding, and a `/paste-image` slash command (`SlashResult{Output:
+"\x00paste-image"}`, same sentinel-string protocol `/copy` and `/sidebar` already use to hop from
+the pure `slash.go` handler back into a `tui.go` `tea.Cmd`) for terminals that bind ctrl+v to their
+own native paste before Aegis's `Update()` ever sees the keystroke. Both paths converge on
+`pasteClipboardImageCmd()` → `pasteImageResultMsg`, which on success calls the *same*
+`attachTokenFor`/`@image:` token path P16.8 was scoped to reuse (TQ9's `looksLikeImagePath`/
+`extractImageRefs`) — so the daemon-side image-attachment handling (`buildImageBlocks` in
+`internal/server/images.go`) needed no changes at all.
+
+Tests: `internal/tui/clipboard_image_test.go` covers the OS-independent pieces
+(`winSingleQuoteEscape`, `tempImagePath` uniqueness/cleanup, `commandExists`); the real
+clipboard-reading paths were verified manually against a live Windows clipboard (both
+image-present and no-image cases) rather than in the committed suite, since exercising an actual OS
+clipboard isn't reproducible in CI — matching `copyToClipboard`'s own precedent of no automated
+test for the real clipboard I/O.
 
 ### P16.6 — SHIPPED 2026-07-07 — Unified dialog overlay + shared filterable list component
 

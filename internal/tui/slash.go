@@ -1450,6 +1450,13 @@ func (d *SlashDispatcher) cmdCopy(args []string) SlashResult {
 	return SlashResult{Output: "\x00copy"}
 }
 
+// cmdPasteImage reads an image off the OS clipboard and attaches it to the
+// draft — a slash-command fallback for terminals that intercept ctrl+v for
+// their own paste binding before it ever reaches Aegis (P16.8).
+func (d *SlashDispatcher) cmdPasteImage(_ []string) SlashResult {
+	return SlashResult{Output: "\x00paste-image"}
+}
+
 func (d *SlashDispatcher) cmdQuit(_ []string) SlashResult {
 	return SlashResult{Quit: true}
 }

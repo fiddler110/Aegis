@@ -234,6 +234,24 @@ type todoStripItem struct {
 // clipboardResultMsg carries the result of an async clipboard write.
 type clipboardResultMsg struct{ err error }
 
+// pasteImageResultMsg carries the result of reading an image off the OS
+// clipboard (P16.8). ok is false with a nil err when the clipboard simply
+// held no image.
+type pasteImageResultMsg struct {
+	path string
+	ok   bool
+	err  error
+}
+
+// pasteClipboardImageCmd returns a tea.Cmd that reads an image from the OS
+// clipboard into a temp file.
+func pasteClipboardImageCmd() tea.Cmd {
+	return func() tea.Msg {
+		path, ok, err := pasteClipboardImage()
+		return pasteImageResultMsg{path: path, ok: ok, err: err}
+	}
+}
+
 type slashResultMsg SlashResult
 type editorDoneMsg struct {
 	content string
@@ -804,6 +822,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeToast = t
 		return m, cmd
 
+	case pasteImageResultMsg:
+		if msg.err != nil {
+			t, cmd := newToastCmd("paste image: "+msg.err.Error(), toastError)
+			m.activeToast = t
+			return m, cmd
+		}
+		if !msg.ok {
+			t, cmd := newToastCmd("clipboard has no image", toastInfo)
+			m.activeToast = t
+			return m, cmd
+		}
+		m.ta.InsertString(attachTokenFor(msg.path))
+		t, cmd := newToastCmd("image attached: "+filepath.Base(msg.path), toastInfo)
+		m.activeToast = t
+		return m, cmd
+
 	case editorDoneMsg:
 		m.ta.Focus()
 		if msg.err != nil {
@@ -953,6 +987,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.streaming {
 				return m, m.openEditorCmd()
 			}
+		case "ctrl+v":
+			return m, pasteClipboardImageCmd()
 		case "shift+tab":
 			if !m.streaming {
 				return m, m.cycleModeCmd()
@@ -1314,6 +1350,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			return m, copyToClipboardCmd(text)
+		}
+		if msg.Output == "\x00paste-image" {
+			return m, pasteClipboardImageCmd()
 		}
 		if msg.Output == "\x00humor-on" {
 			m.humorMode = true
