@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3
-	charm.land/lipgloss/v2 v2.0.4
+	charm.land/lipgloss/v2 v2.0.5
 	github.com/alecthomas/chroma/v2 v2.20.0
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/ultraviolet v0.0.0-20260525132238-948f4557a654
