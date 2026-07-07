@@ -271,7 +271,11 @@ func (g *gatingBackend) OnStop(func(swarm.Identity, swarm.Result)) {}
 // the limiter's starting cap (floor 2) simultaneously, even though nothing
 // else in the request limits concurrency below MaxParallelAgents.
 func TestAgentToolParallelWorkflowRespectsConcurrencyCap(t *testing.T) {
-	entered := make(chan struct{})
+	const numAgents = 5
+	// entered is buffered so every agent's enter() can report in without
+	// blocking on a receiver: once release is closed, agents beyond the two
+	// this test explicitly drains must not deadlock trying to send here.
+	entered := make(chan struct{}, numAgents)
 	release := make(chan struct{})
 	b := &gatingBackend{root: t.TempDir(), enter: func() {
 		entered <- struct{}{}
@@ -279,7 +283,7 @@ func TestAgentToolParallelWorkflowRespectsConcurrencyCap(t *testing.T) {
 	}}
 	at := NewAgentTool(b, nil) // no WithConcurrencyLimiter -> fresh floor-2 limiter
 
-	agents := make([]map[string]string, 5)
+	agents := make([]map[string]string, numAgents)
 	for i := range agents {
 		agents[i] = map[string]string{"prompt": "do something"}
 	}
