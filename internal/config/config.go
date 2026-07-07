@@ -128,6 +128,13 @@ type TUIConfig struct {
 	// transcript when an image is attached: "auto" (default — rendered when
 	// the terminal's detected color profile supports it) or "off".
 	ImageRendering string `koanf:"image_rendering"`
+	// Keybindings remaps named TUI actions (P13.3.5). Keys are the binding
+	// names from internal/tui's keyMap (e.g. "terminal", "palette",
+	// "diagnose" — lowercased struct field name), values are one or more
+	// key sequences in bubbles/key form (e.g. "ctrl+x", "alt+t"). Unlisted
+	// actions keep their hardcoded default. Unknown action names are
+	// rejected at TUI startup.
+	Keybindings map[string][]string `koanf:"keybindings"`
 }
 
 // CleanupConfig controls automatic pruning of old sessions.

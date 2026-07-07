@@ -45,6 +45,7 @@ type Config struct {
 	Theme          string // color scheme name: "dark" (default) or "light" (TQ10)
 	Notifications  string // attention-system mode (P16.1): off/bell/desktop/both
 	ImageRendering string // inline image thumbnails (P16.9): "auto" (default) or "off"
+	Keybindings    map[string][]string // P13.3.5: action name -> key sequence overrides
 }
 
 // Run starts the TUI event loop and blocks until the user quits.
@@ -52,6 +53,11 @@ func Run(cfg Config) error {
 	// Bind the configured color scheme before any styles are built — lipgloss
 	// styles capture colors at creation time (TQ10).
 	cfg.Theme = applyTheme(cfg.Theme, cfg.WorkDir)
+	// Validate keybinding overrides up front so a typo in config fails fast
+	// with a clear error instead of silently doing nothing (P13.3.5).
+	if _, err := buildKeyMap(cfg.Keybindings); err != nil {
+		return err
+	}
 	m := newModel(cfg)
 	p := tea.NewProgram(m)
 	_, err := p.Run()
@@ -170,6 +176,13 @@ type model struct {
 	term        termPane
 	termRun     *termRun // non-nil while a command is running in the terminal
 
+	// lastFailure is the most recent failed command run outside the model's
+	// automatic view — the embedded terminal pane or a ! bang command — kept
+	// around so the P13.3.1 "diagnose" action has something to send. A
+	// shell-tool call the model itself made needs no such bridge: its result
+	// already flows back to the model on the very next turn.
+	lastFailure *shellFailure
+
 	// File frecency map for @-mention completion ranking (P2.3).
 	fileFrecency map[string]int
 
@@ -278,6 +291,15 @@ type bangMsg struct {
 	code   int
 }
 
+// shellFailure captures a failed command run outside the model's automatic
+// view, for the P13.3.1 "diagnose" action (see model.lastFailure).
+type shellFailure struct {
+	source  string // "!" or "terminal", for the synthesized prompt
+	command string
+	output  string
+	code    int
+}
+
 // teammatesUpdateMsg is a silent subagent poll result (P2.5).
 type teammatesUpdateMsg struct{ items []api.Teammate }
 
@@ -369,7 +391,7 @@ func newModel(cfg Config) model {
 		live:         &liveBlock{},
 		thinkText:    &strings.Builder{},
 		renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
-		keys:         defaultKeyMap(),
+		keys:         mustKeyMap(cfg.Keybindings),
 		followBottom: true,
 		toolCompact:  true,
 		humorMode:    cfg.HumorMode,
@@ -378,6 +400,8 @@ func newModel(cfg Config) model {
 		notifyMode:   notify.ParseMode(cfg.Notifications),
 		imageProto:   imageProtoFor(cfg.ImageRendering),
 	}
+	// P13.3.5: keep /help's shortcut list in sync with any keybinding remap.
+	m.slash.keys = m.keys
 	// P5.6: restore an unsent draft if one was saved from the previous session.
 	if draft := loadStash(stashPath); draft != "" {
 		m.ta.SetValue(draft)
@@ -602,6 +626,28 @@ func (m *model) sendUserMessage(text string) tea.Cmd {
 	m.followBottom = true // jump to the freshly sent message
 	m.refresh()
 	return m.startStream(cleanText, images)
+}
+
+// diagnoseLastFailureCmd sends the most recent failed !-command or terminal-
+// pane command to the model as a new turn, asking it to diagnose and fix the
+// failure (P13.3.1). Both surfaces run outside the model's normal view — a
+// shell tool call the model makes itself needs no such bridge, since its
+// result already flows back to the model on the next turn automatically.
+func (m *model) diagnoseLastFailureCmd() tea.Cmd {
+	f := m.lastFailure
+	if f == nil || m.streaming {
+		return nil
+	}
+	m.lastFailure = nil
+	if m.termFocused {
+		m.termFocused = false
+		m.ta.Focus()
+	}
+	out := truncate(strings.TrimSpace(f.output), 4000)
+	prompt := fmt.Sprintf(
+		"The following command (run via %s, not a tool call) failed with exit code %d:\n\n```\n%s\n```\n\nOutput:\n```\n%s\n```\n\nDiagnose the failure and fix it.",
+		f.source, f.code, f.command, out)
+	return m.sendUserMessage(prompt)
 }
 
 // sendSteerCmd posts a steering instruction to the daemon. The instruction is
@@ -915,6 +961,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// P13.3.1: diagnose the last failed !-command, if any is pending.
+		if key.Matches(msg, m.keys.Diagnose) {
+			if cmd := m.diagnoseLastFailureCmd(); cmd != nil {
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
 		case "esc", "alt+esc":
 			if m.streaming {
@@ -1145,6 +1198,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.code != 0 {
 			m.transcript.Append(m.th.toolErr.Render(fmt.Sprintf("exit %d", msg.code)) + "\n")
+			// P13.3.1: a ! command never reaches the model automatically —
+			// offer the same diagnose bridge the terminal pane gets.
+			m.lastFailure = &shellFailure{source: "!", command: msg.cmd, output: msg.output, code: msg.code}
+			m.transcript.Append(m.th.statusDim.Render(m.keys.Diagnose.Help().Key+" to ask Aegis to diagnose this") + "\n")
 		}
 		m.transcript.Append("\n")
 		m.followBottom = true
@@ -1197,6 +1254,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case termDoneMsg:
 		m.termRun = nil
 		m.term.handleDone(msg.err)
+		if m.term.lastFailed {
+			// P13.3.1: bridge the failure to the model on request — the
+			// terminal pane's output never reaches it automatically.
+			m.lastFailure = &shellFailure{
+				source:  "terminal",
+				command: m.term.lastCmd,
+				output:  m.term.lastOutput,
+				code:    m.term.lastExitCode,
+			}
+		}
 		m.term.refreshVP()
 		m.refresh()
 		return m, nil
@@ -1789,6 +1856,11 @@ func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// P13.3.1: diagnose the terminal pane's last failed command, if any.
+	if m.term.lastFailed && key.Matches(msg, m.keys.Diagnose) {
+		return m.diagnoseLastFailureCmd()
+	}
+
 	switch k {
 	case "esc":
 		m.termFocused = false
@@ -1810,7 +1882,7 @@ func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
 		if m.term.handleCD(cmd) {
 			break
 		}
-		m.term.running = true
+		m.term.beginRun(cmd)
 		run, execCmd := execTermCmd(m.term.workDir, cmd)
 		m.termRun = run
 		m.refresh()
@@ -1869,6 +1941,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.pendingReadPaths = nil
 	m.streaming = false
 	m.status = "ready"
+	m.lastFailure = nil
 
 	m.transcript.Append(buildWelcomeContent(m.cfg, m.workDir, m.th))
 	m.loadHistory(sess.Messages)
@@ -2308,13 +2381,13 @@ func (m model) renderChat() string {
 	if m.sidebarOpen && m.width >= sidebarMinTermW {
 		sidebar := m.renderSidebar(m.transcript.Height())
 		if m.termOpen {
-			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main, m.term.view(m.th, m.termFocused))
+			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
 		} else {
 			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
 		}
 	} else {
 		if m.termOpen {
-			content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused))
+			content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
 		} else {
 			content = main
 		}

@@ -239,6 +239,18 @@ tui:
   # terminals, NO_COLOR). "off": never render, text-only notice as before.
   image_rendering: auto
 
+  # Keybinding remap (P13.3.5): override the key sequence(s) for a named
+  # action. Action names are the lowercased internal/tui keyMap field names
+  # (send, queue, newline, thinking, complete, help, palette, cancel,
+  # interrupt, clear, editor, cyclemode, histup, histdown, teammates,
+  # sessions, terminal, sidebartoggle, pasteimage, diagnose). Values are one
+  # or more bubbles/key sequences (e.g. "ctrl+x", "alt+t", "f2"); the first
+  # is shown in help text. Unlisted actions keep their default. Run with an
+  # unknown action name and Aegis exits with an error naming the typo.
+  keybindings:
+    terminal: ["ctrl+x"]
+    diagnose: ["ctrl+g"]
+
 
 # ── Diagrams ──────────────────────────────────────────────────────────────────
 diagram:

@@ -1,9 +1,12 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P13.7 shipped — `latex-report` builtin skill + `/report` command,
-closing out the last P13 item with a real gap; P16.9 shipped earlier the same day — in-terminal
-half-block image thumbnails, closing out the P16 TUI polish & interaction parity track from the
-crush/opencode/Claude Code gap analysis)
+**Last updated:** 2026-07-07 (P13.3.1 + P13.3.5 shipped — shell-aware "diagnose this?" error assist
+for the embedded terminal pane and `!` bang commands, plus a `tui.keybindings` config remap with
+startup validation and help-text sync; P13.3.2/P13.3.3 deliberately left open as the lower-value
+remainder. Also shipped the same day: P13.7 — `latex-report` builtin skill + `/report` command,
+closing out the last P13 item with a real gap; P16.9 — in-terminal half-block image thumbnails,
+closing out the P16 TUI polish & interaction parity track from the crush/opencode/Claude Code gap
+analysis)
 
 This document tracks only **open** work — what's next. For shipped-feature history and full design
 rationale behind completed items, see [releases.md](releases.md).
@@ -157,28 +160,38 @@ Genuinely new, worth adding:
 
 - **P13.3.1** — Shell-aware error assist: on a non-zero exit from the `shell` tool or the embedded
   terminal pane, offer an inline "diagnose this?" affordance that pipes stderr+exit code to the
-  model on request. Cross-platform (exit-code capture only). (S/M)
+  model on request. Cross-platform (exit-code capture only). (S/M) — **shipped 2026-07-07**: scoped
+  to the two surfaces where the model has zero automatic visibility — the embedded terminal pane
+  and `!` bang commands (a `shell`-tool failure already flows back to the model on its next turn,
+  so it needed no bridge). `ctrl+g` (remappable via P13.3.5) sends the failed command + output as a
+  new turn asking the model to diagnose and fix it; the terminal pane's status line and the bang-
+  command transcript entry both surface the hint when a command fails.
 - **P13.3.2** — `@shell`/`@last` context token: extend the existing `@file`/`@image:`
   attachment-token parser to inject the last N lines of embedded-terminal output into the next
   prompt. (S) — TUI-surface work; build under the same command-surface conventions P14 established.
+  Narrower now that P13.3.1 covers the dominant failure-diagnosis case; mainly useful for
+  referencing successful manual-terminal output.
 - **P13.3.3** — ACP `terminal/*` capability passthrough: `internal/acp` implements
   session/prompt/permission methods but not the optional ACP terminal capability
   (`terminal/create`, `/output`, `/wait_for_exit`, `/kill`, `/release`). Implementing it lets an
   ACP host (Zed, a future Intelligent-Terminal-as-client) supply its own pty for agent shell calls
   — live visibility/Ctrl+C control on the host side — falling back to Aegis's native exec path
   when the host doesn't advertise the capability. The one item requiring real ACP protocol work;
-  everything else here is TUI-only. (M/L)
+  everything else here is TUI-only. (M/L) — lowest-leverage remaining item: real ACP protocol work
+  for an audience narrower than the primary TUI users; defer until there's evidence of ACP-host
+  usage.
 - **P13.3.4** — Background-task attention indicator: extend the existing sidebar agent-count
   display to flag a failed background sub-agent/cron job. (S) — **subsumed by P16.1** (2026-07-07):
   route these events through the P16.1 notification seam instead of building a sidebar-only
   affordance; don't implement separately.
 - **P13.3.5** — Configurable keybinding remap: `internal/tui/keymap.go` is fully hardcoded; add a
   `tui.keybindings` config section. Trivial cross-platform (bubbles/key is already OS-agnostic). (S)
-  — TUI-surface work, same note as P13.3.2. Priority raised by the P16 polish track (2026-07-07):
-  Claude Code (`keybindings.json`) and opencode both ship this; it's the P16-adjacent item users
-  will ask for first.
+  — **shipped 2026-07-07**: `tui.keybindings` config map (action name -> one or more bubbles/key
+  sequences), validated at TUI startup (unknown action name is a hard error, not a silent no-op);
+  overriding a binding regenerates its help label too, so the F1 overlay and `/help` both show the
+  real bound key, not the hardcoded default.
 
-Priority: Low-Medium, Effort: S-M per item, no single blocker.
+Remaining: P13.3.2 (S), P13.3.3 (M/L). No blocker between them.
 
 ### P13.4 — Nebula (berylliumsec/nebula) AI-pentesting review
 

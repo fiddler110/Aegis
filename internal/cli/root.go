@@ -143,6 +143,7 @@ Use "aegis <command> --help" for details on any command below.`,
 				Theme:          cfg.TUI.Theme,
 				Notifications:  cfg.TUI.Notifications,
 				ImageRendering: cfg.TUI.ImageRendering,
+				Keybindings:    cfg.TUI.Keybindings,
 			})
 			unloadOllamaModel(cfg)
 			return runErr
