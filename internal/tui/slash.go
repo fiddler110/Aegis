@@ -17,6 +17,7 @@ import (
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/commands"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/modelcatalog"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/share"
 	"github.com/fiddler110/aegis/internal/skills"
@@ -39,6 +40,17 @@ type SlashResult struct {
 	// SecurityConfigGlobal is non-nil to open the /security-config dialog
 	// (P11.11): *true edits the global config, *false the project config.
 	SecurityConfigGlobal *bool
+
+	// Models is non-nil to open the P16.6 model picker with these curated
+	// entries.
+	Models []modelcatalog.Model
+
+	// Model is non-nil after a successful /model switch (not on "/model
+	// default"), so the TUI can update its own display copy (title bar,
+	// sidebar, context-window sizing) to match — those all read the model
+	// the TUI was started with otherwise, which /model's daemon-side
+	// override alone never touched.
+	Model *string
 }
 
 // SlashDispatcher dispatches slash commands to built-in handlers or custom
@@ -474,8 +486,11 @@ func (d *SlashDispatcher) cmdCommands(_ []string) SlashResult {
 	return SlashResult{Output: b.String()}
 }
 
+// cmdModels opens the interactive model picker (P16.6): curated models
+// grouped by provider with the current model marked. Use /model <id>
+// directly if the exact id is already known.
 func (d *SlashDispatcher) cmdModels(_ []string) SlashResult {
-	return SlashResult{Output: fmt.Sprintf("Model: %s\nMode: %s", d.model, d.mode)}
+	return SlashResult{Models: modelcatalog.Curated()}
 }
 
 // cmdModel switches this session's model (P14.7). Unlike /mode, this isn't
@@ -509,7 +524,10 @@ func (d *SlashDispatcher) cmdModel(args []string) SlashResult {
 		return SlashResult{Output: "Cleared the session model override; reverts to the persona/global default on the next turn."}
 	}
 	d.model = newModel
-	return SlashResult{Output: fmt.Sprintf("Switched to model %q for this session. This must be a model id belonging to your currently configured provider (see /status) — a cross-provider id will fail on the next turn, not now.", newModel)}
+	return SlashResult{
+		Output: fmt.Sprintf("Switched to model %q for this session. This must be a model id belonging to your currently configured provider (see /status) — a cross-provider id will fail on the next turn, not now.", newModel),
+		Model:  &newModel,
+	}
 }
 
 func (d *SlashDispatcher) cmdSandbox(args []string) SlashResult {
