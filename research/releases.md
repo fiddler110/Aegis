@@ -134,7 +134,7 @@ Full change history and design rationale for every shipped item lives below in
 
 ## Shipped — P16 items (TUI Polish & Interaction Parity)
 
-The rest of P16 (P16.5, P16.6, P16.8–P16.9) is still open — see
+The rest of P16 (P16.6, P16.8–P16.9) is still open — see
 [roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
 
 ### P16.4 — SHIPPED 2026-07-07 — Transcript as a cached per-message item list
@@ -182,6 +182,71 @@ API (including a `testKeyMsg` helper building `tea.KeyPressMsg`s for the fixed s
 `HandleKey` matches); `integration_test.go`'s timeline-seek test now asserts `ScrollToItem` +
 `View()` lands exactly on the target turn's own content instead of checking a rendered prefix
 string.
+
+### P16.5 — SHIPPED 2026-07-07 — Mouse selection, click interactions, and scrollbar
+
+The gap: `MouseModeCellMotion` was enabled but nothing handled `tea.MouseMsg` — only the
+viewport's built-in wheel scroll did anything. Alt-screen + mouse mode disables the terminal's own
+native text selection, so enabling mouse mode without offering a replacement made copy/paste
+*worse* than not enabling it at all (shift-click still worked, but that's not discoverable).
+
+New `internal/tui/selection.go`, plus a `sel selection` / `focusedIdx int` pair added to `model`:
+
+- **Coordinate translation.** `tea.Mouse` reports terminal-absolute X/Y; `paneOrigin()` /
+  `toPaneCoord()` / `clampPaneCoord()` convert that into transcript-pane-relative row/col,
+  accounting for the 1-row title bar, the 1-col `PaddingLeft` on the transcript, and the sidebar's
+  width when open. Selection state itself is kept in this screen space — not mapped onto persistent
+  item/offset coordinates — which matches how a real terminal's native selection behaves (it
+  doesn't survive a scroll mid-drag either) and is far simpler than threading selection through the
+  virtualized item model from P16.4.
+- **Drag selection.** `tea.MouseClickMsg` arms a selection (`sel.active = true`) at the clicked
+  cell; `tea.MouseMotionMsg` (only delivered while a button is held, under cell-motion mode) moves
+  the far end; `tea.MouseReleaseMsg` finalizes it and — if the anchor and release cells differ —
+  extracts the covered text via `selectedText()` (ANSI-aware via `ansi.Cut`, so styled transcript
+  content copies as plain text) and copies it with the existing `copyToClipboardCmd` (the native
+  per-OS clipboard path; there is no OSC-52 path in the codebase to reuse, unlike what the original
+  roadmap wording implied).
+- **Double-click / triple-click.** `registerClick()` tracks a same-cell click count within a
+  400ms window, wrapping back to 1 after a third click. Double-click selects the word under the
+  cursor (`wordBounds()` — letters/digits/`_` are word runes, lone punctuation is its own
+  single-char word, whitespace is its own single-char word) and copies it immediately; triple-click
+  selects and copies the entire rendered line.
+- **Click-to-focus.** Any left click sets `focusedIdx` to `transcript.ItemIndexAtY(row)` — the
+  P16.4 seam this item was built to consume. Purely a visual affordance (a left accent bar drawn
+  over column 0 in `renderTranscriptContent`, done by overwriting the column rather than prepending
+  and shifting the rest of the line right, so wrap width and later `lipgloss.JoinHorizontal`
+  composition stay untouched); it gates no other behavior.
+- **Scrollbar.** `transcriptPane.ScrollbarThumb()` (new) returns the thumb's `[start, end)` row
+  range sized proportionally to the visible fraction of total content, backed by a new
+  `offsetLines()` helper factored out of `ScrollPercent()` so the two can't drift apart.
+  `renderScrollbar()` draws it as a `┃`/`│` glyph column to the right of the transcript
+  (`layout()` reserves one column for it); the title bar's old "62% ·" text is gone — `renderTitleBar`
+  now renders just the model name on the right.
+- **`VisibleLines()`** (new, on `transcriptPane`) splits the current `View()` into per-row ANSI
+  strings once, reused by both the selection overlay and the scrollbar/focus-bar renderers instead
+  of re-deriving rows from `View()` repeatedly.
+
+Two deliberate narrowings from the roadmap item's original wording, called out so the docs stay
+accurate: no OSC-52 clipboard path exists anywhere in the codebase (only the native per-OS
+`copyToClipboard` tool path, which is what's reused), and there is no Esc-key clearing of an active
+selection or focused item — left out to avoid touching the already carefully-tuned double-tap
+ESC/interrupt handling elsewhere in `Update()`.
+
+`tui.go`: `Update()`'s message-type switch gained `tea.MouseClickMsg` / `tea.MouseMotionMsg` /
+`tea.MouseReleaseMsg` cases dispatching to `handleMouseClick`/`handleMouseMotion`/
+`handleMouseRelease`; `render()` composes `renderTranscriptContent()` and `renderScrollbar()`
+side by side via `lipgloss.JoinHorizontal` instead of rendering `transcript.View()` directly.
+
+Tests: new `internal/tui/selection_test.go` covers `wordBounds`, `selectedText` (single/multi-row,
+out-of-range clamping), `registerClick` counting/timeout/wraparound, the pane-coordinate geometry,
+and each handler (single-click focus+arm, drag+release copy, no-drag release copies nothing,
+double-click word select, triple-click line select, non-left-button and outside-pane clicks
+ignored) — plus two tests that drive the same click/drag/release and wheel-scroll sequences
+through the real `Update()` dispatch rather than calling the handlers directly, so the
+`tea.MouseClickMsg`/`tea.MouseMotionMsg`/`tea.MouseReleaseMsg`/`tea.MouseWheelMsg` wiring itself is
+covered, not just the handler logic. `transcript_test.go` gained coverage for `ScrollbarThumb`
+(no-thumb-when-content-fits, thumb tracks top/bottom scroll position) and `VisibleLines` (matches
+`View()` when split on `\n`).
 
 ### P16.7 — SHIPPED 2026-07-07 — Runtime-loadable themes
 
