@@ -24,6 +24,7 @@ import (
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
 
 // fixedAdapter returns a single text response regardless of input.
@@ -458,6 +459,12 @@ func TestServerStatusEndpoint(t *testing.T) {
 	}
 	if info.DailyCapUSD != 5 || info.DailyTokenCap != 1000 {
 		t.Errorf("caps = %v/%d, want 5/1000", info.DailyCapUSD, info.DailyTokenCap)
+	}
+	if info.AgentConcurrency != swarm.AdaptiveLimiterFloor {
+		t.Errorf("AgentConcurrency = %d, want floor %d", info.AgentConcurrency, swarm.AdaptiveLimiterFloor)
+	}
+	if info.AgentConcurrencyMax != builtin.MaxParallelAgents {
+		t.Errorf("AgentConcurrencyMax = %d, want %d", info.AgentConcurrencyMax, builtin.MaxParallelAgents)
 	}
 }
 

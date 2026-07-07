@@ -56,6 +56,12 @@ type StatusInfo struct {
 	DailyCapUSD           float64 `json:"daily_cap_usd,omitempty"`
 	DailyTokens           int     `json:"daily_tokens"`
 	DailyTokenCap         int     `json:"daily_token_cap,omitempty"`
+
+	// AgentConcurrency is the adaptive limiter's current cap (P17) on how
+	// many sub-agents a 'parallel' workflow batch runs simultaneously.
+	// AgentConcurrencyMax is the fixed ceiling it adapts toward.
+	AgentConcurrency    int `json:"agent_concurrency"`
+	AgentConcurrencyMax int `json:"agent_concurrency_max"`
 }
 
 // PruneResponse reports how many sessions were deleted by a prune operation.

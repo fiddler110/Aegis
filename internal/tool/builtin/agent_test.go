@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/tool"
 	_ "modernc.org/sqlite"
 )
 
@@ -219,14 +221,14 @@ func TestAgentToolBackgroundSpawnCarriesCostTracker(t *testing.T) {
 
 // TestAgentToolParallelWorkflowBreadthCap is the D1 breadth-limit regression:
 // a 'parallel' workflow call's 'agents' array is model-controlled JSON with no
-// other limit, so without maxParallelAgents a single tool call could fan out
+// other limit, so without MaxParallelAgents a single tool call could fan out
 // arbitrarily wide, multiplying spend past a session's budget faster than the
 // shared-ledger check can catch it.
 func TestAgentToolParallelWorkflowBreadthCap(t *testing.T) {
 	b := &fakeBackend{root: t.TempDir(), output: "ok"}
 	at := NewAgentTool(b, nil)
 
-	agents := make([]map[string]string, maxParallelAgents+1)
+	agents := make([]map[string]string, MaxParallelAgents+1)
 	for i := range agents {
 		agents[i] = map[string]string{"prompt": "do something"}
 	}
@@ -243,5 +245,68 @@ func TestAgentToolParallelWorkflowBreadthCap(t *testing.T) {
 	}
 	if b.spawns != 0 {
 		t.Errorf("must not spawn any agent when over the breadth cap, spawns=%d", b.spawns)
+	}
+}
+
+// gatingBackend blocks each spawned agent inside enter() until release is
+// closed, so a test can observe exactly how many spawns are in flight at once
+// without relying on real sleeps.
+type gatingBackend struct {
+	root  string
+	enter func()
+}
+
+func (g *gatingBackend) Spawn(ctx context.Context, cfg swarm.SpawnConfig) (*swarm.Handle, error) {
+	b := swarm.NewInProcessBackend(func(context.Context, swarm.SpawnConfig) (string, error) {
+		g.enter()
+		return "ok", nil
+	}, swarm.NewRegistry(), swarm.MailboxRoot(g.root))
+	return b.Spawn(ctx, cfg)
+}
+func (g *gatingBackend) Shutdown(context.Context)                  {}
+func (g *gatingBackend) OnStop(func(swarm.Identity, swarm.Result)) {}
+
+// TestAgentToolParallelWorkflowRespectsConcurrencyCap is the P17.2
+// integration check: a 'parallel' batch of 5 agents must not run more than
+// the limiter's starting cap (floor 2) simultaneously, even though nothing
+// else in the request limits concurrency below MaxParallelAgents.
+func TestAgentToolParallelWorkflowRespectsConcurrencyCap(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	b := &gatingBackend{root: t.TempDir(), enter: func() {
+		entered <- struct{}{}
+		<-release
+	}}
+	at := NewAgentTool(b, nil) // no WithConcurrencyLimiter -> fresh floor-2 limiter
+
+	agents := make([]map[string]string, 5)
+	for i := range agents {
+		agents[i] = map[string]string{"prompt": "do something"}
+	}
+	input, err := json.Marshal(map[string]any{"mode": "parallel", "agents": agents})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan tool.Result, 1)
+	go func() {
+		res, execErr := at.Execute(context.Background(), input)
+		if execErr != nil {
+			t.Errorf("Execute: %v", execErr)
+		}
+		done <- res
+	}()
+
+	<-entered
+	<-entered
+	select {
+	case <-entered:
+		t.Fatal("a third spawn started concurrently while the cap was 2")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if res := <-done; res.IsError {
+		t.Errorf("unexpected error result: %+v", res)
 	}
 }

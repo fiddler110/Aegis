@@ -23,13 +23,16 @@ const maxAgentDuration = 10 * time.Minute
 // maxSpawnDepth bounds sub-agent recursion (an agent spawning an agent ...).
 const maxSpawnDepth = 3
 
-// maxParallelAgents bounds how many teammates one 'parallel' workflow call may
-// spawn concurrently (D1). The 'agents' array length is model-controlled JSON
-// with no other limit, so without this a single tool call could fan out
-// arbitrarily wide; paired with the shared cost ledger (subAgentRunner reading
-// swarm.CostTrackerFromContext) this keeps both the concurrency burst and the
-// total spend bounded.
-const maxParallelAgents = 8
+// MaxParallelAgents bounds how many teammates one 'parallel' workflow call may
+// request in a single tool call (D1). The 'agents' array length is
+// model-controlled JSON with no other limit, so without this a single tool
+// call could fan out arbitrarily wide; paired with the shared cost ledger
+// (subAgentRunner reading swarm.CostTrackerFromContext) this keeps both the
+// fan-out burst and the total spend bounded. It stays a fixed hard ceiling —
+// unlike the adaptive limiter (P17), which governs how many of those
+// requested agents actually run *simultaneously*, this bounds how many may be
+// requested at all in one call.
+const MaxParallelAgents = 8
 
 // checkpointIDFrom returns the parent turn's checkpoint id, if ctx carries a
 // Snapshotter, or "" otherwise. The in-process swarm backend already
@@ -61,6 +64,11 @@ type agentTool struct {
 	// unlimited, same convention as engine.Options.
 	budgetUSD       float64
 	maxTokensPerRun int
+
+	// limiter governs how many agents in a 'parallel' workflow batch actually
+	// run simultaneously (P17), separate from MaxParallelAgents which bounds
+	// how many may be requested at all.
+	limiter *swarm.AdaptiveLimiter
 }
 
 // AgentToolOption configures optional behavior on the `agent` tool.
@@ -75,12 +83,28 @@ func WithCostCaps(budgetUSD float64, maxTokensPerRun int) AgentToolOption {
 	}
 }
 
+// WithConcurrencyLimiter sets the adaptive limiter (P17) that throttles how
+// many agents in a 'parallel' workflow batch run simultaneously. The daemon
+// constructs one instance and shares it across every agent-tool call in the
+// process so the cap adapts from the host's real observed behavior instead
+// of resetting per call.
+func WithConcurrencyLimiter(l *swarm.AdaptiveLimiter) AgentToolOption {
+	return func(a *agentTool) {
+		a.limiter = l
+	}
+}
+
 // NewAgentTool builds the `agent` delegation tool over the given backend. mgr
-// may be nil, which disables background delegation.
+// may be nil, which disables background delegation. If no
+// WithConcurrencyLimiter option is given, a fresh floor-capped limiter is
+// created so callers (including existing tests) need not know about it.
 func NewAgentTool(backend swarm.Backend, mgr *task.Manager, opts ...AgentToolOption) tool.Tool {
 	a := &agentTool{backend: backend, mgr: mgr}
 	for _, opt := range opts {
 		opt(a)
+	}
+	if a.limiter == nil {
+		a.limiter = swarm.NewAdaptiveLimiter(MaxParallelAgents)
 	}
 	return a
 }
@@ -242,9 +266,9 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 	if depth := swarm.DepthFromContext(ctx); depth >= maxSpawnDepth {
 		return tool.Result{Content: fmt.Sprintf("agent: maximum sub-agent depth (%d) reached", maxSpawnDepth), IsError: true}, nil
 	}
-	if mode == "parallel" && len(agents) > maxParallelAgents {
+	if mode == "parallel" && len(agents) > MaxParallelAgents {
 		return tool.Result{
-			Content: fmt.Sprintf("agent: parallel workflow requested %d agents, exceeding the max of %d; split into smaller batches", len(agents), maxParallelAgents),
+			Content: fmt.Sprintf("agent: parallel workflow requested %d agents, exceeding the max of %d; split into smaller batches", len(agents), MaxParallelAgents),
 			IsError: true,
 		}, nil
 	}
@@ -304,23 +328,45 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 			idx int
 			out string
 			err error
+			dur time.Duration
 		}
 		ch := make(chan result, len(agents))
+		batchStart := time.Now()
 		for i, wa := range agents {
 			go func(idx int, wa workflowAgent) {
+				// Beyond the current adaptive cap, this blocks until a slot
+				// frees up instead of firing every spawn at once (P17.2).
+				if err := a.limiter.Acquire(agentCtx); err != nil {
+					ch <- result{idx: idx, err: err}
+					return
+				}
+				defer a.limiter.Release()
+				start := time.Now()
 				out, err := spawn(agentCtx, wa, "")
-				ch <- result{idx: idx, out: out, err: err}
+				ch <- result{idx: idx, out: out, err: err, dur: time.Since(start)}
 			}(i, wa)
 		}
 		outputs := make([]string, len(agents))
 		var errs []string
+		var sumDur time.Duration
+		exhausted := false
 		for range agents {
 			r := <-ch
 			if r.err != nil {
 				errs = append(errs, fmt.Sprintf("agent %d: %v", r.idx+1, r.err))
+				if isResourceExhaustionErr(r.err) {
+					exhausted = true
+				}
 			} else {
 				outputs[r.idx] = fmt.Sprintf("=== Agent %d ===\n%s", r.idx+1, r.out)
+				sumDur += r.dur
 			}
+		}
+		// AIMD adjustment (P17.3) from this batch's measured concurrency.
+		if exhausted {
+			a.limiter.RecordExhaustion()
+		} else {
+			a.limiter.RecordBatch(len(agents), sumDur, time.Since(batchStart))
 		}
 		if len(errs) > 0 {
 			return tool.Result{Content: "parallel: " + strings.Join(errs, "; "), IsError: true}, nil
@@ -456,6 +502,30 @@ func (a *agentTool) spawnBackground(ctx context.Context, cfg swarm.SpawnConfig, 
 		return tool.Result{Content: "agent: " + err.Error(), IsError: true}, nil
 	}
 	return tool.Result{Content: fmt.Sprintf("Spawned background sub-agent %q (task id %s). Poll with task_get; read its result with task_output.", agentName, tk.ID)}, nil
+}
+
+// isResourceExhaustionErr reports whether err looks like the host ran out of
+// capacity to serve a spawn (P17.3) — a deadline blown while a request sat
+// queued, or the model server refusing/dropping the connection outright —
+// rather than the sub-agent's own task failing. This is a deliberately
+// narrow, string-matching signal (no typed sentinel exists across the
+// in-process/subprocess/HTTP-provider boundary this error can originate
+// from); it only ever triggers an extra multiplicative-decrease, so a false
+// negative just costs one missed adjustment, not correctness.
+func isResourceExhaustionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sub := range []string{"connection refused", "timeout", "timed out", "connection reset", "too many requests"} {
+		if strings.Contains(msg, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // modeRank assigns an ordinal to each permission posture.
