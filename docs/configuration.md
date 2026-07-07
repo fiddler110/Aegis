@@ -222,6 +222,14 @@ tui:
   # shell tool output.
   theme: dark
 
+  # Attention system (P16.1): fires on stream-end, approval-pending, and
+  # error, but only while the terminal is known to be unfocused (via
+  # tea.FocusMsg/BlurMsg — not every terminal/multiplexer reports focus).
+  # "off": nothing. "bell": terminal BEL. "desktop": OSC 9/777 desktop
+  # notification. "both" (default): bell + desktop. Also settable live with
+  # /notify <mode>, for that session only.
+  notifications: both
+
 
 # ── Diagrams ──────────────────────────────────────────────────────────────────
 diagram:

@@ -254,6 +254,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdTheme,
 		},
 		{
+			name: "notify", argHint: "<off|bell|desktop|both>", needsArgs: true,
+			shortDesc:    "Set the attention-system mode (bell/desktop notifications)",
+			detailedHelp: "/notify <off|bell|desktop|both>\n  Set how the P16.1 attention system fires on stream-end, approval-pending, and error while the terminal isn't focused.\n  off: nothing. bell: terminal BEL. desktop: OSC 9/777 desktop notification. both (default): bell + desktop.\n  No args: show the current mode.\n  This session only; set tui.notifications: <mode> in config (project or global) to make it the default on restart.",
+			handler:      (*SlashDispatcher).cmdNotify,
+		},
+		{
 			name: "copy", argHint: "[N]",
 			shortDesc:    "Copy last assistant message, or Nth code block, to clipboard",
 			detailedHelp: "/copy [N]\n  No args: copy the last assistant message to the clipboard.\n  /copy <N>: copy the Nth fenced code block from the last assistant message instead.\n  Uses pbcopy/xclip/clip.exe depending on platform; shows a toast confirming what was copied.",

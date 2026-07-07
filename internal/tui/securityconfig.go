@@ -233,7 +233,7 @@ func (m *securityConfigModel) buildEditForm() *huh.Form {
 			Height(5),
 		huh.NewSelect[string]().
 			Title("Install policy").
-			Description("Only affects `aegis security install "+m.editingName+"`.").
+			Description("Only affects `aegis security install " + m.editingName + "`.").
 			Options(installOpts...).
 			Value(&m.editInstall).
 			Height(5),
@@ -348,7 +348,7 @@ func (m *securityConfigModel) buildActionForm() *huh.Form {
 				Description(m.statuses[m.editingName]).
 				Options(opts...).
 				Value(&m.action).
-				Height(len(opts)+2),
+				Height(len(opts) + 2),
 		),
 	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
 }

@@ -9,7 +9,13 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-06 — **P15.1** (web UI frontend architecture) shipped: moved `aegis ui`
+**Last updated:** 2026-07-07 — **P16.1** (TUI notifications & attention system) shipped: terminal
+bell + OSC 9/777 desktop notification on stream-end/approval-pending/error (suppressed while the
+terminal is focused, via bubbletea v2's `tea.FocusMsg`/`BlurMsg`), OSC 0/2 window-title updates
+reflecting streaming/ready/approval state, new `tui.notifications` config + `/notify` command. See
+[P16 shipped](releases.md#shipped--p16-items-tui-polish--interaction-parity) below. P16.2–P16.9
+remain open.
+**Previously, 2026-07-06:** **P15.1** (web UI frontend architecture) shipped: moved `aegis ui`
 off the old dependency-free single-file page to a bundled Vite + Preact + TypeScript frontend
 (`internal/server/webui/frontend/`), built output committed at `internal/server/webui/dist/` and
 embedded via `go:embed` (`internal/server/webui.go`) so `go build`/`go run` still need no Node.js.
@@ -102,6 +108,58 @@ Full change history and design rationale for every shipped item lives below in
 [Appendix A](#appendix-a--completed-work).
 
 ---
+
+## Shipped — P16 items (TUI Polish & Interaction Parity)
+
+The rest of P16 (P16.2–P16.9) is still open — see
+[roadmap.md](roadmap.md#open-work--p16-tui-polish--interaction-parity).
+
+### P16.1 — SHIPPED 2026-07-07 — Notifications & attention system
+
+The gap: Aegis emitted nothing when the user tabbed away — no terminal bell, no desktop
+notification, no window/tab title updates, no focus tracking — so a user couldn't tell a finished
+run apart from one blocked on an approval prompt without switching back to check. Also **subsumes
+P13.3.4** (background-task attention indicator): rather than a separate sidebar-only affordance for
+failed background sub-agents, that's deferred to route through this same seam once a concrete
+trigger exists — no separate implementation needed now.
+
+New `internal/tui/notify` package: a `Mode` type (`off`/`bell`/`desktop`/`both`, `ParseMode`
+defaulting unrecognized/empty input to `both`) and `Sequence(mode, Event)`, which builds BEL
+(terminal bell) and/or an OSC 9 + OSC 777 desktop-notification escape sequence (both emitted
+together so either terminal convention is picked up; a terminal understanding neither just ignores
+the inert bytes). Input is sanitized (control characters and `;` stripped) before going into the
+sequence, since bodies come from tool names / error text. Window-title updates (OSC 0/2) needed no
+hand-rolled escape sequence at all — bubbletea v2's `tea.View.WindowTitle` field handles it
+natively; `model.windowTitle()` derives "Aegis — ready" / "— working…" / "— approval needed" from
+existing `m.streaming`/`m.approval` state on every `View()` call.
+
+Focus tracking uses bubbletea v2's built-in `tea.FocusMsg`/`tea.BlurMsg`, enabled via
+`v.ReportFocus = true` in `View()`; `model.focused` defaults to `false` (not `true`) since not every
+terminal/multiplexer reports focus (tmux needs explicit configuration) — when a terminal never
+sends focus events, the safe failure mode is "always notify," not "silently suppress forever."
+`model.notifyCmd(ev)` returns `nil` while focused or in `Off` mode, otherwise `tea.Raw(sequence)` —
+`tea.Raw`/`tea.RawMsg` is bubbletea v2's sanctioned path for writing raw bytes through the same
+synchronized output buffer the renderer itself uses, avoiding the interleaving risk of writing
+directly to stdout from a `tea.Cmd` goroutine.
+
+Wired at the three trigger points named in the roadmap: `streamClosedMsg` (run finished — skipped
+when a TQ8-queued message is about to auto-send, since another run starts immediately), `errMsg`
+(SSE connection-level error), and inside `applyEvent`'s `KindApprovalRequest`/`KindError` branches
+via a `model.pendingNotify *notify.Event` field the `eventMsg` Update case reads and clears (since
+`applyEvent` mutates state but returns no `tea.Cmd` of its own).
+
+Config: new `tui.notifications` key (`TUIConfig.Notifications`, default `"both"`), threaded through
+`internal/cli/root.go` into `tui.Config` the same way `tui.theme`/`tui.humor_mode` already are. New
+`/notify <off|bell|desktop|both>` slash command (bare args show the current mode) follows the exact
+`/theme` convention: the dispatcher validates and emits a `"\x00notify "`-prefixed sentinel Output,
+applied by a `slashResultMsg` case in `tui.go` — session-only, `tui.notifications` in config persists
+across restarts. Documented in `docs/configuration.md`.
+
+Tests: `internal/tui/notify/notify_test.go` (mode parsing, sequence construction per mode,
+sanitization) and `internal/tui/notify_test.go` (`/notify` dispatch + live sentinel wiring, focus
+tracking suppresses/allows `notifyCmd`, `Off` mode never fires, `windowTitle()` reflects
+streaming/approval/ready state) — all via the existing `driveUpdate`/`plainView` integration-test
+helpers, no new test scaffolding needed.
 
 ## Shipped — P15 items (Web UI Parity with the TUI)
 

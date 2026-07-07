@@ -117,6 +117,10 @@ type TUIConfig struct {
 	HumorMode bool `koanf:"humor_mode"`
 	// Theme selects the TUI color scheme: "dark" (default) or "light".
 	Theme string `koanf:"theme"`
+	// Notifications controls the P16.1 attention system fired on stream-end,
+	// approval-pending, and error while the terminal isn't focused: "off",
+	// "bell", "desktop", or "both" (default).
+	Notifications string `koanf:"notifications"`
 }
 
 // CleanupConfig controls automatic pruning of old sessions.
@@ -467,6 +471,7 @@ func defaults() map[string]any {
 		"output_guard.rubric":          DefaultGuardRubric,
 		"tui.humor_mode":               true,
 		"tui.theme":                    "dark",
+		"tui.notifications":            "both",
 		"embeddings.enabled":           false,
 		"embeddings.provider":          "ollama",
 		"embeddings.model":             "nomic-embed-text",

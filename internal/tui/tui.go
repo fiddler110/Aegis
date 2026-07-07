@@ -31,17 +31,19 @@ import (
 	"github.com/fiddler110/aegis/internal/commands"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/tui/notify"
 )
 
 // Config configures the TUI.
 type Config struct {
-	Client    *client.Client
-	SessionID string
-	Mode      string
-	Model     string
-	WorkDir   string
-	HumorMode bool   // D&D-themed thinking phrases; false = plain "thinking…"
-	Theme     string // color scheme name: "dark" (default) or "light" (TQ10)
+	Client        *client.Client
+	SessionID     string
+	Mode          string
+	Model         string
+	WorkDir       string
+	HumorMode     bool   // D&D-themed thinking phrases; false = plain "thinking…"
+	Theme         string // color scheme name: "dark" (default) or "light" (TQ10)
+	Notifications string // attention-system mode (P16.1): off/bell/desktop/both
 }
 
 // Run starts the TUI event loop and blocks until the user quits.
@@ -186,6 +188,16 @@ type model struct {
 	activeToast    *toast
 	completion     completionState
 	approval       *approvalState // non-nil while engine is blocked waiting for user approval
+
+	// P16.1 attention system: notifyMode is parsed once from config/session
+	// state; focused tracks terminal focus (via tea.FocusMsg/BlurMsg) so
+	// notifications are suppressed while the user is already looking. Focus
+	// reporting isn't supported by every terminal (see tea.BlurMsg docs), so
+	// focused defaults to false ("not known to be focused") — when in doubt,
+	// notify rather than silently suppress.
+	notifyMode    notify.Mode
+	focused       bool
+	pendingNotify *notify.Event // set by applyEvent, consumed by the eventMsg handler
 }
 
 // approvalState holds the details of a pending tool-execution approval request
@@ -330,6 +342,7 @@ func newModel(cfg Config) model {
 		humorMode:    cfg.HumorMode,
 		term:         newTermPane(workDir, 10), // height recalculated on first resize
 		stashPath:    stashPath,
+		notifyMode:   notify.ParseMode(cfg.Notifications),
 	}
 	// P5.6: restore an unsent draft if one was saved from the previous session.
 	if draft := loadStash(stashPath); draft != "" {
@@ -585,6 +598,18 @@ func waitForEvent(ch <-chan api.Event) tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	// Focus tracking (P16.1) always updates regardless of any open overlay —
+	// it carries no interaction semantics of its own, just suppression state
+	// for the attention system.
+	switch msg.(type) {
+	case tea.FocusMsg:
+		m.focused = true
+		return m, nil
+	case tea.BlurMsg:
+		m.focused = false
+		return m, nil
+	}
 
 	// Wizard overlay: delegate all messages while the wizard is open.
 	if m.wizard != nil {
@@ -1036,7 +1061,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventMsg:
 		m.applyEvent(api.Event(msg))
 		m.refresh()
-		return m, waitForEvent(m.events)
+		var notifyCmd tea.Cmd
+		if m.pendingNotify != nil {
+			notifyCmd = m.notifyCmd(*m.pendingNotify)
+			m.pendingNotify = nil
+		}
+		return m, tea.Batch(waitForEvent(m.events), notifyCmd)
 
 	case streamClosedMsg:
 		m.flushThinking()
@@ -1048,14 +1078,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.escPending = false
 		m.setSteerMode(false)
 		m.transcript.append("\n")
-		// TQ8: auto-send the next queued message, one per completed run.
+		// TQ8: auto-send the next queued message, one per completed run. Don't
+		// notify here — another run is about to start immediately.
 		if len(m.queued) > 0 {
 			next := m.queued[0]
 			m.queued = m.queued[1:]
 			return m, m.sendUserMessage(next)
 		}
 		m.refresh()
-		return m, nil
+		return m, m.notifyCmd(notify.Event{Title: "Aegis", Body: "Run finished"})
 
 	case errMsg:
 		m.streaming = false
@@ -1069,7 +1100,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "ready"
 		m.refresh()
-		return m, nil
+		return m, m.notifyCmd(notify.Event{Title: "Aegis", Body: "Error: " + truncate(msg.err.Error(), 100)})
 
 	case bangMsg: // P2.2: shell command result
 		header := m.th.tool.Render("! " + msg.cmd)
@@ -1238,6 +1269,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.th = newTheme()
 			m.renderer = newGlamourRenderer(m.rendererW)
 			m.transcript.append(m.th.statusText.Render(fmt.Sprintf("Theme switched to %s. This session only — set tui.theme: %s in config to persist.", name, name)) + "\n\n")
+			m.refresh()
+			return m, nil
+		}
+		if msg.Output == "\x00notify-show" {
+			m.transcript.append(m.th.statusText.Render(fmt.Sprintf("Current notify mode: %s", m.notifyMode)) + "\n\n")
+			m.refresh()
+			return m, nil
+		}
+		if strings.HasPrefix(msg.Output, "\x00notify ") {
+			name := strings.TrimPrefix(msg.Output, "\x00notify ")
+			m.notifyMode = notify.ParseMode(name)
+			m.transcript.append(m.th.statusText.Render(fmt.Sprintf("Notify mode switched to %s. This session only — set tui.notifications: %s in config to persist.", name, name)) + "\n\n")
 			m.refresh()
 			return m, nil
 		}
@@ -1981,6 +2024,7 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 		m.status = "approval required"
 		m.applyViewportHeight() // dialog height varies with the preview (TQ6)
+		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + ev.Tool}
 
 	case api.KindSteer:
 		// A steering instruction was injected mid-run. Flush any partial model
@@ -2016,6 +2060,7 @@ func (m *model) applyEvent(ev api.Event) {
 		m.flushLiveText()
 		m.approval = nil // clear any pending approval if the run aborts
 		m.transcript.append("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
+		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Error: " + truncate(ev.Error, 100)}
 	}
 }
 
@@ -2054,7 +2099,37 @@ func (m model) View() tea.View {
 	v.AltScreen = true
 	v.BackgroundColor = colSurface
 	v.MouseMode = tea.MouseModeCellMotion
+	v.WindowTitle = m.windowTitle() // P16.1: OSC 0/2, reflects session state
+	v.ReportFocus = true            // P16.1: enables tea.FocusMsg/BlurMsg
 	return v
+}
+
+// windowTitle reflects session state in the terminal title (P16.1) so a
+// tabbed-away user can tell streaming/ready/awaiting-approval apart from the
+// tab/window list alone.
+func (m model) windowTitle() string {
+	switch {
+	case m.approval != nil:
+		return "Aegis — approval needed"
+	case m.streaming:
+		return "Aegis — working…"
+	default:
+		return "Aegis — ready"
+	}
+}
+
+// notifyCmd returns a tea.Cmd that fires the P16.1 attention system for ev —
+// bell and/or OS desktop notification per m.notifyMode — or nil if the
+// terminal is known to be focused or the mode has nothing to send.
+func (m model) notifyCmd(ev notify.Event) tea.Cmd {
+	if m.focused {
+		return nil
+	}
+	seq := notify.Sequence(m.notifyMode, ev)
+	if seq == "" {
+		return nil
+	}
+	return tea.Raw(seq)
 }
 
 func (m model) render() string {
