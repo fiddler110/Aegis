@@ -47,6 +47,9 @@ ask → Operational Threat Model.
 5. **Keep it current** — note in the output that this model should be
    revisited when the feature/infra it covers changes materially, since
    VAST's Agile framing assumes iteration rather than a one-time document.
+   The inventory sidecar (`references/verification-and-updates.md`) is what
+   makes that revisit cheap — the next run diffs against it instead of
+   starting over, which is exactly the cadence VAST assumes.
 
 ## Output template
 
@@ -61,9 +64,9 @@ ask → Operational Threat Model.
 
 ## Threats (backlog-shaped)
 
-| ID | Title | Description | Severity | Acceptance criteria for mitigation |
-|---|---|---|---|---|
-| V1 | <short title, ticket-ready> | <threat description> | <critical/high/medium/low> | <what "fixed" looks like> |
+| ID | Title | Description | Evidence | Severity | Acceptance criteria for mitigation |
+|---|---|---|---|---|---|
+| V1 | <short title, ticket-ready> | <threat description> | <file/config making it real> | <critical/high/medium/low> | <what "fixed" looks like> |
 
 ## Enumeration method used
 <e.g. "STRIDE per diagram element" — state it since VAST doesn't mandate one>

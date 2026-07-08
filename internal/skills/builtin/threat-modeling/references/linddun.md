@@ -55,9 +55,9 @@ data, anything where the risk that matters is a person being harmed by data
 
 ## Threats
 
-| ID | Element | Category | Threat | Mitigation | Residual risk | Severity |
-|---|---|---|---|---|---|---|
-| P1 | <element> | Linkability | <description> | <control, or "none — open finding"> | <what remains> | <critical/high/medium/low> |
+| ID | Element | Category | Threat | Evidence | Prerequisite | Mitigation | Residual risk | Severity |
+|---|---|---|---|---|---|---|---|---|
+| P1 | <element> | Linkability | <description> | <code/config/schema showing the data handling> | <none/authenticated/internal network/local process/host compromise> | <control, or "none — open finding"> | <what remains> | <critical/high/medium/low> |
 
 ## Summary
 <count of threats by category and severity; any consent/purpose-scope gaps found>
