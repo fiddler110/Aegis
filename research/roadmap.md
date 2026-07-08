@@ -1,6 +1,12 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P20.1 shipped — `deep-research` builtin skill (structured
+**Last updated:** 2026-07-07 (P21 added — fresh-eyes code review of the running app, roadmap/releases
+deliberately ignored; found the TUI's "rough feel" root cause — per-token markdown re-render instead
+of per-frame — plus daemon-robustness and web-UI-token findings. P21.1 stream-delta coalescing +
+P21.4 render-cost regression bench SHIPPED the same day (buffered SSE channel + drain-batched
+`waitForEvent` → one markdown render per frame instead of per token); P21.2/P21.3/P21.5/P21.6 scoped.
+The `/ui` token-exposure finding folded into P15 as P15.12.
+Earlier the same day: P20.1 shipped — `deep-research` builtin skill (structured
 plan → search → read → synthesize rounds, source-quality bar, findings log + analyzed-URLs audit
 trail, cited report) plus `/research` TUI command — see
 [releases.md](releases.md#shipped--p20-items-odysseus-review-research-compare-model-fit).
@@ -26,9 +32,12 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P15.2–P15.11** (web UI
+Open items: **P21** (2026-07-07 fresh-eyes review — P21.1 TUI stream-delta coalescing + P21.4
+render-cost bench SHIPPED 2026-07-07; P21.2 tool-call cards, P21.3 streaming caret, P21.5 daemon
+resource ceilings, P21.6 MCP output trust remain scoped), **P15.2–P15.12** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
--port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
+-port shipped 2026-07-06, see below; P15.12 added 2026-07-07 for the `/ui` token-exposure finding),
+**P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
 engagement tooling), **P20** (P20.2 blind model compare, P20.3 hardware-aware model
 recommendation — P20.1 deep-research shipped 2026-07-07), **P9.4** (per-task model
 routing), **P6.1** (mid-turn state persistence).
@@ -132,6 +141,19 @@ endpoint (`internal/server/*.go`) — those items below are frontend-only.
   AllowAlways`+`.Pattern` — already in the API type); the current page's approval box only ever
   sends `approved: true/false` for the one call. Frontend-only: add the "always allow this" checkbox
   and pattern input the API already accepts. (S)
+- **P15.12 — Harden the `/ui` token-injection mechanism (2026-07-07 review finding).** `GET /ui`
+  (`handleWebUI`, `internal/server/webui.go`) is exempt from `authMiddleware` and injects the raw,
+  long-lived daemon auth token straight into the HTML shell (`__AEGIS_TOKEN__` `strings.Replace`).
+  The origin guard (`originMiddleware`) only rejects requests that *carry* a non-loopback `Origin`
+  header — a direct `GET /ui` from any local process (no Origin header at all) returns the daemon
+  token in cleartext. On a single-user host this sits within the current threat model, but on a
+  shared/multi-user machine any local account that can reach the loopback port harvests full API
+  access, and the token is the *same* secret every other client uses for the lifetime of the daemon.
+  Tighten to a short-lived, single-use page token minted per `/ui` load (exchanged once for the real
+  session, then invalidated) rather than handing out the daemon's master secret, so a leaked page
+  source can't be replayed. Keep the loopback-only posture as the outer boundary. (S/M, security) —
+  note: this is a change to P15.1's existing injection mechanism, not new panel work, so it can land
+  independently of P15.2–P15.11.
 - **P15.11 — Non-technical-user framing, not just feature parity.** The TUI is intentionally
   information-dense (terse slash commands, raw persona names, tabwriter tables) for a power-user
   audience; "bring the web UI to TUI depth" and "make it usable for less-technical users" pull in
@@ -309,6 +331,80 @@ exercises the P15.1 scaffold on a real new panel); P20.3 needs no web UI at all.
 cross-cutting rule applies: each item ships its in-session TUI surface (`/compare`, `/models` —
 P20.1's `/research` shipped) and is covered by the P14 command-surface sync tests. Priority:
 **Low-Medium** (competitive-inspired, no direct user pain behind it). Effort: **M** per item.
+
+---
+
+## Open Work — P21 (Fresh-Eyes Code Review — 2026-07-07)
+
+A from-scratch review of the running application — engine loop, permission gate, daemon auth/HTTP
+surface, swarm subprocess, and the full TUI streaming/render path — done deliberately *without*
+reference to the roadmap or releases, to catch what a checklist re-verification structurally can't
+(cf. the 2026-07-03 fresh-eyes review). Overall finding: the backend is sound (per-turn budget
+gates, capability-based tool serialization, panic recovery in tool goroutines, loopback bind +
+constant-time token compare + DNS-rebinding origin guard + Windows token ACLs). The issues are
+concentrated in the TUI render pipeline and two daemon-robustness gaps.
+
+**Root cause of the "TUI feels rough vs crush/Claude Code" complaint (P21.1):** the render pipeline
+does expensive per-*token* work where the polished TUIs do per-*frame* work. `waitForEvent`
+(`internal/tui/tui.go`) pulls exactly one SSE event per Bubbletea `Update` cycle; each streamed
+token (`eventMsg` → `applyEvent` → `refresh()`) re-runs glamour markdown over the growing live tail
+(`liveBlock.render` → `md(b.raw[boundary:])`, `internal/tui/transcript.go`) and recomputes scroll
+layout (`SetTail`+`GotoBottom`), on every token. Bubbletea throttles *painting* to ~60fps, but this
+work runs inside `Update`, upstream of that throttle, so it executes at token rate. The
+boundary-cache only settles the prefix at blank lines, so inside a long paragraph the whole current
+paragraph is re-parsed per token. That is the micro-jitter, input latency, and CPU spin.
+
+- **P21.1 — Stream-delta coalescing — SHIPPED 2026-07-07.** Decoupled ingest rate from render rate
+  so glamour/layout work is bounded by frame rate, not token rate. Two-part fix: (1) the client's
+  SSE channel is now buffered (`make(chan api.Event, 256)`, `internal/client/client.go`) so the
+  parser goroutine runs ahead of the render loop — an unbuffered channel meant at most one event was
+  ever ready, so draining alone would have done nothing; (2) `waitForEvent` (`internal/tui/tui.go`)
+  now blocks for the first event then non-blockingly drains everything else buffered into one
+  `batchEventMsg` (capped at `maxEventsPerBatch = 512` so a fast stream still yields to input/paint),
+  and the new `applyStreamBatch` applies the whole batch with a single `refresh()`. A close observed
+  mid-drain folds into the batch (`closed` flag) and re-uses the existing `streamClosedMsg` teardown.
+  The single-event `eventMsg` path is retained (direct test drivers) and funnels through the same
+  helper, so follow-bottom/notify bookkeeping is identical. Verified: `go test`/`-race`/`vet`/build
+  all clean.
+- **P21.1a — Follow-up (open, only if needed):** frame-clock `refresh()` on a ticker so even a
+  single unbroken burst larger than one drain is rendered at most once per frame. Not built —
+  channel buffering + drain already collapses the common case; revisit only if profiling shows
+  residual per-token cost on very fast local models.
+- **P21.2 — Tool-call cards (in-place updating block).** Today a tool call and its result are two
+  separately-appended transcript items (`renderToolCall` then `renderToolResult`, keyed by
+  call/result ordering per tool name). Claude Code renders a tool invocation as one coherent block
+  that updates in place (pending → ok/err) — that in-place model is what keeps a tool-heavy turn
+  from reading as noise. Restructure the two appends into a single addressable, updatable transcript
+  item. Depends on nothing; complements P21.1. (M)
+- **P21.3 — Streaming caret.** The live tail shows a spinner phrase but no steady text cursor at the
+  write head. A blinking block caret at the end of the streaming text reads as "alive" rather than
+  "redrawing" and is a large share of the perceived-polish gap for a cheap change. (S)
+- **P21.4 — Render-cost regression bench — SHIPPED 2026-07-07 (with P21.1).**
+  `internal/tui/streaming_coalesce_test.go` locks in the fix: `TestWaitForEventCoalescesBufferedTokens`
+  asserts 200 buffered tokens collapse into exactly one batch (one refresh = one render — reverting
+  to one-event-per-msg makes it fail), `TestWaitForEventRespectsBatchCap` proves the 512 cap yields
+  control back, `TestBatchEventMsgEquivalentToSequential` proves the coalesced path renders
+  byte-identically to the per-token path, and `TestBatchEventMsgClosedTearsDownStream` covers the
+  mid-drain close.
+- **P21.5 — Daemon resource ceilings.** `sessionSems` caps runs to one-per-session, but there is no
+  global cap on total concurrent sessions/runs and no bound on SSE buffer growth. This matters more
+  now that `aegis mcp-serve` (`internal/mcpserver`) exposes sessions to other MCP-speaking harnesses
+  — a misbehaving or hostile MCP client could fan out sessions unbounded and exhaust the host. Add a
+  configurable max-concurrent-runs and an optional per-run wall-clock ceiling; keep the loopback
+  boundary as the outer guard. (S/M, security/robustness)
+- **P21.6 — MCP tool output trust boundary.** MCP tools are capability-gated (default `execute`, the
+  most restrictive — P7.1) but their *output* flows back into the model context unfiltered, so a
+  compromised or malicious MCP server is a prompt-injection vector with no guardrail. Document the
+  trust assumption in `docs/` and consider an opt-in output scan / provenance marker for MCP sources
+  the user hasn't explicitly trusted. (S, security — lower urgency, no reported incident)
+
+**Suggested sequencing:** P21.1 + P21.4 together (the fix and its proof), then P21.3 (cheap visible
+win), then P21.2 (larger visual restructure). P21.5/P21.6 are independent security/robustness items
+with no ordering constraint. The `/ui` token finding from the same review is tracked as **P15.12**
+in the web-UI track above (it's a change to P15.1's existing token-injection mechanism, so it lives
+with P15). Per the P13 cross-cutting rule, none of these add model-callable capability, so no new
+`/slash` surface is required. Priority: **High** for P21.1 (direct user pain), **Medium** for the
+rest. Effort: **M** overall — mostly small, contained changes.
 
 ---
 
