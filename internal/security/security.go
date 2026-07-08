@@ -204,15 +204,57 @@ func RunAll(ctx context.Context, dir string, scanners []Scanner) Report {
 
 // RunWithOptions is RunAll with explicit per-tool policy (P11.11).
 func RunWithOptions(ctx context.Context, dir string, scanners []Scanner, opts Options) Report {
+	return RunWithProgress(ctx, dir, scanners, opts, nil)
+}
+
+// ScanPhase marks where a ScanEvent falls in a single scanner's lifecycle.
+type ScanPhase string
+
+const (
+	PhaseSkipped ScanPhase = "skipped" // Resolve returned MethodNone; Reason explains why
+	PhaseStart   ScanPhase = "start"   // Scan is about to run
+	PhaseDone    ScanPhase = "done"    // Scan returned (Err set on failure)
+)
+
+// ScanEvent is emitted by RunWithProgress before/after each scanner runs, so
+// a caller (aegis scan) can print live status instead of waiting silently for
+// the whole run to finish — RunWithOptions previously gave no signal at all
+// until every scanner (SAST/SCA/secrets/etc., each its own subprocess) had
+// completed, which reads as a hang on a large repo.
+type ScanEvent struct {
+	Scanner  string
+	Phase    ScanPhase
+	Method   Method        // meaningful for PhaseStart/PhaseDone
+	Reason   string        // meaningful for PhaseSkipped
+	Findings int           // meaningful for PhaseDone
+	Err      error         // meaningful for PhaseDone
+	Elapsed  time.Duration // meaningful for PhaseDone
+}
+
+// RunWithProgress is RunWithOptions with an optional callback invoked before
+// and after each scanner runs. progress may be nil (equivalent to
+// RunWithOptions); scanners still run strictly sequentially, so events arrive
+// in a deterministic, non-overlapping order.
+func RunWithProgress(ctx context.Context, dir string, scanners []Scanner, opts Options, progress func(ScanEvent)) Report {
 	rep := newReport()
 	for _, sc := range scanners {
 		method, rt, image, reason := sc.Resolve(ctx, opts)
 		if method == MethodNone {
 			rep.Skipped[sc.Name()] = reason
+			if progress != nil {
+				progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseSkipped, Reason: reason})
+			}
 			continue
 		}
+		if progress != nil {
+			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseStart, Method: method})
+		}
+		start := time.Now()
 		findings, err := sc.Scan(ctx, dir, method, rt, image, opts)
 		rep.record(sc.Name(), method, findings, err)
+		if progress != nil {
+			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseDone, Method: method, Findings: len(findings), Err: err, Elapsed: time.Since(start)})
+		}
 	}
 	// Dedup and ASVS-tag before baseline matching, so a suppression entry
 	// matches the same (rule/CVE, location) key a reader would see reported

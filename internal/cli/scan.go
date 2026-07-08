@@ -2,15 +2,38 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/spf13/cobra"
 )
+
+// scanProgressPrinter renders security.ScanEvent as one line per scanner
+// start/finish/skip, so `aegis scan` shows live activity in the terminal
+// instead of going silent until the whole (potentially multi-minute, one
+// subprocess per tool) run completes.
+func scanProgressPrinter(out io.Writer) func(security.ScanEvent) {
+	return func(ev security.ScanEvent) {
+		switch ev.Phase {
+		case security.PhaseStart:
+			fmt.Fprintf(out, "-> %s (%s)...\n", ev.Scanner, ev.Method)
+		case security.PhaseDone:
+			if ev.Err != nil {
+				fmt.Fprintf(out, "   %s: error: %v (%s)\n", ev.Scanner, ev.Err, ev.Elapsed.Round(time.Millisecond))
+				return
+			}
+			fmt.Fprintf(out, "   %s: %d finding(s) (%s)\n", ev.Scanner, ev.Findings, ev.Elapsed.Round(time.Millisecond))
+		case security.PhaseSkipped:
+			fmt.Fprintf(out, "-- %s: skipped (%s)\n", ev.Scanner, ev.Reason)
+		}
+	}
+}
 
 func newScanCmd() *cobra.Command {
 	var scanners []string
@@ -63,10 +86,11 @@ func newScanCmd() *cobra.Command {
 			} else {
 				opts = security.AutoEnableLanguageScanners(abs, opts)
 			}
-			report := security.RunWithOptions(cmd.Context(), abs, selected, opts)
+			out := cmd.OutOrStdout()
+			report := security.RunWithProgress(cmd.Context(), abs, selected, opts, scanProgressPrinter(out))
 			security.WriteReportArtifact(abs, "scan", report)
-			fmt.Fprintln(cmd.OutOrStdout(), report.Format())
-			fmt.Fprintf(cmd.OutOrStdout(), "\nReport written to %s\n", security.ReportArtifactPath(abs, "scan"))
+			fmt.Fprintln(out, report.Format())
+			fmt.Fprintf(out, "\nReport written to %s\n", security.ReportArtifactPath(abs, "scan"))
 			return nil
 		},
 	}
