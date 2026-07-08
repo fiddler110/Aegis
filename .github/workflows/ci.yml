@@ -26,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # go-version-file resolves the exact toolchain pinned in go.mod so all
       # three OSes build against the same compiler version the project
