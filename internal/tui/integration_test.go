@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -185,5 +186,129 @@ func TestTUITimelineSeek_NoPTY(t *testing.T) {
 	view := m.transcript.View()
 	if !strings.Contains(view, "first turn") {
 		t.Fatalf("expected ScrollToItem(blockIndex) to land on turn 1's own content, got:\n%s", view)
+	}
+}
+
+// followBottomTestModel builds a model with a small, exactly-known transcript
+// pane size, with the welcome-banner content cleared out first so the tests
+// below control every line in the pane instead of depending on the welcome
+// banner's (unrelated, may-change) line count.
+func followBottomTestModel(t *testing.T) model {
+	t.Helper()
+	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.transcript.Reset()
+	m.transcript.SetSize(60, 8) // pane height fixed directly, independent of layout()'s fixedH budget
+	return m
+}
+
+// TestFollowBottomStaysPinnedDuringEventStream_NoPTY (P18.3a) drives a
+// streaming reply token-by-token through the real eventMsg path (the same
+// one waitForEvent delivers from the daemon's SSE channel) and checks the
+// viewport stays pinned to the bottom of every token, not just at spinner-
+// tick boundaries, as long as followBottom is true throughout.
+func TestFollowBottomStaysPinnedDuringEventStream_NoPTY(t *testing.T) {
+	m := followBottomTestModel(t)
+
+	m.appendUser("please write a long answer", nil)
+	m.streaming = true
+	m.followBottom = true
+	m.refresh()
+	if !m.transcript.AtBottom() {
+		t.Fatal("expected a freshly sent turn to start pinned to the bottom")
+	}
+
+	for i := 0; i < 20; i++ {
+		m = driveUpdate(t, m, eventMsg(api.Event{
+			Kind: api.KindText,
+			Text: fmt.Sprintf("streamed line %d of the reply\n", i),
+		}))
+		if !m.followBottom {
+			t.Fatalf("token %d: followBottom unexpectedly cleared mid-stream", i)
+		}
+		if !m.transcript.AtBottom() {
+			t.Fatalf("token %d: expected viewport to stay pinned to the bottom while followBottom is true", i)
+		}
+	}
+	if m.transcript.TotalHeight() <= 8 {
+		t.Fatal("expected the streamed reply to exceed one page — otherwise pinned vs. unpinned isn't distinguishable")
+	}
+}
+
+// TestFollowBottomResumesOnNextEvent_NoPTY (P18.3b) covers the fix's exact
+// mechanism: the eventMsg case in Update always returns early, so before
+// this fix it never reached the second switch's catch-all
+// `m.followBottom = m.transcript.AtBottom()` re-derivation (tui.go, after
+// the tea.KeyMsg/MouseWheelMsg cases) — only a spinner tick or another
+// key/mouse message could resync followBottom. This reproduces the instant
+// right after a user scrolls back down to the bottom mid-stream: the scroll
+// position is already exactly at the bottom (AtBottom() is true), but
+// followBottom itself hasn't been resynced from that position yet. The fix
+// must resync it from the very next streamed token, not wait for a tick.
+func TestFollowBottomResumesOnNextEvent_NoPTY(t *testing.T) {
+	m := followBottomTestModel(t)
+
+	m.appendUser("please write a long answer", nil)
+	m.streaming = true
+	m.followBottom = true
+	for i := 0; i < 20; i++ {
+		m.applyEvent(api.Event{Kind: api.KindText, Text: fmt.Sprintf("streamed line %d of the reply\n", i)})
+	}
+	m.refresh()
+	if m.transcript.TotalHeight() <= 8 {
+		t.Fatal("expected streamed content to exceed one page for scrolling to be meaningful")
+	}
+
+	// The user scrolls up mid-stream. Scroll directly at the pane level and
+	// mirror the model's own catch-all re-derivation (the second switch's
+	// `m.followBottom = m.transcript.AtBottom()` in Update) rather than
+	// driving a real tea.KeyMsg through model.Update: with streaming active,
+	// every keystroke also runs syncCompletion(), which calls out to the
+	// (here, nil) daemon client for custom commands — an unrelated
+	// pre-existing crash risk in a client-less test model, not anything this
+	// fix touches, so it's sidestepped rather than worked around.
+	for i := 0; i < 5; i++ {
+		m.transcript.HandleKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	}
+	m.followBottom = m.transcript.AtBottom()
+	if m.followBottom {
+		t.Fatal("expected followBottom to clear once the user scrolls away from the bottom")
+	}
+	if m.transcript.AtBottom() {
+		t.Fatal("expected the viewport to have actually moved off the bottom")
+	}
+
+	// Simulate the instant the user's scroll returns to exactly the bottom,
+	// before followBottom has been resynced from that position (isolating
+	// the eventMsg fix from the already-working key/mouse re-derivation
+	// path, which would otherwise resync followBottom itself and mask the
+	// very thing under test here).
+	m.transcript.GotoBottom()
+	m.followBottom = false
+	if !m.transcript.AtBottom() {
+		t.Fatal("setup error: expected GotoBottom to land exactly at the bottom")
+	}
+
+	m = driveUpdate(t, m, eventMsg(api.Event{Kind: api.KindText, Text: "one more streamed token\n"}))
+
+	if !m.followBottom {
+		t.Fatal("expected the next eventMsg to resync followBottom to true from the pre-event scroll position")
+	}
+	if !m.transcript.AtBottom() {
+		t.Fatal("expected the viewport to follow the newly streamed token once followBottom resyncs")
+	}
+
+	// Conversely, a token arriving while genuinely scrolled away from the
+	// bottom must not force followBottom back on.
+	for i := 0; i < 5; i++ {
+		m.transcript.HandleKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	}
+	m.followBottom = m.transcript.AtBottom()
+	if m.followBottom || m.transcript.AtBottom() {
+		t.Fatal("setup error: expected scrolling up again to leave the bottom")
+	}
+	m = driveUpdate(t, m, eventMsg(api.Event{Kind: api.KindText, Text: "yet another token\n"}))
+	if m.followBottom {
+		t.Fatal("expected a token arriving while scrolled away from the bottom to leave followBottom false")
 	}
 }

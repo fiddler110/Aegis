@@ -110,7 +110,20 @@ func EstimateTokens(system string, msgs []provider.Message) int {
 // preserves tool_use/tool_result pairing by cutting only before an assistant
 // message.
 func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider.Message) ([]provider.Message, bool, error) {
-	if !s.shouldCompact(EstimateTokens(system, msgs)) {
+	return s.compact(ctx, system, msgs, false)
+}
+
+// ForceCompact runs the same compaction pass unconditionally, skipping the
+// budget checks Compact uses to decide whether compaction is warranted — for
+// a user-triggered manual compaction (e.g. the TUI `/compact` command) ahead
+// of a tool-heavy stretch the user knows is coming, rather than the automatic
+// budget-driven path.
+func (s *Summarizer) ForceCompact(ctx context.Context, system string, msgs []provider.Message) ([]provider.Message, bool, error) {
+	return s.compact(ctx, system, msgs, true)
+}
+
+func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider.Message, force bool) ([]provider.Message, bool, error) {
+	if !force && !s.shouldCompact(EstimateTokens(system, msgs)) {
 		return msgs, false, nil
 	}
 
@@ -118,7 +131,7 @@ func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider
 	// old search dumps) before paying for an LLM summarization call. Cheaper,
 	// and it preserves the exact wording of everything the model actually said.
 	if pruned, prunedChars := pruneStaleToolResults(msgs, s.keepRecent); prunedChars > 0 {
-		if !s.shouldCompact(EstimateTokens(system, pruned)) {
+		if !force && !s.shouldCompact(EstimateTokens(system, pruned)) {
 			return pruned, true, nil
 		}
 		msgs = pruned

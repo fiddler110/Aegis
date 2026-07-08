@@ -156,6 +156,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/rewind` | List checkpoints (newest first, with file counts) |
 | `/rewind <n> [code\|conversation\|both]` | Restore checkpoint n |
 | `/rollback [n]` | Restore checkpoint n and run `git reset --hard` |
+| `/compact` | Force context compaction now, ahead of a heavy stretch, instead of waiting for the automatic budget-driven trigger |
 | `/timeline` | Jump to a past turn in the conversation |
 | `/detach [on\|off]` | Run session in background (survives TUI close) |
 | `/archive [off\|list]` | Archive session (hidden from listings, data kept); `/archive off` to restore; `/archive list` to list archived sessions |
@@ -208,6 +209,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/debate <claim>` | Adversarially debate any claim (security finding, design assertion, plan) — propose/critique/rebut/arbitrate, ending in an UPHOLD/REVISE/REJECT verdict |
 | `/threat-model [system or feature]` | Threat-model the whole project, or a named system/feature, using STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154 |
 | `/report [latex] <sources…>` | Consolidate existing markdown docs into one report — a shareable `.html` page by default, or a LaTeX/PDF report with `latex` |
+| `/research [topic or question]` | Deep-research a topic on the web via the `deep-research` skill — planned rounds, a source-quality bar, and a report with numbered citations |
 
 ### Display & Session
 
@@ -341,7 +343,7 @@ Use `/guard status` to check the current guard state; `/guard off` disables it f
 
 ## Context Window Meter
 
-The sidebar shows a fill bar (`▰▰▰▱▱▱▱ 31%`) representing how full the model's context window is. At 85% fill, automatic context compaction kicks in and summarizes old turns. The `cache N% hit` line (Anthropic only) shows the prompt-cache hit rate — higher is better for both speed and cost.
+The sidebar shows a fill bar (`▰▰▰▱▱▱▱ 31%`) representing how full the model's context window is. At 85% fill, automatic context compaction kicks in and summarizes old turns. Run `/compact` to trigger the same summarization early — e.g. before a long tool-heavy stretch you know is coming — rather than waiting for the automatic trigger; it reports "nothing to compact" if the conversation is too short to safely summarize. (Not to be confused with `/tools compact`, which only changes tool-output display width.) The `cache N% hit` line (Anthropic only) shows the prompt-cache hit rate — higher is better for both speed and cost.
 
 ---
 

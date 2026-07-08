@@ -117,15 +117,52 @@ type transcriptPane struct {
 	offsetIdx  int
 	offsetLine int
 
-	totalHeightCache int
-	totalHeightValid bool
+	// itemsHeightCache/itemsHeightValid cache the summed height of the
+	// marker + real items (everything except the ephemeral tail). Deliberately
+	// separate from the tail's own contribution (see TotalHeight) so a
+	// streaming tail changing on every token (SetTail) never forces an
+	// O(items) resum — only mutations that can change a real item's height
+	// (append, trim, edit, resize) invalidate this.
+	itemsHeightCache int
+	itemsHeightValid bool
+
+	// offsetLinesCacheSum/-W/-Valid track the sum of segment heights strictly
+	// before offsetIdx. Rather than a plain memo keyed on offsetIdx (which
+	// would miss every tick for single-line-item transcripts, where offsetIdx
+	// changes on every scroll step), ScrollBy/GotoTop/GotoBottom maintain this
+	// sum incrementally as they move offsetIdx — each step adds or removes
+	// exactly the one segment's height that crossed the offset boundary,
+	// using heights those functions already compute for their own bookkeeping.
+	// Anything that can change a pre-offset segment's own height
+	// (invalidateItemsHeight) or jump offsetIdx non-incrementally
+	// (ScrollToItem) invalidates instead, falling back to a full recompute on
+	// next access — this is what keeps offsetLines() correct, not just fast.
+	//
+	// Before this, offsetLines() (called by ScrollbarThumb/ScrollPercent on
+	// every render, for the scrollbar) re-walked every segment from the top
+	// of the transcript on every single call — an O(scroll depth) cost paid
+	// on every scroll tick and every streamed token while auto-follow is
+	// active. See BenchmarkScrollTick_WithScrollbar_NoTrimCap in
+	// transcript_bench_test.go for the confirming profile (P18.2).
+	offsetLinesCacheSum   int
+	offsetLinesCacheW     int
+	offsetLinesCacheValid bool
 }
 
 func newTranscriptPane(width, height int) *transcriptPane {
 	return &transcriptPane{width: width, height: height}
 }
 
-func (p *transcriptPane) invalidateTotal() { p.totalHeightValid = false }
+// invalidateItemsHeight marks the items-only height sum (and the dependent
+// offsetLines memo, since it sums a prefix of the same segments) stale.
+// Called by mutations that can change a real item's rendered height:
+// append/trim/edit/resize. NOT called by SetTail — the tail is summed
+// separately in TotalHeight, and it never contributes to offsetLines since
+// it is always the last segment.
+func (p *transcriptPane) invalidateItemsHeight() {
+	p.itemsHeightValid = false
+	p.offsetLinesCacheValid = false
+}
 
 // Append adds one rendered item. Empty strings are ignored (mirrors the old
 // WriteString("") no-op behavior).
@@ -135,7 +172,7 @@ func (p *transcriptPane) Append(raw string) {
 	}
 	p.items = append(p.items, newItem(raw))
 	p.rawBytes += len(raw)
-	p.invalidateTotal()
+	p.invalidateItemsHeight()
 	p.trim()
 }
 
@@ -148,7 +185,7 @@ func (p *transcriptPane) AppendRaw(raw string) {
 	}
 	p.items = append(p.items, newRawItem(raw))
 	p.rawBytes += len(raw)
-	p.invalidateTotal()
+	p.invalidateItemsHeight()
 	p.trim()
 }
 
@@ -162,7 +199,7 @@ func (p *transcriptPane) AppendBlock(raw string) *transcriptItem {
 	it := newItem(raw)
 	p.items = append(p.items, it)
 	p.rawBytes += len(raw)
-	p.invalidateTotal()
+	p.invalidateItemsHeight()
 	p.trim()
 	// trim may have evicted the item we just appended (pathological budget);
 	// report it only if it survived.
@@ -179,7 +216,7 @@ func (p *transcriptPane) SetItemRaw(it *transcriptItem, raw string) {
 	p.rawBytes += len(raw) - len(it.raw)
 	it.raw = raw
 	it.invalidate()
-	p.invalidateTotal()
+	p.invalidateItemsHeight()
 	p.trim()
 }
 
@@ -204,7 +241,7 @@ func (p *transcriptPane) trim() {
 		p.marker = newItem(trimmedMarker)
 		p.offsetIdx++ // keep pointing at the same item now that marker occupies segment 0
 	}
-	p.invalidateTotal()
+	p.invalidateItemsHeight()
 }
 
 // Reset clears the pane (session switch, /clear).
@@ -217,7 +254,7 @@ func (p *transcriptPane) Reset() {
 	p.tailCache = nil
 	p.offsetIdx = 0
 	p.offsetLine = 0
-	p.invalidateTotal()
+	p.invalidateItemsHeight()
 }
 
 // Len returns the current item count (excluding the trim marker and the
@@ -228,11 +265,11 @@ func (p *transcriptPane) Len() int { return len(p.items) }
 // SetSize updates the pane's viewport dimensions. Item render caches
 // self-invalidate lazily on next access when their cached width no longer
 // matches (transcriptItem.rendered), so no global invalidation is needed
-// here — only the cached total-height sum, which depends on every item's
-// height at the current width.
+// here — only the cached height sums, which depend on every item's height at
+// the current width.
 func (p *transcriptPane) SetSize(w, h int) {
 	if p.width != w {
-		p.invalidateTotal()
+		p.invalidateItemsHeight()
 	}
 	p.width = w
 	p.height = h
@@ -251,6 +288,14 @@ func (p *transcriptPane) Height() int { return p.height }
 // line isn't silently dropped by View's height accounting, which — like
 // every other segment — counts newlines to know how many lines a segment
 // contributes.
+//
+// Deliberately does NOT invalidate itemsHeightCache/offsetLinesCache: the
+// tail is always the last segment, so changing it can never affect the
+// height of any earlier segment or the offsetLines() prefix sum before
+// offsetIdx. TotalHeight adds the tail's own (independently cached, O(tail
+// length) not O(history)) height on top of itemsHeight — see TotalHeight.
+// Without this split, a streaming reply that calls SetTail on every token
+// would force a full O(history) resum on every single token (P18.2).
 func (p *transcriptPane) SetTail(raw string) {
 	if raw != "" && !strings.HasSuffix(raw, "\n") {
 		raw += "\n"
@@ -260,7 +305,6 @@ func (p *transcriptPane) SetTail(raw string) {
 	}
 	p.tailRaw = raw
 	p.tailCache = nil
-	p.invalidateTotal()
 }
 
 // segmentCount is the number of addressable segments: marker (if any) +
@@ -313,19 +357,46 @@ func (p *transcriptPane) markerOffset() int {
 }
 
 // TotalHeight returns the total number of rendered lines across every
-// segment at the current width. Cached and invalidated on any mutation that
-// could change it (append, trim, SetItemRaw, SetSize, SetTail, Reset).
+// segment at the current width: the marker+items sum (itemsHeight, cached —
+// see invalidateItemsHeight) plus the ephemeral tail's own height (tailHeight
+// — cheap on its own, since the tail is a single item with its own wrap
+// cache, O(tail length) not O(history)). Splitting these two sums is what
+// lets a streaming tail change on every token (SetTail) without forcing a
+// full re-walk of the whole transcript on every frame (P18.2).
 func (p *transcriptPane) TotalHeight() int {
-	if !p.totalHeightValid {
+	return p.itemsHeight() + p.tailHeight()
+}
+
+// itemsHeight sums the marker (if any) + every real item's height, cached
+// until invalidateItemsHeight() is called (append/trim/edit/resize —
+// anything that can change a real item's contribution).
+func (p *transcriptPane) itemsHeight() int {
+	if !p.itemsHeightValid {
 		total := 0
-		n := p.segmentCount()
-		for i := 0; i < n; i++ {
-			total += p.segmentAt(i).height(p.width)
+		if p.marker != nil {
+			total += p.marker.height(p.width)
 		}
-		p.totalHeightCache = total
-		p.totalHeightValid = true
+		for _, it := range p.items {
+			total += it.height(p.width)
+		}
+		p.itemsHeightCache = total
+		p.itemsHeightValid = true
 	}
-	return p.totalHeightCache
+	return p.itemsHeightCache
+}
+
+// tailHeight returns the ephemeral tail segment's height, or 0 if there is
+// none. Needs no cache of its own beyond transcriptItem's per-item wrap
+// cache (tailCache) — SetTail already invalidates that when the text
+// actually changes.
+func (p *transcriptPane) tailHeight() int {
+	if p.tailRaw == "" {
+		return 0
+	}
+	if p.tailCache == nil {
+		p.tailCache = newItem(p.tailRaw)
+	}
+	return p.tailCache.height(p.width)
 }
 
 func (p *transcriptPane) TotalLineCount() int   { return p.TotalHeight() }
@@ -333,17 +404,20 @@ func (p *transcriptPane) VisibleLineCount() int { return p.height }
 
 // lastOffsetSegment returns the segment index and line offset that puts the
 // last segment's last line at the bottom of the viewport (crush's
-// lastOffsetItem, list.go:203-225, generalized over segments).
+// lastOffsetItem, list.go:203-225, generalized over segments). Bounded to
+// the handful of segments needed to fill one viewport from the end — it
+// deliberately never touches (or wrap-caches) segments further back than
+// that, which is what keeps GotoBottom() cheap on a huge transcript.
 func (p *transcriptPane) lastOffsetSegment() (idx, lineOffset int) {
 	n := p.segmentCount()
-	var totalHeight int
+	var windowHeight int
 	for idx = n - 1; idx >= 0; idx-- {
-		totalHeight += p.segmentAt(idx).height(p.width)
-		if totalHeight > p.height {
+		windowHeight += p.segmentAt(idx).height(p.width)
+		if windowHeight > p.height {
 			break
 		}
 	}
-	lineOffset = max(totalHeight-p.height, 0)
+	lineOffset = max(windowHeight-p.height, 0)
 	idx = max(idx, 0)
 	return idx, lineOffset
 }
@@ -373,12 +447,24 @@ func (p *transcriptPane) AtTop() bool {
 // offsetLines returns the total number of content lines scrolled past above
 // the viewport top — the same quantity ScrollPercent and ScrollbarThumb both
 // need, factored out so they can't drift apart.
+//
+// The sum of segment heights strictly before offsetIdx is normally kept
+// correct incrementally by ScrollBy/GotoTop/GotoBottom as offsetIdx moves
+// (see the offsetLinesCache* field docs), so the common scroll-tick path
+// never re-walks anything here. This is the fallback full recompute for
+// when the cache has been invalidated (content/width change, or a
+// non-incremental jump like ScrollToItem).
 func (p *transcriptPane) offsetLines() int {
-	offset := 0
-	for i := 0; i < p.offsetIdx; i++ {
-		offset += p.segmentAt(i).height(p.width)
+	if !p.offsetLinesCacheValid || p.offsetLinesCacheW != p.width {
+		sum := 0
+		for i := 0; i < p.offsetIdx; i++ {
+			sum += p.segmentAt(i).height(p.width)
+		}
+		p.offsetLinesCacheSum = sum
+		p.offsetLinesCacheW = p.width
+		p.offsetLinesCacheValid = true
 	}
-	return offset + p.offsetLine
+	return p.offsetLinesCacheSum + p.offsetLine
 }
 
 // ScrollPercent mirrors bubbles/viewport's: how far the current offset is
@@ -430,21 +516,42 @@ func (p *transcriptPane) VisibleLines() []string {
 	return strings.Split(v, "\n")
 }
 
+// GotoTop resets the scroll position to the very top, where by definition no
+// segment lies above the offset — an exact, O(1) offsetLines cache reset,
+// not just an invalidation.
 func (p *transcriptPane) GotoTop() {
 	p.offsetIdx = 0
 	p.offsetLine = 0
+	p.offsetLinesCacheSum = 0
+	p.offsetLinesCacheW = p.width
+	p.offsetLinesCacheValid = true
 }
 
+// GotoBottom scrolls to the end. Deliberately does NOT try to derive the
+// offsetLines prefix sum here: doing so would need the height of every
+// segment before the new offset, which — the first time it's asked for on a
+// long transcript — means wrap-caching every one of them (see
+// BenchmarkColdFirstRender), defeating View()'s O(visible) guarantee for
+// callers that only ever call GotoBottom+View() and never touch the
+// scrollbar (TestTranscriptPaneViewIsWindowed). So this just invalidates;
+// offsetLines() recomputes lazily, only when something (ScrollbarThumb/
+// ScrollPercent) actually asks for it.
 func (p *transcriptPane) GotoBottom() {
 	if p.segmentCount() == 0 {
 		return
 	}
 	p.offsetIdx, p.offsetLine = p.lastOffsetSegment()
+	p.offsetLinesCacheValid = false
 }
 
 // ScrollToItem scrolls so that the item recorded via Len() at index idx
 // becomes the first visible segment (replaces the old renderUpTo +
 // SetYOffset(strings.Count(prefix, "\n")) dance with an O(1) index set).
+// This is a non-incremental jump (the timeline picker's scroll-to-turn), so
+// it simply invalidates the offsetLines cache rather than trying to derive
+// it — offsetLines() will pay one full recompute lazily on next access,
+// which is fine for an infrequent, deliberate jump rather than a per-tick
+// scroll.
 func (p *transcriptPane) ScrollToItem(idx int) {
 	if idx < 0 {
 		idx = 0
@@ -454,10 +561,20 @@ func (p *transcriptPane) ScrollToItem(idx int) {
 	}
 	p.offsetIdx = idx + p.markerOffset()
 	p.offsetLine = 0
+	p.offsetLinesCacheValid = false
 }
 
 // ScrollBy scrolls the pane by the given number of lines; positive scrolls
 // down, negative scrolls up (crush's ScrollBy, list.go:414-474).
+//
+// As offsetIdx steps across a segment boundary, the segment that was just
+// crossed moves into (scrolling down) or out of (scrolling up) the "before
+// offsetIdx" prefix that offsetLines() sums — so its height is added to or
+// subtracted from offsetLinesCacheSum right here, using the height value
+// this loop already computed for its own bookkeeping. That keeps the cache
+// exactly in sync at zero extra asymptotic cost, including for
+// single-line-tall segments where offsetIdx changes on every tick (see
+// BenchmarkScrollTick_WithScrollbar_NoTrimCap).
 func (p *transcriptPane) ScrollBy(lines int) {
 	n := p.segmentCount()
 	if n == 0 || lines == 0 {
@@ -470,7 +587,11 @@ func (p *transcriptPane) ScrollBy(lines int) {
 		p.offsetLine += lines
 		current := p.segmentAt(p.offsetIdx)
 		for current != nil && p.offsetLine >= current.height(p.width) {
-			p.offsetLine -= current.height(p.width)
+			h := current.height(p.width)
+			p.offsetLine -= h
+			if p.offsetLinesCacheValid && p.offsetLinesCacheW == p.width {
+				p.offsetLinesCacheSum += h
+			}
 			p.offsetIdx++
 			if p.offsetIdx > n-1 {
 				p.GotoBottom()
@@ -480,7 +601,10 @@ func (p *transcriptPane) ScrollBy(lines int) {
 		}
 		lastIdx, lastLine := p.lastOffsetSegment()
 		if p.offsetIdx > lastIdx || (p.offsetIdx == lastIdx && p.offsetLine > lastLine) {
+			// A jump-clamp, not a step — the incremental accounting above
+			// doesn't apply to it, so fall back to invalidating.
 			p.offsetIdx, p.offsetLine = lastIdx, lastLine
+			p.offsetLinesCacheValid = false
 		}
 	} else {
 		p.offsetLine += lines // lines is negative
@@ -490,7 +614,11 @@ func (p *transcriptPane) ScrollBy(lines int) {
 				p.GotoTop()
 				return
 			}
-			p.offsetLine += p.segmentAt(p.offsetIdx).height(p.width)
+			h := p.segmentAt(p.offsetIdx).height(p.width)
+			if p.offsetLinesCacheValid && p.offsetLinesCacheW == p.width {
+				p.offsetLinesCacheSum -= h
+			}
+			p.offsetLine += h
 		}
 	}
 }

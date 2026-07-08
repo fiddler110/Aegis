@@ -303,6 +303,16 @@ func (c *Client) Rollback(ctx context.Context, sessionID, checkpointID, scope st
 	return &out, nil
 }
 
+// Compact forces context compaction on a session's message history now,
+// rather than waiting for the automatic budget-driven trigger (P19.2).
+func (c *Client) Compact(ctx context.Context, sessionID string) (*api.CompactResponse, error) {
+	var out api.CompactResponse
+	if err := c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/compact", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SetBackground marks or unmarks a session as a background (detached) session.
 // When background is true, subsequent message runs use a server-level context
 // so the turn continues even if the TUI disconnects (P3.2).

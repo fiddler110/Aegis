@@ -873,6 +873,23 @@ func (d *SlashDispatcher) cmdReport(args []string) SlashResult {
 	return SlashResult{Message: prompt.String()}
 }
 
+// cmdResearch sends a message that directly invokes the deep-research skill
+// (P20.1 TUI-surface requirement), so a structured research run — planned
+// rounds, source-quality vetting, a findings log with an audit trail, and a
+// cited report — is a discoverable entry point instead of relying on the
+// model noticing a trigger phrase in free text.
+func (d *SlashDispatcher) cmdResearch(args []string) SlashResult {
+	topic := strings.TrimSpace(strings.Join(args, " "))
+	prompt := "Load the deep-research skill and run a structured research workflow"
+	if topic != "" {
+		prompt += " on: " + topic
+	} else {
+		prompt += ". Ask me what to research before running any searches."
+	}
+	prompt += " Follow the skill's round structure, source-quality bar, and citation discipline; end with the cited report."
+	return SlashResult{Message: prompt}
+}
+
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -903,6 +920,26 @@ func (d *SlashDispatcher) cmdSession(args []string) SlashResult {
 	}
 	return SlashResult{Output: fmt.Sprintf("Session: %s\nTitle: %s\nMode: %s\nMessages: %d\nCreated: %s",
 		sess.ID, sess.Title, sess.Mode, len(sess.Messages), sess.CreatedAt.Format(time.RFC3339))}
+}
+
+// cmdCompact forces context compaction now rather than waiting for the
+// automatic budget-driven trigger inside engine.Run (P19.2) — e.g. ahead of a
+// long tool-heavy stretch the user knows is coming.
+func (d *SlashDispatcher) cmdCompact(args []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	resp, err := d.client.Compact(ctx, d.sessionID)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Compaction failed: %v", err), IsError: true}
+	}
+	if !resp.Compacted {
+		return SlashResult{Output: "Nothing to compact — the conversation is too short to safely summarize."}
+	}
+	return SlashResult{
+		Output:        fmt.Sprintf("Compacted conversation: %d messages -> %d.", resp.MessagesBefore, resp.MessagesAfter),
+		ReloadSession: true,
+	}
 }
 
 func (d *SlashDispatcher) cmdRewind(args []string) SlashResult {

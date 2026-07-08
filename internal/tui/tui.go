@@ -1143,6 +1143,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(waitForEvent(m.events), m.sp.Tick)
 
 	case eventMsg:
+		// P18.3: this case always returns before reaching the second switch's
+		// catch-all `m.followBottom = m.transcript.AtBottom()` re-derivation
+		// (~tui.go:1504), so without this, once followBottom flips false it
+		// stays false until the next spinner tick or explicit user scroll —
+		// streamed tokens in between never nudge the viewport back to bottom
+		// after the user scrolls back down mid-stream. Re-derive here too,
+		// from the pre-event scroll position: the token this event is about
+		// to append would itself push the viewport off the bottom and make
+		// AtBottom() read false if checked afterward, so the snapshot must
+		// happen before applyEvent grows the content.
+		m.followBottom = m.transcript.AtBottom()
 		m.applyEvent(api.Event(msg))
 		m.refresh()
 		var notifyCmd tea.Cmd

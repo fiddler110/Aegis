@@ -9,7 +9,52 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P13.3.1** (shell-aware error assist) and **P13.3.5** (configurable
+**Last updated:** 2026-07-07 — **P20.1** (deep-research workflow, first of the three adopted
+Odysseus-review items) shipped skill-first as scoped: new `deep-research` embedded builtin skill
+(`internal/skills/builtin/deep-research/SKILL.md`) encoding a structured research playbook —
+scope-the-question first (primary question + 2–5 sub-questions, budgets up front), iterative
+plan → search → select → read → record rounds capped at 8 with explicit stop conditions
+(saturation, all sub-questions corroborated, cap, or diminishing returns), a source-quality bar
+(primary/authoritative preferred, corroborate-only tiers, reject SEO/AI-aggregator pages,
+two-independent-sources rule for load-bearing claims), a structured findings log
+(`url/title/type+date/summary/evidence/bearing` per source) plus an analyzed-URLs audit trail
+including rejected URLs with reasons (kept in a `.aegis/research/<slug>.md` working file on longer
+runs so compaction can't destroy it), numbered inline-citation discipline
+(single-source claims flagged, contradictions surfaced with both sides cited), and a six-part
+report format that can hand off to `html-report`/`latex-report` (`/report`) for a shareable
+artifact. New `/research [topic]` TUI command (`commandDefs` entry + `cmdResearch` in
+`internal/tui`) — the P13/P20 cross-cutting TUI-surface requirement, automatically covered by the
+P14.1/P14.10 command-surface sync tests. Concept-level reimplementation only per the P20 AGPL
+constraint — no Odysseus code, prompts, or assets were reused. `TestBuiltinsListsEmbeddedSkills`
+want-list extended with `deep-research` (and `latex-report`, which had been missed);
+built-in-skills lists in `CLAUDE.md`, `docs/skills.md`, `docs/configuration.md`,
+`docs/memory-and-knowledge.md`, and `docs/tui-guide.md`'s command table updated. No persona
+changes needed: `skill` is already in every non-debate persona's advisory Tools list (P13.7) and
+`web_search`/`web_fetch` already in 19 of 22.
+**Previously, 2026-07-07:** **P19** (docs/command misc bucket, both items) shipped: **P19.1**
+(skill authoring guide) added `docs/skills.md`, a sibling to `docs/personas.md`/`docs/debate.md`
+covering minimal single-file skills, bundled directory skills with a companion script and how the
+generated `<skill_assets>` manifest exposes it to the model, frontmatter fields, project/user/
+builtin precedence and name collisions, and a worked example — the mechanism was previously fully
+built but documented only in code comments. Cross-linked from `docs/README.md`'s table and folded
+into `docs/memory-and-knowledge.md`'s now-slimmer Skills section, which also picked up two accuracy
+fixes found while writing the guide: the documented user-skills path (`~/.local/share/aegis/
+skills/*.md`) didn't match the actual loader (`~/.aegis/skills/*.md`), and the documented memory-load
+order had project/user skills reversed relative to the real project-shadows-user precedence.
+**P19.2** (manual `/compact`) added a `Summarizer.ForceCompact` (`internal/compaction/
+compaction.go`) that runs the same summarization pass as the automatic budget-driven `Compact` but
+skips both `shouldCompact` budget checks, a `POST /sessions/{id}/compact` daemon endpoint
+(`internal/server/sessions.go`, serialized against an in-flight run via the same per-session
+semaphore `/rewind` uses) and TUI `/compact` command, for forcing compaction ahead of a known
+tool-heavy stretch rather than waiting for the 85%-fill auto-trigger. Reports "nothing to compact"
+(`Compacted: false`) rather than fabricating a summary when the conversation is shorter than
+`KeepRecent` messages. Verified no collision with the pre-existing `/tools compact` (an unrelated
+`/tools` subcommand toggling tool-output display width, not conversation compaction) — separate
+top-level command-table entries, distinct dispatch paths. Tested with new unit tests for
+`ForceCompact`'s ignore-budget and too-short-is-noop behavior (`internal/compaction/
+compaction_test.go`) and server-level tests exercising the full endpoint round-trip including the
+no-compactor-configured error path (`internal/server/server_compact_test.go`).
+**Previously, 2026-07-07:** **P13.3.1** (shell-aware error assist) and **P13.3.5** (configurable
 keybinding remap) shipped, picked as the two genuinely-valuable P13.3 items (over P13.3.2/P13.3.3,
 judged lower-leverage — see [roadmap.md](roadmap.md#p133--terminal-enhancements-microsoft
 -intelligent-terminal-review)). P13.3.1 deliberately excludes the `shell` tool itself: a tool call
@@ -191,6 +236,195 @@ evaluated and dropped, not wanted. P13 (7 exploratory items) fully researched an
 concrete sub-items; P13.1, P13.5, and P13.8 (added after initial scoping) now shipped.
 Full change history and design rationale for every shipped item lives below in
 [Appendix A](#appendix-a--completed-work).
+
+---
+
+## Shipped — P20 items (Odysseus Review: Research, Compare, Model Fit)
+
+Three capabilities adopted from the 2026-07-07 review of the Odysseus self-hosted AI workspace
+(github.com/pewdiepie-archdaemon/odysseus); P20.2 (blind model compare) and P20.3 (hardware-aware
+model recommendation) are still open — see
+[roadmap.md](roadmap.md#open-work--p20-odysseus-review-research-compare-model-fit). Everything
+here is concept-level reimplementation per the track's AGPL-3.0 constraint: no Odysseus code,
+prompt, or asset reuse.
+
+### P20.1 — SHIPPED 2026-07-07 — Deep-research skill (`deep-research`) + `/research` command
+
+Aegis had every primitive a research task needs (web_search/web_fetch, the engine loop, budget
+enforcement, html-report/latex-report for output) but no structured workflow over them — "research
+X" was unguided tool-looping: ad-hoc searches, whichever pages happened to load, and a summary
+whose claims couldn't be traced to any source. Built skill-first as scoped (cheapest path, zero
+engine change), keeping the escalation path open: promote to an engine-level workflow only if
+skill-driven runs prove insufficient, and fold a web UI research panel into P15 later.
+
+- New `internal/skills/builtin/deep-research/SKILL.md` (embedded builtin, dormant by default like
+  the other eight), encoding the workflow the P20 research scoped as a playbook:
+  - **Scope before searching** — restate the request as a primary question plus 2–5 sub-questions,
+    define what a complete answer contains, set budgets up front (hard cap of 8 rounds, ~5–12
+    quality sources), and distinguish uncited background knowledge from sourced findings.
+  - **Structured rounds** — plan → search (1–3 varied `web_search` queries) → select (quality bar
+    applied to snippets *before* fetching) → read (`web_fetch`, raising `max_chars` for
+    load-bearing pages) → record; with explicit stop conditions (all sub-questions corroborated,
+    saturation, round cap, or remaining gaps not worth the budget — named, not silently hit).
+  - **Findings log + audit trail** — one structured `url/title/type+date/summary/evidence/bearing`
+    record per contributing source, plus a `kept/rejected — reason` line for *every* URL examined;
+    kept in a `.aegis/research/<topic-slug>.md` working file on multi-round runs so context
+    compaction can't destroy exactly the state a long run depends on.
+  - **Source-quality bar** — primary/authoritative sources preferred; forums/Q&A/uncredentialed
+    blogs are corroborate-only, never citable alone; SEO farms, AI-aggregator pages, and
+    undated/unattributed listicles rejected outright; load-bearing claims need two *independent*
+    sources; publication dates noted and staleness flagged.
+  - **Citation discipline + report format** — numbered inline `[n]` markers on every non-obvious
+    claim, single-source claims flagged as such, contradictions surfaced with both sides cited;
+    final report is question/answer-TL;DR/findings/contradictions-and-open-questions/sources/audit
+    -trail, delivered as markdown with an offered hand-off to `html-report`/`latex-report`
+    (`/report`) for a shareable artifact.
+- New `/research [topic or question]` TUI command (`commandDefs` entry in
+  `internal/tui/commands.go`, handler `cmdResearch` in `internal/tui/slash.go`) — the same
+  cross-cutting TUI-surface requirement every P13/P20 item follows; sends a message that explicitly
+  invokes the skill (asking what to research when called bare) instead of relying on the model
+  noticing a trigger phrase. Automatically covered by the P14.1/P14.10 command-surface sync tests
+  since it's a `commandDefs` entry.
+- `TestBuiltinsListsEmbeddedSkills` (`internal/skills/skills_test.go`) want-list extended with
+  `deep-research` — and `latex-report`, which P13.7 had missed adding.
+- Built-in-skills lists updated in `CLAUDE.md`, `docs/skills.md`, `docs/configuration.md`, and
+  `docs/memory-and-knowledge.md`; `/research` row added to `docs/tui-guide.md`'s command table.
+- No persona changes needed: `skill` is already in every non-debate-role persona's advisory
+  `Tools` list (P13.7 follow-up), and `web_search`/`web_fetch` are already carried by 19 of the 22
+  built-ins (all but the deliberately-minimal arbiter roles and the unrestricted `general`).
+
+---
+
+## Shipped — P18 items (TUI Streaming & Scroll Polish)
+
+Three related complaints about the transcript pane during a streaming turn, requested and researched
+2026-07-07 (see prior roadmap entry); implemented 2026-07-07 using three engineers working in
+parallel git worktrees against the same diagnosis, then merged.
+
+### P18.1 — DECIDED 2026-07-07 (no code change) — Extended-thinking display policy
+
+Option (a) chosen: leave collapse-on-flush as the resting state (`m.thinkExpanded` still starts
+`false` in `internal/tui/tui.go`, matching the "fold once done" convention TQ9 was built around)
+rather than adding a config/session default to keep reasoning expanded through the whole turn. This
+relies entirely on the P18.3 auto-follow fix below to make the *live*, not-yet-collapsed portion
+trackable while it's being generated. `docs/tui-guide.md`'s existing "Extended Thinking Display"
+section already accurately described this behavior, so no doc changes were needed either. Still
+open: an interactive spot-check against a real terminal (unavailable in this dev environment, as in
+every prior TUI session) to confirm the auto-follow fix alone is sufficient in practice; revisit
+option (b) if it isn't.
+
+### P18.2 — SHIPPED 2026-07-07 — Smooth scrolling (scrollbar/offset O(n) → O(1))
+
+Profiled before fixing, per the roadmap's instruction not to guess. A benchmark (`internal/tui/
+transcript_bench_test.go`) isolating each hot function found the actual per-tick cost wasn't in
+per-item wrap caching or `View()`'s windowing (both already flat regardless of history size, per
+P16.4) but in the scrollbar/percent path: `offsetLines()` (backing `ScrollbarThumb()`/
+`ScrollPercent()`, called on every render via `renderScrollbar`) re-walked from segment 0 on every
+call — cost proportional to scroll depth into history, not bounded to the visible window. A related
+bug: `TotalHeight()`'s single cache was invalidated by every `SetTail` call, forcing a full
+items+tail resum on each streamed token.
+
+Fixed in `internal/tui/transcript.go`: split `TotalHeight()` into `itemsHeight()` (invalidated only
+by structural mutations — append/trim/edit/resize) and the tail's already-cheap per-item cache, so a
+streaming tail no longer forces a full resum; and made `offsetLines()`'s prefix sum maintained
+*incrementally* by `ScrollBy`/`GotoTop`/`GotoBottom` as they move the offset, falling back to a full
+recompute only on non-incremental jumps (`ScrollToItem`) or genuine invalidation. `GotoBottom`
+deliberately does not derive its offset via `TotalHeight()` — that would force wrap-caching every
+never-rendered item, breaking the existing O(visible) windowing guarantee (`TestTranscriptPaneViewIsWindowed`).
+
+`BenchmarkScrollTick_WithScrollbar_NoTrimCap` (ns/op): 1,000 items 21,007→13,388; 10,000
+28,501→15,327; 50,000 89,249→20,836; 200,000 331,060→12,601 — flat after the fix vs. clear linear
+growth before. New `TestOffsetLinesCacheMatchesBruteForce`, a 400-step randomized differential test
+comparing the incrementally-maintained prefix sum against a from-scratch computation across
+scroll/append/resize/edit/jump sequences, backstops the incremental-cache correctness risk. `go vet`
+and `go test -race ./internal/tui/...` both clean.
+
+### P18.3 — SHIPPED 2026-07-07 — Auto-follow reliability + resume-on-return-to-bottom
+
+Confirmed the code-read diagnosis: `internal/tui/tui.go`'s `eventMsg` case (fires for every streamed
+token) always `return`s before reaching the second `switch`'s catch-all `m.followBottom =
+m.transcript.AtBottom()` re-derivation, so once `followBottom` flipped `false`, nothing streamed by
+`eventMsg` could re-arm it — only a subsequent `spinner.TickMsg` or an explicit user scroll-to-bottom
+would. Fixed with one line re-deriving `m.followBottom = m.transcript.AtBottom()` *before*
+`applyEvent` grows the content (checking after would always read `false` once new content outpaces
+the still-unmoved viewport), mirroring what the tick/key/mouse paths already did; the existing P3.7
+redraw-suppression guard is untouched.
+
+New tests in `internal/tui/integration_test.go`: `TestFollowBottomStaysPinnedDuringEventStream_NoPTY`
+(pinned at bottom across 20 streamed tokens while following) and
+`TestFollowBottomResumesOnNextEvent_NoPTY` (scroll up clears `followBottom`; returning to bottom
+mid-stream resumes on the very next `eventMsg`, not a spinner tick; a token arriving while genuinely
+scrolled away does not force it back on). Verified as a real regression test by reverting the fix and
+confirming the resume test fails, then restoring it. `go test -race ./internal/tui/...` clean.
+
+Flagged, not fixed (pre-existing, unrelated): driving a real `tea.KeyMsg` through `model.Update`
+while streaming hits a nil-client panic via `syncCompletion()` → `SlashDispatcher.Customs()` in a
+client-less test model — the new tests route scroll input at the `transcriptPane` level directly to
+avoid it.
+
+---
+
+## Shipped — P19 items (Docs & Session-Command Misc)
+
+Two unrelated small items requested alongside P18 on 2026-07-07, grouped as a no-blocker bucket the
+same way P13.3's leftovers were — not because they share a theme. Both shipped 2026-07-07.
+
+### P19.1 — SHIPPED 2026-07-07 — Skill + companion-script authoring guide
+
+`internal/skills` (bundled `SKILL.md` + companion assets like `internal/skills/builtin/
+latex-report/analyze_sources.py` or `html-report/validate_report.py`) had no user-facing walkthrough
+— `docs/extensibility.md` covered lifecycle hooks, MCP servers, custom commands/agents, process
+plugins, and plugin bundles, but never mentioned skills at all, even though the mechanism
+(frontmatter `name:`/`description:`, progressive disclosure via the `skill` tool, the generated
+`<skill_assets>` manifest for bundled files, project vs. user vs. embedded-builtin precedence,
+`aegis skills enable/disable`) was fully built and documented only in code comments. New
+`docs/skills.md` (sibling to `docs/personas.md`/`docs/debate.md`, not folded into
+`extensibility.md`, since skills are already their own documented subsystem in CLAUDE.md) covers: a
+minimal single-file skill, a bundled directory skill with a companion script and how
+`<skill_assets>` exposes it to the model, frontmatter fields, project/user/builtin precedence and
+name collisions, and a worked example mirroring `html-report`.
+
+Writing the guide surfaced two accuracy bugs in the existing docs, fixed in the same pass:
+- `docs/memory-and-knowledge.md` documented the user-skills directory as `~/.local/share/aegis/
+  skills/*.md`; the actual loader reads `~/.aegis/skills/*.md`.
+- The documented memory-load order listed user skills before project skills; the real precedence
+  (project shadows a same-named user skill) is the other way around.
+
+`docs/README.md`'s doc-index table now links to `docs/skills.md`; `docs/memory-and-knowledge.md`'s
+Skills section is slimmed to a quick reference plus a pointer to the full guide.
+
+### P19.2 — SHIPPED 2026-07-07 — Manual `/compact` command
+
+`internal/compaction` previously only ever triggered when a turn's estimated token count crossed
+budget (`Summarizer.shouldCompact`); there was no way to force it early — e.g. before a long
+tool-heavy stretch a user knows is coming. New `Summarizer.ForceCompact` (`internal/compaction/
+compaction.go`) factors the existing `Compact` into a shared `compact(ctx, system, msgs, force
+bool)` and runs the identical summarization pass — same stale-tool-result pre-pass, same
+tool_use/tool_result-pairing-safe boundary selection — but skips both `shouldCompact` budget checks
+when `force` is true, so it fires unconditionally rather than only near the context-window limit.
+
+A new `POST /sessions/{id}/compact` daemon endpoint (`handleCompactSession`, `internal/server/
+sessions.go`) type-asserts `s.compactor` to `*compaction.Summarizer` (returning 503 if no model
+adapter is configured, so a nil compactor fails cleanly rather than panicking), serializes against
+an in-flight run on the session via the same per-session semaphore `/rewind` already uses, calls
+`ForceCompact`, and persists the result only if it actually changed the message list. `api.
+CompactResponse` reports `Compacted`/`MessagesBefore`/`MessagesAfter`; a new `Client.Compact`
+(`internal/client/client.go`) and TUI `/compact` command (`internal/tui/slash.go`,
+`cmdCompact`) wire it end to end, reporting "nothing to compact" when the conversation is shorter
+than `KeepRecent` messages rather than fabricating a summary out of almost nothing.
+
+Confirmed no naming collision with the pre-existing `/tools compact` (`internal/tui/slash.go`,
+`cmdTools`) — that's an unrelated `/tools` subcommand toggling tool-*output* display width, never
+touching conversation history. `/compact` and `tools compact` are separate top-level entries in the
+`commandDefs` dispatch table, resolved as distinct commands, not a shared string switch, so there is
+no ambiguity in the palette or autocomplete.
+
+Tested with new unit tests for `ForceCompact`'s two defining behaviors — ignoring the budget check
+entirely and no-op'ing on a conversation too short to have a safe cut boundary — in `internal/
+compaction/compaction_test.go`, plus server-level tests in `internal/server/
+server_compact_test.go` exercising the full HTTP round-trip: a real multi-turn conversation
+shrinking via `/compact`, a too-short conversation reporting `Compacted: false`, and the
+no-compactor-configured 503 path.
 
 ---
 

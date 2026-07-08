@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -263,6 +265,78 @@ func TestTranscriptPaneViewIsWindowed(t *testing.T) {
 	// touched (and cached) item 0 along the way. It shouldn't have.
 	if tr.items[0].cached {
 		t.Fatal("expected View() to leave far-off-screen items uncached (O(visible), not O(total))")
+	}
+}
+
+// bruteOffsetLines recomputes the "lines scrolled past above the viewport
+// top" quantity from scratch, independent of transcriptPane's incrementally
+// maintained offsetLinesCache — the ground truth a differential test checks
+// the maintained cache against.
+func bruteOffsetLines(tr *transcriptPane) int {
+	sum := 0
+	for i := 0; i < tr.offsetIdx; i++ {
+		sum += tr.segmentAt(i).height(tr.width)
+	}
+	return sum + tr.offsetLine
+}
+
+// TestOffsetLinesCacheMatchesBruteForce exercises a long, varied sequence of
+// scroll/content operations (ScrollBy in both directions across segment
+// boundaries, GotoTop/GotoBottom, resize, append, trim-triggering growth,
+// SetItemRaw, ScrollToItem) and checks the incrementally maintained
+// offsetLines() value against a from-scratch recomputation after every step.
+// This is the correctness backstop for P18.2's scroll-tick perf fix
+// (transcript.go: offsetLinesCacheSum maintained by ScrollBy/GotoTop/
+// GotoBottom instead of recomputed on every call) — a fast but wrong cache
+// would be worse than the O(n) walk it replaces.
+func TestOffsetLinesCacheMatchesBruteForce(t *testing.T) {
+	tr := newTranscriptPane(40, 8)
+	var blocks []*transcriptItem
+	rng := rand.New(rand.NewSource(1))
+
+	check := func(step string) {
+		t.Helper()
+		got := tr.offsetLines()
+		want := bruteOffsetLines(tr)
+		if got != want {
+			t.Fatalf("after %s: offsetLines() = %d, want %d (offsetIdx=%d offsetLine=%d)",
+				step, got, want, tr.offsetIdx, tr.offsetLine)
+		}
+	}
+
+	for i := 0; i < 400; i++ {
+		switch rng.Intn(9) {
+		case 0, 1:
+			tr.Append(fmt.Sprintf("line %d\n", i))
+			check("Append")
+		case 2:
+			tr.Append(strings.Repeat(fmt.Sprintf("word%d ", i), 20) + "\n\n")
+			check("Append (multi-line)")
+		case 3:
+			tr.ScrollBy(rng.Intn(7) - 3) // -3..3, including 0 (no-op)
+			check("ScrollBy")
+		case 4:
+			tr.GotoTop()
+			check("GotoTop")
+		case 5:
+			tr.GotoBottom()
+			check("GotoBottom")
+		case 6:
+			tr.SetSize(30+rng.Intn(40), tr.Height())
+			check("SetSize (width change)")
+		case 7:
+			if len(blocks) > 0 {
+				b := blocks[rng.Intn(len(blocks))]
+				tr.SetItemRaw(b, fmt.Sprintf("edited %d\n", i))
+				check("SetItemRaw")
+			}
+		case 8:
+			b := tr.AppendBlock(fmt.Sprintf("block %d\n", i))
+			if b != nil {
+				blocks = append(blocks, b)
+			}
+			check("AppendBlock")
+		}
 	}
 }
 
