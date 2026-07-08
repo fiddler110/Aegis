@@ -25,17 +25,49 @@ below.
 
 ### Picking specific scanners, or letting Aegis pick for you
 
-A plain scan with no `--scanner` filter does two things beyond "run every enabled scanner":
+A plain scan with no `--scanner` filter does three things beyond "run every enabled scanner":
 
 1. **Language auto-detection** — it looks for `go.mod`/`*.go`, `requirements.txt`/`*.py`,
-   `Gemfile`/`*.rb`, or `package.json`/`*.js`/`*.ts` under the scanned path and auto-enables the
-   matching opt-in language-specific SAST engine (gosec/bandit/brakeman/njsscan) for that run —
-   no config change needed. This never overrides an explicit
-   `security.tools.<name>.enabled` you've already set, in either direction.
-2. Everything already enabled by default or via config still runs, as before.
+   `Gemfile`/`*.rb`, `package.json`/`*.js`/`*.ts`, and several more languages (Rust, Java, C/C++,
+   C#, PHP, Kotlin, Swift — shown for information even though most have no dedicated engine yet;
+   opengrep's general multi-language SAST already covers them) under the scanned path and
+   auto-enables the matching opt-in language-specific SAST engine (gosec/bandit/brakeman/njsscan)
+   for that run — no config change needed, and a pure Rust or Java repo never triggers bandit.
+   This never overrides an explicit `security.tools.<name>.enabled` you've already set, in either
+   direction.
+2. **File-relevance gating** — hadolint (Dockerfile lint) and kubescape (Kubernetes manifest scan)
+   are skipped, with a reason ("no Dockerfile found in workspace" / "no Kubernetes manifests found
+   in workspace"), when the scanned path has nothing for them to analyze, rather than running a
+   binary that would just report zero findings every time. An explicit `--scanner hadolint` (or
+   `security.tools.hadolint.enabled: true`) always bypasses this and runs it anyway.
+3. Everything already enabled by default or via config still runs, as before.
+
+At a real terminal, a plain `aegis scan` (no `--scanner`, no `--yes`) previews this auto-detected
+plan — the languages it found and exactly which scanners would run or be skipped and why — and
+asks for confirmation before running anything:
+
+```
+$ aegis scan
+Detected: go (gosec)
+
+Planned scan:
+  ->  opengrep    host
+  ->  gosec       host
+  --  bandit      skip: opt-in tool, not enabled by default — ...
+  --  hadolint    skip: no Dockerfile found in workspace
+  --  kubescape   skip: no Kubernetes manifests found in workspace
+  ...
+
+Run this plan? [Y/n, or a comma-separated scanner/category list, e.g. "secrets" or "gitleaks,trufflehog"]
+```
+
+Press Enter/`y` to run it, `n` to abort, or type a scanner/category list to run something else
+instead. Pass `--yes` to skip the prompt and run the plan immediately — the default in
+non-interactive contexts (CI, scripts, piped stdin) either way, where the prompt never appears.
 
 Pass `--scanner <name-or-category>` (repeatable, or comma-separated in the TUI) to instead run
-**only** specific scanners, force-enabled for this run regardless of config — the same way
+**only** specific scanners, force-enabled for this run regardless of config or relevance — no
+prompt, since naming scanners explicitly is already a deliberate choice — the same way
 `aegis scan image` already runs its own distinct, explicitly-requested scanner set:
 
 ```bash
@@ -74,15 +106,24 @@ daemon runs it against its own workspace and prints the formatted report straigh
 transcript:
 
 ```
-/scan                          # scan the whole workspace (language auto-detection applies)
-/scan src                      # scan a workspace-relative subdirectory
-/scan trufflehog                # run only trufflehog, force-enabled for this run
-/scan secrets                  # run only the "secrets" category
-/scan gitleaks,trufflehog src   # comma-separated selector list + a path
+/scan                          # preview the auto-detected plan for the whole workspace
+/scan confirm                  # run the previewed plan
+/scan src                      # preview the plan for a workspace-relative subdirectory
+/scan src confirm              # run it
+/scan trufflehog                # run only trufflehog immediately, force-enabled, no preview
+/scan secrets                  # run only the "secrets" category immediately, no preview
+/scan gitleaks,trufflehog src   # comma-separated selector list + a path, immediately, no preview
 /scan list                     # list every valid scanner name/category, with live availability
 /scan image alpine:3.20        # scan a container image reference instead
 /scan sbom                     # generate a CycloneDX SBOM instead of a findings report
 ```
+
+A bare `/scan` (or `/scan <path>`) doesn't run anything on the first call — like
+`/security install <tool>`, it shows what it *would* do (detected languages, and each scanner's
+planned run/skip with a reason, including the file-relevance gating described above) and asks you
+to re-run with a trailing `confirm` — `/scan confirm`, or `/scan <path> confirm` to keep the same
+path scope. Naming a scanner/category explicitly is already a deliberate choice, so that skips the
+preview and runs immediately, as before.
 
 `/scan`'s first argument is treated as a scanner/category selector only when *every*
 comma-separated token in it resolves to a known scanner name or category — otherwise it's treated

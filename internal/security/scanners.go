@@ -324,6 +324,70 @@ func (kubescapeScanner) Resolve(ctx context.Context, opts Options) (Method, sand
 	return Resolve(ctx, "kubescape", opts)
 }
 
+// Relevant implements RelevanceChecker: kubescape analyzes Kubernetes
+// manifests, so a repo with none has nothing for it to do.
+func (kubescapeScanner) Relevant(dir string) (bool, string) {
+	files, err := findK8sManifests(dir)
+	if err != nil || len(files) == 0 {
+		return false, "no Kubernetes manifests found in workspace"
+	}
+	return true, ""
+}
+
+// k8sManifestMaxFiles bounds how many YAML files findK8sManifests will open
+// and read on a huge tree — a real k8s manifest usually turns up within the
+// first few hundred YAML files; this is a safety cap, not a tuned budget.
+const k8sManifestMaxFiles = 500
+
+// findK8sManifests walks dir (bounded, skipping the same dependency/build/
+// VCS directories DetectLanguages skips) for files kubescape would actually
+// have something to analyze: a Helm/Kustomize marker file by name, or any
+// .yaml/.yml file whose content contains both "apiVersion:" and "kind:" —
+// the two fields every Kubernetes manifest declares, which a docker-compose
+// file or other generic YAML config won't have together. Best-effort and
+// approximate by design, same posture as DetectLanguages — good enough to
+// decide whether kubescape has anything to do, not a manifest validator.
+func findK8sManifests(dir string) ([]string, error) {
+	var out []string
+	seen := 0
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if seen > k8sManifestMaxFiles {
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			if path != dir && detectLanguagesSkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		lower := strings.ToLower(name)
+		if lower == "chart.yaml" || lower == "kustomization.yaml" || lower == "kustomization.yml" {
+			out = append(out, path)
+			return nil
+		}
+		if !strings.HasSuffix(lower, ".yaml") && !strings.HasSuffix(lower, ".yml") {
+			return nil
+		}
+		seen++
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		if strings.Contains(string(data), "apiVersion:") && strings.Contains(string(data), "kind:") {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // kubescape's --output flag writes a file rather than stdout (unlike
 // semgrep/trivy, whose SARIF flag writes directly to stdout), so this
 // mirrors gitleaks' report-file pattern: a real temp file on the host,
@@ -372,6 +436,16 @@ type hadolintScanner struct{}
 func (hadolintScanner) Name() string { return "hadolint" }
 func (hadolintScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "hadolint", opts)
+}
+
+// Relevant implements RelevanceChecker: hadolint lints Dockerfiles, so a
+// repo with none has nothing for it to do.
+func (hadolintScanner) Relevant(dir string) (bool, string) {
+	files, err := findDockerfiles(dir)
+	if err != nil || len(files) == 0 {
+		return false, "no Dockerfile found in workspace"
+	}
+	return true, ""
 }
 
 // findDockerfiles walks dir for files hadolint should lint: "Dockerfile",

@@ -243,6 +243,53 @@ func TestRunAllAggregatesAndSorts(t *testing.T) {
 	}
 }
 
+// fakeRelevanceScanner wraps fakeScanner with a RelevanceChecker so
+// PlanScanners' relevance-gating branch can be tested without depending on
+// hadolint/kubescape's real file-detection heuristics.
+type fakeRelevanceScanner struct {
+	fakeScanner
+	relevant bool
+	reason   string
+}
+
+func (f fakeRelevanceScanner) Relevant(string) (bool, string) { return f.relevant, f.reason }
+
+// TestPlanScannersSkipsIrrelevantScanner is the "don't run hadolint on a
+// repo with no Dockerfile" behavior at the PlanScanners level: an available
+// scanner that says it's not relevant is skipped with its own reason,
+// without ever reaching Resolve/Scan.
+func TestPlanScannersSkipsIrrelevantScanner(t *testing.T) {
+	sc := fakeRelevanceScanner{
+		fakeScanner: fakeScanner{name: "hadolint-like", available: true},
+		relevant:    false,
+		reason:      "no Dockerfile found in workspace",
+	}
+	plan := PlanScanners(context.Background(), ".", []Scanner{sc}, Options{})
+	if len(plan) != 1 || !plan[0].Skipped || plan[0].Reason != "no Dockerfile found in workspace" {
+		t.Errorf("plan = %+v, want a single skipped entry with the relevance reason", plan)
+	}
+}
+
+// TestPlanScannersExplicitEnableBypassesRelevanceGate checks the "explicit
+// always wins" rule (same one AutoEnableLanguageScanners follows): an
+// operator/user who explicitly enabled the tool gets it to run even when
+// Relevant says no — an explicit `/scan hadolint` or
+// security.tools.hadolint.enabled: true must never be silently overridden.
+func TestPlanScannersExplicitEnableBypassesRelevanceGate(t *testing.T) {
+	sc := fakeRelevanceScanner{
+		fakeScanner: fakeScanner{name: "hadolint-like", available: true},
+		relevant:    false,
+		reason:      "no Dockerfile found in workspace",
+	}
+	opts := Options{Tools: map[string]ToolPolicy{
+		"hadolint-like": {Enabled: true, EnabledExplicit: true},
+	}}
+	plan := PlanScanners(context.Background(), ".", []Scanner{sc}, opts)
+	if len(plan) != 1 || plan[0].Skipped {
+		t.Errorf("plan = %+v, want the explicitly-enabled scanner to run despite Relevant()==false", plan)
+	}
+}
+
 // fakeImageScanner lets us test ScanImage without external binaries.
 type fakeImageScanner struct {
 	name     string

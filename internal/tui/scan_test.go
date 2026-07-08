@@ -92,3 +92,51 @@ func TestCmdScanListDoesNotTouchDaemonClient(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdScanBareShowsPreviewAndDoesNotTouchDaemonClient checks the new
+// picker behavior: a plain `/scan` with no args must preview the plan and
+// tell the operator to re-run with "confirm" instead of running anything —
+// a nil client would panic if this reached d.client.Scan.
+func TestCmdScanBareShowsPreviewAndDoesNotTouchDaemonClient(t *testing.T) {
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
+	res := d.Dispatch(&commands.ParsedCommand{Name: "scan", Args: nil})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Output)
+	}
+	for _, want := range []string{"Planned scan:", "/scan confirm"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("output missing %q:\n%s", want, res.Output)
+		}
+	}
+}
+
+// TestCmdScanPathShowsPreviewWithPathConfirm checks `/scan <path>` (no
+// "confirm") previews too and tells the operator to re-run with the same
+// path plus "confirm" — not a bare "confirm" that would silently drop the
+// path scope.
+func TestCmdScanPathShowsPreviewWithPathConfirm(t *testing.T) {
+	dir := t.TempDir()
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
+	res := d.Dispatch(&commands.ParsedCommand{Name: "scan", Args: []string{dir}})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, "/scan "+dir+" confirm") {
+		t.Errorf("output missing path-scoped confirm instruction:\n%s", res.Output)
+	}
+}
+
+// TestCmdScanSelectorSkipsPreview checks that naming a scanner/category
+// explicitly is still treated as an already-made choice (skips the preview
+// and reaches for the daemon client directly) — using a nil client the same
+// way the usage-error tests above do, since reaching d.client.Scan would
+// panic and prove the branch didn't take the preview shortcut instead.
+func TestCmdScanSelectorSkipsPreview(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected a nil-pointer panic reaching d.client.Scan — selector branch must not preview")
+		}
+	}()
+	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
+	d.Dispatch(&commands.ParsedCommand{Name: "scan", Args: []string{"trufflehog"}})
+}

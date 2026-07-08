@@ -141,13 +141,24 @@ var languageScanner = map[string]string{
 // languageMarkers are the file names/extensions DetectLanguages looks for.
 // Deliberately simple — first marker found wins per language, no attempt at
 // a full language-identification library — since this only needs to be
-// right enough to auto-suggest one of four specific opt-in scanners, not
-// classify a repository precisely.
+// right enough to auto-suggest one of the opt-in language-targeted scanners
+// (languageScanner) or, for a language with no dedicated engine wired in yet,
+// to name it in a scan preview so the operator knows opengrep's general SAST
+// coverage (30+ languages) is what's actually covering it — not to classify
+// a repository precisely.
 var languageMarkers = map[string][]string{
 	"go":     {"go.mod", ".go"},
 	"python": {"requirements.txt", "pyproject.toml", "Pipfile", "setup.py", ".py"},
 	"ruby":   {"Gemfile", ".rb"},
 	"node":   {"package.json", ".ts", ".tsx", ".js", ".jsx"},
+	"rust":   {"Cargo.toml", ".rs"},
+	"java":   {"pom.xml", "build.gradle", "build.gradle.kts", ".java"},
+	"csharp": {".csproj", ".sln", ".cs"},
+	"cpp":    {"CMakeLists.txt", ".cpp", ".cc", ".cxx", ".hpp"},
+	"c":      {".c", ".h"},
+	"php":    {"composer.json", ".php"},
+	"kotlin": {".kt", ".kts"},
+	"swift":  {"Package.swift", ".swift"},
 }
 
 // detectLanguagesMaxFiles bounds DetectLanguages' walk on a huge tree — a
@@ -209,6 +220,29 @@ func DetectLanguages(dir string) []string {
 	}
 	sort.Strings(langs)
 	return langs
+}
+
+// DetectedLanguage pairs one language DetectLanguages found with the
+// dedicated opt-in SAST engine available for it, if any (languageScanner) —
+// Scanner is "" when no dedicated engine is wired in yet, meaning opengrep's
+// general multi-language SAST coverage is what actually covers that
+// language today. Used to build a human-readable scan preview (`aegis scan`,
+// `/scan`) rather than silently leaving an unmapped language undiscoverable.
+type DetectedLanguage struct {
+	Language string
+	Scanner  string
+}
+
+// DetectLanguageSummary is DetectLanguages plus, per language, its dedicated
+// scanner name if one exists — the shape the interactive scan picker prints
+// (e.g. "Detected: go (gosec), rust").
+func DetectLanguageSummary(dir string) []DetectedLanguage {
+	langs := DetectLanguages(dir)
+	out := make([]DetectedLanguage, 0, len(langs))
+	for _, l := range langs {
+		out = append(out, DetectedLanguage{Language: l, Scanner: languageScanner[l]})
+	}
+	return out
 }
 
 // AutoEnableLanguageScanners returns opts with each detected language's

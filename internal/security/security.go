@@ -144,6 +144,22 @@ type Scanner interface {
 	Scan(ctx context.Context, dir string, method Method, runtime sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error)
 }
 
+// RelevanceChecker is an optional interface a Scanner implements when its
+// usefulness depends on specific files existing in the scanned directory,
+// not just on whether its binary is available — hadolint only has something
+// to analyze if there's a Dockerfile, kubescape only if there's a Kubernetes
+// manifest. PlanScanners consults this (skipped when the operator explicitly
+// enabled the tool — see ToolPolicy.EnabledExplicit, the same "explicit
+// always wins" rule AutoEnableLanguageScanners follows) so a repo with
+// neither reports an accurate "no Dockerfile found" skip reason instead of
+// running a binary that would just report zero findings every time.
+type RelevanceChecker interface {
+	// Relevant reports whether dir contains anything this scanner would
+	// actually analyze. When ok is false, reason explains why, for the skip
+	// report — never a silent omission (P11.1's posture applies here too).
+	Relevant(dir string) (ok bool, reason string)
+}
+
 // DefaultScanners returns the built-in filesystem scanners. opengrep is the
 // default SAST engine (P11.3); semgrep and the four language-targeted
 // engines (gosec/bandit/brakeman/njsscan) are included too but resolve to
@@ -231,29 +247,70 @@ type ScanEvent struct {
 	Elapsed  time.Duration // meaningful for PhaseDone
 }
 
+// ScanPlanEntry is one scanner's resolved fate for a specific dir/opts pair,
+// computed by PlanScanners without actually running Scan — either it would
+// execute (Method/Runtime/Image set) or it's skipped (Reason explains why,
+// whether that's unavailability, config, or RelevanceChecker).
+type ScanPlanEntry struct {
+	Scanner Scanner
+	Method  Method
+	Runtime sandbox.ContainerRuntime
+	Image   string
+	Skipped bool
+	Reason  string
+}
+
+// PlanScanners resolves, for each candidate scanner, whether it would
+// actually run against dir under opts right now — relevance-gated the same
+// way RunWithProgress gates execution — without invoking Scan. This is what
+// lets a caller (the interactive `aegis scan` / `/scan` picker) preview a run
+// before committing to it, and RunWithProgress itself calls this so the
+// preview and the real run can never drift apart.
+func PlanScanners(ctx context.Context, dir string, scanners []Scanner, opts Options) []ScanPlanEntry {
+	plan := make([]ScanPlanEntry, 0, len(scanners))
+	for _, sc := range scanners {
+		if rc, ok := sc.(RelevanceChecker); ok {
+			policy := opts.policyFor(sc.Name(), descriptors[sc.Name()].DefaultEnabled)
+			if !policy.EnabledExplicit {
+				if relevant, reason := rc.Relevant(dir); !relevant {
+					plan = append(plan, ScanPlanEntry{Scanner: sc, Skipped: true, Reason: reason})
+					continue
+				}
+			}
+		}
+		method, rt, image, reason := sc.Resolve(ctx, opts)
+		if method == MethodNone {
+			plan = append(plan, ScanPlanEntry{Scanner: sc, Skipped: true, Reason: reason})
+			continue
+		}
+		plan = append(plan, ScanPlanEntry{Scanner: sc, Method: method, Runtime: rt, Image: image})
+	}
+	return plan
+}
+
 // RunWithProgress is RunWithOptions with an optional callback invoked before
 // and after each scanner runs. progress may be nil (equivalent to
 // RunWithOptions); scanners still run strictly sequentially, so events arrive
 // in a deterministic, non-overlapping order.
 func RunWithProgress(ctx context.Context, dir string, scanners []Scanner, opts Options, progress func(ScanEvent)) Report {
 	rep := newReport()
-	for _, sc := range scanners {
-		method, rt, image, reason := sc.Resolve(ctx, opts)
-		if method == MethodNone {
-			rep.Skipped[sc.Name()] = reason
+	for _, entry := range PlanScanners(ctx, dir, scanners, opts) {
+		sc := entry.Scanner
+		if entry.Skipped {
+			rep.Skipped[sc.Name()] = entry.Reason
 			if progress != nil {
-				progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseSkipped, Reason: reason})
+				progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseSkipped, Reason: entry.Reason})
 			}
 			continue
 		}
 		if progress != nil {
-			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseStart, Method: method})
+			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseStart, Method: entry.Method})
 		}
 		start := time.Now()
-		findings, err := sc.Scan(ctx, dir, method, rt, image, opts)
-		rep.record(sc.Name(), method, findings, err)
+		findings, err := sc.Scan(ctx, dir, entry.Method, entry.Runtime, entry.Image, opts)
+		rep.record(sc.Name(), entry.Method, findings, err)
 		if progress != nil {
-			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseDone, Method: method, Findings: len(findings), Err: err, Elapsed: time.Since(start)})
+			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseDone, Method: entry.Method, Findings: len(findings), Err: err, Elapsed: time.Since(start)})
 		}
 	}
 	// Dedup and ASVS-tag before baseline matching, so a suppression entry

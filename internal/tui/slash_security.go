@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -205,18 +206,28 @@ func scanSelectorTokens(raw string) []string {
 // and prints the formatted report — no model turn spent, same underlying scan
 // as `aegis scan`/the security_scan tool. Usage:
 //
-//	/scan                        run every enabled scanner over the whole workspace
-//	/scan <path>                 scan just a workspace-relative subdirectory
+//	/scan                        preview the auto-detected plan for the whole workspace
+//	/scan confirm                run the previewed plan
+//	/scan <path>                 preview the auto-detected plan for a subdirectory
+//	/scan <path> confirm         run it
 //	/scan <scanner-or-category>[,<...>] [path]   run only the named scanner(s)/category(ies)
-//	                             e.g. /scan trufflehog, /scan secrets, /scan gitleaks,trufflehog src/
+//	                             immediately, no preview — e.g. /scan trufflehog, /scan secrets,
+//	                             /scan gitleaks,trufflehog src/
 //	/scan image <ref>            scan a container image reference instead
 //	/scan sbom [path]            generate a CycloneDX SBOM instead of a findings report
 //	/scan network <target...>    run nmap+nuclei (recon_scan) against a host/IP/CIDR list
 //	/scan list                  list every valid scanner name/category, with live availability
 //
-// A plain path scan (no selector) auto-detects the project's language and
-// auto-enables the matching opt-in SAST engine (gosec/bandit/brakeman/
-// njsscan) for that run.
+// A bare /scan (or /scan <path>) doesn't run anything on first invocation: it
+// auto-detects the project's language, auto-enables the matching opt-in SAST
+// engine (gosec/bandit/brakeman/njsscan), skips hadolint/kubescape when the
+// workspace has no Dockerfile/Kubernetes manifest for them to analyze, and
+// prints that plan for review — mirroring cmdSecurityInstall's "no
+// interactive stdin, so require a second invocation with a trailing confirm"
+// convention rather than adding new dialog/overlay plumbing. Naming specific
+// scanners/categories is already an explicit choice, so that branch (and
+// image/sbom/network/list) skips the preview and runs immediately, same as
+// before.
 //
 // A scan can take a while (container fallback pulls, multiple scanner
 // binaries), so this uses a long timeout rather than the 5s default other
@@ -246,8 +257,18 @@ func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
 		if len(args) >= 2 {
 			req.Path = args[1]
 		}
-	case len(args) >= 1:
-		req.Path = args[0]
+	default:
+		rest := args
+		confirmed := len(rest) > 0 && strings.ToLower(rest[len(rest)-1]) == "confirm"
+		if confirmed {
+			rest = rest[:len(rest)-1]
+		}
+		if len(rest) >= 1 {
+			req.Path = rest[0]
+		}
+		if !confirmed {
+			return d.cmdScanPreview(req.Path)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -257,6 +278,64 @@ func (d *SlashDispatcher) cmdScan(args []string) SlashResult {
 		return SlashResult{Output: fmt.Sprintf("Scan failed: %v", err), IsError: true}
 	}
 	return SlashResult{Output: resp.Report}
+}
+
+// cmdScanPreview computes and prints the same auto-detected plan `aegis
+// scan`'s interactive picker previews (language detection +
+// AutoEnableLanguageScanners + PlanScanners' relevance gating) for path
+// (default: workspace root) — resolved entirely locally, same as
+// cmdScanList/cmdSecurityStatus, since the plan doesn't need a live scan run
+// to know what it would do.
+func (d *SlashDispatcher) cmdScanPreview(path string) SlashResult {
+	cfg, err := config.Load()
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to load config: %v", err), IsError: true}
+	}
+	dir := "."
+	if path != "" {
+		dir = path
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to resolve path: %v", err), IsError: true}
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return SlashResult{Output: fmt.Sprintf("path not found: %s", dir), IsError: true}
+	}
+	opts := security.AutoEnableLanguageScanners(abs, security.OptionsFromConfig(cfg.Security))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var b strings.Builder
+	if langs := security.DetectLanguageSummary(abs); len(langs) > 0 {
+		parts := make([]string, len(langs))
+		for i, l := range langs {
+			if l.Scanner != "" {
+				parts[i] = fmt.Sprintf("%s (%s)", l.Language, l.Scanner)
+			} else {
+				parts[i] = l.Language
+			}
+		}
+		fmt.Fprintf(&b, "Detected: %s\n\n", strings.Join(parts, ", "))
+	}
+	fmt.Fprintln(&b, "Planned scan:")
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	for _, e := range security.PlanScanners(ctx, abs, security.DefaultScanners(), opts) {
+		if e.Skipped {
+			fmt.Fprintf(tw, "  --\t%s\tskip: %s\n", e.Scanner.Name(), e.Reason)
+			continue
+		}
+		fmt.Fprintf(tw, "  ->\t%s\t%s\n", e.Scanner.Name(), e.Method)
+	}
+	tw.Flush()
+
+	confirmArgs := "confirm"
+	if path != "" {
+		confirmArgs = path + " confirm"
+	}
+	fmt.Fprintf(&b, "\nRun `/scan %s` to proceed, or `/scan <scanner-or-category>[,...] [path]` to run only "+
+		"specific scanners instead (e.g. /scan secrets, /scan gitleaks,trufflehog).\n", confirmArgs)
+	return SlashResult{Output: b.String()}
 }
 
 // cmdScanList lists every scanner name and category alias usable with
