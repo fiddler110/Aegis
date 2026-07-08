@@ -41,7 +41,7 @@ aegis --resume abc12345
 ```
 
 **Switch sessions inside TUI:**
-Press `Ctrl+R` to open the interactive session picker. Sessions are listed newest-first with title, mode, persona, and last-updated time. Select one to replay its transcript.
+Press `Ctrl+Y` to open the interactive session picker. Sessions are listed newest-first with title, mode, persona, and last-updated time. Select one to replay its transcript.
 
 ---
 

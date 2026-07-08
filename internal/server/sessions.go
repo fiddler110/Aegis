@@ -295,6 +295,35 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, Model: sess.Model, InputTokens: sess.InputTokens, OutputTokens: sess.OutputTokens, CostUSD: sess.CostUSD, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
 }
 
+// handleActivateSkill turns on a dormant embedded built-in skill for this
+// session only (P22.x): unlike /skills enable (which writes config and needs
+// a restart), this takes effect on the very next turn, and never persists —
+// a fresh session starts with every built-in dormant again.
+func (s *Server) handleActivateSkill(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	id := r.PathValue("id")
+	var req api.ActivateSkillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if !skills.IsBuiltin(name) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown built-in skill %q", name))
+		return
+	}
+	if _, err := s.store.Get(r.Context(), id); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.activateSessionSkill(id, name)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListCommands(w http.ResponseWriter, _ *http.Request) {
 	var out []api.CommandInfo
 	if s.cmdReg != nil {

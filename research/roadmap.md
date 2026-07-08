@@ -1,6 +1,22 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P21 added — fresh-eyes code review of the running app, roadmap/releases
+**Last updated:** 2026-07-08 (P22.1 + P22.4 + P22.2 SHIPPED from the same-day Codex CLI evaluation:
+a no-model-turn `/diff [--staged] [path]` command showing the working-tree git diff including
+untracked files, chroma-highlighted via a new `highlightUnifiedDiff`; Ctrl+R input-history search (a
+filterable, newest-first picker recalling a past sent message onto the input line; Ctrl+R was
+already bound to the session switcher, which moved to Ctrl+Y to make room); and `/review
+[--staged | <branch|commit>]`, a read-only review flow that inlines the resolved diff into a
+prompt loading the already-shipped `content-review` skill and switches the session to plan mode for
+the duration — see
+[releases.md](releases.md#shipped--p22-items-openai-codex-cli-evaluation-diff-ctrlr-history-search-review).
+P22.3 (Esc-Esc backtrack/`/fork`), P22.5 (`/side`), and P22.6 (raw
+scrollback) remain open. Earlier the same day: P21.7 intent-based scroll follow SHIPPED — the
+still-reported "viewport doesn't follow streamed text" bug post-P18.3/P21.1: every typed key was
+also forwarded to the transcript's vi scroll bindings and the geometry-derived `followBottom`
+catch-all then killed auto-follow; follow is now explicit user intent. Also same day: P22 added —
+OpenAI Codex CLI feature evaluation; six items scoped, the rest of Codex's surface confirmed already
+covered or rejected.
+Earlier, 2026-07-07: P21 added — fresh-eyes code review of the running app, roadmap/releases
 deliberately ignored; found the TUI's "rough feel" root cause — per-token markdown re-render instead
 of per-frame — plus daemon-robustness and web-UI-token findings. P21.1 stream-delta coalescing +
 P21.4 render-cost regression bench SHIPPED the same day (buffered SSE channel + drain-batched
@@ -32,9 +48,12 @@ rationale behind completed items, see [releases.md](releases.md).
 
 ## Status
 
-Open items: **P21** (2026-07-07 fresh-eyes review — P21.1 TUI stream-delta coalescing + P21.4
-render-cost bench SHIPPED 2026-07-07; P21.2 tool-call cards, P21.3 streaming caret, P21.5 daemon
-resource ceilings, P21.6 MCP output trust remain scoped), **P15.2–P15.12** (web UI
+Open items: **P22** (2026-07-08 Codex CLI evaluation — `/review`, Esc-Esc
+backtrack/`/fork`, `/side`, raw scrollback; `/diff` and Ctrl+R history search SHIPPED 2026-07-08),
+**P21** (2026-07-07 fresh-eyes
+review — P21.1 TUI stream-delta coalescing + P21.4 render-cost bench SHIPPED 2026-07-07, P21.7
+intent-based scroll follow SHIPPED 2026-07-08; P21.2 tool-call cards, P21.3 streaming caret, P21.5
+daemon resource ceilings, P21.6 MCP output trust remain scoped), **P15.2–P15.12** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below; P15.12 added 2026-07-07 for the `/ui` token-exposure finding),
 **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
@@ -397,6 +416,23 @@ paragraph is re-parsed per token. That is the micro-jitter, input latency, and C
   compromised or malicious MCP server is a prompt-injection vector with no guardrail. Document the
   trust assumption in `docs/` and consider an opt-in output scan / provenance marker for MCP sources
   the user hasn't explicitly trusted. (S, security — lower urgency, no reported incident)
+- **P21.7 — Intent-based scroll follow — SHIPPED 2026-07-08.** Root cause of the still-reported
+  "viewport doesn't follow streamed content, I have to scroll to find it" complaint (post-P18.3,
+  post-P21.1): `followBottom` was re-derived from *geometry* (`AtBottom()`) in Update's catch-all on
+  every fall-through message, while every KeyMsg was also forwarded to `transcriptPane.HandleKey`'s
+  vi-style scroll bindings (the P16.4 "known existing quirk"). Net effect: typing any `u`/`k`/`b`/
+  space/arrow-key while a response streamed both edited the draft AND scrolled the transcript, and
+  the catch-all then cleared `followBottom` for the rest of the turn; separately, any mid-stream
+  pane-height change (completion popup, approval dialog, textarea wrap) briefly falsified
+  `AtBottom()` and killed follow the same silent way. Fix (crush parity): follow is now user
+  *intent* — paused only by an explicit scroll-up (wheel, pgup), resumed by scrolling back to the
+  bottom or sending a message; only pgup/pgdown scroll the transcript while the textarea owns typed
+  input (full vi set still active on the approval dialog's fall-through, where nothing is being
+  typed); the batch-apply path re-arms follow one-way (`if AtBottom() → follow=true`), never clears;
+  `applyViewportHeight` re-pins the bottom on pane resize while following; the send/queue paths
+  resync the pane height after `ta.Reset()`. Tests: `internal/tui/follow_intent_test.go` (5
+  regressions: typing letters mid-stream, viewport shrink mid-stream, resize re-pin, pgup-pause/
+  pgdown-resume, wheel pause/resume).
 
 **Suggested sequencing:** P21.1 + P21.4 together (the fix and its proof), then P21.3 (cheap visible
 win), then P21.2 (larger visual restructure). P21.5/P21.6 are independent security/robustness items
@@ -405,6 +441,54 @@ in the web-UI track above (it's a change to P15.1's existing token-injection mec
 with P15). Per the P13 cross-cutting rule, none of these add model-callable capability, so no new
 `/slash` surface is required. Priority: **High** for P21.1 (direct user pain), **Medium** for the
 rest. Effort: **M** overall — mostly small, contained changes.
+
+---
+
+## Open Work — P22 (OpenAI Codex CLI evaluation — 2026-07-08)
+
+Feature evaluation of [github.com/openai/codex](https://github.com/openai/codex) (Rust, terminal
+coding agent) against Aegis, requested 2026-07-08 — same exercise as the P16 crush/opencode/Claude
+Code gap analysis and the P20 Odysseus evaluation. Most of Codex's surface Aegis already has, often
+more richly: AGENTS.md/CLAUDE.md context files (`internal/memory/context.go`), skills, MCP
+client+server, plan/approval modes, sandboxing, `/compact`, `/copy`, `/theme`, `/status`,
+`/archive`, session resume/switch, per-turn checkpoints (`/rewind`), background runs
+(`/bg`, `/runs`, `/detach`), queued messages, mid-turn steering, `!` shell commands, `@`-file
+fuzzy mention, external-editor compose, image paste, custom commands, configurable keybindings,
+cost/usage display, personas (richer than Codex's `/personality`), debate, memory. Genuine gaps
+worth adopting, in priority order:
+
+- **P22.1 — SHIPPED 2026-07-08 — `/diff` command.**
+  See [releases.md](releases.md#shipped--p22-items-openai-codex-cli-evaluation-diff-ctrlr-history-search).
+- **P22.2 — SHIPPED 2026-07-08 — `/review` mode.**
+  See [releases.md](releases.md#shipped--p22-items-openai-codex-cli-evaluation-diff-ctrlr-history-search-review).
+- **P22.3 — Esc-Esc backtrack + `/fork`.** Edit a previous user message and fork the conversation
+  from that turn (Codex: transcript forking). Aegis's per-turn checkpoints (`internal/checkpoint`)
+  and the timeline picker already address file state and navigation; the missing piece is forking
+  the *conversation* into a new session from turn N with the edited message replayed. Session store
+  already snapshots turns, so this is a copy-turns-then-branch operation plus TUI affordance. (M)
+- **P22.4 — SHIPPED 2026-07-08 — Ctrl+R prompt-history search.**
+  See [releases.md](releases.md#shipped--p22-items-openai-codex-cli-evaluation-diff-ctrlr-history-search).
+  Note: this moved the session switcher to Ctrl+Y to free up Ctrl+R.
+- **P22.5 — `/side` ephemeral side conversation.** Ask a quick side question in a throwaway context
+  that never enters the session transcript or token budget (Codex `/side`/`/btw`). Maps cleanly to
+  a hidden one-shot session against the current model. (S/M)
+- **P22.6 — Raw scrollback mode.** `/raw` (Codex Alt+R): temporarily render the transcript as plain
+  unstyled text and release the alternate screen so the terminal's native selection/copy and
+  scrollback work. Complements the P16.5 mouse selection for tmux/SSH cases where screen-space
+  selection is awkward. (S/M)
+
+Evaluated and **rejected**: remote TUI over WebSocket (conflicts with the deliberate loopback-bind
+security boundary; the P15 web UI with its token story is Aegis's remote surface), best-of-N
+attempts (swarm/debate already cover multi-candidate workflows with arbitration, and local models
+make N full attempts expensive), `codex cloud` task integration (no cloud backend exists or is
+wanted), `/import` Claude-Code migration (niche; `.aegis/` layout is close enough to hand-port),
+execpolicy Starlark DSL (Aegis's text permission rules + capability gates + contextual gates cover
+the need; a new policy language is surface area without a trigger), Vim composer mode and
+`/statusline`/`/title` customization (polish without demand — revisit on request).
+
+Priority: **Medium** overall — P22.1/P22.4/P22.2 shipped 2026-07-08; P22.3 is the highest-value
+remaining item. Effort: **S–M** per item. None add model-callable capability beyond what
+`/review`'s read-only flow already reused from existing gates.
 
 ---
 

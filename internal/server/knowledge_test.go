@@ -154,7 +154,7 @@ func TestHandleRepoMapIndexRebuildsCacheAndPrompt(t *testing.T) {
 	defer ts.Close()
 	cl := client.New(ts.URL).WithToken("test-token")
 
-	before := srv.effectiveSystem("base")
+	before := srv.effectiveSystem("base", "")
 	resp, err := cl.RepoMapIndex(context.Background())
 	if err != nil {
 		t.Fatalf("RepoMapIndex: %v", err)
@@ -166,7 +166,7 @@ func TestHandleRepoMapIndexRebuildsCacheAndPrompt(t *testing.T) {
 		t.Errorf("expected the cache file to exist at %s: %v", resp.Path, err)
 	}
 
-	after := srv.effectiveSystem("base")
+	after := srv.effectiveSystem("base", "")
 	if after == before {
 		t.Error("expected effectiveSystem to change after indexing (repo map should now be injected)")
 	}

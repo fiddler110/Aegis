@@ -728,10 +728,11 @@ func (p *transcriptPane) View() string {
 // (viewport/keymap.go:23-58): pgup/b, pgdown/space/f, u/ctrl+u, d/ctrl+d,
 // up/k, down/j. Left/right/horizontal scrolling are dropped — SoftWrap
 // already made horizontal scrolling dead code for this pane. Returns true if
-// the key was consumed as a scroll command (informational only; callers keep
-// forwarding every key to the textarea regardless, matching today's
-// behavior — see the "known existing quirk" note in transcript.go's package
-// docs / research/roadmap.md P16.4 plan notes).
+// the key was consumed as a scroll command; callers use that to update
+// follow-bottom state only on real scroll input (P21.7). While the textarea
+// owns typed input, Update forwards only pgup/pgdown here (a plain 'u'/'k'/
+// space is typing, not scrolling); the approval dialog's fall-through path
+// forwards everything, so the vi-style keys work there.
 func (p *transcriptPane) HandleKey(msg tea.KeyMsg) bool {
 	switch msg.String() {
 	case "pgdown", "space", "f":

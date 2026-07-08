@@ -124,6 +124,45 @@ type Server struct {
 	// registry. Lazily created on first use per session and reused across
 	// that session's turns so a loaded tool stays loaded turn to turn.
 	sessionTools sync.Map // string → *tool.Registry
+
+	// sessionSkills maps session ID → extra embedded built-in skill names
+	// activated on demand for that session (e.g. via /threat-model), layered
+	// on top of the persistent cfg.Skills.BuiltinEnabled list. In-memory only:
+	// it resets on daemon restart and never touches config, so built-ins stay
+	// dormant by default and are only ever pulled in by an explicit request.
+	sessionSkills sync.Map // string → []string
+}
+
+// activateSessionSkill turns on a built-in skill for one session: it's added
+// to that session's extra-enabled set (read by effectiveSystem for the
+// <skills_available> index) and the session's tool registry clone gets an
+// updated skill tool so the `skill` tool can load it immediately, without
+// waiting for a restart or writing to config.
+func (s *Server) activateSessionSkill(id, name string) {
+	var extra []string
+	if v, ok := s.sessionSkills.Load(id); ok {
+		extra = v.([]string)
+	}
+	for _, n := range extra {
+		if strings.EqualFold(n, name) {
+			return
+		}
+	}
+	extra = append(append([]string{}, extra...), name)
+	s.sessionSkills.Store(id, extra)
+
+	enabled := append(append([]string{}, s.cfg.Skills.BuiltinEnabled...), extra...)
+	s.sessionToolRegistry(id).Upsert(builtin.NewSkillTool(s.workspace, s.cfg.DataDir, enabled))
+}
+
+// sessionEnabledSkills returns the persistent config-level enabled built-ins
+// plus any activated on demand for this session.
+func (s *Server) sessionEnabledSkills(id string) []string {
+	enabled := append([]string{}, s.cfg.Skills.BuiltinEnabled...)
+	if v, ok := s.sessionSkills.Load(id); ok {
+		enabled = append(enabled, v.([]string)...)
+	}
+	return enabled
 }
 
 // sessionToolRegistry returns the session-scoped tool registry clone for id,
@@ -664,6 +703,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
 	mux.HandleFunc("POST /sessions/{id}/compact", s.handleCompactSession)
+	mux.HandleFunc("POST /sessions/{id}/skills/activate", s.handleActivateSkill)
 	mux.HandleFunc("POST /sessions/{id}/background", s.handleSetBackground) // P3.2
 	mux.HandleFunc("GET /sessions/{id}/events", s.handleGetBGEvents)        // P3.2
 	mux.HandleFunc("POST /sessions/{id}/archive", s.handleArchiveSession)

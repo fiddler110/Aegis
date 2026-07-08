@@ -32,7 +32,7 @@ func TestDebateIntegrationBlockOptInDefault(t *testing.T) {
 	cfg := &config.Config{Provider: config.ProviderConfig{Model: "test"}, Permission: config.PermissionConfig{Mode: "plan"}}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 
-	got := srv.effectiveSystem("base prompt")
+	got := srv.effectiveSystem("base prompt", "")
 	if strings.Contains(got, "Debate mode") {
 		t.Errorf("effectiveSystem should not mention debate mode with both toggles off: %q", got)
 	}

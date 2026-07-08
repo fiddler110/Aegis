@@ -125,7 +125,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL},
 		&modelsTool{},
 		&securityScanTool{root: root, opts: opts.SecurityScan},
-		&skillTool{root: root, dataDir: opts.DataDir, builtinEnabled: opts.BuiltinSkills},
+		NewSkillTool(root, opts.DataDir, opts.BuiltinSkills),
 		&toolSearchTool{reg: reg},
 	}
 	// Deferred tools are niche: registered but advertised only as a name+

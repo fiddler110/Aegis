@@ -31,6 +31,7 @@ type keyMap struct {
 	SidebarToggle key.Binding
 	PasteImage    key.Binding
 	Diagnose      key.Binding
+	HistorySearch key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -50,11 +51,16 @@ func defaultKeyMap() keyMap {
 		HistUp:        key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history prev")),
 		HistDown:      key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "history next")),
 		Teammates:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "list sub-agents")),
-		Sessions:      key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "switch session")),
+		Sessions:      key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("ctrl+y", "switch session")),
 		Terminal:      key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "toggle terminal pane")),
 		SidebarToggle: key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "toggle sidebar")),
 		PasteImage:    key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste image from clipboard")),
 		Diagnose:      key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "diagnose last failed shell/terminal command")),
+		// P22.4: Ctrl+R matches the shell reverse-search muscle memory this
+		// item targets; the session switcher moved to Ctrl+Y to make room
+		// (it previously held Ctrl+R — see docs/tui-guide.md and
+		// docs/sessions.md, updated alongside this change).
+		HistorySearch: key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "search input history")),
 	}
 }
 
@@ -83,6 +89,7 @@ func (km *keyMap) bindingsByName() map[string]*key.Binding {
 		"sidebartoggle": &km.SidebarToggle,
 		"pasteimage":    &km.PasteImage,
 		"diagnose":      &km.Diagnose,
+		"historysearch": &km.HistorySearch,
 	}
 }
 
@@ -175,5 +182,6 @@ func (km keyMap) helpEntries() []keyHelpEntry {
 		{km.Diagnose.Help().Key, km.Diagnose.Help().Desc},
 		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
 		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
+		{km.HistorySearch.Help().Key, km.HistorySearch.Help().Desc},
 	}
 }

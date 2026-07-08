@@ -26,8 +26,10 @@ import (
 
 // effectiveSystem combines the session's base system prompt with platform
 // context, loaded project/user memory, skills, and context files (AGENTS.md,
-// CLAUDE.md).
-func (s *Server) effectiveSystem(base string) string {
+// CLAUDE.md). sessionID selects which on-demand-activated built-in skills
+// (see activateSessionSkill) are layered on top of the persistently
+// configured set; pass "" where no session is in scope (e.g. tests).
+func (s *Server) effectiveSystem(base, sessionID string) string {
 	var parts []string
 	if base != "" {
 		parts = append(parts, base)
@@ -41,7 +43,7 @@ func (s *Server) effectiveSystem(base string) string {
 	if mem := s.memory.Load(); mem != "" {
 		parts = append(parts, mem)
 	}
-	if sk := skills.BuildIndex(s.workspace, s.cfg.DataDir, s.cfg.Skills.BuiltinEnabled); sk != "" {
+	if sk := skills.BuildIndex(s.workspace, s.cfg.DataDir, s.sessionEnabledSkills(sessionID)); sk != "" {
 		parts = append(parts, sk)
 	}
 	s.repoMapMu.Lock()

@@ -136,9 +136,14 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Let transcript scroll keys fall through so the transcript stays reviewable.
-	m.transcript.HandleKey(msg)
-	m.followBottom = m.transcript.AtBottom()
+	// Let transcript scroll keys fall through so the transcript stays
+	// reviewable. The textarea isn't capturing input here, so the full
+	// vi-style scroll set applies; follow state only changes when a key
+	// actually scrolled (P21.7 — a non-scroll key must not re-derive follow
+	// from geometry the approval dialog itself just perturbed).
+	if m.transcript.HandleKey(msg) {
+		m.followBottom = m.transcript.AtBottom()
+	}
 	return m, nil
 }
 

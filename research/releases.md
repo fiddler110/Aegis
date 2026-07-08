@@ -9,7 +9,32 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-07 — **P20.1** (deep-research workflow, first of the three adopted
+**Last updated:** 2026-07-08 — **P22.1** (`/diff` command), **P22.4** (Ctrl+R input-history
+search), and **P22.2** (`/review` read-only review mode) shipped from the same-day Codex CLI
+evaluation.
+**P22.1** adds a no-model-turn `/diff [--staged] [path]` — same pattern as `/scan` — showing the
+working-tree git diff (tracked changes vs `HEAD`, or `--staged` for just the index) plus a
+synthetic "new file" diff for every untracked file via `git diff --no-index -- /dev/null <file>`
+(plain `git diff` omits untracked files entirely; this needed no index mutation like `git add -N`
+would have). Rendered through chroma's built-in `diff` lexer (`highlightUnifiedDiff`, a sibling to
+the existing `highlightSource`) for `+`/`-`/`@@` coloring, threaded through a `\x00diff` transcript
+marker so the rendering happens in `tui.go` where the active theme lives — the same reason
+`/theme`/`/clear` use marker passthrough instead of pre-rendering in the dispatcher.
+**P22.4** adds Ctrl+R as a filterable, newest-first picker over sent-message history (the existing
+`listDialog`/`list.Item` machinery, same as the timeline/model pickers), reusing the list's
+built-in fuzzy filter as the actual "search." Ctrl+R was already bound to the session switcher, so
+per an explicit user decision that switcher moved to **Ctrl+Y** — `docs/tui-guide.md`,
+`docs/sessions.md`, and `/help`'s keybind-only-features line were updated to match. Selecting a
+history entry recalls it onto the input line for further editing (does not auto-send), mirroring a
+shell reverse-search accept.
+**P22.2** adds `/review [--staged | <branch|commit>]`: resolves the target diff (uncommitted,
+staged, a branch/tag's merge-base, or a single commit), inlines it into a prompt that loads the
+already-shipped `content-review` builtin skill for structured severity-rubric findings, and
+switches the session to `plan` (read-only) mode for the duration if it isn't already — real
+permission-gate enforcement, reported back with how to switch back afterward. P22.3/P22.5/P22.6
+remain open — see
+[roadmap.md](roadmap.md#open-work--p22-openai-codex-cli-evaluation--2026-07-08).
+**Previously, 2026-07-07:** **P20.1** (deep-research workflow, first of the three adopted
 Odysseus-review items) shipped skill-first as scoped: new `deep-research` embedded builtin skill
 (`internal/skills/builtin/deep-research/SKILL.md`) encoding a structured research playbook —
 scope-the-question first (primary question + 2–5 sub-questions, budgets up front), iterative
@@ -236,6 +261,107 @@ evaluated and dropped, not wanted. P13 (7 exploratory items) fully researched an
 concrete sub-items; P13.1, P13.5, and P13.8 (added after initial scoping) now shipped.
 Full change history and design rationale for every shipped item lives below in
 [Appendix A](#appendix-a--completed-work).
+
+---
+
+## Shipped — P22 items (OpenAI Codex CLI evaluation: `/diff`, Ctrl+R history search, `/review`)
+
+Three of the six items scoped from the 2026-07-08 Codex CLI feature evaluation, per
+[roadmap.md](roadmap.md#open-work--p22-openai-codex-cli-evaluation--2026-07-08). P22.3 (Esc-Esc
+backtrack + `/fork`), P22.5 (`/side`), and P22.6 (raw scrollback) remain open.
+
+### P22.1 — SHIPPED 2026-07-08 — `/diff` command
+
+- New `internal/tui/slash_diff.go`: `cmdDiff` runs directly against the TUI process's own workspace
+  (`d.workDir`), consistent with `/sandbox`/`/security-config` rather than a daemon round trip, and
+  spends no model turn — same posture as `/scan`.
+  - Default: `git diff HEAD` (staged + unstaged tracked changes) plus a synthetic diff for each
+    untracked file, found via `git ls-files --others --exclude-standard` and rendered with
+    `git diff --no-index -- /dev/null <file>` — chosen over `git add -N` so a read-only command
+    never mutates the index.
+  - `--staged`/`--cached`: only the index diff; untracked files are excluded since they can't be
+    staged without first adding them.
+  - Optional trailing `<path>` scopes either mode to a workspace-relative file/directory.
+  - `runGitDiff` treats `git diff`'s exit code 1 (differences found) as success — only exit codes
+    >1, or git failing to start at all, are surfaced as errors.
+- New `highlightUnifiedDiff` (`internal/tui/highlight.go`), a sibling to the existing
+  `highlightSource`: tokenizes the raw diff text with chroma's built-in `diff` lexer (`lexers.Get
+  ("diff")`, matched by name rather than by file-extension `Match`, since a diff has no path) so
+  `+`/`-`/`@@` lines get the same `GenericInserted`/`GenericDeleted`/`GenericSubheading` theme roles
+  used elsewhere, rather than trying to per-file-language-highlight a multi-file diff. Both
+  functions now share a `highlightWithLexer` tokenize/render core.
+- Result plumbing: `cmdDiff` returns the raw diff text behind a `\x00diff\n` marker (`SlashResult
+  .Output`) rather than pre-rendering, since the dispatcher has no theme reference — `tui.go`'s
+  `Update` intercepts the marker, calls `highlightUnifiedDiff(m.th, …)`, and appends the result
+  un-wrapped (not through `style.Render`, which would double-style already-ANSI'd text) — the same
+  marker-passthrough convention `/theme`/`/clear`/`/notify` already use.
+- New `commandDefs` entry (`internal/tui/commands.go`) — automatically covered by the P14.1/P14.10
+  command-surface sync tests.
+- Tests: `internal/tui/slash_diff_test.go` (tracked+untracked combined diff, `--staged` excludes
+  untracked, no-changes case, non-git-directory error) against real `exec.Command("git", …)` scratch
+  repos (same pattern as `internal/tool/builtin/git_test.go`), plus `highlight_test.go` additions
+  covering `highlightUnifiedDiff`'s ANSI output and its empty-source `ok=false` case.
+
+### P22.4 — SHIPPED 2026-07-08 — Ctrl+R input-history search
+
+- New `internal/tui/historypicker.go`: `historyItem`/`newHistoryPicker` build a `listDialog`
+  (the same shared filterable-list overlay backing the palette/persona/session/timeline/model
+  pickers, P16.6) over `m.history`, newest-first, with the list's built-in fuzzy filter serving as
+  the actual incremental "search" — typing narrows the list exactly like a shell reverse-i-search.
+  New `dialogHistoryPicker` `dialogKind` and a `dialogSelectedMsg` case in `tui.go` that recalls the
+  selected entry onto the input line (`m.ta.SetValue`) without sending it, matching a shell
+  reverse-search accept rather than an immediate submit.
+- **Keybinding conflict, resolved by explicit user decision:** Ctrl+R was already bound to the
+  session switcher (documented in `/help` and `docs/tui-guide.md`/`docs/sessions.md`). Rather than
+  picking an unfamiliar key for the new feature, the session switcher moved to **Ctrl+Y** (new
+  `HistorySearch` `keyMap` field bound to `ctrl+r`; `Sessions` field rebound to `ctrl+y`), and all
+  three docs plus `/help`'s keybind-only-features line were updated to match. `ctrl+r` with an empty
+  history shows a toast ("no input history yet") instead of opening an empty dialog.
+- Tests: `internal/tui/historypicker_test.go` drives the real `model.Update()` path (not a mock) —
+  Ctrl+R opens the picker newest-first, Ctrl+R with empty history shows a toast and opens nothing,
+  selecting an entry recalls it onto the input without sending, and Ctrl+Y still triggers the
+  session-switcher fetch.
+
+### P22.2 — SHIPPED 2026-07-08 — `/review` read-only review mode
+
+- New `cmdReview` in `internal/tui/slash_diff.go`, alongside `/diff` since it shares the same
+  target-resolution and git plumbing. Unlike `/diff`, this spends a model turn: it inlines the
+  resolved diff into a prompt that loads the already-shipped `content-review` builtin skill
+  (structured severity-rubric findings — this made a from-scratch reviewer persona/debate-trio
+  unnecessary, since the skill already covers diff/PR review end to end) and sends it as a normal
+  message in the current session, so streaming/approval/cost tracking all work exactly as any other
+  turn's do.
+  - `/review` (no args): the uncommitted working-tree diff, same scope `/diff`'s default uses
+    (`git diff HEAD` plus a synthetic diff per untracked file).
+  - `/review --staged`/`--cached`: only the staged (index) diff.
+  - `/review <branch-or-tag>`: diff against the merge-base with that ref (`reviewRefDiff` +
+    `refIsNamed`, which checks `refs/heads/`, `refs/remotes/`, and `refs/tags/` via
+    `git show-ref --verify --quiet`) — "what would this PR change" against the ref's history rather
+    than its current tip.
+  - `/review <commit>`: that single commit's own diff (`git diff <ref>^ <ref>`, falling back to
+    `git show <ref>` for a root commit with no parent).
+  - A ref argument is validated with `git rev-parse --verify --quiet <ref>^{commit}` first — via a
+    new `runGit` helper (unlike `runGitDiff`, exit code 1 is a real error here, not "differences
+    found") — so an invalid ref is reported as a usage error rather than silently falling through.
+  - The diff is capped at `maxReviewDiffChars` (200,000 runes) before inlining, since unlike `/diff`
+    (rendered locally, no model involved) this diff becomes part of the conversation's context — a
+    truncation note is appended to the prompt when the cap is hit.
+- **Read-only enforcement:** if the session isn't already in `plan` mode, `cmdReview` switches it
+  there via `UpdateSession` before sending the review message (same mechanism `/persona`'s
+  mode-changing switch already uses) and reports the switch plus how to switch back — real
+  permission-gate enforcement, not persona-advisory. Deliberately does not attempt to auto-restore
+  the prior mode after the turn completes; no such per-turn hook exists in the current dispatch
+  architecture, and `/mode <prev>` is one command away.
+- New `commandDefs` entry — automatically covered by the P14.1/P14.10 command-surface sync tests.
+  `docs/tui-guide.md` gained rows for both `/review` and the previously-undocumented `/diff` (a
+  P22.1 gap caught while updating the same table).
+- Tests: `internal/tui/slash_diff_test.go` additions covering no-changes, working-tree/`--staged`/
+  branch/commit target resolution (asserting the prompt's scope description and inlined diff
+  content), invalid-ref and conflicting-args usage errors, and the non-git-directory case — all via
+  `reviewDispatcher`, which starts in `plan` mode specifically so these tests exercise the
+  diff-gathering/prompt-building logic without touching the (nil in tests) daemon client through the
+  mode-switch branch.
+- P22.3/P22.5/P22.6 remain open.
 
 ---
 

@@ -63,6 +63,34 @@ func TestHighlightSource_BgForLine(t *testing.T) {
 	}
 }
 
+func TestHighlightUnifiedDiff(t *testing.T) {
+	th := newTheme()
+	src := "diff --git a/x.go b/x.go\n--- a/x.go\n+++ b/x.go\n@@ -1,1 +1,1 @@\n-old line\n+new line\n"
+	lines, ok := highlightUnifiedDiff(th, src)
+	if !ok {
+		t.Fatal("expected the built-in diff lexer to match")
+	}
+	if len(lines) != 6 {
+		t.Fatalf("expected 6 lines, got %d: %#v", len(lines), lines)
+	}
+	if plain := ansi.Strip(lines[4]); plain != "-old line" {
+		t.Errorf("line 4 plain text = %q, want %q", plain, "-old line")
+	}
+	if lines[4] == ansi.Strip(lines[4]) {
+		t.Error("expected the deleted line to carry ANSI styling")
+	}
+	if lines[5] == ansi.Strip(lines[5]) {
+		t.Error("expected the added line to carry ANSI styling")
+	}
+}
+
+func TestHighlightUnifiedDiff_Empty(t *testing.T) {
+	th := newTheme()
+	if _, ok := highlightUnifiedDiff(th, ""); ok {
+		t.Error("expected empty source to report ok=false")
+	}
+}
+
 func TestHexColor(t *testing.T) {
 	if got := hexColor(nil); got != "" {
 		t.Errorf("hexColor(nil) = %q, want empty", got)

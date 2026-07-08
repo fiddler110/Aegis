@@ -44,7 +44,7 @@ func commandDefs() []commandDef {
 		{
 			name: "help", argHint: "[cmd]", needsArgs: true,
 			shortDesc:    "Show this help or detail for a command",
-			detailedHelp: "/help [command]\n  Show available commands, or detailed help for a specific command.\n  No args: also lists keyboard shortcuts, including keybind-only features that have no slash-command equivalent (e.g. ctrl+x terminal pane, ctrl+t sub-agent list, ctrl+r session switcher).",
+			detailedHelp: "/help [command]\n  Show available commands, or detailed help for a specific command.\n  No args: also lists keyboard shortcuts, including keybind-only features that have no slash-command equivalent (e.g. ctrl+x terminal pane, ctrl+t sub-agent list, ctrl+y session switcher, ctrl+r input-history search).",
 			handler:      (*SlashDispatcher).cmdHelp,
 		},
 		{
@@ -276,6 +276,18 @@ func commandDefs() []commandDef {
 			shortDesc:    "Set the attention-system mode (bell/desktop notifications)",
 			detailedHelp: "/notify <off|bell|desktop|both>\n  Set how the P16.1 attention system fires on stream-end, approval-pending, and error while the terminal isn't focused.\n  off: nothing. bell: terminal BEL. desktop: OSC 9/777 desktop notification. both (default): bell + desktop.\n  No args: show the current mode.\n  This session only; set tui.notifications: <mode> in config (project or global) to make it the default on restart.",
 			handler:      (*SlashDispatcher).cmdNotify,
+		},
+		{
+			name: "diff", argHint: "[--staged] [path]",
+			shortDesc:    "Show the working-tree git diff, including untracked files",
+			detailedHelp: "/diff [--staged] [path]\n  Shows the working-tree git diff as a syntax-highlighted transcript block — no model turn spent, same no-model-turn pattern as /scan.\n  No args: tracked changes (staged + unstaged) against HEAD, plus a synthetic \"new file\" diff for each untracked file (plain `git diff` omits those).\n  --staged (or --cached): only the staged (index) diff; untracked files are excluded since they can't be staged without adding them first.\n  <path>: scope to a workspace-relative file or directory.",
+			handler:      (*SlashDispatcher).cmdDiff,
+		},
+		{
+			name: "review", argHint: "[--staged | <branch|commit>]",
+			shortDesc:    "Read-only review of a diff, with structured findings",
+			detailedHelp: "/review [--staged | <branch|commit>]\n  Reviews a diff for correctness/quality/security issues, seeded with the content-review skill's severity-rubric format. Spends a model turn, unlike /diff.\n  No args: the uncommitted working-tree changes (tracked + untracked), same scope as /diff's default.\n  --staged (or --cached): only the staged (index) changes.\n  <branch>: diff against the merge-base with that branch (\"what would this PR change\").\n  <commit>: that single commit's own diff.\n  Switches the session to plan (read-only) mode for the review if it isn't already, and says so — /mode <prev> to switch back afterward.\n  Needs the content-review built-in skill enabled (/skills enable content-review) for the structured format; without it the model still reviews the diff, just less structured.",
+			handler:      (*SlashDispatcher).cmdReview,
 		},
 		{
 			name: "copy", argHint: "[N]",

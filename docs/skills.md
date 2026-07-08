@@ -111,9 +111,13 @@ aegis skills enable security-audit --global # user-global config instead
 aegis skills disable security-audit
 ```
 
-Or from the TUI: `/skills` (list), `/skills enable <name> [global]`, `/skills disable <name> [global]`. Changes take effect on restart (config-driven, read once at daemon startup).
+Or from the TUI: `/skills` (list), `/skills enable <name> [global]`, `/skills disable <name> [global]`. This is the config-driven route: it writes `.aegis/config.yaml` (or the user-global one) and takes effect on the next daemon restart.
 
 A project or user skill file with the same name always takes precedence over a built-in of that name — enabling a built-in never overrides something you authored yourself.
+
+### On-demand activation
+
+The four TUI commands that invoke a specific built-in skill directly — `/threat-model`, `/report`, `/research`, `/review` — activate that skill for the current session automatically, right when you run the command. No config edit or restart needed, and the skill stays dormant (no system-prompt cost) for every session that never asks for it; a fresh session starts with everything dormant again. This is what makes those commands work out of the box on a freshly cloned checkout even with an empty `builtin_enabled` list. `aegis skills enable`/`/skills enable` is still the right tool when you want a skill available every turn of every session without a dedicated command (e.g. `security-audit`, `architecture-diagram`).
 
 ---
 
