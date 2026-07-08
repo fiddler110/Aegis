@@ -17,6 +17,7 @@ Welcome to the Aegis documentation. These guides cover every aspect of using, co
 | [Session Management](sessions.md) | Durable sessions, checkpoints, rewind, export, archiving |
 | [Providers & Models](providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
 | [Memory & Knowledge](memory-and-knowledge.md) | Project/user memory, skills, project knowledge base, long-term entity store |
+| [Skills](skills.md) | Authoring guide: minimal/bundled skills, companion scripts, frontmatter, precedence, built-ins |
 | [Extensibility](extensibility.md) | Lifecycle hooks, MCP servers, custom commands, custom agents, process plugins, bundles |
 | [Multi-Agent & Background Tasks](multi-agent.md) | Swarm, sub-agents, parallel sessions, background tasks, cron scheduling |
 | [Multi-Agent Debate](debate.md) | Adversarial claim review: domains, file-grounding, persona overrides, all four entry points |

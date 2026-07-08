@@ -663,6 +663,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/steer", s.handleSteer)
 	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
+	mux.HandleFunc("POST /sessions/{id}/compact", s.handleCompactSession)
 	mux.HandleFunc("POST /sessions/{id}/background", s.handleSetBackground) // P3.2
 	mux.HandleFunc("GET /sessions/{id}/events", s.handleGetBGEvents)        // P3.2
 	mux.HandleFunc("POST /sessions/{id}/archive", s.handleArchiveSession)

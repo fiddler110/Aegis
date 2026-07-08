@@ -76,6 +76,63 @@ func TestCompactionSummarizesPrefix(t *testing.T) {
 	}
 }
 
+// TestForceCompactIgnoresBudget is the P19.2 regression: a manual /compact
+// must summarize a conversation that is nowhere near the configured budget,
+// which Compact would leave untouched.
+func TestForceCompactIgnoresBudget(t *testing.T) {
+	a := &summaryAdapter{summary: "earlier we set up the project"}
+	s := New(Options{Adapter: a, Model: "m", MaxBudget: 1000000, KeepRecent: 2})
+	msgs := []provider.Message{
+		text(provider.RoleUser, "msg one"),
+		text(provider.RoleAssistant, "reply one"),
+		text(provider.RoleUser, "msg two"),
+		text(provider.RoleAssistant, "reply two"),
+		text(provider.RoleUser, "msg three"),
+		text(provider.RoleAssistant, "final reply kept"),
+	}
+
+	// Compact leaves it alone: nowhere near the (huge) budget.
+	out, changed, err := s.Compact(context.Background(), "", msgs)
+	if err != nil || changed {
+		t.Fatalf("Compact: expected no-op under budget, changed=%v err=%v", changed, err)
+	}
+
+	// ForceCompact summarizes it anyway.
+	out, changed, err = s.ForceCompact(context.Background(), "", msgs)
+	if err != nil {
+		t.Fatalf("ForceCompact: %v", err)
+	}
+	if !changed {
+		t.Fatal("ForceCompact: expected compaction to occur despite being under budget")
+	}
+	if a.called != 1 {
+		t.Errorf("summarizer called %d times, want 1", a.called)
+	}
+	if len(out) >= len(msgs) {
+		t.Errorf("ForceCompact did not shrink conversation: %d -> %d", len(msgs), len(out))
+	}
+}
+
+// TestForceCompactTooShortIsNoop covers a conversation with no safe boundary
+// to cut at (fewer messages than KeepRecent) — ForceCompact must report no
+// change rather than fabricating a summary out of almost nothing.
+func TestForceCompactTooShortIsNoop(t *testing.T) {
+	a := &summaryAdapter{summary: "summary"}
+	s := New(Options{Adapter: a, Model: "m", MaxBudget: 1000000, KeepRecent: 8})
+	msgs := []provider.Message{text(provider.RoleUser, "hi"), text(provider.RoleAssistant, "hello")}
+
+	out, changed, err := s.ForceCompact(context.Background(), "", msgs)
+	if err != nil {
+		t.Fatalf("ForceCompact: %v", err)
+	}
+	if changed {
+		t.Error("expected no-op for a conversation shorter than KeepRecent")
+	}
+	if len(out) != len(msgs) || a.called != 0 {
+		t.Errorf("conversation altered unexpectedly (len=%d called=%d)", len(out), a.called)
+	}
+}
+
 func TestCompactionPreservesToolPair(t *testing.T) {
 	a := &summaryAdapter{summary: "summary"}
 	s := New(Options{Adapter: a, Model: "m", MaxBudget: 5, KeepRecent: 2})

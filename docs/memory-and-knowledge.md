@@ -88,26 +88,24 @@ When prompted for scope, choose **user**.
 
 ## Skills
 
-Skills are reusable procedures saved as markdown files. They are loaded into the system prompt alongside memory, giving the agent step-by-step instructions for repeatable workflows.
+Skills are reusable procedures saved as markdown files, loaded on demand (progressive disclosure) rather than eagerly into every system prompt. See [Skills](skills.md) for the full authoring guide (frontmatter, bundled directory skills with companion assets, precedence, built-ins). Quick reference:
 
 **Locations:**
 | Scope | Directory |
 |-------|-----------|
 | Project | `.aegis/skills/*.md` |
-| User (global) | `~/.local/share/aegis/skills/*.md` |
+| User (global) | `~/.aegis/skills/*.md` |
 
 **Creating a skill from the TUI:**
 ```
 /remember      # then describe a skill, or use the agent tool:
 ```
 
-The agent can save skills with `save_skill`:
+The agent can save skills with `save_skill` — this always writes to the *project* skills directory with exactly the content given (no `description`/`scope` params, so add frontmatter yourself afterward if you want progressive disclosure):
 ```json
 {
   "name": "deploy-staging",
-  "description": "Deploy the application to the staging environment",
-  "content": "1. Run `go build -o bin/app ./cmd/app`\n2. Copy binary to staging server: `scp bin/app deploy@staging:/opt/app/`\n3. Restart the service: `ssh deploy@staging 'sudo systemctl restart app'`\n4. Check logs: `ssh deploy@staging 'journalctl -u app -f --lines=50'`",
-  "scope": "project"
+  "content": "1. Run `go build -o bin/app ./cmd/app`\n2. Copy binary to staging server: `scp bin/app deploy@staging:/opt/app/`\n3. Restart the service: `ssh deploy@staging 'sudo systemctl restart app'`\n4. Check logs: `ssh deploy@staging 'journalctl -u app -f --lines=50'`"
 }
 ```
 
@@ -118,7 +116,7 @@ The agent can save skills with `save_skill`:
 
 ### Built-in skills
 
-Aegis also ships several skills embedded in the binary — `content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation`, `redteam-engagement`, `threat-modeling`, `latex-report` — covering common workflows out of the box. They stay **dormant by default** (no system-prompt cost) until enabled, since unlike a project/user skill file a user didn't choose to author them:
+Aegis also ships several skills embedded in the binary — `content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation`, `redteam-engagement`, `threat-modeling`, `latex-report`, `deep-research` — covering common workflows out of the box. They stay **dormant by default** (no system-prompt cost) until enabled, since unlike a project/user skill file a user didn't choose to author them:
 
 ```bash
 aegis skills list                          # see all built-ins and their on/off status
@@ -248,8 +246,8 @@ At session start, Aegis loads memory in this order:
 
 1. User memory (`~/.local/share/aegis/memory.md`)
 2. Project memory (`.aegis/memory.md`)
-3. User skills (`~/.local/share/aegis/skills/*.md`)
-4. Project skills (`.aegis/skills/*.md`)
+3. Project skills (`.aegis/skills/*.md`) — checked first, so a project skill shadows a same-named user skill
+4. User skills (`~/.aegis/skills/*.md`)
 5. Repo map (`.aegis/repomap.json` → injected into system prompt)
 
 Memory files are cached for 5 seconds — file edits are picked up within a few seconds without restarting Aegis.

@@ -96,6 +96,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdRemember,
 		},
 		{
+			name:         "compact",
+			shortDesc:    "Force context compaction now, ahead of a heavy stretch",
+			detailedHelp: "/compact\n  Force conversation compaction now instead of waiting for the automatic budget-driven trigger — summarizes older turns into a compact note, keeping the most recent messages verbatim.\n  Useful ahead of a long tool-heavy stretch you know is coming. Reports \"nothing to compact\" if the conversation is too short to safely summarize.\n  Not to be confused with /tools compact, which sets the tool-output display width and does not touch the conversation.",
+			handler:      (*SlashDispatcher).cmdCompact,
+		},
+		{
 			name: "skills", argHint: "[enable|disable <name> [global]]",
 			shortDesc: "List skills, or toggle a built-in skill on/off",
 			detailedHelp: "/skills\n  List active skills (project/user skill files, plus any enabled built-ins) and the full built-in catalog with on/off status.\n" +
@@ -180,6 +186,12 @@ func commandDefs() []commandDef {
 			shortDesc:    "Consolidate markdown docs into a report (html or latex/PDF)",
 			detailedHelp: "/report [latex] <sources…>\n  Loads a report-consolidation skill and starts writing. Names the source markdown docs (files, globs, or a directory) to synthesize into one coherent report.\n  No 'latex': loads the html-report skill — a single self-contained, shareable .html file.\n  With 'latex': loads the latex-report skill instead — a formally structured LaTeX document built via latex_new_document/latex_build, output as PDF.\n  e.g. /report research/*.md  or  /report latex research/roadmap.md research/releases.md\n  Spends a model turn, same as /debate and /threat-model — a discoverable entry point instead of relying on the model noticing a trigger phrase in free text.",
 			handler:      (*SlashDispatcher).cmdReport,
+		},
+		{
+			name: "research", argHint: "[topic or question]",
+			shortDesc:    "Deep-research a topic on the web: planned rounds, vetted sources, cited report",
+			detailedHelp: "/research [topic or question]\n  Loads the deep-research skill and starts a structured research run: iterative plan → search → read → synthesize rounds (capped at 8), a source-quality bar on what gets cited, a findings log with an analyzed-URLs audit trail, and a final report with numbered citations.\n  No args: asks what to research.\n  With args: researches the given topic, e.g. /research current state of Go structured logging libraries.\n  Needs the deep-research built-in skill enabled (/skills enable deep-research) and spends model turns, same as /debate, /threat-model, and /report — a discoverable entry point into the skill instead of relying on the model noticing a trigger phrase in free text.",
+			handler:      (*SlashDispatcher).cmdResearch,
 		},
 		{
 			name: "session", argHint: "[list]", needsArgs: true,

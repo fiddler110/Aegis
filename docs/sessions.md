@@ -260,6 +260,11 @@ curl -H "Authorization: Bearer <token>" \
 curl -X POST -H "Authorization: Bearer <token>" \
   -d '{"seq":3,"scope":"both"}' \
   http://127.0.0.1:4127/sessions/<id>/rewind
+
+# Force context compaction now, instead of waiting for the automatic
+# budget-driven trigger
+curl -X POST -H "Authorization: Bearer <token>" \
+  http://127.0.0.1:4127/sessions/<id>/compact
 ```
 
 The bearer token is stored at `~/.local/share/aegis/auth`.

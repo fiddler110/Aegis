@@ -225,6 +225,13 @@ type RewindResponse struct {
 	MessagesKept  int    `json:"messages_kept"`
 }
 
+// CompactResponse reports the result of a manually triggered compaction.
+type CompactResponse struct {
+	Compacted      bool `json:"compacted"`
+	MessagesBefore int  `json:"messages_before"`
+	MessagesAfter  int  `json:"messages_after"`
+}
+
 // RunInfo describes an in-flight message run, surfaced so concurrent parallel
 // sessions are observable.
 type RunInfo struct {

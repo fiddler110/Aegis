@@ -1,8 +1,18 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-07 (P18 and P19 added — TUI streaming/scroll polish and a docs/command
-misc bucket, researched and scoped from a user report, not started. Earlier the same day: P13.3.1 +
-P13.3.5 shipped — shell-aware "diagnose this?" error assist for the embedded terminal pane and `!`
+**Last updated:** 2026-07-07 (P20.1 shipped — `deep-research` builtin skill (structured
+plan → search → read → synthesize rounds, source-quality bar, findings log + analyzed-URLs audit
+trail, cited report) plus `/research` TUI command — see
+[releases.md](releases.md#shipped--p20-items-odysseus-review-research-compare-model-fit).
+Earlier the same day: P18 shipped, all three items — see [releases.md](releases.md#shipped
+--p18-items-tui-streaming--scroll-polish); P18.1 resolved as a documented decision (no code change),
+P18.2 fixed an O(n)-in-scroll-depth scrollbar/offset computation down to O(1), P18.3 fixed the
+auto-follow re-arm bug, done in parallel via three isolated git worktrees then merged. Earlier the
+same day: P20 added — evaluation of the Odysseus self-hosted AI workspace
+(github.com/pewdiepie-archdaemon/odysseus); three capabilities scoped, most of its surface
+explicitly rejected as out of scope, not started. Earlier: P19 shipped, both items — see [releases.md](releases.md#shipped--p19
+-items-docs--session-command-misc). Earlier the same day: P13.3.1 + P13.3.5
+shipped — shell-aware "diagnose this?" error assist for the embedded terminal pane and `!`
 bang commands, plus a `tui.keybindings` config remap with startup validation and help-text sync;
 P13.3.2/P13.3.3 deliberately left open as the lower-value remainder. Also shipped the same day:
 P13.7 — `latex-report` builtin skill + `/report` command, closing out the last P13 item with a real
@@ -19,13 +29,14 @@ rationale behind completed items, see [releases.md](releases.md).
 Open items: **P15.2–P15.11** (web UI
 parity with the TUI — P15.1's architecture question is resolved and the frontend scaffold/faithful
 -port shipped 2026-07-06, see below), **P13** (P13.3 terminal enhancements, P13.4 nebula-inspired
-engagement tooling), **P18** (streaming-thinking display, scroll smoothness, auto-follow
-reliability), **P19** (skill/script authoring guide, manual `/compact`), **P9.4** (per-task model
+engagement tooling), **P20** (P20.2 blind model compare, P20.3 hardware-aware model
+recommendation — P20.1 deep-research shipped 2026-07-07), **P9.4** (per-task model
 routing), **P6.1** (mid-turn state persistence).
 
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
 15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.7/P13.8, P14 (all of P14.1–P14.10), the
-TQ TUI track, P15.1, P16 (all of P16.1–P16.9), P17 (all of P17.1–P17.5), and the 2026-07-06 fable-review.md remediation
+TQ TUI track, P15.1, P16 (all of P16.1–P16.9), P17 (all of P17.1–P17.5), P18 (all three items), P19
+(both items), P20.1, and the 2026-07-06 fable-review.md remediation
 (CI/CodeQL/Dependabot, Windows token ACL, compiler-enforced daily-cap guard, `aegis harden`,
 plan-mode network gating, release workflow, server/TUI file splits, fuzz coverage, live-model eval
 tier, script-aware token estimation) — is shipped. See [releases.md](releases.md) for what each
@@ -241,97 +252,63 @@ the P14.1/P14.10 command-surface sync test (`TestBuiltinCommandsCoverDispatchTab
 
 ---
 
-## Open Work — P18 (TUI Streaming & Scroll Polish)
+## Open Work — P20 (Odysseus Review: Research, Compare, Model Fit)
 
-Requested 2026-07-07: three related complaints about the transcript pane during a streaming turn —
-extended-thinking collapses instead of staying visible while it's being generated, scrolling feels
-non-smooth, and the viewport doesn't reliably auto-follow a streaming response or resume following
-when the user scrolls back to the bottom mid-stream. Researched 2026-07-07 (code-read only — no
-real terminal available in this environment to reproduce interactively, per prior sessions); all
-three below are scoped but **not started**, and should ship as one incremental pass since P18.1 and
-P18.3 share the same root cause.
+Researched 2026-07-07 from github.com/pewdiepie-archdaemon/odysseus (~81k stars, Python/Flask-style
+backend + vanilla JS frontend) — a self-hosted AI *workspace*: chat + agents (tools, MCP, files,
+shell, skills, memory), deep research, blind model comparison, a hardware-aware model "cookbook",
+plus a documents editor, IMAP/SMTP email triage, notes/tasks/calendar with CalDAV, gallery/image
+editing, TTS/STT. Its chat-agent core (tools/MCP/skills/memory/sessions/themes) is a Python
+re-tread of what Aegis already has, and its workspace surface (email, calendar, documents) is out
+of scope — but three capabilities fill real Aegis gaps, and two of them are natural web UI panels
+that align with the P15 direction. **License constraint: Odysseus is AGPL-3.0 — everything below
+is concept-level reimplementation in Go; no code, prompt, or asset reuse.**
 
-- **P18.1 — Full live extended-thinking display.** Today (`internal/tui/tui.go`), streaming
-  `KindThinking` events accumulate into `m.thinkText` and `refresh()` re-renders the *entire*
-  accumulated buffer dim above the answer on every frame (tui.go:1677-1679) — nothing is
-  code-truncated while a turn is actively streaming. What actually shortens the reasoning is
-  `flushThinking`/`appendThinkingBlock` (tui.go:1727-1762): once the turn moves on to the answer or
-  a tool call, the block collapses to a one-line `✻ thought for Ns  (ctrl+o to expand)` summary by
-  default (`m.thinkExpanded` starts `false`) — the full text is retained, just hidden until ctrl+o.
-  Combined with P18.3 below, a user watching a long reasoning pass in a short terminal window sees
-  only whatever fraction of the growing dim block currently fits above the fold and never catches
-  up, which reads as truncation even though no text is discarded. Needs a product decision before
-  implementing: (a) leave collapse-on-flush as the resting state (matches the "fold once done"
-  convention TQ9 was built around) and rely on the P18.3 auto-follow fix to make the *live* portion
-  actually trackable while it's being generated — plausibly sufficient on its own; or (b) add a
-  config/session default so `m.thinkExpanded` starts `true`, keeping reasoning visible through the
-  whole turn and only collapsing retroactively once scrolled past. (S once the default is chosen —
-  this is a display-policy question, not a missing-data bug.)
-- **P18.2 — Smooth scrolling.** Keyboard scroll (`transcriptPane.HandleKey`) moves one line at a
-  time; mouse wheel (`HandleMouseWheel`, transcript.go:627+) reproduces bubbles/viewport's default
-  3-line-per-tick delta. Neither is obviously wrong, so "not smooth" needs a profiling pass before
-  a fix is chosen: candidates are (a) per-tick render cost — `refresh()`/`View()` cost scales with
-  visible segment count and re-wraps on every call rather than reusing a wrapped-line cache across
-  scroll-only updates (no content change), which could show up as visible jank under rapid wheel
-  events or held-down j/k; (b) coalescing bursts of `tea.MouseWheelMsg` that arrive faster than a
-  frame can render, so each tick doesn't force a full synchronous redraw; (c) the fixed 3-line delta
-  itself feeling coarse compared to other TUIs' finer step. Start by instrumenting scroll-to-render
-  latency before picking between these — don't guess. (M — needs measurement first, fix itself is
-  likely S.)
-- **P18.3 — Auto-follow reliability + resume-on-return-to-bottom.** `m.followBottom` is meant to
-  auto-scroll during streaming and re-arm the moment the user scrolls back to the bottom (already
-  partly implemented: `sendUserMessage` sets it `true` on send, `refresh()` calls `GotoBottom()`
-  when it's `true`, and a catch-all `m.followBottom = m.transcript.AtBottom()` re-derivation runs at
-  tui.go:1504). The likely bug, found by code reading, not yet reproduced live: that catch-all sits
-  after a *second*, separate `switch` statement reached only when the *first* `switch msg.(type)`
-  (starting ~tui.go:837) falls through without an early `return`. `eventMsg` — the case that fires
-  for every streamed token, including thinking/text deltas — always `return`s early (tui.go:1153)
-  and so never reaches the re-derivation. Meanwhile `spinner.TickMsg` (tui.go:844-861) *does* fall
-  through to it, but only calls `refresh()`/`GotoBottom()` itself when `followBottom` is already
-  `true` (a P3.7 redraw-suppression guard) — so once `followBottom` flips `false` for any reason,
-  nothing streamed by `eventMsg` in between ever nudges the viewport, and only a subsequent spinner
-  tick or an explicit user scroll can re-arm it. Needs verification against a real terminal (flagged
-  in every prior TUI session as unavailable in this dev environment) before landing a fix; the fix
-  itself is likely small — e.g. re-deriving `followBottom` (or unconditionally following when it's
-  already `true`) from inside the `eventMsg` branch too, not just the tick/key/mouse paths. (S once
-  verified.)
+- **P20.1 — SHIPPED 2026-07-07** — deep-research workflow, built skill-first as scoped: new
+  `deep-research` embedded builtin skill (structured plan → search → select → read → record
+  rounds capped at 8, a source-quality bar, a findings log with an analyzed-URLs audit trail,
+  numbered-citation discipline, and a structured final report) plus a `/research` TUI command —
+  see [releases.md](releases.md#shipped--p20-items-odysseus-review-research-compare-model-fit).
+  The escalation path stays open as scoped: promote to an engine-level workflow only if
+  skill-driven runs prove insufficient; a web UI research panel folds into P15 later.
+- **P20.2 — Blind model compare.** Same prompt sent to two models side-by-side, identities hidden
+  until the user votes left/right/tie, then reveal + optional synthesis of both answers. Directly
+  useful to Aegis's local-model audience — "is qwen3.5 or llama3.2 better at my codebase", "did
+  this persona/prompt change help", "is the cloud model worth it over local" — and Aegis already
+  has the entire backend: multi-provider adapters, per-session model override, ephemeral sessions,
+  independent SSE streams. Design lesson worth stealing from their implementation: blinding leaks
+  easily — comparison sessions must be neutrally named (`[CMP] Model A/B`) because session
+  lists/sidebars de-anonymize the pair before the vote; store the blind mapping server-side and
+  return real model names only after the vote is recorded. Scope: `POST /compare` daemon endpoint
+  (two ephemeral sessions, two streams, vote/reveal/optional-synthesis), web UI side-by-side panel
+  as the primary surface (fits P15; the P15.1 scaffold makes this buildable now), TUI `/compare`
+  with sequential A-then-B display as the required in-session surface. (M)
+- **P20.3 — Hardware-aware model recommendation ("cookbook-lite").** Odysseus's `services/hwfit`
+  detects hardware (RAM/GPU/VRAM via profiles), discovers candidate models from Hugging Face, and
+  recommends what actually fits, feeding a download-and-serve flow. Aegis is explicitly
+  local-model-first (Ollama) yet offers zero fit guidance — first-run setup assumes the user
+  already knows which model their machine can run. Scope: cross-platform CPU/RAM/GPU/VRAM
+  detection (the existing sandbox runtime-detection pattern is the precedent for probing host
+  capability), a small curated table of coding-agent-suitable local models with memory footprints
+  and quantization variants (curated beats live HF discovery — Aegis cares about the ~dozen models
+  good at tool use, not all of HF), recommend + offer `ollama pull`, surfaced as `aegis models
+  recommend`, a `--first-init` step, and a `/models` TUI info command. Explicitly **not** a
+  serving stack — Ollama serves; Aegis only advises and pulls. (M)
+- **P20.4 — Not adopting (recorded so it isn't re-litigated).** Documents editor, email
+  (IMAP/SMTP triage/drafts), notes/tasks/calendar/CalDAV, gallery/image editing, TTS/STT,
+  contacts/faces/YouTube ingestion: workspace/personal-assistant features that would dilute
+  Aegis's coding + security agent focus and drag in heavy non-goal dependencies. Themes, presets,
+  sessions, scheduled tasks, 2FA: already covered by P16.7 themes, personas, the session store,
+  `internal/cron`, and token auth + `aegis harden`. If the web UI is ever deliberately exposed
+  beyond loopback, revisit auth hardening as its own item on Aegis's threat model, not by
+  borrowing Odysseus's multi-user account design.
 
-TUI surface requirement: none of these are new capabilities, so no new `/slash` command — existing
-scroll keys/mouse wheel and the ctrl+o thinking toggle are the surface.
-
-Priority: Medium (direct usability complaint, not exploratory), Effort: S-M per item once P18.2 is
-profiled. Ship as one pass — P18.1's chosen option and P18.3 are coupled.
-
----
-
-## Open Work — P19 (Docs & Session-Command Misc)
-
-Two unrelated small items requested alongside P18 on 2026-07-07; grouped here as a no-blocker
-bucket the same way P13.3's leftovers are, not because they share a theme.
-
-- **P19.1 — Skill + companion-script authoring guide.** `internal/skills` (bundled `SKILL.md` +
-  companion assets like `internal/skills/builtin/latex-report/analyze_sources.py` or
-  `html-report/validate_report.py`) has no user-facing walkthrough today — `docs/extensibility.md`
-  covers lifecycle hooks, MCP servers, custom commands/agents, process plugins, and plugin bundles,
-  but never mentions skills at all, even though the mechanism (frontmatter `name:`/`description:`,
-  progressive disclosure via the `skill` tool, the generated `<skill_assets>` manifest for bundled
-  files, project vs. user vs. embedded-builtin precedence, `aegis skills enable/disable`) is fully
-  built and documented in code comments only. Scope: a new `docs/skills.md` (sibling to
-  `docs/personas.md`/`docs/debate.md`, not folded into `extensibility.md`, since skills are already
-  their own documented subsystem in CLAUDE.md) covering: minimal single-file skill, bundled
-  directory skill with a companion script and how `<skill_assets>` exposes it to the model,
-  frontmatter fields, project/user/builtin precedence and name collisions, and a worked example
-  (e.g. a small skill that ships a Python validation script, mirroring `html-report`). (S)
-- **P19.2 — Manual `/compact` command.** `internal/compaction` only ever triggers automatically
-  when a turn's estimated token count crosses budget (`Summarizer.shouldCompact`); there is no way
-  for a user to force it early (e.g. before a long tool-heavy stretch they know is coming). Note:
-  `/tools compact` (`internal/tui/slash.go:325`) is an unrelated existing command — it toggles
-  tool-*output* display width, not conversation compaction — so naming the new command needs to
-  avoid that collision (`/compact` is likely still fine since `/tools compact` is a subcommand of
-  `/tools`, but confirm no ambiguity in the palette/autocomplete before shipping). Needs a daemon
-  entry point (`Summarizer.Compact` is already callable directly, sidestepping the budget check) and
-  a thin slash command wired to it, following the same dispatch-table pattern as every other command
-  in `internal/tui/slash.go`. (S)
+**Suggested sequencing:** independent items, no ordering constraint between the two remaining
+(P20.1 shipped 2026-07-07). P20.2 first if the web UI track is active (clearest immediate utility,
+exercises the P15.1 scaffold on a real new panel); P20.3 needs no web UI at all. The P13
+cross-cutting rule applies: each item ships its in-session TUI surface (`/compare`, `/models` —
+P20.1's `/research` shipped) and is covered by the P14 command-surface sync tests. Priority:
+**Low-Medium** (competitive-inspired, no direct user pain behind it). Effort: **M** per item.
 
 ---
 

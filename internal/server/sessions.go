@@ -15,6 +15,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/checkpoint"
+	"github.com/fiddler110/aegis/internal/compaction"
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
@@ -496,6 +497,55 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleCompactSession forces context compaction on a session's current
+// message history outside of a model turn (P19.2) — e.g. before a long
+// tool-heavy stretch the user knows is coming, rather than waiting for the
+// automatic budget-driven trigger in engine.Run.
+func (s *Server) handleCompactSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	summarizer, ok := s.compactor.(*compaction.Summarizer)
+	if !ok || summarizer == nil {
+		writeError(w, http.StatusServiceUnavailable, "compaction not available (no model adapter configured)")
+		return
+	}
+
+	// Serialize against an in-flight run on this session, same as rewind.
+	sem := s.sessionSemaphore(id)
+	select {
+	case sem <- struct{}{}:
+	case <-r.Context().Done():
+		writeError(w, http.StatusServiceUnavailable, "request cancelled while waiting for active run to finish")
+		return
+	}
+	defer func() { <-sem }()
+
+	sess, err := s.store.Get(r.Context(), id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+
+	before := len(sess.Messages)
+	out, changed, err := summarizer.ForceCompact(r.Context(), sess.System, sess.Messages)
+	if err != nil {
+		s.logger.Warn("manual compaction failed", "session", id, "err", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("compaction failed: %v", err))
+		return
+	}
+	if changed {
+		if err := s.store.SaveMessages(r.Context(), id, out); err != nil {
+			s.logger.Error("save compacted messages", "session", id, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, api.CompactResponse{
+		Compacted:      changed,
+		MessagesBefore: before,
+		MessagesAfter:  len(out),
+	})
 }
 
 // handleSetBackground marks or unmarks a session as a background (detached)
