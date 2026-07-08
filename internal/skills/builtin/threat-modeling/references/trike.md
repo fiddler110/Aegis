@@ -49,6 +49,13 @@ For each threat found this way, assign:
   owner and a reason is incomplete — Trike's governance value comes from
   that record existing, not just the risk number.
 
+**The accept decision is never yours.** When producing the model, fill the
+decision column with `mitigate: <proposed control>` or `pending decision`;
+write `accept` only when recording a decision a named human already made
+(stated by the user, or found in an existing risk register/ADR), with that
+owner and reason attributed. A model-authored `accept` defeats the entire
+point of Trike's paper trail.
+
 ## Output template
 
 ```

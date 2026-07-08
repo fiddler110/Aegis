@@ -61,6 +61,33 @@ Use this when the destination for threat output is a sprint backlog rather
 than a standalone document — it slots directly next to normal user stories
 without translation.
 
+## Technology-specific sweep
+
+Run this after the primary framework pass, whichever framework was used.
+Per-element analysis reasons from the diagram outward and reliably misses
+gaps that belong to a *technology* rather than a component — a database
+whose auth is off by default, a Dockerfile with no `USER` line. Scan the
+workspace for each technology below; for each one present, either an
+existing threat entry already covers its checks or add one.
+
+| Technology present | Check for |
+|---|---|
+| Redis / Memcached | auth disabled by default (`requirepass`), no TLS, exposed port |
+| SQL databases | superuser connections, `ssl=false`, injection paths, credentials in connection strings |
+| Docker / containers | running as root (no `USER`), host mounts, unpinned base images |
+| Kubernetes / Helm | no NetworkPolicy, missing resource limits, secrets in values.yaml, no security contexts |
+| LLM / cloud AI calls | PII or secrets sent to external endpoints, prompt injection, unvalidated model output driving actions |
+| Message queues | unauthenticated pub/sub, unencrypted or unsigned messages |
+| REST / gRPC APIs | missing auth, no rate limiting, verbose errors, gRPC reflection in production |
+| CI/CD pipelines | secrets in logs, unpinned/mutable dependencies, no artifact signing |
+| File shares / NFS | path traversal, world-readable mounts, no access control |
+| Logging | secrets/PII in logs, no security-event logging, log injection |
+
+The evidence rules from SKILL.md §3 still apply: verify the insecure
+default actually holds in *this* deployment before flagging it — a Redis
+with `requirepass` set and a bound-to-localhost port is a documented
+control, not a finding.
+
 ## Hybrid Threat Modeling — a one-paragraph note
 
 Combining frameworks in one exercise is legitimate when a single system
