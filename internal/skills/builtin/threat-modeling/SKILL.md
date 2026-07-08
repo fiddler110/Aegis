@@ -42,10 +42,20 @@ the output so the reader knows a default was chosen, not derived.
 Once chosen, read the matching reference file before doing anything else:
 `references/stride.md`, `references/linddun.md`, `references/pasta.md`,
 `references/trike.md`, `references/vast.md`, or
-`references/nist-800-154.md`. Each one has the framework's process steps and
-an output template — follow it rather than improvising a structure, since
-these keep the model's output actually aligned to the named framework
-instead of a generic threat list wearing the framework's label.
+`references/nist-800-154.md`. Each one has the framework's process steps
+and points onward to its **skeleton** — the verbatim, fill-in-the-blanks
+document template for that framework, under `references/skeletons/`. §4
+below covers when to load the skeleton and how to use it; the point for
+now is: the skeleton, not this prose, is what fixes the actual document
+structure, so don't improvise one from the process description alone.
+
+| Reference file | Read when | Contains |
+|---|---|---|
+| `references/stride.md` / `linddun.md` / `pasta.md` / `trike.md` / `vast.md` / `nist-800-154.md` | Framework chosen, before exploring the workspace | That framework's process/stages and category definitions |
+| `references/companion-techniques.md` | After the framework pass, or if attacker realism/backlog framing was asked for | Technology sweep, Attack Trees, MITRE ATT&CK mapping, Evil User Stories |
+| `references/skeletons/skeleton-<framework>.md` | **Before writing the skeleton (§4.1), and again before filling each section (§4.2)** | Verbatim document structure, fixed value lists (prerequisite/severity/etc.), inline `<!-- ⛔ POST-*-CHECK -->` self-verification comments |
+| `references/skeletons/skeleton-inventory.md` | Writing the `.inventory.yaml` sidecar (§6) | Exact field names and structure for the sidecar |
+| `references/verification-and-updates.md` | Before finishing (§6) | Final self-check, sidecar rules, update workflow |
 
 ## 2. Explore the workspace before modeling
 
@@ -100,33 +110,46 @@ the whole document its credibility. Before writing any "missing X" threat:
 
 ## 4. Apply the framework, writing the document as you go
 
-Follow the loaded reference file's process and output template exactly. Do
-not stop after a partial pass — populate every category/stage/cell the
-framework defines, even ones with no findings ("none identified" is a valid,
-complete entry; a missing cell is not).
+Follow the loaded reference file's process, and its skeleton's structure,
+exactly. Do not stop after a partial pass — populate every category/stage/
+cell the framework defines, even ones with no findings ("none identified"
+is a valid, complete entry; a missing cell is not).
 
 **Write incrementally, never all-at-once at the end.** A threat model is a
 long task; holding the whole analysis in conversation until one final
 `write_file` means an interrupted run — context exhaustion on a local model,
 a step limit, a crash — loses everything. Instead:
 
-1. **Skeleton first.** Immediately after §2/§3, before analyzing any
-   component, create the document via `write_file` at
-   **`.aegis/security/threat-model/`** — the same directory family the
-   other persisted security reports use — named
-   `<framework>[-<scope>]-<YYYY-MM-DD>.md` (e.g. `stride-2026-07-08.md`, or
-   `stride-webui-2026-07-08.md` when the model covers one feature rather
-   than the whole project). The skeleton contains the header (framework and
-   why, deployment classification, date), the component/trust-boundary/
-   data-flow map from §2, and **every section heading the framework's
-   template defines**, each with the body `<!-- PENDING -->`.
-2. **Fill section by section.** Work through the framework one component/
-   stage at a time, and the moment a section's analysis is complete, edit
-   the document to replace that section's `<!-- PENDING -->` marker with
-   its content. Do not batch several finished sections in memory — the
-   document on disk is the working state, and once a section is written you
-   no longer need to keep its details in the conversation (this is what
-   lets a long model survive context compaction).
+1. **Skeleton first.** Read `references/skeletons/skeleton-<framework>.md`
+   and copy its "Skeleton (initial, before any analysis)" block **verbatim**
+   via `write_file` — every heading in the order shown, each body replaced
+   with `<!-- PENDING -->` — at **`.aegis/security/threat-model/`** — the
+   same directory family the other persisted security reports use — named
+   `<framework>-<target>-<YYYY-MM-DD-HHMM>.md`. The `<target>` slug is
+   **mandatory, never omitted**: use the scoped feature/system name when the
+   model covers one (`webui`, `auth-service`), or the repo/workspace
+   directory name when it covers the whole project (`aegis`) — a reader
+   scanning the directory listing must be able to tell what each file
+   modeled without opening it. The `<YYYY-MM-DD-HHMM>` timestamp (local
+   time, 24h, dash-separated — e.g. `stride-aegis-2026-07-08-1432.md`) is
+   what keeps two same-day runs from colliding or overwriting each other; a
+   date alone is not enough since a full model plus an update can both land
+   on one day.
+2. **Fill section by section, copying the skeleton's table shape exactly.**
+   Work through the framework one component/stage at a time, and the
+   moment a section's analysis is complete, edit the document to replace
+   that section's `<!-- PENDING -->` marker with the filled content shown
+   under that same heading in the skeleton file — same columns, same
+   order, same fixed value lists (prerequisite, severity, deployment
+   classification, and whatever else that skeleton pins down); do not
+   rename a column or substitute a free-text value for a fixed one. Run
+   the skeleton's inline `<!-- ⛔ POST-*-CHECK -->` comments right after
+   writing each table — they travel with the copied content and are
+   invisible once rendered, but skipping them is how column drift and
+   missing cells happen. Do not batch several finished sections in memory
+   — the document on disk is the working state, and once a section is
+   written you no longer need to keep its details in the conversation
+   (this is what lets a long model survive context compaction).
 3. **Resume, don't restart.** If the target document already exists and
    still contains `<!-- PENDING -->` markers, a previous run was
    interrupted: re-read the document, keep every completed section, and

@@ -138,7 +138,10 @@ scan's findings survive past whatever ephemeral output captured them (terminal s
 model turn) and are diffable/greppable/scriptable afterward.
 
 Threat models produced by the `threat-modeling` skill (`/threat-model`) live in the same family:
-the skill always writes its report to `.aegis/security/threat-model/<framework>[-<scope>]-<date>.md`
+the skill always writes its report to
+`.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>.md` — the target slug (scoped
+feature name, or the repo name for a whole-project model) and timestamp are both mandatory, so the
+directory listing alone says what each file modeled and when, and two same-day runs never collide —
 plus a `.inventory.yaml` sidecar with stable component/threat IDs. Unlike the scan JSONs these are
 *not* overwritten — each update is a new dated file diffed against the previous one (the sidecar is
 what makes the "what changed since the last threat model?" re-run cheap), so the directory is the

@@ -51,26 +51,9 @@ ask → Operational Threat Model.
    makes that revisit cheap — the next run diffs against it instead of
    starting over, which is exactly the cadence VAST assumes.
 
-## Output template
+## Skeleton
 
-```
-# VAST Threat Model — <feature/service name> (<Application|Operational>)
-
-## Scope
-<the single feature/service or infra boundary this model covers, and why that scope>
-
-## Diagram
-<process-flow diagram (Application) or data-flow/infra diagram (Operational)>
-
-## Threats (backlog-shaped)
-
-| ID | Title | Description | Evidence | Severity | Acceptance criteria for mitigation |
-|---|---|---|---|---|---|
-| V1 | <short title, ticket-ready> | <threat description> | <file/config making it real> | <critical/high/medium/low> | <what "fixed" looks like> |
-
-## Enumeration method used
-<e.g. "STRIDE per diagram element" — state it since VAST doesn't mandate one>
-
-## Summary
-<count by severity; note that this model should be revisited on material change to the scoped feature/infra>
-```
+The exact document structure — verbatim skeleton, fill-in table shapes,
+fixed value lists, and inline self-check comments — lives in
+`references/skeletons/skeleton-vast.md`. Read it before writing anything;
+do not improvise the structure from the process description above.

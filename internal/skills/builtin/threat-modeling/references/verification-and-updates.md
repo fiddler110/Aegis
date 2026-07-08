@@ -8,28 +8,11 @@ final self-check. All three apply whichever framework was used.
 
 Alongside the finished document in `.aegis/security/threat-model/`, write
 `<document-stem>.inventory.yaml` — a compact, machine-readable index of
-the model. It exists for *matching*
-(a future run diffing itself against this one), not for reading, so keep
-every entry to one line:
-
-```yaml
-metadata:
-  framework: stride            # the framework actually used
-  date: 2026-07-08
-  commit: 825bb98              # short SHA if in a git repo, else omit
-  document: stride-2026-07-08.md   # sibling file in .aegis/security/threat-model/
-  deployment_classification: localhost-service
-components:
-  - id: SessionStore           # PascalCase, named after its anchor
-    anchor: internal/session/store.go
-threats:
-  - id: T1
-    component: SessionStore
-    category: tampering        # framework-specific category, lowercase
-    severity: medium
-    prerequisite: local-process-access
-    status: open               # open | mitigated
-```
+the model. It exists for *matching* (a future run diffing itself against
+this one), not for reading, so keep every entry to one line. The exact
+field names, structure, and a post-write self-check live in
+`references/skeletons/skeleton-inventory.md` — copy that skeleton
+verbatim rather than improvising the shape here.
 
 Rules that make the diff work:
 
@@ -50,8 +33,9 @@ last time":
 
 1. **Locate the baseline** — the document/inventory the user named, or
    the most recent inventory sidecar in `.aegis/security/threat-model/`
-   (matching the scope slug, if the ask is scoped to one feature). If
-   none exists, say so and fall back to a fresh full analysis.
+   (matching the target slug, if the ask is scoped to one feature — sort by
+   the filename's timestamp, not directory listing order, to find the
+   latest). If none exists, say so and fall back to a fresh full analysis.
 2. **Keep the baseline's framework** unless the user explicitly asks for
    a different one (a framework switch is a new model, not an update —
    say that if it comes up).
@@ -92,3 +76,6 @@ Run this before reporting; fix failures rather than noting them:
 - [ ] Summary counts match the actual table rows.
 - [ ] The inventory sidecar exists and agrees with the document
       (same components, same threat IDs and statuses).
+- [ ] No stray skeleton syntax remains — grep the document for `[FILL`,
+      `[REPEAT`, `[END-REPEAT`, and `[CONDITIONAL` before reporting done;
+      each hit is a placeholder that was never actually filled in.

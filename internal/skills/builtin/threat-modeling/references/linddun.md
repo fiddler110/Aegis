@@ -39,26 +39,10 @@ data, anything where the risk that matters is a person being harmed by data
    pseudonymization, aggregation, differential privacy, minimization) and/or
    procedural (consent flow, retention policy, access review).
 
-## Output template
+## Skeleton
 
-```
-# LINDDUN Privacy Threat Model — <system/feature name>
-
-## Scope
-<which data flows/stores carry personal data and were modeled; what's out of scope>
-
-## Personal data inventory
-<data category, source, purpose of collection, retention, legal basis if known>
-
-## Data-flow diagram
-<Mermaid/PlantUML diagram, personal-data flows highlighted, trust boundaries annotated>
-
-## Threats
-
-| ID | Element | Category | Threat | Evidence | Prerequisite | Mitigation | Residual risk | Severity |
-|---|---|---|---|---|---|---|---|---|
-| P1 | <element> | Linkability | <description> | <code/config/schema showing the data handling> | <none/authenticated/internal network/local process/host compromise> | <control, or "none — open finding"> | <what remains> | <critical/high/medium/low> |
-
-## Summary
-<count of threats by category and severity; any consent/purpose-scope gaps found>
-```
+The exact document structure — verbatim skeleton, fill-in table shapes,
+fixed value lists, and inline self-check comments — lives in
+`references/skeletons/skeleton-linddun.md`. Read it before writing
+anything; do not improvise the structure from the process description
+above.

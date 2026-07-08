@@ -56,34 +56,10 @@ write `accept` only when recording a decision a named human already made
 owner and reason attributed. A model-authored `accept` defeats the entire
 point of Trike's paper trail.
 
-## Output template
+## Skeleton
 
-```
-# Trike Threat Model — <system/feature name>
-
-## Requirements model
-
-### Actors
-<list, one row per distinct actor class>
-
-### Assets
-<data/capabilities worth protecting>
-
-### Permission matrix
-
-| Actor | Asset | Action | Allowed? |
-|---|---|---|---|
-| <actor> | <asset> | <action> | <allowed/denied> |
-
-## Implementation model
-<data-flow diagram, trust boundaries, each flow annotated with the permission-matrix cell(s) it implements>
-
-## Risk model
-
-| ID | Denied action attempted / allowed action misused | Actor | Asset | Probability | Impact | Risk | Decision (mitigate/accept) | Decided by |
-|---|---|---|---|---|---|---|---|---|
-| R1 | <description> | <actor> | <asset> | <low/med/high> | <low/med/high> | <rating> | <mitigate: control / accept: reason> | <owner> |
-
-## Summary
-<count of accepted vs. mitigated risks; any accepted risk lacking a named owner or reason — flag as incomplete>
-```
+The exact document structure — verbatim skeleton, fill-in table shapes,
+fixed value lists, and inline self-check comments — lives in
+`references/skeletons/skeleton-trike.md`. Read it before writing
+anything; do not improvise the structure from the process description
+above.
