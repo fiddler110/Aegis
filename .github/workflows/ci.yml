@@ -1,10 +1,12 @@
 name: CI
 
+# Temporarily disabled (non-security pipeline) — re-enable by uncommenting
+# the triggers below.
 on:
   # push:
   #   branches: [main]
-  pull_request:
-    branches: [main]
+  # pull_request:
+  #   branches: [main]
   workflow_dispatch:
 
 concurrency:

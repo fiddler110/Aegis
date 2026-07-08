@@ -1,9 +1,12 @@
 name: Release
 
+# Temporarily disabled (non-security pipeline) — re-enable by uncommenting
+# the trigger below.
 on:
-  push:
-    tags:
-      - "v*"
+  # push:
+  #   tags:
+  #     - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
