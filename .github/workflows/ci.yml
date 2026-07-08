@@ -33,7 +33,7 @@ jobs:
       # targets; check-latest avoids a stale actions/setup-go cache missing a
       # recently released patch version.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           check-latest: true
