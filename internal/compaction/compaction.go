@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/fiddler110/aegis/internal/provider"
 )
@@ -27,9 +28,9 @@ const (
 type Summarizer struct {
 	adapter       provider.Adapter
 	model         string
-	maxBudget     int // fallback fixed budget when contextWindow == 0; 0 = skip
-	contextWindow int // model context window in tokens; 0 = use maxBudget
-	keepRecent    int // minimum number of trailing messages kept verbatim
+	maxBudget     int          // fallback fixed budget when contextWindow == 0; 0 = skip
+	contextWindow atomic.Int64 // model context window in tokens; 0 = use maxBudget. Atomic: updatable after construction (late Ollama detection) while Compact runs concurrently.
+	keepRecent    int          // minimum number of trailing messages kept verbatim
 	summaryTokens int
 }
 
@@ -61,25 +62,34 @@ func New(opts Options) *Summarizer {
 	if opts.SummaryTokens <= 0 {
 		opts.SummaryTokens = 1024
 	}
-	return &Summarizer{
+	s := &Summarizer{
 		adapter:       opts.Adapter,
 		model:         opts.Model,
 		maxBudget:     opts.MaxBudget,
-		contextWindow: opts.ContextWindow,
 		keepRecent:    opts.KeepRecent,
 		summaryTokens: opts.SummaryTokens,
 	}
+	s.contextWindow.Store(int64(opts.ContextWindow))
+	return s
+}
+
+// SetContextWindow updates the context window driving compaction thresholds.
+// Safe to call while Compact is running; used when the effective window is
+// only learned after construction (e.g. Ollama reports the loaded model's
+// real allocation once the first request has loaded it).
+func (s *Summarizer) SetContextWindow(tokens int) {
+	s.contextWindow.Store(int64(tokens))
 }
 
 // shouldCompact reports whether the current estimated token count warrants
 // compaction given the configured context window or fixed budget.
 func (s *Summarizer) shouldCompact(estimated int) bool {
-	if s.contextWindow > 0 {
-		remaining := s.contextWindow - estimated
-		if s.contextWindow > largeContextWindowThreshold {
+	if win := int(s.contextWindow.Load()); win > 0 {
+		remaining := win - estimated
+		if win > largeContextWindowThreshold {
 			return remaining < largeContextWindowBuffer
 		}
-		return remaining < int(float64(s.contextWindow)*smallContextWindowRatio)
+		return remaining < int(float64(win)*smallContextWindowRatio)
 	}
 	if s.maxBudget <= 0 {
 		return false

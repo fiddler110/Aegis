@@ -9,7 +9,9 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-08 — **P22.1** (`/diff` command), **P22.4** (Ctrl+R input-history
+**Last updated:** 2026-07-08 — **P23** (local-model context-window truth: Ollama detection,
+proactive-compaction notices, incremental threat-model writing) shipped; see its section below.
+Earlier the same day — **P22.1** (`/diff` command), **P22.4** (Ctrl+R input-history
 search), and **P22.2** (`/review` read-only review mode) shipped from the same-day Codex CLI
 evaluation.
 **P22.1** adds a no-model-turn `/diff [--staged] [path]` — same pattern as `/scan` — showing the
@@ -261,6 +263,61 @@ evaluated and dropped, not wanted. P13 (7 exploratory items) fully researched an
 concrete sub-items; P13.1, P13.5, and P13.8 (added after initial scoping) now shipped.
 Full change history and design rationale for every shipped item lives below in
 [Appendix A](#appendix-a--completed-work).
+
+---
+
+## Shipped — P23 items (Local-Model Context-Window Truth & Long-Run Survivability)
+
+Shipped 2026-07-08, from a user-reported field failure: a threat-model run on an
+Ollama-backed machine ingested a large codebase and then "just stopped and didn't write
+anything down." Root cause was a three-layer disagreement about the context window. Aegis
+talks to Ollama through its OpenAI-compatible endpoint, which offers no way to set or read
+`num_ctx`; when a prompt exceeds the served context (default **4096** tokens), Ollama
+**silently drops the oldest tokens — system prompt and task instructions first** — so the
+model literally forgets what it was doing. Meanwhile Aegis either disabled compaction
+entirely (`provider.default: ollama` + `context_window: 0` set `MaxBudget = 0`) or used the
+meaningless 120k default budget (`openai` provider pointed at `localhost:11434/v1`), and the
+TUI context bar divided by a name-based guess (128k for unknown models) that showed "3%" at
+the moment truncation began.
+
+- **P23.1 — Ollama context-window detection** (`internal/ollamainfo`, new): when the provider
+  is `ollama` — or `openai` with a `base_url` that answers Ollama's native `GET /api/version`
+  probe — the daemon resolves the *effective* served window in order of authority:
+  `/api/ps context_length` for the loaded model (authoritative) → modelfile-pinned `num_ctx`
+  from `/api/show` → Ollama's 4096 default capped by the model's training context. Detection
+  runs at startup and re-runs after each completed run until authoritative (the first run is
+  what loads the model into Ollama). Reconciliation (`internal/server/contextwindow.go`): an
+  unset `context_window` takes the detected value; a configured value wins over a guess but
+  **loses to a verified smaller served window** (with a logged warning naming
+  `OLLAMA_CONTEXT_LENGTH`/`num_ctx` as the fix) — honoring the larger config would just
+  reintroduce silent truncation. The effective value now drives the compactor
+  (`Summarizer.SetContextWindow`, atomic, retunable after late detection), the engine's
+  proactive 85% per-turn compaction (previously off for exactly these local sessions), the
+  TUI usage bar (`/status`-fed, replacing the name-table guess), and `/status` (value +
+  provenance, with a raise-your-context hint when serving the assumed default).
+- **P23.2 — visible context/step notices** (engine `KindNotice` → api/SSE `"notice"` → TUI
+  dim ⚠ line): proactive compaction now announces itself ("context ~N% full — compacted
+  X→Y messages"); a ≥95%-full context with nothing left to compact warns once per run that
+  the model server may silently drop older turns; and hitting `max_iterations` (default 40
+  tool rounds) — a second, previously-invisible way long agent tasks died with work unwritten
+  — now says so and names the config key to raise.
+- **P23.3 — incremental threat-model writing** (`threat-modeling` SKILL.md §4/§5/§7 rewrite):
+  skeleton document written to disk *first* (header, component map, every framework section
+  as `<!-- PENDING -->`), each section written the moment its analysis completes, resume-from-
+  pending-markers on re-run, and the P12 debate round moved from per-entry-mid-flight to a
+  final whole-document review pass (cross-section consistency, severity-floor recheck, then
+  debate only the contested entries and patch verdicts back). An interrupted run now leaves
+  every completed section on disk instead of losing everything held in conversation.
+
+Tested: `internal/ollamainfo` httptest-fake Ollama covering ps/modelfile/default/cap
+precedence and non-Ollama rejection; engine tests for both notice paths (compaction notice,
+warn-once no-compactor); server reconciliation tests including the user's real deployment
+shape (`openai` provider + Ollama base URL) and the post-run authoritative upgrade. Docs:
+`docs/providers.md` Context Window section rewritten (detection order, `OLLAMA_CONTEXT_LENGTH`
+guidance, 16k–32k minimum for agent workloads), `docs/configuration.md` `context_window`
+comment. Known limitation: detection is daemon-global keyed to the configured model; per-run
+`BudgetUSD`/`MaxTokensPerRun` remain off by default and were confirmed *not* the failure
+mechanism.
 
 ---
 

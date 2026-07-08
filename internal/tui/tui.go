@@ -41,10 +41,10 @@ type Config struct {
 	Mode           string
 	Model          string
 	WorkDir        string
-	HumorMode      bool   // D&D-themed thinking phrases; false = plain "thinking…"
-	Theme          string // color scheme name: "dark" (default) or "light" (TQ10)
-	Notifications  string // attention-system mode (P16.1): off/bell/desktop/both
-	ImageRendering string // inline image thumbnails (P16.9): "auto" (default) or "off"
+	HumorMode      bool                // D&D-themed thinking phrases; false = plain "thinking…"
+	Theme          string              // color scheme name: "dark" (default) or "light" (TQ10)
+	Notifications  string              // attention-system mode (P16.1): off/bell/desktop/both
+	ImageRendering string              // inline image thumbnails (P16.9): "auto" (default) or "off"
 	Keybindings    map[string][]string // P13.3.5: action name -> key sequence overrides
 }
 
@@ -111,6 +111,8 @@ type model struct {
 	cacheCreationTokens int  // prompt-cache writes (last turn)
 	tokensEstimated     bool // true when token counts are derived from heuristic
 	costUSD             float64
+	srvCtxWin           int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
+	srvCtxWinSrc        string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default"
 
 	streamStart time.Time // when the current stream began; zero when idle
 	thinkStart  time.Time // when extended thinking began this turn; zero when idle
@@ -328,6 +330,14 @@ type sessionSwitchedMsg struct {
 	err  error
 }
 
+// statusInfoMsg carries the daemon /status payload; fetched at startup (and
+// after runs while the value can still improve) for the effective context
+// window driving the usage bar (P23.1).
+type statusInfoMsg struct {
+	info api.StatusInfo
+	err  error
+}
+
 func newModel(cfg Config) model {
 	ta := textarea.New()
 	ta.Placeholder = "Message Aegis…"
@@ -423,7 +433,23 @@ func newModel(cfg Config) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.sp.Tick)
+	return tea.Batch(textarea.Blink, m.sp.Tick, m.fetchStatusInfo())
+}
+
+// fetchStatusInfo pulls the daemon /status payload for the effective context
+// window (P23.1) so the usage bar divides by what the model server actually
+// honors, not a name-based guess.
+func (m model) fetchStatusInfo() tea.Cmd {
+	cl := m.cfg.Client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		info, err := cl.StatusInfo(ctx)
+		if err != nil {
+			return statusInfoMsg{err: err}
+		}
+		return statusInfoMsg{info: *info}
+	}
 }
 
 // --- commands ---
@@ -1296,6 +1322,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case teammatesMsg:
 		m.renderTeammates(msg)
 		m.refresh()
+		return m, nil
+
+	case statusInfoMsg:
+		// Silent: a daemon that predates /status context fields (or an
+		// unreachable one) just leaves the name-based fallback in place.
+		if msg.err == nil && msg.info.ContextWindow > 0 {
+			m.srvCtxWin = msg.info.ContextWindow
+			m.srvCtxWinSrc = msg.info.ContextWindowSource
+		}
 		return m, nil
 
 	case sessionsLoadedMsg:
@@ -2229,16 +2264,28 @@ func (m *model) applyStreamBatch(evs []api.Event) tea.Cmd {
 	if m.transcript.AtBottom() {
 		m.followBottom = true
 	}
+	sawDone := false
 	for _, ev := range evs {
 		m.applyEvent(ev)
+		if ev.Kind == api.KindDone {
+			sawDone = true
+		}
 	}
 	m.refresh()
+	var cmds []tea.Cmd
 	if m.pendingNotify != nil {
-		cmd := m.notifyCmd(*m.pendingNotify)
+		cmds = append(cmds, m.notifyCmd(*m.pendingNotify))
 		m.pendingNotify = nil
-		return cmd
 	}
-	return nil
+	// A finished run may have improved the daemon's context-window detection
+	// (first run loads the model into Ollama); re-fetch until authoritative.
+	if sawDone && m.srvCtxWinSrc != "config" && m.srvCtxWinSrc != "ollama:loaded" {
+		cmds = append(cmds, m.fetchStatusInfo())
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) applyEvent(ev api.Event) {
@@ -2398,6 +2445,13 @@ func (m *model) applyEvent(ev api.Event) {
 
 	case api.KindCostAlert:
 		// Spend crossed the configured alert threshold; surface it as a dim warning.
+		m.flushThinking()
+		m.flushLiveText()
+		m.transcript.Append("\n" + m.th.elapsedDim.Render("⚠ "+ev.Text) + "\n")
+
+	case api.KindNotice:
+		// Engine advisory (context fill, compaction, step limit) — same dim
+		// warning treatment as cost alerts.
 		m.flushThinking()
 		m.flushLiveText()
 		m.transcript.Append("\n" + m.th.elapsedDim.Render("⚠ "+ev.Text) + "\n")
@@ -2660,7 +2714,7 @@ func (m model) renderSidebar(h int) string {
 	promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
 	if promptTokens > 0 {
 		section("CONTEXT")
-		add(renderContextBar(promptTokens, contextWindowFor(m.cfg.Model), w))
+		add(renderContextBar(promptTokens, m.contextWindowSize(), w))
 		if m.cacheReadTokens > 0 {
 			hit := int(float64(m.cacheReadTokens)/float64(promptTokens)*100 + 0.5)
 			add(m.th.sideMuted.Render(fmt.Sprintf("cache %d%% hit", hit)))
@@ -2725,7 +2779,7 @@ func (m model) renderInputArea() string {
 		// Fold glanceable sidebar data into the status bar when sidebar is hidden.
 		promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
 		if promptTokens > 0 {
-			segs = append(segs, renderContextBar(promptTokens, contextWindowFor(m.cfg.Model), 14))
+			segs = append(segs, renderContextBar(promptTokens, m.contextWindowSize(), 14))
 		}
 		running := 0
 		for _, tm := range m.teammates {
@@ -3151,6 +3205,19 @@ func wrap(s string, width int) string {
 		return s
 	}
 	return lipgloss.NewStyle().Width(width).Render(s)
+}
+
+// contextWindowSize returns the context window the usage bar divides by: the
+// daemon's effective value (config or Ollama-detected, from /status) when
+// known, else the name-based guess. The distinction matters most for local
+// models — contextWindowFor guesses 128k for "gemma4:12b" while Ollama may be
+// serving 4k, making the bar read 3% at the moment the prompt starts silently
+// truncating.
+func (m model) contextWindowSize() int {
+	if m.srvCtxWin > 0 {
+		return m.srvCtxWin
+	}
+	return contextWindowFor(m.cfg.Model)
 }
 
 // contextWindowFor returns an approximate context-window size (in tokens) for a

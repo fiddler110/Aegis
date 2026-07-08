@@ -62,6 +62,14 @@ type StatusInfo struct {
 	// AgentConcurrencyMax is the fixed ceiling it adapts toward.
 	AgentConcurrency    int `json:"agent_concurrency"`
 	AgentConcurrencyMax int `json:"agent_concurrency_max"`
+
+	// ContextWindow is the effective model context window (tokens) the daemon
+	// uses for compaction thresholds — from config, or auto-detected from the
+	// local Ollama server when unset. 0 when unknown. ContextWindowSource says
+	// where the value came from: "config", "ollama:loaded", "ollama:modelfile",
+	// or "ollama:default".
+	ContextWindow       int    `json:"context_window,omitempty"`
+	ContextWindowSource string `json:"context_window_source,omitempty"`
 }
 
 // PruneResponse reports how many sessions were deleted by a prune operation.
@@ -104,6 +112,7 @@ const (
 	KindSteer           EventKind = "steer"            // mid-run steering instruction injected
 	KindGuard           EventKind = "guard"            // output validation warning
 	KindCostAlert       EventKind = "cost_alert"       // spend crossed the configured alert threshold (P9.5)
+	KindNotice          EventKind = "notice"           // engine advisory (context fill, compaction, step limit)
 )
 
 // Event is one server-sent event during a message run.

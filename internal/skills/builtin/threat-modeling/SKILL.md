@@ -98,21 +98,45 @@ the whole document its credibility. Before writing any "missing X" threat:
   a setting. A threat you cannot evidence goes in a "needs verification"
   note, not the threat table.
 
-## 4. Apply the framework, then write the document
+## 4. Apply the framework, writing the document as you go
 
 Follow the loaded reference file's process and output template exactly. Do
 not stop after a partial pass — populate every category/stage/cell the
 framework defines, even ones with no findings ("none identified" is a valid,
 complete entry; a missing cell is not).
 
-Write the completed document via `write_file` to
-**`.aegis/security/threat-model/`** — the same directory family the other
-persisted security reports use — named
-`<framework>[-<scope>]-<YYYY-MM-DD>.md` (e.g. `stride-2026-07-08.md`, or
-`stride-webui-2026-07-08.md` when the model covers one feature rather than
-the whole project). Never delete or overwrite a prior report in that
-directory — an update is a new dated file, and the old one is the baseline
-it was diffed against.
+**Write incrementally, never all-at-once at the end.** A threat model is a
+long task; holding the whole analysis in conversation until one final
+`write_file` means an interrupted run — context exhaustion on a local model,
+a step limit, a crash — loses everything. Instead:
+
+1. **Skeleton first.** Immediately after §2/§3, before analyzing any
+   component, create the document via `write_file` at
+   **`.aegis/security/threat-model/`** — the same directory family the
+   other persisted security reports use — named
+   `<framework>[-<scope>]-<YYYY-MM-DD>.md` (e.g. `stride-2026-07-08.md`, or
+   `stride-webui-2026-07-08.md` when the model covers one feature rather
+   than the whole project). The skeleton contains the header (framework and
+   why, deployment classification, date), the component/trust-boundary/
+   data-flow map from §2, and **every section heading the framework's
+   template defines**, each with the body `<!-- PENDING -->`.
+2. **Fill section by section.** Work through the framework one component/
+   stage at a time, and the moment a section's analysis is complete, edit
+   the document to replace that section's `<!-- PENDING -->` marker with
+   its content. Do not batch several finished sections in memory — the
+   document on disk is the working state, and once a section is written you
+   no longer need to keep its details in the conversation (this is what
+   lets a long model survive context compaction).
+3. **Resume, don't restart.** If the target document already exists and
+   still contains `<!-- PENDING -->` markers, a previous run was
+   interrupted: re-read the document, keep every completed section, and
+   continue from the first pending one. Only the final §5 review round
+   re-examines completed sections.
+
+Never delete or overwrite a *prior dated report* in that directory — an
+update is a new dated file, and the old one is the baseline it was diffed
+against (editing today's own in-progress file is of course the normal flow
+above).
 
 Three cross-framework rules while filling the template:
 
@@ -134,16 +158,33 @@ Agile-native framing, check `references/companion-techniques.md` for Attack
 Trees, MITRE ATT&CK mapping, and Evil User Stories — optional add-ons layered
 on top of the chosen primary framework, not replacements for it.
 
-## 5. Route disputed findings through debate (P12), when enabled
+## 5. Final review round — consistency, then debate (P12) when enabled
 
-If your system prompt's "Debate mode (P12)" section marks threat modeling
-enabled, route each identified threat/mitigation pair through the `agent`
-tool's `mode:"debate"` before writing it into the document — call with
-`claim` set to the threat description, severity, and proposed mitigation.
-Reflect the arbiter's verdict in the final entry: adjust severity/mitigation
-per a REVISE verdict, drop the entry per a REJECT verdict, write it as-is per
-UPHOLD. Skip this for a clear-cut, uncontroversial entry; it exists for
-threats where the severity or mitigation is genuinely arguable.
+After every section is filled (no `<!-- PENDING -->` markers remain),
+re-read the **complete document from disk** and review it as a whole —
+the sections were written one at a time, so this is where seams show:
+
+- Component names and threat IDs are consistent across sections and match
+  the inventory sidecar; no section refers to a component another section
+  renamed or dropped.
+- Every threat's prerequisite still respects the deployment
+  classification's floor from §2, and severities are calibrated *against
+  each other*, not just individually plausible.
+- No two sections contradict each other about the same control or data
+  flow, and every threat still cites its evidence (§3).
+
+Fix what fails by editing the document in place.
+
+Then, if your system prompt's "Debate mode (P12)" section marks threat
+modeling enabled, route the **contested entries** — high-severity threats
+and any whose severity or mitigation is genuinely arguable — through the
+`agent` tool's `mode:"debate"`, with `claim` set to the threat description,
+severity, and proposed mitigation. Patch the arbiter's verdict back into
+the document: adjust severity/mitigation per a REVISE verdict, drop the
+entry per a REJECT verdict, keep it as-is per UPHOLD. Skip clear-cut,
+uncontroversial entries. Debating at the end, over the assembled document,
+both keeps a long run from stalling mid-analysis and lets the debaters see
+each threat in the context of the whole model rather than in isolation.
 
 ## 6. Self-check, inventory, and updates
 
@@ -160,11 +201,14 @@ old document's claims.
 
 ## 7. Report
 
-Write the full document to `.aegis/security/threat-model/` per §4 — a
-chat-only summary is not a complete threat model, since the whole point is
-a document mitigations can be tracked against. State which framework was
-used (and why, if inferred rather than requested) and the deployment
-classification at the top of the document. Do
-not stop after an outline; every category/stage the framework defines needs
-a populated entry, the self-check needs to pass, and the inventory sidecar
-needs to exist before the task is done.
+The document in `.aegis/security/threat-model/` (built incrementally per
+§4) is the deliverable — a chat-only summary is not a complete threat
+model, since the whole point is a document mitigations can be tracked
+against. State which framework was used (and why, if inferred rather than
+requested) and the deployment classification at the top of the document.
+The task is done only when no `<!-- PENDING -->` marker remains, the §5
+review round has run over the assembled document, the self-check passes,
+and the inventory sidecar exists. If the run must stop early anyway (step
+limit, context pressure), say plainly which sections are complete on disk
+and that a follow-up "continue the threat model" run will resume from the
+pending markers.

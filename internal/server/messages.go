@@ -334,6 +334,10 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("save traces", "session", id, "err", err)
 		}
 	}
+	// The run just loaded the model into Ollama (if that's the backend), so
+	// /api/ps can now report the real serving context; re-detect while the
+	// current value is non-authoritative. No-op for cloud providers.
+	go s.maybeRefreshContextWindow(context.Background())
 	if sess.Title == "" {
 		go s.generateTitle(id, req.Text)
 	}
