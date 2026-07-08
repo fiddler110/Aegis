@@ -1,6 +1,11 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-08 (P23 SHIPPED same day — local-model context-window truth, from a field
+**Last updated:** 2026-07-08 (`/threat-model` framework picker SHIPPED same day — a follow-up
+polish to P13.6: a recognized leading framework name, e.g. `/threat-model PASTA the auth service`,
+skips the clarifying question; otherwise a picker dialog opens listing all six frameworks with
+descriptions instead of spending a model turn asking in chat — see
+[releases.md](releases.md#shipped--p13-items-security--capability-enhancements). Earlier the same
+day: P23 SHIPPED — local-model context-window truth, from a field
 failure where an Ollama-backed threat-model run silently lost its instructions to context truncation:
 `internal/ollamainfo` detection of the *served* window via Ollama's native API, effective-window
 reconciliation driving compaction/proactive-compaction/TUI bar/`/status`, visible `notice` events for

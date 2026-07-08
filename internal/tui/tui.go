@@ -204,11 +204,16 @@ type model struct {
 	// near-identical dialog types into one, tagged by dialog.kind.
 	dialog         *listDialog
 	securityConfig *securityConfigModel
-	helpOpen       bool
-	quitConfirm    bool // P16.6: confirm before quitting while a turn is streaming
-	activeToast    *toast
-	completion     completionState
-	approval       *approvalState // non-nil while engine is blocked waiting for user approval
+	// pendingThreatModelTarget carries the already-parsed /threat-model
+	// target text (scope, "" for the whole project) from the moment the
+	// framework picker opens through to the follow-up dispatch once a
+	// framework is chosen.
+	pendingThreatModelTarget string
+	helpOpen                 bool
+	quitConfirm              bool // P16.6: confirm before quitting while a turn is streaming
+	activeToast              *toast
+	completion               completionState
+	approval                 *approvalState // non-nil while engine is blocked waiting for user approval
 
 	// P16.1 attention system: notifyMode is parsed once from config/session
 	// state; focused tracks terminal focus (via tea.FocusMsg/BlurMsg) so
@@ -822,6 +827,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if c.kind == dialogPersonaPicker {
 				m.refresh()
 			}
+			if c.kind == dialogThreatModelPicker {
+				m.pendingThreatModelTarget = ""
+			}
 			return m, nil
 		}
 		if sel, ok := msg.(dialogSelectedMsg); ok && sel.kind == m.dialog.kind {
@@ -858,6 +866,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case dialogModelPicker:
 				item := sel.item.(modelItem)
 				parsed := &commands.ParsedCommand{Name: "model", Args: []string{item.id}, Raw: "/model " + item.id}
+				return m, m.handleSlashCommand(parsed)
+			case dialogThreatModelPicker:
+				item := sel.item.(frameworkItem)
+				target := m.pendingThreatModelTarget
+				m.pendingThreatModelTarget = ""
+				args := strings.Fields(item.name) // splits "NIST 800-154" into the two tokens extractThreatModelFramework expects
+				if target != "" {
+					args = append(args, target)
+				}
+				parsed := &commands.ParsedCommand{Name: "threat-model", Args: args, Raw: "/threat-model " + strings.Join(args, " ")}
 				return m, m.handleSlashCommand(parsed)
 			case dialogHistoryPicker:
 				item := sel.item.(historyItem)
@@ -1409,6 +1427,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Models != nil {
 			picker := newModelPicker(m.width, m.height, msg.Models, m.cfg.Model)
 			m.dialog = &picker
+			return m, nil
+		}
+		if msg.ThreatModelTarget != nil {
+			picker := newThreatModelFrameworkPicker(m.width, m.height)
+			m.dialog = &picker
+			m.pendingThreatModelTarget = *msg.ThreatModelTarget
 			return m, nil
 		}
 		if msg.Output == "\x00wizard" {
