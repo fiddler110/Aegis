@@ -12,6 +12,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"math"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,9 @@ var wslListDistros = func(ctx context.Context) ([]byte, error) {
 // (e.g. "kali-linux") via `-d`; empty uses whatever `wsl --set-default`
 // currently points at.
 var wslRun = func(ctx context.Context, distro string, args ...string) ([]byte, error) {
+	if len(args) > math.MaxInt-3 {
+		return nil, fmt.Errorf("too many arguments for wsl command")
+	}
 	full := make([]string, 0, len(args)+3)
 	if distro != "" {
 		full = append(full, "-d", distro)
