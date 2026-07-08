@@ -151,6 +151,7 @@ const (
 	KindError      EventKind = "error"       // the run failed
 	KindSteer      EventKind = "steer"       // mid-run steering instruction injected
 	KindGuard      EventKind = "guard"       // output validation result (warning)
+	KindNotice     EventKind = "notice"      // advisory for the user (context fill, compaction)
 )
 
 // Event is emitted to the consumer-provided sink as the run progresses.
@@ -341,6 +342,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 
 	guardRetries := 0
 	toolRoundsCompleted := 0
+	ctxFullWarned := false // one context-nearly-full notice per run, not one per turn
 
 	for iter := 0; iter < e.maxIterations; iter++ {
 		select {
@@ -380,16 +382,30 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		// P2.7: Proactive per-turn compaction — check token headroom before every
-		// turn so context-limit errors never interrupt a run mid-flight.
-		if e.compactor != nil && e.contextWindowTokens > 0 {
+		// turn so context-limit errors never interrupt a run mid-flight. Cloud
+		// providers reject an oversized prompt loudly; local servers (Ollama)
+		// silently drop the oldest tokens instead — including the system prompt —
+		// so when nothing can be compacted the user gets an explicit notice
+		// rather than a model that quietly forgot its instructions.
+		if e.contextWindowTokens > 0 {
 			est := conv.estimatedTokens()
 			if est > e.contextWindowTokens*85/100 {
-				if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
-					e.logger.Warn("proactive compaction failed", "err", compErr)
-				} else if changed {
-					e.logger.Info("proactive compaction", "before", len(conv.Messages), "after", len(out))
-					conv.Messages = out
-					conv.invalidate()
+				pct := est * 100 / e.contextWindowTokens
+				compacted := false
+				if e.compactor != nil {
+					if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
+						e.logger.Warn("proactive compaction failed", "err", compErr)
+					} else if changed {
+						e.logger.Info("proactive compaction", "before", len(conv.Messages), "after", len(out))
+						emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — compacted %d→%d messages", pct, len(conv.Messages), len(out))})
+						conv.Messages = out
+						conv.invalidate()
+						compacted = true
+					}
+				}
+				if !compacted && !ctxFullWarned && pct >= 95 {
+					ctxFullWarned = true
+					emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full and nothing left to compact — the model server may silently drop older turns; consider /compact or a fresh session", pct)})
 				}
 			}
 		}
@@ -402,6 +418,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		suppressTools := false
 		if iter == e.maxIterations-1 && toolRoundsCompleted > 0 {
 			suppressTools = true
+			emit(Event{Kind: KindNotice, Text: fmt.Sprintf("step limit reached (%d tool rounds) — asking the model to summarize; raise provider.max_iterations for longer tasks", e.maxIterations)})
 			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 				provider.TextBlock{Text: "[Step limit reached. Summarize what you have accomplished, what constraints were met, and what work remains. Do not call any tools.]"},
 			}})

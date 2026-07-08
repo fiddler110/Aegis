@@ -190,6 +190,10 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	if tracker == nil {
 		tracker = cost.NewTracker()
 	}
+	// Effective window (config or Ollama-detected, see contextwindow.go)
+	// rather than raw config, so proactive compaction fires before a local
+	// server silently truncates the prompt.
+	ctxWin, _ := s.effectiveContextWindow()
 	return engine.New(engine.Options{
 		Adapter:               s.adapter,
 		Tools:                 tools,
@@ -203,7 +207,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		MaxTokens:             s.cfg.Provider.MaxTokens,
 		MaxIterations:         s.cfg.Provider.MaxIterations,
 		LoopThreshold:         s.cfg.Provider.LoopThreshold,
-		ContextWindowTokens:   s.cfg.Provider.ContextWindow,
+		ContextWindowTokens:   ctxWin,
 		SteerChan:             steerCh,
 		OutputGuard:           guardFn,
 		OutputGuardMaxRetries: guardRetries,

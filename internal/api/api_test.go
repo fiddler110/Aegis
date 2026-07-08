@@ -23,6 +23,7 @@ func TestEventKindWireValues(t *testing.T) {
 		KindSteer:           "steer",
 		KindGuard:           "guard",
 		KindCostAlert:       "cost_alert",
+		KindNotice:          "notice",
 	}
 	for kind, want := range cases {
 		if string(kind) != want {

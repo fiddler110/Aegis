@@ -447,11 +447,30 @@ Cloud→cloud and any→local failover are never gated behind this flag.
 
 ## Context Window
 
-Aegis uses the model's context window size to determine when to run compaction (at 85% fill). For local models that don't report their context size:
+Aegis uses the model's context window size to decide when to compact the conversation (proactively at 85% fill, with a visible `⚠ context …` notice in the TUI when it happens).
+
+**Ollama auto-detection.** Ollama's OpenAI-compatible endpoint gives no way to set or read `num_ctx`, and when a prompt exceeds the served context Ollama **silently drops the oldest tokens — the system prompt and task instructions go first**, which is why a long agent task on a local model can "forget" what it was doing and stop without output. To close that gap, when the provider is `ollama` — or an `openai` provider whose `base_url` points at an Ollama server — the daemon queries Ollama's native API for the context actually being served, in order of authority:
+
+1. the loaded model's real allocation (`/api/ps`) — re-checked after each run until known, since the first run is what loads the model;
+2. a modelfile-pinned `num_ctx` (`/api/show`);
+3. Ollama's server default (4096), capped by the model's training context.
+
+The detected value drives compaction, the engine's proactive per-turn check, and the TUI's context-usage bar; `/status` shows the number and where it came from.
+
+**Raising the served context** happens on the Ollama side, not in Aegis — Ollama sizes its KV cache from available (V)RAM, so this is where "how much memory the system has" actually enters the picture:
+
+```bash
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve   # server-wide
+# or pin per model in a Modelfile:  PARAMETER num_ctx 32768
+```
+
+For agent workloads (threat modeling, deep research, multi-step tool use), 16k–32k is a realistic minimum; at the 4096 default, a handful of file reads fills the window.
+
+**Manual override:**
 
 ```yaml
 provider:
   context_window: 32768   # set manually in tokens
 ```
 
-`0` or missing means auto-detect; if detection fails, compaction is skipped for local models.
+A non-zero value overrides detection, with one exception: if Ollama verifiably serves *less* than the configured value, the served value wins (and a warning is logged) — honoring the larger number would just reintroduce silent truncation. `0` or missing means auto-detect; if detection fails entirely (Ollama unreachable), compaction is skipped for local models until a later run detects successfully.

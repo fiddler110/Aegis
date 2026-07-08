@@ -94,6 +94,19 @@ type Server struct {
 	sandboxFallback       bool
 	sandboxFallbackReason string
 
+	// Effective context-window state (P23.1, see contextwindow.go): the token
+	// window the daemon believes the model server will honor, driving
+	// compaction thresholds and the /status + TUI usage surface. ctxWinFinal
+	// marks the value authoritative (explicit config on a cloud provider, or
+	// an Ollama loaded-model reading); until then runs re-detect. summarizer
+	// is the concrete compactor so a late detection can retune it in place.
+	ctxWinMu    sync.Mutex
+	ctxWin      int
+	ctxWinSrc   string
+	ctxWinFinal bool
+	ollamaBase  string // native Ollama API base when (possibly) Ollama; "" otherwise
+	summarizer  *compaction.Summarizer
+
 	// agentLimiter throttles how many sub-agents a 'parallel' workflow batch
 	// runs simultaneously (P17), adapting from observed batch behavior. One
 	// instance per daemon process, shared by every session's agent tool calls;
@@ -443,18 +456,25 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		if cfg.Provider.SmallModel != "" {
 			compModel = cfg.Provider.SmallModel // prefer a fast small model for compaction
 		}
+		// Resolve the effective context window first (P23.1): explicit config,
+		// or auto-detected from a local Ollama server — whose OpenAI-compat
+		// endpoint otherwise truncates oversized prompts silently.
+		s.initContextWindow(context.Background())
+		win, _ := s.effectiveContextWindow()
 		compOpts := compaction.Options{
 			Adapter:       adapter,
 			Model:         compModel,
-			ContextWindow: cfg.Provider.ContextWindow,
+			ContextWindow: win,
 		}
-		// For local providers without a known context window, skip auto-compaction
-		// rather than falling back to the 120k default — cheap local sessions
-		// should not be truncated arbitrarily.
-		if cfg.Provider.ContextWindow == 0 && cfg.Provider.Default == "ollama" {
+		// A local provider whose window is still unknown (Ollama unreachable at
+		// startup): skip auto-compaction rather than falling back to the 120k
+		// default. maybeRefreshContextWindow retunes the summarizer once the
+		// server is up and the window is known.
+		if win == 0 && cfg.Provider.Default == "ollama" {
 			compOpts.MaxBudget = 0 // explicit skip
 		}
-		s.compactor = compaction.New(compOpts)
+		s.summarizer = compaction.New(compOpts)
+		s.compactor = s.summarizer
 	}
 
 	// Connect configured MCP servers and register their tools.
@@ -847,6 +867,7 @@ func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("read daily tokens for /status", "err", err)
 		dailyTokens = 0
 	}
+	ctxWin, ctxWinSrc := s.effectiveContextWindow()
 	resp := api.StatusInfo{
 		Provider:              s.cfg.Provider.Default,
 		Model:                 s.cfg.Provider.Model,
@@ -858,6 +879,8 @@ func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
 		DailyTokenCap:         s.cfg.Cost.DailyTokenCap,
 		AgentConcurrency:      s.agentLimiter.Cap(),
 		AgentConcurrencyMax:   builtin.MaxParallelAgents,
+		ContextWindow:         ctxWin,
+		ContextWindowSource:   ctxWinSrc,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

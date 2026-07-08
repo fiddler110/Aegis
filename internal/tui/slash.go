@@ -669,6 +669,12 @@ func (d *SlashDispatcher) cmdStatus(_ []string) SlashResult {
 	var b strings.Builder
 	b.WriteString("Daemon: ok\n")
 	fmt.Fprintf(&b, "Provider: %s · Model: %s\n", info.Provider, info.Model)
+	if info.ContextWindow > 0 {
+		fmt.Fprintf(&b, "Context window: %d tokens (%s)\n", info.ContextWindow, describeCtxWinSource(info.ContextWindowSource))
+		if info.ContextWindowSource == "ollama:default" {
+			b.WriteString("  ⚠ Ollama is serving its default context; raise OLLAMA_CONTEXT_LENGTH (or a modelfile num_ctx) for long agent tasks\n")
+		}
+	}
 
 	backend := "local"
 	if cfgErr == nil {
@@ -704,6 +710,23 @@ func (d *SlashDispatcher) cmdStatus(_ []string) SlashResult {
 	fmt.Fprintf(&b, "Sub-agent concurrency: %d (adaptive, max %d)\n", info.AgentConcurrency, info.AgentConcurrencyMax)
 
 	return SlashResult{Output: strings.TrimRight(b.String(), "\n")}
+}
+
+// describeCtxWinSource renders the /status context_window_source values in
+// user-facing terms.
+func describeCtxWinSource(src string) string {
+	switch src {
+	case "config":
+		return "from config context_window"
+	case "ollama:loaded":
+		return "reported by Ollama for the loaded model"
+	case "ollama:modelfile":
+		return "Ollama modelfile num_ctx"
+	case "ollama:default":
+		return "Ollama server default, assumed"
+	default:
+		return src
+	}
 }
 
 // cmdSecurityConfig opens the interactive security-scanner config dialog

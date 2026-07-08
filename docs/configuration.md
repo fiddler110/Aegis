@@ -112,9 +112,15 @@ provider:
   # Only applies to o-series models; ignored otherwise.
   reasoning_effort: ""
 
-  # Model context window in tokens. 0 = auto-detect (skips compaction for local
-  # models that don't report their limits). Set this if your local model doesn't
-  # advertise its context window and you want compaction to work.
+  # Model context window in tokens. 0 = auto-detect: for Ollama (or an openai
+  # provider whose base_url points at an Ollama server) the daemon queries the
+  # native Ollama API for the context actually being served — the loaded
+  # model's allocation, a modelfile num_ctx, or Ollama's 4096 default — and
+  # uses it for compaction thresholds and the TUI usage bar; if Ollama is
+  # unreachable at startup, detection retries after each run. A non-zero value
+  # overrides detection, except that a *verified smaller* served window wins
+  # (Ollama silently truncates prompts beyond it, so trusting a larger
+  # configured value breaks long runs). /status shows the value in use.
   context_window: 0
 
   # Ordered (provider, model) pairs tried in sequence after the primary

@@ -1,6 +1,13 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-08 (P22.1 + P22.4 + P22.2 SHIPPED from the same-day Codex CLI evaluation:
+**Last updated:** 2026-07-08 (P23 SHIPPED same day — local-model context-window truth, from a field
+failure where an Ollama-backed threat-model run silently lost its instructions to context truncation:
+`internal/ollamainfo` detection of the *served* window via Ollama's native API, effective-window
+reconciliation driving compaction/proactive-compaction/TUI bar/`/status`, visible `notice` events for
+context fill + compaction + the max_iterations step cap, and incremental section-by-section
+threat-model document writing with resume markers and an end-of-document review/debate round — see
+[releases.md](releases.md#shipped--p23-items-local-model-context-window-truth--long-run-survivability).
+Earlier the same day: P22.1 + P22.4 + P22.2 SHIPPED from the same-day Codex CLI evaluation:
 a no-model-turn `/diff [--staged] [path]` command showing the working-tree git diff including
 untracked files, chroma-highlighted via a new `highlightUnifiedDiff`; Ctrl+R input-history search (a
 filterable, newest-first picker recalling a past sent message onto the input line; Ctrl+R was
@@ -64,7 +71,7 @@ routing), **P6.1** (mid-turn state persistence).
 Everything else — P2–P5, P7, P8, P9.1/P9.2/P9.5, the 2026-07-03 architecture/security review's
 15-item punch list, P10, P11, P12, P13.1/P13.2/P13.5/P13.6/P13.7/P13.8, P14 (all of P14.1–P14.10), the
 TQ TUI track, P15.1, P16 (all of P16.1–P16.9), P17 (all of P17.1–P17.5), P18 (all three items), P19
-(both items), P20.1, and the 2026-07-06 fable-review.md remediation
+(both items), P20.1, P23 (all three items), and the 2026-07-06 fable-review.md remediation
 (CI/CodeQL/Dependabot, Windows token ACL, compiler-enforced daily-cap guard, `aegis harden`,
 plan-mode network gating, release workflow, server/TUI file splits, fuzz coverage, live-model eval
 tier, script-aware token estimation) — is shipped. See [releases.md](releases.md) for what each
