@@ -176,9 +176,9 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdDebate,
 		},
 		{
-			name: "threat-model", argHint: "[system or feature]",
+			name: "threat-model", argHint: "[framework] [system or feature]",
 			shortDesc:    "Threat-model a system or feature (STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154)",
-			detailedHelp: "/threat-model [system or feature]\n  Loads the threat-modeling skill and starts a threat model. Asks which framework to use (STRIDE, LINDDUN, PASTA, Trike, VAST, or NIST 800-154) if it isn't already clear from context, then explores the workspace and applies it.\n  No args: threat-models the whole project.\n  With args: scopes to the named system/feature, e.g. /threat-model the auth service.\n  Spends a model turn, same as /debate — a discoverable entry point into the skill instead of relying on the model noticing a trigger phrase in free text.",
+			detailedHelp: "/threat-model [framework] [system or feature]\n  Loads the threat-modeling skill and starts a threat model. If the first word is a recognized framework (stride, linddun, pasta, trike, vast, or nist/nist-800-154, case-insensitive) it's used directly; otherwise a picker dialog opens with all six frameworks and a one-line description of each, forcing the choice up front instead of spending a model turn asking in chat.\n  No args: opens the framework picker, then threat-models the application/codebase in the current workspace (named explicitly, with its path) — the common case, since that's almost always what's actually being modeled.\n  Framework only, e.g. /threat-model PASTA: same whole-workspace scope with that framework, no picker.\n  Framework + scope, e.g. /threat-model PASTA the auth service: scopes to the named system/feature within the workspace, no picker.\n  Scope only (no recognized framework as the first word), e.g. /threat-model the auth service: opens the picker, then scopes to that system/feature.\n  Spends a model turn once a framework is set (picker selection is free), same as /debate — a discoverable entry point into the skill instead of relying on the model noticing a trigger phrase in free text.",
 			handler:      (*SlashDispatcher).cmdThreatModel,
 		},
 		{

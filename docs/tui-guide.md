@@ -210,7 +210,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/diff [--staged] [path]` | Show the working-tree git diff, including untracked files, as a syntax-highlighted block; no model turn spent |
 | `/review [--staged \| <branch\|commit>]` | Read-only review of a diff (uncommitted, staged, a branch's merge-base, or a single commit) with structured findings; switches to plan mode for the duration |
 | `/debate <claim>` | Adversarially debate any claim (security finding, design assertion, plan) — propose/critique/rebut/arbitrate, ending in an UPHOLD/REVISE/REJECT verdict |
-| `/threat-model [system or feature]` | Threat-model the whole project, or a named system/feature, using STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154 |
+| `/threat-model [framework] [system or feature]` | Threat-model the application/codebase in the current workspace, or a named system/feature within it, using STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154 — a recognized leading framework name skips straight to it, e.g. `/threat-model PASTA the auth service`; otherwise a picker dialog opens with a description of each framework |
 | `/report [latex] <sources…>` | Consolidate existing markdown docs into one report — a shareable `.html` page by default, or a LaTeX/PDF report with `latex` |
 | `/research [topic or question]` | Deep-research a topic on the web via the `deep-research` skill — planned rounds, a source-quality bar, and a report with numbered citations |
 

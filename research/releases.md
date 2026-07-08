@@ -9,8 +9,11 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-08 — **P23** (local-model context-window truth: Ollama detection,
-proactive-compaction notices, incremental threat-model writing) shipped; see its section below.
+**Last updated:** 2026-07-08 — **`/threat-model` framework picker** (follow-up polish to P13.6:
+a recognized leading framework name skips the clarifying question, otherwise a picker dialog opens
+listing all six with descriptions; see the P13.6 section below) shipped after **P23**
+(local-model context-window truth: Ollama detection, proactive-compaction notices, incremental
+threat-model writing); see its section below.
 Earlier the same day — **P22.1** (`/diff` command), **P22.4** (Ctrl+R input-history
 search), and **P22.2** (`/review` read-only review mode) shipped from the same-day Codex CLI
 evaluation.
@@ -1391,6 +1394,23 @@ that framework's process exactly.
   `docs/configuration.md`, `docs/memory-and-knowledge.md`, and `CLAUDE.md`'s built-in-skills lists
   updated; the pre-existing `redteam-engagement` skill was also missing from those same lists
   (a stale-docs bug predating this change) and got added at the same time.
+
+**Follow-up, 2026-07-08 — framework picker + explicit framework args:** `/threat-model` now
+recognizes a leading framework name (`stride`/`linddun`/`pasta`/`trike`/`vast`/`nist` or
+`nist-800-154`, case-insensitive; `extractThreatModelFramework`, `internal/tui/slash.go`) and skips
+the clarifying question entirely when one is given, e.g. `/threat-model PASTA the auth service`.
+Without a recognized leading framework, a `listDialog`-based picker (`newThreatModelFrameworkPicker`,
+new `internal/tui/threatmodelpicker.go`) opens instead, listing all six frameworks with a one-line
+description each (mirrored from the skill's own framework table) — forcing the choice up front via a
+new `SlashResult.ThreatModelTarget` → `model.pendingThreatModelTarget` → re-dispatched `/threat-model`
+round trip, the same shape `/model`'s picker already uses, rather than spending a model turn asking
+the same question in chat. The no-target default prompt also now names the actual workspace
+explicitly, with its path when known, instead of the vague "this project" — matching the skill's own
+instruction to explore the real workspace rather than an assumed architecture. `docs/tui-guide.md`
+and the `/threat-model` `/help` text (`internal/tui/commands.go`) updated to document the new
+`[framework]` argument and picker behavior; new `internal/tui/threat_model_test.go` covers the
+parser, both prompt-construction paths (with/without a target), and the picker round trip
+(`TestThreatModelPickerFlow`).
 
 ### P13.7 — SHIPPED 2026-07-07 — LaTeX report consolidation skill (`latex-report`) + `/report` command
 

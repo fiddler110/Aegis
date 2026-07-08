@@ -51,6 +51,13 @@ type SlashResult struct {
 	// the TUI was started with otherwise, which /model's daemon-side
 	// override alone never touched.
 	Model *string
+
+	// ThreatModelTarget is non-nil to open the /threat-model framework picker
+	// (forcing the choice up front instead of a model-turn clarifying
+	// question); its value is the already-parsed target text ("" for the
+	// whole project), carried through to re-dispatch /threat-model once a
+	// framework is picked.
+	ThreatModelTarget *string
 }
 
 // SlashDispatcher dispatches slash commands to built-in handlers or custom
@@ -60,7 +67,7 @@ type SlashDispatcher struct {
 	sessionID    string
 	mode         string
 	model        string
-	workDir      string // project root, used to validate/list project-local theme files (P16.7)
+	workDir      string // project root; used to validate/list project-local theme files (P16.7) and to name the workspace in /threat-model's default prompt
 	guardEnabled *bool  // per-session output-guard toggle; nil = server default
 	builtins     map[string]func(args []string) SlashResult
 	customs      []api.CommandInfo
@@ -877,19 +884,69 @@ func parseDebateArgs(args []string) (api.DebateRequest, []string, error) {
 	return req, args[i:], nil
 }
 
+// threatModelFrameworkAliases maps a lowercase leading /threat-model token to
+// its canonical framework name. "nist" alone is accepted since "800-154" is
+// awkward to type and unambiguous in this context; if it's followed by a
+// literal "800-154" token that token is consumed too.
+var threatModelFrameworkAliases = map[string]string{
+	"stride":       "STRIDE",
+	"linddun":      "LINDDUN",
+	"pasta":        "PASTA",
+	"trike":        "Trike",
+	"vast":         "VAST",
+	"nist":         "NIST 800-154",
+	"nist800-154":  "NIST 800-154",
+	"nist-800-154": "NIST 800-154",
+	"nist800154":   "NIST 800-154",
+}
+
+// extractThreatModelFramework consumes a recognized framework name from the
+// front of /threat-model's args (e.g. "PASTA the auth service" ->
+// ("PASTA", ["the", "auth", "service"])), so the framework can be given
+// up front instead of only via the skill's clarifying question.
+func extractThreatModelFramework(args []string) (string, []string) {
+	if len(args) == 0 {
+		return "", args
+	}
+	name, ok := threatModelFrameworkAliases[strings.ToLower(args[0])]
+	if !ok {
+		return "", args
+	}
+	rest := args[1:]
+	if strings.EqualFold(args[0], "nist") && len(rest) > 0 && rest[0] == "800-154" {
+		rest = rest[1:]
+	}
+	return name, rest
+}
+
 // cmdThreatModel sends a message that directly invokes the threat-modeling
 // skill, so its framework-selection clarifying question is asked as part of
 // the resulting turn rather than depending on the model noticing a trigger
-// phrase in free text (P13.6 TUI-surface requirement).
+// phrase in free text (P13.6 TUI-surface requirement). A leading framework
+// name (STRIDE, LINDDUN, PASTA, Trike, VAST, NIST 800-154) is recognized and
+// passed through as an explicit choice; without one, it opens a picker
+// dialog instead of spending a model turn on the clarifying question.
 func (d *SlashDispatcher) cmdThreatModel(args []string) SlashResult {
-	target := strings.TrimSpace(strings.Join(args, " "))
-	prompt := "Load the threat-modeling skill and produce a threat model"
-	if target != "" {
-		prompt += " for " + target
-	} else {
-		prompt += " for this project"
+	framework, rest := extractThreatModelFramework(args)
+	target := strings.TrimSpace(strings.Join(rest, " "))
+	if framework == "" {
+		return SlashResult{ThreatModelTarget: &target}
 	}
-	prompt += ". If the framework to use (STRIDE, LINDDUN, PASTA, Trike, VAST, or NIST 800-154) isn't already clear, ask me which one to use before proceeding, per the skill's framework-selection guidance."
+	// The common case is "model the thing Aegis is actually running against"
+	// — naming the workspace explicitly (and its path, when known) grounds
+	// that instead of leaving the model to guess what "this project" means,
+	// and matches the skill's own §2 instruction to explore the real
+	// workspace rather than an assumed architecture.
+	prompt := "Load the threat-modeling skill and produce a threat model for "
+	if target != "" {
+		prompt += target + ", scoped to the current workspace"
+	} else {
+		prompt += "the application and codebase in the current workspace"
+	}
+	if d.workDir != "" {
+		prompt += fmt.Sprintf(" (%s)", d.workDir)
+	}
+	prompt += fmt.Sprintf(". Use the %s framework — this has already been decided, so skip the framework-selection clarifying question.", framework)
 	warn := d.activateSkill("threat-modeling")
 	return SlashResult{Output: warn, Message: prompt}
 }

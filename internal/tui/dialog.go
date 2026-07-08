@@ -76,6 +76,7 @@ const (
 	dialogTimelinePicker
 	dialogModelPicker
 	dialogHistoryPicker
+	dialogThreatModelPicker
 )
 
 // dialogSelectedMsg is emitted when the user picks an item from any
