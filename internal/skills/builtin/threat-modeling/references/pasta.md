@@ -47,35 +47,10 @@ business X."
   correlate rather than duplicate the `security-audit` skill's output if
   both are in play for the same system.
 
-## Output template
+## Skeleton
 
-```
-# PASTA Threat Model — <system/feature name>
-
-## Stage 1 — Business objectives
-<what the system does; business consequences of compromise (revenue, compliance, reputation, safety)>
-
-## Stage 2 — Technical scope
-<architecture, stack, dependencies, deployment environment>
-
-## Stage 3 — Application decomposition
-<data-flow diagram: components, trust boundaries, entry points, actors, use cases>
-
-## Stage 4 — Threat analysis
-<enumerated threats, each tied to a known attack pattern/CVE/CWE class where applicable>
-
-## Stage 5 — Vulnerability & weakness analysis
-<concrete vulnerabilities in this system per threat, scanner findings cross-referenced>
-
-## Stage 6 — Attack modeling
-<attack tree or attack path per credible threat, entry point → impact>
-
-## Stage 7 — Risk & impact analysis
-
-| Attack path | Likelihood | Business impact | Risk rating | Mitigation | Priority |
-|---|---|---|---|---|---|
-| <path> | <low/med/high> | <consequence from stage 1> | <rating> | <control> | <rank> |
-
-## Summary
-<top-ranked risks; any that remain unmitigated and why>
-```
+The exact document structure — verbatim skeleton, fill-in table shapes,
+fixed value lists, and inline self-check comments — lives in
+`references/skeletons/skeleton-pasta.md`. Read it before writing
+anything; do not improvise the structure from the process description
+above.

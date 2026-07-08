@@ -55,29 +55,10 @@ authorization failures still belong under E, not A.
 4. **Map a mitigation to every identified threat.** A threat with no
    mitigation is an open finding, not a paperwork gap — flag it as such.
 
-## Output template
+## Skeleton
 
-```
-# STRIDE Threat Model — <system/feature name>
-
-## Scope
-<what was modeled, what was explicitly out of scope>
-
-## Deployment classification
-<internet-facing / internal-network / localhost-service / local-desktop, and the evidence for it>
-
-## Assets
-<data, credentials, capabilities worth protecting>
-
-## Data-flow diagram
-<Mermaid/PlantUML diagram with trust boundaries annotated>
-
-## Threats
-
-| ID | Element | Category | Threat | Evidence | Prerequisite | Mitigation | Residual risk | Severity |
-|---|---|---|---|---|---|---|---|---|
-| T1 | <element> | Spoofing | <description> | <file/config that makes it real> | <none/authenticated/internal network/local process/host compromise> | <control, or "none — open finding"> | <what remains after mitigation> | <critical/high/medium/low> |
-
-## Summary
-<count of threats by category and severity; anything left unmitigated>
-```
+The exact document structure — verbatim skeleton, fill-in table shapes,
+fixed value lists, and inline self-check comments — lives in
+`references/skeletons/skeleton-stride.md`. Read it before writing
+anything; do not improvise the structure from the process description
+above.
