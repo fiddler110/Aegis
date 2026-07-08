@@ -127,6 +127,8 @@ aegis skills disable security-audit
 
 Or from the TUI: `/skills` (list), `/skills enable <name> [global]`, `/skills disable <name> [global]`. Changes take effect on the next restart. A project or user skill file with the same name always takes precedence over a built-in.
 
+`/threat-model`, `/report`, `/research`, and `/review` don't need any of this — they activate their skill for the current session on demand, the moment you run the command, with no config edit or restart (see [docs/skills.md](skills.md#on-demand-activation)).
+
 **Example skill file** (`.aegis/skills/security-review.md`):
 ```markdown
 # Security Review Procedure

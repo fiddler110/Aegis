@@ -576,7 +576,7 @@ func TestEffectiveSystemCombinesMemory(t *testing.T) {
 
 	// With no memory files, effectiveSystem returns the base system plus the
 	// platform block (which is always injected).
-	got := srv.effectiveSystem("base prompt")
+	got := srv.effectiveSystem("base prompt", "")
 	if !strings.Contains(got, "base prompt") {
 		t.Errorf("effectiveSystem missing base prompt: %q", got)
 	}
@@ -588,7 +588,7 @@ func TestEffectiveSystemCombinesMemory(t *testing.T) {
 	if err := memory.Append(srv.memory.ProjectMemoryPath(), "test fact"); err != nil {
 		t.Fatal(err)
 	}
-	got = srv.effectiveSystem("base prompt")
+	got = srv.effectiveSystem("base prompt", "")
 	if !strings.Contains(got, "base prompt") || !strings.Contains(got, "test fact") {
 		t.Errorf("effectiveSystem didn't include memory: %q", got)
 	}
@@ -917,7 +917,7 @@ func TestEffectiveSystem_containsToolUseBlock(t *testing.T) {
 		workspace: "",
 		cfg:       &config.Config{},
 	}
-	out := s.effectiveSystem("base-system")
+	out := s.effectiveSystem("base-system", "")
 
 	if !strings.Contains(out, "A tool result is input") {
 		t.Error("effectiveSystem output missing ToolUseBlock content")

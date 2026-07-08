@@ -97,11 +97,12 @@ Shows the current run state (`◐ thinking…`, `◐ running…`, elapsed time) 
 | `Ctrl+X` | Toggle the embedded terminal pane |
 | `Ctrl+E` | Edit the current input in `$EDITOR` |
 | `Shift+Tab` | Cycle permission mode: plan → build → auto → plan |
-| `Ctrl+R` | Open interactive session picker (switch / resume) |
+| `Ctrl+Y` | Open interactive session picker (switch / resume) |
 | `Ctrl+T` | Show active sub-agents panel |
 | `Ctrl+L` | Clear the transcript (history preserved in session) |
 | `F1` | Toggle keyboard-shortcut help overlay |
 | `↑` / `↓` | Navigate input history (moves the cursor within a multiline draft first; history nav only at the first/last line) |
+| `Ctrl+R` | Search sent-message history (reverse-search, like a shell) — filter as you type, `Enter` recalls the match onto the input line |
 | Mouse wheel | Scroll conversation (auto-follow pauses while scrolled up) |
 
 ---
@@ -206,6 +207,8 @@ Type `/` to open the command completion popup and browse available commands.
 | `/security install <tool> [confirm]` | Show (or, with `confirm`, run) the guided host-install command for a scanner |
 | `/security baseline [path]` | Show the accepted-risk suppression baseline and each entry's active/expired/invalid status |
 | `/security config [global]` | Open the interactive scanner configuration dialog (same as `/security-config`) |
+| `/diff [--staged] [path]` | Show the working-tree git diff, including untracked files, as a syntax-highlighted block; no model turn spent |
+| `/review [--staged \| <branch\|commit>]` | Read-only review of a diff (uncommitted, staged, a branch's merge-base, or a single commit) with structured findings; switches to plan mode for the duration |
 | `/debate <claim>` | Adversarially debate any claim (security finding, design assertion, plan) — propose/critique/rebut/arbitrate, ending in an UPHOLD/REVISE/REJECT verdict |
 | `/threat-model [system or feature]` | Threat-model the whole project, or a named system/feature, using STRIDE/LINDDUN/PASTA/Trike/VAST/NIST 800-154 |
 | `/report [latex] <sources…>` | Consolidate existing markdown docs into one report — a shareable `.html` page by default, or a LaTeX/PDF report with `latex` |
@@ -286,9 +289,15 @@ The `code` scope deletes files the turn created and reverts files it modified. A
 
 ---
 
-## Session Picker (`Ctrl+R`)
+## Session Picker (`Ctrl+Y`)
 
-Press `Ctrl+R` to open the interactive session picker. It lists all sessions (newest first) with their title, mode, persona, and last-updated time. Select one to switch to it — the transcript is replayed including past diffs, tool output, and thinking blocks.
+Press `Ctrl+Y` to open the interactive session picker. It lists all sessions (newest first) with their title, mode, persona, and last-updated time. Select one to switch to it — the transcript is replayed including past diffs, tool output, and thinking blocks.
+
+---
+
+## Input History Search (`Ctrl+R`)
+
+Press `Ctrl+R` to open a filterable list of previously sent messages, newest first — the same reverse-search muscle memory as a shell. Type to narrow the list, `Enter` recalls the selected entry onto the input line for editing or resending, `Esc` cancels. For simple back/forward recall without filtering, `↑`/`↓` still cycle history in place.
 
 ---
 

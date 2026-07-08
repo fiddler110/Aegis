@@ -185,7 +185,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conv := &engine.Conversation{System: s.effectiveSystem(sess.System), Messages: sess.Messages, Persisted: len(sess.Messages)}
+	conv := &engine.Conversation{System: s.effectiveSystem(sess.System, id), Messages: sess.Messages, Persisted: len(sess.Messages)}
 
 	// P3.2: background (detached) sessions run the engine in a goroutine bound to
 	// a server-level context so the turn continues even after the HTTP client

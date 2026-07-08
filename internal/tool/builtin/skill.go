@@ -19,6 +19,14 @@ type skillTool struct {
 	builtinEnabled []string
 }
 
+// NewSkillTool constructs the skill tool. Exposed so callers outside this
+// package (the server, to activate a built-in skill on demand for a single
+// session — see P22.x on-demand skill activation) can rebuild it with an
+// expanded builtinEnabled list without reaching into an unexported type.
+func NewSkillTool(root, dataDir string, builtinEnabled []string) tool.Tool {
+	return &skillTool{root: root, dataDir: dataDir, builtinEnabled: builtinEnabled}
+}
+
 func (t *skillTool) Name() string                { return "skill" }
 func (t *skillTool) Capability() tool.Capability { return tool.CapRead }
 func (t *skillTool) Description() string {

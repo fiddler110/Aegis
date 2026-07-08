@@ -423,6 +423,25 @@ func (d *SlashDispatcher) cmdSkills(args []string) SlashResult {
 	return SlashResult{Output: b.String()}
 }
 
+// activateSkill turns on a dormant embedded built-in skill for this session
+// only, right before a command like /threat-model sends a message that
+// invokes it — the skill stays dormant (no system-prompt cost) for every
+// session that never asks for it, and needs no config edit or daemon restart
+// to become available in this one. Returns a warning string to prepend to the
+// command's Output on failure (e.g. daemon unreachable); empty on success, so
+// the model still gets a shot at the skill via a plain-text fallback.
+func (d *SlashDispatcher) activateSkill(name string) string {
+	if d.client == nil { // unit tests exercise prompt-building without a live daemon
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := d.client.ActivateSkill(ctx, d.sessionID, name); err != nil {
+		return fmt.Sprintf("Warning: couldn't activate the %s skill (%v); asking anyway.\n\n", name, err)
+	}
+	return ""
+}
+
 // cmdSkillsToggle enables or disables a built-in skill by writing the full
 // desired enabled set back to config. Like /sandbox use, the change is
 // written immediately but applies on the next restart.
@@ -848,7 +867,8 @@ func (d *SlashDispatcher) cmdThreatModel(args []string) SlashResult {
 		prompt += " for this project"
 	}
 	prompt += ". If the framework to use (STRIDE, LINDDUN, PASTA, Trike, VAST, or NIST 800-154) isn't already clear, ask me which one to use before proceeding, per the skill's framework-selection guidance."
-	return SlashResult{Message: prompt}
+	warn := d.activateSkill("threat-modeling")
+	return SlashResult{Output: warn, Message: prompt}
 }
 
 // cmdReport sends a message that directly invokes the html-report or
@@ -870,7 +890,8 @@ func (d *SlashDispatcher) cmdReport(args []string) SlashResult {
 	} else {
 		prompt.WriteString("the relevant existing markdown docs in this project into one coherent report. Ask me which docs to include if it isn't already clear from context.")
 	}
-	return SlashResult{Message: prompt.String()}
+	warn := d.activateSkill(skill)
+	return SlashResult{Output: warn, Message: prompt.String()}
 }
 
 // cmdResearch sends a message that directly invokes the deep-research skill
@@ -887,7 +908,8 @@ func (d *SlashDispatcher) cmdResearch(args []string) SlashResult {
 		prompt += ". Ask me what to research before running any searches."
 	}
 	prompt += " Follow the skill's round structure, source-quality bar, and citation discipline; end with the cited report."
-	return SlashResult{Message: prompt}
+	warn := d.activateSkill("deep-research")
+	return SlashResult{Output: warn, Message: prompt}
 }
 
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {

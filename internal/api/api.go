@@ -185,6 +185,14 @@ type AppendMemoryRequest struct {
 	Scope string `json:"scope"` // "project" (default) or "user"
 }
 
+// ActivateSkillRequest turns on a dormant embedded built-in skill for the
+// remainder of one session — e.g. a slash command like /threat-model that
+// invokes a specific skill on demand — without persisting it to config or
+// affecting any other session.
+type ActivateSkillRequest struct {
+	Name string `json:"name"`
+}
+
 // PersonaInfo describes an available persona.
 type PersonaInfo struct {
 	Name        string `json:"name"`

@@ -636,6 +636,12 @@ func (m *model) sendUserMessage(text string) tea.Cmd {
 	m.streaming = true
 	m.status = "thinking…"
 	m.followBottom = true // jump to the freshly sent message
+	// The callers reset the textarea just before this; with DynamicHeight
+	// that changes fixedH, so resync the pane height (which also re-pins).
+	// Skipped before the first WindowSizeMsg, when m.height is still zero.
+	if m.height > 0 {
+		m.applyViewportHeight()
+	}
 	m.refresh()
 	return m.startStream(cleanText, images)
 }
@@ -827,6 +833,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				item := sel.item.(modelItem)
 				parsed := &commands.ParsedCommand{Name: "model", Args: []string{item.id}, Raw: "/model " + item.id}
 				return m, m.handleSlashCommand(parsed)
+			case dialogHistoryPicker:
+				item := sel.item.(historyItem)
+				// Recall the entry onto the input line for further editing or
+				// sending, same as a shell reverse-search accepting a match —
+				// it does not send immediately.
+				m.ta.SetValue(item.text)
+				m.histIdx = -1
+				m.draftInput = ""
+				return m, nil
 			}
 			return m, nil
 		}
@@ -1059,9 +1074,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+t":
 			return m, m.fetchTeammates()
-		case "ctrl+r":
+		case "ctrl+y":
 			if !m.streaming {
 				return m, m.fetchSessions()
+			}
+		case "ctrl+r":
+			// P22.4: reverse-search over sent-message history, like a shell's
+			// Ctrl+R — moved the session switcher to ctrl+y to free this key
+			// up for the muscle-memory binding shell users expect.
+			if !m.streaming {
+				if len(m.history) == 0 {
+					t, cmd := newToastCmd("no input history yet", toastInfo)
+					m.activeToast = t
+					return m, cmd
+				}
+				m.completion = completionState{}
+				m.applyViewportHeight()
+				picker := newHistoryPicker(m.width, m.height, m.history)
+				m.dialog = &picker
+				return m, nil
 			}
 		case "ctrl+l":
 			if !m.streaming {
@@ -1166,6 +1197,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.queued = append(m.queued, text)
 				m.escPending = false
 				m.followBottom = true
+				m.applyViewportHeight() // ta was just Reset; resync pane height
 				m.refresh()
 				return m, nil
 			}
@@ -1495,6 +1527,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refresh()
 			return m, nil
 		}
+		if strings.HasPrefix(msg.Output, "\x00diff\n") {
+			// P22.1: chroma-highlight the raw git diff text here, where m.th
+			// (the active theme) is available — the dispatcher that produced
+			// it has no theme reference, same reason /theme and /clear pass
+			// through a \x00 marker instead of pre-rendering.
+			diffText := strings.TrimPrefix(msg.Output, "\x00diff\n")
+			rendered := diffText
+			if lines, ok := highlightUnifiedDiff(m.th, diffText); ok {
+				rendered = strings.Join(lines, "\n")
+			}
+			m.transcript.Append(rendered + "\n")
+			m.refresh()
+			return m, nil
+		}
 		if msg.Output != "" {
 			style := m.th.statusText
 			if msg.IsError {
@@ -1537,9 +1583,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch tmsg := msg.(type) {
 	case tea.KeyMsg:
-		m.transcript.HandleKey(tmsg)
+		// P21.7: while the textarea owns typed input, only the dedicated page
+		// keys scroll the transcript. Forwarding every key (the old "known
+		// existing quirk") meant typing any 'u'/'k'/'b'/space — or pressing the
+		// arrow keys to edit the draft — both edited the text AND scrolled the
+		// transcript, which silently killed auto-follow mid-stream. The vi-style
+		// scroll keys still work where the textarea isn't capturing input (the
+		// approval dialog's fall-through path in approval.go).
+		switch tmsg.String() {
+		case "pgup", "pgdown":
+			if m.transcript.HandleKey(tmsg) {
+				m.followBottom = m.transcript.AtBottom()
+			}
+		}
 	case tea.MouseWheelMsg:
-		m.transcript.HandleMouseWheel(tmsg)
+		if m.transcript.HandleMouseWheel(tmsg) {
+			m.followBottom = m.transcript.AtBottom()
+		}
 	case tea.MouseClickMsg:
 		cmds = append(cmds, m.handleMouseClick(tmsg))
 	case tea.MouseMotionMsg:
@@ -1547,9 +1607,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseReleaseMsg:
 		cmds = append(cmds, m.handleMouseRelease(tmsg))
 	}
-	// Re-derive scroll-follow state: auto-scroll resumes once the user returns
-	// to the bottom and pauses the moment they scroll up.
-	m.followBottom = m.transcript.AtBottom()
+	// P21.7: followBottom is user intent — paused by an explicit scroll away
+	// from the bottom, resumed by scrolling back to it (both handled above, at
+	// the scroll inputs themselves) or by sending/queueing a message. It is
+	// deliberately NOT re-derived from geometry here on every message: any
+	// layout perturbation (completion popup, approval dialog, textarea growth)
+	// briefly makes AtBottom() read false, and a blanket re-derivation would
+	// turn that into a permanently dead auto-follow with no user scroll having
+	// happened.
 	return m, tea.Batch(cmds...)
 }
 
@@ -1621,6 +1686,13 @@ func (m *model) fixedH() int {
 // applyViewportHeight resizes the transcript pane to fit the current fixed budget.
 func (m *model) applyViewportHeight() {
 	m.transcript.SetSize(m.transcript.Width(), max(m.height-m.fixedH(), 3))
+	// P21.7: a height change moves the bottom edge out from under the pinned
+	// offset. While following, re-pin immediately so a pane shrink (approval
+	// dialog, completion popup, textarea wrap) never leaves the newest content
+	// below the fold.
+	if m.followBottom {
+		m.transcript.GotoBottom()
+	}
 }
 
 // commandEntries returns the cached built-in + custom command list, rebuilding
@@ -2146,15 +2218,17 @@ func (m *model) appendUser(text string, thumbnails []string) {
 // applied event set one. Both the single-event (eventMsg) and coalesced
 // (batchEventMsg) paths funnel through here so their bookkeeping is identical.
 func (m *model) applyStreamBatch(evs []api.Event) tea.Cmd {
-	// P18.3: snapshot follow-bottom from the pre-batch scroll position. The
-	// content these events append would itself push the viewport off the
-	// bottom, making AtBottom() read false if checked afterward — so the
-	// snapshot must happen before applyEvent grows the transcript. Without it,
-	// once followBottom flips false mid-stream it would stay false (this path
-	// returns before the second switch's catch-all re-derivation) until the
-	// next spinner tick or explicit user scroll, so streamed tokens wouldn't
-	// nudge the viewport back to the bottom after the user scrolls down.
-	m.followBottom = m.transcript.AtBottom()
+	// P18.3/P21.7: resume-on-return-to-bottom, one-way. If the pre-batch
+	// scroll position is at the bottom, (re-)arm follow — checked before
+	// applyEvent grows the transcript, since the content this batch appends
+	// would itself make AtBottom() read false afterward. Never cleared here:
+	// pausing follow is exclusively an explicit user scroll (wheel-up/pgup),
+	// so a mid-stream geometry change (completion popup, approval dialog,
+	// textarea growing a line — all of which shrink the pane and briefly
+	// falsify AtBottom) can no longer silently kill auto-follow.
+	if m.transcript.AtBottom() {
+		m.followBottom = true
+	}
 	for _, ev := range evs {
 		m.applyEvent(ev)
 	}

@@ -88,6 +88,37 @@ func highlightSource(th theme, path, source string, bgForLine func(line int) col
 	if lexer == nil {
 		return nil, false
 	}
+	return highlightWithLexer(th, lexer, source, bgForLine)
+}
+
+// highlightUnifiedDiff tokenizes a raw unified-diff text (e.g. `git diff`
+// output) with chroma's built-in "diff" lexer — +/-/@@ lines colored via the
+// same GenericInserted/GenericDeleted/GenericSubheading roles highlightSource
+// uses for tool-call diffs — rather than per-file language lexers, since a
+// multi-file diff's content lines belong to whatever language each file is,
+// but the diff markup itself (headers, hunks) is one consistent grammar.
+func highlightUnifiedDiff(th theme, source string) (lines []string, ok bool) {
+	if th.chroma == nil || source == "" {
+		return nil, false
+	}
+	lexer := lexers.Get("diff")
+	if lexer == nil {
+		return nil, false
+	}
+	return highlightWithLexer(th, lexer, source, nil)
+}
+
+// highlightWithLexer tokenizes source with lexer and renders each token
+// through th.chroma, returning one already-ANSI-styled string per line. ok is
+// false when the theme has no chroma style or tokenizing failed.
+//
+// bgForLine, if non-nil, supplies a per-line background tint (0-indexed) —
+// used by the diff view (P16.3) to lay chroma's token colours "under" a
+// tinted add/removed row without a second, background-blind render pass.
+// Tokenizing the whole source in one lexer pass (rather than per displayed
+// line) keeps multi-line constructs — block comments, triple-quoted strings —
+// lexed with correct context.
+func highlightWithLexer(th theme, lexer chroma.Lexer, source string, bgForLine func(line int) color.Color) (lines []string, ok bool) {
 	lexer = chroma.Coalesce(lexer)
 	iter, err := lexer.Tokenise(nil, source)
 	if err != nil {
