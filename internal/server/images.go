@@ -29,6 +29,37 @@ var supportedImageTypes = map[string]bool{
 	"image/webp": true,
 }
 
+// resolveSafeImagePath validates a user-supplied image path and constrains it
+// to the current working directory tree.
+func resolveSafeImagePath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", fmt.Errorf("empty image path")
+	}
+	if filepath.IsAbs(p) {
+		return "", fmt.Errorf("absolute image paths are not allowed")
+	}
+
+	baseDir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve base dir: %w", err)
+	}
+	baseDir, err = filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve base dir: %w", err)
+	}
+
+	candidate := filepath.Clean(filepath.Join(baseDir, p))
+	rel, err := filepath.Rel(baseDir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("invalid image path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("image path escapes allowed directory")
+	}
+	return candidate, nil
+}
+
 // buildImageBlocks turns API image inputs into provider image blocks, reading
 // and base64-encoding any path-based inputs. It enforces a per-image size cap
 // and the supported-media-type allowlist. Image bytes are never logged.
@@ -42,7 +73,11 @@ func buildImageBlocks(inputs []api.ImageInput) ([]provider.Block, error) {
 		var data string
 		switch {
 		case strings.TrimSpace(in.Path) != "":
-			raw, err := os.ReadFile(in.Path)
+			safePath, err := resolveSafeImagePath(in.Path)
+			if err != nil {
+				return nil, fmt.Errorf("image %d: %w", i+1, err)
+			}
+			raw, err := os.ReadFile(safePath)
 			if err != nil {
 				return nil, fmt.Errorf("image %d: %w", i+1, err)
 			}
@@ -50,7 +85,7 @@ func buildImageBlocks(inputs []api.ImageInput) ([]provider.Block, error) {
 				return nil, fmt.Errorf("image %d is too large (%d bytes, max %d)", i+1, len(raw), maxImageBytes)
 			}
 			if mediaType == "" {
-				mediaType = detectImageType(in.Path, raw)
+				mediaType = detectImageType(safePath, raw)
 			}
 			data = base64.StdEncoding.EncodeToString(raw)
 		case in.Data != "":
