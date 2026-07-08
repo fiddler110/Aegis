@@ -381,7 +381,14 @@ func (c *Client) PostMessageReq(ctx context.Context, id string, reqBody api.Post
 		return nil, decodeError(resp)
 	}
 
-	out := make(chan api.Event)
+	// Buffered so the SSE-parsing goroutine can run ahead of the consumer's
+	// render loop (P21.1): a fast stream fills this buffer, and the TUI drains
+	// many queued events in one Update to do a single markdown re-render,
+	// instead of one full re-render per token. FIFO order across the single
+	// producer/consumer is preserved. Sized to absorb a burst without the
+	// producer blocking on the common case; a sustained overrun just makes the
+	// producer block as before (backpressure), never drops events.
+	out := make(chan api.Event, 256)
 	go func() {
 		defer close(out)
 		defer resp.Body.Close()

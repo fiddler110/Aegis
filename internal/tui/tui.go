@@ -281,6 +281,18 @@ type streamStartedMsg struct {
 	cancel context.CancelFunc
 }
 type eventMsg api.Event
+
+// batchEventMsg carries one or more streamed events drained together by
+// waitForEvent (P21.1). Collapsing a burst of token deltas into a single
+// Update — and therefore a single markdown re-render — keeps render cost
+// bounded by frame rate rather than token rate. closed is set when the event
+// channel closed during the same drain, so the batch and the stream-teardown
+// are delivered in one cycle instead of an extra round-trip.
+type batchEventMsg struct {
+	events []api.Event
+	closed bool
+}
+
 type streamClosedMsg struct{}
 type errMsg struct{ err error }
 
@@ -664,13 +676,39 @@ func (m model) sendSteerCmd(text string) tea.Cmd {
 	}
 }
 
+// maxEventsPerBatch caps how many events a single waitForEvent drain collapses
+// into one batchEventMsg. Without a cap a model that streams faster than the
+// TUI renders could hand back an unbounded batch and starve input handling; the
+// cap yields control back to Update (and thus to key/mouse/tick handling and a
+// paint) at a bounded interval while still coalescing the common bursty case.
+const maxEventsPerBatch = 512
+
+// waitForEvent blocks for the next streamed event, then non-blockingly drains
+// whatever else is already buffered on the channel, returning them as one
+// batchEventMsg (P21.1). The blocking first read means an idle stream costs
+// nothing; the drain means a fast stream is rendered once per Update rather
+// than once per token. A close observed mid-drain is folded into the batch via
+// the closed flag so no separate round-trip is needed to tear the stream down.
 func waitForEvent(ch <-chan api.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
 			return streamClosedMsg{}
 		}
-		return eventMsg(ev)
+		batch := make([]api.Event, 0, 16)
+		batch = append(batch, api.Event(ev))
+		for len(batch) < maxEventsPerBatch {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					return batchEventMsg{events: batch, closed: true}
+				}
+				batch = append(batch, ev)
+			default:
+				return batchEventMsg{events: batch}
+			}
+		}
+		return batchEventMsg{events: batch}
 	}
 }
 
@@ -1143,23 +1181,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(waitForEvent(m.events), m.sp.Tick)
 
 	case eventMsg:
-		// P18.3: this case always returns before reaching the second switch's
-		// catch-all `m.followBottom = m.transcript.AtBottom()` re-derivation
-		// (~tui.go:1504), so without this, once followBottom flips false it
-		// stays false until the next spinner tick or explicit user scroll —
-		// streamed tokens in between never nudge the viewport back to bottom
-		// after the user scrolls back down mid-stream. Re-derive here too,
-		// from the pre-event scroll position: the token this event is about
-		// to append would itself push the viewport off the bottom and make
-		// AtBottom() read false if checked afterward, so the snapshot must
-		// happen before applyEvent grows the content.
-		m.followBottom = m.transcript.AtBottom()
-		m.applyEvent(api.Event(msg))
-		m.refresh()
-		var notifyCmd tea.Cmd
-		if m.pendingNotify != nil {
-			notifyCmd = m.notifyCmd(*m.pendingNotify)
-			m.pendingNotify = nil
+		// Single-event path (kept for direct drivers such as the integration
+		// tests); the live stream arrives as batchEventMsg. Both share
+		// applyStreamBatch so the follow-bottom and notify bookkeeping stay
+		// identical.
+		notifyCmd := m.applyStreamBatch([]api.Event{api.Event(msg)})
+		return m, tea.Batch(waitForEvent(m.events), notifyCmd)
+
+	case batchEventMsg:
+		notifyCmd := m.applyStreamBatch(msg.events)
+		if msg.closed {
+			// The stream closed within this same drain: run the exact
+			// teardown the dedicated streamClosedMsg path does, on the
+			// already-applied state, and carry any per-event notification
+			// (e.g. a cost alert) alongside the closed path's own command.
+			nm, closeCmd := m.Update(streamClosedMsg{})
+			return nm, tea.Batch(notifyCmd, closeCmd)
 		}
 		return m, tea.Batch(waitForEvent(m.events), notifyCmd)
 
@@ -2101,6 +2138,33 @@ func (m *model) appendUser(text string, thumbnails []string) {
 		m.transcript.AppendRaw(thumb)
 	}
 	m.transcript.Append(barLabel("Assistant", colAssistFg) + "\n")
+}
+
+// applyStreamBatch applies a run of streamed events and refreshes the view
+// exactly once (P21.1), so a burst of token deltas costs one markdown
+// re-render instead of one per token. It returns a notification command if any
+// applied event set one. Both the single-event (eventMsg) and coalesced
+// (batchEventMsg) paths funnel through here so their bookkeeping is identical.
+func (m *model) applyStreamBatch(evs []api.Event) tea.Cmd {
+	// P18.3: snapshot follow-bottom from the pre-batch scroll position. The
+	// content these events append would itself push the viewport off the
+	// bottom, making AtBottom() read false if checked afterward — so the
+	// snapshot must happen before applyEvent grows the transcript. Without it,
+	// once followBottom flips false mid-stream it would stay false (this path
+	// returns before the second switch's catch-all re-derivation) until the
+	// next spinner tick or explicit user scroll, so streamed tokens wouldn't
+	// nudge the viewport back to the bottom after the user scrolls down.
+	m.followBottom = m.transcript.AtBottom()
+	for _, ev := range evs {
+		m.applyEvent(ev)
+	}
+	m.refresh()
+	if m.pendingNotify != nil {
+		cmd := m.notifyCmd(*m.pendingNotify)
+		m.pendingNotify = nil
+		return cmd
+	}
+	return nil
 }
 
 func (m *model) applyEvent(ev api.Event) {
