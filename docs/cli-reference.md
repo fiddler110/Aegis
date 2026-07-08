@@ -388,20 +388,24 @@ Run available security scanners against a path.
 aegis scan [path] [flags]
 ```
 
-Default path is the current directory. Runs every enabled scanner (**opengrep**, **trivy**, **gitleaks**, **kubescape**, **hadolint**, **osv-scanner**, **grype**, whichever are installed or container-fallback-able) and produces a normalized findings report with severity, location, rule ID, and remediation hint, persisted to `.aegis/security/scan.json`. **semgrep** and the language-targeted engines (**gosec**/**bandit**/**brakeman**/**njsscan**) are opt-in — a plain scan auto-detects the project's language (`go.mod`/`*.go`, `requirements.txt`/`*.py`, `Gemfile`/`*.rb`, `package.json`/`*.js`) and auto-enables the matching one for this run only, without touching config.
+Default path is the current directory. Runs every enabled scanner (**opengrep**, **trivy**, **gitleaks**, **kubescape**, **hadolint**, **osv-scanner**, **grype**, whichever are installed or container-fallback-able) and produces a normalized findings report with severity, location, rule ID, and remediation hint, persisted to `.aegis/security/scan.json`. **semgrep** and the language-targeted engines (**gosec**/**bandit**/**brakeman**/**njsscan**) are opt-in — a plain scan auto-detects the project's language (`go.mod`/`*.go`, `requirements.txt`/`*.py`, `Gemfile`/`*.rb`, `package.json`/`*.js`, and more) and auto-enables the matching one for this run only, without touching config, so a Rust or Java repo never triggers bandit. **hadolint**/**kubescape** are likewise skipped, with a reason, when the path has no Dockerfile/Kubernetes manifest.
+
+At a real terminal, a plain `aegis scan` (no `--scanner`, no `--yes`) previews that auto-detected plan and asks for confirmation before running anything; `--yes` (or a non-interactive stdin, e.g. CI) skips the prompt and runs immediately.
 
 ```bash
 aegis scan ./src
 aegis scan .
-aegis scan --scanner trufflehog          # run only trufflehog, force-enabled for this run
+aegis scan --yes                         # skip the confirmation prompt, run the auto-detected plan
+aegis scan --scanner trufflehog          # run only trufflehog, force-enabled for this run, no prompt
 aegis scan --scanner secrets ./src       # category alias: every scanner tagged "secrets"
 aegis scan --list                        # every valid --scanner name/category, with live availability
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--scanner`, `-s` | Run only this scanner or category (repeatable), force-enabled regardless of config — see `--list` for valid names |
+| `--scanner`, `-s` | Run only this scanner or category (repeatable), force-enabled regardless of config or relevance — see `--list` for valid names |
 | `--list` | List every scanner name and category alias usable with `--scanner`, with live availability, then exit |
+| `--yes`, `-y` | Skip the interactive scanner-plan confirmation and run the auto-detected set immediately (for scripts/CI) |
 
 Full scanner reference, category aliases, and details on the container/WSL fallback and dedup/ASVS/baseline pipeline: [docs/security.md](security.md).
 

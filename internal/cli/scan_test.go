@@ -68,6 +68,70 @@ func TestScanListShowsScannersAndCategories(t *testing.T) {
 	}
 }
 
+// TestApplyScanPlanChoiceAccept checks blank/"y"/"yes" all accept the
+// auto-detected plan unchanged — the picker's default (pressing Enter) case.
+func TestApplyScanPlanChoiceAccept(t *testing.T) {
+	all := security.DefaultScanners()
+	for _, line := range []string{"", "y", "Y", "yes", "  yes  \n"} {
+		selected, _, run, err := applyScanPlanChoice(line, all, security.Options{})
+		if err != nil {
+			t.Fatalf("line %q: unexpected error: %v", line, err)
+		}
+		if !run {
+			t.Errorf("line %q: run = false, want true", line)
+		}
+		if len(selected) != len(all) {
+			t.Errorf("line %q: selected = %d scanners, want all %d unchanged", line, len(selected), len(all))
+		}
+	}
+}
+
+// TestApplyScanPlanChoiceDecline checks "n"/"no" abort without error.
+func TestApplyScanPlanChoiceDecline(t *testing.T) {
+	all := security.DefaultScanners()
+	for _, line := range []string{"n", "N", "no\n"} {
+		_, _, run, err := applyScanPlanChoice(line, all, security.Options{})
+		if err != nil {
+			t.Fatalf("line %q: unexpected error: %v", line, err)
+		}
+		if run {
+			t.Errorf("line %q: run = true, want false (declined)", line)
+		}
+	}
+}
+
+// TestApplyScanPlanChoiceOverridesSelection checks typing a scanner/category
+// list at the prompt restricts the run the same way --scanner does.
+func TestApplyScanPlanChoiceOverridesSelection(t *testing.T) {
+	all := security.DefaultScanners()
+	selected, opts, run, err := applyScanPlanChoice("gitleaks, trufflehog\n", all, security.Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !run {
+		t.Fatal("run = false, want true")
+	}
+	got := map[string]bool{}
+	for _, sc := range selected {
+		got[sc.Name()] = true
+	}
+	if !got["gitleaks"] || !got["trufflehog"] || len(got) != 2 {
+		t.Errorf("selected = %v, want exactly gitleaks+trufflehog", got)
+	}
+	if !opts.Tools["trufflehog"].EnabledExplicit {
+		t.Error("typed selection should force-enable the same way --scanner does")
+	}
+}
+
+// TestApplyScanPlanChoiceUnknownSelectorErrors checks a typo at the prompt
+// surfaces the same error --scanner would.
+func TestApplyScanPlanChoiceUnknownSelectorErrors(t *testing.T) {
+	_, _, _, err := applyScanPlanChoice("not-a-real-scanner", security.DefaultScanners(), security.Options{})
+	if err == nil {
+		t.Fatal("expected an error for an unrecognized selector typed at the prompt")
+	}
+}
+
 // TestScanPersistsReportArtifact is the "all security scan results go under
 // .aegis/security/" regression for the CLI surface.
 func TestScanPersistsReportArtifact(t *testing.T) {

@@ -175,6 +175,31 @@ func TestAutoEnableLanguageScannersNoLanguageDetectedIsNoop(t *testing.T) {
 	}
 }
 
+// TestDetectLanguageSummaryDedicatedVsGeneric checks the "don't try to run
+// bandit on a Rust repo" case end to end: Rust is detected but has no
+// dedicated opt-in engine (Scanner == ""), while Go's is named — Rust source
+// is still covered by opengrep's generic multi-language SAST, just not by a
+// language-specific tool that doesn't exist for it.
+func TestDetectLanguageSummaryDedicatedVsGeneric(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"go.mod", "Cargo.toml"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary := DetectLanguageSummary(dir)
+	got := map[string]string{}
+	for _, s := range summary {
+		got[s.Language] = s.Scanner
+	}
+	if got["go"] != "gosec" {
+		t.Errorf("go scanner = %q, want gosec", got["go"])
+	}
+	if got["rust"] != "" {
+		t.Errorf("rust scanner = %q, want empty (no dedicated engine yet)", got["rust"])
+	}
+}
+
 func TestWriteReportArtifactRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	rep := Report{Findings: []Finding{{Tool: "trufflehog", RuleID: "AWS", Severity: SevHigh}}}

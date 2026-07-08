@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/security"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -38,6 +40,7 @@ func scanProgressPrinter(out io.Writer) func(security.ScanEvent) {
 func newScanCmd() *cobra.Command {
 	var scanners []string
 	var list bool
+	var yes bool
 	cmd := &cobra.Command{
 		Use:   "scan [path]",
 		Short: "Run available security scanners and print normalized findings",
@@ -46,11 +49,16 @@ func newScanCmd() *cobra.Command {
 			".aegis/security/scan.json under it. semgrep and the language-targeted engines (gosec/bandit/brakeman/" +
 			"njsscan) are opt-in — enable via security.tools.<name>.enabled: true or `aegis security config` — but " +
 			"a plain scan with no --scanner filter auto-detects the project's language (go.mod/*.go, " +
-			"requirements.txt/*.py, Gemfile/*.rb, package.json/*.js) and auto-enables the matching one for this " +
-			"run, without needing config, unless you've explicitly enabled/disabled it yourself. Pass --scanner " +
-			"one or more times to run only specific scanners or categories instead (e.g. --scanner trufflehog, " +
-			"--scanner secrets) — this force-enables them for the run regardless of config, the same way " +
-			"`aegis scan image` already runs its own distinct scanner set on request. Run `aegis scan --list` to " +
+			"requirements.txt/*.py, Gemfile/*.rb, package.json/*.js, and more for display only) and auto-enables " +
+			"the matching one for this run, without needing config, unless you've explicitly enabled/disabled it " +
+			"yourself; hadolint/kubescape are likewise skipped automatically when the workspace has no Dockerfile " +
+			"or Kubernetes manifest for them to analyze. At a real terminal, a plain `aegis scan` (no --scanner, " +
+			"no --yes) previews this auto-detected plan and asks for confirmation before running anything — pass " +
+			"--yes, or run non-interactively (CI/scripts), to skip the prompt and run the plan immediately. Pass " +
+			"--scanner one or more times to run only specific scanners or categories instead (e.g. --scanner " +
+			"trufflehog, --scanner secrets) — this force-enables them for the run regardless of config or " +
+			"relevance, the same way `aegis scan image` already runs its own distinct scanner set on request, and " +
+			"skips the confirmation prompt since the selection is already explicit. Run `aegis scan --list` to " +
 			"see every valid --scanner name and category alias, with live availability. Falls back to a " +
 			"configured container image (security.tools.<name>.image) for any enabled scanner not installed on " +
 			"PATH. Findings are deduped across overlapping tools and, where confident, tagged with an OWASP ASVS " +
@@ -78,6 +86,7 @@ func newScanCmd() *cobra.Command {
 			}
 			opts := security.OptionsFromConfig(cfg.Security)
 			selected := security.DefaultScanners()
+			out := cmd.OutOrStdout()
 			if len(scanners) > 0 {
 				selected, opts, err = security.SelectScanners(selected, opts, scanners)
 				if err != nil {
@@ -85,8 +94,18 @@ func newScanCmd() *cobra.Command {
 				}
 			} else {
 				opts = security.AutoEnableLanguageScanners(abs, opts)
+				if !yes && isatty.IsTerminal(os.Stdin.Fd()) {
+					var run bool
+					selected, opts, run, err = confirmScanPlan(cmd, abs, selected, opts)
+					if err != nil {
+						return err
+					}
+					if !run {
+						fmt.Fprintln(out, "Aborted — no scan run.")
+						return nil
+					}
+				}
 			}
-			out := cmd.OutOrStdout()
 			report := security.RunWithProgress(cmd.Context(), abs, selected, opts, scanProgressPrinter(out))
 			security.WriteReportArtifact(abs, "scan", report)
 			fmt.Fprintln(out, report.Format())
@@ -96,11 +115,84 @@ func newScanCmd() *cobra.Command {
 	}
 	cmd.Flags().StringArrayVarP(&scanners, "scanner", "s", nil, "run only this scanner or category (repeatable) — e.g. --scanner trufflehog --scanner secrets; see --list for valid names")
 	cmd.Flags().BoolVar(&list, "list", false, "list every scanner name and category alias usable with --scanner (with live availability), then exit")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the interactive scanner-plan confirmation and run the auto-detected set immediately (for scripts/CI)")
 	cmd.AddCommand(newScanImageCmd())
 	cmd.AddCommand(newScanSBOMCmd())
 	cmd.AddCommand(newScanDASTCmd())
 	cmd.AddCommand(newScanNetworkCmd())
 	return cmd
+}
+
+// formatScanPlan renders a PlanScanners result as a human-readable preview:
+// one line per scanner, "->" for what would run (with its method) and "--"
+// for what's skipped (with why) — the same shape scanProgressPrinter uses
+// for the live run, so the preview and the real output read consistently.
+func formatScanPlan(plan []security.ScanPlanEntry) string {
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	for _, e := range plan {
+		if e.Skipped {
+			fmt.Fprintf(tw, "  --\t%s\tskip: %s\n", e.Scanner.Name(), e.Reason)
+			continue
+		}
+		fmt.Fprintf(tw, "  ->\t%s\t%s\n", e.Scanner.Name(), e.Method)
+	}
+	tw.Flush()
+	return b.String()
+}
+
+// applyScanPlanChoice interprets one line of picker input against the
+// auto-detected plan: blank/"y"/"yes" accepts it as-is, "n"/"no" aborts, and
+// anything else is treated as a comma-separated scanner/category selection
+// (the same syntax --scanner accepts) that overrides the plan entirely. A
+// pure function of (line, all, opts) — separated from confirmScanPlan's I/O
+// so the parsing logic is unit-testable without a real terminal.
+func applyScanPlanChoice(line string, all []security.Scanner, opts security.Options) (selected []security.Scanner, newOpts security.Options, run bool, err error) {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "y", "yes":
+		return all, opts, true, nil
+	case "n", "no":
+		return nil, opts, false, nil
+	default:
+		tokens := strings.Split(line, ",")
+		for i := range tokens {
+			tokens[i] = strings.TrimSpace(tokens[i])
+		}
+		sel, selOpts, err := security.SelectScanners(all, opts, tokens)
+		if err != nil {
+			return nil, opts, false, err
+		}
+		return sel, selOpts, true, nil
+	}
+}
+
+// confirmScanPlan previews, at a real terminal, exactly which scanners the
+// auto-detected set (language detection + hadolint/kubescape relevance
+// gating) would run right now, and lets the operator accept it, decline, or
+// type a specific scanner/category selection instead of always silently
+// running the full set the moment `aegis scan` is invoked. Skipped entirely
+// (by the --yes flag or a non-interactive stdin) so scripts/CI keep today's
+// immediate-run behavior.
+func confirmScanPlan(cmd *cobra.Command, dir string, all []security.Scanner, opts security.Options) (selected []security.Scanner, newOpts security.Options, run bool, err error) {
+	out := cmd.OutOrStdout()
+	if langs := security.DetectLanguageSummary(dir); len(langs) > 0 {
+		parts := make([]string, len(langs))
+		for i, l := range langs {
+			if l.Scanner != "" {
+				parts[i] = fmt.Sprintf("%s (%s)", l.Language, l.Scanner)
+			} else {
+				parts[i] = l.Language
+			}
+		}
+		fmt.Fprintf(out, "Detected: %s\n\n", strings.Join(parts, ", "))
+	}
+	plan := security.PlanScanners(cmd.Context(), dir, all, opts)
+	fmt.Fprintln(out, "Planned scan:")
+	fmt.Fprint(out, formatScanPlan(plan))
+	fmt.Fprint(out, "\nRun this plan? [Y/n, or a comma-separated scanner/category list, e.g. \"secrets\" or \"gitleaks,trufflehog\"] ")
+	reader := bufio.NewReader(cmd.InOrStdin())
+	line, _ := reader.ReadString('\n')
+	return applyScanPlanChoice(line, all, opts)
 }
 
 func newScanNetworkCmd() *cobra.Command {
