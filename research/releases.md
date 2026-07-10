@@ -9,7 +9,49 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-08 — **`/threat-model` framework picker** (follow-up polish to P13.6:
+**Last updated:** 2026-07-10 — **Tier 1 security/robustness items shipped**, all three in parallel
+via isolated git-worktree sub-agents against the same-day roadmap tiering pass (see
+[roadmap.md](roadmap.md#priority-order)):
+**P21.5 — daemon resource ceilings.** `sessionSems` capped runs to one-per-session but had no
+global cap on total concurrent runs and no bound on SSE buffer growth — a live gap now that
+`aegis mcp-serve` exposes sessions to external MCP clients, not just a theoretical one. Added a
+non-blocking global run semaphore (`Server.runSem`, `internal/server/messages.go`) that rejects a
+request beyond `server.max_concurrent_runs` with an immediate 429 instead of queuing it; an
+optional per-run wall-clock ceiling (`server.max_run_duration_sec`) via `context.WithTimeout`
+around the run context, reusing the engine's existing clean-cancellation path; and a new
+`sseWriter` (`internal/server/sse.go`) that decouples the engine's event-producing goroutine from
+how fast the HTTP client actually reads, dropping the oldest queued event on overflow
+(`server.sse_buffer_size`, default 256) rather than growing memory or blocking the producer. All
+three configurable via matching `AEGIS_SERVER_*` env vars, default to unlimited/256 so existing
+deployments are unaffected. **P15.12 — harden the `/ui` token-injection mechanism.** `GET /ui`
+previously injected the daemon's real, long-lived auth token straight into HTML shell source — any
+local process reaching the loopback port with no `Origin` header (so the origin guard didn't apply)
+got that standing secret in cleartext, replayable for the daemon's whole lifetime. `handleWebUI`
+now mints a random single-use "page token" (32 bytes, 60s TTL — `mintPageToken`,
+`internal/server/auth.go`) and injects that instead; a new `POST /auth/exchange` endpoint (exempt
+from the auth check for the obvious reason, still origin-guarded) redeems it exactly once — deleted
+from the server-side map on first read regardless of outcome — and returns the real token, which
+the frontend now fetches on load (`internal/server/webui/frontend/src/api.ts`) before making any
+other API call, using it exactly as before thereafter. **P21.6 — MCP tool output trust boundary.**
+MCP tool output flowed back into model context completely unfiltered despite MCP tools already
+being capability-gated — a compromised MCP server was an unguarded prompt-injection vector. Added
+an always-on provenance marker (`internal/mcp/trust.go`, `wrapUntrusted`) wrapping every
+`tools/call`/`resources/read`/`prompts/get` result in an `<mcp_untrusted_output>` frame naming the
+source server and instructing the model to treat the content as untrusted data, not instructions —
+no configuration needed. Layered on top: an opt-in per-server heuristic scan
+(`scan_output` on `MCPServerConfig`, mirroring the existing per-server `capability` field) that
+flags prompt-injection-shaped output (ignore-prior-instructions phrasing, role-override attempts,
+fake system-prompt tags, secret-exfiltration patterns) with a `[SECURITY WARNING]` line inside the
+same frame — flagged, never silently dropped, matching the engine's existing non-fatal
+`notice`-event convention. New `docs/mcp-trust-boundary.md` documents the boundary end to end.
+Tests: `internal/server/limits_test.go`, `internal/config/config_test.go`,
+`internal/server/webui_test.go`, `internal/mcp/trust_test.go`. `go build ./...`, `go vet ./...`
+clean; `go test ./...` green except three pre-existing/environmental failures on this box
+(`TestBuildImageBlocksFromPath`, and two `scan_test.go` 30s-timeout tests) confirmed unrelated —
+each agent verified via `git stash` that they failed identically before its change. Full detail in
+[roadmap.md](roadmap.md#open-work--p21-fresh-eyes-code-review--2026-07-07) (P21.5/P21.6) and
+[roadmap.md](roadmap.md#open-work--p15-web-ui-parity-with-the-tui) (P15.12).
+Earlier, 2026-07-08 — **`/threat-model` framework picker** (follow-up polish to P13.6:
 a recognized leading framework name skips the clarifying question, otherwise a picker dialog opens
 listing all six with descriptions; see the P13.6 section below) shipped after **P23**
 (local-model context-window truth: Ollama detection, proactive-compaction notices, incremental
