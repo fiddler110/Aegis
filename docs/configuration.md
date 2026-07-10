@@ -46,6 +46,9 @@ Any config key can be overridden with an environment variable by converting the 
 | `AEGIS_COST_BUDGET_USD` | `cost.budget_usd` | `5.0` |
 | `AEGIS_LOG_LEVEL` | `log_level` | `debug` |
 | `AEGIS_SERVER_ADDR` | `server.addr` | `127.0.0.1:4127` |
+| `AEGIS_SERVER_MAX_CONCURRENT_RUNS` | `server.max_concurrent_runs` | `10` |
+| `AEGIS_SERVER_MAX_RUN_DURATION_SEC` | `server.max_run_duration_sec` | `1800` |
+| `AEGIS_SERVER_SSE_BUFFER_SIZE` | `server.sse_buffer_size` | `256` |
 
 API keys use their native names (not the `AEGIS_` prefix):
 
@@ -207,6 +210,29 @@ cost:
 server:
   # The daemon's listen address. Loopback only — non-loopback origins are rejected.
   addr: "127.0.0.1:4127"
+
+  # 0 = unlimited (default). Caps how many message-turn runs may be actively
+  # executing across ALL sessions at once. A request past the cap is rejected
+  # immediately (429) rather than queued. The per-session serialization the
+  # daemon already does (at most one active run per session) doesn't bound
+  # total concurrency across sessions — set this when exposing the daemon to
+  # a lower-trust caller that can create many sessions, e.g. `aegis mcp-serve`.
+  max_concurrent_runs: 0
+
+  # 0 = unlimited (default). Aborts a single run once it has been active this
+  # many seconds, the same clean way an interrupted request is handled.
+  # cost.max_tokens_per_run/budget_usd are the primary spend guardrails; this
+  # is a coarser wall-clock backstop for a run that never trips those (e.g. a
+  # local model stuck in a near-zero-cost tool-call loop).
+  max_run_duration_sec: 0
+
+  # Per-connection cap on queued-but-not-yet-flushed SSE events. If a
+  # consumer (TUI, web UI, or an mcp-serve client) reads slower than the
+  # engine produces events and the queue fills, the oldest queued event is
+  # dropped to make room for the newest rather than growing memory without
+  # bound. The run itself keeps executing and persisting to the session store
+  # regardless of how far behind the SSE stream falls.
+  sse_buffer_size: 256
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -729,6 +755,19 @@ default_persona: developer
 ```
 
 Or from the CLI: `aegis persona use developer` (add `--global` to set the user-wide default instead).
+
+### Bound daemon resources when exposing sessions to another harness (P21.5)
+
+`aegis mcp-serve` lets another MCP-speaking harness create sessions and drive
+runs through this daemon. Set a global concurrency ceiling and a wall-clock
+run timeout so a misbehaving or hostile caller can't fan out unbounded
+sessions/runs and exhaust the host:
+
+```yaml
+server:
+  max_concurrent_runs: 10    # refuse (429) runs past this many active at once
+  max_run_duration_sec: 1800 # abort any single run past 30 minutes
+```
 
 ### Enable a built-in skill for this project
 

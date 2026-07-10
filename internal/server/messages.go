@@ -57,6 +57,21 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { <-sem }()
 
+	// Global concurrency ceiling across every session (P21.5): unlike the
+	// per-session semaphore above, this bounds total daemon-wide active runs
+	// so a caller that fans out across many sessions (e.g. a hostile or
+	// misbehaving aegis mcp-serve client) can't exhaust host resources.
+	// Non-blocking: a full daemon rejects immediately rather than queuing.
+	if s.runSem != nil {
+		select {
+		case s.runSem <- struct{}{}:
+			defer func() { <-s.runSem }()
+		default:
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("daemon at max concurrent runs (%d); try again shortly", cap(s.runSem)))
+			return
+		}
+	}
+
 	sess, err := s.store.Get(r.Context(), id)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -91,13 +106,24 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// All writes to w (events + heartbeat) go through writeMu so the two
 	// goroutines never interleave a frame.
 	var writeMu sync.Mutex
-	send := func(ev api.Event) {
-		data, _ := json.Marshal(ev)
-		writeMu.Lock()
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, data)
-		flusher.Flush()
-		writeMu.Unlock()
+
+	// Events are queued and flushed by a dedicated writer goroutine rather
+	// than written synchronously from the engine's own goroutine (P21.5): a
+	// slow or stalled SSE consumer (TUI, web UI, or an mcp-serve client)
+	// falling behind drops its oldest queued event instead of growing memory
+	// without bound or blocking the run — see sseWriter.
+	sseBufSize := s.cfg.Server.SSEBufferSize
+	if sseBufSize <= 0 {
+		sseBufSize = config.DefaultSSEBufferSize
 	}
+	var sseDropWarnOnce sync.Once
+	sw := newSSEWriter(w, flusher, &writeMu, sseBufSize, func() {
+		sseDropWarnOnce.Do(func() {
+			s.logger.Warn("sse buffer full for run; dropping oldest queued events", "session", id, "buffer_size", sseBufSize)
+		})
+	})
+	defer sw.Close()
+	send := sw.send
 
 	// Heartbeat: emit an SSE comment periodically so idle long-running tool
 	// calls don't get dropped by intermediaries. The goroutine is joined before
@@ -235,6 +261,18 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	baseRunCtx := r.Context()
 	if sess.Background {
 		baseRunCtx = context.Background()
+	}
+	// Optional wall-clock ceiling (P21.5): off by default (0). A coarse
+	// last-resort backstop for a run that never trips the token/dollar
+	// budgets — e.g. a local model stuck in a near-zero-cost tool-call loop,
+	// or a hostile caller trying to hold a run (and the session/global
+	// concurrency slot it occupies) open forever. The engine already treats
+	// context cancellation as an interruption (engine.ErrInterrupted), so a
+	// timeout aborts the run the same clean way a client-initiated cancel does.
+	if d := s.cfg.Server.MaxRunDurationSec; d > 0 {
+		var cancel context.CancelFunc
+		baseRunCtx, cancel = context.WithTimeout(baseRunCtx, time.Duration(d)*time.Second)
+		defer cancel()
 	}
 	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)
 	runCtx = swarm.WithCostTracker(runCtx, tracker)

@@ -75,6 +75,40 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.MCPServer.DefaultMode != "plan" {
 		t.Errorf("mcp_server.default_mode = %q, want %q", cfg.MCPServer.DefaultMode, "plan")
 	}
+	// P21.5: unlimited/off by default so existing single-user deployments see
+	// no behavior change; sse_buffer_size falls back to a sane built-in cap.
+	if cfg.Server.MaxConcurrentRuns != 0 {
+		t.Errorf("server.max_concurrent_runs = %d, want 0 (unlimited)", cfg.Server.MaxConcurrentRuns)
+	}
+	if cfg.Server.MaxRunDurationSec != 0 {
+		t.Errorf("server.max_run_duration_sec = %d, want 0 (unlimited)", cfg.Server.MaxRunDurationSec)
+	}
+	if cfg.Server.SSEBufferSize != DefaultSSEBufferSize {
+		t.Errorf("server.sse_buffer_size = %d, want %d", cfg.Server.SSEBufferSize, DefaultSSEBufferSize)
+	}
+}
+
+// TestEnvOverrideServerLimits is the P21.5 counterpart to TestEnvOverride:
+// the daemon resource-ceiling keys must be settable via AEGIS_SERVER_* env
+// vars the same way server.addr already is.
+func TestEnvOverrideServerLimits(t *testing.T) {
+	t.Setenv("AEGIS_SERVER_MAX_CONCURRENT_RUNS", "4")
+	t.Setenv("AEGIS_SERVER_MAX_RUN_DURATION_SEC", "600")
+	t.Setenv("AEGIS_SERVER_SSE_BUFFER_SIZE", "64")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.MaxConcurrentRuns != 4 {
+		t.Errorf("max_concurrent_runs = %d, want 4", cfg.Server.MaxConcurrentRuns)
+	}
+	if cfg.Server.MaxRunDurationSec != 600 {
+		t.Errorf("max_run_duration_sec = %d, want 600", cfg.Server.MaxRunDurationSec)
+	}
+	if cfg.Server.SSEBufferSize != 64 {
+		t.Errorf("sse_buffer_size = %d, want 64", cfg.Server.SSEBufferSize)
+	}
 }
 
 func TestEnvOverride(t *testing.T) {
