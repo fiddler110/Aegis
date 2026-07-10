@@ -28,10 +28,15 @@ func mustSubFS(f embed.FS, dir string) fs.FS {
 	return sub
 }
 
-// handleWebUI serves the built single-page app's HTML shell. The daemon's
-// auth token is injected into the page so its same-origin fetch/SSE calls
-// can authenticate; this is safe because the daemon binds to loopback only
-// and the token already lives on local disk for any local client.
+// handleWebUI serves the built single-page app's HTML shell. Rather than
+// injecting the real daemon auth token — a standing secret that would then
+// sit in cleartext in page source for any local process to read and replay
+// for the life of the daemon (P15.12) — a short-lived, single-use page token
+// is minted per load (mintPageToken, auth.go) and injected instead. The
+// frontend trades it for the real token via POST /auth/exchange on startup,
+// after which it authenticates exactly as before; this is safe because the
+// daemon binds to loopback only and the real token already lives on local
+// disk for any local client.
 //
 // Current scope covers the core chat loop only — session list, streaming
 // transcript, inline tool-call approvals — not persona/mode switching,
@@ -49,7 +54,12 @@ func (s *Server) handleWebUI(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "web UI not available", http.StatusInternalServerError)
 		return
 	}
-	page := strings.Replace(string(raw), "__AEGIS_TOKEN__", s.authToken, 1)
+	pageToken, err := s.mintPageToken()
+	if err != nil {
+		http.Error(w, "web UI not available", http.StatusInternalServerError)
+		return
+	}
+	page := strings.Replace(string(raw), "__AEGIS_TOKEN__", pageToken, 1)
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")

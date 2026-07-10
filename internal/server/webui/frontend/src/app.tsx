@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { api, consumeSSE } from "./api";
+import { api, consumeSSE, exchangeToken } from "./api";
 import type { Event, Message, SessionMeta } from "./types";
 import { SessionList } from "./components/SessionList";
 import { Transcript, type RenderBlock, type TranscriptItem } from "./components/Transcript";
@@ -69,6 +69,7 @@ export function App() {
   const [streaming, setStreaming] = useState(false);
   const [phaseLabel, setPhaseLabel] = useState("Thinking");
   const [elapsed, setElapsed] = useState(0);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const controllerRef = useRef<AbortController | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -279,8 +280,21 @@ export function App() {
   };
 
   useEffect(() => {
-    loadSessions();
+    exchangeToken()
+      .then(loadSessions)
+      .catch((e) => setAuthError((e as Error).message || "authentication failed"));
   }, []);
+
+  if (authError) {
+    return (
+      <section id="main">
+        <div id="topbar">
+          <span class="title">Aegis</span>
+        </div>
+        <p style={{ padding: "1rem" }}>Could not authenticate: {authError}. Reload the page to try again.</p>
+      </section>
+    );
+  }
 
   return (
     <>
