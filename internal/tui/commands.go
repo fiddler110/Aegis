@@ -212,6 +212,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdRollback,
 		},
 		{
+			name: "fork", argHint: "[n]", needsArgs: true,
+			shortDesc:    "Branch into a new session, optionally from checkpoint n",
+			detailedHelp: "/fork [n]\n  No args: fork the conversation as-is into a brand-new session at its current end — a clean sandbox to try something risky without touching this session.\n  /fork <n>: fork truncated to checkpoint n (newest first, same numbering as /rewind) — the state just before that turn's user message, ready for a fresh/edited message picking up from there.\n  Unlike /rewind, the source session is never modified; the TUI switches into the new forked session on success.\n  See also: pressing Esc twice with an empty input box (and not streaming) opens an interactive picker that forks at a chosen prior message and pre-fills it for editing.",
+			handler:      (*SlashDispatcher).cmdFork,
+		},
+		{
 			name: "detach", argHint: "[on|off]", needsArgs: true,
 			shortDesc:    "Run this session in the background (turn continues after TUI closes)",
 			detailedHelp: "/detach [on|off]\n  Toggle background (detached) mode for this session.\n  on (default): turns continue running after the TUI closes. Use `aegis bg events <id>` to check progress.\n  off: revert to normal foreground execution.",

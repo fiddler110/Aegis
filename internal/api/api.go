@@ -242,6 +242,24 @@ type RewindResponse struct {
 	MessagesKept  int    `json:"messages_kept"`
 }
 
+// ForkRequest creates a new session that starts as a copy of an existing
+// session's conversation, optionally truncated to a checkpoint (P22.3). An
+// empty CheckpointID forks at the current end of the conversation — a clean
+// branch point to try something risky without touching the original session.
+// A non-empty CheckpointID truncates the new session's messages to that
+// checkpoint's Seq, the same cut point /rewind's "conversation" scope uses —
+// but unlike rewind, the source session's own messages are never touched.
+type ForkRequest struct {
+	CheckpointID string `json:"checkpoint_id,omitempty"`
+}
+
+// ForkResponse reports the newly created forked session.
+type ForkResponse struct {
+	SessionID    string `json:"session_id"`
+	Title        string `json:"title"`
+	MessagesKept int    `json:"messages_kept"`
+}
+
 // CompactResponse reports the result of a manually triggered compaction.
 type CompactResponse struct {
 	Compacted      bool `json:"compacted"`

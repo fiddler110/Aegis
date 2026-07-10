@@ -406,3 +406,154 @@ func TestRewindValidation(t *testing.T) {
 		t.Error("expected error for invalid scope")
 	}
 }
+
+// TestSessionFork is the P22.3 counterpart to TestCheckpointRewind: forking
+// must create a genuinely separate session truncated to the checkpoint, while
+// leaving the source session's own messages completely untouched (the whole
+// point of a fork over a rewind).
+func TestSessionFork(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "out.txt")
+	if err := os.WriteFile(target, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cl, cleanup := newCheckpointTestServer(t, root, &scriptedAdapter{path: "out.txt", content: "v2"})
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Title: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1: writes the file (produces a checkpoint at Seq 0).
+	ch, err := cl.PostMessage(ctx, meta.ID, "overwrite the file")
+	if err != nil {
+		t.Fatalf("PostMessage 1: %v", err)
+	}
+	for range ch {
+	}
+
+	// Turn 2: a second, plain turn (produces a second checkpoint).
+	ch2, err := cl.PostMessage(ctx, meta.ID, "second message")
+	if err != nil {
+		t.Fatalf("PostMessage 2: %v", err)
+	}
+	for range ch2 {
+	}
+
+	origBefore, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(origBefore.Messages) == 0 {
+		t.Fatal("expected messages on original session")
+	}
+
+	cps, err := cl.ListCheckpoints(ctx, meta.ID)
+	if err != nil {
+		t.Fatalf("ListCheckpoints: %v", err)
+	}
+	if len(cps) != 2 {
+		t.Fatalf("got %d checkpoints, want 2", len(cps))
+	}
+	// cps is newest-first; the oldest (last element) is Seq 0, the very start.
+	oldest := cps[len(cps)-1]
+	if oldest.Seq != 0 {
+		t.Fatalf("oldest checkpoint Seq = %d, want 0", oldest.Seq)
+	}
+
+	// Fork at the oldest checkpoint: the new session should be truncated to
+	// that checkpoint's Seq, just like /rewind's "conversation" scope would
+	// truncate the *same* session — except here it lands in a new one.
+	forkResp, err := cl.Fork(ctx, meta.ID, oldest.ID)
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if forkResp.SessionID == meta.ID {
+		t.Fatal("fork must create a separate session id")
+	}
+	if forkResp.MessagesKept != oldest.Seq {
+		t.Errorf("MessagesKept = %d, want %d", forkResp.MessagesKept, oldest.Seq)
+	}
+	if forkResp.Title != "Fork of original" {
+		t.Errorf("Title = %q, want %q", forkResp.Title, "Fork of original")
+	}
+
+	forkedSess, err := cl.GetSession(ctx, forkResp.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession(forked): %v", err)
+	}
+	if len(forkedSess.Messages) != oldest.Seq {
+		t.Errorf("forked session has %d messages, want %d", len(forkedSess.Messages), oldest.Seq)
+	}
+	if forkedSess.Mode != origBefore.Mode {
+		t.Errorf("forked mode = %q, want %q", forkedSess.Mode, origBefore.Mode)
+	}
+
+	// The source session must be completely untouched by the fork.
+	origAfter, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(origAfter.Messages) != len(origBefore.Messages) {
+		t.Errorf("original session message count changed: %d -> %d", len(origBefore.Messages), len(origAfter.Messages))
+	}
+
+	// Fork with no checkpoint id: carries the full current conversation as-is.
+	forkAllResp, err := cl.Fork(ctx, meta.ID, "")
+	if err != nil {
+		t.Fatalf("Fork (no checkpoint): %v", err)
+	}
+	if forkAllResp.MessagesKept != len(origBefore.Messages) {
+		t.Errorf("no-checkpoint fork MessagesKept = %d, want %d", forkAllResp.MessagesKept, len(origBefore.Messages))
+	}
+	forkAllSess, err := cl.GetSession(ctx, forkAllResp.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession(forkAll): %v", err)
+	}
+	if len(forkAllSess.Messages) != len(origBefore.Messages) {
+		t.Errorf("no-checkpoint fork has %d messages, want %d", len(forkAllSess.Messages), len(origBefore.Messages))
+	}
+}
+
+// TestSessionForkValidation mirrors TestRewindValidation's error-path
+// coverage for the new /fork endpoint.
+func TestSessionForkValidation(t *testing.T) {
+	root := t.TempDir()
+	cl, cleanup := newCheckpointTestServer(t, root, &scriptedAdapter{path: "x.txt", content: "x"})
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown checkpoint → error.
+	if _, err := cl.Fork(ctx, meta.ID, "no-such-checkpoint"); err == nil {
+		t.Error("expected error for unknown checkpoint")
+	}
+
+	// Unknown session id → error.
+	if _, err := cl.Fork(ctx, "no-such-session", ""); err == nil {
+		t.Error("expected error for unknown session")
+	}
+
+	// A checkpoint belonging to a different session → error.
+	other, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, _ := cl.PostMessage(ctx, other.ID, "do something")
+	for range ch {
+	}
+	otherCps, _ := cl.ListCheckpoints(ctx, other.ID)
+	if len(otherCps) == 0 {
+		t.Fatal("expected a checkpoint on the other session")
+	}
+	if _, err := cl.Fork(ctx, meta.ID, otherCps[0].ID); err == nil {
+		t.Error("expected error forking with another session's checkpoint")
+	}
+}
