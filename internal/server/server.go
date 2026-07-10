@@ -129,6 +129,14 @@ type Server struct {
 	// buffered channel of size 1; acquiring it blocks until the prior run finishes.
 	sessionSems sync.Map // string → chan struct{}
 
+	// runSem bounds total concurrent active runs across every session
+	// (P21.5). nil when server.max_concurrent_runs is 0 (unlimited).
+	// Acquired non-blocking in handlePostMessage: a full semaphore rejects
+	// the request immediately (429) rather than queuing it, since queuing
+	// would just relocate the unbounded-fan-out problem from goroutines to a
+	// backlog — see ServerConfig.MaxConcurrentRuns.
+	runSem chan struct{}
+
 	// sessionTools maps session ID → a *tool.Registry clone of s.tools (P9).
 	// tool_search exposes deferred tools by mutating a registry's exposed map;
 	// without a per-session clone, that mutation was permanent and
@@ -678,6 +686,9 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 // used by tests to inject a mock adapter and an in-memory store.
 func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, adapter provider.Adapter, tools *tool.Registry) *Server {
 	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry()}
+	if cfg.Server.MaxConcurrentRuns > 0 {
+		s.runSem = make(chan struct{}, cfg.Server.MaxConcurrentRuns)
+	}
 	s.agentLimiter = swarm.NewAdaptiveLimiter(builtin.MaxParallelAgents)
 	s.http = &http.Server{
 		Addr:              cfg.Server.Addr,

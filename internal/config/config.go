@@ -279,7 +279,40 @@ type ProviderFallbackConfig struct {
 // ServerConfig configures the local daemon.
 type ServerConfig struct {
 	Addr string `koanf:"addr"` // host:port the daemon listens on
+
+	// MaxConcurrentRuns caps how many message-turn runs (POST
+	// /sessions/{id}/messages) may be actively executing across all sessions
+	// at once (P21.5). A request that would exceed the cap is rejected
+	// immediately with 429 rather than queued indefinitely — the per-session
+	// sessionSems gate only prevents two runs racing on the *same* session,
+	// so with no global cap a caller that fans out many sessions (e.g. a
+	// hostile or misbehaving `aegis mcp-serve` client) could still exhaust
+	// host resources. 0 = unlimited (default).
+	MaxConcurrentRuns int `koanf:"max_concurrent_runs"`
+
+	// MaxRunDurationSec aborts a single run once it has been active this many
+	// seconds, the same way an interrupted/cancelled request is handled. 0 =
+	// unlimited (default) — cost.max_tokens_per_run/budget_usd are the
+	// primary spend guardrails; this is a coarser wall-clock backstop for a
+	// run that never trips those (e.g. a local model stuck making tool calls
+	// with near-zero token cost, or a hostile caller trying to hold a run,
+	// and the session/global concurrency slot it occupies, open forever).
+	MaxRunDurationSec int `koanf:"max_run_duration_sec"`
+
+	// SSEBufferSize bounds how many not-yet-flushed SSE events are queued for
+	// a single run's HTTP connection before the daemon drops the oldest
+	// queued event to make room for the newest (P21.5). Protects daemon
+	// memory from a slow or stalled SSE consumer (TUI, web UI, or an
+	// mcp-serve client) that reads events slower than the engine produces
+	// them; the run itself keeps executing and persisting to the session
+	// store regardless of how far behind the client falls. 0 falls back to
+	// the built-in default (256).
+	SSEBufferSize int `koanf:"sse_buffer_size"`
 }
+
+// DefaultSSEBufferSize is the fallback per-connection SSE event queue depth
+// used when ServerConfig.SSEBufferSize is left at 0 (P21.5).
+const DefaultSSEBufferSize = 256
 
 // PermissionConfig sets the default agent permission posture.
 type PermissionConfig struct {
@@ -454,13 +487,16 @@ const (
 
 func defaults() map[string]any {
 	return map[string]any{
-		"data_dir":             defaultDataDir(),
-		"log_level":            "info",
-		"provider.default":     "anthropic",
-		"provider.model":       "claude-opus-4-8",
-		"provider.max_tokens":  32768,
-		"provider.max_retries": 4,
-		"server.addr":          "127.0.0.1:4127",
+		"data_dir":                    defaultDataDir(),
+		"log_level":                   "info",
+		"provider.default":            "anthropic",
+		"provider.model":              "claude-opus-4-8",
+		"provider.max_tokens":         32768,
+		"provider.max_retries":        4,
+		"server.addr":                 "127.0.0.1:4127",
+		"server.max_concurrent_runs":  0,
+		"server.max_run_duration_sec": 0,
+		"server.sse_buffer_size":      DefaultSSEBufferSize,
 		// "build" is the intentional default: the agent can read and write
 		// files freely, but shell/execute calls still prompt for approval
 		// (or are denied non-interactively). Use "plan" for read-only
