@@ -1,1 +1,1 @@
-{"root":["./src/api.ts","./src/app.tsx","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/approval.tsx","./src/components/composer.tsx","./src/components/sessionlist.tsx","./src/components/transcript.tsx"],"version":"5.9.3"}
+{"root":["./src/api.ts","./src/app.tsx","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/approval.tsx","./src/components/composer.tsx","./src/components/sessionlist.tsx","./src/components/transcript.tsx"],"version":"6.0.3"}

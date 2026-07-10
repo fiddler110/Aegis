@@ -1,14 +1,34 @@
 import type { Event } from "./types";
 
-export function authToken(): string {
-  return document.getElementById("root")?.dataset.token ?? "";
+// authToken holds the real daemon auth token, set once by exchangeToken().
+// It never comes from the page itself: the HTML shell only carries a
+// short-lived, single-use page token (data-page-token), traded in for this
+// one via POST /auth/exchange so a leaked page source can't be replayed as
+// a standing credential (P15.12).
+let authToken = "";
+
+function pageToken(): string {
+  return document.getElementById("root")?.dataset.pageToken ?? "";
+}
+
+// exchangeToken redeems the page token for the real auth token. Must
+// resolve before any other api() call — the app's mount effect awaits it
+// before doing anything else.
+export async function exchangeToken(): Promise<void> {
+  const r = await fetch("/auth/exchange", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + pageToken() },
+  });
+  if (!r.ok) throw new Error((await r.text()) || String(r.status));
+  const body = (await r.json()) as { token: string };
+  authToken = body.token;
 }
 
 export async function api(path: string, opts: RequestInit = {}): Promise<Response> {
   const r = await fetch(path, {
     ...opts,
     headers: {
-      Authorization: "Bearer " + authToken(),
+      Authorization: "Bearer " + authToken,
       ...(opts.headers as Record<string, string> | undefined),
     },
   });
