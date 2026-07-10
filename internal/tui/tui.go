@@ -125,8 +125,12 @@ type model struct {
 	// they scroll up, so streaming output never yanks them back down mid-read.
 	followBottom bool
 
-	// escPending is true after a first ESC press during streaming; a second ESC
-	// cancels the run. Any non-ESC key clears this state.
+	// escPending is true after a first ESC press arms a double-tap action; a
+	// second ESC confirms it. Any non-ESC key clears this state. Two distinct
+	// actions share the flag, gated by m.streaming: while streaming, a second
+	// ESC cancels the run; while not streaming (and only once the input box
+	// is already empty, so a plain "clear the input" ESC doesn't arm it), a
+	// second ESC opens the P22.3 backtrack picker instead.
 	escPending bool
 
 	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
@@ -335,6 +339,27 @@ type sessionSwitchedMsg struct {
 	err  error
 }
 
+// backtrackTargetsMsg carries the P22.3 Esc-Esc picker's candidate list: one
+// entry per checkpoint on the current session, paired with that turn's
+// verbatim original user message (see fetchBacktrackTargets).
+type backtrackTargetsMsg struct {
+	items []backtrackItem
+	err   error
+}
+
+// forkedMsg reports the result of forking the current session (P22.3),
+// whether triggered by /fork or by picking an entry from the Esc-Esc
+// backtrack picker. prefill, when non-empty, is set on the new session's
+// input box so the user can edit the original message before resending —
+// only the backtrack-picker path populates it; /fork n leaves it empty and
+// just switches sessions.
+type forkedMsg struct {
+	sess    *session.Session
+	title   string
+	prefill string
+	err     error
+}
+
 // statusInfoMsg carries the daemon /status payload; fetched at startup (and
 // after runs while the value can still improve) for the effective context
 // window driving the usage bar (P23.1).
@@ -531,6 +556,83 @@ func (m model) switchSessionCmd(id string) tea.Cmd {
 		defer cancel()
 		sess, err := cl.GetSession(ctx, id)
 		return sessionSwitchedMsg{sess: sess, err: err}
+	}
+}
+
+// userMessageText extracts the concatenated text blocks of msgs[idx] if it is
+// a user message, or "" otherwise (out-of-range idx, a non-user role, or an
+// image/tool-result-only message with no text). Used to recover a checkpoint
+// turn's verbatim original prompt: Checkpoint.Label is the same text but
+// truncated to 120 runes, so it is only a reliable stand-in for short
+// messages — this reads the real message content instead.
+func userMessageText(msgs []provider.Message, idx int) string {
+	if idx < 0 || idx >= len(msgs) {
+		return ""
+	}
+	msg := msgs[idx]
+	if msg.Role != provider.RoleUser {
+		return ""
+	}
+	var sb strings.Builder
+	for _, b := range msg.Content {
+		if tb, ok := b.(provider.TextBlock); ok {
+			sb.WriteString(tb.Text)
+		}
+	}
+	return sb.String()
+}
+
+// fetchBacktrackTargets loads the P22.3 Esc-Esc picker's candidate list: the
+// current session's checkpoints (newest first, one per turn) paired with each
+// turn's verbatim user message recovered via userMessageText, falling back to
+// the checkpoint's own truncated label if that message can't be found (e.g.
+// a pre-P22.3 checkpoint layout edge case).
+func (m model) fetchBacktrackTargets() tea.Cmd {
+	cl, id := m.cfg.Client, m.cfg.SessionID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cps, err := cl.ListCheckpoints(ctx, id)
+		if err != nil {
+			return backtrackTargetsMsg{err: err}
+		}
+		if len(cps) == 0 {
+			return backtrackTargetsMsg{}
+		}
+		sess, err := cl.GetSession(ctx, id)
+		if err != nil {
+			return backtrackTargetsMsg{err: err}
+		}
+		items := make([]backtrackItem, 0, len(cps))
+		for _, cp := range cps {
+			text := userMessageText(sess.Messages, cp.Seq)
+			if text == "" {
+				text = cp.Label
+			}
+			items = append(items, backtrackItem{cpID: cp.ID, text: text, createdAt: cp.CreatedAt, fileCount: cp.FileCount})
+		}
+		return backtrackTargetsMsg{items: items}
+	}
+}
+
+// forkAndSwitchCmd forks the current session at checkpointID (empty = current
+// end of conversation) and loads the resulting session, same shape as
+// switchSessionCmd but starting from a Fork call instead of a plain fetch.
+// prefill is threaded through to forkedMsg unexamined — see its doc comment.
+func (m model) forkAndSwitchCmd(checkpointID, prefill string) tea.Cmd {
+	cl, id := m.cfg.Client, m.cfg.SessionID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		resp, err := cl.Fork(ctx, id, checkpointID)
+		if err != nil {
+			return forkedMsg{err: err}
+		}
+		sess, err := cl.GetSession(ctx, resp.SessionID)
+		if err != nil {
+			return forkedMsg{err: err}
+		}
+		return forkedMsg{sess: sess, title: resp.Title, prefill: prefill}
 	}
 }
 
@@ -886,6 +988,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.histIdx = -1
 				m.draftInput = ""
 				return m, nil
+			case dialogBacktrackPicker:
+				item := sel.item.(backtrackItem)
+				// P22.3: fork at that turn's checkpoint and pre-fill its
+				// original text so the user edits before resending, rather
+				// than the plain "load onto the input line" the history
+				// picker above does — the picked entry has already been sent
+				// once in the (now-untouched) source session.
+				return m, m.forkAndSwitchCmd(item.cpID, item.text)
 			}
 			return m, nil
 		}
@@ -1090,7 +1200,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refresh()
 				return m, nil
 			}
-			// Not streaming: clear the input box.
+			// Not streaming: an empty input box has nothing to clear, so a
+			// genuine second Esc press there opens the P22.3 backtrack
+			// picker instead of the no-op this used to be — same double-tap
+			// detection as the streaming branch above, including its
+			// documented same-frame alt+esc quirk.
+			if strings.TrimSpace(m.ta.Value()) == "" {
+				if m.escPending || msg.String() == "alt+esc" {
+					m.escPending = false
+					m.refresh()
+					return m, m.fetchBacktrackTargets()
+				}
+				m.escPending = true
+				m.refresh()
+				return m, nil
+			}
 			m.ta.Reset()
 			m.escPending = false
 			return m, nil
@@ -1376,6 +1500,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refresh()
 		return m, nil
 
+	case backtrackTargetsMsg:
+		if msg.err != nil {
+			t, cmd := newToastCmd("backtrack: "+msg.err.Error(), toastError)
+			m.activeToast = t
+			return m, cmd
+		}
+		if len(msg.items) == 0 {
+			t, cmd := newToastCmd("no checkpoints yet — send a message first", toastInfo)
+			m.activeToast = t
+			return m, cmd
+		}
+		picker := newBacktrackPicker(m.width, m.height, msg.items)
+		m.dialog = &picker
+		return m, nil
+
+	case forkedMsg:
+		if msg.err != nil {
+			t, cmd := newToastCmd("fork: "+msg.err.Error(), toastError)
+			m.activeToast = t
+			return m, cmd
+		}
+		m.applySwitchedSession(msg.sess)
+		if msg.prefill != "" {
+			// P22.3: hand the original message back for editing rather than
+			// resending it verbatim — the whole point of backtracking.
+			m.ta.SetValue(msg.prefill)
+		}
+		t, cmd := newToastCmd(fmt.Sprintf("Forked into %q — edit and send to continue.", msg.title), toastInfo)
+		m.activeToast = t
+		m.refresh()
+		return m, cmd
+
 	case termOutputMsg:
 		m.term.handleOutput(msg.text)
 		m.refresh()
@@ -1469,6 +1625,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, c)
 			}
 			cmds = append(cmds, m.switchSessionCmd(m.cfg.SessionID))
+			return m, tea.Batch(cmds...)
+		}
+		if msg.SwitchToSession != "" {
+			// P22.3: /fork created a genuinely different session (not just a
+			// truncated version of this one) — load it the same way Ctrl+Y's
+			// session picker does, rather than ReloadSession's "refetch this
+			// same id" path above.
+			var cmds []tea.Cmd
+			if msg.Output != "" {
+				level := toastInfo
+				if msg.IsError {
+					level = toastError
+				}
+				t, c := newToastCmd(msg.Output, level)
+				m.activeToast = t
+				cmds = append(cmds, c)
+			}
+			cmds = append(cmds, m.switchSessionCmd(msg.SwitchToSession))
 			return m, tea.Batch(cmds...)
 		}
 		if msg.Output == "\x00clear" {
@@ -1632,9 +1806,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyViewportHeight()
 			}
 			m.syncCompletion()
-			// Any non-ESC key while escPending clears the interrupt arm state
-			// (the ESC case already returns early and manages escPending itself).
-			if m.streaming && m.escPending {
+			// Any non-ESC key while escPending clears the interrupt/backtrack
+			// arm state (the ESC case already returns early and manages
+			// escPending itself) — covers both the streaming double-tap-to-
+			// cancel arm and the not-streaming double-tap-to-backtrack arm
+			// (P22.3).
+			if m.escPending {
 				m.escPending = false
 				m.refresh()
 			}
@@ -2809,6 +2986,10 @@ func (m model) renderInputArea() string {
 	var statusLeft string
 	if m.streaming && m.escPending {
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to stop")
+	} else if !m.streaming && m.escPending {
+		// P22.3: armed by a first ESC press on an already-empty input box;
+		// a second press opens the backtrack picker.
+		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to backtrack")
 	} else if m.streaming {
 		secs := 0
 		if !m.streamStart.IsZero() {

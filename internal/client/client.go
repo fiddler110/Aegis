@@ -299,6 +299,19 @@ func (c *Client) Rewind(ctx context.Context, sessionID, checkpointID, scope stri
 	return &out, nil
 }
 
+// Fork creates a new session as a copy of sessionID's conversation, optionally
+// truncated to a checkpoint (P22.3) — an empty checkpointID forks at the
+// current end of the conversation. Unlike Rewind, the source session is left
+// untouched; the returned response describes the new session.
+func (c *Client) Fork(ctx context.Context, sessionID, checkpointID string) (*api.ForkResponse, error) {
+	var out api.ForkResponse
+	req := api.ForkRequest{CheckpointID: checkpointID}
+	if err := c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/fork", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Rollback is like Rewind but also runs `git reset --hard <sha>` to restore
 // git HEAD to the pre-turn state (P3.4). Scope defaults to "both".
 func (c *Client) Rollback(ctx context.Context, sessionID, checkpointID, scope string) (*api.RewindResponse, error) {
