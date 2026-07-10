@@ -498,6 +498,12 @@ lsp:
 # the always-allowed "network" capability. Use `tool_capabilities` to override
 # per remote tool name when a server exposes a known mix (e.g. a read-only
 # `search` tool alongside a `write_file` tool).
+#
+# `scan_output` (default false) opts a server's tool/resource/prompt output
+# into a heuristic prompt-injection scan before it reaches the model — for
+# MCP sources you haven't fully vetted. Every server's output is always
+# wrapped with a provenance marker regardless of this flag. See
+# docs/mcp-trust-boundary.md.
 mcp:
   - name: filesystem
     command: npx
@@ -519,6 +525,7 @@ mcp:
     command: ""
     auth: "$MY_MCP_TOKEN"   # $VAR references expanded from environment / .aegis/.env
     # capability omitted → defaults to "execute", so calls hit the Ask gate in build mode
+    scan_output: true        # not fully vetted — flag suspicious tool output in-context
 
 
 # ── MCP server mode ────────────────────────────────────────────────────────────

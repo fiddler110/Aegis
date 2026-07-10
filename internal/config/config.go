@@ -235,6 +235,12 @@ type MCPServerConfig struct {
 	// ToolCapabilities overrides Capability per remote tool name for servers
 	// that expose a known mix of tools with different risk levels.
 	ToolCapabilities map[string]string `koanf:"tool_capabilities"`
+	// ScanOutput opts this server's output into a heuristic prompt-injection
+	// scan before it reaches the model. Off by default (P21.6) — a
+	// best-effort check with false positives, meant for MCP sources you
+	// haven't explicitly trusted. The output's provenance marker noting it
+	// came from an external MCP server is always applied regardless.
+	ScanOutput bool `koanf:"scan_output"`
 }
 
 // ProviderConfig selects and configures the model provider.
