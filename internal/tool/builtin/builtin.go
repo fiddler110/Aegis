@@ -88,6 +88,10 @@ type SearchOptions struct {
 	Provider string
 	APIKey   string
 	BaseURL  string
+	// ScanOutput opts web_fetch/web_search output into the heuristic
+	// prompt-injection scan (FIND-04). The untrusted-content provenance
+	// marker is always applied regardless of this setting.
+	ScanOutput bool
 }
 
 // Register adds all built-in tools to the registry.
@@ -121,8 +125,8 @@ func Register(reg *tool.Registry, opts Options) error {
 		&gitCommitTool{root: root},
 		&gitPRTool{root: root},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
-		&fetchTool{userAgent: opts.HTTPUserAgent},
-		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL},
+		&fetchTool{userAgent: opts.HTTPUserAgent, scanOutput: opts.Search.ScanOutput},
+		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL, scanOutput: opts.Search.ScanOutput},
 		&modelsTool{},
 		&securityScanTool{root: root, opts: opts.SecurityScan},
 		NewSkillTool(root, opts.DataDir, opts.BuiltinSkills),

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/trust"
 	"golang.org/x/net/html"
 )
 
@@ -37,7 +38,13 @@ var ssrfClient = &http.Client{
 
 // --- fetch ---
 
-type fetchTool struct{ userAgent string }
+// scanOutput opts fetched/searched content into the heuristic
+// prompt-injection scan (FIND-04, mirrors mcp_server's per-server
+// scan_output). The provenance marker itself is always applied regardless.
+type fetchTool struct {
+	userAgent  string
+	scanOutput bool
+}
 
 func (t *fetchTool) Name() string                { return "web_fetch" }
 func (t *fetchTool) Capability() tool.Capability { return tool.CapNetwork }
@@ -73,7 +80,9 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if args.MaxChars > 0 {
 		limit = args.MaxChars
 	}
-	return tool.Result{Content: clip(text, limit)}, nil
+	text = clip(text, limit)
+	wrapped := trust.Wrap("web_untrusted_output", [][2]string{{"url", u.String()}}, "a URL fetched from the web", text, t.scanOutput)
+	return tool.Result{Content: wrapped}, nil
 }
 
 func (t *fetchTool) get(ctx context.Context, rawURL string) ([]byte, string, error) {
@@ -166,10 +175,11 @@ func mustParseCIDR(s string) *net.IPNet {
 // DuckDuckGo (no API key). Configured providers (brave, tavily, searxng) use
 // their APIs and fall back to DuckDuckGo on error (P5.3).
 type searchTool struct {
-	userAgent string
-	provider  string
-	apiKey    string
-	baseURL   string
+	userAgent  string
+	provider   string
+	apiKey     string
+	baseURL    string
+	scanOutput bool
 }
 
 func (t *searchTool) Name() string                { return "web_search" }
@@ -224,7 +234,8 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 			fmt.Fprintf(&b, "   %s\n", r.snippet)
 		}
 	}
-	return tool.Result{Content: b.String()}, nil
+	wrapped := trust.Wrap("web_untrusted_output", [][2]string{{"query", args.Query}}, "a web search", b.String(), t.scanOutput)
+	return tool.Result{Content: wrapped}, nil
 }
 
 // duckDuckGo runs the zero-config HTML scrape (primary + lite fallback).

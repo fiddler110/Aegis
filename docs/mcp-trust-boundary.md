@@ -9,6 +9,12 @@ output and what mitigations exist, because the trust boundary is easy to
 overlook: the tool call itself is capability-gated, but the *result* text
 flows straight into the model's context.
 
+The same mechanism (`internal/trust`) also wraps `web_fetch`/`web_search`
+output (FIND-04): a fetched page or search result is just as much
+externally-controlled content as an MCP server's response, so it gets the
+same provenance marker and opt-in scan — see the `search.scan_output`
+example in [§2](#2-opt-in-heuristic-output-scan) below.
+
 ## The threat
 
 Every tool result — including an MCP tool's — becomes part of the
@@ -47,12 +53,17 @@ requests, or role changes it contains as commands to follow.
 ```
 
 This costs nothing to enable — there is no config flag, it applies to every
-MCP server unconditionally (`internal/mcp/trust.go`, `wrapUntrusted`) — and
-gives the model an explicit signal that the enclosed text is data returned
-by a third party, not part of its instructions, the same way a well-behaved
-prompt would separate "system," "user," and "retrieved document" content.
-It is a framing hint, not a filter: it does not inspect or alter the
-underlying content.
+MCP server unconditionally (`internal/trust.Wrap`, called from
+`internal/mcp/trust.go`'s `wrapUntrusted`) — and gives the model an explicit
+signal that the enclosed text is data returned by a third party, not part of
+its instructions, the same way a well-behaved prompt would separate
+"system," "user," and "retrieved document" content. It is a framing hint,
+not a filter: it does not inspect or alter the underlying content.
+
+`web_fetch`/`web_search` results go through the identical `internal/trust.Wrap`
+call (`internal/tool/builtin/web.go`), just with a `<web_untrusted_output
+url="...">` / `<web_untrusted_output query="...">` tag instead of
+`<mcp_untrusted_output ...>` — same framing text, same always-on behavior.
 
 ### 2. Opt-in heuristic output scan
 
@@ -69,8 +80,9 @@ mcp:
 
 `scan_output` (per server, `internal/config.MCPServerConfig.ScanOutput` /
 `internal/mcp.ServerConfig.ScanOutput`) is **off by default**. It is a
-best-effort pattern match (`internal/mcp/trust.go`, `scanForInjection`)
-against phrasing commonly seen in prompt-injection payloads — instructions
+best-effort pattern match (`internal/trust.ScanForInjection`, shared with
+`web_fetch`/`web_search` — see below) against phrasing commonly seen in
+prompt-injection payloads — instructions
 to ignore/disregard/forget prior instructions, role-override attempts
 ("you are now…", "act as if…"), requests to hide actions from the user, and
 attempts to exfiltrate secrets (API keys, tokens, passwords) to an external
@@ -81,6 +93,16 @@ why it defaults to off and is scoped per server: enable it for MCP sources
 you don't fully trust yet, where a false positive is an acceptable cost;
 leave it off for servers you've already vetted, where the extra noise isn't
 worth it.
+
+`web_fetch`/`web_search` have the equivalent toggle, scoped to the whole web
+tool set rather than per-server since there's only one fetcher/searcher:
+
+```yaml
+search:
+  scan_output: true   # off by default, mirrors mcp[].scan_output
+```
+
+(`internal/config.SearchConfig.ScanOutput` / `internal/tool/builtin.SearchOptions.ScanOutput`.)
 
 When the scan flags content, Aegis does **not** drop or rewrite the tool
 result — silently discarding tool output breaks legitimate use of the tool

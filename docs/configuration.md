@@ -208,8 +208,16 @@ cost:
 
 # ── Daemon ────────────────────────────────────────────────────────────────────
 server:
-  # The daemon's listen address. Loopback only — non-loopback origins are rejected.
+  # The daemon's listen address. Defaults to loopback. Separately, browser
+  # requests carrying a non-loopback Origin header are always rejected
+  # regardless of this setting (DNS-rebinding protection).
   addr: "127.0.0.1:4127"
+
+  # Must be set to bind `addr` to a non-loopback address (e.g. "0.0.0.0:4127"
+  # to reach the daemon from another machine). The API is protected only by a
+  # bearer token with no rate limiting, so the daemon refuses to start on a
+  # non-loopback address until this is explicitly acknowledged (FIND-08).
+  allow_remote: false
 
   # 0 = unlimited (default). Caps how many message-turn runs may be actively
   # executing across ALL sessions at once. A request past the cap is rejected
@@ -327,6 +335,13 @@ search:
 
   # Required when provider=searxng. Base URL of your self-hosted SearxNG instance.
   base_url: ""
+
+  # Opts web_fetch/web_search output into the heuristic prompt-injection
+  # scan, mirroring the per-server mcp[].scan_output toggle (FIND-04). Off by
+  # default. The untrusted-content provenance marker is always applied to
+  # fetched/searched content regardless of this setting — see
+  # docs/mcp-trust-boundary.md.
+  scan_output: false
 
 
 # ── Background session notifications ──────────────────────────────────────────

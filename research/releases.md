@@ -9,9 +9,26 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **Tier 1 security/robustness items shipped**, all three in parallel
-via isolated git-worktree sub-agents against the same-day roadmap tiering pass (see
+**Last updated:** 2026-07-10 — **Tier 2 high-visibility wins shipped**, both in parallel via
+isolated git-worktree sub-agents, same day as the Tier 1 pass (see
 [roadmap.md](roadmap.md#priority-order)):
+**P21.3 — streaming caret.** A blinking write-head caret (`█`) at the end of live-streaming
+assistant text, so a long reply reads as "alive" rather than "redrawing." Rendered in
+`refresh()` (`internal/tui/tui.go`): the caret is appended directly after the last rendered
+character of the live tail — trimming and restoring glamour's trailing newline so it lands at
+the true write-head rather than on its own blank line — and blinks on the pre-existing
+`animStep` tick that already drives the "thinking" shimmer, so no new ticker was introduced.
+Only shown while streaming with non-empty live text; never baked into the persisted transcript.
+**P22.3 — Esc-Esc backtrack + `/fork`.** A new `POST /sessions/{id}/fork` endpoint
+(`internal/server/sessions.go`) creates a new session copying the source session's
+system/mode/persona and messages — optionally truncated to a checkpoint's cut point, the same
+`Seq` boundary `/rewind`'s conversation scope uses — without mutating the source. `/fork [n]`
+mirrors `/rewind`'s checkpoint numbering (no arg forks the current end of the conversation as a
+sandbox branch point); pressing Esc twice while idle with an empty input box (mirroring the
+existing streaming double-tap-to-cancel detection) opens a picker
+(`internal/tui/backtrackpicker.go`) of prior user turns, forks at the selected turn, switches
+into the new session (reusing the Ctrl+Y session-switch path), and pre-fills the input box with
+the original message text for editing before resending.
 **P21.5 — daemon resource ceilings.** `sessionSems` capped runs to one-per-session but had no
 global cap on total concurrent runs and no bound on SSE buffer growth — a live gap now that
 `aegis mcp-serve` exposes sessions to external MCP clients, not just a theoretical one. Added a
