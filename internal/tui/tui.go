@@ -1863,7 +1863,20 @@ func (m *model) refresh() {
 	// restyle pop.
 	if live := m.liveText.String(); live != "" {
 		m.live.setText(live)
-		tail.WriteString(m.live.render(w, m.mdRender))
+		rendered := m.live.render(w, m.mdRender)
+		if m.streaming {
+			// P21.3: a blinking caret at the true write-head, so streaming
+			// reads as "alive" rather than "redrawing". mdRender/glamour
+			// normalize their output to end in exactly one trailing "\n";
+			// strip it, land the caret glyph directly after the last
+			// rendered character, then restore exactly one trailing "\n" so
+			// SetTail's own newline-enforcement doesn't double up or orphan
+			// the caret on its own blank line. Never baked into the
+			// persisted transcript — flushLiveText re-renders from raw
+			// liveText, not from this tail string.
+			rendered = strings.TrimRight(rendered, "\n") + m.caretGlyph() + "\n"
+		}
+		tail.WriteString(rendered)
 	} else if m.streaming {
 		secs := 0
 		if !m.streamStart.IsZero() {
@@ -1889,6 +1902,29 @@ func (m *model) refresh() {
 	if m.followBottom {
 		m.transcript.GotoBottom()
 	}
+}
+
+// caretBlinkPeriod is the number of animStep ticks (driven by the existing
+// spinner tick — see spinner.TickMsg handling — one tick per ~100ms) in one
+// full blink cycle of the streaming caret: half on, half off. No dedicated
+// ticker is introduced; this reuses the tick that already drives the
+// "thinking" shimmer.
+const caretBlinkPeriod = 8
+
+// caretChar is the block character used for the P21.3 streaming write-head
+// caret. Deliberately a full block (█) rather than the left-half block (▌)
+// already used elsewhere in this TUI as the crush-style message-bar accent
+// (see "▌ You" / "▌ Assistant" headers) — reusing that glyph here would make
+// the caret visually and programmatically indistinguishable from those bars.
+const caretChar = "█"
+
+// caretGlyph returns the styled caret glyph for the current animation frame,
+// or "" on the "off" half of the blink cycle.
+func (m *model) caretGlyph() string {
+	if m.animStep%caretBlinkPeriod < caretBlinkPeriod/2 {
+		return m.th.caret.Render(caretChar)
+	}
+	return ""
 }
 
 // thinkEntry pairs a flushed thinking transcript block with its two renderings
