@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // --- authentication & security middleware ---
@@ -42,9 +43,12 @@ func generateAndWriteToken(path string) (string, error) {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /healthz is public; the web UI page itself is served without a token
-		// (a browser navigation can't send one) and injects the token for its
-		// own API calls, which remain authenticated.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") {
+		// (a browser navigation can't send one). /ui no longer injects the real
+		// daemon token — it mints a short-lived, single-use page token instead
+		// (see mintPageToken) and /auth/exchange trades that page token for the
+		// real one the frontend then uses for every other call, so neither of
+		// those two endpoints can require the real token up front either.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") || r.URL.Path == "/auth/exchange" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -82,6 +86,77 @@ func (s *Server) originMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// pageTokenTTL is how long a page token minted by GET /ui stays redeemable
+// at POST /auth/exchange before it expires unused. A browser load exchanges
+// it within milliseconds of parsing the page, so this only needs to survive
+// normal page-load latency, not idle time.
+const pageTokenTTL = 60 * time.Second
+
+// mintPageToken generates a random, single-use token scoped to one /ui page
+// load and records its expiry in s.pageTokens (keyed by token, guarded by
+// pageTokenMu). It stands in for the real daemon auth token in the HTML
+// response so that token never appears in a page a local process could read
+// off disk/DOM and replay indefinitely (P15.12); the frontend immediately
+// trades it for the real token via exchangePageToken/POST /auth/exchange.
+func (s *Server) mintPageToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(buf[:])
+	s.pageTokenMu.Lock()
+	if s.pageTokens == nil {
+		s.pageTokens = make(map[string]time.Time)
+	}
+	s.pageTokens[token] = time.Now().Add(pageTokenTTL)
+	s.pageTokenMu.Unlock()
+	return token, nil
+}
+
+// exchangePageToken redeems a page token minted by mintPageToken: it must
+// exist and not be expired. Either way the token is removed on this call so
+// it can never be redeemed twice (single-use), and expired entries are
+// swept opportunistically here rather than by a background goroutine, since
+// exchanges are the only place page tokens are ever read.
+func (s *Server) exchangePageToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	s.pageTokenMu.Lock()
+	defer s.pageTokenMu.Unlock()
+	exp, ok := s.pageTokens[token]
+	delete(s.pageTokens, token)
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	for t, e := range s.pageTokens {
+		if now.After(e) {
+			delete(s.pageTokens, t)
+		}
+	}
+	return now.Before(exp)
+}
+
+// handleAuthExchange trades a single-use page token (minted by GET /ui, sent
+// here as a Bearer token since the frontend has no other credential yet) for
+// the real daemon auth token used on every subsequent request. The page
+// token is invalidated whether or not the exchange succeeds, so it can be
+// redeemed at most once.
+func (s *Server) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(auth, prefix) {
+		writeError(w, http.StatusUnauthorized, "missing page token")
+		return
+	}
+	if !s.exchangePageToken(auth[len(prefix):]) {
+		writeError(w, http.StatusUnauthorized, "invalid or expired page token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": s.authToken})
 }
 
 func isLoopbackOrigin(origin string) bool {

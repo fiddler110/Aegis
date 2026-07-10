@@ -87,6 +87,14 @@ type Server struct {
 	http        *http.Server
 	authToken   string // shared secret for API authentication
 
+	// pageTokens holds short-lived, single-use tokens minted per GET /ui load
+	// (P15.12): the page carries one of these instead of authToken, and the
+	// frontend immediately trades it for the real token via POST
+	// /auth/exchange (see mintPageToken/exchangePageToken in auth.go), so a
+	// leaked page source can't be replayed as a standing credential.
+	pageTokenMu sync.Mutex
+	pageTokens  map[string]time.Time
+
 	// sandboxFallback and sandboxFallbackReason record whether the configured
 	// sandbox backend failed to initialize and the daemon fell back to
 	// unsandboxed local execution (P7.4). Surfaced via /healthz so clients can
@@ -754,6 +762,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /ui", s.handleWebUI)
 	mux.HandleFunc("GET /ui/", s.handleWebUI)
 	mux.HandleFunc("GET /ui/assets/", s.handleWebUIAssets)
+	mux.HandleFunc("POST /auth/exchange", s.handleAuthExchange)
 	return s.authMiddleware(s.originMiddleware(mux))
 }
 
