@@ -59,6 +59,8 @@ type theme struct {
 	thinking    lipgloss.Style // "✻ thinking" header
 	thinkingDim lipgloss.Style // extended-thinking body
 
+	caret lipgloss.Style // P21.3: blinking write-head caret at the live streaming tail
+
 	// chroma is the token-type → colour mapping (P16.2) built from the
 	// active scheme's palette so highlighted code, diffs, and read_file
 	// output stay coherent with the rest of the theme. Rebuilt whenever
@@ -110,6 +112,8 @@ func newTheme() theme {
 
 		thinking:    lipgloss.NewStyle().Foreground(colTextMuted).Bold(true),
 		thinkingDim: lipgloss.NewStyle().Foreground(colTextMuted).Italic(true),
+
+		caret: lipgloss.NewStyle().Foreground(colAccent).Bold(true),
 
 		chroma: buildChromaStyle(),
 	}
