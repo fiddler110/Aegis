@@ -488,6 +488,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			Auth:             m.Auth,
 			Capability:       m.Capability,
 			ToolCapabilities: m.ToolCapabilities,
+			ScanOutput:       m.ScanOutput,
 		})
 	}
 	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)

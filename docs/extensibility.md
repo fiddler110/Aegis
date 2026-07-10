@@ -77,6 +77,11 @@ Hooks complement the `permission.rules` text-rule system. Rules are evaluated fi
 
 [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers expose additional tools to the agent. From the agent's perspective, MCP tools appear alongside built-in tools with no distinction.
 
+MCP servers are third-party code and their tool output is treated as
+untrusted external input — see [MCP Trust Boundary](mcp-trust-boundary.md)
+for how Aegis marks that output's provenance and the opt-in `scan_output`
+heuristic scan, in addition to the capability gating described below.
+
 Two transport modes are supported:
 - **stdio** — Aegis launches the server as a child process and communicates over stdin/stdout (JSON-RPC)
 - **HTTP/SSE** — Aegis connects to a running HTTP server

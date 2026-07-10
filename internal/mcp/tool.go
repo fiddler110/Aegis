@@ -16,6 +16,7 @@ type mcpTool struct {
 	info        ToolInfo
 	exposedName string
 	capability  tool.Capability
+	scanOutput  bool
 }
 
 func (t *mcpTool) Name() string                { return t.exposedName }
@@ -32,7 +33,7 @@ func (t *mcpTool) Execute(ctx context.Context, input json.RawMessage) (tool.Resu
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("mcp call failed: %v", err), IsError: true}, nil
 	}
-	return tool.Result{Content: text, IsError: isErr}, nil
+	return tool.Result{Content: wrapUntrusted(t.client.Server(), t.info.Name, text, t.scanOutput), IsError: isErr}, nil
 }
 
 // mcpResourceListTool lists available resources from an MCP server.
@@ -67,6 +68,7 @@ type mcpResourceReadTool struct {
 	client      *Client
 	exposedName string
 	capability  tool.Capability
+	scanOutput  bool
 }
 
 func (t *mcpResourceReadTool) Name() string { return t.exposedName }
@@ -92,7 +94,7 @@ func (t *mcpResourceReadTool) Execute(ctx context.Context, input json.RawMessage
 	if mimeType != "" && mimeType != "text/plain" && mimeType != "text/plain; charset=utf-8" {
 		content = fmt.Sprintf("[%s]\n%s", mimeType, text)
 	}
-	return tool.Result{Content: content}, nil
+	return tool.Result{Content: wrapUntrusted(t.client.Server(), t.exposedName, content, t.scanOutput)}, nil
 }
 
 // mcpPromptListTool lists available prompt templates from an MCP server.
@@ -127,6 +129,7 @@ type mcpPromptGetTool struct {
 	client      *Client
 	exposedName string
 	capability  tool.Capability
+	scanOutput  bool
 }
 
 func (t *mcpPromptGetTool) Name() string { return t.exposedName }
@@ -157,7 +160,7 @@ func (t *mcpPromptGetTool) Execute(ctx context.Context, input json.RawMessage) (
 	for _, m := range messages {
 		fmt.Fprintf(&sb, "[%s]: %s\n", m.Role, m.Content.Text)
 	}
-	return tool.Result{Content: strings.TrimSpace(sb.String())}, nil
+	return tool.Result{Content: wrapUntrusted(t.client.Server(), t.exposedName, strings.TrimSpace(sb.String()), t.scanOutput)}, nil
 }
 
 // ServerConfig configures one MCP server.
@@ -178,6 +181,13 @@ type ServerConfig struct {
 	// by the server's tools/list, before the mcp__<server>__ namespace
 	// prefix is applied) for servers that expose a known mix of tools.
 	ToolCapabilities map[string]string `koanf:"tool_capabilities"`
+	// ScanOutput opts this server's tool/resource/prompt output into a
+	// heuristic prompt-injection scan before it reaches the model (P21.6).
+	// Off by default — it's a best-effort heuristic with false positives, so
+	// it only runs for servers the operator has flagged as not fully
+	// trusted. The provenance marker (see wrapUntrusted) is always applied
+	// regardless of this flag.
+	ScanOutput bool `koanf:"scan_output"`
 }
 
 // parseCapability maps a config capability string to a tool.Capability,
@@ -243,7 +253,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		for _, info := range tools {
 			name := fmt.Sprintf("mcp__%s__%s", sc.Name, info.Name)
 			cap := resolveCapability(sc, info.Name)
-			if err := reg.Register(&mcpTool{client: client, info: info, exposedName: name, capability: cap}); err != nil {
+			if err := reg.Register(&mcpTool{client: client, info: info, exposedName: name, capability: cap, scanOutput: sc.ScanOutput}); err != nil {
 				logger.Warn("mcp tool register failed", "tool", name, "err", err)
 			}
 		}
@@ -259,7 +269,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		if _, err := client.ListResources(ctx); err == nil {
 			prefix := fmt.Sprintf("mcp__%s", sc.Name)
 			_ = reg.Register(&mcpResourceListTool{client: client, exposedName: prefix + "__list_resources", capability: metaCap})
-			_ = reg.Register(&mcpResourceReadTool{client: client, exposedName: prefix + "__read_resource", capability: metaCap})
+			_ = reg.Register(&mcpResourceReadTool{client: client, exposedName: prefix + "__read_resource", capability: metaCap, scanOutput: sc.ScanOutput})
 			logger.Info("mcp resources registered", "server", sc.Name)
 		}
 
@@ -267,7 +277,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		if _, err := client.ListPrompts(ctx); err == nil {
 			prefix := fmt.Sprintf("mcp__%s", sc.Name)
 			_ = reg.Register(&mcpPromptListTool{client: client, exposedName: prefix + "__list_prompts", capability: metaCap})
-			_ = reg.Register(&mcpPromptGetTool{client: client, exposedName: prefix + "__get_prompt", capability: metaCap})
+			_ = reg.Register(&mcpPromptGetTool{client: client, exposedName: prefix + "__get_prompt", capability: metaCap, scanOutput: sc.ScanOutput})
 			logger.Info("mcp prompts registered", "server", sc.Name)
 		}
 
@@ -284,7 +294,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 				}
 				for _, info := range newTools {
 					name := fmt.Sprintf("mcp__%s__%s", serverName, info.Name)
-					reg.Upsert(&mcpTool{client: cl, info: info, exposedName: name, capability: resolveCapability(serverCfg, info.Name)})
+					reg.Upsert(&mcpTool{client: cl, info: info, exposedName: name, capability: resolveCapability(serverCfg, info.Name), scanOutput: serverCfg.ScanOutput})
 				}
 				logger.Info("mcp tools refreshed", "server", serverName, "tools", len(newTools))
 			}
