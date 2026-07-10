@@ -367,7 +367,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
 	todoList := builtin.NewTodoList()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -767,10 +767,29 @@ func (s *Server) routes() http.Handler {
 	return s.authMiddleware(s.originMiddleware(mux))
 }
 
+// validateListenAddr enforces FIND-08: server.addr defaults to loopback, but
+// nothing previously stopped an operator from pointing it at a non-loopback
+// address (e.g. "0.0.0.0:4127") and silently exposing the bearer-token-
+// protected, unrate-limited API to the network. Fail closed unless the
+// operator has explicitly acknowledged the tradeoff via server.allow_remote.
+func (s *Server) validateListenAddr() error {
+	if isLoopbackAddr(s.cfg.Server.Addr) {
+		return nil
+	}
+	if !s.cfg.Server.AllowRemote {
+		return fmt.Errorf("server: refusing to bind non-loopback address %q: set server.allow_remote: true to acknowledge that this exposes the daemon's API to the network (see docs/configuration.md)", s.cfg.Server.Addr)
+	}
+	s.logger.Warn("daemon is binding to a non-loopback address; its bearer-token-protected API will be reachable from the network", "addr", s.cfg.Server.Addr)
+	return nil
+}
+
 // ListenAndServe runs the daemon until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.authToken == "" {
 		return fmt.Errorf("server: refusing to start: auth token was not generated")
+	}
+	if err := s.validateListenAddr(); err != nil {
+		return err
 	}
 	defer s.store.Close()
 	defer func() {

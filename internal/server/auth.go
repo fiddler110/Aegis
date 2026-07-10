@@ -174,3 +174,22 @@ func isLoopbackOrigin(origin string) bool {
 	ip := net.ParseIP(h)
 	return (ip != nil && ip.IsLoopback()) || h == "localhost"
 }
+
+// isLoopbackAddr reports whether a listen address (e.g. "127.0.0.1:4127",
+// "localhost:4127", or ":4127") resolves to loopback only. An empty host
+// (":4127") binds every interface and is therefore not loopback (FIND-08).
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}

@@ -1,0 +1,84 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'background': '#ffffff', 'primaryColor': '#ffffff', 'lineColor': '#666666' }}}%%
+flowchart LR
+    classDef process fill:#6baed6,stroke:#2171b5,stroke-width:2px,color:#000000
+    classDef external fill:#fdae61,stroke:#d94701,stroke-width:2px,color:#000000
+    classDef datastore fill:#74c476,stroke:#238b45,stroke-width:2px,color:#000000
+
+    Operator["Operator"]:::external
+    ExternalHarness["External Harness<br/>(editor / MCP host)"]:::external
+    AnthropicAPI["AnthropicAPI"]:::external
+    OpenAICompatibleEndpoint["OpenAICompatibleEndpoint"]:::external
+    MCPExternalServers["MCPExternalServers"]:::external
+    GitHubAPI["GitHubAPI"]:::external
+    Internet["Internet"]:::external
+    ContainerRuntime["ContainerRuntime"]:::external
+
+    subgraph ClientProc["Client Process"]
+        TerminalUI(("TerminalUI")):::process
+        Client(("Client")):::process
+    end
+
+    subgraph DaemonProc["Daemon Process"]
+        Server(("Server")):::process
+        WebUI(("WebUI")):::process
+        Engine(("Engine")):::process
+        ToolRegistry(("ToolRegistry")):::process
+        PermissionGate(("PermissionGate")):::process
+        PersonaLoader(("PersonaLoader")):::process
+        SkillRegistry(("SkillRegistry")):::process
+        OutputGuard(("OutputGuard")):::process
+        SecurityScanner(("SecurityScanner")):::process
+        CronScheduler(("CronScheduler")):::process
+        SwarmCoordinator(("SwarmCoordinator")):::process
+        MCPClient(("MCPClient")):::process
+        MCPServer(("MCPServer")):::process
+        ACPAgent(("ACPAgent")):::process
+        ExecutionSandbox(("ExecutionSandbox")):::process
+        ConfigLoader(("ConfigLoader")):::process
+        AnthropicAdapter(("AnthropicAdapter")):::process
+        OpenAIAdapter(("OpenAIAdapter")):::process
+        SessionStore[("SessionStore")]:::datastore
+        CheckpointStore[("CheckpointStore")]:::datastore
+        MemoryStore[("MemoryStore")]:::datastore
+        Mailbox[("Mailbox")]:::datastore
+    end
+
+    Operator <-->|"DF01: keyboard/CLI"| TerminalUI
+    Operator <-->|"DF02: browser HTTP"| WebUI
+    TerminalUI <-->|"DF03: in-process call"| Client
+    Client <-->|"DF04: HTTP + Bearer token"| Server
+    Server <-->|"DF05: run turn"| Engine
+    Server <-->|"DF06: serve /ui, page-token exchange"| WebUI
+    Engine <-->|"DF07: tool dispatch"| ToolRegistry
+    Engine <-->|"DF08: capability decision"| PermissionGate
+    Engine <-->|"DF09: system prompt/profile"| PersonaLoader
+    Engine <-->|"DF10: skill index/body"| SkillRegistry
+    Engine <-->|"DF11: output validation"| OutputGuard
+    Engine <-->|"DF12: conversation/turn trace"| SessionStore
+    Engine <-->|"DF13: per-turn snapshot"| CheckpointStore
+    Engine <-->|"DF14: model stream"| AnthropicAdapter
+    Engine <-->|"DF15: model stream"| OpenAIAdapter
+    ToolRegistry <-->|"DF16: security_scan"| SecurityScanner
+    ToolRegistry <-->|"DF17: MCP tool call"| MCPClient
+    ToolRegistry <-->|"DF18: shell/exec"| ExecutionSandbox
+    ToolRegistry <-->|"DF19: memory read/write"| MemoryStore
+    ToolRegistry <-->|"DF20: gh CLI / git"| GitHubAPI
+    ToolRegistry <-->|"DF21: web_fetch / web_search"| Internet
+    Server <-->|"DF22: schedule/fire jobs"| CronScheduler
+    Server <-->|"DF23: spawn/coordinate sub-agents"| SwarmCoordinator
+    Server <-->|"DF24: expose sessions as MCP tools"| MCPServer
+    Server <-->|"DF25: ACP JSON-RPC"| ACPAgent
+    SwarmCoordinator <-->|"DF26: inter-agent messages"| Mailbox
+    CronScheduler <-->|"DF27: unattended shell/exec"| ExecutionSandbox
+    ExecutionSandbox <-->|"DF28: container exec"| ContainerRuntime
+    AnthropicAdapter <-->|"DF29: Messages API (TLS)"| AnthropicAPI
+    OpenAIAdapter <-->|"DF30: chat completions (TLS or local HTTP)"| OpenAICompatibleEndpoint
+    MCPClient <-->|"DF31: MCP protocol (stdio/HTTPS/SSE)"| MCPExternalServers
+    ExternalHarness <-->|"DF32: aegis_prompt and friends (stdio)"| MCPServer
+    ExternalHarness <-->|"DF33: ACP JSON-RPC (stdio)"| ACPAgent
+    ConfigLoader <-->|"DF34: layered config + secrets"| Server
+
+    style ClientProc fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style DaemonProc fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+
+    linkStyle default stroke:#666666,stroke-width:2px

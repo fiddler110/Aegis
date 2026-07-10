@@ -101,6 +101,12 @@ type SearchConfig struct {
 	Provider string `koanf:"provider"` // "", "duckduckgo", "brave", "tavily", "searxng"
 	APIKey   string `koanf:"api_key"`  // may reference $ENV; expanded on load
 	BaseURL  string `koanf:"base_url"` // required for searxng self-host
+	// ScanOutput opts web_fetch/web_search output into the same heuristic
+	// prompt-injection scan used for opted-in MCP servers (FIND-04). Off by
+	// default — a best-effort check with false positives. The untrusted-
+	// content provenance marker on fetched/search output is always applied
+	// regardless of this setting.
+	ScanOutput bool `koanf:"scan_output"`
 }
 
 // NotifyConfig configures notifications when a background session finishes or
@@ -279,6 +285,15 @@ type ProviderFallbackConfig struct {
 // ServerConfig configures the local daemon.
 type ServerConfig struct {
 	Addr string `koanf:"addr"` // host:port the daemon listens on
+
+	// AllowRemote must be explicitly set to bind Addr to a non-loopback
+	// address (FIND-08). The daemon's API is protected only by a bearer
+	// token with no rate limiting; binding it to a network-reachable address
+	// (e.g. "0.0.0.0:4127") silently exposes it to anyone who can reach that
+	// address unless the operator has deliberately acknowledged the
+	// tradeoff. Loopback addresses (127.0.0.1, ::1, localhost) never require
+	// this flag. Off by default.
+	AllowRemote bool `koanf:"allow_remote"`
 
 	// MaxConcurrentRuns caps how many message-turn runs (POST
 	// /sessions/{id}/messages) may be actively executing across all sessions

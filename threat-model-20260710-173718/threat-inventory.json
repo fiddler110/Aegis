@@ -1,0 +1,3256 @@
+{
+  "schema_version": "1.0",
+  "report_folder": "threat-model-20260710-173718",
+  "commit": "34aa687",
+  "commit_date": "2026-07-10 11:52:48 -0400",
+  "branch": "main",
+  "repository": "https://github.com/fiddler110/Aegis.git",
+  "analysis_timestamp": "2026-07-10 17:37:18",
+  "model": "claude-sonnet-5",
+  "components": [
+    {
+      "id": "ACPAgent",
+      "display": "ACPAgent",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebSvc",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/acp/agent.go",
+        "internal/acp/jsonrpc.go",
+        "internal/acp/protocol.go"
+      ],
+      "source_directories": [
+        "internal/acp"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/acp/agent.go",
+          "internal/acp/jsonrpc.go",
+          "internal/acp/protocol.go"
+        ],
+        "source_directories": [
+          "internal/acp"
+        ],
+        "class_names": [
+          "Agent",
+          "Conn"
+        ],
+        "namespace": "aegis/internal/acp",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Server",
+          "ExternalHarness"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "stdio"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "AnthropicAPI",
+      "display": "AnthropicAPI",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [
+          "Adapter"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "ANTHROPIC_API_KEY"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "AnthropicAdapter"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "AnthropicAdapter",
+      "display": "AnthropicAdapter",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.NetApp",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/provider/anthropic/anthropic.go"
+      ],
+      "source_directories": [
+        "internal/provider/anthropic"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/provider/anthropic/anthropic.go"
+        ],
+        "source_directories": [
+          "internal/provider/anthropic"
+        ],
+        "class_names": [
+          "Adapter"
+        ],
+        "namespace": "aegis/internal/provider/anthropic",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [
+          "github.com"
+        ],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "AnthropicAPI"
+        ],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "CheckpointStore",
+      "display": "CheckpointStore",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.FS",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/checkpoint/checkpoint.go"
+      ],
+      "source_directories": [
+        "internal/checkpoint"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/checkpoint/checkpoint.go"
+        ],
+        "source_directories": [
+          "internal/checkpoint"
+        ],
+        "class_names": [
+          "Store",
+          "Snapshotter"
+        ],
+        "namespace": "aegis/internal/checkpoint",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "FileIO"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Client",
+      "display": "Client",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "ClientProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/client/client.go"
+      ],
+      "source_directories": [
+        "internal/client"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/client/client.go"
+        ],
+        "source_directories": [
+          "internal/client"
+        ],
+        "class_names": [
+          "Client"
+        ],
+        "namespace": "aegis/internal/client",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "TerminalUI"
+        ],
+        "outbound_to": [
+          "Server"
+        ],
+        "protocols": [
+          "HTTP"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ConfigLoader",
+      "display": "ConfigLoader",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/config/config.go"
+      ],
+      "source_directories": [
+        "internal/config"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/config/config.go"
+        ],
+        "source_directories": [
+          "internal/config"
+        ],
+        "class_names": [
+          "Config"
+        ],
+        "namespace": "aegis/internal/config",
+        "config_keys": [
+          "ANTHROPIC_API_KEY",
+          "OPENAI_API_KEY"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [],
+        "outbound_to": [
+          "Server"
+        ],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ContainerRuntime",
+      "display": "ContainerRuntime",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [],
+        "namespace": "",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [
+          "docker",
+          "podman"
+        ],
+        "inbound_from": [
+          "ExecutionSandbox"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "socket"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "CronScheduler",
+      "display": "CronScheduler",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/cron/cron.go",
+        "internal/cron/schedule.go"
+      ],
+      "source_directories": [
+        "internal/cron"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/cron/cron.go",
+          "internal/cron/schedule.go"
+        ],
+        "source_directories": [
+          "internal/cron"
+        ],
+        "class_names": [
+          "Scheduler",
+          "Job"
+        ],
+        "namespace": "aegis/internal/cron",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "ExecutionSandbox"
+        ],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Engine",
+      "display": "Engine",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/engine/engine.go",
+        "internal/engine/loopdetect.go"
+      ],
+      "source_directories": [
+        "internal/engine"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/engine/engine.go",
+          "internal/engine/loopdetect.go"
+        ],
+        "source_directories": [
+          "internal/engine"
+        ],
+        "class_names": [
+          "Engine"
+        ],
+        "namespace": "aegis/internal/engine",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "ToolRegistry",
+          "PermissionGate",
+          "PersonaLoader",
+          "SkillRegistry",
+          "OutputGuard",
+          "SessionStore",
+          "CheckpointStore",
+          "AnthropicAdapter",
+          "OpenAIAdapter"
+        ],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ExecutionSandbox",
+      "display": "ExecutionSandbox",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/sandbox/detect.go",
+        "internal/sandbox/docker.go",
+        "internal/sandbox/local.go"
+      ],
+      "source_directories": [
+        "internal/sandbox"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/sandbox/detect.go",
+          "internal/sandbox/docker.go",
+          "internal/sandbox/local.go"
+        ],
+        "source_directories": [
+          "internal/sandbox"
+        ],
+        "class_names": [
+          "ContainerBackend",
+          "LocalBackend"
+        ],
+        "namespace": "aegis/internal/sandbox",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "ToolRegistry",
+          "CronScheduler"
+        ],
+        "outbound_to": [
+          "ContainerRuntime"
+        ],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ExternalHarness",
+      "display": "ExternalHarness",
+      "type": "external_interactor",
+      "tmt_type": "SE.EI.TMCore.WebApp",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_interactor",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [],
+        "namespace": "",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [],
+        "outbound_to": [
+          "MCPServer",
+          "ACPAgent"
+        ],
+        "protocols": [
+          "stdio"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "GitHubAPI",
+      "display": "GitHubAPI",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [],
+        "namespace": "",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [
+          "gh"
+        ],
+        "inbound_from": [
+          "ToolRegistry"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Internet",
+      "display": "Internet",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [
+          "fetchTool"
+        ],
+        "namespace": "",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "ToolRegistry"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "HTTP",
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "MCPClient",
+      "display": "MCPClient",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.NetApp",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/mcp/mcp.go",
+        "internal/mcp/http.go",
+        "internal/mcp/trust.go"
+      ],
+      "source_directories": [
+        "internal/mcp"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/mcp/mcp.go",
+          "internal/mcp/http.go",
+          "internal/mcp/trust.go"
+        ],
+        "source_directories": [
+          "internal/mcp"
+        ],
+        "class_names": [
+          "ToolInfo",
+          "httpTransport"
+        ],
+        "namespace": "aegis/internal/mcp",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "ToolRegistry"
+        ],
+        "outbound_to": [
+          "MCPExternalServers"
+        ],
+        "protocols": [
+          "stdio",
+          "HTTPS",
+          "SSE"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "MCPExternalServers",
+      "display": "MCPExternalServers",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [
+          "httpTransport"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "mcp[].auth",
+          "mcp[].command",
+          "mcp[].url"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "MCPClient"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "stdio",
+          "HTTPS",
+          "SSE"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "MCPServer",
+      "display": "MCPServer",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebSvc",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/mcpserver/server.go",
+        "internal/mcpserver/protocol.go"
+      ],
+      "source_directories": [
+        "internal/mcpserver"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/mcpserver/server.go",
+          "internal/mcpserver/protocol.go"
+        ],
+        "source_directories": [
+          "internal/mcpserver"
+        ],
+        "class_names": [
+          "initializeResult"
+        ],
+        "namespace": "aegis/internal/mcpserver",
+        "config_keys": [],
+        "api_routes": [
+          "aegis_prompt",
+          "aegis_new_session",
+          "aegis_list_sessions"
+        ],
+        "dependencies": [],
+        "inbound_from": [
+          "Server",
+          "ExternalHarness"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "stdio"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Mailbox",
+      "display": "Mailbox",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.FS",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/swarm/mailbox.go"
+      ],
+      "source_directories": [
+        "internal/swarm"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/swarm/mailbox.go"
+        ],
+        "source_directories": [
+          "internal/swarm"
+        ],
+        "class_names": [
+          "Mailbox",
+          "Message"
+        ],
+        "namespace": "aegis/internal/swarm",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "SwarmCoordinator"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "FileIO"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "MemoryStore",
+      "display": "MemoryStore",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.FS",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/memory/memory.go",
+        "internal/memory/relevance.go"
+      ],
+      "source_directories": [
+        "internal/memory"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/memory/memory.go",
+          "internal/memory/relevance.go"
+        ],
+        "source_directories": [
+          "internal/memory"
+        ],
+        "class_names": [
+          "Sources",
+          "Entry"
+        ],
+        "namespace": "aegis/internal/memory",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "ToolRegistry"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "FileIO"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "OpenAIAdapter",
+      "display": "OpenAIAdapter",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.NetApp",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/provider/openai/openai.go"
+      ],
+      "source_directories": [
+        "internal/provider/openai"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/provider/openai/openai.go"
+        ],
+        "source_directories": [
+          "internal/provider/openai"
+        ],
+        "class_names": [
+          "Adapter"
+        ],
+        "namespace": "aegis/internal/provider/openai",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "OpenAICompatibleEndpoint"
+        ],
+        "protocols": [
+          "HTTPS",
+          "HTTP"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "OpenAICompatibleEndpoint",
+      "display": "OpenAICompatibleEndpoint",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [
+          "Adapter"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "OPENAI_API_KEY"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "OpenAIAdapter"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "HTTPS",
+          "HTTP"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Operator",
+      "display": "Operator",
+      "type": "external_interactor",
+      "tmt_type": "SE.EI.TMCore.User",
+      "boundary": "",
+      "boundary_kind": "",
+      "aliases": [],
+      "source_files": [],
+      "source_directories": [],
+      "fingerprint": {
+        "component_type": "external_interactor",
+        "boundary_kind": "",
+        "source_files": [],
+        "source_directories": [],
+        "class_names": [],
+        "namespace": "",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [],
+        "outbound_to": [
+          "TerminalUI",
+          "WebUI"
+        ],
+        "protocols": [
+          "TTY",
+          "HTTP"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "OutputGuard",
+      "display": "OutputGuard",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/guard/guard.go"
+      ],
+      "source_directories": [
+        "internal/guard"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/guard/guard.go"
+        ],
+        "source_directories": [
+          "internal/guard"
+        ],
+        "class_names": [
+          "Config"
+        ],
+        "namespace": "aegis/internal/guard",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "PermissionGate",
+      "display": "PermissionGate",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/permission/permission.go",
+        "internal/permission/contextual.go",
+        "internal/permission/rules.go",
+        "internal/permission/persona_tools.go"
+      ],
+      "source_directories": [
+        "internal/permission"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/permission/permission.go",
+          "internal/permission/contextual.go",
+          "internal/permission/rules.go",
+          "internal/permission/persona_tools.go"
+        ],
+        "source_directories": [
+          "internal/permission"
+        ],
+        "class_names": [
+          "Policy",
+          "ContextualGate",
+          "PersonaToolGate"
+        ],
+        "namespace": "aegis/internal/permission",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "PersonaLoader",
+      "display": "PersonaLoader",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/persona/persona.go",
+        "internal/persona/load.go"
+      ],
+      "source_directories": [
+        "internal/persona"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/persona/persona.go",
+          "internal/persona/load.go"
+        ],
+        "source_directories": [
+          "internal/persona"
+        ],
+        "class_names": [
+          "Persona"
+        ],
+        "namespace": "aegis/internal/persona",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "SecurityScanner",
+      "display": "SecurityScanner",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/security/target.go",
+        "internal/security/install.go"
+      ],
+      "source_directories": [
+        "internal/security"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/security/target.go",
+          "internal/security/install.go"
+        ],
+        "source_directories": [
+          "internal/security"
+        ],
+        "class_names": [
+          "Baseline",
+          "DASTOptions"
+        ],
+        "namespace": "aegis/internal/security",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "ToolRegistry"
+        ],
+        "outbound_to": [],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Server",
+      "display": "Server",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebSvc",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/server/server.go",
+        "internal/server/auth.go"
+      ],
+      "source_directories": [
+        "internal/server"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/server/server.go",
+          "internal/server/auth.go"
+        ],
+        "source_directories": [
+          "internal/server"
+        ],
+        "class_names": [
+          "Server"
+        ],
+        "namespace": "aegis/internal/server",
+        "config_keys": [],
+        "api_routes": [
+          "/sessions",
+          "/auth/exchange",
+          "/healthz"
+        ],
+        "dependencies": [],
+        "inbound_from": [
+          "Client",
+          "ConfigLoader"
+        ],
+        "outbound_to": [
+          "Engine",
+          "WebUI",
+          "CronScheduler",
+          "SwarmCoordinator",
+          "MCPServer",
+          "ACPAgent"
+        ],
+        "protocols": [
+          "HTTP",
+          "SSE"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "SessionStore",
+      "display": "SessionStore",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.SQL",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/session/session.go"
+      ],
+      "source_directories": [
+        "internal/session"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/session/session.go"
+        ],
+        "source_directories": [
+          "internal/session"
+        ],
+        "class_names": [
+          "Store"
+        ],
+        "namespace": "aegis/internal/session",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [
+          "modernc.org/sqlite"
+        ],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [],
+        "protocols": [
+          "SQL"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "SkillRegistry",
+      "display": "SkillRegistry",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/skills/skills.go",
+        "internal/skills/embedded.go"
+      ],
+      "source_directories": [
+        "internal/skills"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/skills/skills.go",
+          "internal/skills/embedded.go"
+        ],
+        "source_directories": [
+          "internal/skills"
+        ],
+        "class_names": [
+          "Skill",
+          "BuiltinSkill"
+        ],
+        "namespace": "aegis/internal/skills",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "SwarmCoordinator",
+      "display": "SwarmCoordinator",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/swarm/inprocess.go",
+        "internal/swarm/registry.go",
+        "internal/swarm/adaptive.go",
+        "internal/swarm/subprocess.go"
+      ],
+      "source_directories": [
+        "internal/swarm"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/swarm/inprocess.go",
+          "internal/swarm/registry.go",
+          "internal/swarm/adaptive.go",
+          "internal/swarm/subprocess.go"
+        ],
+        "source_directories": [
+          "internal/swarm"
+        ],
+        "class_names": [
+          "InProcessBackend",
+          "AdaptiveLimiter"
+        ],
+        "namespace": "aegis/internal/swarm",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "Mailbox"
+        ],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "TerminalUI",
+      "display": "TerminalUI",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.ThickClient",
+      "boundary": "ClientProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/tui/tui.go"
+      ],
+      "source_directories": [
+        "internal/tui"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/tui/tui.go"
+        ],
+        "source_directories": [
+          "internal/tui"
+        ],
+        "class_names": [
+          "model"
+        ],
+        "namespace": "aegis/internal/tui",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Client"
+        ],
+        "outbound_to": [
+          "Operator"
+        ],
+        "protocols": [
+          "TTY"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ToolRegistry",
+      "display": "ToolRegistry",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/tool/tool.go",
+        "internal/tool/builtin/shell.go",
+        "internal/tool/builtin/web.go",
+        "internal/tool/builtin/git.go",
+        "internal/tool/builtin/gitpr.go",
+        "internal/lsp/client.go"
+      ],
+      "source_directories": [
+        "internal/tool",
+        "internal/tool/builtin",
+        "internal/lsp"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/tool/tool.go",
+          "internal/tool/builtin/shell.go",
+          "internal/tool/builtin/web.go",
+          "internal/tool/builtin/git.go",
+          "internal/tool/builtin/gitpr.go",
+          "internal/lsp/client.go"
+        ],
+        "source_directories": [
+          "internal/tool",
+          "internal/tool/builtin",
+          "internal/lsp"
+        ],
+        "class_names": [
+          "Registry"
+        ],
+        "namespace": "aegis/internal/tool",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "SecurityScanner",
+          "MCPClient",
+          "ExecutionSandbox",
+          "MemoryStore",
+          "GitHubAPI",
+          "Internet"
+        ],
+        "protocols": []
+      },
+      "sidecars": []
+    },
+    {
+      "id": "WebUI",
+      "display": "WebUI",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebServer",
+      "boundary": "DaemonProc",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/server/webui.go"
+      ],
+      "source_directories": [
+        "internal/server/webui"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/server/webui.go"
+        ],
+        "source_directories": [
+          "internal/server/webui"
+        ],
+        "class_names": [
+          "Server"
+        ],
+        "namespace": "aegis/internal/server",
+        "config_keys": [],
+        "api_routes": [
+          "/ui",
+          "/ui/*"
+        ],
+        "dependencies": [],
+        "inbound_from": [
+          "Operator",
+          "Server"
+        ],
+        "outbound_to": [
+          "Server"
+        ],
+        "protocols": [
+          "HTTP"
+        ]
+      },
+      "sidecars": []
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "ClientProc",
+      "display": "Client Process",
+      "kind": "ProcessBoundary",
+      "aliases": [],
+      "contains": [
+        "Client",
+        "TerminalUI"
+      ],
+      "contains_fingerprint": "Client|TerminalUI"
+    },
+    {
+      "id": "DaemonProc",
+      "display": "Daemon Process",
+      "kind": "ProcessBoundary",
+      "aliases": [],
+      "contains": [
+        "ACPAgent",
+        "AnthropicAdapter",
+        "CheckpointStore",
+        "ConfigLoader",
+        "CronScheduler",
+        "Engine",
+        "ExecutionSandbox",
+        "MCPClient",
+        "MCPServer",
+        "Mailbox",
+        "MemoryStore",
+        "OpenAIAdapter",
+        "OutputGuard",
+        "PermissionGate",
+        "PersonaLoader",
+        "SecurityScanner",
+        "Server",
+        "SessionStore",
+        "SkillRegistry",
+        "SwarmCoordinator",
+        "ToolRegistry",
+        "WebUI"
+      ],
+      "contains_fingerprint": "ACPAgent|AnthropicAdapter|CheckpointStore|ConfigLoader|CronScheduler|Engine|ExecutionSandbox|MCPClient|MCPServer|Mailbox|MemoryStore|OpenAIAdapter|OutputGuard|PermissionGate|PersonaLoader|SecurityScanner|Server|SessionStore|SkillRegistry|SwarmCoordinator|ToolRegistry|WebUI"
+    }
+  ],
+  "flows": [
+    {
+      "id": "DF_AnthropicAdapter_to_AnthropicAPI",
+      "from": "AnthropicAdapter",
+      "to": "AnthropicAPI",
+      "protocol": "HTTPS",
+      "description": "Streamed Messages API requests"
+    },
+    {
+      "id": "DF_Client_to_Server",
+      "from": "Client",
+      "to": "Server",
+      "protocol": "HTTP+Bearer",
+      "description": "All daemon API calls"
+    },
+    {
+      "id": "DF_ConfigLoader_to_Server",
+      "from": "ConfigLoader",
+      "to": "Server",
+      "protocol": "in-process",
+      "description": "Supplies layered config and secrets at startup"
+    },
+    {
+      "id": "DF_CronScheduler_to_ExecutionSandbox",
+      "from": "CronScheduler",
+      "to": "ExecutionSandbox",
+      "protocol": "in-process",
+      "description": "Runs a due job's shell command unattended"
+    },
+    {
+      "id": "DF_Engine_to_AnthropicAdapter",
+      "from": "Engine",
+      "to": "AnthropicAdapter",
+      "protocol": "in-process",
+      "description": "Streams model requests/responses"
+    },
+    {
+      "id": "DF_Engine_to_CheckpointStore",
+      "from": "Engine",
+      "to": "CheckpointStore",
+      "protocol": "FileIO",
+      "description": "Captures/restores per-turn file snapshots"
+    },
+    {
+      "id": "DF_Engine_to_OpenAIAdapter",
+      "from": "Engine",
+      "to": "OpenAIAdapter",
+      "protocol": "in-process",
+      "description": "Streams model requests/responses"
+    },
+    {
+      "id": "DF_Engine_to_OutputGuard",
+      "from": "Engine",
+      "to": "OutputGuard",
+      "protocol": "in-process",
+      "description": "Optional second-pass output validation"
+    },
+    {
+      "id": "DF_Engine_to_PermissionGate",
+      "from": "Engine",
+      "to": "PermissionGate",
+      "protocol": "in-process",
+      "description": "Requests allow/deny/ask decision"
+    },
+    {
+      "id": "DF_Engine_to_PersonaLoader",
+      "from": "Engine",
+      "to": "PersonaLoader",
+      "protocol": "in-process",
+      "description": "Retrieves active persona system prompt"
+    },
+    {
+      "id": "DF_Engine_to_SessionStore",
+      "from": "Engine",
+      "to": "SessionStore",
+      "protocol": "SQL",
+      "description": "Persists/reads conversation and turn traces"
+    },
+    {
+      "id": "DF_Engine_to_SkillRegistry",
+      "from": "Engine",
+      "to": "SkillRegistry",
+      "protocol": "in-process",
+      "description": "Retrieves skill index/body"
+    },
+    {
+      "id": "DF_Engine_to_ToolRegistry",
+      "from": "Engine",
+      "to": "ToolRegistry",
+      "protocol": "in-process",
+      "description": "Dispatches model-requested tool calls"
+    },
+    {
+      "id": "DF_ExecutionSandbox_to_ContainerRuntime",
+      "from": "ExecutionSandbox",
+      "to": "ContainerRuntime",
+      "protocol": "socket",
+      "description": "Container-backed command execution"
+    },
+    {
+      "id": "DF_ExternalHarness_to_ACPAgent",
+      "from": "ExternalHarness",
+      "to": "ACPAgent",
+      "protocol": "stdio",
+      "description": "ACP JSON-RPC editor integration"
+    },
+    {
+      "id": "DF_ExternalHarness_to_MCPServer",
+      "from": "ExternalHarness",
+      "to": "MCPServer",
+      "protocol": "stdio",
+      "description": "aegis_prompt and friends"
+    },
+    {
+      "id": "DF_MCPClient_to_MCPExternalServers",
+      "from": "MCPClient",
+      "to": "MCPExternalServers",
+      "protocol": "stdio/HTTPS/SSE",
+      "description": "MCP protocol tool/resource/prompt calls"
+    },
+    {
+      "id": "DF_OpenAIAdapter_to_OpenAICompatibleEndpoint",
+      "from": "OpenAIAdapter",
+      "to": "OpenAICompatibleEndpoint",
+      "protocol": "HTTPS/HTTP",
+      "description": "Streamed chat-completions requests"
+    },
+    {
+      "id": "DF_Operator_to_TerminalUI",
+      "from": "Operator",
+      "to": "TerminalUI",
+      "protocol": "TTY",
+      "description": "Interactive prompts and rendered output"
+    },
+    {
+      "id": "DF_Operator_to_WebUI",
+      "from": "Operator",
+      "to": "WebUI",
+      "protocol": "HTTP",
+      "description": "Browser-based session interaction"
+    },
+    {
+      "id": "DF_Server_to_ACPAgent",
+      "from": "Server",
+      "to": "ACPAgent",
+      "protocol": "in-process",
+      "description": "Wires session access into ACP server"
+    },
+    {
+      "id": "DF_Server_to_CronScheduler",
+      "from": "Server",
+      "to": "CronScheduler",
+      "protocol": "in-process",
+      "description": "Registers/fires scheduled jobs"
+    },
+    {
+      "id": "DF_Server_to_Engine",
+      "from": "Server",
+      "to": "Engine",
+      "protocol": "in-process",
+      "description": "Daemon dispatches a turn to the agent loop"
+    },
+    {
+      "id": "DF_Server_to_MCPServer",
+      "from": "Server",
+      "to": "MCPServer",
+      "protocol": "in-process",
+      "description": "Wires session access into aegis mcp-serve"
+    },
+    {
+      "id": "DF_Server_to_SwarmCoordinator",
+      "from": "Server",
+      "to": "SwarmCoordinator",
+      "protocol": "in-process",
+      "description": "Spawns/coordinates sub-agents"
+    },
+    {
+      "id": "DF_Server_to_WebUI",
+      "from": "Server",
+      "to": "WebUI",
+      "protocol": "in-process",
+      "description": "Serves /ui, mints/exchanges page tokens"
+    },
+    {
+      "id": "DF_SwarmCoordinator_to_Mailbox",
+      "from": "SwarmCoordinator",
+      "to": "Mailbox",
+      "protocol": "FileIO",
+      "description": "Inter-agent progress/result messages"
+    },
+    {
+      "id": "DF_TerminalUI_to_Client",
+      "from": "TerminalUI",
+      "to": "Client",
+      "protocol": "in-process",
+      "description": "TUI delegates API calls to the HTTP client"
+    },
+    {
+      "id": "DF_ToolRegistry_to_ExecutionSandbox",
+      "from": "ToolRegistry",
+      "to": "ExecutionSandbox",
+      "protocol": "in-process",
+      "description": "Executes shell/exec tool calls"
+    },
+    {
+      "id": "DF_ToolRegistry_to_GitHubAPI",
+      "from": "ToolRegistry",
+      "to": "GitHubAPI",
+      "protocol": "HTTPS",
+      "description": "Pushes branches, opens pull requests"
+    },
+    {
+      "id": "DF_ToolRegistry_to_Internet",
+      "from": "ToolRegistry",
+      "to": "Internet",
+      "protocol": "HTTP/HTTPS",
+      "description": "web_fetch/web_search outbound requests"
+    },
+    {
+      "id": "DF_ToolRegistry_to_MCPClient",
+      "from": "ToolRegistry",
+      "to": "MCPClient",
+      "protocol": "in-process",
+      "description": "Invokes external MCP tools"
+    },
+    {
+      "id": "DF_ToolRegistry_to_MemoryStore",
+      "from": "ToolRegistry",
+      "to": "MemoryStore",
+      "protocol": "FileIO",
+      "description": "Reads/writes persistent memory"
+    },
+    {
+      "id": "DF_ToolRegistry_to_SecurityScanner",
+      "from": "ToolRegistry",
+      "to": "SecurityScanner",
+      "protocol": "in-process",
+      "description": "Invokes SAST/SCA/DAST scans"
+    }
+  ],
+  "threats": [
+    {
+      "id": "T01.T",
+      "title": "Terminal control-sequence injection",
+      "description": "Streamed model text may contain ANSI/OSC control sequences manipulating the terminal before rendering.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "None observed.",
+      "identity_key": {
+        "component_id": "TerminalUI",
+        "data_flow_id": "DF_Operator_to_TerminalUI",
+        "stride_category": "T",
+        "attack_surface": "Streamed text rendering"
+      }
+    },
+    {
+      "id": "T02.D",
+      "title": "Large stream render stall",
+      "description": "An extremely large single streamed chunk could stall rendering.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "Wrap-cache/scroll-follow logic (P21.7).",
+      "identity_key": {
+        "component_id": "TerminalUI",
+        "data_flow_id": "DF_Operator_to_TerminalUI",
+        "stride_category": "D",
+        "attack_surface": "Streaming render loop"
+      }
+    },
+    {
+      "id": "T03.I",
+      "title": "Token in Client memory",
+      "description": "The bearer token resides in Client's process memory for its lifetime.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "None beyond OS process protection.",
+      "identity_key": {
+        "component_id": "Client",
+        "data_flow_id": "DF_TerminalUI_to_Client",
+        "stride_category": "I",
+        "attack_surface": "Client process memory"
+      }
+    },
+    {
+      "id": "T04.S",
+      "title": "No auth rate limiting",
+      "description": "No rate limiting/alerting on repeated invalid bearer-token attempts.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Constant-time compare only.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "S",
+        "attack_surface": "authMiddleware"
+      }
+    },
+    {
+      "id": "T05.T",
+      "title": "server.addr misconfiguration",
+      "description": "server.addr configurable to non-loopback with no validation/warning.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Privileged User",
+      "status": "Open",
+      "mitigation": "Default remains loopback.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "T",
+        "attack_surface": "server.addr config"
+      }
+    },
+    {
+      "id": "T06.I",
+      "title": "Unencrypted loopback traffic",
+      "description": "Client-Server traffic unencrypted over loopback.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Loopback-only default.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "I",
+        "attack_surface": "HTTP transport"
+      }
+    },
+    {
+      "id": "T07.D",
+      "title": "Unbounded concurrent runs",
+      "description": "Malicious/runaway client could open unbounded concurrent runs or SSE connections.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "max_concurrent_runs/max_run_duration_sec/bounded SSE buffer (P21.5).",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "D",
+        "attack_surface": "Run/SSE handling"
+      }
+    },
+    {
+      "id": "T08.S",
+      "title": "Local token bypass via /ui",
+      "description": "Any local process can mint+exchange a page token for the real bearer token.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Single-use/60s TTL limits replay only.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_Server_to_WebUI",
+        "stride_category": "S",
+        "attack_surface": "/ui, /auth/exchange"
+      }
+    },
+    {
+      "id": "T09.I",
+      "title": "Conversation content sent to cloud",
+      "description": "Full conversation content forwarded to configured provider with no redaction.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "Local Ollama backend avoids this.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Engine_to_AnthropicAdapter",
+        "stride_category": "I",
+        "attack_surface": "Provider dispatch"
+      }
+    },
+    {
+      "id": "T10.D",
+      "title": "No local-model budget ceiling",
+      "description": "No token/dollar budget ceiling for local models.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "loopdetect.go + run timeout.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Engine_to_OpenAIAdapter",
+        "stride_category": "D",
+        "attack_surface": "Provider dispatch"
+      }
+    },
+    {
+      "id": "T11.T",
+      "title": "LSP arbitrary binary",
+      "description": "lsp tool spawns config-specified binary with no allowlist.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Relies on config trust boundary.",
+      "identity_key": {
+        "component_id": "ToolRegistry",
+        "data_flow_id": "DF_Engine_to_ToolRegistry",
+        "stride_category": "T",
+        "attack_surface": "lsp tool"
+      }
+    },
+    {
+      "id": "T12.A",
+      "title": "Unmarked web content injection",
+      "description": "web_fetch/web_search content has no untrusted-content marker.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "SSRF dialer restricts destination only.",
+      "identity_key": {
+        "component_id": "ToolRegistry",
+        "data_flow_id": "DF_ToolRegistry_to_Internet",
+        "stride_category": "A",
+        "attack_surface": "web_fetch/web_search"
+      }
+    },
+    {
+      "id": "T13.E",
+      "title": "Auto mode no per-call confirmation",
+      "description": "In auto mode every execute tool runs with no per-call confirmation.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "build mode requires approval; contextual/rule gates still apply.",
+      "identity_key": {
+        "component_id": "ToolRegistry",
+        "data_flow_id": "DF_Engine_to_ToolRegistry",
+        "stride_category": "E",
+        "attack_surface": "Permission mode"
+      }
+    },
+    {
+      "id": "T14.E",
+      "title": "PersonaToolGate advisory only",
+      "description": "PersonaToolGate warns/allows rather than blocking.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "Real enforcement at mode/contextual/rule layers.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "E",
+        "attack_surface": "PersonaToolGate"
+      }
+    },
+    {
+      "id": "T15.T",
+      "title": "Rule bypass via shell metachars",
+      "description": "Loosely-scoped allow rule could be widened via shell metacharacters.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "globToRegexpExec restricts execute allow-rule patterns.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "T",
+        "attack_surface": "Rule engine"
+      }
+    },
+    {
+      "id": "T16.T",
+      "title": "Persona prompt injection",
+      "description": "Persona .md content injected verbatim into system prompt.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "None at loader layer.",
+      "identity_key": {
+        "component_id": "PersonaLoader",
+        "data_flow_id": "DF_Engine_to_PersonaLoader",
+        "stride_category": "T",
+        "attack_surface": "Persona loader"
+      }
+    },
+    {
+      "id": "T17.E",
+      "title": "Persona mode/rule escalation",
+      "description": "Loaded persona could raise permission mode or add allow rules.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "resolveSessionMode/filterPersonaRules strip escalation.",
+      "identity_key": {
+        "component_id": "PersonaLoader",
+        "data_flow_id": "DF_Engine_to_PersonaLoader",
+        "stride_category": "E",
+        "attack_surface": "Persona loader"
+      }
+    },
+    {
+      "id": "T18.T",
+      "title": "Skill prompt injection",
+      "description": "Skill .md content injected verbatim into system prompt.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "None at loader layer.",
+      "identity_key": {
+        "component_id": "SkillRegistry",
+        "data_flow_id": "DF_Engine_to_SkillRegistry",
+        "stride_category": "T",
+        "attack_surface": "Skill loader"
+      }
+    },
+    {
+      "id": "T19.A",
+      "title": "Guard fail-open no signal",
+      "description": "Guard transport failure fails open with no distinct audit signal.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Ambiguous verdicts fail closed by design.",
+      "identity_key": {
+        "component_id": "OutputGuard",
+        "data_flow_id": "DF_Engine_to_OutputGuard",
+        "stride_category": "A",
+        "attack_surface": "LLMGuard"
+      }
+    },
+    {
+      "id": "T20.T",
+      "title": "Installer script unverified",
+      "description": "Installer scripts invoke shell with unaudited arg construction.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Unconfirmed.",
+      "identity_key": {
+        "component_id": "SecurityScanner",
+        "data_flow_id": "DF_ToolRegistry_to_SecurityScanner",
+        "stride_category": "T",
+        "attack_surface": "install.go"
+      }
+    },
+    {
+      "id": "T21.I",
+      "title": "DAST target scope",
+      "description": "DAST/recon scans could target arbitrary network hosts.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Mitigated",
+      "mitigation": "isHostAllowed allow-list, literal host matching.",
+      "identity_key": {
+        "component_id": "SecurityScanner",
+        "data_flow_id": "DF_ToolRegistry_to_SecurityScanner",
+        "stride_category": "I",
+        "attack_surface": "target allow-list"
+      }
+    },
+    {
+      "id": "T22.E",
+      "title": "Unattended cron exec no gate",
+      "description": "Cron jobs fire shell commands with no permission gate/approval.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Only a 10-minute timeout.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_CronScheduler_to_ExecutionSandbox",
+        "stride_category": "E",
+        "attack_surface": "cronShellRunner"
+      }
+    },
+    {
+      "id": "T23.R",
+      "title": "No cron audit trail",
+      "description": "Job.Command stored with no dedicated execution audit trail.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "None observed.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_CronScheduler_to_ExecutionSandbox",
+        "stride_category": "R",
+        "attack_surface": "Job storage"
+      }
+    },
+    {
+      "id": "T24.D",
+      "title": "Swarm shared budget exhaustion",
+      "description": "Sub-agents share one budget tracker; one agent can exhaust it.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "AdaptiveLimiter bounds concurrency not spend.",
+      "identity_key": {
+        "component_id": "SwarmCoordinator",
+        "data_flow_id": "DF_Server_to_SwarmCoordinator",
+        "stride_category": "D",
+        "attack_surface": "Budget tracker"
+      }
+    },
+    {
+      "id": "T25.E",
+      "title": "Sub-agent gate bypass (P10.1)",
+      "description": "Sub-agents previously bypassed parent's contextual/rule gates.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "buildGate applied uniformly; regression-tested.",
+      "identity_key": {
+        "component_id": "SwarmCoordinator",
+        "data_flow_id": "DF_Server_to_SwarmCoordinator",
+        "stride_category": "E",
+        "attack_surface": "subAgentRunner"
+      }
+    },
+    {
+      "id": "T26.A",
+      "title": "MCP scan bypass",
+      "description": "Opt-in scan_output is regex-based and bypassable.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "Always-on provenance wrapper still applies.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_ToolRegistry_to_MCPClient",
+        "stride_category": "A",
+        "attack_surface": "scan_output"
+      }
+    },
+    {
+      "id": "T27.I",
+      "title": "MCP output unmarked (baseline)",
+      "description": "Without marking, compromised MCP server output indistinguishable from instructions.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Mitigated",
+      "mitigation": "Always-on provenance wrapper (trust.go).",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_ToolRegistry_to_MCPClient",
+        "stride_category": "I",
+        "attack_surface": "wrapUntrusted"
+      }
+    },
+    {
+      "id": "T28.S",
+      "title": "mcp-serve no auth",
+      "description": "handleToolsCall performs no authentication check.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Sessions default to plan mode; auto_approve required for actions.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_ExternalHarness_to_MCPServer",
+        "stride_category": "S",
+        "attack_surface": "handleToolsCall"
+      }
+    },
+    {
+      "id": "T29.S",
+      "title": "ACP no auth",
+      "description": "methodAuthenticate is a no-op stub.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Relies on OS process boundary.",
+      "identity_key": {
+        "component_id": "ACPAgent",
+        "data_flow_id": "DF_ExternalHarness_to_ACPAgent",
+        "stride_category": "S",
+        "attack_surface": "methodAuthenticate"
+      }
+    },
+    {
+      "id": "T30.E",
+      "title": "Sandbox silent fallback",
+      "description": "Non-strict fallback to local unsandboxed execution on backend failure.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "cfg.Strict makes this a hard failure.",
+      "identity_key": {
+        "component_id": "ExecutionSandbox",
+        "data_flow_id": "DF_ToolRegistry_to_ExecutionSandbox",
+        "stride_category": "E",
+        "attack_surface": "SelectSandbox"
+      }
+    },
+    {
+      "id": "T31.I",
+      "title": "Config secret hardcoding risk",
+      "description": "Nothing prevents hardcoding a literal secret in config.yaml.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Privileged User",
+      "status": "Mitigated",
+      "mitigation": "gitignore default + env-only API keys + redaction.",
+      "identity_key": {
+        "component_id": "ConfigLoader",
+        "data_flow_id": "DF_ConfigLoader_to_Server",
+        "stride_category": "I",
+        "attack_surface": "MCP Auth/Search APIKey config"
+      }
+    },
+    {
+      "id": "T32.I",
+      "title": ".env no Windows ACL",
+      "description": "No Windows ACL hardening on .aegis/.env unlike daemon.token.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "None beyond parent directory permissions.",
+      "identity_key": {
+        "component_id": "ConfigLoader",
+        "data_flow_id": "DF_ConfigLoader_to_Server",
+        "stride_category": "I",
+        "attack_surface": "loadDotEnv"
+      }
+    },
+    {
+      "id": "T33.D",
+      "title": "Cloud outage no fallback",
+      "description": "Cloud outage/rate-limit halts sessions with no automatic fallback.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Mitigated",
+      "mitigation": "failover.go/retry.go.",
+      "identity_key": {
+        "component_id": "AnthropicAdapter",
+        "data_flow_id": "DF_AnthropicAdapter_to_AnthropicAPI",
+        "stride_category": "D",
+        "attack_surface": "Adapter.Stream"
+      }
+    },
+    {
+      "id": "T34.T",
+      "title": "Ollama plaintext traffic",
+      "description": "Local Ollama traffic typically unencrypted plain HTTP.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Default Ollama bind also loopback-only.",
+      "identity_key": {
+        "component_id": "OpenAIAdapter",
+        "data_flow_id": "DF_OpenAIAdapter_to_OpenAICompatibleEndpoint",
+        "stride_category": "T",
+        "attack_surface": "Adapter.Stream"
+      }
+    },
+    {
+      "id": "T35.I",
+      "title": "SessionStore plaintext DB",
+      "description": "SQLite DB plaintext, no encryption at rest, no Windows ACL hardening.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "EnsureDataDir 0o700 (POSIX only).",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "data_flow_id": "DF_Engine_to_SessionStore",
+        "stride_category": "I",
+        "attack_surface": "sessions.db"
+      }
+    },
+    {
+      "id": "T36.I",
+      "title": "CheckpointStore plaintext",
+      "description": "Per-turn snapshots stored unencrypted on disk.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Same data-directory permissions as SessionStore.",
+      "identity_key": {
+        "component_id": "CheckpointStore",
+        "data_flow_id": "DF_Engine_to_CheckpointStore",
+        "stride_category": "I",
+        "attack_surface": "Snapshot files"
+      }
+    },
+    {
+      "id": "T37.T",
+      "title": "Memory file tampering",
+      "description": "Memory files directly editable to inject false learned content.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "None beyond file permissions.",
+      "identity_key": {
+        "component_id": "MemoryStore",
+        "data_flow_id": "DF_ToolRegistry_to_MemoryStore",
+        "stride_category": "T",
+        "attack_surface": "Memory files"
+      }
+    },
+    {
+      "id": "T38.I",
+      "title": "Mailbox plaintext files",
+      "description": "Inter-agent messages are plaintext files readable by same OS user.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "0o700 dir / 0o600 file permissions.",
+      "identity_key": {
+        "component_id": "Mailbox",
+        "data_flow_id": "DF_SwarmCoordinator_to_Mailbox",
+        "stride_category": "I",
+        "attack_surface": "Mailbox files"
+      }
+    },
+    {
+      "id": "T39.I",
+      "title": "Anthropic cloud data exposure",
+      "description": "Conversation content sent to Anthropic with no redaction.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "Local Ollama backend avoids this.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_AnthropicAdapter_to_AnthropicAPI",
+        "stride_category": "I",
+        "attack_surface": "Messages API"
+      }
+    },
+    {
+      "id": "T40.D",
+      "title": "Anthropic outage",
+      "description": "Full Anthropic outage stalls sessions pinned to that provider.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Mitigated",
+      "mitigation": "failover.go/retry.go; can switch providers.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_AnthropicAdapter_to_AnthropicAPI",
+        "stride_category": "D",
+        "attack_surface": "Messages API"
+      }
+    },
+    {
+      "id": "T41.I",
+      "title": "OpenAI-compatible cloud data exposure",
+      "description": "Same cross-cloud exposure risk when configured against cloud OpenAI.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "Local Ollama config eliminates risk.",
+      "identity_key": {
+        "component_id": "OpenAICompatibleEndpoint",
+        "data_flow_id": "DF_OpenAIAdapter_to_OpenAICompatibleEndpoint",
+        "stride_category": "I",
+        "attack_surface": "Chat completions API"
+      }
+    },
+    {
+      "id": "T42.T",
+      "title": "MCP server content manipulation",
+      "description": "Malicious/compromised MCP server can return injected instructions.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Mitigated",
+      "mitigation": "Always-on provenance wrapping + opt-in scan.",
+      "identity_key": {
+        "component_id": "MCPExternalServers",
+        "data_flow_id": "DF_MCPClient_to_MCPExternalServers",
+        "stride_category": "T",
+        "attack_surface": "tools/call results"
+      }
+    },
+    {
+      "id": "T43.I",
+      "title": "Tool args sent to MCP server",
+      "description": "Tool-call args with sensitive data sent unconditionally to configured MCP server.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "None beyond operator's server choice.",
+      "identity_key": {
+        "component_id": "MCPExternalServers",
+        "data_flow_id": "DF_MCPClient_to_MCPExternalServers",
+        "stride_category": "I",
+        "attack_surface": "tools/call arguments"
+      }
+    },
+    {
+      "id": "T44.I",
+      "title": "GitHub PR content leak",
+      "description": "PR titles/bodies not inspected for secrets before publishing.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "git.go allowlist/denylist does not inspect PR body.",
+      "identity_key": {
+        "component_id": "GitHubAPI",
+        "data_flow_id": "DF_ToolRegistry_to_GitHubAPI",
+        "stride_category": "I",
+        "attack_surface": "gh pr create"
+      }
+    },
+    {
+      "id": "T45.A",
+      "title": "Unmarked web content (external view)",
+      "description": "Fetched web content re-enters context with no untrusted marker.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Open",
+      "mitigation": "SSRF dialer restricts destination only.",
+      "identity_key": {
+        "component_id": "Internet",
+        "data_flow_id": "DF_ToolRegistry_to_Internet",
+        "stride_category": "A",
+        "attack_surface": "web_fetch/web_search"
+      }
+    },
+    {
+      "id": "T46.T",
+      "title": "SSRF baseline",
+      "description": "Without validation, web_fetch/web_search could reach internal-only services.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Internal Network",
+      "status": "Mitigated",
+      "mitigation": "ssrfSafeDialer + redirect revalidation.",
+      "identity_key": {
+        "component_id": "Internet",
+        "data_flow_id": "DF_ToolRegistry_to_Internet",
+        "stride_category": "T",
+        "attack_surface": "ssrfSafeDialer"
+      }
+    },
+    {
+      "id": "T47.E",
+      "title": "Docker socket privilege equivalence",
+      "description": "Docker/Podman socket access equivalent to local-root/administrator.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Only ExecutionSandbox's fallback warning; no rootless enforcement.",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "data_flow_id": "DF_ExecutionSandbox_to_ContainerRuntime",
+        "stride_category": "E",
+        "attack_surface": "Container socket"
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "FIND-01",
+      "title": "Local process can obtain the daemon's real bearer token via the pre-auth /ui page-token flow",
+      "severity": "Critical",
+      "cvss_score": 8.2,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-306",
+      "owasp": "A07:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T08.S"
+      ],
+      "evidence_files": [
+        "internal/server/auth.go"
+      ],
+      "component": "WebUI",
+      "identity_key": {
+        "component_id": "WebUI",
+        "vulnerability": "CWE-306",
+        "attack_surface": "/ui, /auth/exchange"
+      }
+    },
+    {
+      "id": "FIND-02",
+      "title": "aegis mcp-serve and the ACP server accept commands from any local process with no authentication",
+      "severity": "Important",
+      "cvss_score": 7.8,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-306",
+      "owasp": "A07:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T28.S",
+        "T29.S"
+      ],
+      "evidence_files": [
+        "internal/mcpserver/server.go",
+        "internal/acp/agent.go"
+      ],
+      "component": "MCPServer",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "vulnerability": "CWE-306",
+        "attack_surface": "handleToolsCall / methodAuthenticate"
+      }
+    },
+    {
+      "id": "FIND-03",
+      "title": "Scheduled cron jobs execute unattended shell commands with no permission gate or approval",
+      "severity": "Important",
+      "cvss_score": 7.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:L/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-862",
+      "owasp": "A01:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T22.E"
+      ],
+      "evidence_files": [
+        "internal/cron/cron.go",
+        "internal/server/helpers.go"
+      ],
+      "component": "CronScheduler",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "vulnerability": "CWE-862",
+        "attack_surface": "cronShellRunner"
+      }
+    },
+    {
+      "id": "FIND-04",
+      "title": "web_fetch/web_search content re-enters the model's context with no untrusted-content marker",
+      "severity": "Important",
+      "cvss_score": 6.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:P/VC:H/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1427",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T12.A",
+        "T45.A"
+      ],
+      "evidence_files": [
+        "internal/tool/builtin/web.go",
+        "internal/mcp/trust.go"
+      ],
+      "component": "ToolRegistry",
+      "identity_key": {
+        "component_id": "ToolRegistry",
+        "vulnerability": "CWE-1427",
+        "attack_surface": "web_fetch/web_search"
+      }
+    },
+    {
+      "id": "FIND-05",
+      "title": "Persona and skill .md files are injected into the system prompt with no sanitization",
+      "severity": "Important",
+      "cvss_score": 6.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1427",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T16.T",
+        "T18.T"
+      ],
+      "evidence_files": [
+        "internal/persona/load.go",
+        "internal/skills/skills.go"
+      ],
+      "component": "PersonaLoader",
+      "identity_key": {
+        "component_id": "PersonaLoader",
+        "vulnerability": "CWE-1427",
+        "attack_surface": "parsePersonaFile / BuildBlock"
+      }
+    },
+    {
+      "id": "FIND-06",
+      "title": "Docker/Podman socket access grants the daemon local-root-equivalent privilege",
+      "severity": "Moderate",
+      "cvss_score": 6.4,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+      "cwe": "CWE-250",
+      "owasp": "A02:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T47.E"
+      ],
+      "evidence_files": [
+        "internal/sandbox/docker.go"
+      ],
+      "component": "ContainerRuntime",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "vulnerability": "CWE-250",
+        "attack_surface": "Container socket"
+      }
+    },
+    {
+      "id": "FIND-07",
+      "title": "lsp tool spawns a config-specified binary with no allowlist or verification",
+      "severity": "Moderate",
+      "cvss_score": 6.0,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:L/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-829",
+      "owasp": "A08:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T11.T"
+      ],
+      "evidence_files": [
+        "internal/lsp/client.go",
+        "internal/lsp/manager.go"
+      ],
+      "component": "ToolRegistry",
+      "identity_key": {
+        "component_id": "ToolRegistry",
+        "vulnerability": "CWE-829",
+        "attack_surface": "lsp command/args config"
+      }
+    },
+    {
+      "id": "FIND-08",
+      "title": "server.addr can be configured to a non-loopback address with no validation or warning",
+      "severity": "Moderate",
+      "cvss_score": 5.8,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1188",
+      "owasp": "A02:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T05.T"
+      ],
+      "evidence_files": [
+        "internal/config/config.go",
+        "internal/server/server.go"
+      ],
+      "component": "Server",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-1188",
+        "attack_surface": "server.addr config"
+      }
+    },
+    {
+      "id": "FIND-09",
+      "title": "Conversation content is sent to cloud LLM providers with no redaction or DLP step",
+      "severity": "Moderate",
+      "cvss_score": 5.2,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-201",
+      "owasp": "A04:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T09.I",
+        "T39.I",
+        "T41.I"
+      ],
+      "evidence_files": [
+        "internal/engine/engine.go"
+      ],
+      "component": "Engine",
+      "identity_key": {
+        "component_id": "Engine",
+        "vulnerability": "CWE-201",
+        "attack_surface": "Provider dispatch"
+      }
+    },
+    {
+      "id": "FIND-10",
+      "title": "Opt-in MCP output injection scan is regex-based and easily bypassed",
+      "severity": "Moderate",
+      "cvss_score": 5.0,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1427",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T26.A"
+      ],
+      "evidence_files": [
+        "internal/mcp/trust.go"
+      ],
+      "component": "MCPClient",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "vulnerability": "CWE-1427",
+        "attack_surface": "scan_output / scanForInjection"
+      }
+    },
+    {
+      "id": "FIND-11",
+      "title": "No rate limiting or alerting on repeated invalid bearer-token attempts",
+      "severity": "Moderate",
+      "cvss_score": 4.8,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-307",
+      "owasp": "A07:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T04.S"
+      ],
+      "evidence_files": [
+        "internal/server/auth.go"
+      ],
+      "component": "Server",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-307",
+        "attack_surface": "authMiddleware"
+      }
+    },
+    {
+      "id": "FIND-12",
+      "title": "Tool-call arguments are sent unconditionally to whichever MCP server is configured",
+      "severity": "Moderate",
+      "cvss_score": 4.6,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-200",
+      "owasp": "A04:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T43.I"
+      ],
+      "evidence_files": [
+        "internal/mcp/mcp.go",
+        "internal/mcp/http.go"
+      ],
+      "component": "MCPExternalServers",
+      "identity_key": {
+        "component_id": "MCPExternalServers",
+        "vulnerability": "CWE-200",
+        "attack_surface": "tools/call arguments"
+      }
+    },
+    {
+      "id": "FIND-13",
+      "title": "GitHub PR titles/bodies are not inspected for secrets before publishing",
+      "severity": "Low",
+      "cvss_score": 3.7,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-200",
+      "owasp": "A04:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T44.I"
+      ],
+      "evidence_files": [
+        "internal/tool/builtin/gitpr.go"
+      ],
+      "component": "GitHubAPI",
+      "identity_key": {
+        "component_id": "GitHubAPI",
+        "vulnerability": "CWE-200",
+        "attack_surface": "gh pr create"
+      }
+    },
+    {
+      "id": "FIND-14",
+      "title": "Sub-agents in a swarm share a single budget tracker, allowing one runaway agent to exhaust it for all",
+      "severity": "Low",
+      "cvss_score": 3.6,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-770",
+      "owasp": "A10:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T24.D"
+      ],
+      "evidence_files": [
+        "internal/swarm/subprocess.go"
+      ],
+      "component": "SwarmCoordinator",
+      "identity_key": {
+        "component_id": "SwarmCoordinator",
+        "vulnerability": "CWE-770",
+        "attack_surface": "Budget tracker"
+      }
+    },
+    {
+      "id": "FIND-15",
+      "title": "OpenAIAdapter traffic to a local Ollama endpoint is typically unencrypted",
+      "severity": "Low",
+      "cvss_score": 3.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-319",
+      "owasp": "A04:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T34.T"
+      ],
+      "evidence_files": [
+        "internal/provider/openai/openai.go"
+      ],
+      "component": "OpenAIAdapter",
+      "identity_key": {
+        "component_id": "OpenAIAdapter",
+        "vulnerability": "CWE-319",
+        "attack_surface": "Adapter.Stream"
+      }
+    },
+    {
+      "id": "FIND-16",
+      "title": "OutputGuard's fail-open behavior produces no distinct audit signal when validation is skipped",
+      "severity": "Low",
+      "cvss_score": 3.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-778",
+      "owasp": "A09:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T19.A"
+      ],
+      "evidence_files": [
+        "internal/guard/guard.go"
+      ],
+      "component": "OutputGuard",
+      "identity_key": {
+        "component_id": "OutputGuard",
+        "vulnerability": "CWE-778",
+        "attack_surface": "LLMGuard"
+      }
+    },
+    {
+      "id": "FIND-17",
+      "title": "TerminalUI does not sanitize ANSI/OSC control sequences in streamed model output",
+      "severity": "Low",
+      "cvss_score": 3.0,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:P/VC:N/VI:L/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-150",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T01.T"
+      ],
+      "evidence_files": [
+        "internal/tui/streaming.go"
+      ],
+      "component": "TerminalUI",
+      "identity_key": {
+        "component_id": "TerminalUI",
+        "vulnerability": "CWE-150",
+        "attack_surface": "Streaming render loop"
+      }
+    },
+    {
+      "id": "FIND-18",
+      "title": "SSRF-safe outbound HTTP dialer for web_fetch/web_search (existing control)",
+      "severity": "Low",
+      "cvss_score": 2.2,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-918",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T46.T"
+      ],
+      "evidence_files": [
+        "internal/tool/builtin/web.go"
+      ],
+      "component": "Internet",
+      "identity_key": {
+        "component_id": "Internet",
+        "vulnerability": "CWE-918",
+        "attack_surface": "ssrfSafeDialer"
+      }
+    },
+    {
+      "id": "FIND-19",
+      "title": "Always-on MCP output provenance wrapping (existing control)",
+      "severity": "Low",
+      "cvss_score": 2.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1427",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T27.I",
+        "T42.T"
+      ],
+      "evidence_files": [
+        "internal/mcp/trust.go"
+      ],
+      "component": "MCPClient",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "vulnerability": "CWE-1427",
+        "attack_surface": "wrapUntrusted"
+      }
+    },
+    {
+      "id": "FIND-20",
+      "title": "Sub-agent permission-gate parity fix (existing control)",
+      "severity": "Low",
+      "cvss_score": 2.0,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-862",
+      "owasp": "A01:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T25.E"
+      ],
+      "evidence_files": [
+        "internal/server/server.go",
+        "internal/cli/worker.go"
+      ],
+      "component": "SwarmCoordinator",
+      "identity_key": {
+        "component_id": "SwarmCoordinator",
+        "vulnerability": "CWE-862",
+        "attack_surface": "subAgentRunner"
+      }
+    },
+    {
+      "id": "FIND-21",
+      "title": "Sandbox strict-mode hard-fail on backend unavailability (existing control)",
+      "severity": "Low",
+      "cvss_score": 2.0,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-250",
+      "owasp": "A02:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T30.E"
+      ],
+      "evidence_files": [
+        "internal/server/server.go"
+      ],
+      "component": "ExecutionSandbox",
+      "identity_key": {
+        "component_id": "ExecutionSandbox",
+        "vulnerability": "CWE-250",
+        "attack_surface": "SelectSandbox"
+      }
+    },
+    {
+      "id": "FIND-22",
+      "title": "Rule-engine anti-bypass protections and advisory-by-design persona tool gate (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-88",
+      "owasp": "A01:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T13.E",
+        "T14.E",
+        "T15.T"
+      ],
+      "evidence_files": [
+        "internal/permission/rules.go",
+        "internal/permission/persona_tools.go"
+      ],
+      "component": "PermissionGate",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "vulnerability": "CWE-88",
+        "attack_surface": "Rule engine"
+      }
+    },
+    {
+      "id": "FIND-23",
+      "title": "Persona mode/rule escalation guard (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-269",
+      "owasp": "A01:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T17.E"
+      ],
+      "evidence_files": [
+        "internal/server/sessions.go"
+      ],
+      "component": "PersonaLoader",
+      "identity_key": {
+        "component_id": "PersonaLoader",
+        "vulnerability": "CWE-269",
+        "attack_surface": "resolveSessionMode"
+      }
+    },
+    {
+      "id": "FIND-24",
+      "title": "Run/connection resource ceilings and tool-call loop detection (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.8,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-770",
+      "owasp": "A10:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T07.D",
+        "T10.D"
+      ],
+      "evidence_files": [
+        "internal/server/server.go",
+        "internal/engine/loopdetect.go"
+      ],
+      "component": "Server",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-770",
+        "attack_surface": "Run/SSE ceilings"
+      }
+    },
+    {
+      "id": "FIND-25",
+      "title": "Security-scan target allow-list with literal-string host matching (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.7,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-918",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T21.I"
+      ],
+      "evidence_files": [
+        "internal/security/target.go"
+      ],
+      "component": "SecurityScanner",
+      "identity_key": {
+        "component_id": "SecurityScanner",
+        "vulnerability": "CWE-918",
+        "attack_surface": "isHostAllowed"
+      }
+    },
+    {
+      "id": "FIND-26",
+      "title": "Provider failover/retry for cloud LLM outages (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.6,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-410",
+      "owasp": "A10:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T33.D",
+        "T40.D"
+      ],
+      "evidence_files": [
+        "internal/provider/failover.go",
+        "internal/provider/retry.go"
+      ],
+      "component": "AnthropicAdapter",
+      "identity_key": {
+        "component_id": "AnthropicAdapter",
+        "vulnerability": "CWE-410",
+        "attack_surface": "Failover/retry"
+      }
+    },
+    {
+      "id": "FIND-27",
+      "title": "Secret handling hygiene: env-only API keys, gitignored project config, redacted debug output (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.6,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:H/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-798",
+      "owasp": "A04:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T31.I"
+      ],
+      "evidence_files": [
+        "internal/config/config.go",
+        ".gitignore"
+      ],
+      "component": "ConfigLoader",
+      "identity_key": {
+        "component_id": "ConfigLoader",
+        "vulnerability": "CWE-798",
+        "attack_surface": "API key handling"
+      }
+    },
+    {
+      "id": "FIND-28",
+      "title": "Terminal render wrap-cache and scroll-follow for large streamed content (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.4,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-400",
+      "owasp": "A10:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T02.D"
+      ],
+      "evidence_files": [
+        "internal/tui/streaming.go"
+      ],
+      "component": "TerminalUI",
+      "identity_key": {
+        "component_id": "TerminalUI",
+        "vulnerability": "CWE-400",
+        "attack_surface": "Streaming render loop"
+      }
+    },
+    {
+      "id": "FIND-29",
+      "title": "Local data stores lack the Windows ACL hardening applied to daemon.token",
+      "severity": "Moderate",
+      "cvss_score": 4.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-732",
+      "owasp": "A02:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T35.I",
+        "T36.I",
+        "T32.I"
+      ],
+      "evidence_files": [
+        "internal/session/session.go",
+        "internal/config/config.go",
+        "internal/server/token_windows.go"
+      ],
+      "component": "SessionStore",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "vulnerability": "CWE-732",
+        "attack_surface": "File ACLs"
+      }
+    },
+    {
+      "id": "FIND-30",
+      "title": "Memory files can be directly edited to inject persistent false learned content",
+      "severity": "Moderate",
+      "cvss_score": 4.2,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-345",
+      "owasp": "A08:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T37.T"
+      ],
+      "evidence_files": [
+        "internal/memory/memory.go"
+      ],
+      "component": "MemoryStore",
+      "identity_key": {
+        "component_id": "MemoryStore",
+        "vulnerability": "CWE-345",
+        "attack_surface": "Memory entry integrity"
+      }
+    },
+    {
+      "id": "FIND-31",
+      "title": "Security-scanner installer script argument construction was not fully verified",
+      "severity": "Low",
+      "cvss_score": 3.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:H/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-78",
+      "owasp": "A03:2025",
+      "tier": 3,
+      "effort": "Low",
+      "related_threats": [
+        "T20.T"
+      ],
+      "evidence_files": [
+        "internal/security/install.go"
+      ],
+      "component": "SecurityScanner",
+      "identity_key": {
+        "component_id": "SecurityScanner",
+        "vulnerability": "CWE-78",
+        "attack_surface": "install.go shell invocation"
+      }
+    },
+    {
+      "id": "FIND-32",
+      "title": "Client-Server traffic is unencrypted plain HTTP over loopback",
+      "severity": "Low",
+      "cvss_score": 3.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:H/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-319",
+      "owasp": "A04:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T06.I"
+      ],
+      "evidence_files": [
+        "internal/server/server.go"
+      ],
+      "component": "Server",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-319",
+        "attack_surface": "HTTP transport"
+      }
+    },
+    {
+      "id": "FIND-33",
+      "title": "Bearer token persists in Client process memory for the process lifetime",
+      "severity": "Low",
+      "cvss_score": 2.8,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:H/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-316",
+      "owasp": "A04:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T03.I"
+      ],
+      "evidence_files": [
+        "internal/client/client.go"
+      ],
+      "component": "Client",
+      "identity_key": {
+        "component_id": "Client",
+        "vulnerability": "CWE-316",
+        "attack_surface": "In-memory token"
+      }
+    },
+    {
+      "id": "FIND-34",
+      "title": "Cron job commands have no execution audit trail distinct from ordinary tool-call tracing",
+      "severity": "Low",
+      "cvss_score": 2.5,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:H/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-778",
+      "owasp": "A09:2025",
+      "tier": 3,
+      "effort": "Low",
+      "related_threats": [
+        "T23.R"
+      ],
+      "evidence_files": [
+        "internal/cron/cron.go"
+      ],
+      "component": "CronScheduler",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "vulnerability": "CWE-778",
+        "attack_surface": "Job execution logging"
+      }
+    },
+    {
+      "id": "FIND-35",
+      "title": "Mailbox file-permission restriction (existing control)",
+      "severity": "Low",
+      "cvss_score": 1.5,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:N/PR:H/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-732",
+      "owasp": "A02:2025",
+      "tier": 3,
+      "effort": "Low",
+      "related_threats": [
+        "T38.I"
+      ],
+      "evidence_files": [
+        "internal/swarm/mailbox.go"
+      ],
+      "component": "Mailbox",
+      "identity_key": {
+        "component_id": "Mailbox",
+        "vulnerability": "CWE-732",
+        "attack_surface": "Mailbox file perms"
+      }
+    }
+  ],
+  "metrics": {
+    "total_components": 32,
+    "total_boundaries": 2,
+    "total_flows": 34,
+    "total_threats": 47,
+    "total_findings": 35,
+    "threats_by_tier": {
+      "T1": 0,
+      "T2": 38,
+      "T3": 9
+    },
+    "findings_by_tier": {
+      "T1": 0,
+      "T2": 28,
+      "T3": 7
+    },
+    "threats_by_stride": {
+      "S": 4,
+      "T": 11,
+      "R": 1,
+      "I": 14,
+      "D": 6,
+      "E": 7,
+      "A": 4
+    },
+    "findings_by_severity": {
+      "Critical": 1,
+      "Important": 4,
+      "Moderate": 9,
+      "Low": 21
+    }
+  }
+}
