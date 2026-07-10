@@ -528,6 +528,104 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleFork creates a new session that starts as a copy of an existing
+// session's conversation (P22.3) — the non-destructive counterpart to
+// /rewind. An optional checkpoint id truncates the new session's messages to
+// that checkpoint's Seq, same as rewind's "conversation" scope; omitted, the
+// fork carries the full current conversation. Either way the source session
+// is read-only here: it is never truncated or otherwise mutated, so a risky
+// edit-and-retry can never damage the original.
+func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	id := r.PathValue("id")
+	var req api.ForkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	// Same in-flight-run serialization handleRewind uses: without it, a turn
+	// still appending its tail could interleave with the sess.Messages read
+	// below and get a torn/partial snapshot copied into the fork.
+	sem := s.sessionSemaphore(id)
+	select {
+	case sem <- struct{}{}:
+	case <-r.Context().Done():
+		writeError(w, http.StatusServiceUnavailable, "request cancelled while waiting for active run to finish")
+		return
+	}
+	defer func() { <-sem }()
+
+	sess, err := s.store.Get(r.Context(), id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+
+	keep := len(sess.Messages)
+	if req.CheckpointID != "" {
+		if s.checkpoints == nil {
+			writeError(w, http.StatusServiceUnavailable, "checkpointing not available")
+			return
+		}
+		cp, err := s.checkpoints.Get(r.Context(), req.CheckpointID)
+		if err != nil {
+			if errors.Is(err, checkpoint.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "checkpoint not found")
+				return
+			}
+			s.logger.Error("get checkpoint", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if cp.SessionID != id {
+			writeError(w, http.StatusBadRequest, "checkpoint does not belong to this session")
+			return
+		}
+		keep = cp.Seq
+		if keep < 0 {
+			keep = 0
+		}
+		if keep > len(sess.Messages) {
+			keep = len(sess.Messages)
+		}
+	}
+
+	title := forkTitle(sess.Title)
+	forked, err := s.store.Create(r.Context(), title, sess.System, sess.Mode, sess.Persona)
+	if err != nil {
+		s.logger.Error("fork: create session", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if sess.Model != "" {
+		// Carry a per-session model override (P14.7) forward; SetModel is a
+		// second write rather than a Create param since Create predates it and
+		// only one caller (this one) needs it.
+		if err := s.store.SetModel(r.Context(), forked.ID, sess.Model); err != nil {
+			s.logger.Warn("fork: carry model override", "session", forked.ID, "err", err)
+		}
+	}
+	if err := s.store.SaveMessages(r.Context(), forked.ID, sess.Messages[:keep]); err != nil {
+		s.logger.Error("fork: save messages", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, api.ForkResponse{SessionID: forked.ID, Title: title, MessagesKept: keep})
+}
+
+// forkTitle derives a forked session's title from its source's, mirroring
+// git's "branch off" naming convention (no dedicated model call — this stays
+// a cheap, deterministic label, unlike generateTitle's async first-message
+// summarization for a brand-new top-level session).
+func forkTitle(orig string) string {
+	if orig == "" {
+		return "Fork"
+	}
+	return "Fork of " + orig
+}
+
 // handleCompactSession forces context compaction on a session's current
 // message history outside of a model turn (P19.2) — e.g. before a long
 // tool-heavy stretch the user knows is coming, rather than waiting for the
