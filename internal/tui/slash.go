@@ -58,6 +58,14 @@ type SlashResult struct {
 	// whole project), carried through to re-dispatch /threat-model once a
 	// framework is picked.
 	ThreatModelTarget *string
+
+	// SwitchToSession is non-empty after a successful /fork (P22.3): the TUI
+	// must load this session id as the active one, the same "fetch and
+	// replace the live view" path Ctrl+Y's session picker and ReloadSession
+	// both already use — reused here rather than duplicated, since a fork's
+	// "switch into a different, already-fully-formed session" is exactly the
+	// Ctrl+Y case, not the "refetch this same session" ReloadSession case.
+	SwitchToSession string
 }
 
 // SlashDispatcher dispatches slash commands to built-in handlers or custom
@@ -1105,6 +1113,55 @@ func (d *SlashDispatcher) cmdRewind(args []string) SlashResult {
 		return SlashResult{Output: summary}
 	}
 	return SlashResult{Output: summary, ReloadSession: true}
+}
+
+// cmdFork creates a new session that branches off the current one (P22.3) —
+// the non-destructive counterpart to /rewind: the source session is never
+// truncated, so this is safe to use for "let me try something risky" without
+// any risk to the conversation you're forking from.
+//
+// No args forks at the current end of the conversation — a clean sandbox
+// branch point. /fork <n> instead truncates the new session to the nth
+// checkpoint (newest first, same numbering /rewind and /rollback already
+// use): the state just before that turn's user message, ready to receive a
+// fresh or edited message picking up from there. Either way, on success the
+// TUI switches into the new session, mirroring what picking an entry from
+// Ctrl+Y's session switcher already does.
+func (d *SlashDispatcher) cmdFork(args []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	checkpointID := ""
+	if len(args) > 0 {
+		// Validate the argument shape locally before ever touching the
+		// daemon — "/fork abc" should fail immediately rather than paying
+		// for a checkpoint list fetch just to reject it.
+		n, err := strconv.Atoi(args[0])
+		if err != nil || n < 1 {
+			return SlashResult{Output: fmt.Sprintf("Invalid checkpoint number %q. Use /rewind to see the list.", args[0]), IsError: true}
+		}
+		cps, err := d.client.ListCheckpoints(ctx, d.sessionID)
+		if err != nil {
+			return SlashResult{Output: fmt.Sprintf("Failed to list checkpoints: %v", err), IsError: true}
+		}
+		if len(cps) == 0 {
+			return SlashResult{Output: "No checkpoints yet. One is captured at the start of each turn once you send a message."}
+		}
+		if n > len(cps) {
+			return SlashResult{Output: fmt.Sprintf("Invalid checkpoint number %d. Use /rewind to see the list (1–%d).", n, len(cps)), IsError: true}
+		}
+		checkpointID = cps[n-1].ID
+	}
+
+	resp, err := d.client.Fork(ctx, d.sessionID, checkpointID)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Fork failed: %v", err), IsError: true}
+	}
+
+	return SlashResult{
+		Output:          fmt.Sprintf("Forked into new session %s (%q), %d message(s) — switching to it.", short(resp.SessionID), resp.Title, resp.MessagesKept),
+		SwitchToSession: resp.SessionID,
+	}
 }
 
 // cmdRollback is like rewind but also resets git HEAD to the pre-turn commit,
