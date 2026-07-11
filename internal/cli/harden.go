@@ -9,24 +9,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Hardened cost-cap defaults, applied only to a cap that is currently unset
-// (0 = unlimited) — harden tightens whatever was left wide open by default,
-// it never silently overrides a value the user already chose. These are
-// deliberately conservative starting points, not a prescription: edit
-// cost.* in the resulting config to fit your own workflow.
-const (
-	hardenSessionCapUSD   = 5.0
-	hardenDailyCapUSD     = 25.0
-	hardenSessionTokenCap = 300_000
-	hardenDailyTokenCap   = 2_000_000
-)
-
 // newHardenCmd builds `aegis harden`, a one-command way to flip the
 // permissive-by-default knobs the fable-review.md security audit called
 // out (sandbox=local, egress-then-write=off, cost caps unlimited) from
 // opt-in to on, instead of requiring an operator to discover and set each
 // one individually across `aegis sandbox use`, `aegis security-config`, and
 // hand-editing cost.* in config.yaml.
+//
+// The cap thresholds and "leave an already-hardened knob alone" logic live in
+// config.ComputeHardenPlan, shared with POST /config/harden (P15.2) so the
+// CLI and HTTP surfaces can never drift apart on what "hardened" means.
 func newHardenCmd() *cobra.Command {
 	var project, yes bool
 	cmd := &cobra.Command{
@@ -51,72 +43,24 @@ func newHardenCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 
-			sandboxPatch := config.SandboxPatch{
-				Backend:  cfg.Sandbox.Backend,
-				Runtime:  cfg.Sandbox.Runtime,
-				Priority: cfg.Sandbox.Priority,
-				Image:    cfg.Sandbox.Image,
-				Network:  cfg.Sandbox.Network,
-			}
-			// "container" is already hardened (a specific runtime was pinned);
-			// only "local" (or unset, which defaults to local) needs to move.
-			sandboxChanged := sandboxPatch.Backend != "auto" && sandboxPatch.Backend != "container"
-			if sandboxChanged {
-				sandboxPatch.Backend = "auto"
-			}
-
-			securityPatch := config.SecurityPatch{
-				EgressThenWrite:  true,
-				NetworkAllowList: cfg.Security.NetworkAllowList,
-				DefaultMethod:    cfg.Security.DefaultMethod,
-				Tools:            cfg.Security.Tools,
-				DAST:             cfg.Security.DAST,
-			}
-			securityChanged := !cfg.Security.EgressThenWrite
-
-			costPatch := config.CostPatch{
-				BudgetUSD:       cfg.Cost.BudgetUSD,
-				MaxTokensPerRun: cfg.Cost.MaxTokensPerRun,
-				SessionCapUSD:   cfg.Cost.SessionCapUSD,
-				DailyCapUSD:     cfg.Cost.DailyCapUSD,
-				SessionTokenCap: cfg.Cost.SessionTokenCap,
-				DailyTokenCap:   cfg.Cost.DailyTokenCap,
-				AlertThreshold:  cfg.Cost.AlertThreshold,
-			}
-			var costChanges []string
-			if costPatch.SessionCapUSD <= 0 {
-				costPatch.SessionCapUSD = hardenSessionCapUSD
-				costChanges = append(costChanges, fmt.Sprintf("session_cap_usd -> $%.2f", hardenSessionCapUSD))
-			}
-			if costPatch.DailyCapUSD <= 0 {
-				costPatch.DailyCapUSD = hardenDailyCapUSD
-				costChanges = append(costChanges, fmt.Sprintf("daily_cap_usd -> $%.2f", hardenDailyCapUSD))
-			}
-			if costPatch.SessionTokenCap <= 0 {
-				costPatch.SessionTokenCap = hardenSessionTokenCap
-				costChanges = append(costChanges, fmt.Sprintf("session_token_cap -> %d", hardenSessionTokenCap))
-			}
-			if costPatch.DailyTokenCap <= 0 {
-				costPatch.DailyTokenCap = hardenDailyTokenCap
-				costChanges = append(costChanges, fmt.Sprintf("daily_token_cap -> %d", hardenDailyTokenCap))
-			}
+			plan := config.ComputeHardenPlan(cfg)
 
 			fmt.Fprintln(out, "This will apply the following changes:")
 			fmt.Fprintln(out)
-			if sandboxChanged {
+			if plan.SandboxChanged {
 				fmt.Fprintf(out, "  sandbox.backend              %q -> \"auto\"\n", cfg.Sandbox.Backend)
 			} else {
 				fmt.Fprintf(out, "  sandbox.backend              already %q — unchanged\n", cfg.Sandbox.Backend)
 			}
-			if securityChanged {
+			if plan.SecurityChanged {
 				fmt.Fprintln(out, "  security.egress_then_write   false -> true")
 			} else {
 				fmt.Fprintln(out, "  security.egress_then_write   already true — unchanged")
 			}
-			if len(costChanges) == 0 {
+			if len(plan.CostChanges) == 0 {
 				fmt.Fprintln(out, "  cost caps                    already set — unchanged")
 			} else {
-				for _, c := range costChanges {
+				for _, c := range plan.CostChanges {
 					fmt.Fprintf(out, "  cost.%s\n", c)
 				}
 			}
@@ -142,13 +86,13 @@ func newHardenCmd() *cobra.Command {
 				writeCost = config.PatchProjectCost
 				scope = "project (.aegis/config.yaml)"
 			}
-			if err := writeSandbox(sandboxPatch); err != nil {
+			if err := writeSandbox(plan.Sandbox); err != nil {
 				return fmt.Errorf("write sandbox config: %w", err)
 			}
-			if err := writeSecurity(securityPatch); err != nil {
+			if err := writeSecurity(plan.Security); err != nil {
 				return fmt.Errorf("write security config: %w", err)
 			}
-			if err := writeCost(costPatch); err != nil {
+			if err := writeCost(plan.Cost); err != nil {
 				return fmt.Errorf("write cost config: %w", err)
 			}
 			fmt.Fprintf(out, "Hardened profile applied to %s config. Restart Aegis to apply.\n", scope)

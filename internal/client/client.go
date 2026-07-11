@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -193,6 +194,118 @@ func (c *Client) Scan(ctx context.Context, req api.ScanRequest) (*api.ScanRespon
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetConfigSandbox returns the daemon's currently effective sandbox: config
+// (P15.2). scope selects "project" or "global"; empty lets the daemon pick a
+// default (see server.resolveScope).
+func (c *Client) GetConfigSandbox(ctx context.Context, scope string) (*api.ConfigSandboxResponse, error) {
+	var out api.ConfigSandboxResponse
+	if err := c.do(ctx, http.MethodGet, "/config/sandbox"+scopeQuery(scope), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PatchConfigSandbox partially updates the sandbox: config block.
+func (c *Client) PatchConfigSandbox(ctx context.Context, req api.ConfigSandboxPatchRequest) (*api.ConfigSandboxResponse, error) {
+	var out api.ConfigSandboxResponse
+	if err := c.do(ctx, http.MethodPatch, "/config/sandbox", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetConfigSecurity returns the daemon's currently effective security:
+// config (P15.2). scope selects "project" or "global"; empty lets the
+// daemon pick a default.
+func (c *Client) GetConfigSecurity(ctx context.Context, scope string) (*api.ConfigSecurityResponse, error) {
+	var out api.ConfigSecurityResponse
+	if err := c.do(ctx, http.MethodGet, "/config/security"+scopeQuery(scope), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PatchConfigSecurity partially updates the security: config block.
+func (c *Client) PatchConfigSecurity(ctx context.Context, req api.ConfigSecurityPatchRequest) (*api.ConfigSecurityResponse, error) {
+	var out api.ConfigSecurityResponse
+	if err := c.do(ctx, http.MethodPatch, "/config/security", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetConfigSkills returns which embedded built-in skills are currently
+// active (P15.2). scope selects "project" or "global"; empty lets the
+// daemon pick a default.
+func (c *Client) GetConfigSkills(ctx context.Context, scope string) (*api.ConfigSkillsResponse, error) {
+	var out api.ConfigSkillsResponse
+	if err := c.do(ctx, http.MethodGet, "/config/skills"+scopeQuery(scope), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PatchConfigSkills replaces the skills.builtin_enabled list. names is the
+// full desired set, not a delta.
+func (c *Client) PatchConfigSkills(ctx context.Context, scope string, names []string) (*api.ConfigSkillsResponse, error) {
+	var out api.ConfigSkillsResponse
+	req := api.ConfigSkillsPatchRequest{Scope: scope, BuiltinEnabled: names}
+	if err := c.do(ctx, http.MethodPatch, "/config/skills", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ConfigHarden applies (or, with Confirm false, previews) the hardened
+// profile config.ComputeHardenPlan computes — the HTTP equivalent of
+// `aegis harden` (P15.2).
+func (c *Client) ConfigHarden(ctx context.Context, req api.ConfigHardenRequest) (*api.ConfigHardenResponse, error) {
+	var out api.ConfigHardenResponse
+	if err := c.do(ctx, http.MethodPost, "/config/harden", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SecurityStatus reports every built-in scanner's configured/resolved
+// status (P15.2) — the same live-availability probe the `/security-config`
+// TUI dialog shows.
+func (c *Client) SecurityStatus(ctx context.Context) (*api.SecurityStatusResponse, error) {
+	var out api.SecurityStatusResponse
+	if err := c.do(ctx, http.MethodGet, "/security/status", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SecurityBaseline returns the project's accepted-risk suppression
+// allowlist (.aegis/security-baseline.yaml, P11.8).
+func (c *Client) SecurityBaseline(ctx context.Context) (*api.SecurityBaselineResponse, error) {
+	var out api.SecurityBaselineResponse
+	if err := c.do(ctx, http.MethodGet, "/security/baseline", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SecurityInstall runs (or, with req.Confirm false, previews) a security
+// scanner's guided host install (P15.2) — the same underlying command
+// `aegis security install` and the `/security-config` TUI wizard run.
+func (c *Client) SecurityInstall(ctx context.Context, req api.SecurityInstallRequest) (*api.SecurityInstallResponse, error) {
+	var out api.SecurityInstallResponse
+	if err := c.do(ctx, http.MethodPost, "/security/install", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func scopeQuery(scope string) string {
+	if scope == "" {
+		return ""
+	}
+	return "?scope=" + url.QueryEscape(scope)
 }
 
 // Debate runs a multi-agent debate (P12) over a claim directly against the
