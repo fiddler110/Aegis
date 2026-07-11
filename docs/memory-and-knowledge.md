@@ -46,7 +46,7 @@ The agent can call `remember` to persist facts:
 
 **Format:** Freeform markdown. You can also edit `.aegis/memory.md` directly in your editor — changes are picked up on the next session start (cached for 5 seconds).
 
-**Example `.aegis/memory.md`:**
+**Integrity check:** Aegis records a sha256 hash of each memory file's content in a sidecar file next to it (`.aegis/memory.md.integrity`) every time it writes via `remember`/`/remember`. If the file's content on disk no longer matches that recorded hash the next time it's loaded — i.e. it was edited by something other than Aegis's own write path — a visible `⚠️ integrity check failed` warning is prepended to that memory's injected text, and a warning is logged. The content itself is never dropped (a mismatch doesn't necessarily mean malicious tampering — you may have hand-edited the file on purpose), so intentional manual edits still load; they just also carry the warning banner until the next `remember` refreshes the sidecar's baseline. A file with no sidecar at all (a pre-existing `memory.md` from before this check existed, or its very first write) loads silently with no warning — the sidecar is simply (re)established as the new trust baseline for future loads. This is a tamper-detection heuristic, not cryptographic authentication: anyone with enough host/OS access to edit `memory.md` can also edit or delete its sidecar, so it does not stop a determined attacker — see [FIND-30](../threat-model-20260710-173718/3-findings.md) for the full threat-model writeup.
 ```markdown
 ## Project: Aegis
 
@@ -252,7 +252,7 @@ At session start, Aegis loads memory in this order:
 4. User skills (`~/.aegis/skills/*.md`)
 5. Repo map (`.aegis/repomap.json` → injected into system prompt)
 
-Memory files are cached for 5 seconds — file edits are picked up within a few seconds without restarting Aegis.
+Memory files are cached for 5 seconds — file edits are picked up within a few seconds without restarting Aegis. Each memory file's integrity is re-checked against its `.integrity` sidecar on every (post-cache) load — see [Project Memory](#project-memory) above.
 
 The project knowledge base and long-term entity store are *not* injected into the system prompt — they're queried on demand via the `project_knowledge` and `entity_recall` tools, keeping their (potentially large) content out of every turn's token budget.
 
