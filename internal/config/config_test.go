@@ -203,3 +203,37 @@ func TestAPIKeyFromEnv(t *testing.T) {
 		t.Errorf("api key not read from env, got %q", cfg.Provider.APIKey)
 	}
 }
+
+// TestLoadDotEnvAppliesPermissionHardening exercises the FIND-29/P24.16
+// fsguard.RestrictToOwner call loadDotEnv makes on a successful read. On
+// POSIX, fsguard.RestrictToOwner is a no-op, so this mainly guards against a
+// regression where the hardening call errors out and (incorrectly) fails
+// the whole load; on Windows it also confirms the file remains readable
+// and its variables still get applied after the ACL is tightened.
+func TestLoadDotEnvAppliesPermissionHardening(t *testing.T) {
+	clearEnv(t, "AEGIS_TEST_DOTENV_VAR")
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("AEGIS_TEST_DOTENV_VAR=hardened\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	if err := loadDotEnv(envPath); err != nil {
+		t.Fatalf("loadDotEnv: %v", err)
+	}
+	if got := os.Getenv("AEGIS_TEST_DOTENV_VAR"); got != "hardened" {
+		t.Errorf("AEGIS_TEST_DOTENV_VAR = %q, want %q", got, "hardened")
+	}
+}
+
+// TestLoadDotEnvMissingFileNoOp confirms a missing .env file is still a
+// silent no-op (not an error) now that a hardening call has been added to
+// the success path — the os.IsNotExist short-circuit above it must still
+// return before fsguard is ever consulted.
+func TestLoadDotEnvMissingFileNoOp(t *testing.T) {
+	dir := t.TempDir()
+	if err := loadDotEnv(filepath.Join(dir, "does-not-exist.env")); err != nil {
+		t.Errorf("loadDotEnv on missing file: %v, want nil", err)
+	}
+}

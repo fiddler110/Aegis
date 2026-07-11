@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,8 @@ import (
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
+
+	"github.com/fiddler110/aegis/internal/fsguard"
 )
 
 // Config is the fully resolved harness configuration.
@@ -605,6 +608,14 @@ func ProjectConfigPath() string {
 // environment variables always take precedence. The file format is KEY=VALUE
 // per line; lines beginning with # and blank lines are ignored. Values may be
 // surrounded by single or double quotes (stripped on read).
+//
+// On a successful read, it also opportunistically hardens the file's
+// permissions via fsguard.RestrictToOwner (FIND-29/P24.16; a no-op on
+// POSIX). Unlike daemon.token or the session database, .env is a
+// pre-existing file the user created, not one Aegis wrote itself, so a
+// failure here only logs a warning rather than failing config.Load() — a
+// locked-down host where the current user can't rewrite the ACL of their
+// own file shouldn't break every command.
 func loadDotEnv(path string) error {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -612,6 +623,9 @@ func loadDotEnv(path string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if err := fsguard.RestrictToOwner(path); err != nil {
+		slog.Default().Warn("failed to restrict .env file permissions", "path", path, "err", err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)

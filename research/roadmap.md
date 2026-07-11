@@ -1,19 +1,20 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-11 — Tier 3's third item, **P24.17, shipped** (memory-file integrity
-verification). Full-repo STRIDE-A threat model (`threat-model-20260710-173718/`) findings now stand
-at 14 of 17 actionable findings shipped (P24.1–P24.13, P24.17); 3 remain open as P24.16/P24.18 (plus
-the parked P24.22), tiered by severity/effort/dependency alongside the existing tracks. Remaining
-Tier 3 work is P24.16 and P24.18 (security findings), being shipped independently in separate
-worktree sub-agents.
+**Last updated:** 2026-07-11 — Tier 3's remaining findings, **P24.16 and P24.17, shipped in
+parallel via isolated git-worktree sub-agents** alongside P24.18 (same pattern as the 2026-07-11
+P24.11/P24.12/P24.13 batch and the 2026-07-10 P15.2/P21.2/P24.10 batch). Full-repo STRIDE-A threat
+model (`threat-model-20260710-173718/`) findings now stand at 15 of 17 actionable findings shipped
+(P24.1–P24.13, P24.16, P24.17); 2 remain open as P24.18–P24.21 (plus the parked P24.22), tiered by
+severity/effort/dependency alongside the existing tracks. Remaining Tier 3 work is P24.18 (security
+finding), also shipped the same day in its own worktree sub-agent — see below.
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.17 (Tier 3, memory-file integrity check, 2026-07-11), P24.11–P24.13 (Tier 3 second batch, 2026-07-11), P15.2/P21.2/P24.10 (Tier 3 first batch, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
+This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.16/P24.17 (Tier 3 third batch, 2026-07-11), P24.11–P24.13 (Tier 3 second batch, 2026-07-11), P15.2/P21.2/P24.10 (Tier 3 first batch, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
 
 ---
 
 ## Status
 
-**Open items:** P24.16/P24.18–P24.22 (threat-model findings), P15.3–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
+**Open items:** P24.18–P24.22 (threat-model findings), P15.3–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
 
 **Priority order:** see the tiered breakdown immediately below — it is the authoritative "what's next" view, ordered by tier and effort.
 
@@ -118,9 +119,25 @@ isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
   caught); added a documented evaluate-and-defer writeup for a model-based classifier as the
   longer-term option, since it would add a real network/latency/cost dependency and a new
   attackable trust surface with no evidence the current heuristic is inadequate in practice.
-- **P24.16 — FIND-29: extend Windows DACL hardening beyond `daemon.token`** (M, security, Moderate,
+- ~~**P24.16 — FIND-29: extend Windows DACL hardening beyond `daemon.token`** (M, security, Moderate,
   CVSS 4.9). Session DB, checkpoint snapshots, and `.aegis/.env` inherit ambient directory ACLs
-  today.
+  today.~~ **SHIPPED 2026-07-11.** Extracted the SDDL-based owner-only-DACL logic out of
+  `internal/server/token_windows.go`/`token_other.go` into a new leaf package, `internal/fsguard`
+  (`RestrictToOwner`, same windows/other build-tag split, same `"D:PAI(A;;FA;;;OW)"` SDDL string),
+  so `internal/session` and `internal/config` can call it without an import cycle through
+  `internal/server`; the old server-local copies were deleted and `auth.go`'s
+  `generateAndWriteToken` now calls the shared one. `session.Open` hardens `sessions.db` plus its
+  WAL-mode `-wal`/`-shm` sidecars after `migrate()` succeeds (checkpoint snapshots need no separate
+  treatment — `internal/checkpoint` shares the same SQLite connection); a hardening failure on the
+  main db file propagates as an `Open` error like `daemon.token`'s always has, while a sidecar
+  failure (including "doesn't exist yet") only logs a warning. `config.loadDotEnv` applies the same
+  hardening to `.aegis/.env` after a successful read, best-effort (warns, doesn't fail
+  `config.Load()`) since that file is user-owned, not Aegis-written. `RestrictToOwner` itself treats
+  a missing path as a no-op. New `internal/fsguard/fsguard_windows_test.go` reads the on-disk DACL
+  back via `golang.org/x/sys/windows` and asserts exactly one ACE naming the owner-rights SID (not
+  Everyone); cross-platform smoke/no-op tests added in `internal/fsguard/fsguard_test.go`,
+  `internal/session/session_test.go`, and `internal/config/config_test.go`. `docs/configuration.md`
+  documents the extended coverage.
 - ~~**P24.17 — FIND-30: add integrity verification (hash-at-write, check-at-load) for memory
   files** (M, security, Moderate, CVSS 4.2).~~ **SHIPPED 2026-07-11.** Each memory file
   (`.aegis/memory.md` and the user-global `memory.md`) now has a sha256 sidecar
@@ -134,6 +151,8 @@ isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
   sidecar next to it, so a secret key wouldn't raise the bar.
 - **P24.18 — FIND-32: offer optional TLS or a Unix-domain-socket/named-pipe transport for
   client↔daemon traffic** (M, security, Low, CVSS 3.3). Currently plaintext HTTP over loopback.
+  Being shipped independently in its own worktree sub-agent alongside P24.16/P24.17 — see
+  [releases.md](releases.md#latest-changes) once merged.
 
 ### Tier 4 — Parked / low priority / no current trigger
 Do not build speculatively — revisit only if a concrete trigger (user demand, reported pain, incident) appears.
@@ -172,9 +191,10 @@ Full-repo STRIDE-A threat model at commit `34aa687`:
 total; 14 were "existing control" (already mitigated, verified, no action needed — FIND-18/19/20/
 21/22/23/24/25/26/27/28/35), FIND-04/FIND-08 shipped same-day, and P24.1–P24.9 (Critical/Important
 + Tier 2 quick wins, below) shipped same-day too. P24.10–P24.13 (Tier 3 first and second batches)
-shipped 2026-07-10/11; P24.17 (Tier 3, memory-file integrity check) shipped 2026-07-11. 4 remain
-open as P24.16/P24.18–P24.21 (plus P24.22, a new low-severity item P24.8's audit surfaced), grouped
-by the tier they were slotted into above.
+shipped 2026-07-10/11; P24.16 and P24.17 (Tier 3 third batch) shipped 2026-07-11, in parallel with
+P24.18 (still open, being merged from its own worktree sub-agent). 2 remain open as P24.18/
+P24.19–P24.21 (plus P24.22, a new low-severity item P24.8's audit surfaced), grouped by the tier
+they were slotted into above.
 
 **Critical/Important (Tier 1): all shipped 2026-07-10.** See [releases.md](releases.md#latest-changes)
 for what each one actually did — P24.1 (FIND-01, `/ui` page-token double-submit CSRF binding),
@@ -191,12 +211,9 @@ tests; see P24.22 above for the one latent observation it surfaced), P24.9 (FIND
 `cron_runs` table + `cron_history` tool, independent of turn traces).
 
 **Larger/sequence-dependent (Tier 3, Medium effort):** P24.10 shipped 2026-07-10; P24.11–P24.13
-shipped 2026-07-11, all three in parallel via isolated git-worktree sub-agents (see
-[releases.md](releases.md#latest-changes)). P24.17 also shipped 2026-07-11 (memory-file integrity
-check), built independently alongside P24.16/P24.18 in a separate worktree sub-agent — see
-[releases.md](releases.md#latest-changes) for the writeup.
-- **P24.16 (FIND-29)** — Extend `restrictToOwner`-style Windows DACL hardening to `sessions.db`,
-  checkpoint snapshots, and `.aegis/.env`.
+shipped 2026-07-11, all three in parallel via isolated git-worktree sub-agents; P24.16 and P24.17
+shipped 2026-07-11, also in parallel via isolated git-worktree sub-agents alongside P24.18 (see
+[releases.md](releases.md#latest-changes)).
 - **P24.18 (FIND-32)** — Optional TLS (self-signed/pinned) or Unix-domain-socket/named-pipe
   transport for client↔daemon traffic.
 
