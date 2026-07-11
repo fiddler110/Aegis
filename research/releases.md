@@ -9,9 +9,70 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **P15.2, the daemon config-mutation endpoints, shipped via an
+**Last updated:** 2026-07-11 — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
+second batch — shipped in parallel via isolated git-worktree sub-agents** (see
+[roadmap.md](roadmap.md#priority-order)):
+**P24.11 (FIND-07) — allowlist/trust-gate LSP server commands.** `internal/lsp/client.go`'s
+`NewClient` passed a project/user-config-supplied `command`/`args` straight to
+`exec.CommandContext` with no allowlist or verification — a malicious project `.aegis/config.yaml`
+could point the LSP client at an arbitrary binary for code execution the first time LSP integration
+activated. All configured LSP servers start eagerly and synchronously at daemon construction time
+(`internal/server/server.go`, inside `server.New`), before any TUI/session/interactive approver
+exists, which ruled out a live TOFU-confirmation prompt — there's no human present at the point
+that matters. Added a built-in allowlist of common LSP server binary basenames
+(`internal/lsp/trust.go`, matched case-insensitively against just the basename, not the full path)
+plus an explicit per-server `lsp[].trust: true` config opt-in for anything else; `Manager.Start`
+now calls a new pure `checkTrusted` before spawning and refuses (with an actionable error naming
+the config knob) instead of exec'ing an unrecognized, non-trusted command.
+Tests: `internal/lsp/trust_test.go` (new) — allowlisted basename, allowlisted-via-full-path
+(including Windows-style), non-allowlisted refused, non-allowlisted allowed with `trust: true`,
+case-insensitivity. `go build ./...` clean; `go test ./internal/lsp/... ./internal/config/...
+./internal/server/...` green except the same three pre-existing/environmental `internal/server`
+failures noted elsewhere in this doc.
+**P24.12 (FIND-09) — opt-in secret redaction pass for tool-read content.** Full conversation and
+tool-read file content streams to whichever provider is configured with no content-filtering step
+— for a cloud provider (Anthropic, OpenAI, any OpenAI-compatible cloud endpoint), a secret embedded
+in a file a tool reads goes to that third party unmasked. Added a new `security.RedactText`
+(`internal/security/redact.go`), extending the FIND-13 gitleaks-backed detection machinery
+(`ScanText`) to also capture the literal matched secret string from gitleaks' JSON report and mask
+each occurrence to `[REDACTED:<RuleID>]` — same fail-open posture as `ScanText` (no gitleaks on
+PATH, or any scan error, leaves the text unchanged rather than blocking). New opt-in
+`security.redact_secrets` config flag (off by default); when set, `engine.executeTool`
+(`internal/engine/engine.go`) runs every successful read-capability tool result through it before
+the result re-enters the model's context, logging a count at Info rather than ever blocking the
+call. `docs/providers.md` gained a "Data Exposure & Redaction" section documenting local-Ollama as
+the no-exposure alternative for sensitive codebases.
+Tests: `internal/security/redact_test.go` (new, no-gitleaks-on-PATH + live AWS-key-pattern cases,
+both exercised for real on this box) and `internal/engine/redact_test.go` (new, stubs the
+`redactSecretsFn` seam so it runs unconditionally in CI without a gitleaks dependency). `go build
+./...` clean; `go test ./internal/security/... ./internal/engine/... ./internal/server/...` green
+except the same three pre-existing failures.
+**P24.13 (FIND-10) — detect zero-width/base64-obfuscated injection attempts.** The shared
+opt-in MCP/web-fetch prompt-injection heuristic (`trust.ScanForInjection`, ~14 plain regexes) was
+trivially bypassed by encoding a payload or inserting zero-width/invisible Unicode characters
+inside a trigger word. `ScanForInjection` now additionally matches the same regex set against (a) a
+copy of the content with Unicode `Cf` (zero-width/invisible format) characters stripped, and (b)
+the decoded text of any base64-looking substring (20+ contiguous base64-alphabet characters) that
+decodes to valid UTF-8 — hits inside decoded content are labeled distinctly so the surfaced warning
+makes clear the match was inside an encoded payload. The original content handed to `trust.Wrap` is
+never altered, only throwaway matching copies are. `docs/mcp-trust-boundary.md`'s "What this does
+not do" bypass list was updated to reflect the new boundary (homoglyphs, translation, other
+encodings, and multi-call-split payloads still aren't caught), and a new "Evaluating a model-based
+classifier" section documents why a model-based classifier is deferred rather than built now — it
+would add a real network/latency/cost dependency and a new attackable trust surface, with no
+evidence yet that the heuristic is inadequate for its defense-in-depth role — with a concrete
+revisit trigger (an opt-in `scan_output: model` mode if false-negative reports accumulate).
+Tests: `internal/trust/trust_test.go` gained zero-width-obfuscation, base64-encoded-payload, and
+benign-base64ish-no-false-positive cases alongside the existing pattern tests. `go build ./...`,
+`gofmt`, `go vet` clean; `go test ./internal/trust/... ./internal/mcp/... ./internal/tool/...`
+green.
+All three merged independently (`go build ./...` and the full `go test ./...` re-verified clean
+after each merge and after all three landed together — same three pre-existing/environmental
+`internal/server` failures, confirmed unrelated via `git stash` on the pre-change tree by two of
+the three sub-agents independently).
+Earlier — **P15.2, the daemon config-mutation endpoints, shipped via an
 isolated git-worktree sub-agent — closing out Tier 3's first batch (alongside P21.2 and P24.10,
-below)** (see [roadmap.md](roadmap.md#priority-order)):
+below), 2026-07-10** (see [roadmap.md](roadmap.md#priority-order)):
 **P15.2 — new daemon config-mutation endpoints.** The web UI's planned sandbox/security/skills
 config panels and security-tooling admin panel (P15.6/P15.7) had no HTTP surface to talk to —
 every config mutation (sandbox backend, security scanner policy, `skills.builtin_enabled`, the

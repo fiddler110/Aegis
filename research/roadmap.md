@@ -1,23 +1,19 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-10 — Tier 1 (P24.1–P24.4) and Tier 2 (P24.5–P24.9) shipped; Tier 3's first
-batch — **P15.2, P21.2, and P24.10, all three shipped in parallel via isolated git-worktree
-sub-agents** — is now complete too, closing the P21 track outright and unblocking P15.6/P15.7. See
-[releases.md](releases.md#latest-changes) for the full writeup. Full-repo STRIDE-A threat model
-(`threat-model-20260710-173718/`) folded in as new track P24 earlier the same day. FIND-04 and
-FIND-08 shipped as part of that pass too; of the 17 actionable findings (of 35 total; 14 were
-already-mitigated "existing control" findings needing no action), 10 are now shipped (P24.1–P24.10)
-and 7 remain open as P24.11–P24.21 (plus a new P24.22 parked item surfaced during P24.8's audit),
-tiered by severity/effort/dependency alongside the existing tracks. Remaining Tier 3 work is all
-P24.11–P24.18 (security findings).
+**Last updated:** 2026-07-11 — Tier 3's second batch, **P24.11/P24.12/P24.13, shipped in parallel
+via isolated git-worktree sub-agents** (same pattern as the 2026-07-10 P15.2/P21.2/P24.10 batch).
+Full-repo STRIDE-A threat model (`threat-model-20260710-173718/`) findings now stand at 13 of 17
+actionable findings shipped (P24.1–P24.13); 4 remain open as P24.16–P24.21 (plus the parked
+P24.22), tiered by severity/effort/dependency alongside the existing tracks. Remaining Tier 3 work
+is P24.16–P24.18 (security findings).
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P15.2/P21.2/P24.10 (Tier 3 first batch, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
+This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.11–P24.13 (Tier 3 second batch, 2026-07-11), P15.2/P21.2/P24.10 (Tier 3 first batch, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
 
 ---
 
 ## Status
 
-**Open items:** P24.11–P24.22 (threat-model findings), P15.3–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
+**Open items:** P24.16–P24.22 (threat-model findings), P15.3–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
 
 **Priority order:** see the tiered breakdown immediately below — it is the authoritative "what's next" view, ordered by tier and effort.
 
@@ -99,16 +95,29 @@ isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
   added a "Docker/Podman socket privilege equivalence" doc section (`docs/security_scan.md`)
   recommending rootless Podman/userns-remapped Docker, plus a one-time `SocketPrivilegeNotice` log
   line when the daemon selects a docker/podman backend.
-- **P24.11 — FIND-07: allowlist or TOFU-confirm the `lsp` tool's config-specified binary** (M,
-  security, Moderate, CVSS 6.0). A malicious project `.aegis/config.yaml` can currently point the
-  LSP client at an arbitrary binary for silent code execution.
-- **P24.12 — FIND-09: add an opt-in redaction/DLP pass for cloud-provider traffic** (M, security,
-  Moderate, CVSS 5.2). Full conversation/file content goes to Anthropic/cloud-OpenAI with no
-  secret-pattern masking; document local-Ollama as the mitigation for sensitive codebases in the
-  meantime.
-- **P24.13 — FIND-10: strengthen or clearly caveat the MCP `scan_output` heuristic** (M, security,
-  Moderate, CVSS 5.0). Current ~14-regex scan is easily bypassed by encoding/rewording; reinforce
-  docs and evaluate a model-based classifier as a longer-term option.
+- ~~**P24.11 — FIND-07: allowlist or TOFU-confirm the `lsp` tool's config-specified binary** (M,
+  security, Moderate, CVSS 6.0).~~ **SHIPPED 2026-07-11.** Added a built-in allowlist of common LSP
+  server binary basenames (`internal/lsp/trust.go`) plus an explicit per-server `lsp[].trust: true`
+  config opt-in for anything else; `Manager.Start` now refuses to spawn an unrecognized,
+  non-trusted command instead of exec'ing it unconditionally. Chose allowlist+opt-in over a
+  persisted TOFU store since all configured LSP servers start eagerly at daemon boot, before any
+  interactive approver exists — no live human to prompt at the point that matters.
+- ~~**P24.12 — FIND-09: add an opt-in redaction/DLP pass for cloud-provider traffic** (M, security,
+  Moderate, CVSS 5.2).~~ **SHIPPED 2026-07-11.** New opt-in `security.redact_secrets` config flag;
+  when set, every successful read-capability tool result is run through a new
+  `security.RedactText` (gitleaks-backed, reusing the FIND-13 secret-detection machinery) before it
+  re-enters the model's context, masking any detected secret to `[REDACTED:<RuleID>]`. Fail-open
+  (missing gitleaks or a scan error never blocks the tool call), off by default; `docs/providers.md`
+  documents local-Ollama as the no-exposure alternative for sensitive codebases.
+- ~~**P24.13 — FIND-10: strengthen or clearly caveat the MCP `scan_output` heuristic** (M, security,
+  Moderate, CVSS 5.0).~~ **SHIPPED 2026-07-11.** `trust.ScanForInjection` now also matches against a
+  zero-width/invisible-character-stripped copy of the content and against any base64-looking
+  substring that decodes to valid UTF-8, catching two concrete encoding bypasses the heuristic
+  previously missed entirely. `docs/mcp-trust-boundary.md`'s bypass list updated to reflect the new
+  boundary (homoglyphs, translation, other encodings, and multi-call-split payloads still aren't
+  caught); added a documented evaluate-and-defer writeup for a model-based classifier as the
+  longer-term option, since it would add a real network/latency/cost dependency and a new
+  attackable trust surface with no evidence the current heuristic is inadequate in practice.
 - **P24.16 — FIND-29: extend Windows DACL hardening beyond `daemon.token`** (M, security, Moderate,
   CVSS 4.9). Session DB, checkpoint snapshots, and `.aegis/.env` inherit ambient directory ACLs
   today.
@@ -154,8 +163,9 @@ Full-repo STRIDE-A threat model at commit `34aa687`:
 [`threat-model-20260710-173718/`](../threat-model-20260710-173718/3-findings.md). 35 findings
 total; 14 were "existing control" (already mitigated, verified, no action needed — FIND-18/19/20/
 21/22/23/24/25/26/27/28/35), FIND-04/FIND-08 shipped same-day, and P24.1–P24.9 (Critical/Important
-+ Tier 2 quick wins, below) shipped same-day too. 8 remain open as P24.10–P24.21 (plus P24.22, a
-new low-severity item P24.8's audit surfaced), grouped by the tier they were slotted into above.
++ Tier 2 quick wins, below) shipped same-day too. P24.10–P24.13 (Tier 3 first and second batches)
+shipped 2026-07-10/11. 5 remain open as P24.16–P24.21 (plus P24.22, a new low-severity item
+P24.8's audit surfaced), grouped by the tier they were slotted into above.
 
 **Critical/Important (Tier 1): all shipped 2026-07-10.** See [releases.md](releases.md#latest-changes)
 for what each one actually did — P24.1 (FIND-01, `/ui` page-token double-submit CSRF binding),
@@ -171,14 +181,9 @@ events), P24.8 (FIND-31, audited — no unsanitized concatenation found, locked 
 tests; see P24.22 above for the one latent observation it surfaced), P24.9 (FIND-34, durable
 `cron_runs` table + `cron_history` tool, independent of turn traces).
 
-**Larger/sequence-dependent (Tier 3, Medium effort):** P24.10 shipped 2026-07-10 (see
+**Larger/sequence-dependent (Tier 3, Medium effort):** P24.10 shipped 2026-07-10; P24.11–P24.13
+shipped 2026-07-11, all three in parallel via isolated git-worktree sub-agents (see
 [releases.md](releases.md#latest-changes)).
-- **P24.11 (FIND-07)** — TOFU-confirm or allowlist `ServerConfig.Command`/`.Args` in
-  `internal/lsp/manager.go` before `exec.CommandContext` spawns a new binary for a project.
-- **P24.12 (FIND-09)** — Opt-in secret-pattern redaction pass over tool-read file content before
-  it reaches a cloud provider adapter; document local-Ollama as the no-exposure alternative.
-- **P24.13 (FIND-10)** — Reinforce `docs/mcp-trust-boundary.md`'s framing of `scan_output` as
-  best-effort only; evaluate a model-based classifier for high-value MCP integrations.
 - **P24.16 (FIND-29)** — Extend `restrictToOwner`-style Windows DACL hardening to `sessions.db`,
   checkpoint snapshots, and `.aegis/.env`.
 - **P24.17 (FIND-30)** — Per-entry hash recorded at write time for memory files, checked at load
