@@ -213,6 +213,12 @@ type LSPServerConfig struct {
 	Command    string   `koanf:"command"`    // executable
 	Args       []string `koanf:"args"`       // CLI arguments
 	Extensions []string `koanf:"extensions"` // file extensions (e.g. [".go"])
+	// Trust opts this server into starting even if Command isn't a
+	// recognized LSP binary basename (internal/lsp's built-in allowlist).
+	// LSP servers start eagerly at daemon boot with no interactive
+	// approver present, so an unrecognized command is refused unless this
+	// is explicitly set — see internal/lsp/trust.go.
+	Trust bool `koanf:"trust"`
 }
 
 // ProcessToolConfig declares one external process tool (plugin).
