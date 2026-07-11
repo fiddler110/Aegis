@@ -41,17 +41,17 @@ func TestHardenAppliesUnsetCaps(t *testing.T) {
 	if !cfg.Security.EgressThenWrite {
 		t.Error("security.egress_then_write not set")
 	}
-	if cfg.Cost.SessionCapUSD != hardenSessionCapUSD {
-		t.Errorf("cost.session_cap_usd = %v, want %v", cfg.Cost.SessionCapUSD, hardenSessionCapUSD)
+	if cfg.Cost.SessionCapUSD != config.HardenSessionCapUSD {
+		t.Errorf("cost.session_cap_usd = %v, want %v", cfg.Cost.SessionCapUSD, config.HardenSessionCapUSD)
 	}
-	if cfg.Cost.DailyCapUSD != hardenDailyCapUSD {
-		t.Errorf("cost.daily_cap_usd = %v, want %v", cfg.Cost.DailyCapUSD, hardenDailyCapUSD)
+	if cfg.Cost.DailyCapUSD != config.HardenDailyCapUSD {
+		t.Errorf("cost.daily_cap_usd = %v, want %v", cfg.Cost.DailyCapUSD, config.HardenDailyCapUSD)
 	}
-	if cfg.Cost.SessionTokenCap != hardenSessionTokenCap {
-		t.Errorf("cost.session_token_cap = %v, want %v", cfg.Cost.SessionTokenCap, hardenSessionTokenCap)
+	if cfg.Cost.SessionTokenCap != config.HardenSessionTokenCap {
+		t.Errorf("cost.session_token_cap = %v, want %v", cfg.Cost.SessionTokenCap, config.HardenSessionTokenCap)
 	}
-	if cfg.Cost.DailyTokenCap != hardenDailyTokenCap {
-		t.Errorf("cost.daily_token_cap = %v, want %v", cfg.Cost.DailyTokenCap, hardenDailyTokenCap)
+	if cfg.Cost.DailyTokenCap != config.HardenDailyTokenCap {
+		t.Errorf("cost.daily_token_cap = %v, want %v", cfg.Cost.DailyTokenCap, config.HardenDailyTokenCap)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestHardenPreservesCustomCaps(t *testing.T) {
 		t.Errorf("cost.session_cap_usd = %v, want preserved 1.5", cfg.Cost.SessionCapUSD)
 	}
 	// Untouched caps still get filled in.
-	if cfg.Cost.DailyCapUSD != hardenDailyCapUSD {
-		t.Errorf("cost.daily_cap_usd = %v, want %v", cfg.Cost.DailyCapUSD, hardenDailyCapUSD)
+	if cfg.Cost.DailyCapUSD != config.HardenDailyCapUSD {
+		t.Errorf("cost.daily_cap_usd = %v, want %v", cfg.Cost.DailyCapUSD, config.HardenDailyCapUSD)
 	}
 }
 
