@@ -32,6 +32,24 @@ type Job struct {
 // ErrNotFound is returned for an unknown job id.
 var ErrNotFound = errors.New("cron job not found")
 
+// RunRecord is a durable, queryable audit record of one cron fire attempt —
+// independent of both the ephemeral slog line the scheduler emits and the
+// general task-manager view (which is not cron-scoped and not guaranteed to
+// stay queryable by job over time). Addresses FIND-34/P24.9.
+type RunRecord struct {
+	ID      int64     `json:"id"`
+	JobID   string    `json:"job_id"`
+	FiredAt time.Time `json:"fired_at"`
+	Status  string    `json:"status"` // "ok" | "error" | "blocked"
+	Output  string    `json:"output"` // combined stdout/stderr, truncated
+}
+
+// maxRunOutputBytes caps how much captured output is persisted per run
+// record, so a chatty job can't grow the audit table unboundedly. Mirrors
+// guard.maxGuardFileBytes's rationale: keep enough to diagnose a failure,
+// truncate the rest with a visible marker.
+const maxRunOutputBytes = 8000
+
 // Store persists cron jobs in the shared SQLite database.
 type Store struct{ db *sql.DB }
 
@@ -53,6 +71,19 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 	// Best-effort migration for DBs created before auto_approve existed;
 	// ALTER TABLE fails harmlessly (ignored) if the column is already there.
 	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0`)
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS cron_runs (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id   TEXT NOT NULL,
+    fired_at INTEGER NOT NULL,
+    status   TEXT NOT NULL,
+    output   TEXT NOT NULL DEFAULT ''
+);`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS cron_runs_job_id_idx ON cron_runs(job_id)`); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -116,6 +147,51 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// RecordRun persists one fire-attempt outcome for a job (FIND-34/P24.9).
+// output is truncated to maxRunOutputBytes with a trailing marker when
+// longer, so a chatty or runaway job cannot grow the audit table unboundedly.
+func (s *Store) RecordRun(ctx context.Context, jobID string, firedAt time.Time, status, output string) error {
+	if len(output) > maxRunOutputBytes {
+		output = output[:maxRunOutputBytes] + "\n[...truncated]"
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO cron_runs (job_id, fired_at, status, output) VALUES (?, ?, ?, ?)`,
+		jobID, firedAt.UnixMilli(), status, output)
+	return err
+}
+
+// ListRuns returns fire-attempt records, most-recent-first. jobID == ""
+// returns runs across all jobs; limit <= 0 means unlimited.
+func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]*RunRecord, error) {
+	query := `SELECT id, job_id, fired_at, status, output FROM cron_runs`
+	var args []any
+	if jobID != "" {
+		query += ` WHERE job_id = ?`
+		args = append(args, jobID)
+	}
+	query += ` ORDER BY fired_at DESC, id DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RunRecord
+	for rows.Next() {
+		var r RunRecord
+		var fired int64
+		if err := rows.Scan(&r.ID, &r.JobID, &fired, &r.Status, &r.Output); err != nil {
+			return nil, err
+		}
+		r.FiredAt = time.UnixMilli(fired)
+		out = append(out, &r)
+	}
+	return out, rows.Err()
 }
 
 type scanner interface{ Scan(...any) error }
@@ -194,6 +270,12 @@ func (s *Scheduler) Create(ctx context.Context, schedule, command, title string,
 
 // List returns all jobs.
 func (s *Scheduler) List(ctx context.Context) ([]*Job, error) { return s.store.List(ctx) }
+
+// History returns cron fire-attempt audit records, most-recent-first.
+// jobID == "" returns history across all jobs; limit <= 0 means unlimited.
+func (s *Scheduler) History(ctx context.Context, jobID string, limit int) ([]*RunRecord, error) {
+	return s.store.ListRuns(ctx, jobID, limit)
+}
 
 // Delete removes a job.
 func (s *Scheduler) Delete(ctx context.Context, id string) error { return s.store.Delete(ctx, id) }

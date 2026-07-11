@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -18,6 +19,7 @@ func CronTools(sched *cron.Scheduler) []tool.Tool {
 		&cronListTool{sched: sched},
 		&cronDeleteTool{sched: sched},
 		&cronToggleTool{sched: sched},
+		&cronHistoryTool{sched: sched},
 	}
 }
 
@@ -154,4 +156,49 @@ func (t *cronToggleTool) Execute(ctx context.Context, input json.RawMessage) (to
 		state = "disabled"
 	}
 	return tool.Result{Content: fmt.Sprintf("cron job %s is now %s", args.ID, state)}, nil
+}
+
+// --- cron_history ---
+
+type cronHistoryTool struct{ sched *cron.Scheduler }
+
+func (t *cronHistoryTool) Name() string                { return "cron_history" }
+func (t *cronHistoryTool) Capability() tool.Capability { return tool.CapRead }
+func (t *cronHistoryTool) Description() string {
+	return "List cron job fire-attempt audit history: job id, fired-at time, exit status " +
+		"(ok/error/blocked), and a truncated snippet of the run's combined output. Most recent " +
+		"first. Optionally filter to a single job id and/or cap the number of rows returned " +
+		"(default 20)."
+}
+func (t *cronHistoryTool) InputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"id":{"type":"string","description":"optional cron job id to filter history to"},"limit":{"type":"integer","description":"optional max number of run records to return (default 20)"}}}`)
+}
+func (t *cronHistoryTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
+	var args struct {
+		ID    string `json:"id"`
+		Limit int    `json:"limit"`
+	}
+	if err := parseArgs(input, &args); err != nil {
+		return tool.Result{}, err
+	}
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	runs, err := t.sched.History(ctx, args.ID, limit)
+	if err != nil {
+		return tool.Result{Content: "cron_history: " + err.Error(), IsError: true}, nil
+	}
+	if len(runs) == 0 {
+		return tool.Result{Content: "(no cron run history)"}, nil
+	}
+	var sb strings.Builder
+	for _, r := range runs {
+		snippet := strings.ReplaceAll(r.Output, "\n", " ")
+		if len(snippet) > 120 {
+			snippet = snippet[:120] + "..."
+		}
+		fmt.Fprintf(&sb, "%s  %-7s  job=%s  %s\n", r.FiredAt.Format(time.RFC3339), r.Status, r.JobID, snippet)
+	}
+	return tool.Result{Content: strings.TrimRight(sb.String(), "\n")}, nil
 }
