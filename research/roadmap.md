@@ -1,21 +1,21 @@
 # Aegis Capability Roadmap
 
 **Last updated:** 2026-07-10 — Tier 1 (P24.1–P24.4) and Tier 2 (P24.5–P24.9) shipped; Tier 3 now
-underway, **P24.10 shipped** (first of a 3-item parallel worktree-agent batch alongside P15.2 and
-P21.2, still in progress) — see [releases.md](releases.md#latest-changes) for the full writeup.
+underway, **P24.10 and P21.2 shipped** (2 of a 3-item parallel worktree-agent batch alongside
+P15.2, still in progress) — see [releases.md](releases.md#latest-changes) for the full writeup.
 Full-repo STRIDE-A threat model (`threat-model-20260710-173718/`) folded in as new track P24
 earlier the same day. FIND-04 and FIND-08 shipped as part of that pass too; of the 17 actionable
 findings (of 35 total; 14 were already-mitigated "existing control" findings needing no action), 10
 are now shipped (P24.1–P24.10) and 7 remain open as P24.11–P24.21 (plus a new P24.22 parked item
 surfaced during P24.8's audit), tiered by severity/effort/dependency alongside the existing tracks.
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.10 (FIND-06, Docker/Podman privilege docs, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
+This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P21.2 (TUI tool-call cards, 2026-07-10), P24.10 (FIND-06, Docker/Podman privilege docs, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
 
 ---
 
 ## Status
 
-**Open items:** P24.11–P24.22 (threat-model findings), P21.2, P15.2–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
+**Open items:** P24.11–P24.22 (threat-model findings), P15.2–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
 
 **Priority order:** see the tiered breakdown immediately below — it is the authoritative "what's next" view, ordered by tier and effort.
 
@@ -84,8 +84,10 @@ isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
 ### Tier 3 — Larger, real, sequence-dependent
 - **P15.2 — New daemon config-mutation endpoints** (M). The concrete backend gap blocking
   P15.6/P15.7 and unlocking the rest of the P15 web-UI track. Start here if P15 is still an active priority.
-- **P21.2 — Tool-call cards** (M). In-place-updating tool-call blocks. Real polish win, but a larger
-  visual restructure than P21.3 — do after the caret.
+- ~~**P21.2 — Tool-call cards** (M). In-place-updating tool-call blocks.~~ **SHIPPED 2026-07-10.**
+  Added `ToolID` to `engine.Event`/`api.Event` (the missing correlation key for concurrent tool
+  calls) and restructured TUI rendering from two static appended blocks into one addressable
+  transcript item that updates pending -> ok/err in place.
 - ~~**P24.10 — FIND-06: document Docker/Podman-socket privilege equivalence + default toward
   rootless/capability-dropping** (M, security, Moderate, CVSS 6.4).~~ **SHIPPED 2026-07-10.**
   Capability-dropping (`--cap-drop=ALL`/`--security-opt=no-new-privileges`) was already shipped;
@@ -194,9 +196,8 @@ tests; see P24.22 above for the one latent observation it surfaced), P24.9 (FIND
 
 ## Open Work — P21 (TUI Polish — Tool-Call Cards)
 
-P21.3 (streaming caret) shipped 2026-07-10.
-
-**P21.2 — Tool-call cards (in-place updating block). [Tier 3]** Restructure tool calls and results as one addressable, updatable transcript item that updates in place (pending → ok/err). (M)
+P21.3 (streaming caret) and P21.2 (tool-call cards) shipped 2026-07-10. Track closed — no open
+items remain.
 
 ---
 
