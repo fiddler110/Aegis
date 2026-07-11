@@ -3,10 +3,14 @@ export interface SessionMeta {
   title?: string;
   mode: string;
   model?: string;
+  background?: boolean;
+  archived?: boolean;
   input_tokens?: number;
   output_tokens?: number;
   cost_usd?: number;
+  created_at: string;
   updated_at: string;
+  archived_at?: string;
 }
 
 export interface ContentBlock {
@@ -31,6 +35,8 @@ export interface Session {
   mode: string;
   persona?: string;
   model?: string;
+  background?: boolean;
+  archived?: boolean;
   input_tokens?: number;
   output_tokens?: number;
   cost_usd?: number;
@@ -66,6 +72,65 @@ export interface RewindResponse {
   scope: string;
   files_restored: number;
   messages_kept: number;
+}
+
+// RunInfo is one in-flight message run (GET /runs).
+export interface RunInfo {
+  run_id: string;
+  session_id: string;
+  title: string;
+  started_at: string;
+  tools: number; // tool calls so far this run
+  last_kind: string; // most recent event kind
+}
+
+// Teammate is a sub-agent tracked by the swarm registry (GET /teammates).
+export interface Teammate {
+  agent_id: string;
+  name: string;
+  team: string;
+  status: string;
+  summary?: string;
+  started_at: string;
+  ended_at?: string;
+}
+
+// PruneResponse reports how many sessions POST /sessions/prune deleted.
+export interface PruneResponse {
+  deleted: number;
+}
+
+// BGEventItem is one buffered engine event from a background session
+// (GET /sessions/{id}/events?since=N); data is a JSON-encoded Event.
+export interface BGEventItem {
+  id: number;
+  data: string;
+}
+
+// DebateResponse is the POST /debate result: a formatted transcript plus the
+// arbiter's parsed verdict (empty strings when the verdict didn't parse).
+export interface DebateResponse {
+  report: string;
+  verdict: string; // "UPHOLD" | "REVISE" | "REJECT" | ""
+  confidence: string; // "high" | "medium" | "low" | ""
+}
+
+// KnowledgeResult is one document matched by a knowledge query.
+export interface KnowledgeResult {
+  path: string;
+  title: string;
+  snippet: string;
+  score: number;
+}
+
+// KnowledgeResponse carries the outcome of POST /knowledge: doc_count/db_path/
+// embeddings_enabled after "index", results/count after "query".
+export interface KnowledgeResponse {
+  doc_count?: number;
+  db_path?: string;
+  embeddings_enabled?: boolean;
+  results?: KnowledgeResult[];
+  count?: number;
 }
 
 export interface Event {

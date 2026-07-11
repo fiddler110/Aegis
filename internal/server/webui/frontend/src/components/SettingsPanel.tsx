@@ -5,24 +5,30 @@ import type { PersonaInfo } from "../types";
 // assistant's role/behavior profile) and optionally pin a specific model for
 // this chat. Personas are shown with their plain-language descriptions; the
 // model override is tucked behind an "Advanced" section since most users
-// should stay on the default.
+// should stay on the default. P15.9 adds a background-mode toggle there too:
+// a background chat's responses keep running on the daemon even after every
+// tab disconnects (buffered events let a reopened tab catch up).
 export function SettingsPanel({
   personas,
   currentPersona,
   modelOverride,
   defaultModel,
+  background,
   busy,
   onSwitchPersona,
   onSetModel,
+  onSetBackground,
   onClose,
 }: {
   personas: PersonaInfo[];
   currentPersona: string;
   modelOverride: string;
   defaultModel: string;
+  background: boolean;
   busy: boolean;
   onSwitchPersona: (name: string) => void;
   onSetModel: (model: string) => void;
+  onSetBackground: (on: boolean) => void;
   onClose: () => void;
 }) {
   const [modelDraft, setModelDraft] = useState(modelOverride);
@@ -95,6 +101,22 @@ export function SettingsPanel({
               </button>
             )}
           </div>
+        </details>
+        <details class="advanced">
+          <summary>Advanced: keep this chat working in the background</summary>
+          <p class="hint">
+            When on, the assistant keeps working on its answer even if you close this tab. Come
+            back later and the chat catches up on what happened while you were away.
+          </p>
+          <label class="bg-toggle">
+            <input
+              type="checkbox"
+              checked={background}
+              disabled={busy}
+              onChange={(e) => onSetBackground((e.target as HTMLInputElement).checked)}
+            />
+            Keep working when this tab is closed
+          </label>
         </details>
       </div>
     </>
