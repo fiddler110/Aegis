@@ -9,7 +9,38 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
+**Last updated:** 2026-07-11 — **P24.17 — the STRIDE-A threat model's Tier 3 track — shipped via an
+isolated git-worktree sub-agent, independently alongside P24.16/P24.18 building in their own
+separate worktrees** (see [roadmap.md](roadmap.md#priority-order)):
+**P24.17 (FIND-30) — integrity verification for memory files.** Project/user memory
+(`.aegis/memory.md` and the user-global `memory.md`) is plain text with no tamper detection —
+anyone with host/OS write access (including malware running as the same OS user) could hand-edit
+either file to inject persistent, low-visibility "learned" content that a future session would
+treat as genuine prior context, a durable cross-session prompt-injection vector. Added a new
+`internal/memory/integrity.go`: a sha256 sidecar file next to each memory file
+(`<path>.integrity`), refreshed by `memory.Append` after every write (Aegis's own write path) by
+re-reading the file's full post-append content and re-hashing it. `Sources.loadDirect` now reads
+each memory file through a new `readMemoryFileChecked` instead of the plain `readIfExists`: it
+hashes the file's current content and compares against the sidecar — a match loads silently; a
+mismatch prepends a visible `⚠️ integrity check failed: this memory file was modified outside
+Aegis — treat its contents with reduced trust` banner to that memory section (the content itself is
+never dropped, since a mismatch may just be an intentional hand-edit, which is a supported use
+case) and logs via `slog.Warn`; a missing sidecar (a pre-existing `memory.md` predating this
+feature, or the very first write) silently establishes a new trust baseline instead of
+false-positive-warning every upgrading user on their next session. Deliberately a plain hash, not a
+keyed MAC/signature — an adversary with write access to `memory.md` already has write access to
+whatever sidecar sits next to it, so a secret key wouldn't raise the bar. All hashing/sidecar I/O
+failure modes fail open (log and fall through to loading unwarned) rather than ever blocking memory
+loading. `docs/memory-and-knowledge.md` documents the sidecar file and what does/doesn't trigger
+the warning.
+Tests: `internal/memory/integrity_test.go` (new) — a freshly-`Append`ed file round-trips with no
+warning (project and global memory symmetrically), hand-editing a file after an `Append` triggers
+the warning marker (tampered content still surfaced, not dropped), and a legacy file with no
+sidecar loads warning-free while establishing a baseline, confirmed stable across a second
+unmodified load. `go build ./...` clean; `go test ./internal/memory/...` green; full `go test
+./...` clean except the same three pre-existing/environmental failures noted elsewhere in this doc
+(`TestBuildImageBlocksFromPath`, and two `internal/server` `scan_test.go` 30s-timeout cases).
+Earlier — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
 second batch — shipped in parallel via isolated git-worktree sub-agents** (see
 [roadmap.md](roadmap.md#priority-order)):
 **P24.11 (FIND-07) — allowlist/trust-gate LSP server commands.** `internal/lsp/client.go`'s

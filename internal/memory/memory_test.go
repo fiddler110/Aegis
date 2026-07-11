@@ -32,6 +32,9 @@ func TestAppendAndLoad(t *testing.T) {
 	if !strings.Contains(got, "Project memory") || !strings.Contains(got, "User memory") {
 		t.Errorf("section headers missing: %q", got)
 	}
+	if strings.Contains(got, integrityWarning) {
+		t.Errorf("freshly-Append()ed memory should round-trip with no integrity warning: %q", got)
+	}
 }
 
 // TestSaveSkillAndLoad checks that SaveSkill writes the file where
