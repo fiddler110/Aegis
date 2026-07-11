@@ -4,6 +4,7 @@
 P24.16–P24.18, the STRIDE-A threat model's Tier 3 third batch). This pass re-tiers everything that
 remains open: promoted P15.3–P15.11 out of parked status now that their P15.2 backend dependency has
 shipped, and pulled four cheap, no-dependency P24 residuals up into a new Tier 2. Tier 1 is empty.
+P24.15 (FIND-14), P24.22, and P24.20 (FIND-17) have since shipped too, leaving Tier 2 empty.
 
 This document tracks only **open** work and what's next. For shipped-feature history and full design
 rationale, see [releases.md](releases.md).
@@ -12,7 +13,7 @@ rationale, see [releases.md](releases.md).
 
 ## Status
 
-**Open items:** P24.14/P24.15/P24.20–P24.22 (threat-model residuals), P15.3–P15.11 (web UI frontend
+**Open items:** P24.14/P24.21 (threat-model residuals), P15.3–P15.11 (web UI frontend
 panels), P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1.
 
 **Priority order:** see [Priority Order](#priority-order) below — it is the authoritative "what's
@@ -34,17 +35,10 @@ All Critical/Important findings from the 2026-07-10 STRIDE-A threat model are sh
 [releases.md](releases.md#latest-changes)). Next trigger: a new threat-model pass or a reported
 incident.
 
-### Tier 2 — Cheap, no-dependency wins
+### Tier 2 — empty
 
-- **P24.15 — FIND-14: give each swarm sub-agent a guaranteed minimum budget floor** (S, security,
-  Low, CVSS 3.6). Fairness gap in `internal/swarm/subprocess.go`'s shared tracker; no reported
-  incident but small and self-contained.
-- **P24.20 — FIND-17: strip/escape ANSI/OSC control sequences in streamed model output before TUI
-  render** (S, security, Low, CVSS 3.0). Defense-in-depth for an already-caught injection vector;
-  cheap, self-contained hardening pass.
-- **P24.22 — Quote/escape the `distro` argument in `sandbox.WSLInstallCommand`** (S, security,
-  informational). Currently dead code — `install.go`'s only call site hardcodes `""` for `distro` —
-  but worth closing defensively before a second, config-driven caller appears.
+P24.20 (FIND-17) shipped 2026-07-11 (see [releases.md](releases.md#latest-changes)), the last item
+in this tier. Next trigger: a new threat-model pass or a reported incident.
 
 ### Tier 3 — Larger, real, sequence-dependent
 
@@ -81,9 +75,9 @@ incident) appears.
 
 Full-repo STRIDE-A threat model at commit `34aa687`:
 [`threat-model-20260710-173718/`](../threat-model-20260710-173718/3-findings.md). 35 findings
-total: 14 were "existing control" (already mitigated, verified, no action needed), 26 were shipped
-as P24.1–P24.13/P24.16–P24.19 across 2026-07-10/11 (see [releases.md](releases.md#latest-changes)
-for the full writeup of each), and 5 remain open — P24.14, P24.15, P24.20–P24.22 — tiered above.
+total: 14 were "existing control" (already mitigated, verified, no action needed), 29 were shipped
+as P24.1–P24.13/P24.15–P24.20/P24.22 across 2026-07-10/11 (see [releases.md](releases.md#latest-changes)
+for the full writeup of each), and 2 remain open — P24.14, P24.21 — tiered above.
 
 ---
 

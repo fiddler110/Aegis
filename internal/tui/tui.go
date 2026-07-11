@@ -2223,7 +2223,16 @@ func (m *model) toggleThinking() {
 // to exactly one, so a settled-prefix + tail concatenation (liveBlock) is
 // byte-identical to a single whole-source render split at the same paragraph
 // boundary. Falls back to a plain wrap if the renderer is unavailable.
+//
+// s is the model's own generated text, so it is sanitized with
+// stripControlSeqs before either path sees it (P24.20, FIND-17): an
+// unsanitized ANSI/OSC sequence embedded in adversarial model output (e.g.
+// reproduced verbatim via a prompt-injection vector) could otherwise
+// manipulate the terminal — cursor repositioning, hidden text, or
+// OSC-based clipboard/title-bar tricks — once it reached the terminal
+// either through glamour's output or the plain-wrap fallback.
 func (m *model) mdRender(s string) string {
+	s = stripControlSeqs(s)
 	if m.renderer != nil {
 		if rendered, err := m.renderer.Render(s); err == nil {
 			return strings.TrimRight(rendered, "\n") + "\n"

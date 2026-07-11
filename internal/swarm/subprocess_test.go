@@ -182,6 +182,88 @@ func TestSubprocessSpawnComputesRemainingBudget(t *testing.T) {
 	}
 }
 
+// TestRemainingBudgetFairShareFloor is the FIND-14/P24.15 regression: once
+// the shared tracker's spend has consumed the whole cap, a worker must still
+// get fairShareFraction of the *original* cap, not the near-zero epsilon that
+// used to be the only floor.
+func TestRemainingBudgetFairShareFloor(t *testing.T) {
+	got := remainingBudget(1.0, 1.0) // fully exhausted
+	want := 0.2                      // 1.0 * fairShareFraction
+	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("remainingBudget(1.0, 1.0) = %v, want %v (fair-share floor)", got, want)
+	}
+
+	got = remainingBudget(1.0, 5.0) // spent well past the cap
+	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("remainingBudget(1.0, 5.0) = %v, want %v (fair-share floor still applies)", got, want)
+	}
+}
+
+// TestRemainingBudgetFairShareFloorFallsBackToEpsilon covers the degenerate
+// case the fair-share floor doesn't help with: a cap so small that even
+// fairShareFraction of it rounds to (near) zero. minRemainingBudgetUSD must
+// still apply so the override stays distinguishable from "no cap configured".
+func TestRemainingBudgetFairShareFloorFallsBackToEpsilon(t *testing.T) {
+	got := remainingBudget(0.0000001, 0.0000001)
+	if got != minRemainingBudgetUSD {
+		t.Errorf("remainingBudget with a sub-epsilon cap = %v, want minRemainingBudgetUSD (%v)", got, minRemainingBudgetUSD)
+	}
+}
+
+// TestRemainingTokensFairShareFloor mirrors TestRemainingBudgetFairShareFloor
+// for the token cap.
+func TestRemainingTokensFairShareFloor(t *testing.T) {
+	got := remainingTokens(1000, 1000) // fully exhausted
+	want := 200                        // 1000 * fairShareFraction
+	if got != want {
+		t.Errorf("remainingTokens(1000, 1000) = %d, want %d (fair-share floor)", got, want)
+	}
+
+	got = remainingTokens(1000, 5000) // spent well past the cap
+	if got != want {
+		t.Errorf("remainingTokens(1000, 5000) = %d, want %d (fair-share floor still applies)", got, want)
+	}
+}
+
+// TestSubprocessSpawnLaterSiblingGetsFairShareFloor is an end-to-end version
+// of the FIND-14 regression through Spawn itself: an early worker consumes
+// nearly the whole shared budget, and a later sibling spawned afterward must
+// still see a guaranteed non-trivial floor rather than a near-zero remainder.
+func TestSubprocessSpawnLaterSiblingGetsFairShareFloor(t *testing.T) {
+	t.Setenv("SWARM_TEST_WORKER", "1")
+	reg := NewRegistry()
+	b := NewSubprocessBackend(os.Args[0], "__worker", reg, MailboxRoot(t.TempDir()), "", 1.0, 1000)
+
+	// Simulates an early sibling having already spent the entire shared cap
+	// (and then some) before this later worker is spawned.
+	tracker := &fakeTracker{usd: 1.5, tokens: 1500}
+	ctx := WithCostTracker(context.Background(), tracker)
+
+	h, err := b.Spawn(ctx, SpawnConfig{Name: "late", Prompt: "report-remaining"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		RemainingBudgetUSD float64 `json:"remaining_budget_usd"`
+		RemainingTokens    int     `json:"remaining_tokens"`
+	}
+	if err := json.Unmarshal([]byte(res.Output), &got); err != nil {
+		t.Fatalf("unmarshal worker report: %v (output=%q)", err, res.Output)
+	}
+	// Both would be the near-zero epsilon floor (1e-6 / 1) pre-fix; assert
+	// they instead land at the fair-share floor (0.2 * cap).
+	if got.RemainingBudgetUSD < 0.1 {
+		t.Errorf("RemainingBudgetUSD = %v, want a fair-share floor (~0.2), not the near-zero epsilon", got.RemainingBudgetUSD)
+	}
+	if got.RemainingTokens < 100 {
+		t.Errorf("RemainingTokens = %d, want a fair-share floor (~200), not the near-zero epsilon", got.RemainingTokens)
+	}
+}
+
 // TestSubprocessSpawnFoldsWorkerCostIntoSharedTracker verifies a worker's
 // self-reported spend (cost_usd/tokens in its mailbox result) is folded back
 // into the ctx-carried tracker once it exits, so a sibling spawned
