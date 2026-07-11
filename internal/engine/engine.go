@@ -156,10 +156,17 @@ const (
 
 // Event is emitted to the consumer-provided sink as the run progresses.
 type Event struct {
-	Kind        EventKind
-	Text        string           // KindText
-	ToolName    string           // KindToolCall / KindToolResult
-	ToolInput   json.RawMessage  // KindToolCall
+	Kind      EventKind
+	Text      string          // KindText
+	ToolName  string          // KindToolCall / KindToolResult
+	ToolInput json.RawMessage // KindToolCall
+	// ToolID is the provider-assigned tool_use ID (provider.ToolUseBlock.ID),
+	// carried on both the KindToolCall and its matching KindToolResult so a
+	// consumer can correlate the two exactly instead of guessing from
+	// same-name ordering — required once tools can run concurrently
+	// (runTools below), where results don't necessarily arrive in call order
+	// (P21.2).
+	ToolID      string
 	ToolResult  string           // KindToolResult
 	ToolIsError bool             // KindToolResult
 	Usage       *provider.Usage  // KindTurnDone
@@ -711,7 +718,7 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 					e.logger.Error("recovered panic in tool call", "tool", tu.Name, "panic", r, "stack", string(debug.Stack()))
 					content := fmt.Sprintf("tool %q panicked: %v", tu.Name, r)
 					traces[i] = trace.ToolCall{Name: tu.Name, IsError: true}
-					safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: true})
+					safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: true})
 					results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: true}
 				}
 			}()
@@ -721,11 +728,11 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 				defer execLock.Unlock()
 			}
 
-			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
 			start := time.Now()
 			content, isErr := e.executeTool(ctx, tu)
 			traces[i] = trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr}
-			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
+			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
 			results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: isErr}
 		}(i, tu)
 	}
@@ -748,11 +755,11 @@ func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.Too
 		default:
 		}
 
-		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
 		start := time.Now()
 		content, isErr := e.executeTool(ctx, tu)
 		traces = append(traces, trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr})
-		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
+		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
 
 		results = append(results, provider.ToolResultBlock{
 			ToolUseID: tu.ID,
