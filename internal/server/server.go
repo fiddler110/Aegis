@@ -338,7 +338,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		lspMgr = lsp.NewManager(cwd, logger)
 		for _, lc := range cfg.LSP {
 			if err := lspMgr.Start(context.Background(), lsp.ServerConfig{
-				Name: lc.Name, Command: lc.Command, Args: lc.Args, Extensions: lc.Extensions,
+				Name: lc.Name, Command: lc.Command, Args: lc.Args, Extensions: lc.Extensions, Trust: lc.Trust,
 			}); err != nil {
 				logger.Warn("lsp server start failed", "name", lc.Name, "err", err)
 			}
