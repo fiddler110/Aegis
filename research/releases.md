@@ -9,7 +9,36 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **P24.10, the first of the STRIDE-A threat model's Tier 3 findings,
+**Last updated:** 2026-07-10 — **P21.2, tool-call cards, shipped via an isolated git-worktree
+sub-agent** (see [roadmap.md](roadmap.md#priority-order)):
+**P21.2 — tool-call cards (in-place updating block).** A tool call used to render as two
+independent, static transcript items — `renderToolCall` appended at `KindToolCall`,
+`renderToolResult` appended separately at `KindToolResult` with no link back to the call — so every
+call looked "finished" the instant it started, and concurrent tool calls (`engine.runTools` runs
+read/network tools concurrently, and results don't necessarily land in call order) relied on a
+same-name FIFO queue that could silently cross-attribute a result, or a `read_file`'s highlighted
+path, to the wrong call. The real fix needed a stable per-call identity that didn't exist on the
+wire: added `ToolID` (the provider's `tool_use` ID) to `engine.Event`/`api.Event`, populated at
+every emission site including the panic-recovery path and threaded through
+`messages.go`'s `toAPIEvent`. The TUI (`internal/tui/tui.go`) now `AppendBlock`s a pending card at
+`KindToolCall`, keyed by `ToolID` in a `pendingTools` map, and `SetItemRaw`s it to ok/err in place
+at `KindToolResult` instead of appending a second item; `pendingReadPaths` moved off the same
+same-name-FIFO pattern onto the same keyed map, fixing the same latent cross-talk bug for
+concurrent reads. `resolveStuckToolCards` finalizes any still-pending cards to an "interrupted"
+state from `KindError` and from `streamClosedMsg` (the only signal guaranteed to fire on every run
+end, since a client-initiated cancel hits neither `KindError` nor `KindDone`). New
+`renderToolCardPending`/`-Done`/`-Stuck` in `internal/tui/toolview.go` wrap the existing
+call/diff-preview renderers unchanged, reusing the existing `shimmerText` animation primitive for
+the pending state rather than inventing a new one. Session replay (`loadHistory`) was deliberately
+left rendering call+result as two static items — both halves are already known at replay time, so
+combining them would be cosmetic, not a fix.
+Tests: `internal/tui/toolcard_test.go` (new) — pending→ok, pending→err, two concurrent calls
+resolving independently out of order with no cross-talk, a turn-error resolving a stuck card,
+`streamClosedMsg` resolving a stuck card, and the ID-less FIFO fallback. `go build ./...`,
+`go vet ./...` clean; `go test ./internal/tui/... ./internal/engine/... ./internal/api/...` green.
+No interactive PTY was available to visually verify the pending→ok/err transition in a real
+terminal — noted explicitly rather than claimed.
+Earlier the same day — **P24.10, the first of the STRIDE-A threat model's Tier 3 findings,
 shipped via an isolated git-worktree sub-agent** (see [roadmap.md](roadmap.md#priority-order)):
 **P24.10 (FIND-06) — document Docker/Podman-socket privilege equivalence, recommend rootless
 backends.** FIND-06 flagged that Docker/Podman socket access is privilege-equivalent to local root
