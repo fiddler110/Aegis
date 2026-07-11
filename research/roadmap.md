@@ -1,19 +1,20 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-11 — Tier 3's second batch, **P24.11/P24.12/P24.13, shipped in parallel
-via isolated git-worktree sub-agents** (same pattern as the 2026-07-10 P15.2/P21.2/P24.10 batch).
-Full-repo STRIDE-A threat model (`threat-model-20260710-173718/`) findings now stand at 13 of 17
-actionable findings shipped (P24.1–P24.13); 4 remain open as P24.16–P24.21 (plus the parked
-P24.22), tiered by severity/effort/dependency alongside the existing tracks. Remaining Tier 3 work
-is P24.16–P24.18 (security findings).
+**Last updated:** 2026-07-11 — **P24.18 (FIND-32) shipped**: opt-in TLS for client↔daemon traffic,
+built in an isolated git-worktree sub-agent alongside sibling agents independently working
+P24.16/P24.17 in their own worktrees. Full-repo STRIDE-A threat model
+(`threat-model-20260710-173718/`) findings now stand at 14 of 17 actionable findings shipped
+(P24.1–P24.13, P24.18); 3 remain open as P24.16/P24.17/P24.19–P24.21 (plus the parked P24.22),
+tiered by severity/effort/dependency alongside the existing tracks. Remaining Tier 3 work is
+P24.16/P24.17 (security findings).
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.11–P24.13 (Tier 3 second batch, 2026-07-11), P15.2/P21.2/P24.10 (Tier 3 first batch, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
+This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.18 (Tier 3, 2026-07-11), P24.11–P24.13 (Tier 3 second batch, 2026-07-11), P15.2/P21.2/P24.10 (Tier 3 first batch, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
 
 ---
 
 ## Status
 
-**Open items:** P24.16–P24.22 (threat-model findings), P15.3–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
+**Open items:** P24.16/P24.17/P24.19–P24.22 (threat-model findings), P15.3–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
 
 **Priority order:** see the tiered breakdown immediately below — it is the authoritative "what's next" view, ordered by tier and effort.
 
@@ -124,8 +125,27 @@ isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
 - **P24.17 — FIND-30: add integrity verification (hash-at-write, check-at-load) for memory
   files** (M, security, Moderate, CVSS 4.2). Plain files with no tamper detection — a durable,
   cross-session prompt-injection vector for anyone with host/OS write access.
-- **P24.18 — FIND-32: offer optional TLS or a Unix-domain-socket/named-pipe transport for
-  client↔daemon traffic** (M, security, Low, CVSS 3.3). Currently plaintext HTTP over loopback.
+- ~~**P24.18 — FIND-32: offer optional TLS or a Unix-domain-socket/named-pipe transport for
+  client↔daemon traffic** (M, security, Low, CVSS 3.3).~~ **SHIPPED 2026-07-11.** Chose optional
+  TLS over a Unix-domain-socket/named-pipe transport: TLS is one code path across the
+  Windows/macOS/Linux targets this project supports, where a UDS/named-pipe split would need two.
+  New opt-in `server.tls.enabled` config (default false, byte-for-byte unchanged behavior when
+  unset) plus optional `server.tls.cert_file`/`key_file` for an operator-supplied certificate. When
+  enabled with no cert/key configured, the daemon generates a self-signed ECDSA P-256 certificate
+  on first start and persists it as `<data_dir>/daemon.crt`/`daemon.key` (same
+  generate-once-reuse-unless-missing convention as `daemon.token`); the private key gets the same
+  Windows DACL hardening as the auth token via the existing `restrictToOwner` helper. Every CLI
+  client (`aegis`, `aegis ui`, `aegis sessions`, `aegis acp`, `aegis mcp-serve`) now goes through a
+  single new `client.NewFromConfig` constructor that wires base URL, bearer token, and — only when
+  configured — a pinned-certificate `*x509.CertPool` (`client.WithTLS`, no `InsecureSkipVerify`;
+  an unpinned client fails closed against the self-signed cert) into one place instead of repeating
+  the scheme/token logic at each of the ~9 call sites. `aegis ui`'s printed URL switches to
+  `https://` and prints a one-line "browser will warn about the self-signed certificate" notice
+  when TLS is on. New `internal/server/tls.go` (cert generation) and `internal/server/tls_test.go`
+  (TLS-enabled round trip against a real `ListenAndServe`, an unpinned client failing closed, and a
+  TLS-disabled test confirming no cert/key files are written and plain HTTP is unchanged). Docs:
+  `docs/configuration.md` (`server.tls.*` full reference) and `docs/security_scan.md` (new
+  "Client<->Daemon Transport" section covering the threat model and off-by-default posture).
 
 ### Tier 4 — Parked / low priority / no current trigger
 Do not build speculatively — revisit only if a concrete trigger (user demand, reported pain, incident) appears.
@@ -164,8 +184,9 @@ Full-repo STRIDE-A threat model at commit `34aa687`:
 total; 14 were "existing control" (already mitigated, verified, no action needed — FIND-18/19/20/
 21/22/23/24/25/26/27/28/35), FIND-04/FIND-08 shipped same-day, and P24.1–P24.9 (Critical/Important
 + Tier 2 quick wins, below) shipped same-day too. P24.10–P24.13 (Tier 3 first and second batches)
-shipped 2026-07-10/11. 5 remain open as P24.16–P24.21 (plus P24.22, a new low-severity item
-P24.8's audit surfaced), grouped by the tier they were slotted into above.
+shipped 2026-07-10/11, and P24.18 shipped 2026-07-11. 4 remain open as P24.16/P24.17/P24.19–P24.21
+(plus P24.22, a new low-severity item P24.8's audit surfaced), grouped by the tier they were
+slotted into above.
 
 **Critical/Important (Tier 1): all shipped 2026-07-10.** See [releases.md](releases.md#latest-changes)
 for what each one actually did — P24.1 (FIND-01, `/ui` page-token double-submit CSRF binding),
@@ -182,14 +203,13 @@ tests; see P24.22 above for the one latent observation it surfaced), P24.9 (FIND
 `cron_runs` table + `cron_history` tool, independent of turn traces).
 
 **Larger/sequence-dependent (Tier 3, Medium effort):** P24.10 shipped 2026-07-10; P24.11–P24.13
-shipped 2026-07-11, all three in parallel via isolated git-worktree sub-agents (see
-[releases.md](releases.md#latest-changes)).
+shipped 2026-07-11, all three in parallel via isolated git-worktree sub-agents; P24.18 shipped
+2026-07-11, also via an isolated git-worktree sub-agent alongside sibling agents independently
+working P24.16/P24.17 in their own worktrees (see [releases.md](releases.md#latest-changes)).
 - **P24.16 (FIND-29)** — Extend `restrictToOwner`-style Windows DACL hardening to `sessions.db`,
   checkpoint snapshots, and `.aegis/.env`.
 - **P24.17 (FIND-30)** — Per-entry hash recorded at write time for memory files, checked at load
   with a warning on mismatch.
-- **P24.18 (FIND-32)** — Optional TLS (self-signed/pinned) or Unix-domain-socket/named-pipe
-  transport for client↔daemon traffic.
 
 **Parked (Tier 4 — low severity or doc-only, no current trigger):**
 - **P24.14 (FIND-12)** — Document MCP tool-call argument data flow; consider opt-in outbound
