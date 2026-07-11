@@ -117,16 +117,21 @@ const (
 
 // Event is one server-sent event during a message run.
 type Event struct {
-	Kind         EventKind       `json:"kind"`
-	Text         string          `json:"text,omitempty"`
-	Tool         string          `json:"tool,omitempty"`
-	ToolInput    json.RawMessage `json:"tool_input,omitempty"`
-	ToolResult   string          `json:"tool_result,omitempty"`
-	ToolIsError  bool            `json:"tool_is_error,omitempty"`
-	InputTokens  int             `json:"input_tokens,omitempty"`
-	OutputTokens int             `json:"output_tokens,omitempty"`
-	CostUSD      float64         `json:"cost_usd,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	Kind      EventKind       `json:"kind"`
+	Text      string          `json:"text,omitempty"`
+	Tool      string          `json:"tool,omitempty"`
+	ToolInput json.RawMessage `json:"tool_input,omitempty"`
+	// ToolID is the provider tool_use ID, carried on both KindToolCall and
+	// its matching KindToolResult so a client can correlate the two exactly
+	// — e.g. for concurrent tool calls, which don't necessarily produce
+	// results in call order (P21.2; see engine.Event.ToolID).
+	ToolID       string  `json:"tool_id,omitempty"`
+	ToolResult   string  `json:"tool_result,omitempty"`
+	ToolIsError  bool    `json:"tool_is_error,omitempty"`
+	InputTokens  int     `json:"input_tokens,omitempty"`
+	OutputTokens int     `json:"output_tokens,omitempty"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
+	Error        string  `json:"error,omitempty"`
 	// Cache token usage (Anthropic prompt caching), surfaced for observability.
 	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
