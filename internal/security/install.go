@@ -125,6 +125,16 @@ func NoGuidedInstallReason(name string) string {
 // OS, streaming combined stdout+stderr to out as it runs. The caller is
 // responsible for getting explicit operator confirmation first (see
 // InstallCommand) — this function only executes.
+//
+// Audited for FIND-31/P24.8 (verification-only threat-model item): command
+// is always one of the compile-time literals in descriptors' Install maps
+// (method.go) — name only ever selects a map key, DescriptorFor rejects
+// unknown names, and no config/runtime value is ever concatenated into a
+// command string. shellInvocation hands command to exec.CommandContext as a
+// single, unmodified argv element (never re-split by Go), so it's opaque to
+// everything except the one real shell process that interprets it — see
+// TestInstallCommandsHaveNoInterpolationMarkers and
+// TestShellInvocationKeepsCommandAsSingleArgvElement in install_test.go.
 func RunGuidedInstall(ctx context.Context, name string, out io.Writer) error {
 	command, ok := InstallCommand(name)
 	if !ok {
