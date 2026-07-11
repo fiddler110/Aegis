@@ -1,12 +1,13 @@
 import { useState } from "preact/hooks";
 import type { SessionMeta } from "../types";
 
-export type SidebarTool = "debate" | "knowledge" | "activity";
+export type SidebarTool = "debate" | "knowledge" | "security" | "activity";
 
 // SessionList is the sidebar: active/archived chat lists with archive,
 // restore, and tidy-up (prune) actions (P15.9), live "working" indicators for
 // chats with a response in flight, and launchers for the workspace-level
-// tools (stress-test a claim, project knowledge, activity — P15.8/P15.9).
+// tools (stress-test a claim, project knowledge, security check, activity —
+// P15.6/P15.8/P15.9).
 export function SessionList({
   sessions,
   archivedSessions,
@@ -124,6 +125,9 @@ export function SessionList({
         </button>
         <button class="tool-btn" onClick={() => onOpenTool("knowledge")}>
           📚 Project knowledge
+        </button>
+        <button class="tool-btn" onClick={() => onOpenTool("security")}>
+          🛡️ Security check
         </button>
         <button class="tool-btn" onClick={() => onOpenTool("activity")}>
           📡 Activity{activityCount > 0 ? <span class="act-count">{activityCount}</span> : null}
