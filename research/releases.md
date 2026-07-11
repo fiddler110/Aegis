@@ -9,7 +9,38 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **P21.2, tool-call cards, shipped via an isolated git-worktree
+**Last updated:** 2026-07-10 — **P15.2, the daemon config-mutation endpoints, shipped via an
+isolated git-worktree sub-agent — closing out Tier 3's first batch (alongside P21.2 and P24.10,
+below)** (see [roadmap.md](roadmap.md#priority-order)):
+**P15.2 — new daemon config-mutation endpoints.** The web UI's planned sandbox/security/skills
+config panels and security-tooling admin panel (P15.6/P15.7) had no HTTP surface to talk to —
+every config mutation (sandbox backend, security scanner policy, `skills.builtin_enabled`, the
+hardened profile, guided scanner installs) was CLI/TUI-only. Added seven endpoints:
+`GET/PATCH /config/sandbox`, `/config/security`, `/config/skills`, `POST /config/harden`,
+`GET /security/status`, `GET /security/baseline`, `POST /security/install`
+(`internal/server/config.go`, `internal/server/security_admin.go`). All PATCH handlers write
+through the existing `config.Patch{Global,Project}*` functions rather than hand-rolling YAML
+mutation; the sandbox/security PATCH bodies use pointer fields for genuine partial-update semantics
+since the underlying patches otherwise replace their whole config block. `aegis harden`'s
+cap-computation was extracted from `internal/cli/harden.go` into `config.ComputeHardenPlan`
+(`internal/config/harden.go`) so the CLI and the new `POST /config/harden` share one source of
+truth instead of duplicating the cap thresholds and "leave an already-hardened knob alone"
+exceptions; harden and install both require an explicit `{"confirm": true}` before writing/running
+anything, since there's no terminal to show the CLI's `[y/N]` prompt. `GET /security/status` mirrors
+`internal/tui/securityconfig.go`'s tool-probe/status wording exactly so a future web panel matches
+the TUI. New wire types in `internal/api/api.go` plus typed `internal/client/client.go` methods
+follow the existing `Scan`/`Knowledge`/`Debate` client idiom. Scope selection (project vs. global
+config) defaults to project when the daemon's workspace has a `.aegis/` directory, else global,
+overridable per-request — flagged as a judgment call worth a second look if project/global scoping
+ever needs to be more explicit.
+Tests: `internal/server/config_test.go` (new) — GET defaults, PATCH apply+persist+partial-update,
+project/global scope resolution including auto-detection, unknown-scope rejection, harden
+preview/apply/idempotency; environment-tolerant smoke tests for install/status/baseline (no scanner
+binary required, matching `scan_test.go`'s existing convention on this box). `go build ./...`,
+`go vet ./...` clean; full `internal/server`/`config`/`security`/`cli`/`api`/`client` suites green
+except the same three pre-existing/environmental failures noted elsewhere in this doc (confirmed
+via `git stash` to fail identically without this change).
+Earlier the same day — **P21.2, tool-call cards, shipped via an isolated git-worktree
 sub-agent** (see [roadmap.md](roadmap.md#priority-order)):
 **P21.2 — tool-call cards (in-place updating block).** A tool call used to render as two
 independent, static transcript items — `renderToolCall` appended at `KindToolCall`,
