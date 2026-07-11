@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, consumeSSE, exchangeToken } from "./api";
-import type { Event, Message, SessionMeta } from "./types";
+import type { Event, Message, PersonaInfo, RewindResponse, Session, SessionMeta, StatusInfo } from "./types";
 import { SessionList } from "./components/SessionList";
 import { Transcript, type RenderBlock, type TranscriptItem } from "./components/Transcript";
 import { Composer } from "./components/Composer";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { Checkpoints } from "./components/Checkpoints";
 
 function itemsFromMessages(messages: Message[], sessionId: string): TranscriptItem[] {
   const items: TranscriptItem[] = [];
@@ -59,11 +61,37 @@ function itemsFromMessages(messages: Message[], sessionId: string): TranscriptIt
   return items;
 }
 
+// fmtUSD renders a dollar amount at a precision that keeps small local-model
+// spends visible without turning big ones into noise.
+function fmtUSD(v: number): string {
+  if (v > 0 && v < 0.01) return "$" + v.toFixed(4);
+  return "$" + v.toFixed(2);
+}
+
+// fmtTokens renders a token count compactly ("950", "8.4k", "1.2M").
+function fmtTokens(v: number): string {
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + "M";
+  if (v >= 1000) return (v / 1000).toFixed(1) + "k";
+  return String(v);
+}
+
+interface Toast {
+  id: number;
+  text: string;
+  warn: boolean;
+}
+
 export function App() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [title, setTitle] = useState("No session");
   const [mode, setMode] = useState("");
+  const [sessInfo, setSessInfo] = useState<Session | null>(null);
+  const [status, setStatus] = useState<StatusInfo | null>(null);
+  const [personas, setPersonas] = useState<PersonaInfo[]>([]);
+  const [panel, setPanel] = useState<"none" | "assistant" | "checkpoints">("none");
+  const [panelBusy, setPanelBusy] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -73,11 +101,49 @@ export function App() {
 
   const controllerRef = useRef<AbortController | null>(null);
   const timerRef = useRef<number | null>(null);
+  const toastSeq = useRef(0);
+
+  const addToast = (text: string, warn = false) => {
+    const id = ++toastSeq.current;
+    setToasts((prev) => [...prev, { id, text, warn }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 12000);
+  };
 
   const loadSessions = async () => {
     try {
       const list = (await (await api("/sessions")).json()) as SessionMeta[];
       setSessions(list || []);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const loadStatus = async () => {
+    try {
+      setStatus((await (await api("/status")).json()) as StatusInfo);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const loadPersonas = async () => {
+    try {
+      setPersonas(((await (await api("/personas")).json()) as PersonaInfo[]) || []);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // refreshSessionInfo re-reads a session's metadata (persona, model, cost)
+  // without touching the rendered transcript — safe to call mid/after stream.
+  const refreshSessionInfo = async (id: string) => {
+    try {
+      const sess = (await (await api("/sessions/" + id)).json()) as Session;
+      setSessInfo(sess);
+      setTitle(sess.title || "(untitled)");
+      setMode(sess.mode);
     } catch (e) {
       console.error(e);
     }
@@ -97,15 +163,58 @@ export function App() {
 
   const openSession = async (id: string) => {
     setCurrentId(id);
-    const sess = (await (await api("/sessions/" + id)).json()) as {
-      title?: string;
-      mode: string;
-      messages?: Message[];
-    };
+    setPanel("none");
+    const sess = (await (await api("/sessions/" + id)).json()) as Session;
+    setSessInfo(sess);
     setTitle(sess.title || "(untitled)");
     setMode(sess.mode);
     setItems(itemsFromMessages(sess.messages || [], id));
     loadSessions();
+  };
+
+  const switchPersona = async (name: string) => {
+    if (!currentId) return;
+    setPanelBusy(true);
+    try {
+      await api("/sessions/" + currentId, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ persona: name }),
+      });
+      await refreshSessionInfo(currentId);
+      setPanel("none");
+      addToast(`Assistant switched to “${name}”.`);
+    } catch (e) {
+      addToast("Could not switch: " + (e as Error).message, true);
+    } finally {
+      setPanelBusy(false);
+    }
+  };
+
+  const setSessionModel = async (model: string) => {
+    if (!currentId) return;
+    setPanelBusy(true);
+    try {
+      await api("/sessions/" + currentId, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      await refreshSessionInfo(currentId);
+      addToast(model ? `This chat now uses “${model}”.` : "This chat is back on the default model.");
+    } catch (e) {
+      addToast("Could not change model: " + (e as Error).message, true);
+    } finally {
+      setPanelBusy(false);
+    }
+  };
+
+  const onRewound = async (r: RewindResponse) => {
+    setPanel("none");
+    if (currentId) await openSession(currentId);
+    loadStatus();
+    const files = r.files_restored === 1 ? "1 file" : `${r.files_restored} files`;
+    addToast(`Went back: ${files} restored, conversation trimmed.`);
   };
 
   const startElapsed = () => {
@@ -242,14 +351,21 @@ export function App() {
               reason: ev.approval_reason || `Run ${ev.tool}?`,
               approvalId: ev.approval_id || "",
               sessionId,
+              tool: ev.tool,
+              toolInput: ev.tool_input,
             },
           ]);
+          break;
+        case "cost_alert":
+          // P15.4: spend crossed a configured alert threshold — surface it,
+          // don't silently drop it like turn_done/steer/guard.
+          addToast("Spending heads-up: " + (ev.text || "cost threshold crossed"), true);
           break;
         case "error":
           updateAsst((blocks) => [...blocks, { kind: "error", text: "Error: " + (ev.error || "") }]);
           break;
         default:
-          break; // turn_done/done/steer/guard/cost_alert: parity no-ops for now
+          break; // turn_done/done/steer/guard/notice: parity no-ops for now
       }
     };
 
@@ -276,12 +392,18 @@ export function App() {
       controllerRef.current = null;
       stopElapsed();
       loadSessions();
+      refreshSessionInfo(sessionId); // P15.4: pick up this turn's cost/tokens
+      loadStatus();
     }
   };
 
   useEffect(() => {
     exchangeToken()
-      .then(loadSessions)
+      .then(() => {
+        loadSessions();
+        loadStatus();
+        loadPersonas();
+      })
       .catch((e) => setAuthError((e as Error).message || "authentication failed"));
   }, []);
 
@@ -295,6 +417,14 @@ export function App() {
       </section>
     );
   }
+
+  const sessionTokens = (sessInfo?.input_tokens || 0) + (sessInfo?.output_tokens || 0);
+  const costTitle = status
+    ? `This chat: ${fmtUSD(sessInfo?.cost_usd || 0)} · ${fmtTokens(sessionTokens)} tokens` +
+      `\nToday (all chats): ${fmtUSD(status.daily_cost_usd)} · ${fmtTokens(status.daily_tokens)} tokens` +
+      (status.daily_cap_usd ? `\nDaily spending cap: ${fmtUSD(status.daily_cap_usd)}` : "") +
+      (status.daily_token_cap ? `\nDaily token cap: ${fmtTokens(status.daily_token_cap)}` : "")
+    : "";
 
   return (
     <>
@@ -310,9 +440,59 @@ export function App() {
               {streaming ? `${phaseLabel}… ${elapsed}s` : ""}
             </span>
           </span>
+          {currentId && (
+            <span class="costs" title={costTitle}>
+              {fmtUSD(sessInfo?.cost_usd || 0)} · {fmtTokens(sessionTokens)} tok
+              {status ? ` · today ${fmtUSD(status.daily_cost_usd)}` : ""}
+            </span>
+          )}
+          {currentId && (
+            <button
+              class="chip"
+              title="Choose the assistant's role and model"
+              onClick={() => {
+                if (panel !== "assistant") loadPersonas(); // pick up on-disk persona edits
+                setPanel(panel === "assistant" ? "none" : "assistant");
+              }}
+            >
+              🎭 {sessInfo?.persona || "general"}
+              {sessInfo?.model ? ` · ${sessInfo.model}` : ""}
+            </button>
+          )}
+          {currentId && (
+            <button
+              class="chip"
+              title="Go back to an earlier point in this chat"
+              onClick={() => setPanel(panel === "checkpoints" ? "none" : "checkpoints")}
+            >
+              ⏪ Restore
+            </button>
+          )}
           <span class="badge" id="mode">
             {mode}
           </span>
+        </div>
+        <div class="panel-anchor">
+          {panel === "assistant" && currentId && (
+            <SettingsPanel
+              personas={personas}
+              currentPersona={sessInfo?.persona || "general"}
+              modelOverride={sessInfo?.model || ""}
+              defaultModel={status?.model || ""}
+              busy={panelBusy}
+              onSwitchPersona={switchPersona}
+              onSetModel={setSessionModel}
+              onClose={() => setPanel("none")}
+            />
+          )}
+          {panel === "checkpoints" && currentId && (
+            <Checkpoints
+              sessionId={currentId}
+              streaming={streaming}
+              onRewound={onRewound}
+              onClose={() => setPanel("none")}
+            />
+          )}
         </div>
         <Transcript items={items} />
         <Composer
@@ -324,6 +504,19 @@ export function App() {
           onStop={() => controllerRef.current?.abort()}
         />
       </section>
+      <div id="toasts">
+        {toasts.map((t) => (
+          <div class={"toast" + (t.warn ? " warn" : "")} key={t.id}>
+            <span>{t.text}</span>
+            <button
+              class="linkish"
+              onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
     </>
   );
 }

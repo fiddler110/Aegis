@@ -2,6 +2,10 @@ export interface SessionMeta {
   id: string;
   title?: string;
   mode: string;
+  model?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
   updated_at: string;
 }
 
@@ -25,7 +29,43 @@ export interface Session {
   id: string;
   title?: string;
   mode: string;
+  persona?: string;
+  model?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
   messages?: Message[];
+}
+
+export interface PersonaInfo {
+  name: string;
+  description: string;
+}
+
+// StatusInfo is the GET /status response (daily totals + daemon defaults).
+export interface StatusInfo {
+  provider: string;
+  model: string;
+  daily_cost_usd: number;
+  daily_cap_usd?: number;
+  daily_tokens: number;
+  daily_token_cap?: number;
+}
+
+// CheckpointInfo is one per-turn restore point (GET /sessions/{id}/checkpoints).
+export interface CheckpointInfo {
+  id: string;
+  seq: number;
+  label: string;
+  git_sha?: string;
+  file_count: number;
+  created_at: string;
+}
+
+export interface RewindResponse {
+  scope: string;
+  files_restored: number;
+  messages_kept: number;
 }
 
 export interface Event {
@@ -40,7 +80,8 @@ export interface Event {
     | "approval_request"
     | "steer"
     | "guard"
-    | "cost_alert";
+    | "cost_alert"
+    | "notice";
   text?: string;
   tool?: string;
   tool_input?: unknown;
