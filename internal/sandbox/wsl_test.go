@@ -178,7 +178,18 @@ func TestWSLInstallCommand(t *testing.T) {
 
 func TestWSLInstallCommandWithDistro(t *testing.T) {
 	got := WSLInstallCommand("curl -fsSL https://example.com/install.sh | bash", "kali-linux")
-	want := "wsl -d kali-linux -- bash -lc 'curl -fsSL https://example.com/install.sh | bash'"
+	want := "wsl -d 'kali-linux' -- bash -lc 'curl -fsSL https://example.com/install.sh | bash'"
+	if got != want {
+		t.Errorf("WSLInstallCommand = %q, want %q", got, want)
+	}
+}
+
+func TestWSLInstallCommandQuotesDangerousDistro(t *testing.T) {
+	// A distro name containing a single quote and a semicolon must not be
+	// able to break out of the PowerShell single-quoted argument and inject
+	// an extra command (e.g. "'; rm -rf C:\ ; '").
+	got := WSLInstallCommand("echo hi", "kali'; rm -rf C:\\ ; '")
+	want := "wsl -d 'kali''; rm -rf C:\\ ; ''' -- bash -lc 'echo hi'"
 	if got != want {
 		t.Errorf("WSLInstallCommand = %q, want %q", got, want)
 	}

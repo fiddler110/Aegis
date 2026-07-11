@@ -36,6 +36,10 @@ type WorkerSpec struct {
 	// intended ceiling instead of one shared one. Zero means "no cap
 	// configured on the parent side" (the worker falls back to its own
 	// cfg.Cost.* value, which is 0/unlimited in that case too — same result).
+	// Once the shared cap is exhausted, a worker still gets fairShareFraction
+	// of the *original* cap rather than a near-zero remainder (FIND-14/
+	// P24.15) — an early expensive sibling can no longer starve a later one
+	// down to essentially nothing.
 	RemainingBudgetUSD float64 `json:"remaining_budget_usd,omitempty"`
 	RemainingTokens    int     `json:"remaining_tokens,omitempty"`
 }
@@ -50,21 +54,43 @@ type costTracker interface {
 	AddWorkerCost(costUSD float64, tokens int)
 }
 
-// minRemainingBudgetUSD/minRemainingTokens are the floor passed to a worker
-// when the parent's cap is already exhausted at spawn time: a literal 0 would
-// be indistinguishable from "no cap configured" (which also serializes as
-// 0/omitted), so a tiny positive floor keeps the override active — the
-// worker's very first budget check still lets one turn through (a fresh
-// tracker starts at 0, which is not >= floor) before tripping on that turn's
-// actual spend, the same one-turn slack the in-process budget gate has.
+// minRemainingBudgetUSD/minRemainingTokens are the absolute last-resort floor
+// passed to a worker when the parent's cap is already exhausted at spawn time
+// *and* fairShareFraction (below) would itself round down to zero (e.g. a
+// sub-cent budgetUSD): a literal 0 would be indistinguishable from "no cap
+// configured" (which also serializes as 0/omitted), so a tiny positive floor
+// keeps the override active — the worker's very first budget check still lets
+// one turn through (a fresh tracker starts at 0, which is not >= floor)
+// before tripping on that turn's actual spend, the same one-turn slack the
+// in-process budget gate has.
 const (
 	minRemainingBudgetUSD = 0.000001
 	minRemainingTokens    = 1
 )
 
+// fairShareFraction is FIND-14's guaranteed minimum slice of the *original*
+// cap (not the shared tracker's dwindling remainder) handed to every spawned
+// worker, regardless of how much siblings spawned earlier have already
+// consumed. Without this, remainingBudget/remainingTokens degrade to the
+// near-zero epsilon floor above as soon as the shared cap is exhausted, so
+// one expensive/runaway early sub-agent could starve every later sibling of
+// a swarm run down to essentially nothing — even though those siblings still
+// have real work to do. SubprocessBackend has no notion of how many teammates
+// a swarm run intends to spawn in total (SpawnConfig carries no team-size
+// hint), so rather than trying to divide the cap by an unknown N, this uses a
+// fixed conservative fraction: generous enough that a handful of siblings can
+// each get a meaningful floor, small enough that it can't itself blow the
+// budget by much even if every spawned worker ends up needing its floor
+// (worst case total spend across floors alone is bounded at 5x the original
+// cap, which is an acceptable trade against the fairness gap this closes).
+const fairShareFraction = 0.2
+
 func remainingBudget(cap, spent float64) float64 {
 	if r := cap - spent; r > 0 {
 		return r
+	}
+	if floor := cap * fairShareFraction; floor > minRemainingBudgetUSD {
+		return floor
 	}
 	return minRemainingBudgetUSD
 }
@@ -72,6 +98,9 @@ func remainingBudget(cap, spent float64) float64 {
 func remainingTokens(cap, spent int) int {
 	if r := cap - spent; r > 0 {
 		return r
+	}
+	if floor := int(float64(cap) * fairShareFraction); floor > minRemainingTokens {
+		return floor
 	}
 	return minRemainingTokens
 }

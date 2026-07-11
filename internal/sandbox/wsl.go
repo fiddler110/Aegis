@@ -115,6 +115,13 @@ func bashQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// powershellQuote wraps s in single quotes for safe embedding in a
+// PowerShell -Command string, escaping any embedded single quote by
+// doubling it (PowerShell single-quoted strings have no backslash escape).
+func powershellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 // BashQuoteArgs single-quotes each arg for safe embedding in a bash script
 // line (e.g. building the argv of a command run inside WSL).
 func BashQuoteArgs(args []string) []string {
@@ -174,5 +181,5 @@ func WSLInstallCommand(linuxCmd, distro string) string {
 	if distro == "" {
 		return "wsl -- bash -lc " + bashQuote(linuxCmd)
 	}
-	return "wsl -d " + distro + " -- bash -lc " + bashQuote(linuxCmd)
+	return "wsl -d " + powershellQuote(distro) + " -- bash -lc " + bashQuote(linuxCmd)
 }

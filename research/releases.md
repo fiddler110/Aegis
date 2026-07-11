@@ -9,7 +9,77 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 — **P24.19 (FIND-15) — document that local-Ollama traffic is
+**Last updated:** 2026-07-11 — **P24.20 (FIND-17) — strip/escape ANSI/OSC control sequences in
+streamed model output before TUI render.** Flagged by the STRIDE-A threat model as defense-in-depth
+for an already-mitigated prompt-injection vector: if adversarial content ever reached the model's
+output verbatim, the TUI's markdown render path had no sanitization step, so embedded raw ANSI/OSC
+escape sequences could reach the terminal — cursor repositioning, hidden/overwritten text, or
+OSC-based clipboard/title-bar tricks on terminals that support them. `internal/tui/tui.go`'s
+`mdRender` (the single choke point both the mid-stream `liveBlock.render` and end-of-turn
+`flushLiveText` route through) renders raw model text via glamour or, on renderer failure, a plain
+`wrap` fallback — neither strips unrelated escape sequences embedded in the source text. Added
+`stripControlSeqs` in a new `internal/tui/sanitize.go`, a byte-scanner that strips CSI sequences
+(`ESC [ … <final byte>`), OSC/DCS/APC/PM sequences (`ESC ] … (BEL | ESC \)` and similar,
+BEL/ST-terminated), bare/other 7-bit C1 two-byte escape forms, and raw C0 control bytes (except
+tab/LF/CR) and DEL, while leaving printable text — including multi-byte UTF-8 — untouched; called at
+the top of `mdRender` before both the glamour and fallback paths, so the sanitization happens on the
+untrusted input rather than only on glamour's own (trusted) styled output. Deliberately separate from
+`internal/tui/ansi16.go`'s `remapANSI16`, which remaps SGR colour codes in already-trusted shell-tool
+output and preserves them by design (`internal/tui/toolview.go`'s tool-result rendering path) — that
+path was left untouched since it isn't the vector the finding describes.
+Tests: new `internal/tui/sanitize_test.go` (`TestStripControlSeqs`, table-driven — cursor-
+repositioning CSI, SGR color CSI, OSC terminal-title and OSC-8 hyperlink/OSC-52 clipboard sequences,
+bare ESC, C0 controls, DEL, an unterminated trailing OSC, and markdown/unicode passthrough — plus
+`TestStripControlSeqsIdempotent`). `go build ./...`, `go test ./internal/tui/...`, and
+`go test -race ./internal/tui/...` all clean; `go test ./...` shows only pre-existing, unrelated
+failures (Windows-path-format assertions in `internal/sandbox`/`internal/security`/`internal/lsp` and
+network-timeout flakes in `internal/server`) that reproduce identically on `main` before this change.
+
+Earlier — **P24.22 — quote/escape the `distro` argument in
+`sandbox.WSLInstallCommand`.** Flagged by the STRIDE-A threat model as a latent injection vector:
+`WSLInstallCommand` (`internal/sandbox/wsl.go`) already quoted its `linuxCmd` argument with
+`bashQuote` (correct, since that portion is embedded inside the inner `bash -lc '...'`), but
+concatenated `distro` directly into the command line unquoted — `"wsl -d " + distro + " -- ..."`.
+Currently dead code from a security-impact standpoint (the only call site,
+`internal/security/install.go:42`, hardcodes `distro` to `""`), but worth closing before a second,
+config-driven caller turns it into a real injection vector. The whole returned string is parsed by
+PowerShell first (`shellInvocation` runs it via `<pwsh-or-powershell> -NoProfile -NonInteractive
+-Command <command>`, which then invokes `wsl.exe -d <distro> -- bash -lc '...'`), so `distro` needed
+PowerShell single-quote escaping, not bash quoting — doubling any embedded single quote, no
+backslash escape. Added `powershellQuote` next to the existing `bashQuote` in
+`internal/sandbox/wsl.go` and applied it to the `distro` argument only; `linuxCmd`/`bashQuote` is
+unchanged.
+Tests: `internal/sandbox/wsl_test.go`'s `TestWSLInstallCommandWithDistro` updated to expect the
+now-quoted `'kali-linux'`, plus a new `TestWSLInstallCommandQuotesDangerousDistro` asserting a
+distro name containing a single quote and a semicolon (`kali'; rm -rf C:\ ; '`) is safely escaped
+rather than breaking out of the PowerShell argument. `go build ./...` and
+`go test ./internal/sandbox/...` clean (pre-existing, unrelated `-race` failures on this machine —
+macOS `/private/var` symlink resolution in `TestValidatePath*` and a flaky
+`TestWSLPathConvertsBackslashesViaForwardSlash` — reproduce identically on `main` before this
+change).
+
+Earlier — **P24.15 (FIND-14) — give each swarm sub-agent a guaranteed
+minimum budget floor.** `internal/swarm/subprocess.go`'s `SubprocessBackend.Spawn` computed each
+worker's remaining cost/token allowance as the shared fan-out tracker's cap minus whatever siblings
+had already spent, floored only at a near-zero epsilon (`minRemainingBudgetUSD`/
+`minRemainingTokens`) once exhausted — so one expensive or runaway early sub-agent could reduce a
+later sibling's allowance to essentially nothing, even though the swarm run wasn't done spawning
+its intended workers (STRIDE-A: Denial of Service, CVSS 3.6). Added a `fairShareFraction` (0.2)
+constant: once the shared cap is exhausted, `remainingBudget`/`remainingTokens` now floor a
+worker's allowance at 20% of the *original* cap rather than the epsilon, so a handful of siblings
+can each still get a meaningful floor; the epsilon floor is kept as a fallback for the degenerate
+case where 20% of the cap itself rounds to (near) zero. `SpawnConfig` carries no team-size/worker-
+count hint, so this is a fixed conservative fraction rather than an exact 1/N split — worst case
+total spend across floors alone is bounded at 5x the original cap, an accepted trade against the
+fairness gap it closes.
+Tests: `internal/swarm/subprocess_test.go` gained `TestRemainingBudgetFairShareFloor`,
+`TestRemainingBudgetFairShareFloorFallsBackToEpsilon`, `TestRemainingTokensFairShareFloor`, and an
+end-to-end `TestSubprocessSpawnLaterSiblingGetsFairShareFloor` (spawns a worker after a shared
+tracker shows the cap already blown past, asserts the reported remaining budget/tokens land at the
+fair-share floor instead of the old near-zero epsilon). `go build ./...`, `go test ./internal/swarm/...`,
+and `go test -race ./internal/swarm/...` all clean.
+
+Earlier — **P24.19 (FIND-15) — document that local-Ollama traffic is
 typically unencrypted.** `internal/provider/openai/openai.go` applies no TLS enforcement specific
 to a local base URL, and Ollama's own default configuration binds and serves over plain HTTP on
 `127.0.0.1` — on a single-user machine this is no different from any other loopback traffic, but on
