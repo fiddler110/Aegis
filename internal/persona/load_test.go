@@ -70,8 +70,11 @@ You are a strict secure code reviewer.`)
 	if !p.Loaded {
 		t.Error("expected Loaded=true for a persona parsed from a file (P7.5)")
 	}
-	if p.System != "You are a strict secure code reviewer." {
+	if !strings.Contains(p.System, "You are a strict secure code reviewer.") {
 		t.Errorf("system = %q", p.System)
+	}
+	if !strings.Contains(p.System, "persona_untrusted_content") || !strings.Contains(p.System, "untrusted data") {
+		t.Errorf("expected file-loaded persona body to be wrapped in an untrusted-provenance marker, got %q", p.System)
 	}
 }
 
@@ -104,7 +107,7 @@ func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
 		t.Fatalf("after add: n=%d changed=%v", n, changed)
 	}
 	p, ok := Get("hotswap")
-	if !ok || p.System != "First body." {
+	if !ok || !strings.Contains(p.System, "First body.") {
 		t.Fatalf("persona after add: ok=%v system=%q", ok, p.System)
 	}
 
@@ -128,7 +131,7 @@ func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
 	if _, changed := Refresh(dir); !changed {
 		t.Fatal("Refresh missed a file update")
 	}
-	if p, _ := Get("hotswap"); p.System != "Second body." {
+	if p, _ := Get("hotswap"); !strings.Contains(p.System, "Second body.") {
 		t.Errorf("persona not updated: system=%q", p.System)
 	}
 

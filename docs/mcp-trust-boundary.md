@@ -15,6 +15,23 @@ externally-controlled content as an MCP server's response, so it gets the
 same provenance marker and opt-in scan — see the `search.scan_output`
 example in [§2](#2-opt-in-heuristic-output-scan) below.
 
+It also wraps the body of any **project- or user-local persona/skill `.md`
+file** (FIND-05): those files live on disk, not in the binary, so a
+malicious dependency, template repo, or cloned project could plant one to
+inject instructions into every session that loads it. `internal/persona`'s
+`parsePersonaFile` and `internal/skills`' `appendFromDir` wrap a file-loaded
+persona's `System` prompt / a project-or-user skill's body in the same
+`<persona_untrusted_content persona="...">` / `<skill_untrusted_content
+skill="...">` marker before it reaches the system prompt or a `skill` tool
+result — built-in personas/skills (compiled into the binary) are left
+unwrapped since they aren't attacker-reachable. Unlike MCP/web content, the
+heuristic scan is left **off** for persona/skill wrapping even though the
+marker is always on: this content is re-injected into every session that
+uses the persona/skill (not a one-off fetch), and persona/skill prose
+routinely discusses its own role and instructions, which the scan's
+`\bsystem prompt\b`-style patterns are prone to flag as false positives on
+entirely benign text.
+
 ## The threat
 
 Every tool result — including an MCP tool's — becomes part of the

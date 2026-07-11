@@ -177,6 +177,58 @@ func TestToolsList(t *testing.T) {
 	}
 }
 
+func TestToolsCallRequiresAuthWhenTokenConfigured(t *testing.T) {
+	backend := &fakeBackend{sessionID: "sess-1", events: []api.Event{{Kind: api.KindText, Text: "ok"}}}
+	peer, cleanup := newTestPeer(t, backend, Options{AuthToken: "s3cret"})
+	defer cleanup()
+
+	// tools/list stays reachable unauthenticated.
+	peer.request("tools/list", map[string]any{})
+	if out := peer.readResponse(); out.Error != nil {
+		t.Fatalf("tools/list before auth: unexpected error: %+v", out.Error)
+	}
+
+	// tools/call is denied before authenticating.
+	peer.request("tools/call", toolsCallParams{Name: "aegis_prompt", Arguments: mustJSON(promptArgs{Text: "hi"})})
+	out := peer.readResponse()
+	if out.Error == nil || out.Error.Code != codeUnauthorized {
+		t.Fatalf("expected codeUnauthorized before authenticating, got %+v", out.Error)
+	}
+
+	// Wrong token is rejected and still leaves the call denied.
+	peer.request("aegis/authenticate", authenticateParams{Token: "wrong"})
+	if out := peer.readResponse(); out.Error == nil || out.Error.Code != codeUnauthorized {
+		t.Fatalf("expected codeUnauthorized for wrong token, got %+v", out.Error)
+	}
+	peer.request("tools/call", toolsCallParams{Name: "aegis_prompt", Arguments: mustJSON(promptArgs{Text: "hi"})})
+	if out := peer.readResponse(); out.Error == nil || out.Error.Code != codeUnauthorized {
+		t.Fatalf("expected still-unauthenticated after wrong token, got %+v", out.Error)
+	}
+
+	// Correct token authenticates; tools/call now succeeds.
+	peer.request("aegis/authenticate", authenticateParams{Token: "s3cret"})
+	if out := peer.readResponse(); out.Error != nil {
+		t.Fatalf("authenticate with correct token: unexpected error: %+v", out.Error)
+	}
+	peer.request("tools/call", toolsCallParams{Name: "aegis_prompt", Arguments: mustJSON(promptArgs{Text: "hi"})})
+	out = peer.readResponse()
+	if out.Error != nil {
+		t.Fatalf("tools/call after auth: unexpected error: %+v", out.Error)
+	}
+}
+
+func TestToolsCallUnaffectedWhenNoTokenConfigured(t *testing.T) {
+	backend := &fakeBackend{sessionID: "sess-1", events: []api.Event{{Kind: api.KindText, Text: "ok"}}}
+	peer, cleanup := newTestPeer(t, backend, Options{})
+	defer cleanup()
+
+	peer.request("tools/call", toolsCallParams{Name: "aegis_prompt", Arguments: mustJSON(promptArgs{Text: "hi"})})
+	out := peer.readResponse()
+	if out.Error != nil {
+		t.Fatalf("tools/call with no token configured: unexpected error: %+v", out.Error)
+	}
+}
+
 func TestPromptCreatesSessionAndReturnsText(t *testing.T) {
 	backend := &fakeBackend{
 		sessionID: "sess-1",

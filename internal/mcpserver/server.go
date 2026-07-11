@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +41,16 @@ type Options struct {
 	// Version is reported as the server's version in the initialize response.
 	// Defaults to "0.1" if empty.
 	Version string
+	// AuthToken, when non-empty, requires the client to authenticate (via the
+	// custom "aegis/authenticate" request) with this shared secret before
+	// tools/call is allowed to proceed. initialize/ping/tools/list stay
+	// reachable unauthenticated since they expose no session-driving
+	// capability. This closes FIND-02/P24.2: without it, any local process
+	// able to write to this subprocess's stdin can drive full agent turns.
+	// Empty (the default) leaves behavior unchanged — opt in by setting
+	// AEGIS_MCP_TOKEN and configuring the calling harness to send the same
+	// value back via aegis/authenticate.
+	AuthToken string
 }
 
 // Server implements the MCP server side of the protocol: initialize,
@@ -51,6 +62,10 @@ type Server struct {
 	defaultMode string
 	autoApprove bool
 	version     string
+	authToken   string
+
+	authMu        sync.Mutex
+	authenticated bool
 }
 
 // NewServer builds an MCP server over backend.
@@ -66,7 +81,40 @@ func NewServer(backend Backend, opts Options, logger *slog.Logger) *Server {
 	if version == "" {
 		version = "0.1"
 	}
-	return &Server{backend: backend, logger: logger, defaultMode: mode, autoApprove: opts.AutoApprove, version: version}
+	return &Server{backend: backend, logger: logger, defaultMode: mode, autoApprove: opts.AutoApprove, version: version, authToken: opts.AuthToken}
+}
+
+// authenticateParams is the payload for the custom "aegis/authenticate"
+// request (not part of the base MCP spec — a client unaware of it simply
+// never calls it, which is fine when AuthToken is unset).
+type authenticateParams struct {
+	Token string `json:"token"`
+}
+
+func (s *Server) handleAuthenticate(params json.RawMessage) (any, *rpcErr) {
+	if s.authToken == "" {
+		return map[string]any{"authenticated": true}, nil
+	}
+	var p authenticateParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcErr{Code: codeInvalidParams, Message: "invalid params: " + err.Error()}
+	}
+	if subtle.ConstantTimeCompare([]byte(p.Token), []byte(s.authToken)) != 1 {
+		return nil, &rpcErr{Code: codeUnauthorized, Message: "invalid token"}
+	}
+	s.authMu.Lock()
+	s.authenticated = true
+	s.authMu.Unlock()
+	return map[string]any{"authenticated": true}, nil
+}
+
+func (s *Server) isAuthenticated() bool {
+	if s.authToken == "" {
+		return true
+	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	return s.authenticated
 }
 
 // wireIn is a request or notification received from the client. Requests
@@ -89,11 +137,13 @@ type rpcErr struct {
 	Message string `json:"message"`
 }
 
-// Standard JSON-RPC 2.0 error codes.
+// Standard JSON-RPC 2.0 error codes, plus a server-defined code for the
+// custom auth extension (outside the -32768..-32000 reserved range).
 const (
 	codeParseError     = -32700
 	codeMethodNotFound = -32601
 	codeInvalidParams  = -32602
+	codeUnauthorized   = -32001
 )
 
 // maxLineBytes caps a single JSON-RPC line, matching internal/mcp's client-side
@@ -178,7 +228,12 @@ func (s *Server) handleRequest(ctx context.Context, method string, params json.R
 		return map[string]any{}, nil
 	case "tools/list":
 		return toolsListResult{Tools: listedTools()}, nil
+	case "aegis/authenticate":
+		return s.handleAuthenticate(params)
 	case "tools/call":
+		if !s.isAuthenticated() {
+			return nil, &rpcErr{Code: codeUnauthorized, Message: "authentication required: call aegis/authenticate with the shared token first"}
+		}
 		return s.handleToolsCall(ctx, params)
 	default:
 		return nil, &rpcErr{Code: codeMethodNotFound, Message: "method not found: " + method}

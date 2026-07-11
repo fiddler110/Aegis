@@ -135,7 +135,7 @@ func TestSchedulerCreateAndToggle(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) {}, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo")
+	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestSchedulerCreateBadSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	sched := NewScheduler(store, func(j Job) {}, nil)
-	if _, err := sched.Create(context.Background(), "not a cron", "echo", ""); err == nil {
+	if _, err := sched.Create(context.Background(), "not a cron", "echo", "", false); err == nil {
 		t.Error("expected error for bad schedule")
 	}
 }
@@ -190,7 +190,7 @@ func TestTickFiresAndIdempotent(t *testing.T) {
 	sched := NewScheduler(store, run, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes")
+	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestTickSkipsDisabled(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) { fired = true }, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo", "")
+	j, err := sched.Create(ctx, "* * * * *", "echo", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
