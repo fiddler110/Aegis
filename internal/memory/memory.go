@@ -91,10 +91,15 @@ func (s Sources) Load() string {
 func (s Sources) loadDirect() string {
 	var sections []string
 
-	if txt := readIfExists(s.GlobalMemoryPath()); txt != "" {
+	// P24.17 (FIND-30): unlike other readIfExists callers in this package
+	// (skills, AGENTS.md/CLAUDE.md context files), memory.md is the one file
+	// Aegis itself writes to via Append — so it's the one file where an
+	// integrity sidecar makes sense. readMemoryFileChecked prepends a warning
+	// if the file was edited outside that write path.
+	if txt := readMemoryFileChecked(s.GlobalMemoryPath()); txt != "" {
 		sections = append(sections, "# User memory\n\n"+txt)
 	}
-	if txt := readIfExists(s.ProjectMemoryPath()); txt != "" {
+	if txt := readMemoryFileChecked(s.ProjectMemoryPath()); txt != "" {
 		sections = append(sections, "# Project memory\n\n"+txt)
 	}
 
@@ -123,10 +128,21 @@ func Append(path, entry string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	stamp := time.Now().Format("2006-01-02")
-	_, err = fmt.Fprintf(f, "- (%s) %s\n", stamp, entry)
-	return err
+	_, writeErr := fmt.Fprintf(f, "- (%s) %s\n", stamp, entry)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	// P24.17 (FIND-30): refresh the integrity sidecar to match the file's
+	// full post-append content. This is Aegis's own write path, so the new
+	// baseline is trusted; a future load whose content diverges from this
+	// baseline without going through Append again gets flagged.
+	updateSidecarAfterWrite(path)
+	return nil
 }
 
 // SaveSkill writes a named skill file under the project skills directory.
