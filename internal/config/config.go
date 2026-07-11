@@ -301,6 +301,14 @@ type ServerConfig struct {
 	// this flag. Off by default.
 	AllowRemote bool `koanf:"allow_remote"`
 
+	// TLS optionally encrypts client<->daemon traffic (FIND-32/P24.18). Off
+	// by default: the default loopback-only bind (AllowRemote above) already
+	// limits exposure to other local accounts on the same host with
+	// packet-capture privilege, so this is defense-in-depth rather than a
+	// required control for the common single-user case — see
+	// ServerTLSConfig's doc comment for exactly what enabling it does.
+	TLS ServerTLSConfig `koanf:"tls"`
+
 	// MaxConcurrentRuns caps how many message-turn runs (POST
 	// /sessions/{id}/messages) may be actively executing across all sessions
 	// at once (P21.5). A request that would exceed the cap is rejected
@@ -334,6 +342,38 @@ type ServerConfig struct {
 // DefaultSSEBufferSize is the fallback per-connection SSE event queue depth
 // used when ServerConfig.SSEBufferSize is left at 0 (P21.5).
 const DefaultSSEBufferSize = 256
+
+// ServerTLSConfig configures optional transport encryption for the daemon's
+// HTTP API (FIND-32/P24.18). client<->daemon traffic is plain HTTP over
+// loopback by default; this is Tier 3/low-severity because loopback binding
+// already keeps it off the network, but another local account on a shared
+// host with packet-capture privilege could still observe the bearer token
+// and full conversation content. Enabling TLS closes that gap; it does not
+// protect against Host/OS-level compromise of the same account, which can
+// already read daemon.token (and, with TLS enabled, daemon.key) directly off
+// disk — see docs/configuration.md.
+//
+// When Enabled is true and CertFile/KeyFile are left empty, the daemon
+// generates a self-signed ECDSA P-256 certificate on first start and persists
+// it under DataDir as daemon.crt/daemon.key (mirroring the daemon.token
+// convention — generated once, reused across restarts unless missing). The
+// client must be told to trust that specific certificate (see
+// client.WithTLS); this is certificate pinning to a file that never leaves
+// the local machine, not verification against a public CA or hostname, so
+// there is no browser/OS trust store involved and no renewal workflow.
+type ServerTLSConfig struct {
+	// Enabled turns on TLS for the daemon's HTTP listener and switches
+	// client.NewFromConfig to https:// with the pinned cert. Off by default —
+	// no new files are written and no scheme changes when this is unset.
+	Enabled bool `koanf:"enabled"`
+
+	// CertFile/KeyFile let an operator supply their own certificate instead
+	// of the auto-generated self-signed one (e.g. one issued by an internal
+	// CA). Both empty (the default) means auto-generate/reuse
+	// <DataDir>/daemon.crt and <DataDir>/daemon.key.
+	CertFile string `koanf:"cert_file"`
+	KeyFile  string `koanf:"key_file"`
+}
 
 // PermissionConfig sets the default agent permission posture.
 type PermissionConfig struct {
@@ -747,6 +787,24 @@ func (c *Config) LogPath() string {
 // AuthTokenPath returns the path to the daemon auth token file.
 func (c *Config) AuthTokenPath() string {
 	return filepath.Join(c.DataDir, "daemon.token")
+}
+
+// TLSCertPath returns the path to the daemon's TLS certificate (FIND-32/
+// P24.18): Server.TLS.CertFile if the operator configured one, otherwise
+// <DataDir>/daemon.crt, auto-generated on first start with TLS enabled.
+func (c *Config) TLSCertPath() string {
+	if c.Server.TLS.CertFile != "" {
+		return c.Server.TLS.CertFile
+	}
+	return filepath.Join(c.DataDir, "daemon.crt")
+}
+
+// TLSKeyPath is TLSCertPath's counterpart for the private key.
+func (c *Config) TLSKeyPath() string {
+	if c.Server.TLS.KeyFile != "" {
+		return c.Server.TLS.KeyFile
+	}
+	return filepath.Join(c.DataDir, "daemon.key")
 }
 
 // KnowledgeDBPath returns the path to the project knowledge base (P3.3).

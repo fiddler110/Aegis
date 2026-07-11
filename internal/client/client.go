@@ -5,6 +5,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/session"
 )
 
@@ -55,6 +58,53 @@ func (c *Client) WithTokenFile(path string) *Client {
 		return c
 	}
 	return c.WithToken(strings.TrimSpace(string(data)))
+}
+
+// WithTLS returns a copy of c that trusts the daemon's certificate at
+// certPath instead of the system root CA pool, and switches the base URL to
+// https:// (FIND-32/P24.18). This is certificate pinning, not general TLS
+// verification: certPath is expected to be the daemon's own self-signed
+// daemon.crt (see config.Config.TLSCertPath), read directly off local disk,
+// the same trust model as reading daemon.token for the bearer credential.
+// InsecureSkipVerify is deliberately never used — an unrecognized
+// certificate (wrong file, stale after regeneration, a MITM) fails closed
+// with a TLS handshake error rather than silently connecting.
+//
+// If certPath cannot be read or does not contain a valid PEM certificate, c
+// is returned unchanged (mirroring WithTokenFile's fail-open-to-previous-
+// state behavior). Callers that want "enable TLS only if configured" should
+// use NewFromConfig rather than calling this directly.
+func (c *Client) WithTLS(certPath string) *Client {
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		return c
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return c
+	}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+	c2 := *c
+	c2.http = &http.Client{Timeout: 0, Transport: transport}
+	c2.httpShort = &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	if after, ok := strings.CutPrefix(c2.base, "http://"); ok {
+		c2.base = "https://" + after
+	}
+	return &c2
+}
+
+// NewFromConfig builds a Client wired up the way every CLI command needs it:
+// base address, bearer token from cfg.AuthTokenPath, and — only when the
+// daemon config enables it — TLS pinned to the daemon's certificate
+// (FIND-32/P24.18). Centralizing this here means the scheme/token/TLS wiring
+// changes in one place as transport options evolve, instead of at every
+// `client.New(cfg.Server.Addr)...` call site in internal/cli.
+func NewFromConfig(cfg *config.Config) *Client {
+	c := New(cfg.Server.Addr)
+	if cfg.Server.TLS.Enabled {
+		c = c.WithTLS(cfg.TLSCertPath())
+	}
+	return c.WithTokenFile(cfg.AuthTokenPath())
 }
 
 func (c *Client) setAuth(req *http.Request) {

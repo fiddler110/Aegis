@@ -9,7 +9,51 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
+**Last updated:** 2026-07-11 — **P24.18, opt-in TLS for client↔daemon traffic, shipped via an
+isolated git-worktree sub-agent** alongside sibling agents independently working P24.16/P24.17 in
+their own worktrees (see [roadmap.md](roadmap.md#priority-order)):
+**P24.18 (FIND-32) — optional TLS for client↔daemon traffic.** All traffic between a CLI client and
+the daemon was plain HTTP over loopback, including the bearer token and full conversation content —
+Tier 3/defense-in-depth given the loopback-only default (FIND-08), but observable by another local
+account on a shared host with packet-capture privilege. Chose optional TLS over a Unix-domain-
+socket/named-pipe transport, since TLS is one code path across the Windows/macOS/Linux targets this
+project supports where a UDS/named-pipe split would need two — and this box (Windows) made the
+cross-platform cost of the split concrete rather than theoretical. New opt-in
+`server.tls.enabled` config (`internal/config/config.go`'s new `ServerTLSConfig`, default false —
+byte-for-byte unchanged behavior when unset) plus optional `cert_file`/`key_file` for an operator-
+supplied certificate. When enabled with no cert/key configured, `internal/server/tls.go`'s new
+`ensureTLSCert` generates a self-signed ECDSA P-256 certificate on first start and persists it as
+`<data_dir>/daemon.crt`/`daemon.key` — the same generate-once-reuse-unless-missing convention
+`generateAndWriteToken` uses for `daemon.token` — and the private key gets the same Windows DACL
+hardening as the auth token via the existing `restrictToOwner` helper (checked `git log --all` for
+an `internal/fsguard`-style package before assuming one didn't exist yet; none has landed in this
+worktree's history, so `restrictToOwner` — already in-package — was reused directly rather than
+inventing a new abstraction). `internal/server/server.go`'s `ListenAndServe` calls
+`ListenAndServeTLS("", "")` with the loaded certificate already set on `http.Server.TLSConfig` when
+TLS is enabled, `ListenAndServe()` unchanged otherwise. Client side: new `client.WithTLS(certPath)`
+(`internal/client/client.go`) pins the daemon's certificate into a dedicated `*x509.CertPool` —
+`InsecureSkipVerify` is never used, so an unrecognized certificate fails the TLS handshake closed
+rather than silently connecting — and a new `client.NewFromConfig(cfg)` convenience constructor
+centralizes the base-URL/bearer-token/TLS wiring in one place (confirmed no import cycle: `internal/
+config` imports nothing under `internal/`). All ~9 `client.New(cfg.Server.Addr).WithTokenFile(...)`
+call sites across `internal/cli/{root,acp,mcpserve,sessions,ui}.go` now go through it instead of
+repeating the wiring. `aegis ui`'s printed URL (`webUIURL`) switches to `https://` when TLS is
+enabled and the command prints a one-line "browser will warn about the self-signed certificate —
+this is expected" notice, since a browser (unlike the pinned CLI clients) has no way to trust the
+self-signed cert automatically.
+Tests: `internal/server/tls_test.go` (new) — `TestListenAndServeTLSRoundTrip` starts a real
+`ListenAndServe` with TLS enabled on an ephemeral loopback port, confirms the cert/key files are
+written, a client pinned via `WithTLS` reaches `/healthz` successfully, and an unpinned
+`https://` client fails closed against the self-signed cert; `TestListenAndServeTLSDisabledUnchanged`
+confirms no cert/key files are written and plain HTTP still works when TLS is left off (the
+default). `go build ./...` clean; `go test ./...` green except the same three pre-existing/
+environmental failures noted elsewhere in this doc (`TestBuildImageBlocksFromPath`,
+`TestHandleScanDefaultsToWholeWorkspace`, `TestHandleScanImageRoutesToImageScan`), confirmed
+unrelated via `git stash` on the pre-change tree. Docs: `docs/configuration.md` (`server.tls.*` full
+reference plus an `AEGIS_SERVER_TLS_ENABLED` env-var row) and `docs/security_scan.md` (new
+"Client<->Daemon Transport" section covering the threat model, what TLS does and does not protect
+against, and its off-by-default posture).
+Earlier — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
 second batch — shipped in parallel via isolated git-worktree sub-agents** (see
 [roadmap.md](roadmap.md#priority-order)):
 **P24.11 (FIND-07) — allowlist/trust-gate LSP server commands.** `internal/lsp/client.go`'s
