@@ -525,6 +525,19 @@ lsp:
     command: pyright-langserver
     args: ["--stdio"]
     extensions: [".py"]
+  - name: my-custom-lsp
+    command: /opt/tools/my-custom-lsp
+    args: []
+    extensions: [".foo"]
+    trust: true   # required for commands outside the built-in allowlist
+
+# LSP servers start eagerly at daemon boot, with no interactive prompt
+# available — a malicious project config could otherwise point `command` at
+# an arbitrary binary and get it executed on first launch. `command` is
+# checked by basename (path/extension stripped) against a small built-in
+# allowlist of common LSP servers (gopls, typescript-language-server,
+# pyright*, rust-analyzer, clangd, etc.); anything not on that list is
+# refused unless the entry sets `trust: true`.
 
 
 # ── MCP servers ───────────────────────────────────────────────────────────────
