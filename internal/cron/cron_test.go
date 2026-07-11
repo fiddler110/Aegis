@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -219,6 +220,128 @@ func TestTickFiresAndIdempotent(t *testing.T) {
 		t.Errorf("expected 2 firings total, got %d", len(fired))
 	}
 	mu.Unlock()
+}
+
+func TestRecordAndListRuns(t *testing.T) {
+	db := testDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	t1 := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	if err := store.RecordRun(ctx, "job-a", t1, "ok", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordRun(ctx, "job-a", t2, "error", "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordRun(ctx, "job-b", t1, "blocked", "denied"); err != nil {
+		t.Fatal(err)
+	}
+
+	// All runs, most-recent-first.
+	all, err := store.ListRuns(ctx, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 runs, got %d", len(all))
+	}
+	if all[0].Status != "error" || all[0].JobID != "job-a" {
+		t.Errorf("expected most recent run first (job-a/error), got %+v", all[0])
+	}
+
+	// Filtered by job.
+	jobARuns, err := store.ListRuns(ctx, "job-a", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobARuns) != 2 {
+		t.Fatalf("expected 2 runs for job-a, got %d", len(jobARuns))
+	}
+	for _, r := range jobARuns {
+		if r.JobID != "job-a" {
+			t.Errorf("expected only job-a runs, got %+v", r)
+		}
+	}
+
+	// Limit.
+	limited, err := store.ListRuns(ctx, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 {
+		t.Fatalf("expected 1 run with limit=1, got %d", len(limited))
+	}
+	if limited[0].Status != "error" {
+		t.Errorf("expected the most recent run under limit=1, got %+v", limited[0])
+	}
+}
+
+func TestRecordRunTruncatesOversizedOutput(t *testing.T) {
+	db := testDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	huge := strings.Repeat("x", maxRunOutputBytes+5000)
+	if err := store.RecordRun(ctx, "job-a", time.Now(), "ok", huge); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := store.ListRuns(ctx, "job-a", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run, got %d", len(runs))
+	}
+	got := runs[0].Output
+	if len(got) >= len(huge) {
+		t.Errorf("expected output to be truncated, got length %d (input was %d)", len(got), len(huge))
+	}
+	if !strings.HasSuffix(got, "[...truncated]") {
+		t.Errorf("expected truncation marker suffix, got tail: %q", got[max(0, len(got)-30):])
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", 10)) {
+		t.Errorf("expected truncated output to retain the head of the original content")
+	}
+}
+
+func TestSchedulerHistory(t *testing.T) {
+	db := testDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := NewScheduler(store, func(j Job) {}, nil)
+	ctx := context.Background()
+
+	if err := store.RecordRun(ctx, "job-a", time.Now(), "ok", "output"); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := sched.History(ctx, "job-a", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Status != "ok" {
+		t.Errorf("expected 1 ok run for job-a, got %+v", runs)
+	}
+
+	// Unknown job id yields no rows, not an error.
+	none, err := sched.History(ctx, "no-such-job", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("expected no runs for unknown job, got %d", len(none))
+	}
 }
 
 func TestTickSkipsDisabled(t *testing.T) {
