@@ -109,6 +109,8 @@ aegis acp [flags]
 
 Reuses a running daemon if one is up, or starts an embedded one. Protocol frames use stdout exclusively; logs go to the log file. Image content blocks in a prompt are forwarded to the model.
 
+**Authentication (optional, FIND-02/P24.2):** by default any process able to write to this subprocess's stdin can drive sessions through it — the same trust assumption as most stdio ACP/MCP integrations. Set `AEGIS_ACP_TOKEN` in the environment the editor uses to launch `aegis acp` to require a matching credential: `initialize` then advertises a `shared_secret` auth method, and `session/new`/`session/prompt` are denied with an `authentication required` error until the client calls `authenticate` with `{"methodId": "shared_secret", "token": "<the same value>"}`. Leave it unset (the default) for unchanged, no-auth behavior.
+
 **Zed example** (`settings.json`):
 ```json
 {
@@ -149,6 +151,8 @@ Reuses a running daemon if one is up, or starts an embedded one. Exposes three t
 New sessions default to **plan mode** (read-only) — a materially lower-trust posture than the local TUI/CLI's own default, since the caller is an external harness. A tool call needing approval in a higher mode (`build`/`auto`) is **denied** by default, since an MCP `tools/call` is a synchronous request/response with no human available to ask; pass `--auto-approve` (or set `mcp_server.auto_approve: true`) to allow it instead. See [Configuration Reference](configuration.md#full-config-reference) (`mcp_server:` block) for the config keys.
 
 **v1 scope, deliberately:** individual built-in tools (`security_scan`, `read_file`, etc.) are not exposed 1:1 as MCP tools bypassing the agent loop — every MCP tool call goes through a real Aegis session. `notifications/cancelled` is not propagated to an in-flight `aegis_prompt` call. Both are documented follow-ups, not oversights.
+
+**Authentication (optional, FIND-02/P24.2):** by default any process able to write to this subprocess's stdin can drive sessions through it — the same trust assumption as most stdio MCP servers (an API key passed via `env` in the host's server config, validated by the server itself, is the standard pattern). Set `AEGIS_MCP_TOKEN` in the environment the calling harness uses to launch `aegis mcp-serve` to require it: `tools/call` is denied with an `authentication required` error (JSON-RPC code `-32001`) until the client sends the custom `aegis/authenticate` request with `{"token": "<the same value>"}` (`initialize`/`ping`/`tools/list` stay reachable unauthenticated, since they expose no session-driving capability). This is an Aegis-specific extension, not part of the base MCP spec — a host unaware of it simply never calls it, which is fine as long as `AEGIS_MCP_TOKEN` is left unset. Leave it unset (the default) for unchanged, no-auth behavior.
 
 **Claude Code example** (`.mcp.json`):
 ```json

@@ -79,11 +79,22 @@ func newMCPServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()
 
+			// AEGIS_MCP_TOKEN, when set by the trusted parent process that
+			// spawns this subprocess, requires the calling harness to prove
+			// knowledge of the same value via "aegis/authenticate" before
+			// tools/call is allowed (FIND-02/P24.2). Unset by default, which
+			// preserves today's behavior for every existing integration.
+			authToken := os.Getenv("AEGIS_MCP_TOKEN")
+			if authToken != "" {
+				logger.Info("mcp-serve: authentication required (AEGIS_MCP_TOKEN set)")
+			}
+
 			logger.Info("mcp-serve starting", "default_mode", resolvedMode, "auto_approve", resolvedAutoApprove, "addr", cfg.Server.Addr)
 			srv := mcpserver.NewServer(cl, mcpserver.Options{
 				DefaultMode: resolvedMode,
 				AutoApprove: resolvedAutoApprove,
 				Version:     Version,
+				AuthToken:   authToken,
 			}, logger)
 			return srv.Serve(ctx, os.Stdin, os.Stdout)
 		},

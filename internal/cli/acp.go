@@ -73,8 +73,18 @@ func newACPCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()
 
+			// AEGIS_ACP_TOKEN, when set by the trusted parent process that
+			// spawns this subprocess (the editor), requires the client to
+			// authenticate with the same value before driving a session
+			// (FIND-02/P24.2). Unset by default, which preserves today's
+			// behavior for every existing editor integration.
+			authToken := os.Getenv("AEGIS_ACP_TOKEN")
+			if authToken != "" {
+				logger.Info("acp: authentication required (AEGIS_ACP_TOKEN set)")
+			}
+
 			logger.Info("acp agent starting", "mode", resolvedMode, "addr", cfg.Server.Addr)
-			agent := acp.NewAgent(cl, resolvedMode, logger)
+			agent := acp.NewAgent(cl, resolvedMode, logger, authToken)
 			return agent.Serve(ctx, os.Stdin, os.Stdout)
 		},
 	}

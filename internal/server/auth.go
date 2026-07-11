@@ -94,57 +94,105 @@ func (s *Server) originMiddleware(next http.Handler) http.Handler {
 // normal page-load latency, not idle time.
 const pageTokenTTL = 60 * time.Second
 
+// uiCSRFCookieName/uiCSRFHeaderName implement a double-submit CSRF binding
+// for the page-token mint/exchange flow (FIND-01/P24.1). Without this, any
+// local process that can reach the loopback port — not only the operator's
+// own browser — can call GET /ui, read the minted page token out of the
+// response body, and redeem it at /auth/exchange for the real daemon token,
+// collapsing the whole auth model to "can this process reach 127.0.0.1".
+// Binding the exchange to a same-origin proof closes the realistic instance
+// of that gap: a hostile *webpage* (another tab, a malicious site, a
+// compromised browser extension) driving the flow on the victim's behalf.
+// It relies on two facts the browser enforces and this handler does not:
+//  1. GET /ui's Set-Cookie is HttpOnly, so no page's JS — same-origin or
+//     not — can read its value; the browser attaches it automatically only
+//     to requests to this origin.
+//  2. A cross-origin page cannot read the response body of its own fetch to
+//     GET /ui (blocked by CORS — no Access-Control-Allow-Origin is sent)
+//     and cannot frame this page to scrape its DOM (X-Frame-Options: DENY),
+//     so it cannot obtain the matching nonce embedded in the HTML to send
+//     back as the header.
+// A raw local process with direct HTTP access (not going through a browser)
+// is unaffected by either fact and can still complete the whole flow itself
+// — that residual risk is the same class as reading daemon.token directly
+// off disk for a same-OS-user adversary, and is out of scope for this
+// mitigation (see FIND-01 in the threat model report and its P24.1 roadmap
+// entry for the fuller writeup).
+const (
+	uiCSRFCookieName = "aegis_ui_csrf"
+	uiCSRFHeaderName = "X-Aegis-CSRF"
+)
+
+// pageTokenEntry records a minted page token's expiry and the CSRF nonce
+// bound to it at mint time.
+type pageTokenEntry struct {
+	expiry time.Time
+	csrf   string
+}
+
 // mintPageToken generates a random, single-use token scoped to one /ui page
-// load and records its expiry in s.pageTokens (keyed by token, guarded by
-// pageTokenMu). It stands in for the real daemon auth token in the HTML
-// response so that token never appears in a page a local process could read
-// off disk/DOM and replay indefinitely (P15.12); the frontend immediately
-// trades it for the real token via exchangePageToken/POST /auth/exchange.
-func (s *Server) mintPageToken() (string, error) {
+// load plus a CSRF nonce bound to it, recording both in s.pageTokens (keyed
+// by token, guarded by pageTokenMu). The token stands in for the real daemon
+// auth token in the HTML response so that token never appears in a page a
+// local process could read off disk/DOM and replay indefinitely (P15.12);
+// the frontend trades both for the real token via exchangePageToken/POST
+// /auth/exchange, which requires the csrf nonce as well (see
+// uiCSRFCookieName doc comment).
+func (s *Server) mintPageToken() (token, csrf string, err error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
+		return "", "", err
 	}
-	token := hex.EncodeToString(buf[:])
+	token = hex.EncodeToString(buf[:])
+	var cbuf [32]byte
+	if _, err := rand.Read(cbuf[:]); err != nil {
+		return "", "", err
+	}
+	csrf = hex.EncodeToString(cbuf[:])
 	s.pageTokenMu.Lock()
 	if s.pageTokens == nil {
-		s.pageTokens = make(map[string]time.Time)
+		s.pageTokens = make(map[string]pageTokenEntry)
 	}
-	s.pageTokens[token] = time.Now().Add(pageTokenTTL)
+	s.pageTokens[token] = pageTokenEntry{expiry: time.Now().Add(pageTokenTTL), csrf: csrf}
 	s.pageTokenMu.Unlock()
-	return token, nil
+	return token, csrf, nil
 }
 
 // exchangePageToken redeems a page token minted by mintPageToken: it must
-// exist and not be expired. Either way the token is removed on this call so
-// it can never be redeemed twice (single-use), and expired entries are
-// swept opportunistically here rather than by a background goroutine, since
-// exchanges are the only place page tokens are ever read.
-func (s *Server) exchangePageToken(token string) bool {
+// exist, not be expired, and csrf must match the nonce minted alongside it.
+// The token is removed on this call regardless of outcome so it can never be
+// redeemed twice (single-use), and expired entries are swept opportunistically
+// here rather than by a background goroutine, since exchanges are the only
+// place page tokens are ever read.
+func (s *Server) exchangePageToken(token, csrf string) bool {
 	if token == "" {
 		return false
 	}
 	s.pageTokenMu.Lock()
 	defer s.pageTokenMu.Unlock()
-	exp, ok := s.pageTokens[token]
+	entry, ok := s.pageTokens[token]
 	delete(s.pageTokens, token)
-	if !ok {
-		return false
-	}
 	now := time.Now()
 	for t, e := range s.pageTokens {
-		if now.After(e) {
+		if now.After(e.expiry) {
 			delete(s.pageTokens, t)
 		}
 	}
-	return now.Before(exp)
+	if !ok || now.After(entry.expiry) {
+		return false
+	}
+	return csrf != "" && subtle.ConstantTimeCompare([]byte(csrf), []byte(entry.csrf)) == 1
 }
 
 // handleAuthExchange trades a single-use page token (minted by GET /ui, sent
 // here as a Bearer token since the frontend has no other credential yet) for
 // the real daemon auth token used on every subsequent request. The page
 // token is invalidated whether or not the exchange succeeds, so it can be
-// redeemed at most once.
+// redeemed at most once. The request must also present the double-submit
+// CSRF nonce minted alongside the page token — both via the HttpOnly cookie
+// GET /ui set and via an explicit header only same-origin JS could have
+// constructed — see uiCSRFCookieName's doc comment for why this binds the
+// exchange to the browser that actually loaded the page.
 func (s *Server) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	const prefix = "Bearer "
@@ -152,7 +200,17 @@ func (s *Server) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing page token")
 		return
 	}
-	if !s.exchangePageToken(auth[len(prefix):]) {
+	cookie, err := r.Cookie(uiCSRFCookieName)
+	if err != nil || cookie.Value == "" {
+		writeError(w, http.StatusUnauthorized, "missing csrf cookie")
+		return
+	}
+	header := r.Header.Get(uiCSRFHeaderName)
+	if header == "" || subtle.ConstantTimeCompare([]byte(header), []byte(cookie.Value)) != 1 {
+		writeError(w, http.StatusUnauthorized, "csrf token mismatch")
+		return
+	}
+	if !s.exchangePageToken(auth[len(prefix):], header) {
 		writeError(w, http.StatusUnauthorized, "invalid or expired page token")
 		return
 	}

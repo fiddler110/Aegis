@@ -9,9 +9,60 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **Tier 2 high-visibility wins shipped**, both in parallel via
-isolated git-worktree sub-agents, same day as the Tier 1 pass (see
+**Last updated:** 2026-07-10 — **P24.1–P24.4, the STRIDE-A threat model's Critical/Important
+findings (Tier 1), all shipped same day as the pass that produced them** (see
 [roadmap.md](roadmap.md#priority-order)):
+**P24.1 (FIND-01) — bind the `/ui` page-token exchange to the browser that loaded the page.**
+Previously `GET /ui`'s minted page token and `POST /auth/exchange` had no check on *who* was
+asking — any local process reaching the loopback port, not just the operator's own browser, could
+mint and redeem a page token for the real daemon bearer token, collapsing the whole auth model to
+"can this process reach 127.0.0.1." Added a double-submit CSRF nonce (`internal/server/auth.go`):
+`mintPageToken` now also generates a nonce, set both as an `HttpOnly`/`SameSite=Strict` cookie
+(`aegis_ui_csrf`) and baked into the served HTML (`data-csrf-token`); `handleAuthExchange` requires
+the cookie and an explicit `X-Aegis-CSRF` header (which only same-origin JS reading the page's own
+DOM could construct) to match the nonce bound to the presented page token. This closes the
+realistic instance of the gap — a hostile cross-origin webpage/tab driving the flow blind, which
+can't read an `HttpOnly` cookie or this page's response body (no CORS grant, `X-Frame-Options:
+DENY` blocks framing) — while a raw local process with direct HTTP access remains an accepted
+residual risk, the same class as reading `daemon.token` off disk for a same-OS-user adversary.
+Frontend (`internal/server/webui/frontend/src/api.ts`) sends the header; `dist/` rebuilt via
+`npm run build` and committed. **P24.2 (FIND-02) — authenticate `aegis mcp-serve` and the ACP
+server.** Both accepted commands from any local process able to write to the subprocess's stdin
+with no credential check. `aegis acp` now implements ACP's real `authenticate` method for real: set
+`AEGIS_ACP_TOKEN` in the editor's launch environment and `initialize` advertises a `shared_secret`
+auth method; `session/new`/`session/prompt` are denied until the client authenticates with a
+matching token (`internal/acp/agent.go`, constant-time compare). `aegis mcp-serve` gets an
+equivalent, MCP-spec-external `aegis/authenticate` request gating `tools/call` the same way, opt-in
+via `AEGIS_MCP_TOKEN` (`internal/mcpserver/server.go`). Both default to today's no-auth behavior
+when the env var is unset — zero breaking change for every existing integration. **P24.3 (FIND-03)
+— gate cron firings through the daemon's permission mode.** Scheduled jobs previously ran
+unattended shell commands via `cronShellRunner` with no gate of any kind, regardless of permission
+mode. `internal/cron.Job` gained an `AutoApprove` field (persisted, migrated via `ALTER TABLE ...
+ADD COLUMN`); the fire-time closure in `internal/server/server.go` now evaluates
+`permission.Policy{Mode: currentMode}.Decide(tool.CapExecute)` fresh on every tick — plan mode
+blocks the job outright, build mode requires the job's explicit `auto_approve` opt-in (mirroring
+`mcp_server.auto_approve`) since no one is present to answer an approval prompt, auto mode is
+unchanged. `cron_create`'s new `auto_approve` argument and `cron_list`'s `[auto_approve]` marker
+make the opt-in visible to the model. **P24.4 (FIND-05) — wrap persona/skill file bodies as
+untrusted content.** Project/user `.aegis/personas/*.md` and `.aegis/skills/*.md` files are
+arbitrary content from disk — a compromised dependency or cloned project could plant one to inject
+instructions into every session that loads it — and were spliced into the system prompt verbatim.
+`parsePersonaFile` (`internal/persona/load.go`) and `appendFromDir` (`internal/skills/skills.go`)
+now wrap a file-loaded persona's `System` prompt / a project-or-user skill's body in the same
+`internal/trust.Wrap` provenance marker used for MCP/web output (FIND-04/P21.6) before it can reach
+the model — built-in personas/skills (compiled into the binary) are left unwrapped since they
+aren't attacker-reachable. Unlike MCP/web wrapping, the heuristic injection scan is left off here
+(`scan=false`): this content re-injects every session, and persona/skill prose routinely discusses
+its own instructions/role, which the scan's patterns (e.g. `\bsystem prompt\b`) flag as false
+positives on entirely benign text — caught by `TestPersonaNewThenShowRoundTrip` tripping on the
+persona scaffold's own boilerplate. `docs/mcp-trust-boundary.md` extended to cover this.
+Tests: `internal/server/webui_test.go` (new `TestAuthExchangeRejectsMismatchedCSRF`),
+`internal/mcpserver/server_test.go`, `internal/acp/agent_test.go`, `internal/cron/cron_test.go`,
+`internal/persona/load_test.go`, `internal/skills/skills_test.go`. `go build ./...`, `go vet ./...`
+clean; `go test ./...` green except the same three pre-existing/environmental failures noted below
+(confirmed present before any of this work).
+Earlier the same day — **Tier 2 high-visibility wins shipped**, both in parallel via
+isolated git-worktree sub-agents:
 **P21.3 — streaming caret.** A blinking write-head caret (`█`) at the end of live-streaming
 assistant text, so a long reply reads as "alive" rather than "redrawing." Rendered in
 `refresh()` (`internal/tui/tui.go`): the caret is appended directly after the last rendered

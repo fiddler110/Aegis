@@ -88,12 +88,14 @@ type Server struct {
 	authToken   string // shared secret for API authentication
 
 	// pageTokens holds short-lived, single-use tokens minted per GET /ui load
-	// (P15.12): the page carries one of these instead of authToken, and the
-	// frontend immediately trades it for the real token via POST
-	// /auth/exchange (see mintPageToken/exchangePageToken in auth.go), so a
-	// leaked page source can't be replayed as a standing credential.
+	// (P15.12), each paired with a CSRF nonce binding the exchange to the
+	// browser that loaded the page (FIND-01/P24.1): the page carries one of
+	// these instead of authToken, and the frontend immediately trades it for
+	// the real token via POST /auth/exchange (see
+	// mintPageToken/exchangePageToken in auth.go), so a leaked page source
+	// can't be replayed as a standing credential.
 	pageTokenMu sync.Mutex
-	pageTokens  map[string]time.Time
+	pageTokens  map[string]pageTokenEntry
 
 	// sandboxFallback and sandboxFallbackReason record whether the configured
 	// sandbox backend failed to initialize and the daemon fell back to
@@ -319,6 +321,29 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			title = "cron: " + j.Command
 		}
 		_, _ = taskMgr.Start(task.Spec{Kind: "cron", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
+			// Cron jobs fire unattended, with no session and no human present
+			// to resolve an approval prompt — so route the fire-time decision
+			// through the same mode-based policy interactive shell calls use
+			// (evaluated fresh against the daemon's *current* permission mode,
+			// not whatever it was when the job was created) instead of
+			// executing unconditionally (FIND-03/P24.3). Ask-tier jobs need an
+			// explicit per-job auto_approve opt-in since nothing can answer an
+			// interactive prompt here.
+			mode := permission.ParseMode(cfg.Permission.Mode)
+			switch (permission.Policy{Mode: mode}).Decide(tool.CapExecute) {
+			case permission.Deny:
+				reason := fmt.Sprintf("cron job %q blocked: shell execution is not allowed in %s permission mode", j.Title, mode)
+				logger.Warn("cron: job blocked by permission mode", "job", j.ID, "mode", mode)
+				emit(reason)
+				return "", errors.New(reason)
+			case permission.Ask:
+				if !j.AutoApprove {
+					reason := fmt.Sprintf("cron job %q blocked: needs approval in %s mode and no one is present to grant it — set auto_approve on the job to allow unattended execution", j.Title, mode)
+					logger.Warn("cron: job needs approval, auto_approve not set", "job", j.ID, "mode", mode)
+					emit(reason)
+					return "", errors.New(reason)
+				}
+			}
 			return "", runCronCmd(ctx, j.Command, emit)
 		})
 	}
