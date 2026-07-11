@@ -201,6 +201,33 @@ func hostPathForMount(p string) string {
 	return p
 }
 
+// SocketRuntime reports whether rt talks to its container engine over a local
+// socket whose access is, by the engine's own design, privilege-equivalent to
+// root (Docker) or the invoking user's full privileges (rootful Podman) — see
+// "Docker/Podman socket privilege equivalence" in docs/security_scan.md
+// (FIND-06 / P24.10). WSL containers and Apple Containers are deliberately
+// excluded: wslc talks to a service inside the WSL VM rather than a
+// host-privileged socket, and Apple Containers runs each container in a
+// dedicated per-user, unprivileged lightweight VM — neither shares the
+// Docker/Podman socket-equivalence model this flags.
+func SocketRuntime(rt ContainerRuntime) bool {
+	return rt == RuntimeDocker || rt == RuntimePodman
+}
+
+// SocketPrivilegeNotice returns a one-line informational message about
+// Docker/Podman socket privilege equivalence for runtimes SocketRuntime
+// flags, or "" for runtimes it doesn't apply to. Aegis cannot reliably tell a
+// rootless from a rootful engine install from the client side across
+// platforms, so this is a static, always-shown notice rather than a claim
+// about this particular install's configuration — it is logged once when the
+// container backend is selected (see internal/server.SelectSandbox).
+func SocketPrivilegeNotice(rt ContainerRuntime) string {
+	if !SocketRuntime(rt) {
+		return ""
+	}
+	return fmt.Sprintf("sandbox: %s socket access is privilege-equivalent to local root (rootful Podman: the invoking user's full host privileges) — Aegis applies --cap-drop=ALL and --security-opt=no-new-privileges to every spawned container, but this does not mitigate the socket-level privilege equivalence itself; prefer rootless Podman or a userns-remapped Docker daemon where feasible (see docs/security_scan.md, \"Docker/Podman socket privilege equivalence\")", rt)
+}
+
 // appleContainerArgs builds arguments for Apple Containers CLI. Apple
 // Containers uses a different invocation model; adapt as the CLI evolves.
 func (c *ContainerBackend) appleContainerArgs(command string, opts ExecOpts) []string {

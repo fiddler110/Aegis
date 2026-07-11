@@ -117,16 +117,21 @@ const (
 
 // Event is one server-sent event during a message run.
 type Event struct {
-	Kind         EventKind       `json:"kind"`
-	Text         string          `json:"text,omitempty"`
-	Tool         string          `json:"tool,omitempty"`
-	ToolInput    json.RawMessage `json:"tool_input,omitempty"`
-	ToolResult   string          `json:"tool_result,omitempty"`
-	ToolIsError  bool            `json:"tool_is_error,omitempty"`
-	InputTokens  int             `json:"input_tokens,omitempty"`
-	OutputTokens int             `json:"output_tokens,omitempty"`
-	CostUSD      float64         `json:"cost_usd,omitempty"`
-	Error        string          `json:"error,omitempty"`
+	Kind      EventKind       `json:"kind"`
+	Text      string          `json:"text,omitempty"`
+	Tool      string          `json:"tool,omitempty"`
+	ToolInput json.RawMessage `json:"tool_input,omitempty"`
+	// ToolID is the provider tool_use ID, carried on both KindToolCall and
+	// its matching KindToolResult so a client can correlate the two exactly
+	// — e.g. for concurrent tool calls, which don't necessarily produce
+	// results in call order (P21.2; see engine.Event.ToolID).
+	ToolID       string  `json:"tool_id,omitempty"`
+	ToolResult   string  `json:"tool_result,omitempty"`
+	ToolIsError  bool    `json:"tool_is_error,omitempty"`
+	InputTokens  int     `json:"input_tokens,omitempty"`
+	OutputTokens int     `json:"output_tokens,omitempty"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
+	Error        string  `json:"error,omitempty"`
 	// Cache token usage (Anthropic prompt caching), surfaced for observability.
 	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
@@ -409,4 +414,210 @@ type KnowledgeResponse struct {
 type RepoMapIndexResponse struct {
 	FileCount int    `json:"file_count"`
 	Path      string `json:"path"`
+}
+
+// ConfigScope selects which config file a config-mutation endpoint reads
+// from/writes to: "project" (.aegis/config.yaml) or "global"
+// (~/.config/aegis/config.yaml, see config.GlobalConfigPath). Every
+// GET/PATCH /config/* and POST /config/harden request accepts it (a "scope"
+// query param on GETs, a "scope" body field on PATCH/POST); an empty value
+// lets the daemon pick a default (see server.resolveScope): "project" when
+// its workspace has a .aegis/ directory, else "global".
+type ConfigScope = string
+
+// ConfigSandboxResponse is the GET /config/sandbox response (P15.2): the
+// daemon's currently effective sandbox.* settings (config.Load()'s merged
+// view across global/project/env layers), plus the scope a PATCH without an
+// explicit "scope" would default to.
+type ConfigSandboxResponse struct {
+	Scope    string   `json:"scope"`
+	Backend  string   `json:"backend"`
+	Runtime  string   `json:"runtime,omitempty"`
+	Priority []string `json:"priority,omitempty"`
+	Image    string   `json:"image,omitempty"`
+	Network  bool     `json:"network"`
+}
+
+// ConfigSandboxPatchRequest partially updates the sandbox: config block
+// (PATCH /config/sandbox). Only fields present in the JSON body are changed;
+// the rest keep their current value from config.Load() before the patch is
+// written — this endpoint's semantics genuinely are PATCH (partial), unlike
+// the underlying config.SandboxPatch/PatchGlobalSandbox/PatchProjectSandbox,
+// which always replace the whole sandbox: block wholesale.
+type ConfigSandboxPatchRequest struct {
+	Scope    string    `json:"scope,omitempty"`
+	Backend  *string   `json:"backend,omitempty"`
+	Runtime  *string   `json:"runtime,omitempty"`
+	Priority *[]string `json:"priority,omitempty"`
+	Image    *string   `json:"image,omitempty"`
+	Network  *bool     `json:"network,omitempty"`
+}
+
+// SecurityToolConfigWire mirrors config.SecurityToolConfig on the wire,
+// using a plain bool (not *bool) for Enabled so JSON consumers don't need to
+// know about Go's nil-vs-false distinction — omitted/absent from a PATCH
+// request's Tools map leaves that tool's config untouched (map keys not
+// present in the request are not modified), while an explicit entry always
+// carries an explicit Enabled value.
+type SecurityToolConfigWire struct {
+	Enabled          bool   `json:"enabled"`
+	Method           string `json:"method,omitempty"`
+	Install          string `json:"install,omitempty"`
+	Image            string `json:"image,omitempty"`
+	TemplatesVersion string `json:"templates_version,omitempty"`
+	Verify           bool   `json:"verify,omitempty"`
+}
+
+// DASTConfigWire mirrors config.DASTConfig on the wire.
+type DASTConfigWire struct {
+	AllowedTargets []string `json:"allowed_targets,omitempty"`
+	AllowActive    bool     `json:"allow_active,omitempty"`
+}
+
+// ConfigSecurityResponse is the GET /config/security response (P15.2): the
+// daemon's currently effective security: settings.
+type ConfigSecurityResponse struct {
+	Scope            string                            `json:"scope"`
+	EgressThenWrite  bool                              `json:"egress_then_write"`
+	NetworkAllowList []string                          `json:"network_allowlist,omitempty"`
+	DefaultMethod    string                            `json:"default_method"`
+	Tools            map[string]SecurityToolConfigWire `json:"tools,omitempty"`
+	DAST             DASTConfigWire                    `json:"dast"`
+}
+
+// ConfigSecurityPatchRequest partially updates the security: config block
+// (PATCH /config/security). Only fields present in the JSON body are
+// changed. Tools, when present, replaces the entire tools map wholesale
+// (matching how the existing /security-config TUI dialog and
+// config.SecurityPatch.Tools already behave — a per-tool merge would need a
+// separate "delete this override" signal that config.SecurityToolConfig has
+// no room for).
+type ConfigSecurityPatchRequest struct {
+	Scope            string                            `json:"scope,omitempty"`
+	EgressThenWrite  *bool                             `json:"egress_then_write,omitempty"`
+	NetworkAllowList *[]string                         `json:"network_allowlist,omitempty"`
+	DefaultMethod    *string                           `json:"default_method,omitempty"`
+	Tools            map[string]SecurityToolConfigWire `json:"tools,omitempty"`
+	DAST             *DASTConfigWire                   `json:"dast,omitempty"`
+}
+
+// ConfigSkillsResponse is the GET /config/skills response (P15.2): which
+// embedded built-in skills (internal/skills/builtin) are currently active.
+type ConfigSkillsResponse struct {
+	Scope          string   `json:"scope"`
+	BuiltinEnabled []string `json:"builtin_enabled"`
+}
+
+// ConfigSkillsPatchRequest replaces the skills.builtin_enabled list (PATCH
+// /config/skills). Unlike the sandbox/security patch requests, this is
+// always a full replace — config.PatchGlobalSkillsEnabled/
+// PatchProjectSkillsEnabled already require the full desired set, not a
+// delta (see their doc comments), and a partial-update shape would just
+// invite a caller to accidentally disable every skill it didn't mention.
+type ConfigSkillsPatchRequest struct {
+	Scope          string   `json:"scope,omitempty"`
+	BuiltinEnabled []string `json:"builtin_enabled"`
+}
+
+// ConfigHardenRequest applies the hardened profile computed by
+// config.ComputeHardenPlan (POST /config/harden, P15.2) — the HTTP
+// equivalent of `aegis harden`. Confirm must be true for anything to be
+// written; this is an HTTP analog of the CLI's "Apply? [y/N]" prompt (skipped
+// entirely here since there's no interactive terminal to prompt), not
+// something a caller can accidentally trigger by probing the endpoint.
+type ConfigHardenRequest struct {
+	Scope   string `json:"scope,omitempty"`
+	Confirm bool   `json:"confirm"`
+}
+
+// ConfigHardenResponse reports what POST /config/harden changed (or would
+// change, when Confirm was false) — the same "changed" vs "already X —
+// unchanged" distinction `aegis harden` prints to the terminal.
+type ConfigHardenResponse struct {
+	Scope   string `json:"scope"`
+	Applied bool   `json:"applied"` // false when Confirm was false: nothing was written
+
+	SandboxChanged bool   `json:"sandbox_changed"`
+	SandboxBackend string `json:"sandbox_backend"` // resulting (or would-be) sandbox.backend
+
+	SecurityChanged bool `json:"security_changed"`
+
+	CostChanges []string `json:"cost_changes,omitempty"`
+}
+
+// SecurityInstallRequest runs a security scanner's guided host install
+// (POST /security/install) — the same underlying security.RunGuidedInstall
+// the `aegis security install` CLI and the `/security-config` TUI wizard
+// use. Confirm must be true for the command to actually run; installing
+// software is a privileged, host-modifying action that must never happen
+// silently (see security.RunGuidedInstall's doc comment) — with Confirm
+// false, the response only reports what command *would* run.
+type SecurityInstallRequest struct {
+	Tool    string `json:"tool"`
+	Confirm bool   `json:"confirm"`
+}
+
+// SecurityInstallResponse reports the guided-install command for Tool and,
+// once Confirm was true, its outcome.
+type SecurityInstallResponse struct {
+	Tool    string `json:"tool"`
+	Command string `json:"command,omitempty"` // the exact host command; empty when no guided install exists
+	Ran     bool   `json:"ran"`               // true once the command was actually executed
+	OK      bool   `json:"ok"`                // true when Ran and it exited zero
+	Output  string `json:"output,omitempty"`  // combined stdout+stderr, only when Ran
+	Error   string `json:"error,omitempty"`   // why Command is empty, or why it failed, or the "pass confirm" hint
+}
+
+// SecurityToolStatus is one scanner's entry in the GET /security/status
+// response — the same live-availability probe (host binary / container
+// runtime / WSL) and status wording the `/security-config` TUI dialog shows
+// per tool (see internal/tui/securityconfig.go's resolveCmd/toolBadge).
+type SecurityToolStatus struct {
+	Name     string `json:"name"`
+	Category string `json:"category,omitempty"`
+	// Enabled mirrors config.SecurityToolConfig.ToolEnabled()'s configured
+	// on/off badge state, the same one the TUI list shows next to each tool
+	// name — it does not account for scanner-specific default-enabled
+	// exceptions (see Status/Resolved below for the actual runnable verdict).
+	Enabled bool `json:"enabled"`
+	// Method is the configured resolver method for this tool: "auto"
+	// (default), "host", or "container".
+	Method string `json:"method"`
+	// Resolved is the actual outcome of resolving this tool right now:
+	// "host", "container", "wsl", or "unavailable".
+	Resolved string `json:"resolved"`
+	Runtime  string `json:"runtime,omitempty"` // container runtime name, only when Resolved == "container"
+	// Status is a human-readable summary matching the exact wording
+	// internal/tui/securityconfig.go's resolveCmd shows ("on PATH",
+	// "container (docker)", "via WSL", "unavailable: <reason>[; note]").
+	Status string `json:"status"`
+}
+
+// SecurityStatusResponse is the GET /security/status response: every
+// built-in scanner's configured/resolved status, mirroring what
+// `/security-config` already shows in the TUI (P15.2).
+type SecurityStatusResponse struct {
+	Tools []SecurityToolStatus `json:"tools"`
+}
+
+// SecurityBaselineEntry mirrors security.SuppressionEntry on the wire, with
+// an added Status ("active"/"expired"/"invalid" — see
+// security.SuppressionStatusLabel) so a caller doesn't need to reimplement
+// the expiry/validity check client-side.
+type SecurityBaselineEntry struct {
+	RuleID   string `json:"rule_id"`
+	Location string `json:"location,omitempty"`
+	Reason   string `json:"reason"`
+	Expires  string `json:"expires"`
+	AddedBy  string `json:"added_by,omitempty"`
+	Status   string `json:"status"`
+}
+
+// SecurityBaselineResponse is the GET /security/baseline response: the
+// project's accepted-risk suppression allowlist (.aegis/security-
+// baseline.yaml, P11.8), or an empty Suppressions list when no baseline file
+// exists (the common case).
+type SecurityBaselineResponse struct {
+	Path         string                  `json:"path"`
+	Suppressions []SecurityBaselineEntry `json:"suppressions,omitempty"`
 }

@@ -213,6 +213,12 @@ type LSPServerConfig struct {
 	Command    string   `koanf:"command"`    // executable
 	Args       []string `koanf:"args"`       // CLI arguments
 	Extensions []string `koanf:"extensions"` // file extensions (e.g. [".go"])
+	// Trust opts this server into starting even if Command isn't a
+	// recognized LSP binary basename (internal/lsp's built-in allowlist).
+	// LSP servers start eagerly at daemon boot with no interactive
+	// approver present, so an unrecognized command is refused unless this
+	// is explicitly set — see internal/lsp/trust.go.
+	Trust bool `koanf:"trust"`
 }
 
 // ProcessToolConfig declares one external process tool (plugin).
@@ -340,6 +346,19 @@ type PermissionConfig struct {
 type SecurityConfig struct {
 	EgressThenWrite  bool     `koanf:"egress_then_write"` // require approval for writes after network egress
 	NetworkAllowList []string `koanf:"network_allowlist"` // restrict network calls to these domains (empty = no restriction)
+
+	// RedactSecrets opts in to running a read-capability tool's output
+	// through the same gitleaks-backed secret detection used for PR
+	// title/body scanning (security.ScanText, P24.6 / FIND-13) before it's
+	// appended to the conversation sent to the configured model provider
+	// (P24.12 / FIND-09). Any detected secret pattern is masked as
+	// "[REDACTED:<rule>]". Off by default: it's a best-effort, gitleaks-only
+	// pass (needs the binary on PATH, only catches its known secret
+	// patterns) and shells out per read-tool call, adding latency — local
+	// Ollama usage, which never sends file content off the machine at all,
+	// remains the primary mitigation for sensitive codebases. See
+	// docs/providers.md "Data Exposure & Redaction".
+	RedactSecrets bool `koanf:"redact_secrets"`
 
 	// Tools configures per-scanner behavior for `aegis scan`/the security_scan
 	// tool (P11.11): whether it's enabled, how it runs (host binary vs

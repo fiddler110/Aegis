@@ -36,6 +36,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/trust"
 )
 
 // Skill represents a loaded skill definition.
@@ -55,21 +57,24 @@ func Discover(workDir, dataDir string, enabledBuiltins []string) []Skill {
 	seen := make(map[string]bool) // entry name → already loaded
 	var skills []Skill
 
-	// Project-local skills take precedence.
+	// Project-local skills take precedence. Neither project nor user skill
+	// files are built into the binary, so their bodies are treated as
+	// untrusted (see appendFromDir's trusted param / FIND-05).
 	projectDir := filepath.Join(workDir, ".aegis", "skills")
-	skills = appendFromDir(skills, workDir, projectDir, seen, nil)
+	skills = appendFromDir(skills, workDir, projectDir, seen, nil, false)
 
 	// User-global skills fill in anything not overridden by the project.
 	if home, err := os.UserHomeDir(); err == nil {
 		userDir := filepath.Join(home, ".aegis", "skills")
-		skills = appendFromDir(skills, workDir, userDir, seen, nil)
+		skills = appendFromDir(skills, workDir, userDir, seen, nil, false)
 	}
 
 	// Embedded built-ins fill in last, and only the ones explicitly enabled —
-	// they never override a same-named project/user skill.
+	// they never override a same-named project/user skill. These ship in the
+	// binary, so they're trusted and not wrapped as untrusted content.
 	if enabled := enabledSet(enabledBuiltins); len(enabled) > 0 && dataDir != "" {
 		builtinDir := filepath.Join(dataDir, builtinSkillsDirName)
-		skills = appendFromDir(skills, workDir, builtinDir, seen, enabled)
+		skills = appendFromDir(skills, workDir, builtinDir, seen, enabled, true)
 	}
 
 	return skills
@@ -94,8 +99,12 @@ func enabledSet(names []string) map[string]bool {
 // appendFromDir loads every skill entry in dir. When filter is non-nil, only
 // entries whose stem (filename without extension, or directory name) is
 // present in filter are loaded — used to gate embedded built-ins behind an
-// enabled-list without a second directory-walking implementation.
-func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool, filter map[string]bool) []Skill {
+// enabled-list without a second directory-walking implementation. trusted is
+// true only for the embedded-builtins directory; every other source (project/
+// user skill files) has its body wrapped in an untrusted-provenance marker
+// before it can reach the system prompt (FIND-05/P24.4), since those files
+// are arbitrary content from disk, not compiled into the binary.
+func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool, filter map[string]bool, trusted bool) []Skill {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return dst
@@ -125,6 +134,9 @@ func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool, filte
 			}
 			seen[e.Name()] = true
 			sk := parseSkill(e.Name(), string(data))
+			if !trusted {
+				sk.Content = wrapUntrustedSkill(sk.Name, sk.Content)
+			}
 			sk.Dir = skillDir
 			sk.Content = withAssetManifest(sk.Content, workDir, skillDir, manifestName)
 			dst = append(dst, sk)
@@ -139,9 +151,28 @@ func appendFromDir(dst []Skill, workDir, dir string, seen map[string]bool, filte
 			continue
 		}
 		sk := parseSkill(strings.TrimSuffix(e.Name(), filepath.Ext(e.Name())), string(data))
+		if !trusted {
+			sk.Content = wrapUntrustedSkill(sk.Name, sk.Content)
+		}
 		dst = append(dst, sk)
 	}
 	return dst
+}
+
+// wrapUntrustedSkill tags a project/user skill file's body with the same
+// untrusted-provenance marker used for MCP/web tool output and file-loaded
+// personas, framing it as data rather than instructions for the model.
+// scan=false for the same reason as the persona wrap (internal/persona/load.go):
+// this content is re-injected every session, and skill prose routinely
+// discusses its own instructions, so the heuristic scan would be noisy here;
+// the provenance framing itself is the mitigation FIND-05 asks for.
+func wrapUntrustedSkill(name, content string) string {
+	if content == "" {
+		return content
+	}
+	return trust.Wrap("skill_untrusted_content", [][2]string{{"skill", name}},
+		"a skill file loaded from this project's or the user's .aegis/skills/ directory, not a built-in",
+		content, false)
 }
 
 // findSkillFile returns the manifest filename ("SKILL.md", case-insensitive)

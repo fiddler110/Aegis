@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
@@ -34,15 +35,29 @@ func newTestWebUIServer(t *testing.T) *Server {
 	return srv
 }
 
-var pageTokenRE = regexp.MustCompile(`data-page-token="([0-9a-f]+)"`)
+var (
+	pageTokenRE = regexp.MustCompile(`data-page-token="([0-9a-f]+)"`)
+	csrfTokenRE = regexp.MustCompile(`data-csrf-token="([0-9a-f]+)"`)
+)
 
 func TestWebUIServedAndTokenInjected(t *testing.T) {
 	srv := newTestWebUIServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
+	// A cookie jar is required for this flow now: GET /ui sets the HttpOnly
+	// aegis_ui_csrf cookie the double-submit check in /auth/exchange expects
+	// (FIND-01/P24.1) — exercising this with a jar-backed client is what
+	// distinguishes "this looks like a real browser page load" from a bare
+	// request replaying only the values scraped out of the response body.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+
 	// The UI page is reachable without a bearer token.
-	resp, err := http.Get(ts.URL + "/ui")
+	resp, err := client.Get(ts.URL + "/ui")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +73,8 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 	if !strings.Contains(page, "Aegis") {
 		t.Error("page missing app marker")
 	}
-	if strings.Contains(page, "__AEGIS_TOKEN__") {
-		t.Error("token placeholder was not replaced")
+	if strings.Contains(page, "__AEGIS_TOKEN__") || strings.Contains(page, "__AEGIS_CSRF__") {
+		t.Error("a placeholder was not replaced")
 	}
 	if strings.Contains(page, "secret-token") {
 		t.Error("the real, long-lived auth token leaked into the page (P15.12)")
@@ -69,6 +84,11 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 		t.Fatal("page missing a data-page-token value")
 	}
 	pageToken := m[1]
+	cm := csrfTokenRE.FindStringSubmatch(page)
+	if cm == nil {
+		t.Fatal("page missing a data-csrf-token value")
+	}
+	csrfToken := cm[1]
 
 	// A protected endpoint still requires the real token, not the page token.
 	r2, err := http.Get(ts.URL + "/sessions")
@@ -80,14 +100,17 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 		t.Errorf("GET /sessions without token = %d, want 401", r2.StatusCode)
 	}
 
-	// The page token exchanges for the real token exactly once.
+	// The page token exchanges for the real token exactly once. The jar
+	// attaches the aegis_ui_csrf cookie GET /ui set automatically; the
+	// explicit header simulates what the frontend's JS reads out of the DOM.
 	exchange := func() (int, string) {
 		req, err := http.NewRequest(http.MethodPost, ts.URL+"/auth/exchange", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		req.Header.Set("Authorization", "Bearer "+pageToken)
-		r, err := http.DefaultClient.Do(req)
+		req.Header.Set("X-Aegis-CSRF", csrfToken)
+		r, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,6 +148,56 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 	}
 }
 
+func TestAuthExchangeRejectsMismatchedCSRF(t *testing.T) {
+	srv := newTestWebUIServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+
+	resp, err := client.Get(ts.URL + "/ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	page := string(body)
+	pageToken := pageTokenRE.FindStringSubmatch(page)[1]
+
+	// A cross-origin page's blind attempt: it has neither the HttpOnly
+	// cookie value nor the page's own DOM to read the real csrf nonce from,
+	// so it can at best send a wrong (or empty) header.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/auth/exchange", nil)
+	req.Header.Set("Authorization", "Bearer "+pageToken)
+	req.Header.Set("X-Aegis-CSRF", "wrong-nonce")
+	r, err := client.Do(req) // jar still attaches the real cookie automatically
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("exchange with mismatched csrf header = %d, want 401", r.StatusCode)
+	}
+
+	// No cookie at all (a bare client with no jar, e.g. a raw same-machine
+	// HTTP request that never fetched /ui through this client) is rejected too.
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/auth/exchange", nil)
+	req2.Header.Set("Authorization", "Bearer "+pageToken)
+	req2.Header.Set("X-Aegis-CSRF", "wrong-nonce")
+	r2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("exchange with no cookie = %d, want 401", r2.StatusCode)
+	}
+}
+
 func TestAuthExchangeRejectsMissingOrUnknownToken(t *testing.T) {
 	srv := newTestWebUIServer(t)
 	ts := httptest.NewServer(srv.Handler())
@@ -155,26 +228,34 @@ func TestAuthExchangeRejectsMissingOrUnknownToken(t *testing.T) {
 func TestPageTokenSingleUseAndExpiry(t *testing.T) {
 	srv := newTestWebUIServer(t)
 
-	tok, err := srv.mintPageToken()
+	tok, csrf, err := srv.mintPageToken()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !srv.exchangePageToken(tok) {
+	if !srv.exchangePageToken(tok, csrf) {
 		t.Fatal("expected the first exchange of a fresh token to succeed")
 	}
-	if srv.exchangePageToken(tok) {
+	if srv.exchangePageToken(tok, csrf) {
 		t.Fatal("expected a replayed token to be rejected")
 	}
 
-	expired, err := srv.mintPageToken()
+	expired, expiredCSRF, err := srv.mintPageToken()
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv.pageTokenMu.Lock()
-	srv.pageTokens[expired] = time.Now().Add(-time.Second)
+	srv.pageTokens[expired] = pageTokenEntry{expiry: time.Now().Add(-time.Second), csrf: expiredCSRF}
 	srv.pageTokenMu.Unlock()
-	if srv.exchangePageToken(expired) {
+	if srv.exchangePageToken(expired, expiredCSRF) {
 		t.Fatal("expected an expired token to be rejected")
+	}
+
+	mismatched, _, err := srv.mintPageToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.exchangePageToken(mismatched, "wrong-nonce") {
+		t.Fatal("expected a mismatched csrf nonce to be rejected")
 	}
 }
 

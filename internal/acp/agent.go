@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,27 +24,34 @@ type Backend interface {
 // Agent implements the ACP Handler, translating ACP methods into daemon calls
 // and engine stream events into ACP session/update notifications.
 type Agent struct {
-	backend Backend
-	mode    string // permission mode for new sessions
-	logger  *slog.Logger
+	backend   Backend
+	mode      string // permission mode for new sessions
+	logger    *slog.Logger
+	authToken string // non-empty requires authenticate before session/new|prompt (FIND-02/P24.2)
 
 	conn *Conn
 
-	mu      sync.Mutex
-	cancels map[string]context.CancelFunc // sessionId -> cancel for in-flight prompt
+	mu            sync.Mutex
+	cancels       map[string]context.CancelFunc // sessionId -> cancel for in-flight prompt
+	authenticated bool
 }
 
 // NewAgent builds an ACP agent over backend. mode is the permission mode applied
-// to sessions it creates ("plan", "build", or "auto").
-func NewAgent(backend Backend, mode string, logger *slog.Logger) *Agent {
+// to sessions it creates ("plan", "build", or "auto"). authToken, when
+// non-empty, requires the client to call "authenticate" with a matching
+// shared secret before session/new or session/prompt is allowed to proceed
+// (FIND-02/P24.2); empty leaves behavior unchanged (the pre-existing no-op
+// acknowledge), which is the default for every existing editor integration.
+func NewAgent(backend Backend, mode string, logger *slog.Logger, authToken string) *Agent {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Agent{
-		backend: backend,
-		mode:    mode,
-		logger:  logger,
-		cancels: map[string]context.CancelFunc{},
+		backend:   backend,
+		mode:      mode,
+		logger:    logger,
+		authToken: authToken,
+		cancels:   map[string]context.CancelFunc{},
 	}
 }
 
@@ -59,17 +67,53 @@ func (a *Agent) HandleRequest(ctx context.Context, method string, params json.Ra
 	case methodInitialize:
 		return a.handleInitialize(params)
 	case methodAuthenticate:
-		// No authentication is required; acknowledge so clients proceed.
-		return map[string]any{}, nil
+		return a.handleAuthenticate(params)
 	case methodNewSession:
+		if !a.isAuthenticated() {
+			return nil, errorf(codeUnauthorized, "authentication required: call authenticate with the shared token first")
+		}
 		return a.handleNewSession(ctx, params)
 	case methodPrompt:
+		if !a.isAuthenticated() {
+			return nil, errorf(codeUnauthorized, "authentication required: call authenticate with the shared token first")
+		}
 		return a.handlePrompt(ctx, params)
 	case methodLoadSession:
 		return nil, errorf(codeMethodNotFound, "session/load is not supported")
 	default:
 		return nil, errorf(codeMethodNotFound, "unknown method %q", method)
 	}
+}
+
+// isAuthenticated reports whether the client may proceed to session/new or
+// session/prompt: always true when no authToken is configured (back-compat
+// default), otherwise true only after a successful authenticate call.
+func (a *Agent) isAuthenticated() bool {
+	if a.authToken == "" {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.authenticated
+}
+
+func (a *Agent) handleAuthenticate(params json.RawMessage) (any, *RPCError) {
+	if a.authToken == "" {
+		return map[string]any{}, nil
+	}
+	var p authenticateParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, errorf(codeInvalidParams, "invalid authenticate params: %v", err)
+		}
+	}
+	if subtle.ConstantTimeCompare([]byte(p.Token), []byte(a.authToken)) != 1 {
+		return nil, errorf(codeUnauthorized, "invalid token")
+	}
+	a.mu.Lock()
+	a.authenticated = true
+	a.mu.Unlock()
+	return map[string]any{}, nil
 }
 
 // HandleNotification implements Handler.
@@ -93,6 +137,14 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, *RPCError) {
 			return nil, errorf(codeInvalidParams, "invalid initialize params: %v", err)
 		}
 	}
+	var authMethods []authMethod
+	if a.authToken != "" {
+		authMethods = []authMethod{{
+			ID:          authMethodSharedSecret,
+			Name:        "Shared secret",
+			Description: "Token configured via AEGIS_ACP_TOKEN on the agent side",
+		}}
+	}
 	return initializeResult{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCapabilities{
@@ -103,7 +155,7 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, *RPCError) {
 				EmbeddedContext: true,
 			},
 		},
-		AuthMethods: []authMethod{},
+		AuthMethods: authMethods,
 	}, nil
 }
 

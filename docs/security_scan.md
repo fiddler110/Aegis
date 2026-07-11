@@ -767,6 +767,24 @@ aegis sandbox test            # run uname -a in configured sandbox to verify
 
 **Secret env stripping (P7.2):** The `local` and `os` backends run on the host and would otherwise inherit the daemon's full environment, including `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` — a prompt-injected instruction that gets the agent to run `shell` could read them back out, then use `web_fetch` to exfiltrate them to a public host. Both backends always strip those two names before exec; add more via `sandbox.strip_env` (e.g. MCP tokens loaded from `.aegis/.env`). The `container` backend is unaffected — `docker run`/`podman run` never pass host env into the container in the first place.
 
+### Docker/Podman socket privilege equivalence
+
+> **Read this before treating the `docker`/`podman`/`auto` sandbox backend as a privilege boundary on its own.** This is inherent to how Docker and Podman work, not an Aegis bug, and it is not something a container's runtime flags can close.
+
+By the well-documented design of those engines, access to the Docker daemon's socket is **equivalent to local root** on the host, and access to a **rootful** Podman socket is equivalent to the invoking user's full host privileges. This is not specific to Aegis — it applies to any process that can reach the socket, because both engines let a caller with socket access mount the host filesystem, run privileged containers, or otherwise act as root (Docker) or as that user (rootful Podman). Rootless Podman avoids this specific escalation path by running the engine (and everything it launches) as the invoking user with no daemon socket to compromise.
+
+Concretely: **any component that can reach the container backend Aegis is configured to use inherits that privilege level.** If the daemon process, a compromised MCP server, or a sub-agent can talk to the same Docker/Podman socket Aegis uses, it has the same root-or-invoking-user privilege the engine itself has — independent of whatever flags Aegis passes to `docker run`/`podman run`.
+
+**What Aegis already does today** (verified against `internal/sandbox/docker.go`'s `ociRunArgs`, current as of P24.10): every container Aegis spawns via the `docker` or `podman` runtime unconditionally gets `--cap-drop=ALL` and `--security-opt=no-new-privileges`, dropping all Linux capabilities and preventing privilege escalation inside the container. This meaningfully reduces what a compromised process *inside* a spawned container can do.
+
+**What Aegis does not, and cannot, do:** those flags hardens the container's contents; they do nothing about the privilege equivalence of *socket access itself*. That's a property of the Docker/Podman architecture, not of the container Aegis asks them to run — no combination of `docker run` flags closes it. If your threat model includes "something on this host other than Aegis could reach the configured socket," the mitigation is not a run flag but a different engine configuration:
+
+- **Prefer rootless Podman** for the sandbox backend where feasible (`sandbox.backend: container`, `sandbox.runtime: podman`, with Podman installed and running rootless — this is Podman's default mode for a non-root user, and it means there is no root-owned daemon socket to compromise in the first place).
+- **Or run a user-namespace-remapped ("userns-remap") Docker daemon** if you're committed to Docker specifically — this maps container UID 0 to an unprivileged host UID, so even full container compromise doesn't yield host root. Rootless Docker (`dockerd-rootless`) is a further step in the same direction as rootless Podman.
+- Restrict OS-level access to the socket/group (`docker` group membership, or the Podman socket's file permissions) to only the accounts that need it — the daemon process itself already has this access once `sandbox.backend` is configured to use it, so this is about *other* processes on the same host, not about Aegis.
+
+Aegis does not auto-detect or enforce rootless-vs-rootful at startup: there is no reliable, version-stable cross-platform signal available from the client side to distinguish a rootless from a rootful Docker/Podman install without a fragile `docker/podman info` parse that would vary across engine versions and isn't verified here. Instead, the daemon logs a one-time informational notice at `INFO` level when it selects the `docker` or `podman` runtime (`sandbox: <runtime> socket access is privilege-equivalent to local root ...`), pointing back at this section — it is not a detection of your specific configuration, just a standing reminder that the property applies whenever these two runtimes are in use.
+
 ### When to use
 
 - **Any time the agent runs genuinely untrusted code** (executing downloaded scripts, building user-provided packages) — use `container`. The `os` backend does not confine reads (see above), so a malicious script can still read and exfiltrate host secrets from under it.

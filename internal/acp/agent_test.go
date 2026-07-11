@@ -67,10 +67,15 @@ type testPeer struct {
 
 func newTestPeer(t *testing.T) (*testPeer, *Agent, *fakeBackend, func()) {
 	t.Helper()
+	return newTestPeerWithToken(t, "")
+}
+
+func newTestPeerWithToken(t *testing.T, authToken string) (*testPeer, *Agent, *fakeBackend, func()) {
+	t.Helper()
 	backend := &fakeBackend{sessionID: "sess-1"}
 	toAgentR, toAgentW := io.Pipe()
 	fromAgentR, fromAgentW := io.Pipe()
-	agent := NewAgent(backend, "build", discardLogger())
+	agent := NewAgent(backend, "build", discardLogger(), authToken)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = agent.Serve(ctx, toAgentR, fromAgentW) }()
@@ -166,6 +171,50 @@ func TestInitializeAndNewSession(t *testing.T) {
 	}
 	if ns.SessionID != "sess-1" {
 		t.Errorf("sessionId = %q, want sess-1", ns.SessionID)
+	}
+}
+
+func TestNewSessionRequiresAuthWhenTokenConfigured(t *testing.T) {
+	peer, _, _, cleanup := newTestPeerWithToken(t, "s3cret")
+	defer cleanup()
+
+	id := peer.request(methodInitialize, initializeParams{ProtocolVersion: protocolVersion})
+	resp := peer.read()
+	if string(resp.ID) != string(jsonInt(id)) || resp.Error != nil {
+		t.Fatalf("initialize resp = %+v", resp)
+	}
+	var init initializeResult
+	if err := json.Unmarshal(resp.Result, &init); err != nil {
+		t.Fatal(err)
+	}
+	if len(init.AuthMethods) != 1 || init.AuthMethods[0].ID != authMethodSharedSecret {
+		t.Errorf("expected shared_secret auth method advertised, got %+v", init.AuthMethods)
+	}
+
+	// session/new is denied before authenticating.
+	peer.request(methodNewSession, newSessionParams{Cwd: "/tmp"})
+	resp = peer.read()
+	if resp.Error == nil || resp.Error.Code != codeUnauthorized {
+		t.Fatalf("expected codeUnauthorized before authenticating, got %+v", resp)
+	}
+
+	// Wrong token stays denied.
+	peer.request(methodAuthenticate, authenticateParams{MethodID: authMethodSharedSecret, Token: "wrong"})
+	resp = peer.read()
+	if resp.Error == nil || resp.Error.Code != codeUnauthorized {
+		t.Fatalf("expected codeUnauthorized for wrong token, got %+v", resp)
+	}
+
+	// Correct token authenticates; session/new now succeeds.
+	peer.request(methodAuthenticate, authenticateParams{MethodID: authMethodSharedSecret, Token: "s3cret"})
+	resp = peer.read()
+	if resp.Error != nil {
+		t.Fatalf("authenticate with correct token: unexpected error: %+v", resp.Error)
+	}
+	peer.request(methodNewSession, newSessionParams{Cwd: "/tmp"})
+	resp = peer.read()
+	if resp.Error != nil {
+		t.Fatalf("session/new after auth: unexpected error: %+v", resp.Error)
 	}
 }
 

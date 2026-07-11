@@ -31,13 +31,15 @@ type RPCError struct {
 
 func (e *RPCError) Error() string { return fmt.Sprintf("jsonrpc error %d: %s", e.Code, e.Message) }
 
-// Standard JSON-RPC error codes.
+// Standard JSON-RPC error codes, plus a server-defined code for the
+// authentication extension (outside the -32768..-32000 reserved range).
 const (
 	codeParseError     = -32700
 	codeInvalidRequest = -32600
 	codeMethodNotFound = -32601
 	codeInvalidParams  = -32602
 	codeInternalError  = -32603
+	codeUnauthorized   = -32001
 )
 
 func errorf(code int, format string, args ...any) *RPCError {

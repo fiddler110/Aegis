@@ -635,6 +635,7 @@ func toAPIEvent(ev engine.Event) api.Event {
 		Text:        ev.Text,
 		Tool:        ev.ToolName,
 		ToolInput:   ev.ToolInput,
+		ToolID:      ev.ToolID,
 		ToolResult:  ev.ToolResult,
 		ToolIsError: ev.ToolIsError,
 	}

@@ -64,6 +64,37 @@ func renderToolCall(th theme, name string, input json.RawMessage, width int) str
 	return th.tool.Render(fmt.Sprintf("● %s  %s", name, truncate(oneLine(string(input)), budget)))
 }
 
+// renderToolCardPending renders the "pending" state of a combined tool-call
+// card (P21.2): the already-rendered call block (whatever renderToolCall /
+// renderEditDiff / renderShellCall / etc. produced — unchanged, so the
+// specialized diff-preview renderers keep working verbatim) plus a dim,
+// shimmering "running…" line underneath. step drives the shimmer exactly
+// like the existing "● thinking…" status-line animation (see shimmerText
+// and tui.go's animStep) — reused rather than inventing a second animation
+// primitive. Call is cheap to re-concatenate every animation tick since it
+// is computed once and cached by the caller (tui.go's toolCard.call); only
+// this trailing line actually changes per tick.
+func renderToolCardPending(th theme, call string, step int) string {
+	return call + "\n  " + shimmerText("⧗ running…", step, colTextMuted, colAccent)
+}
+
+// renderToolCardDone renders the finished ("ok"/"err") state of a combined
+// tool-call card: the same call block (see renderToolCardPending) plus the
+// normal finished-result rendering underneath, so what used to be two
+// independent transcript items (one appended at KindToolCall, one at
+// KindToolResult) becomes one item's two possible renderings.
+func renderToolCardDone(th theme, call, name, result string, isErr bool, width, maxBodyLines int, path string) string {
+	return call + "\n" + renderToolResult(th, name, result, isErr, width, maxBodyLines, path)
+}
+
+// renderToolCardStuck renders the terminal state applied to a tool card that
+// is still pending when its run ends without ever producing a matching
+// KindToolResult (turn abort, budget/loop error, or a client-initiated
+// cancel — see tui.go's resolveStuckToolCards, P21.2).
+func renderToolCardStuck(th theme, call string) string {
+	return call + "\n" + th.toolErr.Render("  ⚠ interrupted — run ended before a result arrived")
+}
+
 // renderToolResult renders a finished tool call. Short, single-line results are
 // shown inline; multi-line output (shell, read, search) is shown as a capped,
 // gutter-marked block instead of being collapsed to one truncated line.

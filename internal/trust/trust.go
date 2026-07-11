@@ -8,9 +8,12 @@
 package trust
 
 import (
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Wrap tags content from an untrusted external source with a provenance
@@ -71,11 +74,102 @@ var injectionPatterns = []*regexp.Regexp{
 // ScanForInjection runs injectionPatterns over content and returns a
 // human-readable description of each distinct pattern that matched. A nil
 // result means nothing matched — not that the content is verified safe.
+//
+// Beyond a literal match against the original content, this also matches
+// against a copy with zero-width/invisible formatting characters stripped
+// (catching a trigger phrase broken up by an interleaved character such as
+// U+200B, e.g. "ig​nore all previous instructions") and against any
+// base64-looking substring that decodes to valid UTF-8 text (catching a
+// payload encoded to dodge literal matching). Neither pass alters the
+// content that actually gets shown to the user/model in Wrap's output —
+// stripping/decoding only ever happens on throwaway copies used for
+// matching.
 func ScanForInjection(content string) []string {
 	var hits []string
+	seen := make(map[string]bool)
+	addHit := func(s string) {
+		if seen[s] {
+			return
+		}
+		seen[s] = true
+		hits = append(hits, s)
+	}
+
+	cleaned := stripInvisible(content)
 	for _, re := range injectionPatterns {
 		if m := re.FindString(content); m != "" {
-			hits = append(hits, fmt.Sprintf("matched %q", m))
+			addHit(fmt.Sprintf("matched %q", m))
+			continue
+		}
+		if m := re.FindString(cleaned); m != "" {
+			addHit(fmt.Sprintf("matched %q (after removing invisible characters)", m))
+		}
+	}
+
+	for _, h := range scanBase64ForInjection(content) {
+		addHit(h)
+	}
+
+	return hits
+}
+
+// stripInvisible returns a copy of s with zero-width/invisible Unicode
+// formatting characters removed — zero-width space (U+200B), zero-width
+// non-joiner (U+200C), zero-width joiner (U+200D), zero-width no-break
+// space/BOM (U+FEFF), soft hyphen (U+00AD), and the rest of Unicode
+// category Cf ("format") — the class of character commonly inserted inside
+// a word to defeat literal substring matching while remaining invisible (or
+// near-invisible) when rendered. This is used only to build a matching-only
+// copy of content; callers must keep using the original for anything shown
+// to the user or the model.
+func stripInvisible(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// minBase64Len is the shortest base64-alphabet run scanBase64ForInjection
+// will consider decoding. Chosen to skip short incidental strings
+// (hashes-of-nothing, random identifiers, UUID fragments) while still
+// catching an encoded sentence.
+const minBase64Len = 20
+
+// base64Candidate matches contiguous runs of base64-alphabet characters of
+// at least minBase64Len, optionally followed by padding.
+var base64Candidate = regexp.MustCompile(fmt.Sprintf(`[A-Za-z0-9+/]{%d,}={0,2}`, minBase64Len))
+
+// scanBase64ForInjection looks for base64-looking substrings in content,
+// attempts to decode each one, and — only when decoding succeeds and yields
+// valid UTF-8 text — runs injectionPatterns against the decoded text. A
+// candidate that fails to decode, or decodes to non-UTF-8 bytes, is skipped
+// silently: that is expected for the vast majority of incidental
+// base64-alphabet runs in ordinary content (commit SHAs, UUIDs, tokens) and
+// must never itself produce a hit.
+func scanBase64ForInjection(content string) []string {
+	var hits []string
+	seen := make(map[string]bool)
+	for _, cand := range base64Candidate.FindAllString(content, -1) {
+		if len(cand) < minBase64Len || seen[cand] {
+			continue
+		}
+		seen[cand] = true
+
+		decoded, err := base64.StdEncoding.DecodeString(cand)
+		if err != nil {
+			decoded, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(cand, "="))
+		}
+		if err != nil || len(decoded) == 0 || !utf8.Valid(decoded) {
+			continue
+		}
+
+		text := string(decoded)
+		for _, re := range injectionPatterns {
+			if m := re.FindString(text); m != "" {
+				hits = append(hits, fmt.Sprintf("matched %q (base64-decoded)", m))
+			}
 		}
 	}
 	return hits

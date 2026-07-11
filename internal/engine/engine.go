@@ -19,9 +19,16 @@ import (
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/trace"
 )
+
+// redactSecretsFn is a seam over security.RedactText so tests can stub in
+// findings without needing the real gitleaks binary on PATH — mirrors
+// gitpr.go's scanPRTextForSecrets seam over security.ScanText (P24.6 /
+// FIND-13).
+var redactSecretsFn = security.RedactText
 
 // Conversation is the mutable transcript the engine drives.
 type Conversation struct {
@@ -156,10 +163,17 @@ const (
 
 // Event is emitted to the consumer-provided sink as the run progresses.
 type Event struct {
-	Kind        EventKind
-	Text        string           // KindText
-	ToolName    string           // KindToolCall / KindToolResult
-	ToolInput   json.RawMessage  // KindToolCall
+	Kind      EventKind
+	Text      string          // KindText
+	ToolName  string          // KindToolCall / KindToolResult
+	ToolInput json.RawMessage // KindToolCall
+	// ToolID is the provider-assigned tool_use ID (provider.ToolUseBlock.ID),
+	// carried on both the KindToolCall and its matching KindToolResult so a
+	// consumer can correlate the two exactly instead of guessing from
+	// same-name ordering — required once tools can run concurrently
+	// (runTools below), where results don't necessarily arrive in call order
+	// (P21.2).
+	ToolID      string
 	ToolResult  string           // KindToolResult
 	ToolIsError bool             // KindToolResult
 	Usage       *provider.Usage  // KindTurnDone
@@ -168,6 +182,7 @@ type Event struct {
 	Err         error            // KindError
 	GuardReason string           // KindGuard: why validation failed
 	GuardPassed bool             // KindGuard: whether the guard ultimately passed
+	GuardStatus string           // KindGuard: guard.Status value — "passed" | "failed" | "skipped_transport_error" — distinguishes a genuine pass/fail verdict from a fail-open skip that GuardPassed alone can't
 }
 
 // EmitFunc receives engine events. It must not block for long.
@@ -220,7 +235,14 @@ type Options struct {
 	LoopThreshold         int           // identical tool-call turns before aborting; 0 -> default, <0 disables
 	ContextWindowTokens   int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
 	SteerChan             <-chan string // optional; steering messages injected between tool rounds
-	Logger                *slog.Logger
+	// RedactSecrets opts in to running a read-capability tool's output through
+	// gitleaks-backed secret detection (security.RedactText) before it's
+	// appended to the conversation sent to the model provider (P24.12 /
+	// FIND-09) — mitigates a cloud provider seeing a secret that a file read
+	// happened to pick up. Off by default; never blocks the tool call, only
+	// scrubs detected secret patterns in place.
+	RedactSecrets bool
+	Logger        *slog.Logger
 }
 
 // Engine runs the agent loop.
@@ -243,6 +265,7 @@ type Engine struct {
 	loopThreshold       int
 	contextWindowTokens int
 	steerChan           <-chan string
+	redactSecrets       bool
 	logger              *slog.Logger
 
 	// writtenFiles tracks workspace-relative paths touched by a successful
@@ -300,6 +323,7 @@ func New(opts Options) (*Engine, error) {
 		loopThreshold:       loopThreshold,
 		contextWindowTokens: opts.ContextWindowTokens,
 		steerChan:           opts.SteerChan,
+		redactSecrets:       opts.RedactSecrets,
 		logger:              logger,
 	}, nil
 }
@@ -473,10 +497,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					maxRetries = 1
 				}
 				if final := assistantText(assistant); final != "" {
-					ok, reason := e.outputGuard(ctx, guard.Input{Text: final, Files: e.collectWrittenFiles(ctx)})
+					ok, reason, status := e.outputGuard(ctx, guard.Input{Text: final, Files: e.collectWrittenFiles(ctx)})
+					e.logger.Debug("output guard result", "passed", ok, "guard_status", string(status))
 					if !ok && guardRetries < maxRetries {
 						guardRetries++
-						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason})
+						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason, GuardStatus: string(status)})
 						corrective := "[Your previous response did not pass output validation: " + reason +
 							". This means the actual deliverable is incomplete or unpolished, not just its" +
 							" description. Do not reply with only an acknowledgment, a plan, or a promise to" +
@@ -492,8 +517,15 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 						continue
 					}
 					if !ok {
-						emit(Event{Kind: KindGuard, GuardPassed: false,
+						emit(Event{Kind: KindGuard, GuardPassed: false, GuardStatus: string(status),
 							GuardReason: "surfacing the response after " + itoa(maxRetries) + " failed validation attempt(s): " + reason})
+					} else {
+						// Genuine pass and fail-open-skip both set ok=true, but the
+						// caller can now tell them apart via GuardStatus — without
+						// this, "the guard validated and passed" and "the guard
+						// silently never ran" were byte-for-byte indistinguishable
+						// (FIND-16).
+						emit(Event{Kind: KindGuard, GuardPassed: true, GuardStatus: string(status)})
 					}
 				}
 			}
@@ -702,7 +734,7 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 					e.logger.Error("recovered panic in tool call", "tool", tu.Name, "panic", r, "stack", string(debug.Stack()))
 					content := fmt.Sprintf("tool %q panicked: %v", tu.Name, r)
 					traces[i] = trace.ToolCall{Name: tu.Name, IsError: true}
-					safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: true})
+					safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: true})
 					results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: true}
 				}
 			}()
@@ -712,11 +744,11 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 				defer execLock.Unlock()
 			}
 
-			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
 			start := time.Now()
 			content, isErr := e.executeTool(ctx, tu)
 			traces[i] = trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr}
-			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
+			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
 			results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: isErr}
 		}(i, tu)
 	}
@@ -739,11 +771,11 @@ func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.Too
 		default:
 		}
 
-		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolInput: tu.Input})
+		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
 		start := time.Now()
 		content, isErr := e.executeTool(ctx, tu)
 		traces = append(traces, trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr})
-		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolResult: content, ToolIsError: isErr})
+		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
 
 		results = append(results, provider.ToolResultBlock{
 			ToolUseID: tu.ID,
@@ -891,6 +923,19 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	}
 	if !isErr && t.Capability() == tool.CapWrite {
 		e.recordWrittenPaths(writtenPathsFromInput(tu.Input))
+	}
+	if !isErr && e.redactSecrets && t.Capability() == tool.CapRead {
+		// P24.12 / FIND-09: opt-in scrub of tool-read file content for secret
+		// patterns before it's appended to the conversation sent to whichever
+		// provider is configured (a cloud API by default has no visibility
+		// restriction on what a file read surfaces). Strictly best-effort and
+		// never blocking — a scan failure or gitleaks being absent leaves
+		// content untouched, since the tool result must still reach the model
+		// either way.
+		if redacted, findings, scanErr := redactSecretsFn(ctx, content); scanErr == nil && len(findings) > 0 {
+			content = redacted
+			e.logger.Info("redacted secret pattern(s) from tool output", "tool", tu.Name, "count", len(findings))
+		}
 	}
 	if e.hooks != nil {
 		e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)

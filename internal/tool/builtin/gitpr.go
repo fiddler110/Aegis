@@ -7,8 +7,13 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tool"
 )
+
+// scanPRTextForSecrets is a seam over security.ScanText so tests can stub in
+// findings without needing the real gitleaks binary on PATH.
+var scanPRTextForSecrets = security.ScanText
 
 // gitPRTool closes the autonomous-work loop (P4.8): it pushes the current branch
 // and opens a pull request. It prefers the `gh` CLI when available and falls
@@ -38,6 +43,21 @@ func (t *gitPRTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	}
 	if strings.TrimSpace(args.Title) == "" {
 		return tool.Result{Content: "a PR title is required", IsError: true}, nil
+	}
+
+	// P24.6 / FIND-13: scan the PR title/body for secrets before anything is
+	// pushed or sent to GitHub, reusing the gitleaks machinery security.go
+	// already applies to file trees. Fails open on a scanner error (e.g.
+	// gitleaks misbehaving) — a malfunctioning best-effort scan must not
+	// block a legitimate PR — but a positive finding is a hard stop.
+	if findings, scanErr := scanPRTextForSecrets(ctx, args.Title+"\n\n"+args.Body); scanErr == nil && len(findings) > 0 {
+		var b strings.Builder
+		b.WriteString("refusing to push or open this PR: potential secret(s) detected in the title/body:\n")
+		for _, f := range findings {
+			fmt.Fprintf(&b, "- [%s] %s at %s\n", f.RuleID, f.Title, f.Location)
+		}
+		b.WriteString("remove the secret from the title/body (and rotate it if it's real) before retrying")
+		return tool.Result{Content: b.String(), IsError: true}, nil
 	}
 
 	branch, err := runGit(ctx, t.root, "rev-parse", "--abbrev-ref", "HEAD")
