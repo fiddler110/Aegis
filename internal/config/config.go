@@ -256,6 +256,15 @@ type MCPServerConfig struct {
 	// haven't explicitly trusted. The output's provenance marker noting it
 	// came from an external MCP server is always applied regardless.
 	ScanOutput bool `koanf:"scan_output"`
+	// ScanArguments opts outbound tool-call arguments bound for this server
+	// into a heuristic secret-pattern check before they are forwarded
+	// (P24.14, FIND-12). Tool-call arguments are model-constructed and may
+	// carry anything the model has read into context, making an untrusted
+	// server a potential exfiltration channel. Off by default; a hit logs a
+	// Warn naming the server, tool, and matched pattern class — flag-only,
+	// the call is never blocked or mutated. The outbound mirror of
+	// ScanOutput.
+	ScanArguments bool `koanf:"scan_arguments"`
 }
 
 // ProviderConfig selects and configures the model provider.
