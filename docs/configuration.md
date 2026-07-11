@@ -587,6 +587,16 @@ lsp:
 # MCP sources you haven't fully vetted. Every server's output is always
 # wrapped with a provenance marker regardless of this flag. See
 # docs/mcp-trust-boundary.md.
+#
+# `scan_arguments` (default false) is the outbound mirror (FIND-12):
+# tool-call arguments are model-constructed and may carry anything the model
+# has read into context, and they're forwarded verbatim to the target
+# server — an exfiltration channel if the server is untrusted. When enabled,
+# arguments bound for this server are checked against a small set of
+# credential-shaped patterns (API keys, PEM private keys, AWS keys, bearer
+# tokens, ...) and a hit logs a Warn naming the server, tool, and pattern
+# class. Flag-only: the call is never blocked or altered. See
+# docs/mcp-trust-boundary.md.
 mcp:
   - name: filesystem
     command: npx
@@ -609,6 +619,7 @@ mcp:
     auth: "$MY_MCP_TOKEN"   # $VAR references expanded from environment / .aegis/.env
     # capability omitted → defaults to "execute", so calls hit the Ask gate in build mode
     scan_output: true        # not fully vetted — flag suspicious tool output in-context
+    scan_arguments: true     # not fully vetted — warn if credential-shaped data heads its way
 
 
 # ── MCP server mode ────────────────────────────────────────────────────────────

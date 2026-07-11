@@ -7,7 +7,11 @@ code you configure, often someone else's package run via `npx` or a remote
 HTTP endpoint. This document covers what Aegis assumes about that server's
 output and what mitigations exist, because the trust boundary is easy to
 overlook: the tool call itself is capability-gated, but the *result* text
-flows straight into the model's context.
+flows straight into the model's context. The boundary is crossed in **both
+directions** — the same document also covers what flows *out* in tool-call
+arguments (see [§3](#3-outbound-tool-call-arguments-opt-in-scan_arguments-check)),
+which is the mirror-image problem: model-constructed content leaving the
+process for a server you may not fully trust.
 
 The same mechanism (`internal/trust`) also wraps `web_fetch`/`web_search`
 output (FIND-04): a fetched page or search result is just as much
@@ -148,7 +152,68 @@ engine events used for context-budget warnings (`internal/engine`,
 model, if it is following its system prompt correctly) can decide what to
 do with a flagged result, rather than Aegis silently deciding for them.
 
-## What this does *not* do
+### 3. Outbound: tool-call arguments (opt-in `scan_arguments` check)
+
+Everything above concerns content flowing *back* from the server. The same
+trust boundary is crossed in the other direction on every call, and it is
+just as easy to overlook (FIND-12): a tool call's **arguments** are
+constructed by the model, and the model's context may contain anything it
+has read during the session — file contents, environment and command
+output, memory entries, earlier tool results. Those arguments are forwarded
+verbatim to whichever server the call targets (`internal/mcp/mcp.go` /
+`internal/mcp/http.go`, the `tools/call` request — likewise
+`resources/read` URIs and `prompts/get` arguments), with no content
+inspection at this layer by default.
+
+That makes an untrusted MCP server a potential **exfiltration channel**,
+not just an injection vector. The two halves compose into a single attack:
+a prompt-injection payload (from *any* source — a web page, another MCP
+server's output, a poisoned file) instructs the model to read something
+sensitive and pass it as an argument to a tool on the attacker's server —
+say, a `search` call whose `query` happens to contain the contents of
+`~/.aws/credentials`. Nothing about that call looks unusual to capability
+gating: it is a permitted tool, invoked with schema-valid arguments. The
+data is simply gone.
+
+For servers you haven't fully vetted, you can opt outbound arguments into a
+heuristic secret-pattern check, symmetric with `scan_output`:
+
+```yaml
+mcp:
+  - name: some-server
+    command: npx
+    args: ["-y", "some-untrusted-mcp-package"]
+    scan_output: true      # inbound: flag injection-shaped output
+    scan_arguments: true   # outbound: flag credential-shaped arguments
+```
+
+`scan_arguments` (per server, `internal/config.MCPServerConfig.ScanArguments`
+/ `internal/mcp.ServerConfig.ScanArguments`) is **off by default**. When
+enabled, the serialized arguments of every `tools/call`, `resources/read`,
+and `prompts/get` bound for that server are checked against a small,
+conservative set of credential-shaped patterns (`internal/mcp/outbound.go`)
+— PEM private-key headers, AWS access key IDs, `sk-`-style API keys,
+GitHub/Slack tokens, JWTs, bearer tokens, and `api_key=`/`password:`-style
+assignments — before the request is sent. A hit produces a **Warn-level
+daemon log** identifying the server, the tool, and the matched pattern
+class (never the matched text itself, which would copy the suspected secret
+into the log):
+
+```
+WARN mcp outbound argument scan flagged possible secret in tool-call arguments
+     server=some-server tool=search patterns="PEM private key"
+```
+
+Consistent with the inbound scan's philosophy, this **flags, never blocks
+or mutates**: the call still goes out unchanged. A heuristic with false
+positives must not break a legitimate tool call (plenty of tools have
+honest reasons to receive a token — a git-forge server being handed a PAT
+you configured, for instance), and silently rewriting arguments would
+corrupt calls in ways the model can't see. The warning is a tripwire for
+the operator: if a server you've flagged as not-fully-trusted starts
+receiving credential-shaped arguments, that's the signal to investigate —
+and, if warranted, remove the server — not something Aegis can safely
+auto-decide.
 
 - **It is a mitigation, not a guarantee.** Prompt injection is an open
   problem; a sufficiently subtle payload will still pass through both the
@@ -183,6 +248,13 @@ do with a flagged result, rather than Aegis silently deciding for them.
   content; only `tools/call`, `resources/read`, and `prompts/get` results —
   the operations that return the server's actual data — are wrapped and
   scanned.
+- **The outbound `scan_arguments` check does not prevent exfiltration** —
+  it is detection, not prevention. It matches credential-*shaped* content
+  only: source code, document text, PII, or a secret split across multiple
+  calls (or lightly encoded — base64, hex) passes unflagged, and even a
+  flagged call still goes out. The controls that actually bound what an
+  untrusted server can receive are which servers you configure at all and
+  what the model is allowed to read into context in the first place.
 - **The scan is local and heuristic only** — no content is sent to a
   third-party classifier, and it does not use a model call, so it adds no
   latency-sensitive network dependency or cost. (See "Evaluating a
@@ -227,11 +299,19 @@ for everyone who hasn't opted in.
 
 ## Recommendations
 
-- Only configure MCP servers you trust to run at all — `scan_output` is a
-  defense-in-depth layer on top of that, not a substitute for it.
+- Only configure MCP servers you trust to run at all — `scan_output` and
+  `scan_arguments` are defense-in-depth layers on top of that, not a
+  substitute for it. **Every configured server receives whatever the model
+  puts in a tool call's arguments** — evaluate each server as a place your
+  session's context could end up, not just as a code-execution risk.
 - Turn on `scan_output` for any MCP server that talks to an external,
   attacker-influenceable data source (web search, ticket trackers, shared
   databases, anything ingesting user-generated content).
+- Turn on `scan_arguments` for the same class of server — and especially
+  for any remote (HTTP) server operated by a third party, where an
+  argument that leaves the process is unrecoverable. A server trustworthy
+  enough to leave `scan_output` off for is usually trustworthy enough to
+  leave this off too; they're two halves of the same vetting judgment.
 - Keep MCP tool capabilities as restrictive as the tool actually needs
   (see [Extensibility](extensibility.md#mcp-servers)) — capability gating
   and output provenance/scanning address different halves of the same
