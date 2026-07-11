@@ -336,9 +336,53 @@ type ScanRequest struct {
 	Scanners []string `json:"scanners,omitempty"`
 }
 
-// ScanResponse carries the formatted scan report (or SBOM-generation summary).
+// ScanFinding mirrors security.Finding on the wire — one normalized issue
+// from a scan. Like SecurityBaselineEntry, the api package mirrors the
+// internal/security type rather than importing it, so the wire contract
+// can't drift silently under an internal refactor. Severity is one of
+// "CRITICAL"/"HIGH"/"MEDIUM"/"LOW"/"INFO" (security.Severity's values);
+// Reachability, Verification, CWE, ASVS, and SeenBy are only set when the
+// underlying scanner actually established them (see security.Finding's
+// field comments — never guessed).
+type ScanFinding struct {
+	Tool         string   `json:"tool"`
+	RuleID       string   `json:"rule_id"`
+	Severity     string   `json:"severity"`
+	Title        string   `json:"title"`
+	Location     string   `json:"location"` // file:line or package/target
+	Description  string   `json:"description,omitempty"`
+	Remediation  string   `json:"remediation,omitempty"`
+	Reachability string   `json:"reachability,omitempty"` // "reachable" / "unreachable" / "" (not analyzed)
+	Verification string   `json:"verification,omitempty"` // "verified" / "unverified" / "" (not checked)
+	CWE          string   `json:"cwe,omitempty"`
+	ASVS         string   `json:"asvs,omitempty"`
+	SeenBy       []string `json:"seen_by,omitempty"`
+}
+
+// ScanResponse carries the formatted scan report (or SBOM-generation
+// summary) plus — for the request shapes that produce a security.Report
+// (workspace/path, image, and recon scans; the SBOM branch stays
+// report-text-only) — the same outcome structured, mirroring
+// security.Report field for field so a client (the web UI's Security panel,
+// P15.6) can render a findings table without parsing the formatted text.
+// Report is always set, for callers that only want the text.
 type ScanResponse struct {
 	Report string `json:"report"`
+
+	Findings []ScanFinding `json:"findings,omitempty"`
+	// Suppressed holds findings hidden by an active accepted-risk baseline
+	// entry (.aegis/security-baseline.yaml) — returned rather than dropped,
+	// same never-a-silent-omission posture as security.Report.Suppressed.
+	Suppressed []ScanFinding     `json:"suppressed,omitempty"`
+	Ran        []string          `json:"ran,omitempty"`     // scanners that executed
+	RanVia     map[string]string `json:"ran_via,omitempty"` // scanner -> "host" or "container"
+	Skipped    map[string]string `json:"skipped,omitempty"` // scanner -> reason (disabled / unavailable / error)
+	// Baseline diagnostics (security.Report's fields of the same names):
+	// entries that suppressed nothing this run because they expired or never
+	// parsed, and the parse error when the whole baseline file was unusable.
+	ExpiredSuppressions []string `json:"expired_suppressions,omitempty"`
+	InvalidSuppressions []string `json:"invalid_suppressions,omitempty"`
+	BaselineError       string   `json:"baseline_error,omitempty"`
 }
 
 // DebateRequest runs a multi-agent debate (P12) directly (POST /debate),

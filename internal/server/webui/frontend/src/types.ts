@@ -133,6 +133,89 @@ export interface KnowledgeResponse {
   count?: number;
 }
 
+// SecurityToolStatus is one scanner in GET /security/status: its configured
+// on/off + method, plus the live resolved availability. status is already
+// human wording ("on PATH", "container (docker)", "unavailable: …").
+export interface SecurityToolStatus {
+  name: string;
+  category?: string;
+  enabled: boolean;
+  method: string; // configured: "auto" | "host" | "container"
+  resolved: string; // actual: "host" | "container" | "wsl" | "unavailable"
+  runtime?: string; // container runtime name, only when resolved is "container"
+  status: string;
+}
+
+// SecurityStatusResponse is the GET /security/status response.
+export interface SecurityStatusResponse {
+  tools: SecurityToolStatus[];
+}
+
+// SecurityInstallResponse is the POST /security/install result. Without
+// confirm:true the request runs nothing: command carries the exact host
+// command that *would* run (plus a "set confirm" hint in error); a second
+// call with confirm:true actually runs it and fills ran/ok/output.
+export interface SecurityInstallResponse {
+  tool: string;
+  command?: string; // empty when no guided install exists (see error)
+  ran: boolean;
+  ok: boolean;
+  output?: string; // combined stdout+stderr, only when ran
+  error?: string;
+}
+
+// ScanFinding is one potential problem from POST /security/scan (mirrors
+// security.Finding). severity is "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" |
+// "INFO"; the optional fields are only set when a scanner established them.
+export interface ScanFinding {
+  tool: string;
+  rule_id: string;
+  severity: string;
+  title: string;
+  location: string; // file:line or package/target
+  description?: string;
+  remediation?: string;
+  reachability?: string; // "reachable" | "unreachable" | absent (not analyzed)
+  verification?: string; // "verified" | "unverified" | absent (not checked)
+  cwe?: string;
+  asvs?: string;
+  seen_by?: string[];
+}
+
+// ScanResponse is the POST /security/scan result: the formatted text report
+// plus (for findings scans) the same outcome structured for the table view
+// (P15.6) — findings/suppressed/ran/skipped mirror security.Report.
+export interface ScanResponse {
+  report: string;
+  findings?: ScanFinding[];
+  suppressed?: ScanFinding[]; // hidden by an accepted-risk baseline entry
+  ran?: string[]; // scanners that executed
+  ran_via?: Record<string, string>; // scanner -> "host" or "container"
+  skipped?: Record<string, string>; // scanner -> reason
+  expired_suppressions?: string[];
+  invalid_suppressions?: string[];
+  baseline_error?: string;
+}
+
+// SecurityBaselineEntry is one accepted risk from GET /security/baseline;
+// status ("active" | "expired" | "invalid") is computed server-side.
+export interface SecurityBaselineEntry {
+  rule_id: string;
+  location?: string;
+  reason: string;
+  expires: string;
+  added_by?: string;
+  status: string;
+}
+
+// SecurityBaselineResponse is the GET /security/baseline response: the
+// project's accepted-risk list (.aegis/security-baseline.yaml), or an empty
+// suppressions list when no baseline file exists (the common case).
+export interface SecurityBaselineResponse {
+  path: string;
+  suppressions?: SecurityBaselineEntry[];
+}
+
 export interface Event {
   kind:
     | "text"

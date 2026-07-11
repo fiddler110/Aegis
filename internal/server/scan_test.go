@@ -93,6 +93,36 @@ func TestHandleScanSBOMGeneratesArtifact(t *testing.T) {
 	}
 }
 
+// TestHandleScanReturnsStructuredFields is the P15.6 regression: alongside
+// the formatted text, a findings scan's response must mirror the
+// security.Report structure (findings/ran/skipped) so the web UI's Security
+// panel can render a findings table and a "K scanners skipped" summary
+// without parsing the text. Restricting the run to trufflehog (opt-in, not
+// enabled by default, so it resolves to skipped with no exec call) makes the
+// expected structured shape deterministic regardless of which scanner
+// binaries the test machine happens to have.
+func TestHandleScanReturnsStructuredFields(t *testing.T) {
+	cl, _, _, _ := newScanTestServer(t)
+	resp, err := cl.Scan(context.Background(), api.ScanRequest{Scanners: []string{"trufflehog"}})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if strings.TrimSpace(resp.Report) == "" {
+		t.Error("expected the formatted report text to still be present")
+	}
+	reason, ok := resp.Skipped["trufflehog"]
+	if !ok || strings.TrimSpace(reason) == "" {
+		t.Errorf("skipped = %v, want a trufflehog entry with a non-empty reason", resp.Skipped)
+	}
+	if len(resp.Skipped) != 1 {
+		t.Errorf("skipped = %v, want only the selected scanner mentioned", resp.Skipped)
+	}
+	if len(resp.Ran) != 0 || len(resp.Findings) != 0 {
+		t.Errorf("ran = %v, findings = %v, want none (trufflehog is skipped in this environment)",
+			resp.Ran, resp.Findings)
+	}
+}
+
 // TestHandleScanRejectsBadJSON checks the request body is actually decoded
 // and validated rather than ignored — client.Scan always marshals valid
 // JSON, so this drives the raw HTTP endpoint directly to send a malformed one.
