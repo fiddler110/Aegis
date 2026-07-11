@@ -1,11 +1,25 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, consumeSSE, exchangeToken } from "./api";
-import type { Event, Message, PersonaInfo, RewindResponse, Session, SessionMeta, StatusInfo } from "./types";
-import { SessionList } from "./components/SessionList";
+import type {
+  BGEventItem,
+  Event,
+  Message,
+  PersonaInfo,
+  PruneResponse,
+  RewindResponse,
+  RunInfo,
+  Session,
+  SessionMeta,
+  StatusInfo,
+} from "./types";
+import { SessionList, type SidebarTool } from "./components/SessionList";
 import { Transcript, type RenderBlock, type TranscriptItem } from "./components/Transcript";
 import { Composer } from "./components/Composer";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Checkpoints } from "./components/Checkpoints";
+import { DebatePanel } from "./components/DebatePanel";
+import { KnowledgePanel } from "./components/KnowledgePanel";
+import { Activity } from "./components/Activity";
 
 function itemsFromMessages(messages: Message[], sessionId: string): TranscriptItem[] {
   const items: TranscriptItem[] = [];
@@ -75,26 +89,34 @@ function fmtTokens(v: number): string {
   return String(v);
 }
 
+const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
 interface Toast {
   id: number;
   text: string;
   warn: boolean;
 }
 
+type Panel = "none" | "assistant" | "checkpoints" | "debate" | "knowledge" | "activity";
+
 export function App() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [archivedSessions, setArchivedSessions] = useState<SessionMeta[]>([]);
+  const [listView, setListView] = useState<"active" | "archived">("active");
+  const [runs, setRuns] = useState<RunInfo[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [title, setTitle] = useState("No session");
   const [mode, setMode] = useState("");
   const [sessInfo, setSessInfo] = useState<Session | null>(null);
   const [status, setStatus] = useState<StatusInfo | null>(null);
   const [personas, setPersonas] = useState<PersonaInfo[]>([]);
-  const [panel, setPanel] = useState<"none" | "assistant" | "checkpoints">("none");
+  const [panel, setPanel] = useState<Panel>("none");
   const [panelBusy, setPanelBusy] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [watching, setWatching] = useState(false);
   const [phaseLabel, setPhaseLabel] = useState("Thinking");
   const [elapsed, setElapsed] = useState(0);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -102,6 +124,9 @@ export function App() {
   const controllerRef = useRef<AbortController | null>(null);
   const timerRef = useRef<number | null>(null);
   const toastSeq = useRef(0);
+  // watchRef tracks the active background-session watcher so switching chats
+  // stops it and a second "Watch live" click can't start a duplicate poller.
+  const watchRef = useRef<{ stop: boolean; sessionId: string } | null>(null);
 
   const addToast = (text: string, warn = false) => {
     const id = ++toastSeq.current;
@@ -115,6 +140,30 @@ export function App() {
     try {
       const list = (await (await api("/sessions")).json()) as SessionMeta[];
       setSessions(list || []);
+      return list || [];
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  };
+
+  // loadArchived fetches every session (GET /sessions?archived=true returns
+  // active + archived together) and keeps only the archived ones.
+  const loadArchived = async () => {
+    try {
+      const list = (await (await api("/sessions?archived=true")).json()) as SessionMeta[];
+      const archived = (list || []).filter((s) => s.archived);
+      setArchivedSessions(archived);
+      return archived;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  };
+
+  const loadRuns = async () => {
+    try {
+      setRuns(((await (await api("/runs")).json()) as RunInfo[]) || []);
     } catch (e) {
       console.error(e);
     }
@@ -149,6 +198,15 @@ export function App() {
     }
   };
 
+  const clearSelection = () => {
+    setCurrentId(null);
+    setSessInfo(null);
+    setTitle("No session");
+    setMode("");
+    setItems([]);
+    setPanel("none");
+  };
+
   const newSession = async () => {
     const meta = (await (
       await api("/sessions", {
@@ -158,10 +216,13 @@ export function App() {
       })
     ).json()) as SessionMeta;
     await loadSessions();
+    setListView("active");
     openSession(meta.id);
   };
 
   const openSession = async (id: string) => {
+    // Leaving a chat stops any live background watch on the previous one.
+    if (watchRef.current && watchRef.current.sessionId !== id) watchRef.current.stop = true;
     setCurrentId(id);
     setPanel("none");
     const sess = (await (await api("/sessions/" + id)).json()) as Session;
@@ -170,6 +231,57 @@ export function App() {
     setMode(sess.mode);
     setItems(itemsFromMessages(sess.messages || [], id));
     loadSessions();
+    loadRuns();
+  };
+
+  const archiveSession = async (id: string) => {
+    try {
+      await api(`/sessions/${id}/archive`, { method: "POST" });
+      if (currentId === id) clearSelection();
+      addToast("Chat archived. Find it under “Archived” in the sidebar.");
+      loadSessions();
+      loadArchived();
+    } catch (e) {
+      addToast("Could not archive: " + (e as Error).message, true);
+    }
+  };
+
+  const unarchiveSession = async (id: string) => {
+    try {
+      await api(`/sessions/${id}/unarchive`, { method: "POST" });
+      addToast("Chat restored to your active list.");
+      loadSessions();
+      loadArchived();
+    } catch (e) {
+      addToast("Could not restore: " + (e as Error).message, true);
+    }
+  };
+
+  // pruneOldSessions permanently deletes non-archived chats not used in the
+  // last N days (POST /sessions/prune). Archived chats are kept.
+  const pruneOldSessions = async (days: number) => {
+    try {
+      const r = await api(`/sessions/prune?days=${days}`, { method: "POST" });
+      const body = (await r.json()) as PruneResponse;
+      addToast(
+        body.deleted === 0
+          ? `Nothing to tidy up — no chats were unused for ${days} days.`
+          : `Deleted ${body.deleted} old chat${body.deleted === 1 ? "" : "s"}.`
+      );
+      const [active, archived] = await Promise.all([loadSessions(), loadArchived()]);
+      // The open chat may have been pruned out from under us.
+      if (
+        currentId &&
+        active &&
+        archived &&
+        !active.some((s) => s.id === currentId) &&
+        !archived.some((s) => s.id === currentId)
+      ) {
+        clearSelection();
+      }
+    } catch (e) {
+      addToast("Could not tidy up: " + (e as Error).message, true);
+    }
   };
 
   const switchPersona = async (name: string) => {
@@ -209,6 +321,31 @@ export function App() {
     }
   };
 
+  // setBackgroundMode toggles detached execution (P3.2/P15.9): a background
+  // chat's responses keep running on the daemon even if every tab closes.
+  const setBackgroundMode = async (on: boolean) => {
+    if (!currentId) return;
+    setPanelBusy(true);
+    try {
+      await api(`/sessions/${currentId}/background`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ background: on }),
+      });
+      await refreshSessionInfo(currentId);
+      loadSessions();
+      addToast(
+        on
+          ? "This chat now keeps working even if you close the tab."
+          : "This chat now pauses if you close the tab mid-response."
+      );
+    } catch (e) {
+      addToast("Could not change background mode: " + (e as Error).message, true);
+    } finally {
+      setPanelBusy(false);
+    }
+  };
+
   const onRewound = async (r: RewindResponse) => {
     setPanel("none");
     if (currentId) await openSession(currentId);
@@ -234,22 +371,11 @@ export function App() {
     }
   };
 
-  const send = async () => {
-    const text = input.trim();
-    if (!text || streaming || !currentId) return;
-    setInput("");
-    setStreaming(true);
-    startElapsed();
-
-    const sessionId = currentId;
-    const userId = "u" + Date.now();
-    const asstId = "a" + Date.now();
-    setItems((prev) => [
-      ...prev,
-      { id: userId, role: "user", blocks: [{ kind: "text", text }] },
-      { id: asstId, role: "assistant", blocks: [] },
-    ]);
-
+  // makeEventSink renders engine events into the assistant transcript item
+  // asstId. Shared by live SSE streaming (send) and the background-session
+  // catch-up poller (watchLive), so both paths draw text/thinking/tool/
+  // approval blocks identically.
+  const makeEventSink = (asstId: string, sessionId: string, onPhase: (label: string) => void) => {
     let streamMode: "idle" | "text" | "thinking" = "idle";
     let thinkStart = 0;
 
@@ -305,17 +431,17 @@ export function App() {
     const handleEvent = (ev: Event) => {
       switch (ev.kind) {
         case "text":
-          setPhaseLabel("Writing");
+          onPhase("Writing");
           addText(ev.text || "");
           break;
         case "thinking":
-          setPhaseLabel("Thinking");
+          onPhase("Thinking");
           addThinking(ev.text || "");
           break;
         case "tool_call":
           finishThinking();
           streamMode = "idle";
-          setPhaseLabel("Running " + (ev.tool || "tool"));
+          onPhase("Running " + (ev.tool || "tool"));
           updateAsst((blocks) => [
             ...blocks,
             {
@@ -338,12 +464,12 @@ export function App() {
               err: !!ev.tool_is_error,
             },
           ]);
-          setPhaseLabel("Thinking");
+          onPhase("Thinking");
           break;
         case "approval_request":
           finishThinking();
           streamMode = "idle";
-          setPhaseLabel("Waiting for your approval");
+          onPhase("Waiting for your approval");
           updateAsst((blocks) => [
             ...blocks,
             {
@@ -369,6 +495,27 @@ export function App() {
       }
     };
 
+    return { handleEvent, finish: finishThinking };
+  };
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || streaming || !currentId) return;
+    setInput("");
+    setStreaming(true);
+    startElapsed();
+
+    const sessionId = currentId;
+    const userId = "u" + Date.now();
+    const asstId = "a" + Date.now();
+    setItems((prev) => [
+      ...prev,
+      { id: userId, role: "user", blocks: [{ kind: "text", text }] },
+      { id: asstId, role: "assistant", blocks: [] },
+    ]);
+
+    const sink = makeEventSink(asstId, sessionId, setPhaseLabel);
+
     const controller = new AbortController();
     controllerRef.current = controller;
     try {
@@ -378,33 +525,134 @@ export function App() {
         body: JSON.stringify({ text }),
         signal: controller.signal,
       });
-      await consumeSSE(r, handleEvent);
+      await consumeSSE(r, sink.handleEvent);
     } catch (e) {
-      finishThinking();
+      sink.finish();
       const err = e as Error;
-      updateAsst((blocks) => [
-        ...blocks,
-        { kind: "error", text: err.name === "AbortError" ? "Stopped." : "Error: " + err.message },
-      ]);
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === asstId
+            ? {
+                ...it,
+                blocks: [
+                  ...it.blocks,
+                  { kind: "error", text: err.name === "AbortError" ? "Stopped." : "Error: " + err.message },
+                ],
+              }
+            : it
+        )
+      );
     } finally {
-      finishThinking();
-      setStreaming(false);
+      sink.finish();
       controllerRef.current = null;
       stopElapsed();
+      // Refresh the run list before dropping the streaming flag so the
+      // "still working in the background" banner doesn't flash after our own
+      // run ends (the stale list would briefly still contain it).
+      await loadRuns();
+      setStreaming(false);
       loadSessions();
       refreshSessionInfo(sessionId); // P15.4: pick up this turn's cost/tokens
       loadStatus();
     }
   };
 
+  // watchLive reattaches to a background (detached) session whose response is
+  // still running (P15.9). Buffered events already shown via the persisted
+  // transcript are skipped (the poller starts after the newest buffered event)
+  // and new ones render live; when the run finishes the canonical transcript
+  // is reloaded from the store.
+  const watchLive = async (sessionId: string) => {
+    if (watchRef.current) return;
+    const state = { stop: false, sessionId };
+    watchRef.current = state;
+    setWatching(true);
+
+    const asstId = "w" + Date.now();
+    setItems((prev) => [
+      ...prev,
+      {
+        id: asstId,
+        role: "assistant",
+        bare: true,
+        blocks: [{ kind: "text", text: "(catching up — new activity appears below)" }],
+      },
+      { id: asstId + "b", role: "assistant", blocks: [] },
+    ]);
+    const sink = makeEventSink(asstId + "b", sessionId, () => {});
+
+    let since = 0;
+    let finished = false;
+    try {
+      // Seed past the events buffered so far: what they describe is already
+      // (or will shortly be) in the persisted transcript we just rendered, so
+      // replaying them would duplicate it.
+      const seed =
+        ((await (await api(`/sessions/${sessionId}/events?since=0`)).json()) as BGEventItem[]) || [];
+      if (seed.length) since = seed[seed.length - 1].id;
+
+      while (!state.stop && !finished) {
+        await sleep(2000);
+        if (state.stop) break;
+        let evs: BGEventItem[] = [];
+        try {
+          evs =
+            ((await (await api(`/sessions/${sessionId}/events?since=${since}`)).json()) as BGEventItem[]) ||
+            [];
+        } catch {
+          continue; // transient fetch error — keep polling
+        }
+        for (const item of evs) {
+          since = item.id;
+          try {
+            const ev = JSON.parse(item.data) as Event;
+            if (ev.kind === "done" || ev.kind === "error") finished = true;
+            sink.handleEvent(ev);
+          } catch {
+            // ignore malformed buffered events
+          }
+        }
+        if (!evs.length) {
+          // Quiet — double-check the run is actually still in flight.
+          try {
+            const rs = ((await (await api("/runs")).json()) as RunInfo[]) || [];
+            if (!rs.some((r) => r.session_id === sessionId)) finished = true;
+          } catch {
+            // keep waiting
+          }
+        }
+      }
+    } finally {
+      sink.finish();
+      watchRef.current = null;
+      setWatching(false);
+      loadRuns();
+      if (!state.stop) {
+        // Replace the live view with the canonical stored transcript.
+        await openSession(sessionId);
+        loadStatus();
+        addToast("Caught up — this chat's response has finished.");
+      }
+    }
+  };
+
   useEffect(() => {
+    let runsTimer: number | undefined;
     exchangeToken()
       .then(() => {
         loadSessions();
+        loadArchived();
         loadStatus();
         loadPersonas();
+        loadRuns();
+        // Keep the sidebar "working" indicators and the reattach banner
+        // honest even when this tab isn't the one driving the run.
+        runsTimer = window.setInterval(loadRuns, 5000);
       })
       .catch((e) => setAuthError((e as Error).message || "authentication failed"));
+    return () => {
+      if (runsTimer) window.clearInterval(runsTimer);
+    };
   }, []);
 
   if (authError) {
@@ -426,9 +674,33 @@ export function App() {
       (status.daily_token_cap ? `\nDaily token cap: ${fmtTokens(status.daily_token_cap)}` : "")
     : "";
 
+  const runningIds = new Set(runs.map((r) => r.session_id));
+  // A response is in flight for the open chat but this tab isn't streaming it
+  // (started from another tab/the terminal, or left running in the background).
+  const detachedRun = !!currentId && !streaming && runningIds.has(currentId);
+
+  const openTool = (tool: SidebarTool) => setPanel(panel === tool ? "none" : tool);
+
   return (
     <>
-      <SessionList sessions={sessions} currentId={currentId} onSelect={openSession} onNew={newSession} />
+      <SessionList
+        sessions={sessions}
+        archivedSessions={archivedSessions}
+        view={listView}
+        onViewChange={(v) => {
+          setListView(v);
+          if (v === "archived") loadArchived();
+        }}
+        currentId={currentId}
+        runningIds={runningIds}
+        onSelect={openSession}
+        onNew={newSession}
+        onArchive={archiveSession}
+        onUnarchive={unarchiveSession}
+        onPrune={pruneOldSessions}
+        onOpenTool={openTool}
+        activityCount={runs.length}
+      />
       <section id="main">
         <div id="topbar">
           <span class="title" id="title">
@@ -479,9 +751,11 @@ export function App() {
               currentPersona={sessInfo?.persona || "general"}
               modelOverride={sessInfo?.model || ""}
               defaultModel={status?.model || ""}
+              background={!!sessInfo?.background}
               busy={panelBusy}
               onSwitchPersona={switchPersona}
               onSetModel={setSessionModel}
+              onSetBackground={setBackgroundMode}
               onClose={() => setPanel("none")}
             />
           )}
@@ -493,12 +767,42 @@ export function App() {
               onClose={() => setPanel("none")}
             />
           )}
+          {panel === "debate" && <DebatePanel onClose={() => setPanel("none")} />}
+          {panel === "knowledge" && <KnowledgePanel onClose={() => setPanel("none")} />}
+          {panel === "activity" && (
+            <Activity
+              onOpenSession={(id) => {
+                setPanel("none");
+                setListView("active");
+                openSession(id);
+              }}
+              onClose={() => setPanel("none")}
+            />
+          )}
         </div>
+        {detachedRun && (
+          <div class="bg-banner">
+            <span class="livedot" />
+            <span class="bb-text">
+              The assistant is still working on this chat
+              {sessInfo?.background ? " in the background" : " (started elsewhere)"}.
+            </span>
+            {sessInfo?.background ? (
+              <button disabled={watching} onClick={() => currentId && watchLive(currentId)}>
+                {watching ? "Watching…" : "Watch live"}
+              </button>
+            ) : (
+              <button class="secondary" onClick={() => currentId && openSession(currentId)}>
+                Refresh
+              </button>
+            )}
+          </div>
+        )}
         <Transcript items={items} />
         <Composer
           value={input}
           onChange={setInput}
-          disabled={!currentId}
+          disabled={!currentId || watching || detachedRun}
           streaming={streaming}
           onSend={send}
           onStop={() => controllerRef.current?.abort()}
