@@ -573,6 +573,13 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 			return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), true, reason, nil
 		}
 		logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Image)
+		// FIND-06 / P24.10: Docker/Podman socket access is privilege-equivalent
+		// to local root regardless of the per-container hardening flags below —
+		// surface that once per daemon start so an operator relying on the
+		// container backend for isolation sees it. See docs/security_scan.md.
+		if notice := sandbox.SocketPrivilegeNotice(csb.DetectedRuntime()); notice != "" {
+			logger.Info(notice)
+		}
 		return csb, false, "", nil
 	case "os":
 		// OS-level isolation without a container runtime (P4.7): seatbelt on
