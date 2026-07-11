@@ -501,11 +501,22 @@ type ConfigSecurityPatchRequest struct {
 	DAST             *DASTConfigWire                   `json:"dast,omitempty"`
 }
 
+// BuiltinSkillInfo describes one embedded built-in skill for catalog
+// listings (name + frontmatter description), independent of whether it is
+// currently enabled.
+type BuiltinSkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 // ConfigSkillsResponse is the GET /config/skills response (P15.2): which
-// embedded built-in skills (internal/skills/builtin) are currently active.
+// embedded built-in skills (internal/skills/builtin) are currently active,
+// plus the full catalog of built-ins that could be enabled (P15.7) so a
+// toggle UI doesn't have to hard-code the shipped skill names.
 type ConfigSkillsResponse struct {
-	Scope          string   `json:"scope"`
-	BuiltinEnabled []string `json:"builtin_enabled"`
+	Scope          string             `json:"scope"`
+	BuiltinEnabled []string           `json:"builtin_enabled"`
+	Available      []BuiltinSkillInfo `json:"available"`
 }
 
 // ConfigSkillsPatchRequest replaces the skills.builtin_enabled list (PATCH

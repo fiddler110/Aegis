@@ -11,6 +11,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/skills"
 )
 
 // resolveScope maps a request's scope selector ("project", "global", or "")
@@ -270,6 +271,18 @@ func (s *Server) handlePatchConfigSecurity(w http.ResponseWriter, r *http.Reques
 
 // ─── /config/skills ──────────────────────────────────────────────────────────
 
+// availableBuiltinSkills lists the embedded built-in skill catalog in wire
+// form, so /config/skills clients (P15.7 web UI toggles) can render every
+// built-in with its description instead of hard-coding the shipped names.
+func availableBuiltinSkills() []api.BuiltinSkillInfo {
+	builtins := skills.Builtins()
+	out := make([]api.BuiltinSkillInfo, 0, len(builtins))
+	for _, b := range builtins {
+		out = append(out, api.BuiltinSkillInfo{Name: b.Name, Description: b.Description})
+	}
+	return out
+}
+
 func (s *Server) handleGetConfigSkills(w http.ResponseWriter, r *http.Request) {
 	scope, ok := s.resolveScope(scopeFromQuery(r))
 	if !ok {
@@ -281,7 +294,11 @@ func (s *Server) handleGetConfigSkills(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, api.ConfigSkillsResponse{Scope: scope, BuiltinEnabled: cfg.Skills.BuiltinEnabled})
+	writeJSON(w, http.StatusOK, api.ConfigSkillsResponse{
+		Scope:          scope,
+		BuiltinEnabled: cfg.Skills.BuiltinEnabled,
+		Available:      availableBuiltinSkills(),
+	})
 }
 
 func (s *Server) handlePatchConfigSkills(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +319,11 @@ func (s *Server) handlePatchConfigSkills(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, api.ConfigSkillsResponse{Scope: scope, BuiltinEnabled: req.BuiltinEnabled})
+	writeJSON(w, http.StatusOK, api.ConfigSkillsResponse{
+		Scope:          scope,
+		BuiltinEnabled: req.BuiltinEnabled,
+		Available:      availableBuiltinSkills(),
+	})
 }
 
 // ─── POST /config/harden ─────────────────────────────────────────────────────
