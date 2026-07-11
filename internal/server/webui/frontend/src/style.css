@@ -45,3 +45,52 @@ button:disabled{opacity:.5;cursor:default}
 .approval .q{margin-bottom:8px}
 .empty{color:var(--muted);text-align:center;margin-top:60px}
 .err{color:#b91c1c}
+
+/* topbar chips + cost readout (P15.3/P15.4) */
+.chip{background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:12.5px;white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.costs{font-size:12px;color:var(--muted);white-space:nowrap;cursor:default}
+
+/* popover panels (assistant settings, restore points) */
+.panel-anchor{position:relative}
+.backdrop{position:fixed;inset:0;z-index:9}
+.panel{position:absolute;top:6px;right:12px;z-index:10;width:min(440px,calc(100vw - 32px));max-height:min(70vh,560px);overflow-y:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.hint{font-size:12.5px;color:var(--muted);margin:6px 0}
+.hint.warn{color:#b45309}
+.linkish{background:transparent;color:var(--muted);border:0;padding:2px 6px;font-size:12.5px}
+.linkish:hover{color:var(--fg)}
+
+/* persona list (P15.3) */
+.persona-list{display:flex;flex-direction:column;gap:4px;margin:8px 0}
+.persona-row{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.persona-row:hover:not(:disabled){border-color:var(--accent)}
+.persona-row.active{border-color:var(--accent);background:rgba(109,40,217,.10);opacity:1}
+.persona-row .pr-name{font-weight:600;font-size:13.5px}
+.persona-row .pr-desc{font-size:12px;color:var(--muted);white-space:normal}
+.advanced{margin-top:8px}
+.advanced summary{font-size:12.5px}
+.model-row{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.model-row input{flex:1;min-width:160px;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;font-size:13px}
+
+/* restore points (P15.5) */
+.cp-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.cp-row{border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:6px}
+.cp-label{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.cp-meta{font-size:12px;color:var(--muted)}
+.cp-row>button{align-self:flex-start}
+.cp-confirm{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:#b45309}
+.cp-confirm button{align-self:flex-start}
+button.danger{background:#b91c1c}
+
+/* approval always-allow (P15.10) */
+.approval .always{margin-top:10px;font-size:13px}
+.approval .always label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.approval .always-detail{display:flex;flex-direction:column;gap:4px;margin:6px 0 0 22px}
+.approval .always-detail input{padding:6px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:13px ui-monospace,Menlo,monospace}
+
+/* toasts (P15.4 cost alerts + confirmations) */
+#toasts{position:fixed;top:14px;right:14px;z-index:20;display:flex;flex-direction:column;gap:8px;max-width:min(380px,calc(100vw - 28px))}
+.toast{display:flex;align-items:flex-start;gap:8px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 12px;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+.toast.warn{border-left-color:#d97706}
+.toast span{flex:1}

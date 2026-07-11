@@ -7,7 +7,14 @@ export type RenderBlock =
   | { kind: "tool"; label: string; body: string; open: boolean; err: boolean }
   | { kind: "image"; src: string }
   | { kind: "error"; text: string }
-  | { kind: "approval"; reason: string; approvalId: string; sessionId: string };
+  | {
+      kind: "approval";
+      reason: string;
+      approvalId: string;
+      sessionId: string;
+      tool?: string;
+      toolInput?: unknown;
+    };
 
 export interface TranscriptItem {
   id: string;
@@ -52,6 +59,8 @@ function renderBlock(b: RenderBlock, key: number) {
           sessionId={b.sessionId}
           approvalId={b.approvalId}
           reason={b.reason}
+          tool={b.tool}
+          toolInput={b.toolInput}
         />
       );
   }
