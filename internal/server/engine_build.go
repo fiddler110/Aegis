@@ -211,6 +211,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		SteerChan:             steerCh,
 		OutputGuard:           guardFn,
 		OutputGuardMaxRetries: guardRetries,
+		RedactSecrets:         s.cfg.Security.RedactSecrets,
 		Logger:                s.logger,
 	})
 }
