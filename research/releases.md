@@ -9,9 +9,50 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **P24.1–P24.4, the STRIDE-A threat model's Critical/Important
-findings (Tier 1), all shipped same day as the pass that produced them** (see
+**Last updated:** 2026-07-10 — **P24.5–P24.9, the STRIDE-A threat model's Tier 2 quick wins, all
+shipped in parallel via isolated git-worktree sub-agents** (see
 [roadmap.md](roadmap.md#priority-order)):
+**P24.5 (FIND-11) — count and log repeated invalid-bearer-token attempts.** `authMiddleware`
+(`internal/server/auth.go`) previously rejected a request with a missing/wrong `Authorization:
+Bearer` header with a 401 and nothing else — no signal that the daemon was being probed. Added a
+process-wide `atomic.Uint64` counter on `Server` (deliberately not a per-IP map, so the audit fix
+itself can't become a memory-growth DoS vector) and a `slog.Warn` on the first failure and every
+5th thereafter, logging remote address, path, and cumulative count — never the attempted token.
+**P24.6 (FIND-13) — scan PR titles/bodies for secrets before `gh pr create`.** `git_pr`
+(`internal/tool/builtin/gitpr.go`) previously sent the model-composed title/body straight to GitHub
+with no inspection. `internal/security` gained an exported `ScanText` (factored out of the existing
+`gitleaksScanner`'s host-scan path) that writes text to a temp file and runs gitleaks against it —
+silently a no-op if the binary isn't on PATH, never a hard dependency. `git_pr` now calls it before
+pushing or creating the PR and refuses (naming the rule/location) if it finds anything; a scan
+error itself fails open, matching how the rest of the security tooling treats gitleaks as
+best-effort. **P24.7 (FIND-16) — distinguish `OutputGuard` fail-open from a genuine pass.**
+`guard.Func` previously returned a bare `(ok bool, reason string)` — a genuine PASS and a swallowed
+transport error were byte-for-byte identical, and the engine emitted nothing at all on success
+either way. Added `guard.Status` (`passed`/`failed`/`skipped_transport_error`) as a third return
+value; the engine (`internal/engine/engine.go`) now emits a `KindGuard` event with that status on
+every path, including the previously-silent success path. **P24.8 (FIND-31) — audit
+`internal/security/install.go`'s installer-script argument construction.** Verification-only:
+traced every `Install` map entry (`internal/security/method.go`, all compile-time literals),
+`shellInvocation`, and `exec.CommandContext(shell, args...)` — confirmed the install command always
+reaches the shell as a single, unmodified argv element, never re-split or built from
+runtime/config-controlled data. Locked in with three regression tests; found one latent,
+currently-unreachable issue (unquoted `distro` arg in `sandbox.WSLInstallCommand`, dead code today
+since `install.go`'s only call site hardcodes `""`) tracked as new roadmap item P24.22. **P24.9
+(FIND-34) — dedicated cron-execution audit log.** Cron firings were only visible via transient
+`slog` lines and the generic task-manager view. Added a `cron_runs` table (job ID, fired-at,
+status — `ok`/`error`/`blocked`, truncated combined output) to `cron.Store`, wired through a new
+`newCronRunFunc` (extracted from the inline closure in `Server.New`) that records every fire
+attempt including ones the P24.3 permission gate blocks, and a new read-only `cron_history` tool
+mirroring `cron_list`'s shape.
+Tests: `internal/server/server_test.go` (new `TestServerInvalidAuthAttemptsLoggedAndCounted`),
+`internal/security/scantext_test.go` (new), `internal/tool/builtin/gitpr_test.go`,
+`internal/guard/guard_test.go`, `internal/engine/guard_test.go`, `internal/security/install_test.go`
+(new regression tests), `internal/cron/cron_test.go`, `internal/tool/builtin/cron_test.go`,
+`internal/server/cron_test.go` (new). `go build ./...`, `go vet ./...` clean; `go test ./...` green
+except the same three pre-existing/environmental failures noted below (confirmed present before any
+of this work).
+Earlier the same day — **P24.1–P24.4, the STRIDE-A threat model's Critical/Important
+findings (Tier 1), all shipped same day as the pass that produced them**:
 **P24.1 (FIND-01) — bind the `/ui` page-token exchange to the browser that loaded the page.**
 Previously `GET /ui`'s minted page token and `POST /auth/exchange` had no check on *who* was
 asking — any local process reaching the loopback port, not just the operator's own browser, could

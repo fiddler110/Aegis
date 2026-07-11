@@ -1,19 +1,20 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-10 — **All of Tier 1 (P24.1–P24.4) shipped** — see
-[releases.md](releases.md#latest-changes) for the full writeup. Full-repo STRIDE-A threat model
+**Last updated:** 2026-07-10 — **All of Tier 1 (P24.1–P24.4) and Tier 2 (P24.5–P24.9) shipped** —
+see [releases.md](releases.md#latest-changes) for the full writeup. Full-repo STRIDE-A threat model
 (`threat-model-20260710-173718/`) folded in as new track P24 earlier the same day. FIND-04 and
-FIND-08 shipped as part of that pass too; the remaining 17 actionable findings (of 35 total; 14
-were already-mitigated "existing control" findings needing no action; 4 were P24.1–P24.4) stay
-tracked below as P24.5–P24.21, tiered by severity/effort/dependency alongside the existing tracks.
+FIND-08 shipped as part of that pass too; of the 17 actionable findings (of 35 total; 14 were
+already-mitigated "existing control" findings needing no action), 9 are now shipped (P24.1–P24.9)
+and 8 remain open as P24.10–P24.21 (plus a new P24.22 parked item surfaced during P24.8's audit),
+tiered by severity/effort/dependency alongside the existing tracks.
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
+This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
 
 ---
 
 ## Status
 
-**Open items:** P24.5–P24.21 (threat-model findings), P21.2, P15.2–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
+**Open items:** P24.10–P24.22 (threat-model findings), P21.2, P15.2–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
 
 **Priority order:** see the tiered breakdown immediately below — it is the authoritative "what's next" view, ordered by tier and effort.
 
@@ -60,22 +61,24 @@ of each. Tier 1 is empty; next up is [Tier 2](#tier-2--cheap-high-visibility-win
 
 ### Tier 2 — Cheap, high-visibility wins
 
-**P21.3/P22.3 shipped 2026-07-10** — struck through for the record. New quick-win security findings
-from the threat model (Low remediation effort, no dependency) added below.
+**All of Tier 2 shipped 2026-07-10** — struck through for the record, all five in parallel via
+isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
+[releases.md](releases.md#latest-changes) for the full writeup of each. Tier 2 is empty; next up is
+[Tier 3](#tier-3--larger-real-sequence-dependent).
 
 - ~~**P21.3 — Streaming caret** (S).~~ **SHIPPED 2026-07-10.**
 - ~~**P22.3 — Esc-Esc backtrack + `/fork`** (M).~~ **SHIPPED 2026-07-10.**
-- **P24.5 — FIND-11: rate-limit/log repeated invalid bearer-token attempts** (S). A counter +
-  `Warn` log line in the existing `authMiddleware`; no auditability today for probing.
-- **P24.6 — FIND-13: scan GitHub PR titles/bodies for secret patterns before `gh pr create`** (S).
-  Reuse the secret-pattern checks already in `internal/security`.
-- **P24.7 — FIND-16: distinguish `OutputGuard` fail-open from a genuine pass in logs/metrics** (S).
-  One additional log field (`guard_status`) on the existing fail-open path.
-- **P24.8 — FIND-31: audit `internal/security/install.go`'s installer-script argument
-  construction** (S). Verification-only gap flagged during the threat model — confirm no
-  unsanitized string concatenation feeds the shell invocation; convert to argv-style if it does.
-- **P24.9 — FIND-34: add a dedicated cron-execution audit log** (S). Job ID, fired-at, exit
-  status, output reference — queryable independent of general turn traces.
+- ~~**P24.5 — FIND-11: rate-limit/log repeated invalid bearer-token attempts** (S).~~ **SHIPPED
+  2026-07-10.**
+- ~~**P24.6 — FIND-13: scan GitHub PR titles/bodies for secret patterns before `gh pr create`**
+  (S).~~ **SHIPPED 2026-07-10.**
+- ~~**P24.7 — FIND-16: distinguish `OutputGuard` fail-open from a genuine pass in logs/metrics**
+  (S).~~ **SHIPPED 2026-07-10.**
+- ~~**P24.8 — FIND-31: audit `internal/security/install.go`'s installer-script argument
+  construction** (S).~~ **SHIPPED 2026-07-10** (verification-only: audited, no unsanitized
+  concatenation found, locked in with regression tests — see P24.22 below for one latent,
+  currently-unreachable observation the audit surfaced).
+- ~~**P24.9 — FIND-34: add a dedicated cron-execution audit log** (S).~~ **SHIPPED 2026-07-10.**
 
 ### Tier 3 — Larger, real, sequence-dependent
 - **P15.2 — New daemon config-mutation endpoints** (M). The concrete backend gap blocking
@@ -124,6 +127,12 @@ Do not build speculatively — revisit only if a concrete trigger (user demand, 
 - **P24.21 — FIND-33: memory-lock/zero the bearer token in `Client` process memory** (M, security,
   Low, CVSS 2.8). Explicitly low priority per the finding itself — Host/OS access is already a
   significant compromise.
+- **P24.22 — Quote/escape the `distro` argument in `sandbox.WSLInstallCommand`** (S, security,
+  informational). Surfaced during P24.8's audit: `distro` is concatenated unquoted into the
+  composed `wsl -d <distro> -- bash -lc ...` string, unlike `linuxCmd` which is quoted. Currently
+  unreachable — `install.go`'s only call site hardcodes `""` for `distro`, ignoring
+  `Options.WSLDistro`/`security.wsl_distro` entirely — so this is not a live vulnerability. Worth
+  fixing defensively if `WSLInstallCommand` ever grows a second, config-driven caller.
 
 ---
 
@@ -132,26 +141,23 @@ Do not build speculatively — revisit only if a concrete trigger (user demand, 
 Full-repo STRIDE-A threat model at commit `34aa687`:
 [`threat-model-20260710-173718/`](../threat-model-20260710-173718/3-findings.md). 35 findings
 total; 14 were "existing control" (already mitigated, verified, no action needed — FIND-18/19/20/
-21/22/23/24/25/26/27/28/35), FIND-04/FIND-08 shipped same-day, and P24.1–P24.4 (Critical/Important,
-below) shipped same-day too. The 17 below remain open, grouped by the tier they were slotted into
-above.
+21/22/23/24/25/26/27/28/35), FIND-04/FIND-08 shipped same-day, and P24.1–P24.9 (Critical/Important
++ Tier 2 quick wins, below) shipped same-day too. 8 remain open as P24.10–P24.21 (plus P24.22, a
+new low-severity item P24.8's audit surfaced), grouped by the tier they were slotted into above.
 
 **Critical/Important (Tier 1): all shipped 2026-07-10.** See [releases.md](releases.md#latest-changes)
 for what each one actually did — P24.1 (FIND-01, `/ui` page-token double-submit CSRF binding),
 P24.2 (FIND-02, `aegis acp`/`aegis mcp-serve` shared-secret auth), P24.3 (FIND-03, cron fire-time
 permission gate + per-job `auto_approve`), P24.4 (FIND-05, persona/skill untrusted-content wrap).
 
-**Quick wins (Tier 2, Low effort):**
-- **P24.5 (FIND-11)** — Counter + `Warn` log on repeated invalid-bearer-token attempts in
-  `authMiddleware`.
-- **P24.6 (FIND-13)** — Secret-pattern scan over `git_pr`'s title/body before `gh pr create`,
-  reusing `internal/security`'s existing checks.
-- **P24.7 (FIND-16)** — Add `guard_status` field (`passed`/`failed`/`skipped_transport_error`) to
-  `LLMGuard`'s fail-open path in `internal/guard/guard.go`.
-- **P24.8 (FIND-31)** — Audit `internal/security/install.go:134`'s `args` construction for
-  unsanitized string concatenation; convert to argv-style if any is found.
-- **P24.9 (FIND-34)** — Dedicated cron-execution log table (job ID, fired-at, exit status,
-  truncated output ref), queryable independent of turn traces.
+**Quick wins (Tier 2, Low effort): all shipped 2026-07-10.** See
+[releases.md](releases.md#latest-changes) for what each one actually did — P24.5 (FIND-11, counter
++ `Warn` log on repeated invalid-bearer-token attempts), P24.6 (FIND-13, gitleaks-backed secret
+scan over `git_pr`'s title/body before `gh pr create`), P24.7 (FIND-16, `guard.Status`
+passed/failed/skipped_transport_error threaded from `LLMGuard` through to emitted `KindGuard`
+events), P24.8 (FIND-31, audited — no unsanitized concatenation found, locked in with regression
+tests; see P24.22 above for the one latent observation it surfaced), P24.9 (FIND-34, durable
+`cron_runs` table + `cron_history` tool, independent of turn traces).
 
 **Larger/sequence-dependent (Tier 3, Medium effort):**
 - **P24.10 (FIND-06)** — Document Docker/Podman-socket privilege equivalence; default to/recommend
