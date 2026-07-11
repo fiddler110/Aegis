@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/agentdef"
@@ -86,6 +87,13 @@ type Server struct {
 	logger      *slog.Logger
 	http        *http.Server
 	authToken   string // shared secret for API authentication
+
+	// invalidAuthAttempts counts requests rejected by authMiddleware for a
+	// missing or mismatched bearer token (FIND-11). It is a single
+	// process-wide counter rather than a per-remote-address map so that the
+	// audit fix itself can't be turned into a memory-growth DoS by an
+	// attacker hammering the endpoint with spoofed/varying source data.
+	invalidAuthAttempts atomic.Uint64
 
 	// pageTokens holds short-lived, single-use tokens minted per GET /ui load
 	// (P15.12): the page carries one of these instead of authToken, and the

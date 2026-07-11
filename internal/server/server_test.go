@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -519,6 +520,96 @@ func TestServerAuthRequired(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("healthz status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestServerInvalidAuthAttemptsLoggedAndCounted covers FIND-11: repeated
+// invalid-bearer-token requests must still be rejected exactly as before
+// (401, no behavior change for the reject path) but now also bump a
+// process-wide counter and emit an auditable slog.Warn on a coarse cadence,
+// without ever logging the attempted token value itself.
+func TestServerInvalidAuthAttemptsLoggedAndCounted(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	cfg := &config.Config{Provider: config.ProviderConfig{Model: "test"}, Permission: config.PermissionConfig{Mode: "plan"}}
+	srv := newWithDeps(cfg, logger, store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "secret-token-123"
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	const attemptedWrongToken = "totally-wrong-guess-value"
+
+	// One request with no Authorization header at all (never sends the
+	// Bearer prefix), five with a wrong token — six invalid attempts total.
+	resp, err := http.Get(ts.URL + "/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status (missing header) = %d, want 401", resp.StatusCode)
+	}
+
+	for i := 0; i < 5; i++ {
+		req, _ := http.NewRequest("GET", ts.URL+"/sessions", nil)
+		req.Header.Set("Authorization", "Bearer "+attemptedWrongToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status (wrong token, attempt %d) = %d, want 401", i, resp.StatusCode)
+		}
+	}
+
+	// Counter reflects every failed attempt, not just the logged ones.
+	if got := srv.invalidAuthAttempts.Load(); got != 6 {
+		t.Errorf("invalidAuthAttempts = %d, want 6", got)
+	}
+
+	logged := logBuf.String()
+	if strings.Contains(logged, attemptedWrongToken) {
+		t.Errorf("log output must never contain the attempted token value, got: %s", logged)
+	}
+	if !strings.Contains(logged, "rejected request with invalid or missing bearer token") {
+		t.Errorf("expected a warning log line for invalid auth attempts, got: %s", logged)
+	}
+	// invalidAuthLogEvery is 5, and the first attempt always logs, so with 6
+	// total attempts we expect exactly two log lines: at cumulative_count=1
+	// and cumulative_count=5.
+	if !strings.Contains(logged, "cumulative_count=1") {
+		t.Errorf("expected a log line at cumulative_count=1, got: %s", logged)
+	}
+	if !strings.Contains(logged, "cumulative_count=5") {
+		t.Errorf("expected a log line at cumulative_count=5, got: %s", logged)
+	}
+	if n := strings.Count(logged, "rejected request with invalid or missing bearer token"); n != 2 {
+		t.Errorf("expected exactly 2 log lines for 6 attempts at cadence 5, got %d in: %s", n, logged)
+	}
+
+	// A subsequent valid-token request still succeeds and does not bump the
+	// counter or log anything further.
+	req, _ := http.NewRequest("GET", ts.URL+"/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status with valid token = %d, want 200", resp.StatusCode)
+	}
+	if got := srv.invalidAuthAttempts.Load(); got != 6 {
+		t.Errorf("invalidAuthAttempts after valid request = %d, want unchanged 6", got)
 	}
 }
 
