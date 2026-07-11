@@ -13,14 +13,17 @@ import (
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/hooks"
 	"github.com/fiddler110/aegis/internal/mcp"
+	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -222,5 +225,82 @@ func cronShellRunner(sb sandbox.Backend, cwd string) func(ctx context.Context, c
 		ctx, cancel := context.WithTimeout(ctx, cronJobTimeout)
 		defer cancel()
 		return sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: cwd}, emit)
+	}
+}
+
+// newCronRunFunc builds the cron.RunFunc that fires a due job: it applies the
+// fire-time permission-mode gate (FIND-03/P24.3), runs the job's command via
+// runCronCmd, and — independent of both — persists a durable cron_runs audit
+// record for every fire attempt: gate-blocked, executed-and-failed, or
+// executed-and-succeeded (FIND-34/P24.9). Extracted from Server.New's
+// construction so the fire-time logic (permission gate + run recording) can
+// be unit tested without standing up a full daemon. mode is a thunk rather
+// than a fixed value so each fire re-reads the daemon's *current* permission
+// mode, not whatever it was when the scheduler was constructed.
+func newCronRunFunc(
+	cronStore *cron.Store,
+	taskMgr *task.Manager,
+	runCronCmd func(ctx context.Context, command string, emit func(string)) error,
+	mode func() permission.Mode,
+	logger *slog.Logger,
+) cron.RunFunc {
+	return func(j cron.Job) {
+		// Fire time is captured here, before the task-manager goroutine
+		// starts, so the audit record's fired-at reflects when the scheduler
+		// actually attempted the fire, not when the command happened to
+		// finish.
+		firedAt := time.Now()
+		title := j.Title
+		if title == "" {
+			title = "cron: " + j.Command
+		}
+		_, _ = taskMgr.Start(task.Spec{Kind: "cron", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
+			// Mirror everything sent to the task-manager's live emit into a
+			// local buffer too, so a durable, truncated copy of the run's
+			// combined stdout/stderr can be persisted to the cron_runs audit
+			// log below — independent of the task-manager view, which isn't
+			// cron-scoped or guaranteed to stay queryable by job over time.
+			var outBuf strings.Builder
+			capture := func(s string) {
+				outBuf.WriteString(s)
+				emit(s)
+			}
+			recordRun := func(status string) {
+				if err := cronStore.RecordRun(context.Background(), j.ID, firedAt, status, outBuf.String()); err != nil {
+					logger.Error("cron: record run", "job", j.ID, "err", err)
+				}
+			}
+
+			// Cron jobs fire unattended, with no session and no human present
+			// to resolve an approval prompt — so route the fire-time decision
+			// through the same mode-based policy interactive shell calls use
+			// instead of executing unconditionally. Ask-tier jobs need an
+			// explicit per-job auto_approve opt-in since nothing can answer
+			// an interactive prompt here.
+			m := mode()
+			switch (permission.Policy{Mode: m}).Decide(tool.CapExecute) {
+			case permission.Deny:
+				reason := fmt.Sprintf("cron job %q blocked: shell execution is not allowed in %s permission mode", j.Title, m)
+				logger.Warn("cron: job blocked by permission mode", "job", j.ID, "mode", m)
+				capture(reason)
+				recordRun("blocked")
+				return "", errors.New(reason)
+			case permission.Ask:
+				if !j.AutoApprove {
+					reason := fmt.Sprintf("cron job %q blocked: needs approval in %s mode and no one is present to grant it — set auto_approve on the job to allow unattended execution", j.Title, m)
+					logger.Warn("cron: job needs approval, auto_approve not set", "job", j.ID, "mode", m)
+					capture(reason)
+					recordRun("blocked")
+					return "", errors.New(reason)
+				}
+			}
+			runErr := runCronCmd(ctx, j.Command, capture)
+			status := "ok"
+			if runErr != nil {
+				status = "error"
+			}
+			recordRun(status)
+			return "", runErr
+		})
 	}
 }

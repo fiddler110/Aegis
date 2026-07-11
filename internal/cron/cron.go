@@ -19,12 +19,36 @@ type Job struct {
 	Command  string    `json:"command"`  // shell command to run when due
 	Title    string    `json:"title"`
 	Enabled  bool      `json:"enabled"`
-	LastRun  time.Time `json:"last_run"` // zero if never run
-	Created  time.Time `json:"created"`
+	// AutoApprove opts this job into firing unattended even when the daemon's
+	// current permission mode would otherwise require interactive approval for
+	// shell execution (build mode). No human is present when a scheduled job
+	// fires, so without this explicit opt-in the run is blocked rather than
+	// silently auto-approved (FIND-03/P24.3) — mirrors mcp_server.auto_approve.
+	AutoApprove bool      `json:"auto_approve"`
+	LastRun     time.Time `json:"last_run"` // zero if never run
+	Created     time.Time `json:"created"`
 }
 
 // ErrNotFound is returned for an unknown job id.
 var ErrNotFound = errors.New("cron job not found")
+
+// RunRecord is a durable, queryable audit record of one cron fire attempt —
+// independent of both the ephemeral slog line the scheduler emits and the
+// general task-manager view (which is not cron-scoped and not guaranteed to
+// stay queryable by job over time). Addresses FIND-34/P24.9.
+type RunRecord struct {
+	ID      int64     `json:"id"`
+	JobID   string    `json:"job_id"`
+	FiredAt time.Time `json:"fired_at"`
+	Status  string    `json:"status"` // "ok" | "error" | "blocked"
+	Output  string    `json:"output"` // combined stdout/stderr, truncated
+}
+
+// maxRunOutputBytes caps how much captured output is persisted per run
+// record, so a chatty job can't grow the audit table unboundedly. Mirrors
+// guard.maxGuardFileBytes's rationale: keep enough to diagnose a failure,
+// truncate the rest with a visible marker.
+const maxRunOutputBytes = 8000
 
 // Store persists cron jobs in the shared SQLite database.
 type Store struct{ db *sql.DB }
@@ -44,6 +68,22 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 );`); err != nil {
 		return nil, err
 	}
+	// Best-effort migration for DBs created before auto_approve existed;
+	// ALTER TABLE fails harmlessly (ignored) if the column is already there.
+	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0`)
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS cron_runs (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id   TEXT NOT NULL,
+    fired_at INTEGER NOT NULL,
+    status   TEXT NOT NULL,
+    output   TEXT NOT NULL DEFAULT ''
+);`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS cron_runs_job_id_idx ON cron_runs(job_id)`); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -54,22 +94,23 @@ func (s *Store) Save(ctx context.Context, j *Job) error {
 		last = j.LastRun.UnixMilli()
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created, auto_approve)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
-    schedule = excluded.schedule,
-    command  = excluded.command,
-    title    = excluded.title,
-    enabled  = excluded.enabled,
-    last_run = excluded.last_run`,
-		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli())
+    schedule     = excluded.schedule,
+    command      = excluded.command,
+    title        = excluded.title,
+    enabled      = excluded.enabled,
+    last_run     = excluded.last_run,
+    auto_approve = excluded.auto_approve`,
+		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli(), boolToInt(j.AutoApprove))
 	return err
 }
 
 // Get loads a job by id.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created FROM cron_jobs WHERE id = ?`, id)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve FROM cron_jobs WHERE id = ?`, id)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -80,7 +121,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 // List returns all jobs, newest first.
 func (s *Store) List(ctx context.Context) ([]*Job, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created FROM cron_jobs ORDER BY created DESC`)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve FROM cron_jobs ORDER BY created DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -108,18 +149,64 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// RecordRun persists one fire-attempt outcome for a job (FIND-34/P24.9).
+// output is truncated to maxRunOutputBytes with a trailing marker when
+// longer, so a chatty or runaway job cannot grow the audit table unboundedly.
+func (s *Store) RecordRun(ctx context.Context, jobID string, firedAt time.Time, status, output string) error {
+	if len(output) > maxRunOutputBytes {
+		output = output[:maxRunOutputBytes] + "\n[...truncated]"
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO cron_runs (job_id, fired_at, status, output) VALUES (?, ?, ?, ?)`,
+		jobID, firedAt.UnixMilli(), status, output)
+	return err
+}
+
+// ListRuns returns fire-attempt records, most-recent-first. jobID == ""
+// returns runs across all jobs; limit <= 0 means unlimited.
+func (s *Store) ListRuns(ctx context.Context, jobID string, limit int) ([]*RunRecord, error) {
+	query := `SELECT id, job_id, fired_at, status, output FROM cron_runs`
+	var args []any
+	if jobID != "" {
+		query += ` WHERE job_id = ?`
+		args = append(args, jobID)
+	}
+	query += ` ORDER BY fired_at DESC, id DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RunRecord
+	for rows.Next() {
+		var r RunRecord
+		var fired int64
+		if err := rows.Scan(&r.ID, &r.JobID, &fired, &r.Status, &r.Output); err != nil {
+			return nil, err
+		}
+		r.FiredAt = time.UnixMilli(fired)
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
 type scanner interface{ Scan(...any) error }
 
 func scanJob(sc scanner) (*Job, error) {
 	var (
-		j             Job
-		enabled       int
-		last, created int64
+		j                    Job
+		enabled, autoApprove int
+		last, created        int64
 	)
-	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created); err != nil {
+	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created, &autoApprove); err != nil {
 		return nil, err
 	}
 	j.Enabled = enabled != 0
+	j.AutoApprove = autoApprove != 0
 	if last != 0 {
 		j.LastRun = time.UnixMilli(last)
 	}
@@ -156,7 +243,10 @@ func NewScheduler(store *Store, run RunFunc, logger *slog.Logger) *Scheduler {
 }
 
 // Create validates the schedule, persists a new enabled job, and returns it.
-func (s *Scheduler) Create(ctx context.Context, schedule, command, title string) (*Job, error) {
+// autoApprove opts the job into firing unattended even when the daemon's
+// current permission mode would otherwise require approval for shell
+// execution (see Job.AutoApprove).
+func (s *Scheduler) Create(ctx context.Context, schedule, command, title string, autoApprove bool) (*Job, error) {
 	if _, err := Parse(schedule); err != nil {
 		return nil, err
 	}
@@ -164,12 +254,13 @@ func (s *Scheduler) Create(ctx context.Context, schedule, command, title string)
 		return nil, fmt.Errorf("cron: command is required")
 	}
 	j := &Job{
-		ID:       uuid.NewString(),
-		Schedule: schedule,
-		Command:  command,
-		Title:    title,
-		Enabled:  true,
-		Created:  s.now(),
+		ID:          uuid.NewString(),
+		Schedule:    schedule,
+		Command:     command,
+		Title:       title,
+		Enabled:     true,
+		AutoApprove: autoApprove,
+		Created:     s.now(),
 	}
 	if err := s.store.Save(ctx, j); err != nil {
 		return nil, err
@@ -179,6 +270,12 @@ func (s *Scheduler) Create(ctx context.Context, schedule, command, title string)
 
 // List returns all jobs.
 func (s *Scheduler) List(ctx context.Context) ([]*Job, error) { return s.store.List(ctx) }
+
+// History returns cron fire-attempt audit records, most-recent-first.
+// jobID == "" returns history across all jobs; limit <= 0 means unlimited.
+func (s *Scheduler) History(ctx context.Context, jobID string, limit int) ([]*RunRecord, error) {
+	return s.store.ListRuns(ctx, jobID, limit)
+}
 
 // Delete removes a job.
 func (s *Scheduler) Delete(ctx context.Context, id string) error { return s.store.Delete(ctx, id) }

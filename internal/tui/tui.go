@@ -80,6 +80,21 @@ type toolEntry struct {
 	status string // "pending" | "ok" | "err"
 }
 
+// toolCard is the in-place-updating transcript item for one tool call
+// (P21.2): appended once at KindToolCall in a pending state, then the same
+// item (blk) is mutated via transcriptPane.SetItemRaw to its ok/err
+// rendering when the matching KindToolResult arrives — replacing the old
+// two-independent-static-blocks approach. call is the pre-rendered call
+// block (renderToolCall / renderEditDiff / renderShellCall / etc.),
+// computed once and reused for both the pending state (redrawn every
+// animation tick — see renderToolCardPending) and the final combined
+// render, so neither pays for re-running a diff computation.
+type toolCard struct {
+	blk  *transcriptItem
+	name string
+	call string
+}
+
 type model struct {
 	cfg        Config
 	ta         textarea.Model
@@ -162,10 +177,25 @@ type model struct {
 	todoItems       []todoStripItem
 	pendingTodoText string // captured from todo_add call input, matched to result
 
-	// pendingReadPaths is a FIFO queue of read_file paths awaiting their
-	// KindToolResult (which carries no path/ID, only the tool name) — used to
-	// chroma-highlight the result body by file extension (P16.2).
-	pendingReadPaths []string
+	// pendingReadPaths maps a pending tool call's card key (see pendingTools)
+	// to the read_file path awaiting its KindToolResult, used to
+	// chroma-highlight the result body by file extension (P16.2). Keyed by
+	// card key (P21.2) rather than a same-name FIFO queue so concurrent
+	// read_file calls (engine.runTools runs read tools concurrently) can't
+	// cross-attribute paths if their results arrive out of call order.
+	pendingReadPaths map[string]string
+
+	// pendingTools holds one addressable transcript-card handle per
+	// in-flight tool call (P21.2), keyed by tool_use ID (api.Event.ToolID)
+	// so concurrent calls each own their own card. pendingToolOrder tracks
+	// insertion order for the fallback path (an event with no ToolID —
+	// tests, or a producer that predates it — falls back to the oldest
+	// pending card with a matching tool name, the pre-P21.2 FIFO behavior).
+	// pendingToolSeq synthesizes a unique key for a call whose event has no
+	// ToolID, so two such calls never collide on the same map slot.
+	pendingTools     map[string]*toolCard
+	pendingToolOrder []string
+	pendingToolSeq   int
 
 	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
 	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
@@ -1058,6 +1088,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// followBottom is true.
 			if m.followBottom {
 				m.animStep++
+				m.updatePendingToolCards() // P21.2: keep pending cards' shimmer live
 				m.refresh()
 				// P2.5: poll sub-agent roster every 20 animation frames.
 				if m.animStep%20 == 0 {
@@ -1403,6 +1434,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamClosedMsg:
 		m.flushThinking()
 		m.flushLiveText() // safety: in case KindTurnDone wasn't the last event
+		// P21.2: the universal safety net for a stuck-pending tool card — the
+		// stream can close without KindError or KindDone at all on a
+		// client-initiated cancel (engine.ErrInterrupted's callers return
+		// before emitting anything), so this is the one place guaranteed to
+		// run after every kind of run end. A no-op if KindError already
+		// resolved everything.
+		m.resolveStuckToolCards()
 		m.streaming = false
 		m.events = nil
 		m.cancel = nil
@@ -2331,6 +2369,8 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.teammates = nil
 	m.timelineEntries = nil
 	m.pendingReadPaths = nil
+	m.pendingTools = nil
+	m.pendingToolOrder = nil
 	m.streaming = false
 	m.status = "ready"
 	m.lastFailure = nil
@@ -2544,7 +2584,26 @@ func (m *model) applyEvent(ev api.Event) {
 	case api.KindToolCall:
 		m.flushThinking()
 		m.flushLiveText() // render any preceding prose before the tool line
-		m.transcript.Append("\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.transcript.Width()) + "\n")
+		// P21.2: a tool call gets one addressable card, appended pending and
+		// later mutated in place to ok/err (see KindToolResult below) instead
+		// of appending a second, independent block for the result. key
+		// prefers the real tool_use ID so concurrent calls (engine.runTools
+		// runs read/network tools concurrently) each own their own card; the
+		// synthetic fallback only matters for an event with no ToolID (older
+		// producers, or hand-built test events).
+		key := ev.ToolID
+		if key == "" {
+			m.pendingToolSeq++
+			key = fmt.Sprintf("#%d", m.pendingToolSeq)
+		}
+		call := "\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.transcript.Width())
+		if blk := m.transcript.AppendBlock(renderToolCardPending(m.th, call, m.animStep)); blk != nil {
+			if m.pendingTools == nil {
+				m.pendingTools = make(map[string]*toolCard)
+			}
+			m.pendingTools[key] = &toolCard{blk: blk, name: ev.Tool, call: call}
+			m.pendingToolOrder = append(m.pendingToolOrder, key)
+		}
 		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
 		if len(m.tools) > maxToolHistory {
 			m.tools = m.tools[1:]
@@ -2561,10 +2620,14 @@ func (m *model) applyEvent(ev api.Event) {
 				}
 				m.fileFrecency[inp.Path]++
 				if ev.Tool == "read_file" {
-					// FIFO queue matched by KindToolResult below (P16.2): that
-					// event carries no path/ID, only the tool name, so pairing
-					// relies on call/result ordering per tool name.
-					m.pendingReadPaths = append(m.pendingReadPaths, inp.Path)
+					// Keyed by the same card key as pendingTools above (P21.2)
+					// rather than a same-name FIFO queue, so concurrent
+					// read_file calls can't cross-attribute paths if their
+					// results arrive out of call order.
+					if m.pendingReadPaths == nil {
+						m.pendingReadPaths = make(map[string]string)
+					}
+					m.pendingReadPaths[key] = inp.Path
 				} else {
 					m.recordChangedFile(inp.Path)
 				}
@@ -2580,12 +2643,23 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindToolResult:
+		card, key := m.resolveToolCard(ev)
 		path := ""
-		if ev.Tool == "read_file" && len(m.pendingReadPaths) > 0 {
-			path = m.pendingReadPaths[0]
-			m.pendingReadPaths = m.pendingReadPaths[1:]
+		if key != "" {
+			if p, ok := m.pendingReadPaths[key]; ok {
+				path = p
+				delete(m.pendingReadPaths, key)
+			}
 		}
-		m.transcript.Append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path) + "\n")
+		if card != nil {
+			m.transcript.SetItemRaw(card.blk, renderToolCardDone(m.th, card.call, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path))
+		} else {
+			// No matching pending card (e.g. a result event replayed or
+			// synthesized without a preceding KindToolCall in this session) —
+			// fall back to appending it as its own item rather than
+			// silently dropping the result.
+			m.transcript.Append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path) + "\n")
+		}
 		for i := len(m.tools) - 1; i >= 0; i-- {
 			if m.tools[i].name == ev.Tool && m.tools[i].status == "pending" {
 				if ev.ToolIsError {
@@ -2705,6 +2779,86 @@ func (m *model) applyEvent(ev api.Event) {
 		m.approval = nil // clear any pending approval if the run aborts
 		m.transcript.Append("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
 		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Error: " + truncate(ev.Error, 100)}
+		// P21.2: a turn that errors mid-round can leave a concurrently-run
+		// tool's card stuck pending (its own KindToolResult may simply never
+		// arrive — see runTools/runToolsSequential, which stop emitting
+		// further events once the round is abandoned). Resolve it here
+		// rather than leaving it stuck; streamClosedMsg is the same
+		// safety net for the interrupt path, which reaches neither
+		// KindError nor KindDone (engine.ErrInterrupted returns silently).
+		m.resolveStuckToolCards()
+	}
+}
+
+// resolveToolCard looks up and removes the pending card matching a
+// KindToolResult event (P21.2), returning it and the card key it was
+// registered under (also the key pendingReadPaths uses) so the caller can
+// pop that too. Prefers an exact tool_use-ID match (set on every
+// live-engine-emitted event — see engine.Event.ToolID); falls back to the
+// oldest pending card with a matching tool name for an event with no ID
+// (the pre-P21.2 FIFO behavior), which keeps history-replay-shaped and
+// hand-built test events working unchanged. Returns (nil, "") if nothing
+// matches.
+func (m *model) resolveToolCard(ev api.Event) (*toolCard, string) {
+	if ev.ToolID != "" {
+		if c, ok := m.pendingTools[ev.ToolID]; ok {
+			m.removePendingTool(ev.ToolID)
+			return c, ev.ToolID
+		}
+		return nil, ""
+	}
+	for _, k := range m.pendingToolOrder {
+		if c := m.pendingTools[k]; c != nil && c.name == ev.Tool {
+			m.removePendingTool(k)
+			return c, k
+		}
+	}
+	return nil, ""
+}
+
+// removePendingTool drops key from both pendingTools and pendingToolOrder.
+// The order slice is small (bounded by maxParallelTools concurrent calls in
+// one round), so a linear scan to remove it is cheap.
+func (m *model) removePendingTool(key string) {
+	delete(m.pendingTools, key)
+	for i, k := range m.pendingToolOrder {
+		if k == key {
+			m.pendingToolOrder = append(m.pendingToolOrder[:i], m.pendingToolOrder[i+1:]...)
+			break
+		}
+	}
+}
+
+// resolveStuckToolCards finalizes every still-pending tool card to a
+// terminal "interrupted" state (P21.2). Called wherever a run can end
+// without producing a KindToolResult for every KindToolCall it started —
+// KindError above, and streamClosedMsg (the universal safety net: it fires
+// for every run end, including a client-initiated cancel or a budget/loop
+// abort, none of which necessarily emit any terminal event at all — see
+// engine.ErrInterrupted's callers, which return before emitting anything).
+// A no-op when nothing is pending.
+func (m *model) resolveStuckToolCards() {
+	if len(m.pendingTools) == 0 {
+		return
+	}
+	for _, k := range m.pendingToolOrder {
+		if c := m.pendingTools[k]; c != nil {
+			m.transcript.SetItemRaw(c.blk, renderToolCardStuck(m.th, c.call))
+		}
+		delete(m.pendingReadPaths, k)
+	}
+	m.pendingTools = nil
+	m.pendingToolOrder = nil
+}
+
+// updatePendingToolCards refreshes every still-pending tool card's shimmer
+// frame in place (P21.2), driven by the same animation tick that already
+// advances animStep for the "● thinking…" status line and the streaming
+// write-head caret (P21.3) — so a long-running tool call visibly keeps
+// working instead of sitting static. A no-op when nothing is pending.
+func (m *model) updatePendingToolCards() {
+	for _, c := range m.pendingTools {
+		m.transcript.SetItemRaw(c.blk, renderToolCardPending(m.th, c.call, m.animStep))
 	}
 }
 

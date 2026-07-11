@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/agentdef"
@@ -87,13 +88,22 @@ type Server struct {
 	http        *http.Server
 	authToken   string // shared secret for API authentication
 
+	// invalidAuthAttempts counts requests rejected by authMiddleware for a
+	// missing or mismatched bearer token (FIND-11). It is a single
+	// process-wide counter rather than a per-remote-address map so that the
+	// audit fix itself can't be turned into a memory-growth DoS by an
+	// attacker hammering the endpoint with spoofed/varying source data.
+	invalidAuthAttempts atomic.Uint64
+
 	// pageTokens holds short-lived, single-use tokens minted per GET /ui load
-	// (P15.12): the page carries one of these instead of authToken, and the
-	// frontend immediately trades it for the real token via POST
-	// /auth/exchange (see mintPageToken/exchangePageToken in auth.go), so a
-	// leaked page source can't be replayed as a standing credential.
+	// (P15.12), each paired with a CSRF nonce binding the exchange to the
+	// browser that loaded the page (FIND-01/P24.1): the page carries one of
+	// these instead of authToken, and the frontend immediately trades it for
+	// the real token via POST /auth/exchange (see
+	// mintPageToken/exchangePageToken in auth.go), so a leaked page source
+	// can't be replayed as a standing credential.
 	pageTokenMu sync.Mutex
-	pageTokens  map[string]time.Time
+	pageTokens  map[string]pageTokenEntry
 
 	// sandboxFallback and sandboxFallbackReason record whether the configured
 	// sandbox backend failed to initialize and the daemon fell back to
@@ -313,15 +323,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 	runCronCmd := cronShellRunner(sb, cwd)
-	cronRun := func(j cron.Job) {
-		title := j.Title
-		if title == "" {
-			title = "cron: " + j.Command
-		}
-		_, _ = taskMgr.Start(task.Spec{Kind: "cron", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
-			return "", runCronCmd(ctx, j.Command, emit)
-		})
-	}
+	cronRun := newCronRunFunc(cronStore, taskMgr, runCronCmd,
+		func() permission.Mode { return permission.ParseMode(cfg.Permission.Mode) }, logger)
 	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
 
 	// Shared team task list for agent-team coordination (P5.1); reuses the
@@ -338,7 +341,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		lspMgr = lsp.NewManager(cwd, logger)
 		for _, lc := range cfg.LSP {
 			if err := lspMgr.Start(context.Background(), lsp.ServerConfig{
-				Name: lc.Name, Command: lc.Command, Args: lc.Args, Extensions: lc.Extensions,
+				Name: lc.Name, Command: lc.Command, Args: lc.Args, Extensions: lc.Extensions, Trust: lc.Trust,
 			}); err != nil {
 				logger.Warn("lsp server start failed", "name", lc.Name, "err", err)
 			}
@@ -570,6 +573,13 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 			return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), true, reason, nil
 		}
 		logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Image)
+		// FIND-06 / P24.10: Docker/Podman socket access is privilege-equivalent
+		// to local root regardless of the per-container hardening flags below —
+		// surface that once per daemon start so an operator relying on the
+		// container backend for isolation sees it. See docs/security_scan.md.
+		if notice := sandbox.SocketPrivilegeNotice(csb.DetectedRuntime()); notice != "" {
+			logger.Info(notice)
+		}
 		return csb, false, "", nil
 	case "os":
 		// OS-level isolation without a container runtime (P4.7): seatbelt on
@@ -757,6 +767,16 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /memory", s.handleAppendMemory)
 	mux.HandleFunc("GET /personas", s.handleListPersonas)
 	mux.HandleFunc("POST /security/scan", s.handleScan)
+	mux.HandleFunc("GET /security/status", s.handleSecurityStatus)
+	mux.HandleFunc("GET /security/baseline", s.handleSecurityBaseline)
+	mux.HandleFunc("POST /security/install", s.handleSecurityInstall)
+	mux.HandleFunc("GET /config/sandbox", s.handleGetConfigSandbox)
+	mux.HandleFunc("PATCH /config/sandbox", s.handlePatchConfigSandbox)
+	mux.HandleFunc("GET /config/security", s.handleGetConfigSecurity)
+	mux.HandleFunc("PATCH /config/security", s.handlePatchConfigSecurity)
+	mux.HandleFunc("GET /config/skills", s.handleGetConfigSkills)
+	mux.HandleFunc("PATCH /config/skills", s.handlePatchConfigSkills)
+	mux.HandleFunc("POST /config/harden", s.handleConfigHarden)
 	mux.HandleFunc("POST /debate", s.handleDebate)
 	mux.HandleFunc("POST /knowledge", s.handleKnowledge)
 	mux.HandleFunc("POST /repomap/index", s.handleRepoMapIndex)

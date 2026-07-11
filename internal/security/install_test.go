@@ -226,3 +226,95 @@ func TestRunGuidedInstallRunsCommand(t *testing.T) {
 		t.Errorf("output = %q, want it to contain the command's output", buf.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// FIND-31 / P24.8 — verification-only threat-model item: audit install.go's
+// installer-script argument construction and confirm no unsanitized string
+// concatenation feeds the shell invocation. Audit conclusion (see
+// RunGuidedInstall's doc comment): every ScannerDescriptor.Install entry in
+// method.go's descriptors map is a fixed compile-time string literal; name
+// only ever selects a map key (validated via DescriptorFor, never itself
+// spliced into a command string); and shellInvocation hands the resulting
+// command to exec.CommandContext as a single, unmodified argv element, never
+// re-split or re-parsed by Go. No fix was needed — the two tests below lock
+// in the properties the audit relied on, so a future change that breaks
+// either (e.g. someone adding fmt.Sprintf-based interpolation to an Install
+// entry, or "helpfully" tokenizing command before exec) fails loudly here.
+// ---------------------------------------------------------------------------
+
+// TestInstallCommandsHaveNoInterpolationMarkers asserts every descriptor's
+// Install command (for every OS) is a plain literal with no leftover
+// interpolation markers — Go format verbs or template placeholders — that
+// would signal a future edit accidentally splicing a runtime/config/attacker
+// value into a string that flows unmodified into a real shell.
+func TestInstallCommandsHaveNoInterpolationMarkers(t *testing.T) {
+	suspicious := []string{"%s", "%d", "%v", "%q", "%x", "${", "{{", "}}"}
+	for _, d := range Descriptors() {
+		for osName, cmd := range d.Install {
+			for _, marker := range suspicious {
+				if strings.Contains(cmd, marker) {
+					t.Errorf("descriptor %q install command for %q contains suspicious interpolation marker %q: %q", d.Name, osName, marker, cmd)
+				}
+			}
+		}
+	}
+}
+
+// TestShellInvocationKeepsCommandAsSingleArgvElement proves shellInvocation
+// never tokenizes/re-splits command — it always appears as exactly one,
+// byte-for-byte unmodified element of the returned argv slice, regardless of
+// embedded shell metacharacters. This is the property that makes "command is
+// always a hardcoded literal" sufficient to rule out injection: nothing
+// downstream of InstallCommand re-parses the string against attacker/config
+// input, so there is no second place a concatenation bug could sneak in.
+func TestShellInvocationKeepsCommandAsSingleArgvElement(t *testing.T) {
+	const command = `echo hello; echo "word1 word2" && echo $(danger) | echo`
+	shell, args := shellInvocation(command)
+	if strings.TrimSpace(shell) == "" {
+		t.Fatal("shellInvocation returned an empty shell binary")
+	}
+	if len(args) == 0 {
+		t.Fatal("shellInvocation returned no args")
+	}
+	last := args[len(args)-1]
+	if last != command {
+		t.Errorf("args[last] = %q, want the command unmodified: %q", last, command)
+	}
+	count := 0
+	for _, a := range args {
+		if a == command {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("command appeared as %d distinct argv elements, want exactly 1 (proves Go isn't word-splitting it)", count)
+	}
+}
+
+// TestRunGuidedInstallPassesCommandIntactThroughShell proves a `;`-chained
+// command string reaches a real shell whole (both halves run), matching the
+// shape every real Install entry uses (curl ... | bash, brew install X &&
+// Y). That intact pass-through is safe here only because every Install value
+// is a fixed compile-time literal (TestInstallCommandsHaveNoInterpolationMarkers)
+// with nothing runtime/attacker-controlled spliced in — if it were, this same
+// behavior is exactly what would make injection possible.
+func TestRunGuidedInstallPassesCommandIntactThroughShell(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:   "test-chained-install",
+		Binary: "test-chained-install",
+		Install: map[string]string{
+			"windows": "Write-Output part1; Write-Output part2",
+			"linux":   "echo part1; echo part2",
+			"darwin":  "echo part1; echo part2",
+		},
+	})
+
+	var buf bytes.Buffer
+	if err := RunGuidedInstall(context.Background(), "test-chained-install", &buf); err != nil {
+		t.Fatalf("RunGuidedInstall: %v (output: %s)", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "part1") || !strings.Contains(out, "part2") {
+		t.Errorf("output = %q, want both chained command parts to have run", out)
+	}
+}

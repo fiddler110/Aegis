@@ -1,15 +1,19 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-10 — Tier 2 items shipped (P21.3, P22.3), in parallel via isolated
-git-worktree sub-agents, same day as the Tier 1 pass.
+**Last updated:** 2026-07-11 — Tier 3's second batch, **P24.11/P24.12/P24.13, shipped in parallel
+via isolated git-worktree sub-agents** (same pattern as the 2026-07-10 P15.2/P21.2/P24.10 batch).
+Full-repo STRIDE-A threat model (`threat-model-20260710-173718/`) findings now stand at 13 of 17
+actionable findings shipped (P24.1–P24.13); 4 remain open as P24.16–P24.21 (plus the parked
+P24.22), tiered by severity/effort/dependency alongside the existing tracks. Remaining Tier 3 work
+is P24.16–P24.18 (security findings).
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
+This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.11–P24.13 (Tier 3 second batch, 2026-07-11), P15.2/P21.2/P24.10 (Tier 3 first batch, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
 
 ---
 
 ## Status
 
-**Open items:** P21.2, P15.2–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
+**Open items:** P24.16–P24.22 (threat-model findings), P15.3–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
 
 **Priority order:** see the tiered breakdown immediately below — it is the authoritative "what's next" view, ordered by tier and effort.
 
@@ -25,31 +29,103 @@ urgency, no concrete trigger, or explicitly parked pending demand — do not bui
 
 ### Tier 1 — Security & robustness, do next
 
-**All three shipped 2026-07-10** — Tier 1 is now empty. Kept here (struck through) for the record; see [releases.md](releases.md#latest-changes) for implementation detail.
+Repopulated 2026-07-10 from the STRIDE-A threat model's Critical/Important findings; **all five
+items (plus the two Tier-1-caliber quick wins from the same report) are now shipped** — struck
+through below for the record. See [releases.md](releases.md#latest-changes) for the full writeup
+of each. Tier 1 is empty; next up is [Tier 2](#tier-2--cheap-high-visibility-wins).
 
-- ~~**P21.5 — Daemon resource ceilings** (S/M). No global cap on concurrent sessions/runs or SSE
-  buffer growth; `aegis mcp-serve` now exposes sessions to external MCP clients, so this is a live
-  resource-exhaustion path, not theoretical.~~ **SHIPPED 2026-07-10.**
-- ~~**P15.12 — Harden the `/ui` token-injection mechanism** (S/M, security). `GET /ui` hands the raw
-  long-lived daemon auth token to any local process in cleartext.~~ **SHIPPED 2026-07-10.**
-- ~~**P21.6 — MCP tool output trust boundary** (S, security). MCP tool output flows back into model
-  context unfiltered — a compromised MCP server is an unguarded prompt-injection vector.~~
-  **SHIPPED 2026-07-10.**
+- ~~**FIND-04 — `web_fetch`/`web_search` untrusted-content marker** (S).~~ **SHIPPED 2026-07-10.**
+- ~~**FIND-08 — `server.addr` non-loopback validation** (S).~~ **SHIPPED 2026-07-10.**
+- ~~**P21.5 — Daemon resource ceilings** (S/M).~~ **SHIPPED 2026-07-10.**
+- ~~**P15.12 — Harden the `/ui` token-injection mechanism** (S/M, security).~~ **SHIPPED 2026-07-10.**
+- ~~**P21.6 — MCP tool output trust boundary** (S, security).~~ **SHIPPED 2026-07-10.**
+- ~~**P24.1 — FIND-01: harden the `/ui` page-token flow so only the browser that loaded the page
+  can redeem it** (M, security, **Critical**, CVSS 8.2).~~ **SHIPPED 2026-07-10.** Double-submit
+  CSRF nonce (`HttpOnly` cookie + `data-csrf-token`/`X-Aegis-CSRF` header) binds `/auth/exchange`
+  to the page that actually loaded `/ui`; closes the cross-origin-webpage attack, documented
+  residual risk for a raw co-located process with direct HTTP access.
+- ~~**P24.2 — FIND-02: authenticate `aegis mcp-serve` and the ACP server** (M, security, Important,
+  CVSS 7.8).~~ **SHIPPED 2026-07-10.** `aegis acp` implements ACP's real `authenticate` method;
+  `aegis mcp-serve` gets an equivalent `aegis/authenticate` extension gating `tools/call`. Both
+  opt-in via `AEGIS_ACP_TOKEN`/`AEGIS_MCP_TOKEN`, no-op (today's behavior) when unset.
+- ~~**P24.3 — FIND-03: gate cron firings through the same PermissionGate/contextual-gate stack as
+  interactive tool calls** (M, security, Important, CVSS 7.1).~~ **SHIPPED 2026-07-10.** Fire-time
+  mode check (plan blocks, build requires a new per-job `auto_approve` opt-in, auto unchanged)
+  replaces the previous unconditional exec.
+- ~~**P24.4 — FIND-05: wrap persona/skill `.md` body content in an untrusted-provenance marker**
+  (M, security, Important, CVSS 6.9).~~ **SHIPPED 2026-07-10.** Reused `internal/trust.Wrap`
+  (FIND-04's mechanism) for file-loaded (non-built-in) persona/skill bodies; scan left off (unlike
+  MCP/web content) since this re-injects every session and persona/skill prose routinely discusses
+  its own instructions, which the heuristic scan false-positives on.
 
 ### Tier 2 — Cheap, high-visibility wins
 
-**Both shipped 2026-07-10** — Tier 2 is now empty. Kept here (struck through) for the record; see [releases.md](releases.md#latest-changes) for implementation detail.
+**All of Tier 2 shipped 2026-07-10** — struck through for the record, all five in parallel via
+isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
+[releases.md](releases.md#latest-changes) for the full writeup of each. Tier 2 is empty; next up is
+[Tier 3](#tier-3--larger-real-sequence-dependent).
 
-- ~~**P21.3 — Streaming caret** (S). A blinking caret at the live-tail write head — cheap change,
-  large share of the perceived "feels rough vs. crush/Claude Code" gap.~~ **SHIPPED 2026-07-10.**
-- ~~**P22.3 — Esc-Esc backtrack + `/fork`** (M). Edit a previous user message and fork the
-  conversation from that turn. Real workflow gap (not speculative).~~ **SHIPPED 2026-07-10.**
+- ~~**P21.3 — Streaming caret** (S).~~ **SHIPPED 2026-07-10.**
+- ~~**P22.3 — Esc-Esc backtrack + `/fork`** (M).~~ **SHIPPED 2026-07-10.**
+- ~~**P24.5 — FIND-11: rate-limit/log repeated invalid bearer-token attempts** (S).~~ **SHIPPED
+  2026-07-10.**
+- ~~**P24.6 — FIND-13: scan GitHub PR titles/bodies for secret patterns before `gh pr create`**
+  (S).~~ **SHIPPED 2026-07-10.**
+- ~~**P24.7 — FIND-16: distinguish `OutputGuard` fail-open from a genuine pass in logs/metrics**
+  (S).~~ **SHIPPED 2026-07-10.**
+- ~~**P24.8 — FIND-31: audit `internal/security/install.go`'s installer-script argument
+  construction** (S).~~ **SHIPPED 2026-07-10** (verification-only: audited, no unsanitized
+  concatenation found, locked in with regression tests — see P24.22 below for one latent,
+  currently-unreachable observation the audit surfaced).
+- ~~**P24.9 — FIND-34: add a dedicated cron-execution audit log** (S).~~ **SHIPPED 2026-07-10.**
 
 ### Tier 3 — Larger, real, sequence-dependent
-- **P15.2 — New daemon config-mutation endpoints** (M). The concrete backend gap blocking
-  P15.6/P15.7 and unlocking the rest of the P15 web-UI track. Start here if P15 is still an active priority.
-- **P21.2 — Tool-call cards** (M). In-place-updating tool-call blocks. Real polish win, but a larger
-  visual restructure than P21.3 — do after the caret.
+- ~~**P15.2 — New daemon config-mutation endpoints** (M).~~ **SHIPPED 2026-07-10.** Added
+  `GET/PATCH /config/sandbox`, `/config/security`, `/config/skills`, `POST /config/harden`,
+  `GET /security/status`, `GET /security/baseline`, `POST /security/install`; harden's
+  cap-computation extracted into `config.ComputeHardenPlan`, shared by the CLI and the new
+  endpoint. Unblocks P15.6/P15.7 (still Tier 4 — frontend panels not built yet).
+- ~~**P21.2 — Tool-call cards** (M). In-place-updating tool-call blocks.~~ **SHIPPED 2026-07-10.**
+  Added `ToolID` to `engine.Event`/`api.Event` (the missing correlation key for concurrent tool
+  calls) and restructured TUI rendering from two static appended blocks into one addressable
+  transcript item that updates pending -> ok/err in place.
+- ~~**P24.10 — FIND-06: document Docker/Podman-socket privilege equivalence + default toward
+  rootless/capability-dropping** (M, security, Moderate, CVSS 6.4).~~ **SHIPPED 2026-07-10.**
+  Capability-dropping (`--cap-drop=ALL`/`--security-opt=no-new-privileges`) was already shipped;
+  added a "Docker/Podman socket privilege equivalence" doc section (`docs/security_scan.md`)
+  recommending rootless Podman/userns-remapped Docker, plus a one-time `SocketPrivilegeNotice` log
+  line when the daemon selects a docker/podman backend.
+- ~~**P24.11 — FIND-07: allowlist or TOFU-confirm the `lsp` tool's config-specified binary** (M,
+  security, Moderate, CVSS 6.0).~~ **SHIPPED 2026-07-11.** Added a built-in allowlist of common LSP
+  server binary basenames (`internal/lsp/trust.go`) plus an explicit per-server `lsp[].trust: true`
+  config opt-in for anything else; `Manager.Start` now refuses to spawn an unrecognized,
+  non-trusted command instead of exec'ing it unconditionally. Chose allowlist+opt-in over a
+  persisted TOFU store since all configured LSP servers start eagerly at daemon boot, before any
+  interactive approver exists — no live human to prompt at the point that matters.
+- ~~**P24.12 — FIND-09: add an opt-in redaction/DLP pass for cloud-provider traffic** (M, security,
+  Moderate, CVSS 5.2).~~ **SHIPPED 2026-07-11.** New opt-in `security.redact_secrets` config flag;
+  when set, every successful read-capability tool result is run through a new
+  `security.RedactText` (gitleaks-backed, reusing the FIND-13 secret-detection machinery) before it
+  re-enters the model's context, masking any detected secret to `[REDACTED:<RuleID>]`. Fail-open
+  (missing gitleaks or a scan error never blocks the tool call), off by default; `docs/providers.md`
+  documents local-Ollama as the no-exposure alternative for sensitive codebases.
+- ~~**P24.13 — FIND-10: strengthen or clearly caveat the MCP `scan_output` heuristic** (M, security,
+  Moderate, CVSS 5.0).~~ **SHIPPED 2026-07-11.** `trust.ScanForInjection` now also matches against a
+  zero-width/invisible-character-stripped copy of the content and against any base64-looking
+  substring that decodes to valid UTF-8, catching two concrete encoding bypasses the heuristic
+  previously missed entirely. `docs/mcp-trust-boundary.md`'s bypass list updated to reflect the new
+  boundary (homoglyphs, translation, other encodings, and multi-call-split payloads still aren't
+  caught); added a documented evaluate-and-defer writeup for a model-based classifier as the
+  longer-term option, since it would add a real network/latency/cost dependency and a new
+  attackable trust surface with no evidence the current heuristic is inadequate in practice.
+- **P24.16 — FIND-29: extend Windows DACL hardening beyond `daemon.token`** (M, security, Moderate,
+  CVSS 4.9). Session DB, checkpoint snapshots, and `.aegis/.env` inherit ambient directory ACLs
+  today.
+- **P24.17 — FIND-30: add integrity verification (hash-at-write, check-at-load) for memory
+  files** (M, security, Moderate, CVSS 4.2). Plain files with no tamper detection — a durable,
+  cross-session prompt-injection vector for anyone with host/OS write access.
+- **P24.18 — FIND-32: offer optional TLS or a Unix-domain-socket/named-pipe transport for
+  client↔daemon traffic** (M, security, Low, CVSS 3.3). Currently plaintext HTTP over loopback.
 
 ### Tier 4 — Parked / low priority / no current trigger
 Do not build speculatively — revisit only if a concrete trigger (user demand, reported pain, incident) appears.
@@ -59,24 +135,87 @@ Do not build speculatively — revisit only if a concrete trigger (user demand, 
 - **P9.4 — Per-task model routing** (M) and **P6.1 — Mid-turn state persistence** (L): no concrete trigger; check with user before starting.
 - **P22.5 — `/side` ephemeral conversation** (S/M) and **P22.6 — Raw scrollback mode** (S/M): polish without demand.
 - **P15.3–P15.11 (minus P15.2, covered in Tier 3)** — real scope, but either dependent on P15.2 or part of larger XL P15 initiative; sequence after Tier 1–3 land.
+- **P24.14 — FIND-12: document (and consider an opt-in outbound redaction hook for) MCP tool-call
+  argument content** (S/M, security, Moderate, CVSS 4.6). Depends on FIND-04/05 injection vectors
+  actually being exploited to matter in practice; documentation alone covers most of the value.
+- **P24.15 — FIND-14: give each swarm sub-agent a guaranteed minimum budget floor** (S, security,
+  Low, CVSS 3.6). Real but low-severity fairness gap; no reported incident.
+- **P24.19 — FIND-15: document that local-Ollama traffic is typically unencrypted** (S, doc-only,
+  Low, CVSS 3.3). Root cause is Ollama's own default, not Aegis code.
+- **P24.20 — FIND-17: strip/escape ANSI/OSC control sequences in streamed model output before TUI
+  render** (S, security, Low, CVSS 3.0). Requires another injection vector to already be exploited
+  to matter; still a cheap, self-contained hardening pass.
+- **P24.21 — FIND-33: memory-lock/zero the bearer token in `Client` process memory** (M, security,
+  Low, CVSS 2.8). Explicitly low priority per the finding itself — Host/OS access is already a
+  significant compromise.
+- **P24.22 — Quote/escape the `distro` argument in `sandbox.WSLInstallCommand`** (S, security,
+  informational). Surfaced during P24.8's audit: `distro` is concatenated unquoted into the
+  composed `wsl -d <distro> -- bash -lc ...` string, unlike `linuxCmd` which is quoted. Currently
+  unreachable — `install.go`'s only call site hardcodes `""` for `distro`, ignoring
+  `Options.WSLDistro`/`security.wsl_distro` entirely — so this is not a live vulnerability. Worth
+  fixing defensively if `WSLInstallCommand` ever grows a second, config-driven caller.
+
+---
+
+## Open Work — P24 (Threat Model Findings — 2026-07-10)
+
+Full-repo STRIDE-A threat model at commit `34aa687`:
+[`threat-model-20260710-173718/`](../threat-model-20260710-173718/3-findings.md). 35 findings
+total; 14 were "existing control" (already mitigated, verified, no action needed — FIND-18/19/20/
+21/22/23/24/25/26/27/28/35), FIND-04/FIND-08 shipped same-day, and P24.1–P24.9 (Critical/Important
++ Tier 2 quick wins, below) shipped same-day too. P24.10–P24.13 (Tier 3 first and second batches)
+shipped 2026-07-10/11. 5 remain open as P24.16–P24.21 (plus P24.22, a new low-severity item
+P24.8's audit surfaced), grouped by the tier they were slotted into above.
+
+**Critical/Important (Tier 1): all shipped 2026-07-10.** See [releases.md](releases.md#latest-changes)
+for what each one actually did — P24.1 (FIND-01, `/ui` page-token double-submit CSRF binding),
+P24.2 (FIND-02, `aegis acp`/`aegis mcp-serve` shared-secret auth), P24.3 (FIND-03, cron fire-time
+permission gate + per-job `auto_approve`), P24.4 (FIND-05, persona/skill untrusted-content wrap).
+
+**Quick wins (Tier 2, Low effort): all shipped 2026-07-10.** See
+[releases.md](releases.md#latest-changes) for what each one actually did — P24.5 (FIND-11, counter
++ `Warn` log on repeated invalid-bearer-token attempts), P24.6 (FIND-13, gitleaks-backed secret
+scan over `git_pr`'s title/body before `gh pr create`), P24.7 (FIND-16, `guard.Status`
+passed/failed/skipped_transport_error threaded from `LLMGuard` through to emitted `KindGuard`
+events), P24.8 (FIND-31, audited — no unsanitized concatenation found, locked in with regression
+tests; see P24.22 above for the one latent observation it surfaced), P24.9 (FIND-34, durable
+`cron_runs` table + `cron_history` tool, independent of turn traces).
+
+**Larger/sequence-dependent (Tier 3, Medium effort):** P24.10 shipped 2026-07-10; P24.11–P24.13
+shipped 2026-07-11, all three in parallel via isolated git-worktree sub-agents (see
+[releases.md](releases.md#latest-changes)).
+- **P24.16 (FIND-29)** — Extend `restrictToOwner`-style Windows DACL hardening to `sessions.db`,
+  checkpoint snapshots, and `.aegis/.env`.
+- **P24.17 (FIND-30)** — Per-entry hash recorded at write time for memory files, checked at load
+  with a warning on mismatch.
+- **P24.18 (FIND-32)** — Optional TLS (self-signed/pinned) or Unix-domain-socket/named-pipe
+  transport for client↔daemon traffic.
+
+**Parked (Tier 4 — low severity or doc-only, no current trigger):**
+- **P24.14 (FIND-12)** — Document MCP tool-call argument data flow; consider opt-in outbound
+  redaction hook symmetric to `scan_output`.
+- **P24.15 (FIND-14)** — Per-agent minimum budget floor in `internal/swarm/subprocess.go`'s shared
+  tracker.
+- **P24.19 (FIND-15)** — Document that local-Ollama traffic is typically unencrypted plaintext.
+- **P24.20 (FIND-17)** — Strip/escape ANSI/OSC control sequences in `internal/tui/streaming.go`'s
+  render path.
+- **P24.21 (FIND-33)** — Memory-lock/zero the bearer token in `Client`'s process memory where the
+  platform supports it.
 
 ---
 
 ## Open Work — P21 (TUI Polish — Tool-Call Cards)
 
-P21.3 (streaming caret) shipped 2026-07-10.
-
-**P21.2 — Tool-call cards (in-place updating block). [Tier 3]** Restructure tool calls and results as one addressable, updatable transcript item that updates in place (pending → ok/err). (M)
+P21.3 (streaming caret) and P21.2 (tool-call cards) shipped 2026-07-10. Track closed — no open
+items remain.
 
 ---
 
 ## Open Work — P15 (Web UI Parity with the TUI)
 
-Bring `aegis ui` up to feature parity with the TUI. P15.1 (frontend architecture) and P15.12 (token-injection hardening) shipped 2026-07-06 and 2026-07-10.
+Bring `aegis ui` up to feature parity with the TUI. P15.1 (frontend architecture), P15.12 (token-injection hardening), and P15.2 (config-mutation endpoints) shipped 2026-07-06/2026-07-10/2026-07-10.
 
-**P15.2 — New daemon config-mutation endpoints. [Tier 3]** Backend gap: `GET/PATCH /config/sandbox`, `GET/PATCH /config/security`, `GET/PATCH /config/skills`, `POST /config/harden`, `GET /security/status`, `GET /security/baseline`, `POST /security/install`. Unblocks P15.6/P15.7. (M)
-
-**P15.3–P15.11 — Frontend panels. [Tier 4]** Persona/model management, cost/token visibility, checkpoints/rewind, security scanning, skills/memory, debate/knowledge, multi-session lifecycle, approval persistence, non-technical-user framing. Frontend-only except P15.6/P15.7 depend on P15.2.
+**P15.3–P15.11 — Frontend panels. [Tier 4]** Persona/model management, cost/token visibility, checkpoints/rewind, security scanning, skills/memory, debate/knowledge, multi-session lifecycle, approval persistence, non-technical-user framing. Frontend-only; the P15.6/P15.7 backend dependency on P15.2 is now unblocked.
 
 ---
 

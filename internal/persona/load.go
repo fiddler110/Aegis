@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fiddler110/aegis/internal/trust"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -144,6 +145,25 @@ func parsePersonaFile(path string) (Persona, error) {
 	}
 	p.Loaded = true
 	p.Path = path
+	// Unlike built-ins (compiled into the binary), a project/user persona
+	// file's body is arbitrary content from disk — a dependency, template
+	// repo, or cloned project could plant one to inject instructions into
+	// every session that loads it. Wrap it in the same untrusted-provenance
+	// marker used for MCP/web tool output (FIND-05/P24.4) rather than
+	// splicing it into the system prompt verbatim.
+	if p.System != "" {
+		// scan=false: unlike a one-off web fetch, this content is re-injected
+		// into every session using the persona, and persona/skill prose
+		// legitimately discusses its own role/instructions/system-prompt
+		// often enough that the heuristic scan (internal/trust) would be
+		// noisy here. The provenance marker itself — framing the body as
+		// data, not commands — is the mitigation FIND-05 asks for; scanning
+		// stays available (scan_output-style) for web/MCP content where a
+		// single miss matters more than a session-wide false positive.
+		p.System = trust.Wrap("persona_untrusted_content", [][2]string{{"persona", name}},
+			"a persona file loaded from this project's or the user's .aegis/personas/ directory, not a built-in",
+			p.System, false)
+	}
 	return p, nil
 }
 

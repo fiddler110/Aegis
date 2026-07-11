@@ -227,7 +227,9 @@ func TestAdversarial_BudgetStopsStuckGuardRetryLoop(t *testing.T) {
 		})
 	}
 	adapter := &scriptedAdapter{turns: turns}
-	alwaysFail := func(context.Context, guard.Input) (bool, string) { return false, "never satisfies rubric" }
+	alwaysFail := func(context.Context, guard.Input) (bool, string, guard.Status) {
+		return false, "never satisfies rubric", guard.StatusFailed
+	}
 
 	s := Scenario{
 		Name: "budget stops a stuck guard-retry loop",

@@ -9,9 +9,240 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **Tier 2 high-visibility wins shipped**, both in parallel via
-isolated git-worktree sub-agents, same day as the Tier 1 pass (see
+**Last updated:** 2026-07-11 — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
+second batch — shipped in parallel via isolated git-worktree sub-agents** (see
 [roadmap.md](roadmap.md#priority-order)):
+**P24.11 (FIND-07) — allowlist/trust-gate LSP server commands.** `internal/lsp/client.go`'s
+`NewClient` passed a project/user-config-supplied `command`/`args` straight to
+`exec.CommandContext` with no allowlist or verification — a malicious project `.aegis/config.yaml`
+could point the LSP client at an arbitrary binary for code execution the first time LSP integration
+activated. All configured LSP servers start eagerly and synchronously at daemon construction time
+(`internal/server/server.go`, inside `server.New`), before any TUI/session/interactive approver
+exists, which ruled out a live TOFU-confirmation prompt — there's no human present at the point
+that matters. Added a built-in allowlist of common LSP server binary basenames
+(`internal/lsp/trust.go`, matched case-insensitively against just the basename, not the full path)
+plus an explicit per-server `lsp[].trust: true` config opt-in for anything else; `Manager.Start`
+now calls a new pure `checkTrusted` before spawning and refuses (with an actionable error naming
+the config knob) instead of exec'ing an unrecognized, non-trusted command.
+Tests: `internal/lsp/trust_test.go` (new) — allowlisted basename, allowlisted-via-full-path
+(including Windows-style), non-allowlisted refused, non-allowlisted allowed with `trust: true`,
+case-insensitivity. `go build ./...` clean; `go test ./internal/lsp/... ./internal/config/...
+./internal/server/...` green except the same three pre-existing/environmental `internal/server`
+failures noted elsewhere in this doc.
+**P24.12 (FIND-09) — opt-in secret redaction pass for tool-read content.** Full conversation and
+tool-read file content streams to whichever provider is configured with no content-filtering step
+— for a cloud provider (Anthropic, OpenAI, any OpenAI-compatible cloud endpoint), a secret embedded
+in a file a tool reads goes to that third party unmasked. Added a new `security.RedactText`
+(`internal/security/redact.go`), extending the FIND-13 gitleaks-backed detection machinery
+(`ScanText`) to also capture the literal matched secret string from gitleaks' JSON report and mask
+each occurrence to `[REDACTED:<RuleID>]` — same fail-open posture as `ScanText` (no gitleaks on
+PATH, or any scan error, leaves the text unchanged rather than blocking). New opt-in
+`security.redact_secrets` config flag (off by default); when set, `engine.executeTool`
+(`internal/engine/engine.go`) runs every successful read-capability tool result through it before
+the result re-enters the model's context, logging a count at Info rather than ever blocking the
+call. `docs/providers.md` gained a "Data Exposure & Redaction" section documenting local-Ollama as
+the no-exposure alternative for sensitive codebases.
+Tests: `internal/security/redact_test.go` (new, no-gitleaks-on-PATH + live AWS-key-pattern cases,
+both exercised for real on this box) and `internal/engine/redact_test.go` (new, stubs the
+`redactSecretsFn` seam so it runs unconditionally in CI without a gitleaks dependency). `go build
+./...` clean; `go test ./internal/security/... ./internal/engine/... ./internal/server/...` green
+except the same three pre-existing failures.
+**P24.13 (FIND-10) — detect zero-width/base64-obfuscated injection attempts.** The shared
+opt-in MCP/web-fetch prompt-injection heuristic (`trust.ScanForInjection`, ~14 plain regexes) was
+trivially bypassed by encoding a payload or inserting zero-width/invisible Unicode characters
+inside a trigger word. `ScanForInjection` now additionally matches the same regex set against (a) a
+copy of the content with Unicode `Cf` (zero-width/invisible format) characters stripped, and (b)
+the decoded text of any base64-looking substring (20+ contiguous base64-alphabet characters) that
+decodes to valid UTF-8 — hits inside decoded content are labeled distinctly so the surfaced warning
+makes clear the match was inside an encoded payload. The original content handed to `trust.Wrap` is
+never altered, only throwaway matching copies are. `docs/mcp-trust-boundary.md`'s "What this does
+not do" bypass list was updated to reflect the new boundary (homoglyphs, translation, other
+encodings, and multi-call-split payloads still aren't caught), and a new "Evaluating a model-based
+classifier" section documents why a model-based classifier is deferred rather than built now — it
+would add a real network/latency/cost dependency and a new attackable trust surface, with no
+evidence yet that the heuristic is inadequate for its defense-in-depth role — with a concrete
+revisit trigger (an opt-in `scan_output: model` mode if false-negative reports accumulate).
+Tests: `internal/trust/trust_test.go` gained zero-width-obfuscation, base64-encoded-payload, and
+benign-base64ish-no-false-positive cases alongside the existing pattern tests. `go build ./...`,
+`gofmt`, `go vet` clean; `go test ./internal/trust/... ./internal/mcp/... ./internal/tool/...`
+green.
+All three merged independently (`go build ./...` and the full `go test ./...` re-verified clean
+after each merge and after all three landed together — same three pre-existing/environmental
+`internal/server` failures, confirmed unrelated via `git stash` on the pre-change tree by two of
+the three sub-agents independently).
+Earlier — **P15.2, the daemon config-mutation endpoints, shipped via an
+isolated git-worktree sub-agent — closing out Tier 3's first batch (alongside P21.2 and P24.10,
+below), 2026-07-10** (see [roadmap.md](roadmap.md#priority-order)):
+**P15.2 — new daemon config-mutation endpoints.** The web UI's planned sandbox/security/skills
+config panels and security-tooling admin panel (P15.6/P15.7) had no HTTP surface to talk to —
+every config mutation (sandbox backend, security scanner policy, `skills.builtin_enabled`, the
+hardened profile, guided scanner installs) was CLI/TUI-only. Added seven endpoints:
+`GET/PATCH /config/sandbox`, `/config/security`, `/config/skills`, `POST /config/harden`,
+`GET /security/status`, `GET /security/baseline`, `POST /security/install`
+(`internal/server/config.go`, `internal/server/security_admin.go`). All PATCH handlers write
+through the existing `config.Patch{Global,Project}*` functions rather than hand-rolling YAML
+mutation; the sandbox/security PATCH bodies use pointer fields for genuine partial-update semantics
+since the underlying patches otherwise replace their whole config block. `aegis harden`'s
+cap-computation was extracted from `internal/cli/harden.go` into `config.ComputeHardenPlan`
+(`internal/config/harden.go`) so the CLI and the new `POST /config/harden` share one source of
+truth instead of duplicating the cap thresholds and "leave an already-hardened knob alone"
+exceptions; harden and install both require an explicit `{"confirm": true}` before writing/running
+anything, since there's no terminal to show the CLI's `[y/N]` prompt. `GET /security/status` mirrors
+`internal/tui/securityconfig.go`'s tool-probe/status wording exactly so a future web panel matches
+the TUI. New wire types in `internal/api/api.go` plus typed `internal/client/client.go` methods
+follow the existing `Scan`/`Knowledge`/`Debate` client idiom. Scope selection (project vs. global
+config) defaults to project when the daemon's workspace has a `.aegis/` directory, else global,
+overridable per-request — flagged as a judgment call worth a second look if project/global scoping
+ever needs to be more explicit.
+Tests: `internal/server/config_test.go` (new) — GET defaults, PATCH apply+persist+partial-update,
+project/global scope resolution including auto-detection, unknown-scope rejection, harden
+preview/apply/idempotency; environment-tolerant smoke tests for install/status/baseline (no scanner
+binary required, matching `scan_test.go`'s existing convention on this box). `go build ./...`,
+`go vet ./...` clean; full `internal/server`/`config`/`security`/`cli`/`api`/`client` suites green
+except the same three pre-existing/environmental failures noted elsewhere in this doc (confirmed
+via `git stash` to fail identically without this change).
+Earlier the same day — **P21.2, tool-call cards, shipped via an isolated git-worktree
+sub-agent** (see [roadmap.md](roadmap.md#priority-order)):
+**P21.2 — tool-call cards (in-place updating block).** A tool call used to render as two
+independent, static transcript items — `renderToolCall` appended at `KindToolCall`,
+`renderToolResult` appended separately at `KindToolResult` with no link back to the call — so every
+call looked "finished" the instant it started, and concurrent tool calls (`engine.runTools` runs
+read/network tools concurrently, and results don't necessarily land in call order) relied on a
+same-name FIFO queue that could silently cross-attribute a result, or a `read_file`'s highlighted
+path, to the wrong call. The real fix needed a stable per-call identity that didn't exist on the
+wire: added `ToolID` (the provider's `tool_use` ID) to `engine.Event`/`api.Event`, populated at
+every emission site including the panic-recovery path and threaded through
+`messages.go`'s `toAPIEvent`. The TUI (`internal/tui/tui.go`) now `AppendBlock`s a pending card at
+`KindToolCall`, keyed by `ToolID` in a `pendingTools` map, and `SetItemRaw`s it to ok/err in place
+at `KindToolResult` instead of appending a second item; `pendingReadPaths` moved off the same
+same-name-FIFO pattern onto the same keyed map, fixing the same latent cross-talk bug for
+concurrent reads. `resolveStuckToolCards` finalizes any still-pending cards to an "interrupted"
+state from `KindError` and from `streamClosedMsg` (the only signal guaranteed to fire on every run
+end, since a client-initiated cancel hits neither `KindError` nor `KindDone`). New
+`renderToolCardPending`/`-Done`/`-Stuck` in `internal/tui/toolview.go` wrap the existing
+call/diff-preview renderers unchanged, reusing the existing `shimmerText` animation primitive for
+the pending state rather than inventing a new one. Session replay (`loadHistory`) was deliberately
+left rendering call+result as two static items — both halves are already known at replay time, so
+combining them would be cosmetic, not a fix.
+Tests: `internal/tui/toolcard_test.go` (new) — pending→ok, pending→err, two concurrent calls
+resolving independently out of order with no cross-talk, a turn-error resolving a stuck card,
+`streamClosedMsg` resolving a stuck card, and the ID-less FIFO fallback. `go build ./...`,
+`go vet ./...` clean; `go test ./internal/tui/... ./internal/engine/... ./internal/api/...` green.
+No interactive PTY was available to visually verify the pending→ok/err transition in a real
+terminal — noted explicitly rather than claimed.
+Earlier the same day — **P24.10, the first of the STRIDE-A threat model's Tier 3 findings,
+shipped via an isolated git-worktree sub-agent** (see [roadmap.md](roadmap.md#priority-order)):
+**P24.10 (FIND-06) — document Docker/Podman-socket privilege equivalence, recommend rootless
+backends.** FIND-06 flagged that Docker/Podman socket access is privilege-equivalent to local root
+(Docker) or the invoking user (rootful Podman), and that `internal/sandbox/docker.go` showed no
+capability-dropping. Re-verified against current code first: `ociRunArgs` already applies
+`--cap-drop=ALL` and `--security-opt=no-new-privileges` unconditionally to every docker/podman run,
+so that half of the finding was already shipped — this change didn't touch it. What remained open
+was the doc gap (the inherent socket-level privilege equivalence, which no container-run flag can
+close) and rootless-backend guidance. Added a "Docker/Podman socket privilege equivalence"
+subsection to `docs/security_scan.md` and new `sandbox.SocketRuntime`/`SocketPrivilegeNotice`
+helpers, logged once via `Server.SelectSandbox` when a docker/podman backend is selected — no
+automatic rootless-vs-rootful detection, since no reliable cross-platform client-side signal exists
+without a fragile `docker/podman info` parse (documented as a deliberate scope decision, not an
+oversight).
+Tests: `internal/sandbox/docker_test.go` (new `TestSocketRuntime`/`TestSocketPrivilegeNotice`);
+`go build ./...`, `go vet ./...` clean, `go test ./internal/sandbox/... ./internal/cli/...` and the
+`internal/server` `TestSelectSandbox*` suite green.
+Earlier the same day — **P24.5–P24.9, the STRIDE-A threat model's Tier 2 quick wins, all
+shipped in parallel via isolated git-worktree sub-agents** (see
+[roadmap.md](roadmap.md#priority-order)):
+**P24.5 (FIND-11) — count and log repeated invalid-bearer-token attempts.** `authMiddleware`
+(`internal/server/auth.go`) previously rejected a request with a missing/wrong `Authorization:
+Bearer` header with a 401 and nothing else — no signal that the daemon was being probed. Added a
+process-wide `atomic.Uint64` counter on `Server` (deliberately not a per-IP map, so the audit fix
+itself can't become a memory-growth DoS vector) and a `slog.Warn` on the first failure and every
+5th thereafter, logging remote address, path, and cumulative count — never the attempted token.
+**P24.6 (FIND-13) — scan PR titles/bodies for secrets before `gh pr create`.** `git_pr`
+(`internal/tool/builtin/gitpr.go`) previously sent the model-composed title/body straight to GitHub
+with no inspection. `internal/security` gained an exported `ScanText` (factored out of the existing
+`gitleaksScanner`'s host-scan path) that writes text to a temp file and runs gitleaks against it —
+silently a no-op if the binary isn't on PATH, never a hard dependency. `git_pr` now calls it before
+pushing or creating the PR and refuses (naming the rule/location) if it finds anything; a scan
+error itself fails open, matching how the rest of the security tooling treats gitleaks as
+best-effort. **P24.7 (FIND-16) — distinguish `OutputGuard` fail-open from a genuine pass.**
+`guard.Func` previously returned a bare `(ok bool, reason string)` — a genuine PASS and a swallowed
+transport error were byte-for-byte identical, and the engine emitted nothing at all on success
+either way. Added `guard.Status` (`passed`/`failed`/`skipped_transport_error`) as a third return
+value; the engine (`internal/engine/engine.go`) now emits a `KindGuard` event with that status on
+every path, including the previously-silent success path. **P24.8 (FIND-31) — audit
+`internal/security/install.go`'s installer-script argument construction.** Verification-only:
+traced every `Install` map entry (`internal/security/method.go`, all compile-time literals),
+`shellInvocation`, and `exec.CommandContext(shell, args...)` — confirmed the install command always
+reaches the shell as a single, unmodified argv element, never re-split or built from
+runtime/config-controlled data. Locked in with three regression tests; found one latent,
+currently-unreachable issue (unquoted `distro` arg in `sandbox.WSLInstallCommand`, dead code today
+since `install.go`'s only call site hardcodes `""`) tracked as new roadmap item P24.22. **P24.9
+(FIND-34) — dedicated cron-execution audit log.** Cron firings were only visible via transient
+`slog` lines and the generic task-manager view. Added a `cron_runs` table (job ID, fired-at,
+status — `ok`/`error`/`blocked`, truncated combined output) to `cron.Store`, wired through a new
+`newCronRunFunc` (extracted from the inline closure in `Server.New`) that records every fire
+attempt including ones the P24.3 permission gate blocks, and a new read-only `cron_history` tool
+mirroring `cron_list`'s shape.
+Tests: `internal/server/server_test.go` (new `TestServerInvalidAuthAttemptsLoggedAndCounted`),
+`internal/security/scantext_test.go` (new), `internal/tool/builtin/gitpr_test.go`,
+`internal/guard/guard_test.go`, `internal/engine/guard_test.go`, `internal/security/install_test.go`
+(new regression tests), `internal/cron/cron_test.go`, `internal/tool/builtin/cron_test.go`,
+`internal/server/cron_test.go` (new). `go build ./...`, `go vet ./...` clean; `go test ./...` green
+except the same three pre-existing/environmental failures noted below (confirmed present before any
+of this work).
+Earlier the same day — **P24.1–P24.4, the STRIDE-A threat model's Critical/Important
+findings (Tier 1), all shipped same day as the pass that produced them**:
+**P24.1 (FIND-01) — bind the `/ui` page-token exchange to the browser that loaded the page.**
+Previously `GET /ui`'s minted page token and `POST /auth/exchange` had no check on *who* was
+asking — any local process reaching the loopback port, not just the operator's own browser, could
+mint and redeem a page token for the real daemon bearer token, collapsing the whole auth model to
+"can this process reach 127.0.0.1." Added a double-submit CSRF nonce (`internal/server/auth.go`):
+`mintPageToken` now also generates a nonce, set both as an `HttpOnly`/`SameSite=Strict` cookie
+(`aegis_ui_csrf`) and baked into the served HTML (`data-csrf-token`); `handleAuthExchange` requires
+the cookie and an explicit `X-Aegis-CSRF` header (which only same-origin JS reading the page's own
+DOM could construct) to match the nonce bound to the presented page token. This closes the
+realistic instance of the gap — a hostile cross-origin webpage/tab driving the flow blind, which
+can't read an `HttpOnly` cookie or this page's response body (no CORS grant, `X-Frame-Options:
+DENY` blocks framing) — while a raw local process with direct HTTP access remains an accepted
+residual risk, the same class as reading `daemon.token` off disk for a same-OS-user adversary.
+Frontend (`internal/server/webui/frontend/src/api.ts`) sends the header; `dist/` rebuilt via
+`npm run build` and committed. **P24.2 (FIND-02) — authenticate `aegis mcp-serve` and the ACP
+server.** Both accepted commands from any local process able to write to the subprocess's stdin
+with no credential check. `aegis acp` now implements ACP's real `authenticate` method for real: set
+`AEGIS_ACP_TOKEN` in the editor's launch environment and `initialize` advertises a `shared_secret`
+auth method; `session/new`/`session/prompt` are denied until the client authenticates with a
+matching token (`internal/acp/agent.go`, constant-time compare). `aegis mcp-serve` gets an
+equivalent, MCP-spec-external `aegis/authenticate` request gating `tools/call` the same way, opt-in
+via `AEGIS_MCP_TOKEN` (`internal/mcpserver/server.go`). Both default to today's no-auth behavior
+when the env var is unset — zero breaking change for every existing integration. **P24.3 (FIND-03)
+— gate cron firings through the daemon's permission mode.** Scheduled jobs previously ran
+unattended shell commands via `cronShellRunner` with no gate of any kind, regardless of permission
+mode. `internal/cron.Job` gained an `AutoApprove` field (persisted, migrated via `ALTER TABLE ...
+ADD COLUMN`); the fire-time closure in `internal/server/server.go` now evaluates
+`permission.Policy{Mode: currentMode}.Decide(tool.CapExecute)` fresh on every tick — plan mode
+blocks the job outright, build mode requires the job's explicit `auto_approve` opt-in (mirroring
+`mcp_server.auto_approve`) since no one is present to answer an approval prompt, auto mode is
+unchanged. `cron_create`'s new `auto_approve` argument and `cron_list`'s `[auto_approve]` marker
+make the opt-in visible to the model. **P24.4 (FIND-05) — wrap persona/skill file bodies as
+untrusted content.** Project/user `.aegis/personas/*.md` and `.aegis/skills/*.md` files are
+arbitrary content from disk — a compromised dependency or cloned project could plant one to inject
+instructions into every session that loads it — and were spliced into the system prompt verbatim.
+`parsePersonaFile` (`internal/persona/load.go`) and `appendFromDir` (`internal/skills/skills.go`)
+now wrap a file-loaded persona's `System` prompt / a project-or-user skill's body in the same
+`internal/trust.Wrap` provenance marker used for MCP/web output (FIND-04/P21.6) before it can reach
+the model — built-in personas/skills (compiled into the binary) are left unwrapped since they
+aren't attacker-reachable. Unlike MCP/web wrapping, the heuristic injection scan is left off here
+(`scan=false`): this content re-injects every session, and persona/skill prose routinely discusses
+its own instructions/role, which the scan's patterns (e.g. `\bsystem prompt\b`) flag as false
+positives on entirely benign text — caught by `TestPersonaNewThenShowRoundTrip` tripping on the
+persona scaffold's own boilerplate. `docs/mcp-trust-boundary.md` extended to cover this.
+Tests: `internal/server/webui_test.go` (new `TestAuthExchangeRejectsMismatchedCSRF`),
+`internal/mcpserver/server_test.go`, `internal/acp/agent_test.go`, `internal/cron/cron_test.go`,
+`internal/persona/load_test.go`, `internal/skills/skills_test.go`. `go build ./...`, `go vet ./...`
+clean; `go test ./...` green except the same three pre-existing/environmental failures noted below
+(confirmed present before any of this work).
+Earlier the same day — **Tier 2 high-visibility wins shipped**, both in parallel via
+isolated git-worktree sub-agents:
 **P21.3 — streaming caret.** A blinking write-head caret (`█`) at the end of live-streaming
 assistant text, so a long reply reads as "alive" rather than "redrawing." Rendered in
 `refresh()` (`internal/tui/tui.go`): the caret is appended directly after the last rendered

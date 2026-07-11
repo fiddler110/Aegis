@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -18,6 +19,7 @@ func CronTools(sched *cron.Scheduler) []tool.Tool {
 		&cronListTool{sched: sched},
 		&cronDeleteTool{sched: sched},
 		&cronToggleTool{sched: sched},
+		&cronHistoryTool{sched: sched},
 	}
 }
 
@@ -30,16 +32,19 @@ func (t *cronCreateTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *cronCreateTool) Description() string {
 	return "Create a recurring cron job. The schedule is a standard 5-field cron expression " +
 		"(minute hour dom month dow) or a macro (@hourly, @daily, @weekly, @monthly). " +
-		"The command runs as a background shell job each time it fires."
+		"The command runs as a background shell job each time it fires. Because no one is " +
+		"present to approve the run when it fires unattended, the job is blocked at fire time " +
+		"unless the daemon's current permission mode is auto, or auto_approve is set here."
 }
 func (t *cronCreateTool) InputSchema() json.RawMessage {
-	return schema(`{"type":"object","properties":{"schedule":{"type":"string","description":"5-field cron expression or @hourly/@daily/@weekly/@monthly"},"command":{"type":"string","description":"shell command to run on each tick"},"title":{"type":"string","description":"optional short label for the job"}},"required":["schedule","command"]}`)
+	return schema(`{"type":"object","properties":{"schedule":{"type":"string","description":"5-field cron expression or @hourly/@daily/@weekly/@monthly"},"command":{"type":"string","description":"shell command to run on each tick"},"title":{"type":"string","description":"optional short label for the job"},"auto_approve":{"type":"boolean","description":"allow this job to fire unattended even in build mode, where shell execution would otherwise require interactive approval (default false)"}},"required":["schedule","command"]}`)
 }
 func (t *cronCreateTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
-		Schedule string `json:"schedule"`
-		Command  string `json:"command"`
-		Title    string `json:"title"`
+		Schedule    string `json:"schedule"`
+		Command     string `json:"command"`
+		Title       string `json:"title"`
+		AutoApprove bool   `json:"auto_approve"`
 	}
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
@@ -50,7 +55,7 @@ func (t *cronCreateTool) Execute(ctx context.Context, input json.RawMessage) (to
 	if strings.TrimSpace(args.Command) == "" {
 		return tool.Result{Content: "command is required", IsError: true}, nil
 	}
-	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title)
+	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title, args.AutoApprove)
 	if err != nil {
 		return tool.Result{Content: "cron_create: " + err.Error(), IsError: true}, nil
 	}
@@ -83,7 +88,11 @@ func (t *cronListTool) Execute(ctx context.Context, _ json.RawMessage) (tool.Res
 		if !j.Enabled {
 			enabled = "disabled"
 		}
-		fmt.Fprintf(&sb, "%s  %-10s  %-14s  %s  %s\n", j.ID, enabled, j.Schedule, j.Command, j.Title)
+		approve := ""
+		if j.AutoApprove {
+			approve = " [auto_approve]"
+		}
+		fmt.Fprintf(&sb, "%s  %-10s  %-14s  %s  %s%s\n", j.ID, enabled, j.Schedule, j.Command, j.Title, approve)
 	}
 	return tool.Result{Content: strings.TrimRight(sb.String(), "\n")}, nil
 }
@@ -147,4 +156,49 @@ func (t *cronToggleTool) Execute(ctx context.Context, input json.RawMessage) (to
 		state = "disabled"
 	}
 	return tool.Result{Content: fmt.Sprintf("cron job %s is now %s", args.ID, state)}, nil
+}
+
+// --- cron_history ---
+
+type cronHistoryTool struct{ sched *cron.Scheduler }
+
+func (t *cronHistoryTool) Name() string                { return "cron_history" }
+func (t *cronHistoryTool) Capability() tool.Capability { return tool.CapRead }
+func (t *cronHistoryTool) Description() string {
+	return "List cron job fire-attempt audit history: job id, fired-at time, exit status " +
+		"(ok/error/blocked), and a truncated snippet of the run's combined output. Most recent " +
+		"first. Optionally filter to a single job id and/or cap the number of rows returned " +
+		"(default 20)."
+}
+func (t *cronHistoryTool) InputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"id":{"type":"string","description":"optional cron job id to filter history to"},"limit":{"type":"integer","description":"optional max number of run records to return (default 20)"}}}`)
+}
+func (t *cronHistoryTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
+	var args struct {
+		ID    string `json:"id"`
+		Limit int    `json:"limit"`
+	}
+	if err := parseArgs(input, &args); err != nil {
+		return tool.Result{}, err
+	}
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	runs, err := t.sched.History(ctx, args.ID, limit)
+	if err != nil {
+		return tool.Result{Content: "cron_history: " + err.Error(), IsError: true}, nil
+	}
+	if len(runs) == 0 {
+		return tool.Result{Content: "(no cron run history)"}, nil
+	}
+	var sb strings.Builder
+	for _, r := range runs {
+		snippet := strings.ReplaceAll(r.Output, "\n", " ")
+		if len(snippet) > 120 {
+			snippet = snippet[:120] + "..."
+		}
+		fmt.Fprintf(&sb, "%s  %-7s  job=%s  %s\n", r.FiredAt.Format(time.RFC3339), r.Status, r.JobID, snippet)
+	}
+	return tool.Result{Content: strings.TrimRight(sb.String(), "\n")}, nil
 }

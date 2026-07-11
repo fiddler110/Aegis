@@ -55,16 +55,62 @@ func kinds(evs []Event) []EventKind {
 	return k
 }
 
-func TestGuardPassEmitsDoneOnly(t *testing.T) {
+// TestGuardPassEmitsGuardEvent is the FIND-16 regression: a genuine pass must
+// now be observable, not silent. Before this fix, nothing was emitted on the
+// success path at all, so a real PASS and a fail-open skip (guard never
+// actually ran) were both invisible — and therefore indistinguishable — to
+// any consumer of the event stream.
+func TestGuardPassEmitsGuardEvent(t *testing.T) {
 	evs := runWith(t, Options{
 		Adapter: &scriptAdapter{replies: []string{"final"}}, Model: "m",
-		OutputGuard:           func(context.Context, guard.Input) (bool, string) { return true, "" },
+		OutputGuard: func(context.Context, guard.Input) (bool, string, guard.Status) {
+			return true, "", guard.StatusPassed
+		},
 		OutputGuardMaxRetries: 2,
 	})
-	for _, k := range kinds(evs) {
-		if k == KindGuard {
-			t.Error("passing guard should emit no KindGuard event")
+	var guardEvents int
+	for _, e := range evs {
+		if e.Kind == KindGuard {
+			guardEvents++
+			if !e.GuardPassed {
+				t.Error("expected GuardPassed=true")
+			}
+			if e.GuardStatus != string(guard.StatusPassed) {
+				t.Errorf("GuardStatus = %q, want %q", e.GuardStatus, guard.StatusPassed)
+			}
 		}
+	}
+	if guardEvents != 1 {
+		t.Errorf("expected 1 KindGuard event on a genuine pass, got %d", guardEvents)
+	}
+}
+
+// TestGuardSkippedTransportErrorEmitsSkippedStatus verifies a fail-open guard
+// result (transport error: ok=true but no real verdict) is distinguishable in
+// the emitted event from a genuine pass via GuardStatus (FIND-16) —
+// GuardPassed alone is true in both cases.
+func TestGuardSkippedTransportErrorEmitsSkippedStatus(t *testing.T) {
+	evs := runWith(t, Options{
+		Adapter: &scriptAdapter{replies: []string{"final"}}, Model: "m",
+		OutputGuard: func(context.Context, guard.Input) (bool, string, guard.Status) {
+			return true, "", guard.StatusSkippedTransportError
+		},
+		OutputGuardMaxRetries: 2,
+	})
+	var guardEvents int
+	for _, e := range evs {
+		if e.Kind == KindGuard {
+			guardEvents++
+			if !e.GuardPassed {
+				t.Error("fail-open skip should still report GuardPassed=true")
+			}
+			if e.GuardStatus != string(guard.StatusSkippedTransportError) {
+				t.Errorf("GuardStatus = %q, want %q", e.GuardStatus, guard.StatusSkippedTransportError)
+			}
+		}
+	}
+	if guardEvents != 1 {
+		t.Errorf("expected 1 KindGuard event, got %d", guardEvents)
 	}
 }
 
@@ -73,25 +119,37 @@ func TestGuardFailThenPass(t *testing.T) {
 	evs := runWith(t, Options{
 		Adapter: &scriptAdapter{replies: []string{"bad", "good"}}, Model: "m",
 		OutputGuardMaxRetries: 2,
-		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string, guard.Status) {
 			calls++
 			if in.Text == "good" {
-				return true, ""
+				return true, "", guard.StatusPassed
 			}
-			return false, "needs work"
+			return false, "needs work", guard.StatusFailed
 		},
 	})
-	var guardEvents int
+	var guardEvents, passEvents, failEvents int
 	for _, e := range evs {
 		if e.Kind == KindGuard {
 			guardEvents++
-			if e.GuardReason != "needs work" {
-				t.Errorf("guard reason = %q", e.GuardReason)
+			if e.GuardPassed {
+				passEvents++
+				if e.GuardStatus != string(guard.StatusPassed) {
+					t.Errorf("pass event GuardStatus = %q, want %q", e.GuardStatus, guard.StatusPassed)
+				}
+			} else {
+				failEvents++
+				if e.GuardReason != "needs work" {
+					t.Errorf("guard reason = %q", e.GuardReason)
+				}
+				if e.GuardStatus != string(guard.StatusFailed) {
+					t.Errorf("fail event GuardStatus = %q, want %q", e.GuardStatus, guard.StatusFailed)
+				}
 			}
 		}
 	}
-	if guardEvents != 1 {
-		t.Errorf("expected 1 KindGuard event, got %d", guardEvents)
+	// One failure event (first attempt) plus one pass event (retry succeeds).
+	if guardEvents != 2 || passEvents != 1 || failEvents != 1 {
+		t.Errorf("expected 1 fail + 1 pass KindGuard event, got total=%d pass=%d fail=%d", guardEvents, passEvents, failEvents)
 	}
 	if calls != 2 {
 		t.Errorf("expected guard called twice, got %d", calls)
@@ -137,11 +195,11 @@ func TestGuardCorrectiveMentionsToolsAfterToolRound(t *testing.T) {
 	eng, err := New(Options{
 		Adapter: adapter, Tools: reg, Model: "test",
 		OutputGuardMaxRetries: 1,
-		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string, guard.Status) {
 			if strings.Contains(in.Text, "TODO") {
-				return false, "contains TODOs"
+				return false, "contains TODOs", guard.StatusFailed
 			}
-			return true, ""
+			return true, "", guard.StatusPassed
 		},
 	})
 	if err != nil {
@@ -184,11 +242,11 @@ func TestGuardCorrectiveOmitsToolMentionWithoutToolRound(t *testing.T) {
 	eng, err := New(Options{
 		Adapter: &scriptAdapter{replies: []string{"bad", "good"}}, Model: "m",
 		OutputGuardMaxRetries: 2,
-		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string, guard.Status) {
 			if in.Text == "good" {
-				return true, ""
+				return true, "", guard.StatusPassed
 			}
-			return false, "needs work"
+			return false, "needs work", guard.StatusFailed
 		},
 	})
 	if err != nil {
@@ -289,9 +347,9 @@ func TestGuardValidatesActualFileContentNotJustChatReply(t *testing.T) {
 	var seenFiles []guard.FileContent
 	eng, err := New(Options{
 		Adapter: adapter, Tools: reg, Model: "test",
-		OutputGuard: func(_ context.Context, in guard.Input) (bool, string) {
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string, guard.Status) {
 			seenFiles = in.Files
-			return true, ""
+			return true, "", guard.StatusPassed
 		},
 	})
 	if err != nil {
@@ -319,13 +377,18 @@ func TestGuardExhaustedSurfaces(t *testing.T) {
 	evs := runWith(t, Options{
 		Adapter: &scriptAdapter{replies: []string{"a", "b", "c", "d"}}, Model: "m",
 		OutputGuardMaxRetries: 2,
-		OutputGuard:           func(context.Context, guard.Input) (bool, string) { return false, "always bad" },
+		OutputGuard: func(context.Context, guard.Input) (bool, string, guard.Status) {
+			return false, "always bad", guard.StatusFailed
+		},
 	})
 	var guardEvents, doneEvents int
 	for _, e := range evs {
 		switch e.Kind {
 		case KindGuard:
 			guardEvents++
+			if e.GuardStatus != string(guard.StatusFailed) {
+				t.Errorf("GuardStatus = %q, want %q", e.GuardStatus, guard.StatusFailed)
+			}
 		case KindDone:
 			doneEvents++
 		}

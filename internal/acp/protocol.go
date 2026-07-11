@@ -54,6 +54,18 @@ type authMethod struct {
 	Description string `json:"description,omitempty"`
 }
 
+// authMethodSharedSecret is the id this agent advertises in
+// initialize.authMethods when AEGIS_ACP_TOKEN is configured, and the id the
+// client is expected to echo back in an authenticate request (FIND-02/P24.2).
+const authMethodSharedSecret = "shared_secret"
+
+// --- authenticate ---
+
+type authenticateParams struct {
+	MethodID string `json:"methodId"`
+	Token    string `json:"token"`
+}
+
 // --- session/new ---
 
 type newSessionParams struct {

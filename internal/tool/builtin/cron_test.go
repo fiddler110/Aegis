@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -27,12 +28,22 @@ func cronTestDB(t *testing.T) *sql.DB {
 
 func cronTestScheduler(t *testing.T) *cron.Scheduler {
 	t.Helper()
+	sched, _ := cronTestSchedulerAndStore(t)
+	return sched
+}
+
+// cronTestSchedulerAndStore is like cronTestScheduler but also returns the
+// underlying Store, needed by tests that seed cron_runs rows directly (the
+// scheduler itself has no tool for creating run history — only cron_history
+// reads it).
+func cronTestSchedulerAndStore(t *testing.T) (*cron.Scheduler, *cron.Store) {
+	t.Helper()
 	db := cronTestDB(t)
 	store, err := cron.NewStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cron.NewScheduler(store, func(j cron.Job) {}, nil)
+	return cron.NewScheduler(store, func(j cron.Job) {}, nil), store
 }
 
 func cronToolByName(tools []tool.Tool, name string) tool.Tool {
@@ -167,6 +178,79 @@ func TestCronCreateMissingFields(t *testing.T) {
 	res, _ = create.Execute(ctx, json.RawMessage(`{"command":"echo hi"}`))
 	if !res.IsError {
 		t.Error("expected error for missing schedule")
+	}
+}
+
+func TestCronHistoryEmpty(t *testing.T) {
+	sched := cronTestScheduler(t)
+	tools := CronTools(sched)
+	ctx := context.Background()
+
+	history := cronToolByName(tools, "cron_history")
+	res, err := history.Execute(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Content, "(no cron run history)") {
+		t.Errorf("expected empty-history message, got: %s", res.Content)
+	}
+}
+
+func TestCronHistoryListsAndFilters(t *testing.T) {
+	sched, store := cronTestSchedulerAndStore(t)
+	tools := CronTools(sched)
+	ctx := context.Background()
+
+	now := time.Now()
+	if err := store.RecordRun(ctx, "job-a", now, "ok", "all good"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordRun(ctx, "job-a", now.Add(time.Minute), "error", "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordRun(ctx, "job-b", now, "blocked", "denied by policy"); err != nil {
+		t.Fatal(err)
+	}
+
+	history := cronToolByName(tools, "cron_history")
+
+	// Unfiltered: all 3 runs, most-recent-first.
+	res, err := history.Execute(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"job-a", "job-b", "ok", "error", "blocked"} {
+		if !strings.Contains(res.Content, want) {
+			t.Errorf("expected history output to contain %q, got: %s", want, res.Content)
+		}
+	}
+	if len(strings.Split(strings.TrimSpace(res.Content), "\n")) != 3 {
+		t.Errorf("expected 3 lines of history, got: %s", res.Content)
+	}
+
+	// Filtered to job-a only.
+	res, err = history.Execute(ctx, json.RawMessage(`{"id":"job-a"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Content, "job-b") {
+		t.Errorf("expected job-b to be filtered out, got: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "job-a") {
+		t.Errorf("expected job-a runs present, got: %s", res.Content)
+	}
+
+	// Limit=1 returns only the most recent run.
+	res, err = history.Execute(ctx, json.RawMessage(`{"limit":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(res.Content), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line with limit=1, got %d: %s", len(lines), res.Content)
+	}
+	if !strings.Contains(lines[0], "error") {
+		t.Errorf("expected the most recent run (error) first, got: %s", lines[0])
 	}
 }
 

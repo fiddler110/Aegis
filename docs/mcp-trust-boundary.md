@@ -15,6 +15,23 @@ externally-controlled content as an MCP server's response, so it gets the
 same provenance marker and opt-in scan — see the `search.scan_output`
 example in [§2](#2-opt-in-heuristic-output-scan) below.
 
+It also wraps the body of any **project- or user-local persona/skill `.md`
+file** (FIND-05): those files live on disk, not in the binary, so a
+malicious dependency, template repo, or cloned project could plant one to
+inject instructions into every session that loads it. `internal/persona`'s
+`parsePersonaFile` and `internal/skills`' `appendFromDir` wrap a file-loaded
+persona's `System` prompt / a project-or-user skill's body in the same
+`<persona_untrusted_content persona="...">` / `<skill_untrusted_content
+skill="...">` marker before it reaches the system prompt or a `skill` tool
+result — built-in personas/skills (compiled into the binary) are left
+unwrapped since they aren't attacker-reachable. Unlike MCP/web content, the
+heuristic scan is left **off** for persona/skill wrapping even though the
+marker is always on: this content is re-injected into every session that
+uses the persona/skill (not a one-off fetch), and persona/skill prose
+routinely discusses its own role and instructions, which the scan's
+`\bsystem prompt\b`-style patterns are prone to flag as false positives on
+entirely benign text.
+
 ## The threat
 
 Every tool result — including an MCP tool's — becomes part of the
@@ -134,13 +151,28 @@ do with a flagged result, rather than Aegis silently deciding for them.
 ## What this does *not* do
 
 - **It is a mitigation, not a guarantee.** Prompt injection is an open
-  problem; a sufficiently subtle payload — one that doesn't match any
-  heuristic pattern, or is split across multiple tool calls, or is encoded
-  (base64, homoglyphs, translated to another language) — will pass through
-  both the provenance marker and the scan without being flagged. The
-  provenance marker relies on the model actually respecting the framing
-  instruction; a model can still be manipulated by content it has been told
-  to distrust.
+  problem; a sufficiently subtle payload will still pass through both the
+  provenance marker and the scan without being flagged. As of P24.13
+  (FIND-10), `ScanForInjection` (`internal/trust/trust.go`) additionally
+  catches two specific bypasses that used to sail straight through: content
+  with **zero-width/invisible Unicode characters** spliced into a trigger
+  phrase (e.g. `ig<U+200B>nore all previous instructions`, still readable to
+  a human or model but no longer a literal substring match — the scan
+  strips Unicode category-`Cf` format characters from a matching-only copy
+  before running the regex set) and **base64-encoded payloads** (contiguous
+  base64-alphabet runs of 20+ characters are decoded, and any that yield
+  valid UTF-8 text are scanned the same way, with hits reported distinctly
+  as `"... (base64-decoded)"` so it's clear the trigger text wasn't literally
+  present in the output). What still gets through unflagged: **homoglyph
+  substitution** (visually-similar Unicode letters — e.g. Cyrillic "а" for
+  Latin "a" — standing in for a trigger word's ASCII letters), **translation
+  to another language**, other encodings (**ROT13, hex, URL-encoding**, or
+  anything besides base64), and a payload **deliberately split across
+  multiple separate tool calls** (each call's output is scanned
+  independently — there is no cross-call reassembly or session-level
+  correlation). The provenance marker relies on the model actually
+  respecting the framing instruction; a model can still be manipulated by
+  content it has been told to distrust.
 - **It does not gate tool execution.** That is what `mcp[].capability` and
   the permission system (plan/build/auto modes, allow/deny rules) already
   do — see [Permission System](permissions.md). This document is
@@ -153,7 +185,45 @@ do with a flagged result, rather than Aegis silently deciding for them.
   scanned.
 - **The scan is local and heuristic only** — no content is sent to a
   third-party classifier, and it does not use a model call, so it adds no
-  latency-sensitive network dependency or cost.
+  latency-sensitive network dependency or cost. (See "Evaluating a
+  model-based classifier" below for why this stays true today.)
+
+## Evaluating a model-based classifier
+
+A natural next step beyond regex heuristics is a **model-based classifier**:
+route flagged (or all) tool output through a cheap/fast model call that
+judges whether it contains a prompt-injection attempt, instead of — or in
+addition to — pattern matching. This was considered for P24.13 (FIND-10) and
+deliberately **deferred rather than built**, for three reasons:
+
+- **It adds a real dependency the current design doesn't have.** Every other
+  claim in this document about the scan — "costs nothing," "local and
+  heuristic only," "adds no latency-sensitive network dependency or cost" —
+  stops being true the moment output-scanning requires a network round trip
+  to a model on every scanned tool call. That's a meaningful regression for
+  a feature whose whole selling point is that it's cheap enough to leave on
+  by default for untrusted sources.
+- **It introduces a new thing to trust.** A classifier model is itself
+  attackable — the same prompt-injection payload it's judging could be
+  crafted to also manipulate the classifier's own verdict, and now there are
+  two trust boundaries to reason about instead of one. A regex either
+  matches or it doesn't; a model's judgment is one more surface with its own
+  failure modes.
+- **There's no evidence yet that the regex approach is inadequate for the
+  threat model it targets.** This scan is explicitly defense-in-depth on top
+  of capability gating (see "What Aegis does about it" above), not a sole
+  control — the security boundary that actually matters is what a tool is
+  *allowed to do*, not whether its output gets flagged. Building a heavier
+  mitigation ahead of demonstrated need is premature until the cheap
+  heuristic's false-negative rate is shown to matter in practice.
+
+The honest path forward: keep the current heuristic as the default, and
+revisit if false-negative reports accumulate — content that a user or
+downstream review shows was a real injection attempt the regex set missed.
+At that point, an opt-in `scan_output: model` mode (alongside today's
+implicit boolean) could route content the heuristic scan is uncertain about
+through a real classification call, without changing the zero-cost default
+for everyone who hasn't opted in.
 
 ## Recommendations
 

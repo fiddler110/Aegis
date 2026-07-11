@@ -17,6 +17,12 @@ type ServerConfig struct {
 	Command    string   `koanf:"command"`    // executable to launch
 	Args       []string `koanf:"args"`       // CLI arguments
 	Extensions []string `koanf:"extensions"` // file extensions this server handles (e.g. [".go"])
+	// Trust explicitly opts a server into starting even when its Command
+	// basename is not in the built-in allowlist (see trust.go). LSP configs
+	// can come from a project's committed .aegis/config.yaml, and servers
+	// start eagerly at daemon boot with no interactive approver present, so
+	// unrecognized commands are refused unless this is set.
+	Trust bool `koanf:"trust"`
 }
 
 // Manager owns LSP server lifecycles and routes requests to the right server
@@ -49,6 +55,10 @@ func (m *Manager) Start(ctx context.Context, cfg ServerConfig) error {
 
 	if _, ok := m.servers[cfg.Name]; ok {
 		return nil
+	}
+
+	if err := checkTrusted(cfg); err != nil {
+		return err
 	}
 
 	client, err := NewClient(ctx, cfg.Name, cfg.Command, cfg.Args, m.rootURI)

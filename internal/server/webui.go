@@ -54,12 +54,15 @@ func (s *Server) handleWebUI(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "web UI not available", http.StatusInternalServerError)
 		return
 	}
-	pageToken, err := s.mintPageToken()
+	pageToken, csrf, err := s.mintPageToken()
 	if err != nil {
 		http.Error(w, "web UI not available", http.StatusInternalServerError)
 		return
 	}
-	page := strings.Replace(string(raw), "__AEGIS_TOKEN__", pageToken, 1)
+	page := strings.NewReplacer(
+		"__AEGIS_TOKEN__", pageToken,
+		"__AEGIS_CSRF__", csrf,
+	).Replace(string(raw))
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
@@ -71,6 +74,16 @@ func (s *Server) handleWebUI(w http.ResponseWriter, _ *http.Request) {
 	// the old hand-rolled inline-script page this no longer needs
 	// 'unsafe-inline' for script-src/style-src.
 	h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+	// HttpOnly + SameSite=Strict double-submit CSRF cookie (FIND-01/P24.1):
+	// see uiCSRFCookieName's doc comment in auth.go for the full rationale.
+	http.SetCookie(w, &http.Cookie{
+		Name:     uiCSRFCookieName,
+		Value:    csrf,
+		Path:     "/",
+		MaxAge:   int(pageTokenTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 	_, _ = w.Write([]byte(page))
 }
 

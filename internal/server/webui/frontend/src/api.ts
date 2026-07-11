@@ -11,13 +11,26 @@ function pageToken(): string {
   return document.getElementById("root")?.dataset.pageToken ?? "";
 }
 
+// csrfToken reads the nonce GET /ui baked into the page (also set, HttpOnly,
+// as the aegis_ui_csrf cookie). Sending it back as an explicit header proves
+// this request came from JS running on this same-origin page — a hostile
+// cross-origin page can't read either the HttpOnly cookie or this page's own
+// DOM/response body, so it can't reproduce the pair (FIND-01/P24.1; see
+// uiCSRFCookieName's doc comment in internal/server/auth.go).
+function csrfToken(): string {
+  return document.getElementById("root")?.dataset.csrfToken ?? "";
+}
+
 // exchangeToken redeems the page token for the real auth token. Must
 // resolve before any other api() call — the app's mount effect awaits it
 // before doing anything else.
 export async function exchangeToken(): Promise<void> {
   const r = await fetch("/auth/exchange", {
     method: "POST",
-    headers: { Authorization: "Bearer " + pageToken() },
+    headers: {
+      Authorization: "Bearer " + pageToken(),
+      "X-Aegis-CSRF": csrfToken(),
+    },
   });
   if (!r.ok) throw new Error((await r.text()) || String(r.status));
   const body = (await r.json()) as { token: string };
