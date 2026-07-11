@@ -33,8 +33,29 @@ type Input struct {
 }
 
 // Func validates a final answer. ok=false means it failed; reason is a short
-// explanation appended to the corrective retry prompt.
-type Func func(ctx context.Context, in Input) (ok bool, reason string)
+// explanation appended to the corrective retry prompt. status distinguishes a
+// genuine verdict from a fail-open skip: without it, a transport error that
+// never reached the model (fail open, ok=true) is byte-for-byte identical, to
+// a caller, to a real PASS verdict — there would be no way to tell "the guard
+// actually validated this and it passed" from "the guard silently didn't run
+// at all".
+type Func func(ctx context.Context, in Input) (ok bool, reason string, status Status)
+
+// Status describes how a guard call concluded.
+type Status string
+
+const (
+	// StatusPassed means the guard actually evaluated the output and it
+	// satisfied the check.
+	StatusPassed Status = "passed"
+	// StatusFailed means the guard actually evaluated the output and it did
+	// not satisfy the check.
+	StatusFailed Status = "failed"
+	// StatusSkippedTransportError means the guard never produced a verdict at
+	// all — an adapter/transport error, or a missing adapter/model — and fell
+	// back to fail-open (ok=true) rather than blocking the user's answer.
+	StatusSkippedTransportError Status = "skipped_transport_error"
+)
 
 // maxGuardFileBytes caps how much file content is folded into an LLM guard
 // prompt, per file, so a large generated document doesn't blow the
@@ -56,10 +77,10 @@ type Config struct {
 // ignored: schema mode validates the shape of the chat reply itself, not any
 // artifact it produced.
 func SchemaGuard(required []string) Func {
-	return func(_ context.Context, in Input) (bool, string) {
+	return func(_ context.Context, in Input) (bool, string, Status) {
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(stripFence(in.Text)), &obj); err != nil {
-			return false, "output is not a valid JSON object"
+			return false, "output is not a valid JSON object", StatusFailed
 		}
 		var missing []string
 		for _, k := range required {
@@ -68,9 +89,9 @@ func SchemaGuard(required []string) Func {
 			}
 		}
 		if len(missing) > 0 {
-			return false, "missing required keys: " + strings.Join(missing, ", ")
+			return false, "missing required keys: " + strings.Join(missing, ", "), StatusFailed
 		}
-		return true, ""
+		return true, "", StatusPassed
 	}
 }
 
@@ -97,9 +118,9 @@ func SchemaGuard(required []string) Func {
 // fails closed in parseVerdict: unlike a transport error, that shape is also
 // exactly what a successful injection looks like from here.
 func LLMGuard(adapter provider.Adapter, model, rubric string) Func {
-	return func(ctx context.Context, in Input) (bool, string) {
+	return func(ctx context.Context, in Input) (bool, string, Status) {
 		if adapter == nil || model == "" {
-			return true, ""
+			return true, "", StatusSkippedTransportError
 		}
 		var sb strings.Builder
 		sb.WriteString("<output>\n")
@@ -132,7 +153,7 @@ func LLMGuard(adapter provider.Adapter, model, rubric string) Func {
 			},
 		})
 		if err != nil {
-			return true, "" // transport failure, not a verdict — fail open
+			return true, "", StatusSkippedTransportError // transport failure, not a verdict — fail open
 		}
 		var reply strings.Builder
 		for ev := range ch {
@@ -140,7 +161,11 @@ func LLMGuard(adapter provider.Adapter, model, rubric string) Func {
 				reply.WriteString(ev.Text)
 			}
 		}
-		return parseVerdict(reply.String())
+		ok, reason := parseVerdict(reply.String())
+		if ok {
+			return true, "", StatusPassed
+		}
+		return false, reason, StatusFailed
 	}
 }
 
