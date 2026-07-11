@@ -9,7 +9,43 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
+**Last updated:** 2026-07-11 — **P24.16 — the STRIDE-A threat model's Tier 3 third batch item —
+shipped via an isolated git-worktree sub-agent** (see [roadmap.md](roadmap.md#priority-order)):
+**P24.16 (FIND-29) — extend Windows DACL hardening beyond `daemon.token`.** `daemon.token` got an
+explicit, non-inherited, owner-only Windows DACL via a `restrictToOwner` helper
+(`internal/server/token_windows.go`/`token_other.go`), but the SQLite session database and
+`.aegis/.env` inherited whatever ACL the data/project directory already had — on a shared Windows
+host, another local account with read access to that directory could read conversation history or
+`.env` secrets, neither of which are encrypted at rest. Extracted the SDDL-based logic
+(`"D:PAI(A;;FA;;;OW)"`, same idiom WireGuard for Windows uses) into a new leaf package,
+`internal/fsguard` (`RestrictToOwner`, same windows/other build-tag split as before), so
+`internal/session` and `internal/config` can call it without creating an import cycle through
+`internal/server`; the old server-local `token_windows.go`/`token_other.go` were deleted and
+`auth.go`'s `generateAndWriteToken` now calls the shared function. `session.Open`
+(`internal/session/session.go`) hardens `sessions.db` and its WAL-mode `-wal`/`-shm` sidecar files
+right after `migrate()` succeeds — checkpoint snapshots needed no separate treatment since
+`internal/checkpoint` shares the same SQLite connection via `NewStore(db *sql.DB)`. A hardening
+failure on the main database file propagates as an `Open` error, matching how `daemon.token` has
+always treated a genuine ACL-set failure; a sidecar failure (including "doesn't exist yet", which
+`fsguard.RestrictToOwner` treats as a no-op on any file) is only logged, since the sidecars may not
+have been created yet at open time and the primary db file being locked down already covers the
+bulk of the exposure. `config.loadDotEnv` (`internal/config/config.go`) applies the same hardening
+to `.aegis/.env` right after a successful read; because that file is user-owned, not
+Aegis-written, a failure there only logs a warning rather than failing `config.Load()` — a
+locked-down host where the current user can't rewrite their own file's ACL shouldn't break every
+command. `docs/configuration.md` gained a "Local Data Store Permissions (Windows ACL Hardening)"
+section documenting the extended coverage.
+Tests: `internal/fsguard/fsguard_windows_test.go` (new, Windows-only) reads the on-disk DACL back
+via `golang.org/x/sys/windows` and asserts exactly one ACE naming the well-known owner-rights SID
+(not Everyone); `internal/fsguard/fsguard_test.go` (new, cross-platform) covers the
+existing-file/missing-file no-op smoke cases. `internal/session/session_test.go` gained
+`TestOpenAppliesPermissionHardening` (opens, writes, and reopens a store so both the main db file
+and its now-created sidecars go through hardening) and `internal/config/config_test.go` gained
+`TestLoadDotEnvAppliesPermissionHardening`/`TestLoadDotEnvMissingFileNoOp`. `go build ./...` and
+`go vet ./...` clean; `go test ./...` green except the same three pre-existing/environmental
+failures noted elsewhere in this doc (`internal/server`'s two `scan_test.go` timeouts and
+`TestBuildImageBlocksFromPath`), confirmed unrelated via `git stash` on the pre-change tree.
+Earlier — **P24.11, P24.12, and P24.13 — the STRIDE-A threat model's Tier 3
 second batch — shipped in parallel via isolated git-worktree sub-agents** (see
 [roadmap.md](roadmap.md#priority-order)):
 **P24.11 (FIND-07) — allowlist/trust-gate LSP server commands.** `internal/lsp/client.go`'s

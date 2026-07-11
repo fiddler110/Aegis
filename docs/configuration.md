@@ -656,6 +656,34 @@ SOME_INTERNAL_API_KEY=another-secret
 - Values are loaded before config parsing, so they can be referenced as `$VAR` in supported YAML fields (currently `mcp[].auth`)
 - Real environment variables always override `.env` values
 - The file is never written by Aegis — manage it manually
+- On Windows, after Aegis successfully reads this file it best-effort applies
+  the same owner-only ACL hardening described below for `sessions.db` and
+  the daemon auth token (a no-op on POSIX, where the file's own mode bits
+  already restrict it). A failure to tighten the ACL of this pre-existing
+  file only logs a warning — it never blocks startup.
+
+---
+
+## Local Data Store Permissions (Windows ACL Hardening)
+
+A POSIX file mode bit (e.g. `0o600`) already restricts a file to its owner,
+but has no effect on Windows: a new file there inherits its parent
+directory's ACL, which commonly grants access to more than just the current
+user. On Windows, Aegis applies an explicit, non-inherited, owner-only DACL
+(`internal/fsguard`) to every local file that can hold secrets or
+conversation history, so another local account on a shared machine can't
+read them just because it can read the containing folder:
+
+- The daemon auth token (`<data_dir>/auth`)
+- The SQLite session database (`<data_dir>/sessions.db`) and its WAL-mode
+  sidecar files (`sessions.db-wal`, `sessions.db-shm`) — this also covers
+  checkpoint snapshots, which are stored in the same database
+- `.aegis/.env`, best-effort, after Aegis successfully reads it (see above)
+
+This is a defense-in-depth control for Host/OS-level access (FIND-29); it
+does not protect against a compromised process running as the same user
+account. On POSIX platforms all of the above is a no-op — the existing mode
+bits are already sufficient.
 
 ---
 
