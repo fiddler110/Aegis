@@ -9,7 +9,67 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 — **P24.20 (FIND-17) — strip/escape ANSI/OSC control sequences in
+**Last updated:** 2026-07-11 (evening) — **P15.3–P15.10 — web UI parity with the TUI (batches A, B,
+C) and P24.14 (FIND-12) — MCP outbound tool-call argument flow.** The Tier 3 pass, four ships in one
+day; P15.2's config-mutation endpoints and P15.12's token hardening had already landed, so all three
+web-UI batches were frontend work against existing daemon APIs (plus two small wire-shape additions
+in batch C, below). P15.11's plain-language framing was the design lens throughout — every panel
+speaks user language ("Stress-test a claim", "What the assistant remembers", "Accepted risks"), not
+subsystem language.
+
+*Batch A (`d8fc58e`, P15.3–P15.5, P15.10):* "Assistant" topbar chip opens a persona picker with
+plain-language descriptions (GET /personas), switching via PATCH on the session, with a per-chat
+model override behind an "Advanced" disclosure; persistent cost/token readout in the topbar (this
+chat + today's totals, caps in the tooltip) refreshed after every run, and `cost_alert` SSE events —
+previously dropped — surfaced as warning toasts; "Restore" chip lists per-turn restore points with
+an inline destructive-action confirmation before POST /rewind; approval prompts gained a "Don't ask
+again for requests like this" checkbox with an editable pattern (allow_always/pattern on approve),
+pre-filled by a TS port of the TUI's `suggestRulePattern` (command prefix / file directory / URL
+host).
+
+*Batch B (`eb5a14c`, P15.8–P15.9):* debate ("stress-test a claim") and project-knowledge panels as
+sidebar tools; archived-chats tab with archive/restore, prune-old-chats with confirmation,
+background-session toggle plus reattach-to-a-running-response via the buffered-events endpoint, and
+a daemon-wide activity view (runs + teammates).
+
+*Batch C (`05ca71f` merge of `8686c42`/`bc38dd3`, P15.6–P15.7):* the last two panels, built **in
+parallel by two sub-agents in isolated git worktrees** (disjoint backend files, overlapping only on
+the frontend seams — `app.tsx`/`types.ts`/`SessionList.tsx`/`style.css` — resolved additively at
+merge). P15.6 ("Security check"): scanner-status list from GET /security/status with the two-phase
+guided-install flow preserved (POST /security/install first shows the exact host command, only an
+explicit second confirm click runs it), run-a-scan with a severity-sorted findings table
+(expandable description/remediation/CWE/ASVS rows, skipped-scanner reasons, suppressed count, raw
+report in a collapsible), and the accepted-risk baseline as a read-only table with
+active/expired/invalid badges. Its backend half: `api.ScanResponse` — previously just the formatted
+text `report` — gained structured fields mirroring `security.Report` (`api.ScanFinding` mirrors
+`security.Finding`, same mirror-not-import convention as `SecurityBaselineEntry`), populated for
+workspace/path, image, and recon scans in `handleScan`. P15.7 ("Skills & memory"): project/user
+memory as read-only views with per-scope "Add a note" composers (POST /memory), the
+currently-usable playbook list, and a built-in-skills toggle list with a project/global scope
+selector and an explicit dirty-tracking Save that always sends the complete set (PATCH
+/config/skills is deliberately full-replace). Its backend half: `ConfigSkillsResponse` gained an
+`available` catalog (name + description per embedded built-in, from `skills.Builtins()`) so the
+toggle UI doesn't hardcode the skill list.
+Tests: new `TestHandleScanReturnsStructuredFields` (pins trufflehog so the ran/skipped/findings
+shape is deterministic regardless of installed binaries), extended
+`TestConfigSkillsGetAndPatchRoundTrip` (catalog present, PATCH echoes it); `go build ./...` clean
+and `go test ./...` shows only the pre-existing machine-specific failures, verified identical on
+the pre-merge base commit in a throwaway worktree; frontend `tsc` + vite build clean, `dist/`
+rebuilt once after the merge and committed.
+
+*P24.14 (`73880ae`, FIND-12):* tool-call arguments are model-constructed and forwarded verbatim to
+whichever MCP server the call targets, making an untrusted server an exfiltration channel for
+anything the model has read into context. docs/mcp-trust-boundary.md gained an outbound section
+(§3) covering the data flow, the injection→exfiltration composition, and how to evaluate configured
+servers; new per-server opt-in `scan_arguments` (default false, the outbound mirror of
+`scan_output`) checks tools/call, resources/read, and prompts/get arguments against a small
+conservative credential-shaped pattern set (PEM keys, AWS key IDs, sk-/GitHub/Slack tokens, JWTs,
+bearer tokens, api_key/password assignments) in `internal/mcp/outbound.go`. A hit logs a Warn
+naming the server, tool, and pattern class — never the matched text — and is flag-only, never
+blocking or mutating the call, matching the inbound scan philosophy. Table-driven tests cover
+pattern coverage, off-by-default no-op, warn-and-proceed, and the resource/prompt adapters.
+
+Earlier — **P24.20 (FIND-17) — strip/escape ANSI/OSC control sequences in
 streamed model output before TUI render.** Flagged by the STRIDE-A threat model as defense-in-depth
 for an already-mitigated prompt-injection vector: if adversarial content ever reached the model's
 output verbatim, the TUI's markdown render path had no sanitization step, so embedded raw ANSI/OSC
