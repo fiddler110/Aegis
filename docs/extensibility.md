@@ -80,7 +80,11 @@ Hooks complement the `permission.rules` text-rule system. Rules are evaluated fi
 MCP servers are third-party code and their tool output is treated as
 untrusted external input — see [MCP Trust Boundary](mcp-trust-boundary.md)
 for how Aegis marks that output's provenance and the opt-in `scan_output`
-heuristic scan, in addition to the capability gating described below.
+heuristic scan, in addition to the capability gating described below. The
+same trust boundary applies in the outbound direction: tool-call arguments
+are forwarded verbatim to the target server, and the opt-in
+`scan_arguments` check (same doc) flags credential-shaped content in them
+before they leave the process.
 
 Two transport modes are supported:
 - **stdio** — Aegis launches the server as a child process and communicates over stdin/stdout (JSON-RPC)

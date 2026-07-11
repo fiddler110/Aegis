@@ -17,6 +17,8 @@ type mcpTool struct {
 	exposedName string
 	capability  tool.Capability
 	scanOutput  bool
+	scanArgs    bool
+	logger      *slog.Logger
 }
 
 func (t *mcpTool) Name() string                { return t.exposedName }
@@ -29,6 +31,9 @@ func (t *mcpTool) InputSchema() json.RawMessage {
 	return t.info.InputSchema
 }
 func (t *mcpTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
+	if t.scanArgs {
+		warnOutboundSecrets(t.logger, t.client.Server(), t.info.Name, input)
+	}
 	text, isErr, err := t.client.CallTool(ctx, t.info.Name, input)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("mcp call failed: %v", err), IsError: true}, nil
@@ -69,6 +74,8 @@ type mcpResourceReadTool struct {
 	exposedName string
 	capability  tool.Capability
 	scanOutput  bool
+	scanArgs    bool
+	logger      *slog.Logger
 }
 
 func (t *mcpResourceReadTool) Name() string { return t.exposedName }
@@ -80,6 +87,9 @@ func (t *mcpResourceReadTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"Resource URI to read"}},"required":["uri"]}`)
 }
 func (t *mcpResourceReadTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
+	if t.scanArgs {
+		warnOutboundSecrets(t.logger, t.client.Server(), t.exposedName, input)
+	}
 	var params struct {
 		URI string `json:"uri"`
 	}
@@ -130,6 +140,8 @@ type mcpPromptGetTool struct {
 	exposedName string
 	capability  tool.Capability
 	scanOutput  bool
+	scanArgs    bool
+	logger      *slog.Logger
 }
 
 func (t *mcpPromptGetTool) Name() string { return t.exposedName }
@@ -141,6 +153,9 @@ func (t *mcpPromptGetTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Prompt name"},"arguments":{"type":"object","description":"Prompt arguments as key-value pairs","additionalProperties":{"type":"string"}}},"required":["name"]}`)
 }
 func (t *mcpPromptGetTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
+	if t.scanArgs {
+		warnOutboundSecrets(t.logger, t.client.Server(), t.exposedName, input)
+	}
 	var params struct {
 		Name      string            `json:"name"`
 		Arguments map[string]string `json:"arguments"`
@@ -188,6 +203,14 @@ type ServerConfig struct {
 	// trusted. The provenance marker (see wrapUntrusted) is always applied
 	// regardless of this flag.
 	ScanOutput bool `koanf:"scan_output"`
+	// ScanArguments opts outbound tool-call arguments bound for this server
+	// into a heuristic secret-pattern check before they are forwarded
+	// (P24.14, FIND-12). Arguments are model-constructed and may carry
+	// anything the model has read into context, so an untrusted server is a
+	// potential exfiltration channel. Off by default; a hit logs a Warn
+	// naming the server, tool, and pattern class — flag-only, the call is
+	// never blocked or mutated. The outbound mirror of ScanOutput.
+	ScanArguments bool `koanf:"scan_arguments"`
 }
 
 // parseCapability maps a config capability string to a tool.Capability,
@@ -253,7 +276,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		for _, info := range tools {
 			name := fmt.Sprintf("mcp__%s__%s", sc.Name, info.Name)
 			cap := resolveCapability(sc, info.Name)
-			if err := reg.Register(&mcpTool{client: client, info: info, exposedName: name, capability: cap, scanOutput: sc.ScanOutput}); err != nil {
+			if err := reg.Register(&mcpTool{client: client, info: info, exposedName: name, capability: cap, scanOutput: sc.ScanOutput, scanArgs: sc.ScanArguments, logger: logger}); err != nil {
 				logger.Warn("mcp tool register failed", "tool", name, "err", err)
 			}
 		}
@@ -269,7 +292,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		if _, err := client.ListResources(ctx); err == nil {
 			prefix := fmt.Sprintf("mcp__%s", sc.Name)
 			_ = reg.Register(&mcpResourceListTool{client: client, exposedName: prefix + "__list_resources", capability: metaCap})
-			_ = reg.Register(&mcpResourceReadTool{client: client, exposedName: prefix + "__read_resource", capability: metaCap, scanOutput: sc.ScanOutput})
+			_ = reg.Register(&mcpResourceReadTool{client: client, exposedName: prefix + "__read_resource", capability: metaCap, scanOutput: sc.ScanOutput, scanArgs: sc.ScanArguments, logger: logger})
 			logger.Info("mcp resources registered", "server", sc.Name)
 		}
 
@@ -277,7 +300,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 		if _, err := client.ListPrompts(ctx); err == nil {
 			prefix := fmt.Sprintf("mcp__%s", sc.Name)
 			_ = reg.Register(&mcpPromptListTool{client: client, exposedName: prefix + "__list_prompts", capability: metaCap})
-			_ = reg.Register(&mcpPromptGetTool{client: client, exposedName: prefix + "__get_prompt", capability: metaCap, scanOutput: sc.ScanOutput})
+			_ = reg.Register(&mcpPromptGetTool{client: client, exposedName: prefix + "__get_prompt", capability: metaCap, scanOutput: sc.ScanOutput, scanArgs: sc.ScanArguments, logger: logger})
 			logger.Info("mcp prompts registered", "server", sc.Name)
 		}
 
@@ -294,7 +317,7 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 				}
 				for _, info := range newTools {
 					name := fmt.Sprintf("mcp__%s__%s", serverName, info.Name)
-					reg.Upsert(&mcpTool{client: cl, info: info, exposedName: name, capability: resolveCapability(serverCfg, info.Name), scanOutput: serverCfg.ScanOutput})
+					reg.Upsert(&mcpTool{client: cl, info: info, exposedName: name, capability: resolveCapability(serverCfg, info.Name), scanOutput: serverCfg.ScanOutput, scanArgs: serverCfg.ScanArguments, logger: logger})
 				}
 				logger.Info("mcp tools refreshed", "server", serverName, "tools", len(newTools))
 			}
