@@ -9,7 +9,17 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 — **P24.16, P24.17, and P24.18 — the STRIDE-A threat model's Tier 3
+**Last updated:** 2026-07-11 — **P24.19 (FIND-15) — document that local-Ollama traffic is
+typically unencrypted.** `internal/provider/openai/openai.go` applies no TLS enforcement specific
+to a local base URL, and Ollama's own default configuration binds and serves over plain HTTP on
+`127.0.0.1` — on a single-user machine this is no different from any other loopback traffic, but on
+a **shared multi-user host** another local account could observe or tamper with daemon↔Ollama
+traffic. Not independently actionable in Aegis's own code, since the plaintext behavior originates
+from Ollama's own default configuration — remediation is documentation only. `docs/providers.md`'s
+"Ollama (recommended for local use)" section gained a "Shared-host note" covering the exposure and
+recommending TLS (where Ollama supports it) or a single-user host for sensitive work.
+
+Earlier — **P24.16, P24.17, and P24.18 — the STRIDE-A threat model's Tier 3
 third batch, closing out Tier 3 entirely — shipped in parallel via isolated git-worktree
 sub-agents** (see [roadmap.md](roadmap.md#priority-order)):
 
