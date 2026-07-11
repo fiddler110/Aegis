@@ -919,6 +919,26 @@ See [Permission System](permissions.md) for full rule syntax.
 
 ---
 
+## Client<->Daemon Transport
+
+By default, all traffic between a CLI client (`aegis`, `aegis ui`, `aegis sessions`, `aegis acp`,
+`aegis mcp-serve`, ...) and the daemon is plain HTTP over the loopback interface, protected only by
+a bearer token (`daemon.token`). The daemon refuses to bind a non-loopback address unless
+`server.allow_remote: true` is set (FIND-08), which keeps this traffic off the network by default —
+but on a shared multi-user host, another local account with packet-capture privilege (raw socket
+access) could still observe the loopback interface, including the bearer token and full
+conversation content (FIND-32, CVSS 3.3, Tier 3/defense-in-depth given the loopback-only default).
+
+Set `server.tls.enabled: true` to close that gap: the daemon auto-generates a self-signed
+certificate the client pins explicitly (no `InsecureSkipVerify`, no public CA involved). This is
+off by default and does not change any existing user's behavior. See `server.tls.*` in
+[configuration.md](configuration.md#full-config-reference) for the full option set, the
+auto-generated cert/key file locations, and what this protects against — notably, it does **not**
+protect against Host/OS-level compromise of the same account, which can already read
+`daemon.token` (and, with TLS enabled, `daemon.key`) directly off disk.
+
+---
+
 ## Multi-Agent Debate (P12)
 
 A security claim — a scan finding, a threat/mitigation pair, a "this is a false positive" call — is

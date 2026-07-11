@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,6 +88,12 @@ type Server struct {
 	logger      *slog.Logger
 	http        *http.Server
 	authToken   string // shared secret for API authentication
+
+	// tlsCert is the daemon's TLS certificate/key pair, loaded or generated in
+	// New when server.tls.enabled is true (FIND-32/P24.18); nil when TLS is
+	// disabled (the default), in which case ListenAndServe serves plain HTTP
+	// exactly as before this feature existed.
+	tlsCert *tls.Certificate
 
 	// invalidAuthAttempts counts requests rejected by authMiddleware for a
 	// missing or mismatched bearer token (FIND-11). It is a single
@@ -461,6 +468,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("auth token: %w", err)
 	}
 	s.authToken = token
+
+	if cfg.Server.TLS.Enabled {
+		cert, err := ensureTLSCert(cfg.TLSCertPath(), cfg.TLSKeyPath())
+		if err != nil {
+			store.Close()
+			return nil, fmt.Errorf("tls cert: %w", err)
+		}
+		s.tlsCert = &cert
+	}
 
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
 	s.notifier = notify.New(cfg.Notify.Desktop, cfg.Notify.Webhook, logger)
@@ -865,8 +881,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		s.logger.Info("daemon listening", "addr", s.cfg.Server.Addr)
-		errCh <- s.http.ListenAndServe()
+		if s.tlsCert != nil {
+			s.logger.Info("daemon listening (TLS)", "addr", s.cfg.Server.Addr)
+			s.http.TLSConfig = &tls.Config{Certificates: []tls.Certificate{*s.tlsCert}}
+			// Cert/key are already loaded into TLSConfig above; passing empty
+			// paths here tells ListenAndServeTLS to use that config instead of
+			// reading files itself (see the method's doc comment).
+			errCh <- s.http.ListenAndServeTLS("", "")
+		} else {
+			s.logger.Info("daemon listening", "addr", s.cfg.Server.Addr)
+			errCh <- s.http.ListenAndServe()
+		}
 	}()
 
 	select {

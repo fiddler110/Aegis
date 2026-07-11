@@ -26,13 +26,16 @@ func newUICmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+			cl := client.NewFromConfig(cfg)
 
 			healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
 			healthErr := cl.Health(healthCtx)
 			healthCancel()
 
-			url := webUIURL(cfg.Server.Addr)
+			url := webUIURL(cfg.Server.Addr, cfg.Server.TLS.Enabled)
+			if cfg.Server.TLS.Enabled {
+				fmt.Fprintln(cmd.OutOrStdout(), "TLS is enabled: your browser will warn about the daemon's self-signed certificate — this is expected (see docs/configuration.md).")
+			}
 
 			if healthErr == nil {
 				// A daemon is already running; just point the browser at it.
@@ -70,12 +73,16 @@ func newUICmd() *cobra.Command {
 	return cmd
 }
 
-func webUIURL(addr string) string {
+func webUIURL(addr string, tlsEnabled bool) string {
 	// addr is a host:port like 127.0.0.1:4127; ensure it has a host.
 	if strings.HasPrefix(addr, ":") {
 		addr = "127.0.0.1" + addr
 	}
-	return "http://" + addr + "/ui"
+	scheme := "http://"
+	if tlsEnabled {
+		scheme = "https://"
+	}
+	return scheme + addr + "/ui"
 }
 
 // openBrowser opens url in the default browser, best effort.

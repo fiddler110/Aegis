@@ -51,7 +51,7 @@ func newMCPServeCmd() *cobra.Command {
 			}
 			defer closer.Close()
 
-			cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+			cl := client.NewFromConfig(cfg)
 
 			// Reuse a running daemon if present; otherwise start one embedded in
 			// this process and stop it when the client disconnects.
@@ -67,7 +67,7 @@ func newMCPServeCmd() *cobra.Command {
 				if !waitForDaemon(cl, 10*time.Second) {
 					return fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
 				}
-				cl = client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+				cl = client.NewFromConfig(cfg)
 			}
 
 			resolvedMode := mode

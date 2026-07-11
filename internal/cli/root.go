@@ -74,7 +74,7 @@ Use "aegis <command> --help" for details on any command below.`,
 			if err != nil {
 				return err
 			}
-			cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+			cl := client.NewFromConfig(cfg)
 
 			// Check whether a daemon is already running.
 			healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
@@ -95,7 +95,7 @@ Use "aegis <command> --help" for details on any command below.`,
 				}
 				// The embedded daemon wrote a fresh token to disk; re-read it
 				// so subsequent authenticated requests use the correct value.
-				cl = client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+				cl = client.NewFromConfig(cfg)
 			}
 
 			warnSandboxFallback(cl)
@@ -217,7 +217,7 @@ Use "aegis <command> --help" for details on any command below.`,
 // embedded one if none is reachable. The returned stop func shuts down any
 // daemon this call started (a no-op when an existing daemon was reused).
 func ensureDaemon(ctx context.Context, cfg *config.Config) (*client.Client, func(), error) {
-	cl := client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+	cl := client.NewFromConfig(cfg)
 	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	healthErr := cl.Health(hctx)
 	cancel()
@@ -232,7 +232,7 @@ func ensureDaemon(ctx context.Context, cfg *config.Config) (*client.Client, func
 		stop()
 		return nil, nil, fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
 	}
-	cl = client.New(cfg.Server.Addr).WithTokenFile(cfg.AuthTokenPath())
+	cl = client.NewFromConfig(cfg)
 	return cl, stop, nil
 }
 

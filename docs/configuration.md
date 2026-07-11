@@ -49,6 +49,7 @@ Any config key can be overridden with an environment variable by converting the 
 | `AEGIS_SERVER_MAX_CONCURRENT_RUNS` | `server.max_concurrent_runs` | `10` |
 | `AEGIS_SERVER_MAX_RUN_DURATION_SEC` | `server.max_run_duration_sec` | `1800` |
 | `AEGIS_SERVER_SSE_BUFFER_SIZE` | `server.sse_buffer_size` | `256` |
+| `AEGIS_SERVER_TLS_ENABLED` | `server.tls.enabled` | `true` |
 
 API keys use their native names (not the `AEGIS_` prefix):
 
@@ -218,6 +219,34 @@ server:
   # bearer token with no rate limiting, so the daemon refuses to start on a
   # non-loopback address until this is explicitly acknowledged (FIND-08).
   allow_remote: false
+
+  # Optional transport encryption for client<->daemon traffic (FIND-32/
+  # P24.18). Off by default: client<->daemon HTTP is plaintext, including the
+  # bearer token and full conversation content — fine given the loopback-only
+  # default above, but observable by another local account on a shared host
+  # with packet-capture privilege. This is defense-in-depth, not a required
+  # control for the common single-user case.
+  #
+  # When enabled with no cert_file/key_file set, the daemon generates a
+  # self-signed ECDSA P-256 certificate on first start and persists it as
+  # <data_dir>/daemon.crt and daemon.key (reused across restarts, same
+  # convention as daemon.token). Every CLI client (`aegis`, `aegis ui`, `aegis
+  # sessions`, `aegis acp`, `aegis mcp-serve`, ...) reads daemon.crt and pins
+  # it explicitly — this is certificate pinning to a file that never leaves
+  # the machine, not verification against a public CA or hostname, so no
+  # system trust store is involved. A browser opening the web UI (`aegis ui`)
+  # has no such pinning and will show a self-signed-certificate warning; this
+  # is expected, and the CLI prints a one-line notice to that effect when TLS
+  # is enabled.
+  #
+  # This protects against another local account observing loopback traffic.
+  # It does not protect against Host/OS-level compromise of the same
+  # account, which can already read daemon.token — and, with TLS enabled,
+  # daemon.key — directly off disk.
+  tls:
+    enabled: false
+    cert_file: ""  # optional operator-supplied cert; auto-generated if empty
+    key_file: ""   # optional operator-supplied key; auto-generated if empty
 
   # 0 = unlimited (default). Caps how many message-turn runs may be actively
   # executing across ALL sessions at once. A request past the cap is rejected
