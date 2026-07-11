@@ -160,6 +160,20 @@ func (gitleaksScanner) Scan(ctx context.Context, dir string, method Method, rt s
 // case so ScanText (below) can point it at a scratch directory containing
 // arbitrary text — e.g. a PR title/body — rather than a real project tree.
 func scanGitleaksHostDir(ctx context.Context, dir string) ([]Finding, error) {
+	data, err := runGitleaksHostDirReport(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	return parseGitleaks(data)
+}
+
+// runGitleaksHostDirReport runs gitleaks natively against a directory on the
+// host and returns the raw JSON report bytes, without parsing them into
+// []Finding. Factored out of scanGitleaksHostDir (same command, same temp
+// file dance) so RedactText (redact.go, P24.12 / FIND-09) can additionally
+// recover the literal matched-secret text — gitleaks' "Secret" field, which
+// parseGitleaks/Finding deliberately don't carry — needed to mask it.
+func runGitleaksHostDirReport(ctx context.Context, dir string) ([]byte, error) {
 	report, err := os.CreateTemp("", "gitleaks-*.json")
 	if err != nil {
 		return nil, err
@@ -172,11 +186,7 @@ func scanGitleaksHostDir(ctx context.Context, dir string) ([]Finding, error) {
 		"--report-format", "json", "--report-path", path, "--exit-code", "0")
 	_ = cmd.Run() // gitleaks writes findings to the report file regardless
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return parseGitleaks(data)
+	return os.ReadFile(path)
 }
 
 // ScanText runs the same gitleaks secret-detection machinery used for
