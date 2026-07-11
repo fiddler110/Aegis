@@ -152,6 +152,14 @@ func (gitleaksScanner) Scan(ctx context.Context, dir string, method Method, rt s
 		return parseGitleaks(out)
 	}
 
+	return scanGitleaksHostDir(ctx, dir)
+}
+
+// scanGitleaksHostDir runs gitleaks natively against a directory on the host
+// and parses its report. Factored out of gitleaksScanner.Scan's MethodHost
+// case so ScanText (below) can point it at a scratch directory containing
+// arbitrary text — e.g. a PR title/body — rather than a real project tree.
+func scanGitleaksHostDir(ctx context.Context, dir string) ([]Finding, error) {
 	report, err := os.CreateTemp("", "gitleaks-*.json")
 	if err != nil {
 		return nil, err
@@ -169,6 +177,32 @@ func (gitleaksScanner) Scan(ctx context.Context, dir string, method Method, rt s
 		return nil, err
 	}
 	return parseGitleaks(data)
+}
+
+// ScanText runs the same gitleaks secret-detection machinery used for
+// directory scans against an arbitrary in-memory string — e.g. a PR
+// title/body composed by the model before it's sent to GitHub (P24.6 /
+// FIND-13) — rather than a checked-out project tree. It is deliberately
+// best-effort: if gitleaks isn't installed on the host, it returns (nil,
+// nil) rather than an error, so callers never gain a hard dependency on
+// gitleaks being present — the same tolerant posture as every other
+// gitleaks invocation in this package (--exit-code 0, ignored Run() error).
+func ScanText(ctx context.Context, text string) ([]Finding, error) {
+	if !lookPath("gitleaks") {
+		return nil, nil
+	}
+
+	dir, err := os.MkdirTemp("", "gitleaks-text-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+
+	if err := os.WriteFile(filepath.Join(dir, "content.txt"), []byte(text), 0o600); err != nil {
+		return nil, err
+	}
+
+	return scanGitleaksHostDir(ctx, dir)
 }
 
 func parseGitleaks(data []byte) ([]Finding, error) {
