@@ -232,7 +232,7 @@ func ExpectNoGuardFailure() Check {
 func ExpectRubric(ctx context.Context, adapter provider.Adapter, model, rubric string) Check {
 	return func(r *Result) error {
 		judge := guard.LLMGuard(adapter, model, rubric)
-		ok, reason := judge(ctx, guard.Input{Text: r.FinalText()})
+		ok, reason, _ := judge(ctx, guard.Input{Text: r.FinalText()})
 		if !ok {
 			return fmt.Errorf("rubric %q failed: %s", rubric, reason)
 		}
