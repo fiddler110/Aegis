@@ -1,11 +1,11 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-11 (evening) — the Tier 3 pass is mostly shipped: P24.14 (FIND-12 outbound
-MCP documentation + opt-in `scan_arguments` scan) and web-UI batches A (P15.3–P15.5, P15.10) and
-B (P15.8–P15.9) landed 2026-07-11. **Next up: web-UI batch C — P15.6 (security scanning surface) +
-P15.7 (skills & memory management)** — deliberately paused, not blocked; resume from the Tier 3
-section below. After batch C: write up the day's shipped items in releases.md (the commits
-73880ae/d8fc58e/eb5a14c carry the detail until then).
+**Last updated:** 2026-07-11 (night) — **the Tier 3 pass is complete.** P24.14 (FIND-12 outbound
+MCP documentation + opt-in `scan_arguments` scan) and all three web-UI batches — A (P15.3–P15.5,
+P15.10), B (P15.8–P15.9), and C (P15.6–P15.7, commit `05ca71f`) — landed 2026-07-11, and the day's
+writeup is in [releases.md](releases.md#latest-changes). Everything still open is Tier 4 (parked,
+no current trigger). Next trigger: a new threat-model pass, a reported incident, or concrete user
+demand for a parked item.
 
 This document tracks only **open** work and what's next. For shipped-feature history and full design
 rationale, see [releases.md](releases.md).
@@ -14,8 +14,8 @@ rationale, see [releases.md](releases.md).
 
 ## Status
 
-**Open items:** P15.6–P15.7 (web UI batch C, the only active work), P24.21 (threat-model
-residual), P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1.
+**Open items:** all Tier 4 — P24.21 (threat-model residual), P22.5/P22.6, P20.2–P20.3,
+P13.3.2–P13.3.3/P13.4, P9.4, P6.1. No active work.
 
 **Priority order:** see [Priority Order](#priority-order) below — it is the authoritative "what's
 next" view, ordered by tier and effort.
@@ -41,24 +41,21 @@ incident.
 P24.20 (FIND-17) shipped 2026-07-11 (see [releases.md](releases.md#latest-changes)), the last item
 in this tier. Next trigger: a new threat-model pass or a reported incident.
 
-### Tier 3 — Larger, real, sequence-dependent
+### Tier 3 — empty
 
-- **P15.6–P15.7 — Web UI batch C (NEXT UP — paused 2026-07-11 mid-track, not blocked).**
-  - **P15.6 — Security scanning & baseline surface** (M). `POST /security/scan`,
-    `GET /security/status`, `GET /security/baseline`, `POST /security/install` all exist (P15.2).
-    Needs a findings table (severity/tool/location/remediation — `Finding` is a stable shape)
-    rather than the TUI's plain-text tabwriter output.
-  - **P15.7 — Skills & memory management** (S/M). `GET/POST /memory` (viewer/editor) and
-    `GET/PATCH /config/skills` (builtin enable/disable toggle list) all exist.
-  - Implementation notes for whoever picks this up: frontend-only, reuse batch A/B patterns
-    (topbar chips + `.panel` popovers or sidebar tools, toast system, types.ts conventions,
-    P15.11 plain-language framing), no new npm deps, rebuild + commit `dist/`, ignore the
-    pre-existing `TestBuildImageBlocksFromPath` failure in `internal/server`.
+All items shipped 2026-07-11 (see [releases.md](releases.md#latest-changes)):
+
+- ~~**P15.6–P15.7 — Web UI batch C**~~ **SHIPPED 2026-07-11** (`05ca71f`, built by two parallel
+  worktree sub-agents): "Security check" panel (scanner status + two-phase guided install,
+  severity-sorted structured findings table — `ScanResponse` gained mirrored `security.Report`
+  fields — and the accepted-risk baseline view) and "Skills & memory" panel (memory viewer +
+  per-scope note composer, built-in-skills toggle list — `ConfigSkillsResponse` gained the
+  `available` catalog).
 - ~~**P15.3–P15.5, P15.8–P15.10 — Web UI batches A/B**~~ **SHIPPED 2026-07-11** (`d8fc58e`,
   `eb5a14c`): persona/model panel, cost/token readout + budget-alert toasts, checkpoints/rewind,
   always-allow approvals, debate ("stress-test a claim") + knowledge panels, archived-chats
   tab/prune/background sessions + activity view. P15.11's non-technical framing was applied
-  throughout and remains the design lens for batch C.
+  throughout all three batches.
 - ~~**P24.14 — FIND-12: MCP outbound tool-call argument content**~~ **SHIPPED 2026-07-11**
   (`73880ae`): outbound data flow documented in docs/mcp-trust-boundary.md; opt-in per-server
   `scan_arguments` outbound secret scan (default off, flag-never-block) in internal/mcp.
@@ -96,13 +93,10 @@ Tier 4 above.
 
 ## Open Work — P15 (Web UI Parity with the TUI)
 
-Bring `aegis ui` up to feature parity with the TUI. P15.1 (frontend architecture), P15.12
-(token-injection hardening), P15.2 (config-mutation endpoints), and — as of 2026-07-11 — batches
-A (P15.3–P15.5, P15.10, commit `d8fc58e`) and B (P15.8–P15.9, commit `eb5a14c`) have shipped.
-
-**P15.6–P15.7 — Batch C, the last two panels. [Tier 3, NEXT UP]** Security scanning/baseline
-surface and skills/memory management. Frontend-only — every endpoint exists. Full scope and
-implementation notes in [Tier 3](#tier-3--larger-real-sequence-dependent) above.
+**Complete as of 2026-07-11.** P15.1 (frontend architecture), P15.12 (token-injection hardening),
+P15.2 (config-mutation endpoints), batches A (P15.3–P15.5, P15.10, `d8fc58e`), B (P15.8–P15.9,
+`eb5a14c`), and C (P15.6–P15.7, `05ca71f`) have all shipped — see
+[releases.md](releases.md#latest-changes). Nothing open under P15.
 
 ---
 
