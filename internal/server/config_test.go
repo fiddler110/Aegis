@@ -326,6 +326,23 @@ func TestConfigSkillsGetAndPatchRoundTrip(t *testing.T) {
 	if len(empty.BuiltinEnabled) != 0 {
 		t.Errorf("BuiltinEnabled = %v, want empty by default", empty.BuiltinEnabled)
 	}
+	// The catalog of embedded built-ins is always present (P15.7), even when
+	// nothing is enabled, and each entry carries a description.
+	if len(empty.Available) == 0 {
+		t.Fatal("Available is empty, want the embedded built-in skill catalog")
+	}
+	foundAudit := false
+	for _, b := range empty.Available {
+		if b.Name == "security-audit" {
+			foundAudit = true
+			if b.Description == "" {
+				t.Error("security-audit built-in has no description")
+			}
+		}
+	}
+	if !foundAudit {
+		t.Errorf("Available = %v, want it to include security-audit", empty.Available)
+	}
 
 	resp, err := cl.PatchConfigSkills(ctx, "global", []string{"security-audit", "threat-modeling"})
 	if err != nil {
@@ -333,6 +350,10 @@ func TestConfigSkillsGetAndPatchRoundTrip(t *testing.T) {
 	}
 	if len(resp.BuiltinEnabled) != 2 {
 		t.Errorf("BuiltinEnabled = %v, want 2 entries", resp.BuiltinEnabled)
+	}
+	if len(resp.Available) != len(empty.Available) {
+		t.Errorf("PATCH Available has %d entries, GET had %d — should be the same catalog",
+			len(resp.Available), len(empty.Available))
 	}
 
 	got, err := cl.GetConfigSkills(ctx, "global")

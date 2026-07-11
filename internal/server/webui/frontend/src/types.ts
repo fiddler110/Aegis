@@ -133,6 +133,31 @@ export interface KnowledgeResponse {
   count?: number;
 }
 
+// MemoryResponse is the GET /memory response: what the assistant remembers
+// for this project and across all projects, plus the names of the playbooks
+// (skills) it can currently use.
+export interface MemoryResponse {
+  project_memory: string;
+  user_memory: string;
+  skills: string[] | null;
+}
+
+// BuiltinSkillInfo is one embedded built-in playbook in the /config/skills
+// catalog (name + description), whether or not it is currently enabled.
+export interface BuiltinSkillInfo {
+  name: string;
+  description: string;
+}
+
+// ConfigSkillsResponse is the GET/PATCH /config/skills response: which
+// built-in playbooks are turned on, plus the full catalog of built-ins that
+// could be (P15.7).
+export interface ConfigSkillsResponse {
+  scope: string;
+  builtin_enabled: string[] | null;
+  available: BuiltinSkillInfo[] | null;
+}
+
 export interface Event {
   kind:
     | "text"
