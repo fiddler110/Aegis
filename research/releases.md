@@ -407,9 +407,9 @@ Tests: `internal/server/limits_test.go`, `internal/config/config_test.go`,
 `internal/server/webui_test.go`, `internal/mcp/trust_test.go`. `go build ./...`, `go vet ./...`
 clean; `go test ./...` green except three pre-existing/environmental failures on this box
 (`TestBuildImageBlocksFromPath`, and two `scan_test.go` 30s-timeout tests) confirmed unrelated —
-each agent verified via `git stash` that they failed identically before its change. Full detail in
-[roadmap.md](roadmap.md#open-work--p21-fresh-eyes-code-review--2026-07-07) (P21.5/P21.6) and
-[roadmap.md](roadmap.md#open-work--p15-web-ui-parity-with-the-tui) (P15.12).
+each agent verified via `git stash` that they failed identically before its change. P21.5/P21.6's
+track is fully shipped (no open items remain); P15.12's track is covered in
+[roadmap.md](roadmap.md#open-work--p15-web-ui-parity-with-the-tui).
 Earlier, 2026-07-08 — **`/threat-model` framework picker** (follow-up polish to P13.6:
 a recognized leading framework name skips the clarifying question, otherwise a picker dialog opens
 listing all six with descriptions; see the P13.6 section below) shipped after **P23**
