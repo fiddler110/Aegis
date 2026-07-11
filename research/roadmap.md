@@ -1,10 +1,11 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-11 — Tiers 1–3 of the previous pass are now fully shipped (most recently
-P24.16–P24.18, the STRIDE-A threat model's Tier 3 third batch). This pass re-tiers everything that
-remains open: promoted P15.3–P15.11 out of parked status now that their P15.2 backend dependency has
-shipped, and pulled four cheap, no-dependency P24 residuals up into a new Tier 2. Tier 1 is empty.
-P24.15 (FIND-14), P24.22, and P24.20 (FIND-17) have since shipped too, leaving Tier 2 empty.
+**Last updated:** 2026-07-11 (evening) — the Tier 3 pass is mostly shipped: P24.14 (FIND-12 outbound
+MCP documentation + opt-in `scan_arguments` scan) and web-UI batches A (P15.3–P15.5, P15.10) and
+B (P15.8–P15.9) landed 2026-07-11. **Next up: web-UI batch C — P15.6 (security scanning surface) +
+P15.7 (skills & memory management)** — deliberately paused, not blocked; resume from the Tier 3
+section below. After batch C: write up the day's shipped items in releases.md (the commits
+73880ae/d8fc58e/eb5a14c carry the detail until then).
 
 This document tracks only **open** work and what's next. For shipped-feature history and full design
 rationale, see [releases.md](releases.md).
@@ -13,8 +14,8 @@ rationale, see [releases.md](releases.md).
 
 ## Status
 
-**Open items:** P24.14/P24.21 (threat-model residuals), P15.3–P15.11 (web UI frontend
-panels), P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1.
+**Open items:** P15.6–P15.7 (web UI batch C, the only active work), P24.21 (threat-model
+residual), P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1.
 
 **Priority order:** see [Priority Order](#priority-order) below — it is the authoritative "what's
 next" view, ordered by tier and effort.
@@ -42,14 +43,25 @@ in this tier. Next trigger: a new threat-model pass or a reported incident.
 
 ### Tier 3 — Larger, real, sequence-dependent
 
-- **P15.3–P15.11 — Web UI frontend panels** (M–L). Persona/model management, cost/token visibility,
-  checkpoints/rewind, security scanning, skills/memory, debate/knowledge, multi-session lifecycle,
-  approval persistence, non-technical-user framing. Frontend-only now — the P15.6/P15.7 backend
-  dependency on P15.2's config-mutation endpoints shipped 2026-07-10, so this is no longer blocked.
-- **P24.14 — FIND-12: document (and consider an opt-in outbound redaction hook for) MCP tool-call
-  argument content** (S/M, security, Moderate, CVSS 4.6). Value is contingent on FIND-04/FIND-05
-  injection vectors actually being exploited in practice; documentation alone covers most of the
-  value today, a redaction hook would be the sequence-dependent follow-up if that changes.
+- **P15.6–P15.7 — Web UI batch C (NEXT UP — paused 2026-07-11 mid-track, not blocked).**
+  - **P15.6 — Security scanning & baseline surface** (M). `POST /security/scan`,
+    `GET /security/status`, `GET /security/baseline`, `POST /security/install` all exist (P15.2).
+    Needs a findings table (severity/tool/location/remediation — `Finding` is a stable shape)
+    rather than the TUI's plain-text tabwriter output.
+  - **P15.7 — Skills & memory management** (S/M). `GET/POST /memory` (viewer/editor) and
+    `GET/PATCH /config/skills` (builtin enable/disable toggle list) all exist.
+  - Implementation notes for whoever picks this up: frontend-only, reuse batch A/B patterns
+    (topbar chips + `.panel` popovers or sidebar tools, toast system, types.ts conventions,
+    P15.11 plain-language framing), no new npm deps, rebuild + commit `dist/`, ignore the
+    pre-existing `TestBuildImageBlocksFromPath` failure in `internal/server`.
+- ~~**P15.3–P15.5, P15.8–P15.10 — Web UI batches A/B**~~ **SHIPPED 2026-07-11** (`d8fc58e`,
+  `eb5a14c`): persona/model panel, cost/token readout + budget-alert toasts, checkpoints/rewind,
+  always-allow approvals, debate ("stress-test a claim") + knowledge panels, archived-chats
+  tab/prune/background sessions + activity view. P15.11's non-technical framing was applied
+  throughout and remains the design lens for batch C.
+- ~~**P24.14 — FIND-12: MCP outbound tool-call argument content**~~ **SHIPPED 2026-07-11**
+  (`73880ae`): outbound data flow documented in docs/mcp-trust-boundary.md; opt-in per-server
+  `scan_arguments` outbound secret scan (default off, flag-never-block) in internal/mcp.
 
 ### Tier 4 — Parked / low priority / no current trigger
 
@@ -75,21 +87,22 @@ incident) appears.
 
 Full-repo STRIDE-A threat model at commit `34aa687`:
 [`threat-model-20260710-173718/`](../threat-model-20260710-173718/3-findings.md). 35 findings
-total: 14 were "existing control" (already mitigated, verified, no action needed), 29 were shipped
-as P24.1–P24.13/P24.15–P24.20/P24.22 across 2026-07-10/11 (see [releases.md](releases.md#latest-changes)
-for the full writeup of each), and 2 remain open — P24.14, P24.21 — tiered above.
+total: 14 were "existing control" (already mitigated, verified, no action needed), 30 have shipped
+as P24.1–P24.20/P24.22 across 2026-07-10/11 (P24.14 landed 2026-07-11 as commit `73880ae`; see
+[releases.md](releases.md#latest-changes) for the earlier writeups), and 1 remains open — P24.21,
+Tier 4 above.
 
 ---
 
 ## Open Work — P15 (Web UI Parity with the TUI)
 
 Bring `aegis ui` up to feature parity with the TUI. P15.1 (frontend architecture), P15.12
-(token-injection hardening), and P15.2 (config-mutation endpoints) have shipped.
+(token-injection hardening), P15.2 (config-mutation endpoints), and — as of 2026-07-11 — batches
+A (P15.3–P15.5, P15.10, commit `d8fc58e`) and B (P15.8–P15.9, commit `eb5a14c`) have shipped.
 
-**P15.3–P15.11 — Frontend panels. [Tier 3]** Persona/model management, cost/token visibility,
-checkpoints/rewind, security scanning, skills/memory, debate/knowledge, multi-session lifecycle,
-approval persistence, non-technical-user framing. Frontend-only; the P15.6/P15.7 backend dependency
-on P15.2 is unblocked.
+**P15.6–P15.7 — Batch C, the last two panels. [Tier 3, NEXT UP]** Security scanning/baseline
+surface and skills/memory management. Frontend-only — every endpoint exists. Full scope and
+implementation notes in [Tier 3](#tier-3--larger-real-sequence-dependent) above.
 
 ---
 
