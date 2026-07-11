@@ -1,20 +1,21 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-10 — **All of Tier 1 (P24.1–P24.4) and Tier 2 (P24.5–P24.9) shipped** —
-see [releases.md](releases.md#latest-changes) for the full writeup. Full-repo STRIDE-A threat model
-(`threat-model-20260710-173718/`) folded in as new track P24 earlier the same day. FIND-04 and
-FIND-08 shipped as part of that pass too; of the 17 actionable findings (of 35 total; 14 were
-already-mitigated "existing control" findings needing no action), 9 are now shipped (P24.1–P24.9)
-and 8 remain open as P24.10–P24.21 (plus a new P24.22 parked item surfaced during P24.8's audit),
-tiered by severity/effort/dependency alongside the existing tracks.
+**Last updated:** 2026-07-10 — Tier 1 (P24.1–P24.4) and Tier 2 (P24.5–P24.9) shipped; Tier 3 now
+underway, **P24.10 shipped** (first of a 3-item parallel worktree-agent batch alongside P15.2 and
+P21.2, still in progress) — see [releases.md](releases.md#latest-changes) for the full writeup.
+Full-repo STRIDE-A threat model (`threat-model-20260710-173718/`) folded in as new track P24
+earlier the same day. FIND-04 and FIND-08 shipped as part of that pass too; of the 17 actionable
+findings (of 35 total; 14 were already-mitigated "existing control" findings needing no action), 10
+are now shipped (P24.1–P24.10) and 7 remain open as P24.11–P24.21 (plus a new P24.22 parked item
+surfaced during P24.8's audit), tiered by severity/effort/dependency alongside the existing tracks.
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
+This document tracks only **open** work and what's next. For shipped-feature history and full design rationale, see [releases.md](releases.md). Recent shipped items: P24.10 (FIND-06, Docker/Podman privilege docs, 2026-07-10), P24.5–P24.9 (threat-model Tier 2 findings, 2026-07-10), P24.1–P24.4 (threat-model Tier 1 findings, 2026-07-10), FIND-04/FIND-08 (threat-model quick fixes, 2026-07-10), P21.3/P22.3 (Tier 2 high-visibility wins, 2026-07-10), P21.5/P21.6/P15.12 (Tier 1 security/robustness, 2026-07-10), P22.1–P22.4 (CLI features, 2026-07-08), P21.1/P21.4/P21.7 (TUI polish, 2026-07-07), P20.1 (deep-research skill, 2026-07-07), P18–P19/P17/P16 (TUI/streaming/polish, 2026-07-07), P13.1/P13.2/P13.5/P13.6/P13.7/P13.8 (security/capability, 2026-07-06), P23 (Ollama context-window detection, 2026-07-08).
 
 ---
 
 ## Status
 
-**Open items:** P24.10–P24.22 (threat-model findings), P21.2, P15.2–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
+**Open items:** P24.11–P24.22 (threat-model findings), P21.2, P15.2–P15.11, P22.5/P22.6, P20.2–P20.3, P13.3.2–P13.3.3/P13.4, P9.4, P6.1. See [Priority Order](#priority-order) below for what's next.
 
 **Priority order:** see the tiered breakdown immediately below — it is the authoritative "what's next" view, ordered by tier and effort.
 
@@ -85,8 +86,12 @@ isolated git-worktree sub-agents (same pattern as P21.3/P22.3). See
   P15.6/P15.7 and unlocking the rest of the P15 web-UI track. Start here if P15 is still an active priority.
 - **P21.2 — Tool-call cards** (M). In-place-updating tool-call blocks. Real polish win, but a larger
   visual restructure than P21.3 — do after the caret.
-- **P24.10 — FIND-06: document Docker/Podman-socket privilege equivalence + default toward
-  rootless/capability-dropping** (M, security, Moderate, CVSS 6.4).
+- ~~**P24.10 — FIND-06: document Docker/Podman-socket privilege equivalence + default toward
+  rootless/capability-dropping** (M, security, Moderate, CVSS 6.4).~~ **SHIPPED 2026-07-10.**
+  Capability-dropping (`--cap-drop=ALL`/`--security-opt=no-new-privileges`) was already shipped;
+  added a "Docker/Podman socket privilege equivalence" doc section (`docs/security_scan.md`)
+  recommending rootless Podman/userns-remapped Docker, plus a one-time `SocketPrivilegeNotice` log
+  line when the daemon selects a docker/podman backend.
 - **P24.11 — FIND-07: allowlist or TOFU-confirm the `lsp` tool's config-specified binary** (M,
   security, Moderate, CVSS 6.0). A malicious project `.aegis/config.yaml` can currently point the
   LSP client at an arbitrary binary for silent code execution.
@@ -159,10 +164,8 @@ events), P24.8 (FIND-31, audited — no unsanitized concatenation found, locked 
 tests; see P24.22 above for the one latent observation it surfaced), P24.9 (FIND-34, durable
 `cron_runs` table + `cron_history` tool, independent of turn traces).
 
-**Larger/sequence-dependent (Tier 3, Medium effort):**
-- **P24.10 (FIND-06)** — Document Docker/Podman-socket privilege equivalence; default to/recommend
-  rootless Podman or user-namespace-remapped Docker with explicit `--cap-drop=ALL` for sandbox
-  containers.
+**Larger/sequence-dependent (Tier 3, Medium effort):** P24.10 shipped 2026-07-10 (see
+[releases.md](releases.md#latest-changes)).
 - **P24.11 (FIND-07)** — TOFU-confirm or allowlist `ServerConfig.Command`/`.Args` in
   `internal/lsp/manager.go` before `exec.CommandContext` spawns a new binary for a project.
 - **P24.12 (FIND-09)** — Opt-in secret-pattern redaction pass over tool-read file content before

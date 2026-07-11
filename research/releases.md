@@ -9,7 +9,25 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-10 — **P24.5–P24.9, the STRIDE-A threat model's Tier 2 quick wins, all
+**Last updated:** 2026-07-10 — **P24.10, the first of the STRIDE-A threat model's Tier 3 findings,
+shipped via an isolated git-worktree sub-agent** (see [roadmap.md](roadmap.md#priority-order)):
+**P24.10 (FIND-06) — document Docker/Podman-socket privilege equivalence, recommend rootless
+backends.** FIND-06 flagged that Docker/Podman socket access is privilege-equivalent to local root
+(Docker) or the invoking user (rootful Podman), and that `internal/sandbox/docker.go` showed no
+capability-dropping. Re-verified against current code first: `ociRunArgs` already applies
+`--cap-drop=ALL` and `--security-opt=no-new-privileges` unconditionally to every docker/podman run,
+so that half of the finding was already shipped — this change didn't touch it. What remained open
+was the doc gap (the inherent socket-level privilege equivalence, which no container-run flag can
+close) and rootless-backend guidance. Added a "Docker/Podman socket privilege equivalence"
+subsection to `docs/security_scan.md` and new `sandbox.SocketRuntime`/`SocketPrivilegeNotice`
+helpers, logged once via `Server.SelectSandbox` when a docker/podman backend is selected — no
+automatic rootless-vs-rootful detection, since no reliable cross-platform client-side signal exists
+without a fragile `docker/podman info` parse (documented as a deliberate scope decision, not an
+oversight).
+Tests: `internal/sandbox/docker_test.go` (new `TestSocketRuntime`/`TestSocketPrivilegeNotice`);
+`go build ./...`, `go vet ./...` clean, `go test ./internal/sandbox/... ./internal/cli/...` and the
+`internal/server` `TestSelectSandbox*` suite green.
+Earlier the same day — **P24.5–P24.9, the STRIDE-A threat model's Tier 2 quick wins, all
 shipped in parallel via isolated git-worktree sub-agents** (see
 [roadmap.md](roadmap.md#priority-order)):
 **P24.5 (FIND-11) — count and log repeated invalid-bearer-token attempts.** `authMiddleware`
