@@ -42,6 +42,8 @@ ollama pull qwen3:14b          # reasoning model
 ollama pull deepseek-r1:14b    # reasoning model
 ```
 
+**Shared-host note:** Ollama serves over plain HTTP by default (no TLS), so daemon↔Ollama traffic is unencrypted. On a single-user machine this is no different from any other localhost loopback traffic. On a **shared multi-user host**, another local account could observe or tamper with that traffic; where Ollama supports it, enable TLS, or prefer a single-user host for sensitive work.
+
 ### LM Studio
 
 ```yaml
