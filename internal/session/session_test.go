@@ -101,6 +101,36 @@ func TestLegacyBlobMigration(t *testing.T) {
 	}
 }
 
+// TestOpenAppliesPermissionHardening exercises the FIND-29/P24.16
+// hardenDBPermissions call Open makes on the database file and its
+// WAL-mode sidecars (-wal, -shm). On POSIX this is a no-op (fsguard's
+// RestrictToOwner returns nil immediately there), so the main assertion is
+// simply that Open still succeeds and the store is usable — a regression
+// where the hardening call errors out (including on a sidecar that hasn't
+// been created yet) must not break every session open.
+func TestOpenAppliesPermissionHardening(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hardened.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	if _, err := st.Create(context.Background(), "hardening-check", "sys", "build", ""); err != nil {
+		t.Fatalf("Create after Open: %v", err)
+	}
+
+	// Re-open the same path: hardenDBPermissions runs again and must not
+	// error even though the -wal/-shm sidecars now exist from the first
+	// open's writes above.
+	st2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen after hardening: %v", err)
+	}
+	st2.Close()
+}
+
 func TestSessionRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
