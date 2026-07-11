@@ -168,6 +168,7 @@ type Event struct {
 	Err         error            // KindError
 	GuardReason string           // KindGuard: why validation failed
 	GuardPassed bool             // KindGuard: whether the guard ultimately passed
+	GuardStatus string           // KindGuard: guard.Status value — "passed" | "failed" | "skipped_transport_error" — distinguishes a genuine pass/fail verdict from a fail-open skip that GuardPassed alone can't
 }
 
 // EmitFunc receives engine events. It must not block for long.
@@ -473,10 +474,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					maxRetries = 1
 				}
 				if final := assistantText(assistant); final != "" {
-					ok, reason := e.outputGuard(ctx, guard.Input{Text: final, Files: e.collectWrittenFiles(ctx)})
+					ok, reason, status := e.outputGuard(ctx, guard.Input{Text: final, Files: e.collectWrittenFiles(ctx)})
+					e.logger.Debug("output guard result", "passed", ok, "guard_status", string(status))
 					if !ok && guardRetries < maxRetries {
 						guardRetries++
-						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason})
+						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason, GuardStatus: string(status)})
 						corrective := "[Your previous response did not pass output validation: " + reason +
 							". This means the actual deliverable is incomplete or unpolished, not just its" +
 							" description. Do not reply with only an acknowledgment, a plan, or a promise to" +
@@ -492,8 +494,15 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 						continue
 					}
 					if !ok {
-						emit(Event{Kind: KindGuard, GuardPassed: false,
+						emit(Event{Kind: KindGuard, GuardPassed: false, GuardStatus: string(status),
 							GuardReason: "surfacing the response after " + itoa(maxRetries) + " failed validation attempt(s): " + reason})
+					} else {
+						// Genuine pass and fail-open-skip both set ok=true, but the
+						// caller can now tell them apart via GuardStatus — without
+						// this, "the guard validated and passed" and "the guard
+						// silently never ran" were byte-for-byte indistinguishable
+						// (FIND-16).
+						emit(Event{Kind: KindGuard, GuardPassed: true, GuardStatus: string(status)})
 					}
 				}
 			}
