@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/fsguard"
 )
 
 // --- authentication & security middleware ---
@@ -20,9 +22,9 @@ import (
 // The 0o600 mode bit is sufficient on POSIX but cosmetic on Windows, where a
 // new file inherits its parent directory's ACL rather than deriving
 // permissions from the mode argument — on a shared Windows host another
-// local account can often still read the file. restrictToOwner applies a
-// real, non-inherited ACL restricting the file to its owner on Windows and
-// is a no-op on POSIX (see token_windows.go / token_other.go).
+// local account can often still read the file. fsguard.RestrictToOwner
+// applies a real, non-inherited ACL restricting the file to its owner on
+// Windows and is a no-op on POSIX (see internal/fsguard).
 func generateAndWriteToken(path string) (string, error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -32,7 +34,7 @@ func generateAndWriteToken(path string) (string, error) {
 	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
 		return "", err
 	}
-	if err := restrictToOwner(path); err != nil {
+	if err := fsguard.RestrictToOwner(path); err != nil {
 		return "", fmt.Errorf("restrict auth token permissions: %w", err)
 	}
 	return token, nil
