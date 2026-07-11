@@ -19,9 +19,16 @@ import (
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/trace"
 )
+
+// redactSecretsFn is a seam over security.RedactText so tests can stub in
+// findings without needing the real gitleaks binary on PATH — mirrors
+// gitpr.go's scanPRTextForSecrets seam over security.ScanText (P24.6 /
+// FIND-13).
+var redactSecretsFn = security.RedactText
 
 // Conversation is the mutable transcript the engine drives.
 type Conversation struct {
@@ -228,7 +235,14 @@ type Options struct {
 	LoopThreshold         int           // identical tool-call turns before aborting; 0 -> default, <0 disables
 	ContextWindowTokens   int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
 	SteerChan             <-chan string // optional; steering messages injected between tool rounds
-	Logger                *slog.Logger
+	// RedactSecrets opts in to running a read-capability tool's output through
+	// gitleaks-backed secret detection (security.RedactText) before it's
+	// appended to the conversation sent to the model provider (P24.12 /
+	// FIND-09) — mitigates a cloud provider seeing a secret that a file read
+	// happened to pick up. Off by default; never blocks the tool call, only
+	// scrubs detected secret patterns in place.
+	RedactSecrets bool
+	Logger        *slog.Logger
 }
 
 // Engine runs the agent loop.
@@ -251,6 +265,7 @@ type Engine struct {
 	loopThreshold       int
 	contextWindowTokens int
 	steerChan           <-chan string
+	redactSecrets       bool
 	logger              *slog.Logger
 
 	// writtenFiles tracks workspace-relative paths touched by a successful
@@ -308,6 +323,7 @@ func New(opts Options) (*Engine, error) {
 		loopThreshold:       loopThreshold,
 		contextWindowTokens: opts.ContextWindowTokens,
 		steerChan:           opts.SteerChan,
+		redactSecrets:       opts.RedactSecrets,
 		logger:              logger,
 	}, nil
 }
@@ -907,6 +923,19 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	}
 	if !isErr && t.Capability() == tool.CapWrite {
 		e.recordWrittenPaths(writtenPathsFromInput(tu.Input))
+	}
+	if !isErr && e.redactSecrets && t.Capability() == tool.CapRead {
+		// P24.12 / FIND-09: opt-in scrub of tool-read file content for secret
+		// patterns before it's appended to the conversation sent to whichever
+		// provider is configured (a cloud API by default has no visibility
+		// restriction on what a file read surfaces). Strictly best-effort and
+		// never blocking — a scan failure or gitleaks being absent leaves
+		// content untouched, since the tool result must still reach the model
+		// either way.
+		if redacted, findings, scanErr := redactSecretsFn(ctx, content); scanErr == nil && len(findings) > 0 {
+			content = redacted
+			e.logger.Info("redacted secret pattern(s) from tool output", "tool", tu.Name, "count", len(findings))
+		}
 	}
 	if e.hooks != nil {
 		e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)
