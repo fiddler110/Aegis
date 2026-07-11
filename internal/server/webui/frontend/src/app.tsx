@@ -20,6 +20,7 @@ import { Checkpoints } from "./components/Checkpoints";
 import { DebatePanel } from "./components/DebatePanel";
 import { KnowledgePanel } from "./components/KnowledgePanel";
 import { SkillsMemoryPanel } from "./components/SkillsMemoryPanel";
+import { SecurityPanel } from "./components/SecurityPanel";
 import { Activity } from "./components/Activity";
 
 function itemsFromMessages(messages: Message[], sessionId: string): TranscriptItem[] {
@@ -98,7 +99,15 @@ interface Toast {
   warn: boolean;
 }
 
-type Panel = "none" | "assistant" | "checkpoints" | "debate" | "knowledge" | "skillsmem" | "activity";
+type Panel =
+  | "none"
+  | "assistant"
+  | "checkpoints"
+  | "debate"
+  | "knowledge"
+  | "security"
+  | "skillsmem"
+  | "activity";
 
 export function App() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -770,6 +779,7 @@ export function App() {
           )}
           {panel === "debate" && <DebatePanel onClose={() => setPanel("none")} />}
           {panel === "knowledge" && <KnowledgePanel onClose={() => setPanel("none")} />}
+          {panel === "security" && <SecurityPanel onClose={() => setPanel("none")} />}
           {panel === "skillsmem" && (
             <SkillsMemoryPanel addToast={addToast} onClose={() => setPanel("none")} />
           )}
