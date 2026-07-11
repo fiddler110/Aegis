@@ -62,16 +62,43 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		auth := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(auth, prefix) {
+			s.recordInvalidAuthAttempt(r)
 			writeError(w, http.StatusUnauthorized, "missing authorization")
 			return
 		}
 		provided := auth[len(prefix):]
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(s.authToken)) != 1 {
+			s.recordInvalidAuthAttempt(r)
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// invalidAuthLogEvery caps how often a rejected-auth attempt is logged: one
+// in every N cumulative failures, so a probe hammering the daemon produces
+// steady signal in the log without spamming it once per request (FIND-11).
+// The counter itself is still incremented on every failure regardless of
+// whether this particular one is logged.
+const invalidAuthLogEvery = 5
+
+// recordInvalidAuthAttempt bumps the process-wide invalid-bearer-token
+// counter and, on a coarse cadence, emits a slog.Warn with the cumulative
+// count so a probe against the daemon's auth is auditable. It deliberately
+// never logs the attempted token value itself. Both authMiddleware failure
+// branches (missing "Bearer " prefix, and a token that doesn't match) call
+// this — a probe that never sends a Bearer prefix at all is just as worth
+// surfacing as one that guesses wrong.
+func (s *Server) recordInvalidAuthAttempt(r *http.Request) {
+	n := s.invalidAuthAttempts.Add(1)
+	if n == 1 || n%invalidAuthLogEvery == 0 {
+		s.logger.Warn("rejected request with invalid or missing bearer token",
+			"remote_addr", r.RemoteAddr,
+			"path", r.URL.Path,
+			"cumulative_count", n,
+		)
+	}
 }
 
 // originMiddleware blocks requests with a non-loopback Origin header to
