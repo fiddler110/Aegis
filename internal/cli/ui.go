@@ -27,6 +27,11 @@ func newUICmd() *cobra.Command {
 				return err
 			}
 			cl := client.NewFromConfig(cfg)
+			// This command only uses cl to check/report daemon health before
+			// handing off to the browser (or, for an embedded daemon, to
+			// block until Ctrl+C); it is never reused after RunE returns, so
+			// scrub it on the way out (FIND-33/P24.21).
+			defer cl.Zero()
 
 			healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
 			healthErr := cl.Health(healthCtx)

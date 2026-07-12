@@ -45,6 +45,11 @@ func newParallelCmd() *cobra.Command {
 				return err
 			}
 			defer stopDaemon()
+			// cl is shared read-only by the fan-out goroutines below, all of
+			// which finish before wg.Wait() returns; scrubbing after that
+			// point (deferred, so it runs at the very end of RunE) is safe
+			// (FIND-33/P24.21).
+			defer cl.Zero()
 
 			out := cmd.OutOrStdout()
 			var stdoutMu sync.Mutex
@@ -152,6 +157,7 @@ func newRunsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			runs, err := cl.ListRuns(cmd.Context())
 			if err != nil {
 				return err

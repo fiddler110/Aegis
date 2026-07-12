@@ -40,6 +40,7 @@ func newBGListCmd() *cobra.Command {
 				return err
 			}
 			defer stop()
+			defer cl.Zero() // one-shot command; cl is not reused after RunE returns (FIND-33/P24.21)
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()
@@ -82,6 +83,7 @@ func newBGEventsCmd() *cobra.Command {
 				return err
 			}
 			defer stop()
+			defer cl.Zero() // one-shot command; cl is not reused after RunE returns (FIND-33/P24.21)
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()
