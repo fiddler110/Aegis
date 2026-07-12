@@ -118,11 +118,20 @@ Type `@` to open the reference picker:
 | `@path/to/file.go` | Attach file path — agent reads it with `read_file` |
 | `@path/to/file.go#L10-40` | Attach a specific line range — only lines 10–40 are injected |
 | `@image:<path>` | Attach image (PNG/JPEG/GIF/WebP, max 5 MiB) to send to vision model |
+| `@shell` / `@shell:N` | Inject the last N lines (default 50) of the embedded terminal pane's most recent command + output |
 | `@diagnostics` | Reference to LSP diagnostics for the current project |
 | `@url:<address>` | Reference to a URL — agent fetches it with `web_fetch` |
 | `@symbol:<name>` | Reference to a code symbol — agent locates it with search tools |
 
 Paths can be absolute, `~`-relative, or relative to the workspace. File path completion is fuzzy-matched against a workspace index. Line-range references (`#L10-40` or `#10-40`) are expanded by the daemon before the engine call — the model sees only the specified lines.
+
+`@shell` and `@shell:N` are resolved client-side when you hit Enter, not by the agent — they splice in the last N lines of whatever you last ran in the terminal pane (`Ctrl+X` to toggle it open), success or failure. For example, after running `npm test` in the pane:
+
+```
+Why did this fail? @shell:20
+```
+
+sends the last 20 lines of that run's output as part of your message text. If nothing has run in the pane yet, it substitutes `(no terminal output yet)` instead of failing to send.
 
 ### Multi-line input
 
@@ -367,3 +376,5 @@ When the `agent` tool spawns sub-agents, press `Ctrl+T` to open a panel listing 
 ## Terminal Pane (`Ctrl+X`)
 
 Press `Ctrl+X` to open a scrollable shell pane docked to the right of the transcript. It runs commands directly (via the same local sandbox backend used for shell execution) independent of the agent — useful for poking around the workspace without spending a turn. `Enter` runs the typed command, `↑`/`↓` navigates its own command history, and `Ctrl+C` interrupts a running command in the pane. `Esc` (or `Ctrl+X` again) closes it and returns focus to the main input.
+
+Since commands run here don't automatically flow back to the model, use the `@shell` reference (see [`@` References](#-references)) to pull the most recent command's output into your next message on demand.
