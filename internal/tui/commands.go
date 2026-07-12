@@ -278,6 +278,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdSidebar,
 		},
 		{
+			name: "scrollback", argHint: "[on|off]", needsArgs: true,
+			shortDesc:    "Toggle raw scrollback mode: plain text, native terminal scroll/select/search",
+			detailedHelp: "/scrollback [on|off]\n  Toggle raw scrollback mode (P22.6).\n  on: renders the transcript as plain sequential text with nothing clipped, and releases the terminal's alt-screen buffer and mouse capture — your terminal emulator's own scrollback, mouse-wheel scrolling, click-drag selection, and search (e.g. ctrl+shift+f) all work natively again, the way they would against plain stdout.\n  off (default): the normal dashboard — bounded transcript viewport, sidebar, in-app mouse-drag selection (drag to copy) — is restored.\n  No args: toggle current state.\n  Sidebar, scrollbar, and the terminal pane (ctrl+x) are hidden while this is on, since they assume a fixed-height dashboard. This session only; resets on restart.",
+			handler:      (*SlashDispatcher).cmdScrollback,
+		},
+		{
 			name: "theme", argHint: "<name>", needsArgs: true,
 			shortDesc:    "Switch the color scheme live, no restart needed",
 			detailedHelp: "/theme <name>\n  Switch the TUI color scheme immediately — no restart needed.\n  Built in: dark, light, catppuccin, dracula, gruvbox, tokyonight.\n  Custom: drop a <name>.json file (background/foreground + the 16 ANSI colors) in .aegis/themes/ (project) or ~/.aegis/themes/ (user).\n  No args: show the current theme.\n  This session only; set tui.theme: <name> in config (project or global) to make it the default on restart.",

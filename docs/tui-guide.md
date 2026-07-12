@@ -236,6 +236,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/tools compact` | Set tool-output display to 10 lines max |
 | `/tools full` | Show complete tool output (no line cap) |
 | `/sidebar` | Toggle the left sidebar on/off (also `Ctrl+B`) |
+| `/scrollback [on\|off]` | Toggle raw scrollback mode: plain, unclipped transcript text with the terminal's alt-screen and mouse capture released, so your terminal's own scrollback/selection/search work natively (see [Raw Scrollback Mode](#raw-scrollback-mode)) |
 | `/theme [name]` | Switch the color scheme live (no restart); built in: dark, light, catppuccin, dracula, gruvbox, tokyonight — or a custom `<name>.json` in `.aegis/themes/`/`~/.aegis/themes/`; no args shows the current theme |
 | `/copy` | Copy the last assistant message to clipboard |
 | `/copy <n>` | Copy the Nth fenced code block from the last response |
@@ -379,3 +380,18 @@ When the `agent` tool spawns sub-agents, press `Ctrl+T` to open a panel listing 
 Press `Ctrl+X` to open a scrollable shell pane docked to the right of the transcript. It runs commands directly (via the same local sandbox backend used for shell execution) independent of the agent — useful for poking around the workspace without spending a turn. `Enter` runs the typed command, `↑`/`↓` navigates its own command history, and `Ctrl+C` interrupts a running command in the pane. `Esc` (or `Ctrl+X` again) closes it and returns focus to the main input.
 
 Since commands run here don't automatically flow back to the model, use the `@shell` reference (see [`@` References](#-references)) to pull the most recent command's output into your next message on demand.
+
+---
+
+## Raw Scrollback Mode
+
+By default the transcript lives in a bounded, in-app viewport: a fixed-height window that's redrawn in place as you scroll (`PageUp`/`PageDown`, the mouse wheel, or drag-to-select). That viewport — not just the terminal's alternate-screen buffer — is what stops your terminal emulator's own scrollback, mouse-wheel scrolling, click-drag text selection, and search (e.g. `Ctrl+Shift+F` in most emulators) from working normally: the same screen rows get reused every frame instead of old content actually scrolling through the terminal's history.
+
+`/scrollback` (or `/scrollback on`/`/scrollback off`) toggles **raw scrollback mode**, which trades the dashboard for native terminal behavior:
+
+- The transcript renders as plain, unclipped sequential text — nothing is ever scrolled out of the rendered frame, so as the conversation grows, old content genuinely scrolls off the top into your terminal's own history instead of being redrawn away.
+- The alternate-screen buffer and mouse capture are both released, so your terminal's native scrollback, mouse-wheel scroll, click-drag selection, and search all work exactly as they would against plain command output.
+- The sidebar, scrollbar, and terminal pane (`Ctrl+X`) are hidden while it's on — they assume a fixed-height dashboard next to a bounded transcript, which no longer applies. Turning the mode back off restores them (including sidebar open/closed state) exactly as they were.
+- In-app scroll keys and mouse-drag-to-copy selection have nothing to do in this mode (everything is already visible) — use your terminal's own scrollback and selection instead.
+
+It's off by default and resets on restart, the same as `/tools` and `/humor`.

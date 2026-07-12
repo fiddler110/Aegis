@@ -182,6 +182,16 @@ type model struct {
 	// Sidebar visibility (Ctrl+B / /sidebar to toggle, default off).
 	sidebarOpen bool
 
+	// rawScrollback (P22.6), when true, releases the terminal's native
+	// scrollback/selection/search: the transcript pane renders unclipped
+	// (every segment, not just a bounded viewport window) and View() drops
+	// alt-screen + mouse capture, so growing conversation content scrolls
+	// through the terminal's own history the way plain stdout output would.
+	// Sidebar/scrollbar/terminal-pane chrome — which assume a fixed-height
+	// dashboard — are suppressed while this is on. /scrollback toggles it;
+	// default off, resets on restart (same convention as /tools, /humor).
+	rawScrollback bool
+
 	// lastAssistantText holds the most recent complete assistant message for /copy.
 	lastAssistantText string
 
@@ -1797,6 +1807,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refresh()
 			return m, nil
 		}
+		if msg.Output == "\x00scrollback-on" {
+			return m, m.setRawScrollbackCmd(true)
+		}
+		if msg.Output == "\x00scrollback-off" {
+			return m, m.setRawScrollbackCmd(false)
+		}
+		if msg.Output == "\x00scrollback-toggle" {
+			return m, m.setRawScrollbackCmd(!m.rawScrollback)
+		}
 		if msg.Output == "\x00theme-show" {
 			m.transcript.Append(m.th.statusText.Render(fmt.Sprintf("Current theme: %s", m.cfg.Theme)) + "\n\n")
 			m.refresh()
@@ -2000,14 +2019,21 @@ func (m model) cycleModeCmd() tea.Cmd {
 // plus the completion popup box (completionBoxH) when the popup is active.
 func (m *model) layout() {
 	vpW := m.width - 1 // -1 for PaddingLeft on the main panel
-	if m.sidebarOpen && m.width >= sidebarMinTermW {
-		// sidebar consumes sidebarTotalW; main panel gets the rest minus left pad
-		vpW = m.width - sidebarTotalW - 1
+	if m.rawScrollback {
+		// P22.6: raw scrollback mode suppresses the sidebar, terminal pane,
+		// and scrollbar column (renderChat/renderScrollbar) — none of that
+		// dashboard-column width is reserved, so the plain transcript text
+		// gets the full body width instead.
+	} else {
+		if m.sidebarOpen && m.width >= sidebarMinTermW {
+			// sidebar consumes sidebarTotalW; main panel gets the rest minus left pad
+			vpW = m.width - sidebarTotalW - 1
+		}
+		if m.termOpen {
+			vpW -= termPaneTotalW
+		}
+		vpW -= 1 // scrollbar column (P16.5), rendered to the right of the transcript
 	}
-	if m.termOpen {
-		vpW -= termPaneTotalW
-	}
-	vpW -= 1 // scrollbar column (P16.5), rendered to the right of the transcript
 	vpW = max(vpW, 10)
 
 	m.transcript.SetSize(vpW, m.transcript.Height())
@@ -2045,8 +2071,19 @@ func (m *model) fixedH() int {
 }
 
 // applyViewportHeight resizes the transcript pane to fit the current fixed budget.
+//
+// P22.6: in raw scrollback mode the pane height tracks the content's own
+// total height instead of the terminal window, so View() (transcript.go)
+// renders every segment with nothing clipped — the frame genuinely grows
+// turn over turn instead of redrawing the same fixed-height region in place,
+// which is what lets bubbletea's non-alt-screen renderer scroll old lines
+// through the terminal's real history (see View()'s doc comment on model).
 func (m *model) applyViewportHeight() {
-	m.transcript.SetSize(m.transcript.Width(), max(m.height-m.fixedH(), 3))
+	if m.rawScrollback {
+		m.transcript.SetSize(m.transcript.Width(), m.transcript.TotalHeight())
+	} else {
+		m.transcript.SetSize(m.transcript.Width(), max(m.height-m.fixedH(), 3))
+	}
 	// P21.7: a height change moves the bottom edge out from under the pinned
 	// offset. While following, re-pin immediately so a pane shrink (approval
 	// dialog, completion popup, textarea wrap) never leaves the newest content
@@ -2092,6 +2129,25 @@ func (m *model) syncCompletion() {
 		m.applyViewportHeight()
 		m.refresh()
 	}
+}
+
+// setRawScrollbackCmd applies the P22.6 raw-scrollback toggle: flips
+// m.rawScrollback, re-runs layout (View()'s AltScreen/MouseMode and
+// applyViewportHeight's clipped-vs-unclipped transcript height both key off
+// it) and refresh, and reports the new state as a transcript status line
+// (the same "\x00foo-on/off" -> status-line pattern /humor and /theme use).
+func (m *model) setRawScrollbackCmd(on bool) tea.Cmd {
+	m.rawScrollback = on
+	m.layout()
+	var msg string
+	if on {
+		msg = "Raw scrollback mode: on — plain text, native terminal scroll/select/search restored. Sidebar and terminal pane hidden."
+	} else {
+		msg = "Raw scrollback mode: off — normal dashboard restored."
+	}
+	m.transcript.Append(m.th.statusText.Render(msg) + "\n\n")
+	m.refresh()
+	return nil
 }
 
 // acceptCompletion fills the highlighted command into the textarea. When run
@@ -2201,6 +2257,14 @@ func (m *model) refresh() {
 	}
 
 	m.transcript.SetTail(tail.String())
+	if m.rawScrollback {
+		// P22.6: refresh() runs after nearly every transcript mutation
+		// (append, tool-result update, tail rebuild) — re-sync the pane
+		// height to the content's own total here too, not just on resize
+		// (applyViewportHeight), so a raw-mode pane never falls behind
+		// newly appended content and clips it.
+		m.transcript.SetSize(m.transcript.Width(), m.transcript.TotalHeight())
+	}
 	if m.followBottom {
 		m.transcript.GotoBottom()
 	}
@@ -3020,11 +3084,29 @@ func (m *model) renderTeammates(msg teammatesMsg) {
 
 // View wraps the rendered content in a tea.View, setting the v2 terminal modes
 // (alt-screen, mouse, background) that were previously program options.
+//
+// P22.6: rawScrollback drops both alt-screen and mouse capture. Alt-screen
+// alone isn't the blocker for native terminal scrollback — bubbletea's
+// non-alt-screen renderer already resizes its frame to the content height and
+// lets genuinely new lines scroll through the terminal's own history (see
+// cursed_renderer.go's flush: "the frame height can change based on the
+// content... different from the alt screen buffer, which has a fixed
+// height"). What actually defeats it in this app's normal mode is that the
+// transcript is a bounded, in-place-redrawn viewport (transcriptPane) that
+// clips to a fixed visible window regardless of alt-screen — see
+// applyViewportHeight's rawScrollback branch, which is the other half of this
+// mode: it renders every segment unclipped so the frame truly grows. Mouse
+// capture is released too, since MouseModeCellMotion alone is enough to stop
+// a terminal emulator from offering its own click-drag text selection.
 func (m model) View() tea.View {
 	v := tea.NewView(m.render())
-	v.AltScreen = true
+	v.AltScreen = !m.rawScrollback
 	v.BackgroundColor = colSurface
-	v.MouseMode = tea.MouseModeCellMotion
+	if m.rawScrollback {
+		v.MouseMode = tea.MouseModeNone
+	} else {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	v.WindowTitle = m.windowTitle() // P16.1: OSC 0/2, reflects session state
 	v.ReportFocus = true            // P16.1: enables tea.FocusMsg/BlurMsg
 	return v
@@ -3095,23 +3177,34 @@ func (m model) renderChat() string {
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
 
-	main := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().PaddingLeft(1).Render(m.renderTranscriptContent()),
-		m.renderScrollbar(),
-	)
 	var content string
-	if m.sidebarOpen && m.width >= sidebarMinTermW {
-		sidebar := m.renderSidebar(m.transcript.Height())
-		if m.termOpen {
-			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
-		} else {
-			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
-		}
+	if m.rawScrollback {
+		// P22.6: no scrollbar column (nothing to indicate — the terminal owns
+		// scroll position) and no sidebar/terminal pane (both assume a
+		// fixed-height dashboard next to a bounded transcript; here the
+		// transcript's own height is unbounded and grows with content, so
+		// joining a fixed-height column beside it would either misalign or,
+		// for the sidebar's Height()-padded block, emit thousands of blank
+		// lines). Plain sequential text gets the full body width instead.
+		content = lipgloss.NewStyle().PaddingLeft(1).Render(m.renderTranscriptContent())
 	} else {
-		if m.termOpen {
-			content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
+		main := lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.NewStyle().PaddingLeft(1).Render(m.renderTranscriptContent()),
+			m.renderScrollbar(),
+		)
+		if m.sidebarOpen && m.width >= sidebarMinTermW {
+			sidebar := m.renderSidebar(m.transcript.Height())
+			if m.termOpen {
+				content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
+			} else {
+				content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+			}
 		} else {
-			content = main
+			if m.termOpen {
+				content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
+			} else {
+				content = main
+			}
 		}
 	}
 
