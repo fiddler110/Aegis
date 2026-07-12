@@ -9,6 +9,7 @@ import (
 	"github.com/fiddler110/aegis/internal/hooks"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
+	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -180,8 +181,11 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 // newEngine builds an engine for one turn. modelOverride, when non-empty, is
 // a per-session model pin (P14.7 /model) that takes precedence over the
 // persona's own Model and the global provider.model — same precedence a
-// persona-level override already has over the global default.
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir string) (*engine.Engine, error) {
+// persona-level override already has over the global default. userText and
+// priorMessages (the session's history *before* this turn's message is
+// appended) feed P9.4 task routing — see turnModel/routeModel in routing.go
+// — and are ignored entirely unless routing is opted into.
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir, userText string, priorMessages []provider.Message) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, s.providerUnconfiguredErr()
 	}
@@ -193,7 +197,14 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	}
 	gate, engineHooks := s.buildGate(mode, approver, p)
 
-	model := s.resolveModel(p, modelOverride)
+	model, routingReason, routedToSmall := s.turnModel(p, modelOverride, userText, priorMessages)
+	if routingReason != "" {
+		if routedToSmall {
+			s.logger.Debug("task routing: routed turn to small model", "model", model, "reason", routingReason)
+		} else {
+			s.logger.Debug("task routing: kept primary model", "model", model, "reason", routingReason)
+		}
+	}
 
 	var guardFn guard.Func
 	var guardRetries int

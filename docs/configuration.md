@@ -87,6 +87,17 @@ provider:
   # verdict calls. Falls back to `model` if empty.
   small_model: ""
 
+  # P9.4: opt-in per-turn model routing for user-facing agent turns. When
+  # true AND small_model is set, each turn is classified by a purely local
+  # heuristic (message length, code fences, multi-step lists, sentence
+  # count, and whether the session already made tool calls this turn) as
+  # "simple" or "complex". Simple turns run on small_model; everything else
+  # — including any turn where the classifier is unsure — stays on `model`.
+  # No effect unless small_model is also set, and never overrides an
+  # explicit per-session /model pin (P14.7), which always wins. Off by
+  # default; existing setups see no behavior change.
+  task_routing: false
+
   # Maximum tokens in the model's response. Capped by the model's own limits.
   max_tokens: 8192
 
