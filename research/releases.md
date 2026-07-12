@@ -9,7 +9,86 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 (evening) — **P15.3–P15.10 — web UI parity with the TUI (batches A, B,
+**Last updated:** 2026-07-11 (late night) — **P25.1 — per-session working directory and P25.2 —
+sandbox backend name trap + untruthful `/config/sandbox`** (`6b76e5e`). The two highest-priority
+findings from the same day's local-model live-evaluation session (see roadmap.md's P25 section for
+the eval methodology, comparative-run table, and regression harness).
+
+*P25.1 — per-session working directory.* A TUI session started in directory X against a daemon
+started in directory Y displayed `Dir X` in the welcome screen but executed every tool in Y — in
+the live eval the agent answered `git status` from the wrong repo, concluded the target file
+didn't exist, web-searched, then ran `find /`; `read_file` with the session dir's absolute path
+was refused (outside workspace root), pushing the model to shell `cat`/`ls` and an approval prompt
+each time. Root cause: `internal/server/server.go` captured `os.Getwd()` once at daemon startup
+and that single value became the tool workspace root, `s.workspace`, memory/repo-map/LSP/knowledge
+roots, persona/command discovery dirs, and sandbox `ExecOpts.Dir`; sessions had no workdir of
+their own, and `aegis chat` (in-process engine rooted at the caller's cwd) masked the bug by
+behaving differently from the TUI against the same daemon.
+Shipped: rather than a per-root `tool.Registry` cache — which would mean reconnecting MCP servers,
+re-registering plugins, and rebuilding the swarm/agent tool once per distinct session directory —
+the daemon keeps one shared, MCP/plugin/swarm-wired registry and threads the session's workdir
+through `context.Context` (`tool.WithWorkdir`/`tool.WorkdirFromContext`, mirroring the existing
+`tool.WithRegistry` pattern `tool_search` already relied on). `engine.Options.Workdir` sets it
+once per turn (`executeTool`, right next to `tool.WithRegistry`); every workspace-confined tool
+(file ops, `ls`/`glob`/`grep`, git, `shell`, security/diagram/latex/dast/recon tools,
+`remember`/`save_skill`, background shell jobs) resolves its effective root from that context
+value, falling back to its own construction-time root when unset. `sandbox.ExecOpts.Dir` was
+already per-call for the local and container backends, so this reaches the shell tool with no
+sandbox-package changes. `CreateSessionRequest`/`SessionMeta`/`session.Session`/`session.Meta`
+gained `Workdir`; the session store persists it via the same idempotent
+`ALTER TABLE ... ADD COLUMN` pattern as the P14.7 `Model` field. `handleCreateSession` resolves
+and validates it (must exist, be a directory) and enforces the trust boundary: a new
+`server.session_workdir_allowlist` config key (alongside `server.allow_remote`) restricts a
+remote-accessible daemon to the daemon's own workspace or an explicitly allowlisted root;
+loopback-only daemons (the default) accept any existing directory, matching today's trust model.
+TUI (`internal/cli/root.go`) sends its cwd on create and prefers a resumed session's own
+persisted `Workdir` over the local cwd; ACP (`internal/acp/agent.go`) now forwards the
+`session/new` `cwd` param it was previously parsing and discarding. `aegis chat`, the web UI,
+`mcp-serve`, and `parallel.go` are unchanged.
+Deliberately deferred (documented gap, not a silent one): `lsp.Manager`, `knowledge.Store`,
+`longmem.Store`, the cached repo-map (`s.repoMap`), and persona/command/agent-def directory
+discovery all remain scoped to the daemon's own default workspace regardless of a session's
+Workdir — each is a daemon-wide singleton today (one set of language servers, one knowledge DB,
+etc.) and re-scoping them per session is a materially larger change nothing yet requires.
+`sandbox.OSBackend` (seatbelt/bwrap) also bakes its write-confinement profile to the daemon's
+workspace at construction — a session on a different Workdir under the `os` sandbox backend won't
+get write access extended to its own directory; `resolveSessionWorkdir` logs a one-time warning
+when this combination is detected. Revisit if a concrete pain point shows up in a future
+live-eval pass. Tests: `internal/engine/workdir_test.go`, session-store persistence and
+workdir-validation coverage in `internal/server`.
+
+*P25.2 — sandbox backend name trap + untruthful `/config/sandbox`.* `sandbox.backend: podman` (or
+`docker`) was accepted everywhere — config file, `AEGIS_SANDBOX_BACKEND`, `PATCH /config/sandbox`
+— and `GET /config/sandbox` echoed it back, but `SelectSandbox` switched only on
+`"container" | "auto" | "os"`, so anything else silently hit `default:` → local backend: execution
+ran on the **host, unsandboxed**, and with `auto_approve_exec: true` (the exact combo the docs
+suggest for containerized auto-runs) every shell command ran on the host unprompted. Verified
+live: host-path tracebacks until the backend was respelled, `/workspace` tracebacks after.
+Shipped: (a) `config.SandboxConfig.Normalize()` (internal/config/config.go), called from
+`config.Load()` and reused by the `PATCH /config/sandbox` handler, aliases
+`docker`/`podman`/`wsl`/`wslc`/`apple` → `backend: container` + the matching `runtime` (an
+explicit `runtime` already set is preserved) and hard-errors on any other unrecognized `backend`
+value naming the offending value and the correct keys; `SelectSandbox`
+(internal/server/server.go) also hardened its own `default:` case as defense-in-depth for any
+`SandboxConfig` built outside `config.Load()`. (b) `api.ConfigSandboxResponse` gained
+`active_backend`/`fallback`/`fallback_reason`; both `/config/sandbox` handlers now report the
+daemon's actual `s.sandbox.Name()` and `s.sandboxFallback(Reason)` alongside the configured
+values, verified live (`AEGIS_SANDBOX_BACKEND=podman` with no podman installed correctly reports
+`active_backend: "local", fallback: true` with the underlying error as the reason). (c) new
+`permission.allow_unsandboxed_auto_exec` config key (default false); daemon startup now refuses
+to start (`unsandboxedAutoExecError` in server.go) when `auto_approve_exec: true` and the
+effective backend is local, unless the opt-out is set — verified live, including the opt-out
+downgrading back to a WARN. (d) web UI: `StatusInfo`/new `ConfigSandboxResponse` TS types gained
+the fallback fields; the sidebar's "Security check" button now shows a warning badge when
+`/status` reports `sandbox_fallback`, and the Security panel gained a read-only "Sandbox" tab
+(`SandboxSection` in SecurityPanel.tsx) showing configured vs. active backend and the fallback
+reason via `GET /config/sandbox`; frontend rebuilt and `dist/` committed. Tests:
+`internal/config/sandbox_normalize_test.go` (alias/validation table),
+`internal/server/sandbox_test.go` (`/config/sandbox` reflects the active backend + fallback
+reason), `internal/server/sandbox_startup_test.go` (auto-approve + local-sandbox startup refusal
+and the opt-out).
+
+Earlier — **P15.3–P15.10 — web UI parity with the TUI (batches A, B,
 C) and P24.14 (FIND-12) — MCP outbound tool-call argument flow.** The Tier 3 pass, four ships in one
 day; P15.2's config-mutation endpoints and P15.12's token hardening had already landed, so all three
 web-UI batches were frontend work against existing daemon APIs (plus two small wire-shape additions

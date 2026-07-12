@@ -1,37 +1,36 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-11 (late night) — **P25.1 (per-session working directory) and P25.2
-(sandbox backend name trap) shipped.**
-A hands-on session earlier the same day, driving the real TUI and the daemon HTTP API against
-local Ollama models (qwen3.6:35b-a3b-deep/fast, qwen3coder:30b-a3b-fast), confirmed five
-engine/daemon defects and two quality gaps that make Aegis look far less capable with local models
-than it actually is — filed as **P25.1–P25.7**, with root causes verified at specific file:line
-locations and a repeatable regression harness preserved at
-[research/eval-harness-drive.py](eval-harness-drive.py). P25.1 and P25.2, the two highest-priority
-items, shipped this session (see their entries below for implementation detail and what's
-deliberately still deferred); **P25.3–P25.7 remain open.** The Tier 3 pass (P24.14 + web-UI batches
-A/B/C) completed earlier the same day — writeup in [releases.md](releases.md#latest-changes).
+**Last updated:** 2026-07-11 (late night) — P25.1 (per-session working directory) and P25.2
+(sandbox backend name trap) shipped (`6b76e5e`); writeups moved to
+[releases.md](releases.md#latest-changes). A same-day roadmap review added **P25.8** (workdir
+threading through spawn/cron/debate), Tier 2 **P26.1** (`aegis doctor`) and **P15.13** (web UI
+workdir picker), and parked **P25.9**; P25.7's acceptance was reworked to an on-demand suite —
+**no scheduled/nightly CI eval job, by decision.** Open: **Tier 1 P25.3–P25.8, Tier 2 P26.1 +
+P15.13.**
 
-This document tracks only **open** work and what's next. For shipped-feature history and full design
-rationale, see [releases.md](releases.md).
+This document tracks only **open** work and what's next. For shipped-feature history and full
+design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
+with a `Priority:` line in its body — `scripts/roadmap-status.sh` parses exactly that shape, so
+keep it when adding items.
 
 ---
 
 ## Status
 
-**Open items:** **Tier 1 — P25.3–P25.7** (local-model live-eval findings, 2026-07-11; P25.1 and
-P25.2 shipped 2026-07-11; see
-[Open Work — P25](#open-work--p25-local-model-live-evaluation--2026-07-11)), plus the long-standing
-Tier 4 parked set — P24.21 (threat-model residual), P22.5/P22.6, P20.2–P20.3,
-P13.3.2–P13.3.3/P13.4, P9.4, P6.1.
+**Open items:** Tier 1 — P25.3–P25.8 (P25.3–P25.7 from the local-model live-eval findings,
+2026-07-11; P25.8 from the same-day roadmap review; P25.1 and P25.2 shipped the same day).
+Tier 2 — P26.1 (`aegis doctor`) and P15.13 (web UI workdir picker), also from the roadmap
+review. Tier 3 is empty. Tier 4 is the parked set — see
+[Parked](#open-work--parked-tier-4).
 
 **Next session:** work P25 top-to-bottom. P25.3 (output guard vs local/thinking models) is next —
-3× turn latency and meta-text leakage into user-visible answers. Re-run the harness (recipe inside
-the P25 section) after each fix to confirm the corresponding failure mode is gone — including a
-re-run against P25.1's and P25.2's fixes, since the harness itself predates both.
-
-**Priority order:** see [Priority Order](#priority-order) below — it is the authoritative "what's
-next" view, ordered by tier and effort.
+3× turn latency and meta-text leakage into user-visible answers. P25.5 (S) is a standalone quick
+win that can slot in anywhere; P25.7 lands late so each fix's invariant is regression-locked as it
+ships (the eval suite is on-demand only — no scheduled CI job, per 2026-07-11 decision); P25.8
+closes the remaining workdir seams after it. Re-run the harness (recipe in the P25 section) after
+each fix to confirm the corresponding failure mode is gone — including one re-run against P25.1's
+and P25.2's fixes, since the harness itself predates both. Tier 2 (P26.1, P15.13) follows once
+Tier 1 is clear, or as breaks between larger items.
 
 ---
 
@@ -40,24 +39,10 @@ next" view, ordered by tier and effort.
 Tiering criteria: **Tier 1** = real, currently-exploitable security/robustness gaps, small effort,
 no dependency. **Tier 2** = cheap, no-dependency wins — user-facing polish or small self-contained
 hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or is blocked by other
-work). **Tier 4** = low urgency, no concrete trigger, or explicitly parked pending demand — do not
-build speculatively.
+work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
+speculatively.
 
-### Tier 1 — P25 local-model live-eval findings (2026-07-11)
-
-All Critical/Important findings from the 2026-07-10 STRIDE-A threat model are shipped. The
-2026-07-11 live evaluation (real TUI + daemon API runs against local Ollama models) is the new
-trigger; full detail in [Open Work — P25](#open-work--p25-local-model-live-evaluation--2026-07-11).
-
-- ~~**P25.1 — Per-session working directory**~~ **SHIPPED 2026-07-11** — highest-leverage item:
-  fixed the dominant "model looks dumb in the action phase" failure mode. See the writeup at the
-  end of the [P25.1 entry below](#open-work--p25-local-model-live-evaluation--2026-07-11) for what
-  shipped vs. what's explicitly deferred.
-- ~~**P25.2 — Sandbox backend name trap + untruthful `/config/sandbox`**~~ **SHIPPED 2026-07-11** —
-  closed the live safety hole (`backend: podman` silently ran unsandboxed on the host). See the
-  writeup at the end of the
-  [P25.2 entry below](#open-work--p25-local-model-live-evaluation--2026-07-11) for implementation
-  detail.
+**Tier 1** (work in order; full detail in the [P25 section](#open-work--p25-local-model-live-evaluation--2026-07-11)):
 
 1. **P25.3 — Output guard vs local/thinking models** (M) — 3× turn latency and meta-text leakage
    into user-visible answers.
@@ -65,50 +50,25 @@ trigger; full detail in [Open Work — P25](#open-work--p25-local-model-live-eva
    Allow-always rules, read-only shell commands gated as execute.
 3. **P25.5 — Token-usage observability for local providers** (S).
 4. **P25.6 — Local-model profile: prompt weight + scope-creep guardrails** (S/M).
-5. **P25.7 — Promote the live-eval harness into `internal/eval`** (M) — regression-locks all of
-   the above (now including P25.1 and P25.2).
+5. **P25.7 — Promote the live-eval harness into `internal/eval`** (M) — deliberately late: it
+   regression-locks all of the above (including P25.1 and P25.2). On-demand only; no scheduled
+   CI job.
+6. **P25.8 — Thread session workdir through the spawn/cron/debate seams** (S/M) — P25.1 residue:
+   detached/subprocess sub-agents, cron jobs, and debate still run in the daemon root.
 
-### Tier 2 — empty
+**Tier 2** (from the 2026-07-11 roadmap review):
 
-P24.20 (FIND-17) shipped 2026-07-11 (see [releases.md](releases.md#latest-changes)), the last item
-in this tier. Next trigger: a new threat-model pass or a reported incident.
+- **P26.1 — `aegis doctor` preflight self-diagnostic** (M) — generalizes P25.2's
+  configured-vs-active truth-telling to every silent-misconfiguration class the live eval hit.
+- **P15.13 — Web UI: session workdir picker + display** (S/M) — without it, web sessions always
+  fall back to the daemon root.
 
-### Tier 3 — empty
+**Tier 3:** empty. The last items shipped 2026-07-11 (P24.20; P15 web-UI batches A/B/C; P24.14) —
+see [releases.md](releases.md#latest-changes). Next trigger: a new threat-model pass, a reported
+incident, or a new feature evaluation.
 
-All items shipped 2026-07-11 (see [releases.md](releases.md#latest-changes)):
-
-- ~~**P15.6–P15.7 — Web UI batch C**~~ **SHIPPED 2026-07-11** (`05ca71f`, built by two parallel
-  worktree sub-agents): "Security check" panel (scanner status + two-phase guided install,
-  severity-sorted structured findings table — `ScanResponse` gained mirrored `security.Report`
-  fields — and the accepted-risk baseline view) and "Skills & memory" panel (memory viewer +
-  per-scope note composer, built-in-skills toggle list — `ConfigSkillsResponse` gained the
-  `available` catalog).
-- ~~**P15.3–P15.5, P15.8–P15.10 — Web UI batches A/B**~~ **SHIPPED 2026-07-11** (`d8fc58e`,
-  `eb5a14c`): persona/model panel, cost/token readout + budget-alert toasts, checkpoints/rewind,
-  always-allow approvals, debate ("stress-test a claim") + knowledge panels, archived-chats
-  tab/prune/background sessions + activity view. P15.11's non-technical framing was applied
-  throughout all three batches.
-- ~~**P24.14 — FIND-12: MCP outbound tool-call argument content**~~ **SHIPPED 2026-07-11**
-  (`73880ae`): outbound data flow documented in docs/mcp-trust-boundary.md; opt-in per-server
-  `scan_arguments` outbound secret scan (default off, flag-never-block) in internal/mcp.
-
-### Tier 4 — Parked / low priority / no current trigger
-
-Do not build speculatively — revisit only if a concrete trigger (user demand, reported pain,
-incident) appears.
-
-- **P24.21 — FIND-33: memory-lock/zero the bearer token in `Client` process memory** (M, security,
-  Low, CVSS 2.8). Explicitly low priority per the finding itself — host/OS access is already a
-  significant compromise.
-- **P20.2 — Blind model compare** (M) and **P20.3 — Hardware-aware model recommendation** (M):
-  competitive-inspired, no direct reported pain.
-- **P13.3.2 — `@shell`/`@last` context token** (S) and **P13.3.3 — ACP terminal capability
-  passthrough** (M/L): P13.3.3 deferred pending ACP-host usage.
-- **P13.4 — Nebula-inspired engagement tooling** (M): "interesting, not urgent" per its own scoping.
-- **P9.4 — Per-task model routing** (M) and **P6.1 — Mid-turn state persistence** (L): no concrete
-  trigger; check with user before starting.
-- **P22.5 — `/side` ephemeral conversation** (S/M) and **P22.6 — Raw scrollback mode** (S/M): polish
-  without demand.
+**Tier 4:** parked — P25.9, P24.21, P22.5, P22.6, P20.2, P20.3, P13.3.2, P13.3.3, P13.4, P9.4,
+P6.1. See [Parked](#open-work--parked-tier-4).
 
 ---
 
@@ -152,132 +112,14 @@ machine must be running. Seeded-bug fixture: a two-file `temps.py`/`temps.csv` p
 `row["temp"]` (a CSV string) is added to an int — trivially recreatable, or lift it into the
 P25.7 eval fixture.
 
----
+**P25.1 (per-session working directory)** and **P25.2 (sandbox backend name trap + untruthful
+`/config/sandbox`)** shipped 2026-07-11 (`6b76e5e`) — implementation writeups, including what
+P25.1 deliberately deferred (per-session LSP/knowledge/repo-map scoping, `os`-backend write
+confinement), are in [releases.md](releases.md#latest-changes).
 
-**P25.1 — Per-session working directory. [Tier 1]** (M/L) — **SHIPPED 2026-07-11**
+### P25.3 — Output guard is counterproductive with local/thinking models
 
-- **Symptom:** a TUI session started in directory X, connecting to a daemon that was started in
-  directory Y, displays `Dir X` in the welcome screen but executes every tool in Y. In the live
-  eval the agent ran `git status` (answered from the Aegis repo, not the session dir), concluded
-  "there's no temps.py in the workspace", web-searched, then tried `find / -name temps.py`.
-  `read_file` with the session dir's absolute path was refused (outside workspace root), pushing
-  the model to shell `cat`/`ls` — each an execute-approval prompt. This is the dominant cause of
-  "the model looks dumb in the action phase" with any client that reuses a running daemon.
-- **Root cause:** `internal/server/server.go:314` — `cwd, err := os.Getwd()` once at daemon
-  startup; that single value becomes `builtin.Register(..., Root: cwd, ...)` (tool workspace
-  confinement), `s.workspace`, `memory.NewSources`, `loadRepoMap`, `lsp.NewManager`, the
-  knowledge store, persona/command discovery dirs, and sandbox `ExecOpts.Dir`. Sessions have no
-  workdir of their own: `api.CreateSessionRequest` (internal/api/api.go:11) has only
-  Title/System/Mode/Persona. Meanwhile `aegis chat` (internal/cli/chat.go:95) builds its own
-  in-process `engine.New` rooted at the *caller's* cwd — so chat and the TUI behave differently
-  against the same daemon, which masked the bug.
-- **Fix sketch:** add `Workdir string` to `CreateSessionRequest` + `SessionMeta` (persist in the
-  session store). TUI/`chat`/ACP/web clients send their cwd on create. Thread it per-session:
-  tool `Root`, sandbox `ExecOpts.Dir`, repo-map/memory/knowledge lookups keyed by session
-  workdir (lazy-load + cache per root, the way persona `Refresh` signature-caches). Decide and
-  document the trust boundary: daemon should validate the requested workdir (exists, is a
-  directory, optionally under an allowlist — a remote-capable daemon must not become an
-  arbitrary-filesystem oracle; note `server.allow_remote` exists). Empty `Workdir` keeps today's
-  daemon-cwd behavior for backward compatibility. If full threading is too large for one
-  session, an acceptable first cut: reject session creation (or warn loudly in the TUI banner)
-  when client cwd ≠ daemon workspace root instead of silently mis-executing.
-- **Acceptance:** TUI started in dir X against a daemon started in dir Y reads/writes/executes
-  in X; `read_file` accepts X-relative and X-absolute paths; welcome-screen `Dir` matches actual
-  tool behavior; `aegis chat` and TUI give identical results for the seeded-bug task; harness
-  run from a second project against a shared daemon passes without the `find /` failure mode.
-- **Tests:** server test — two sessions with different workdirs on one daemon each read their
-  own `temps.py`; eval scenario asserting no `web_search`/`find /` tool calls for the fixture
-  task; regression for the workspace-confinement error message pointing at the *session* root.
-- **Shipped implementation (differs from the fix sketch above):** rather than a per-root
-  `tool.Registry` cache — which would mean reconnecting MCP servers, re-registering plugins, and
-  rebuilding the swarm/agent tool once per distinct session directory — the daemon keeps one
-  shared, MCP/plugin/swarm-wired registry and threads the session's workdir through
-  `context.Context` (`tool.WithWorkdir`/`tool.WorkdirFromContext`, mirroring the existing
-  `tool.WithRegistry` pattern `tool_search` already relied on). `engine.Options.Workdir` sets it
-  once per turn (`executeTool`, right next to `tool.WithRegistry`); every workspace-confined tool
-  (file ops, `ls`/`glob`/`grep`, git, `shell`, security/diagram/latex/dast/recon tools,
-  `remember`/`save_skill`, background shell jobs) resolves its effective root from that context
-  value, falling back to its own construction-time root when unset. `sandbox.ExecOpts.Dir` was
-  already per-call for the local and container backends, so this reaches the shell tool with no
-  sandbox-package changes. `CreateSessionRequest`/`SessionMeta`/`session.Session`/`session.Meta`
-  gained `Workdir`; the session store persists it via the same idempotent
-  `ALTER TABLE ... ADD COLUMN` pattern as the P14.7 `Model` field. `handleCreateSession` resolves
-  and validates it (must exist, be a directory) and enforces the trust boundary: a new
-  `server.session_workdir_allowlist` config key (alongside `server.allow_remote`) restricts a
-  remote-accessible daemon to the daemon's own workspace or an explicitly allowlisted root;
-  loopback-only daemons (the default) accept any existing directory, matching today's trust model.
-  TUI (`internal/cli/root.go`) sends its cwd on create and prefers a resumed session's own
-  persisted `Workdir` over the local cwd; ACP (`internal/acp/agent.go`) now forwards the
-  `session/new` `cwd` param it was previously parsing and discarding. `aegis chat`, the web UI,
-  `mcp-serve`, and `parallel.go` are unchanged (see below).
-- **Deliberately deferred (documented gap, not a silent one):** `lsp.Manager`, `knowledge.Store`,
-  `longmem.Store`, the cached repo-map (`s.repoMap`), and persona/command/agent-def directory
-  discovery all remain scoped to the daemon's own default workspace regardless of a session's
-  Workdir — each is a daemon-wide singleton today (one set of language servers, one knowledge DB,
-  etc.) and re-scoping them per session is a materially larger change with no test/acceptance
-  criterion above actually requiring it. `sandbox.OSBackend` (seatbelt/bwrap) also bakes its
-  write-confinement profile to the daemon's workspace at construction — a session on a different
-  Workdir under the `os` sandbox backend won't get write access extended to its own directory;
-  `resolveSessionWorkdir` logs a one-time warning when this combination is detected. The web UI
-  (no filesystem cwd in a browser) and `aegis mcp-serve`/`parallel.go` session creation still omit
-  Workdir, falling back to the daemon's default exactly as before this change. Revisit if a
-  concrete pain point shows up in a future live-eval pass.
-
-**P25.2 — Sandbox backend name trap + untruthful `/config/sandbox`. [Tier 1]** (S) — **SHIPPED 2026-07-11**
-
-- **Symptom:** `sandbox.backend: podman` (or `docker`) is accepted everywhere — config file,
-  `AEGIS_SANDBOX_BACKEND`, `PATCH /config/sandbox` — and `GET /config/sandbox` echoes
-  `{"backend":"podman","image":"python:3.12-slim"}` back, but execution silently runs on the
-  **local host, unsandboxed**. With `auto_approve_exec: true` (the exact combo the docs suggest
-  for containerized auto-runs) every shell command ran on the host unprompted. Only a single
-  daemon-startup WARN line ("auto_approve_exec is enabled with the local sandbox") hinted at it.
-  Verified live: host-path tracebacks until the backend was respelled, `/workspace` tracebacks
-  after.
-- **Root cause:** `SelectSandbox` (internal/server/server.go:570) switches only on
-  `"container" | "auto" | "os"`; anything else — including the runtime names the docs/CLAUDE.md
-  advertise ("local, Docker, Podman, WSL containers, Apple Containers") — hits `default:` →
-  `NewLocalBackendWithEnv`, **with no warning** (the warn path only fires when a recognized
-  backend fails detection). The correct spelling is `backend: container` + `runtime: podman`,
-  which nothing validates or suggests. `/config/sandbox` reports the *configured* value, not the
-  *selected* backend, and drops the `sandboxFallback`/`sandboxFallbackReason` the server already
-  computes.
-- **Fix sketch:** (a) validate at config load: alias `podman`/`docker`/`apple`/`wsl` →
-  `backend: container` + `runtime: <name>` (matching `sandbox.ParseRuntimes` vocabulary), and
-  hard-error on genuinely unknown values instead of silently running local; (b) make
-  `GET /config/sandbox` report the **active** backend + runtime + `fallback_reason`, not the
-  config echo; (c) refuse `auto_approve_exec: true` + effective-local-sandbox at startup unless
-  an explicit `permission.allow_unsandboxed_auto_exec: true` (or similar) opt-out is set —
-  today's WARN is not enough for a silent-privilege-escalation combo; (d) surface the existing
-  `warnSandboxFallback` path in the web UI Security panel too (it already has scanner status
-  plumbing from P15.6).
-- **Acceptance:** `AEGIS_SANDBOX_BACKEND=podman` either works (aliased) or fails fast with a
-  message naming the correct keys; `/config/sandbox` can never claim a container backend while
-  exec is local; the auto-approve+local combo cannot arise without the explicit opt-out.
-- **Tests:** unit tests for the alias/validation table; server test asserting
-  `/config/sandbox` reflects `SelectSandbox`'s actual result including the fallback reason;
-  startup-refusal test for the auto-approve+local combo.
-- **Shipped implementation:** (a) `config.SandboxConfig.Normalize()` (internal/config/config.go),
-  called from `config.Load()` and reused by the `PATCH /config/sandbox` handler, aliases
-  `docker`/`podman`/`wsl`/`wslc`/`apple` → `backend: container` + the matching `runtime` (an
-  explicit `runtime` already set is preserved) and hard-errors on any other unrecognized
-  `backend` value naming the offending value and the correct keys; `SelectSandbox`
-  (internal/server/server.go) also hardened its own `default:` case as defense-in-depth for any
-  `SandboxConfig` built outside `config.Load()`, so an unrecognized backend is rejected there too
-  instead of silently becoming local. (b) `api.ConfigSandboxResponse` gained
-  `active_backend`/`fallback`/`fallback_reason`; both `/config/sandbox` handlers now report the
-  daemon's actual `s.sandbox.Name()` and `s.sandboxFallback(Reason)` alongside the configured
-  values, verified live (`AEGIS_SANDBOX_BACKEND=podman` with no podman installed correctly reports
-  `active_backend: "local", fallback: true` with the underlying error as the reason). (c) new
-  `permission.allow_unsandboxed_auto_exec` config key (default false); daemon startup now refuses
-  to start (`unsandboxedAutoExecError` in server.go) when `auto_approve_exec: true` and the
-  effective backend is local, unless the opt-out is set — verified live, including the opt-out
-  downgrading back to a WARN. (d) web UI: `StatusInfo`/new `ConfigSandboxResponse` TS types gained
-  the fallback fields; the sidebar's "Security check" button now shows a warning badge when
-  `/status` reports `sandbox_fallback`, and the Security panel gained a read-only "Sandbox" tab
-  (`SandboxSection` in SecurityPanel.tsx) showing configured vs. active backend and the fallback
-  reason via `GET /config/sandbox`; frontend rebuilt and `dist/` committed.
-
-**P25.3 — Output guard is counterproductive with local/thinking models. [Tier 1]** (M)
+Priority: Tier 1 · Effort: M
 
 - **Symptom:** with the default `output_guard.enabled: true` + `mode: llm`, a correct answer
   from `qwen3.6:35b-a3b-deep` tripled turn time (26 s → 78 s): the guard verdict failed to
@@ -311,8 +153,9 @@ P25.7 eval fixture.
   verdict-on-last-line / genuinely ambiguous text (still fail-closed); engine test that a
   guard-retry turn replaces the visible answer; config test for SmallModel routing.
 
-**P25.4 — Approval ergonomics: dead hotkeys, bad generated rules, read-only shell gating.
-[Tier 1]** (M)
+### P25.4 — Approval ergonomics: dead hotkeys, bad generated rules, read-only shell gating
+
+Priority: Tier 1 · Effort: M
 
 - **Symptom (a) — dead hotkey:** during the live TUI run the approval dialog's `y` hotkey went
   unresponsive for ~7 minutes of repeated presses (keystrokes were being swallowed, most likely
@@ -344,7 +187,9 @@ P25.7 eval fixture.
   (cd-stripping, metacharacter refusal); classifier tests including bypass attempts
   (`cat f > /etc/x`, `git -c core.pager=sh log`, `ls; rm -rf /`).
 
-**P25.5 — Token-usage observability for local providers. [Tier 1]** (S)
+### P25.5 — Token-usage observability for local providers
+
+Priority: Tier 1 · Effort: S
 
 - **Symptom:** every API-driven run reported `done in=0 out=0` on the SSE `done` event, while
   the TUI status bar showed live counts (e.g. `in:10038 out:104`) for the same engine. Cost/
@@ -360,7 +205,9 @@ P25.7 eval fixture.
 - **Acceptance/tests:** harness summary shows non-zero in/out (with the estimated flag) for an
   Ollama run; engine/server test with a usage-less adapter asserting `done` carries estimates.
 
-**P25.6 — Local-model profile: prompt weight + scope-creep guardrails. [Tier 1]** (S/M)
+### P25.6 — Local-model profile: prompt weight + scope-creep guardrails
+
+Priority: Tier 1 · Effort: S/M
 
 - **Symptom:** first model call carries ~10 k input tokens (system prompt + 19 exposed tool
   schemas + repo map + skills preamble) before the user says a word — heavy for 3B-active MoE
@@ -382,7 +229,9 @@ P25.7 eval fixture.
   ≥ 30 % under the local profile); qwen3coder run produces no unrequested files or `remember`
   calls; deep-model run still completes the fixture task in ≤ 5 tool calls.
 
-**P25.7 — Promote the live-eval harness into `internal/eval`. [Tier 1]** (M)
+### P25.7 — Promote the live-eval harness into `internal/eval`
+
+Priority: Tier 1 · Effort: M
 
 - **Why:** everything above was found by *driving the running system*, not by unit tests — the
   existing `internal/eval` scenario tier uses a deterministic adapter (good for engine-loop
@@ -396,90 +245,181 @@ P25.7 eval fixture.
   golden text: task completes; file actually fixed on disk; re-run tool call observed; **no**
   `web_search`/`find /`-style detours; tool-call count ≤ N; wall-time budget; non-zero token
   usage on `done` (P25.5); no guard meta-text ("PASS"/"FAIL:") in the final answer (P25.3).
-  Wire into the nightly-eval workflow next to `TestLiveModelQuality` with a small pinned
-  Ollama model; keep the Python script in research/ for ad-hoc use.
-- **Acceptance:** nightly job runs it green on main; each P25.1/P25.2/P25.3 fix lands with the
-  corresponding invariant enabled, so a regression in any of them fails the nightly.
+  On-demand only, no scheduled CI job (deliberate — the nightly-eval workflow stays
+  `workflow_dispatch`-only): document the single local command next to the existing `live_eval`
+  tier in CLAUDE.md; keep the Python script in research/ for ad-hoc use.
+- **Acceptance:** the suite runs green on demand against a local Ollama model via one documented
+  `go test -tags live_eval ./internal/eval/... -run TestLiveWorkflow` command; each
+  P25.1/P25.2/P25.3 fix lands with its corresponding invariant enabled; re-running the suite is
+  the documented definition-of-done for changes touching the engine/server/sandbox/guard seams,
+  so a regression in any locked behavior fails the suite on the next run.
+
+### P25.8 — Thread session workdir through the spawn/cron/debate seams
+
+Priority: Tier 1 · Effort: S/M
+
+P25.1 residue at three seams that never received the per-session workdir (roadmap review,
+2026-07-11):
+
+- **Gap (a) — swarm sub-agents:** `subAgentRunner` (internal/server/server.go:812) builds
+  sub-engines without `engine.Options.Workdir`. Foreground in-process spawns inherit the parent
+  session's workdir only *accidentally* — the engine stamps `tool.WithWorkdir` onto the context
+  only when its own workdir is non-empty (internal/engine/engine.go:909), so the parent's
+  context value leaks through the spawn's context chain. Detached/background spawns (context
+  deliberately severed — see the tracker-fallback comment at server.go:789) and the entire
+  subprocess backend lose it: a teammate spawned from a session rooted in X silently operates in
+  daemon root Y — the exact failure mode P25.1 fixed for top-level sessions.
+- **Gap (b) — cron:** jobs always execute in the daemon's cwd (`cronShellRunner(sb, cwd)`,
+  server.go:399); no per-job workdir.
+- **Gap (c) — debate:** session-less; `debate.WithFiles` paths resolve against the
+  daemon-rooted shared tools, so the web UI "stress-test a claim" panel grounds files in the
+  wrong root for any non-default-workdir session.
+- **Fix sketch:** add `Workdir` to `swarm.SpawnConfig`; the agent tool captures the spawning
+  turn's workdir (`tool.WorkdirFromContext`) at spawn time and `subAgentRunner` sets
+  `engine.Options.Workdir` explicitly — no reliance on accidental context inheritance — with the
+  subprocess backend passing it to the worker (arg or env). Cron: optional per-job `workdir`
+  field, default daemon cwd. Debate: accept a workdir on `DebateRequest` (web UI sends the
+  session's), applied the same way messages.go threads it into `newEngine`.
+- **Acceptance:** a teammate spawned from a session with Workdir X reads/writes in X under all
+  three spawn shapes (in-process foreground, detached/background, subprocess backend); a cron
+  job with `workdir` set runs there; debate `WithFiles` resolves against the request workdir.
+- **Tests:** swarm spawn tests asserting workdir propagation across the three spawn shapes
+  (the detached case is the regression that matters — it passes today only by accident);
+  cron-runner workdir test; debate-handler test with a fixture file outside the daemon root.
 
 ---
 
-## Open Work — P24 (Threat Model Findings — 2026-07-10)
+## Open Work — P26 / P15 follow-ons (Tier 2)
 
-Full-repo STRIDE-A threat model at commit `34aa687`:
-[`threat-model-20260710-173718/`](../threat-model-20260710-173718/3-findings.md). 35 findings
-total: 14 were "existing control" (already mitigated, verified, no action needed), 30 have shipped
-as P24.1–P24.20/P24.22 across 2026-07-10/11 (P24.14 landed 2026-07-11 as commit `73880ae`; see
-[releases.md](releases.md#latest-changes) for the earlier writeups), and 1 remains open — P24.21,
-Tier 4 above.
+From the 2026-07-11 roadmap review: cheap, self-contained items that generalize what the P25
+batch exposed. Tackle after the Tier 1 set (or as breaks between larger P25 items).
 
----
+### P26.1 — `aegis doctor` preflight self-diagnostic
 
-## Open Work — P15 (Web UI Parity with the TUI)
+Priority: Tier 2 · Effort: M
 
-**Complete as of 2026-07-11.** P15.1 (frontend architecture), P15.12 (token-injection hardening),
-P15.2 (config-mutation endpoints), batches A (P15.3–P15.5, P15.10, `d8fc58e`), B (P15.8–P15.9,
-`eb5a14c`), and C (P15.6–P15.7, `05ca71f`) have all shipped — see
-[releases.md](releases.md#latest-changes). Nothing open under P15.
+- **Why:** the whole P25 batch shares one root pattern — *the system was misconfigured and
+  nothing said so* (sandbox silently local, workdir silently wrong, guard silently mangling
+  answers, token counts silently zero). P25.2 fixed the sandbox instance of this class;
+  `doctor` generalizes it into one place a user checks first.
+- **Sketch:** `aegis doctor` prints pass/warn/fail per check: provider endpoint reachable and
+  the configured model actually available (Ollama `/api/tags`); configured vs. **active**
+  sandbox backend + runtime present (podman machine running?) with the fallback reason;
+  scanner binaries installed; config validity (reuse `config.SandboxConfig.Normalize()` and
+  the existing load-time validation); guard/SmallModel sanity (warn when `output_guard.mode:
+  llm` targets a thinking model with no SmallModel — pairs with P25.3); workdir allowlist
+  status; daemon reachable + version. Reuses existing plumbing throughout: `/status`,
+  `/security/status`, `/config/sandbox`, `sandboxFallbackReason`. Nonzero exit on any fail so
+  it can gate scripts.
+- **Acceptance:** run against the two live-eval misconfigs — P25.2's (`backend: podman`, no
+  podman running) and P25.1's (client cwd ≠ daemon root, no session workdir) — `doctor` names
+  each problem and the correcting config key; clean setup exits 0.
 
----
+### P15.13 — Web UI: session workdir picker + display
 
-## Open Work — P22 (OpenAI Codex CLI evaluation — 2026-07-08)
+Priority: Tier 2 · Effort: S/M
 
-Feature evaluation of Codex CLI. P22.1 (`/diff`), P22.2 (`/review`), P22.3 (Esc-Esc backtrack +
-`/fork`), and P22.4 (Ctrl+R history search) have shipped.
-
-**P22.5 — `/side` ephemeral side conversation. [Tier 4]** Quick side question in a throwaway
-context. (S/M)
-
-**P22.6 — Raw scrollback mode. [Tier 4]** Plain text rendering + release alternate screen for
-native selection/scrollback. (S/M)
-
----
-
-## Open Work — P20 (Odysseus Review: Research, Compare, Model Fit)
-
-Feature evaluation of Odysseus self-hosted AI workspace. P20.1 (deep-research skill + `/research`
-command) has shipped.
-
-**P20.2 — Blind model compare. [Tier 4]** Same prompt to two models side-by-side, identities hidden
-until vote, then reveal + optional synthesis. (M)
-
-**P20.3 — Hardware-aware model recommendation. [Tier 4]** Detect hardware, curate/recommend local
-models, offer `ollama pull`, surface via `/models` command. (M)
+- **Gap:** a browser has no filesystem cwd, so web sessions always fall back to the daemon
+  root — P25.1's failure mode persists for exactly the audience the P15 track targeted.
+- **Sketch:** the new-chat flow offers a directory choice fed by
+  `server.session_workdir_allowlist` plus recent workdirs from the session store, sent as
+  `Workdir` on create (the API already supports it, P25.1); show the active workdir in the
+  chat header; surface the 400 validation message on a bad choice. Depends on nothing; pairs
+  naturally with P25.8's debate-workdir request field.
+- **Acceptance:** a web session created with workdir X executes tools in X; the header shows
+  it; an invalid directory shows the server's error rather than silently falling back.
 
 ---
 
-## Open Work — P13 (Security & Capability Enhancements)
+## Open Work — Parked (Tier 4)
 
-P13.1, P13.2, P13.3.1, P13.3.5, P13.5, P13.6, and P13.8 have shipped. All remaining items are
-Tier 4.
+Low urgency, no trigger, or explicitly parked pending demand. Do not build speculatively —
+revisit only if a concrete trigger (user demand, reported pain, incident) appears, and check
+with the user before starting any of these.
 
-**P13.3.2 — `@shell`/`@last` context token. [Tier 4]** Extend `@file`/`@image:` to inject last N
-lines of terminal output. (S)
+### P25.9 — Per-session scoping of daemon-singleton services
 
-**P13.3.3 — ACP `terminal/*` capability passthrough. [Tier 4]** Let ACP hosts (Zed) supply pty for
-agent shell calls. (M/L)
+Priority: Tier 4 · Effort: L — parked, no concrete trigger
 
-**P13.4 — Nebula-inspired security engagement tooling. [Tier 4]** Engagement notebook +
-`security_advise` tool + CVE lookup + status digest + guarded next-step suggestions. (M)
+The P25.1 deliberately-deferred gaps, tracked here so they aren't lost in releases.md prose:
+`lsp.Manager`, `knowledge.Store`, `longmem.Store`, the cached repo-map (`s.repoMap`),
+persona/command/agent-def directory discovery, and the `os` sandbox backend's write-confinement
+profile (baked at construction; `resolveSessionWorkdir` warns once on the mismatch) all remain
+scoped to the daemon's default workspace regardless of a session's Workdir. Each is a
+daemon-wide singleton; re-scoping is a materially larger change. Trigger: a concrete pain point
+in a future live-eval pass.
 
----
+### P24.21 — Memory-lock/zero the bearer token in `Client` process memory
 
-## Open Work — P9 (Engineering Quality — lower urgency, no current trigger)
+Priority: Tier 4 · Effort: M — parked, no concrete trigger
 
-P9.1, P9.2, and P9.5 have shipped. P9.3 and P9.6 were dropped.
+FIND-33 (security, Low, CVSS 2.8) from the 2026-07-10 STRIDE-A threat model
+([threat-model-20260710-173718/](../threat-model-20260710-173718/3-findings.md)) — the only one
+of its 35 findings still open (14 were verified existing controls; the other 30 shipped as
+P24.1–P24.20/P24.22). Explicitly low priority per the finding itself — host/OS access is
+already a significant compromise.
 
-**P9.4 — Per-task model routing. [Tier 4]** Pick cheaper model for simple turns, reserve expensive
-for hard ones. No evidence of demand. (M)
+### P22.5 — `/side` ephemeral side conversation
 
----
+Priority: Tier 4 · Effort: S/M — parked, no concrete trigger
 
-## Open Work — P6 (Long-Horizon / Exploratory)
+Quick side question in a throwaway context. From the Codex CLI evaluation (2026-07-08; P22.1–P22.4
+shipped). Polish without demand.
 
-P6.2 (A2A protocol) and P6.3 (MCP server mode) have shipped/dropped.
+### P22.6 — Raw scrollback mode
 
-**P6.1 — Mid-turn state persistence. [Tier 4]** Persist partial turn state (text, tool calls) to
-SQLite during streaming. High complexity, low-probability failure mode. (L)
+Priority: Tier 4 · Effort: S/M — parked, no concrete trigger
+
+Plain-text rendering + release the alternate screen for native selection/scrollback. From the
+Codex CLI evaluation. Polish without demand.
+
+### P20.2 — Blind model compare
+
+Priority: Tier 4 · Effort: M — parked, no concrete trigger
+
+Same prompt to two models side-by-side, identities hidden until vote, then reveal + optional
+synthesis. From the Odysseus review (P20.1 shipped). Competitive-inspired, no direct reported
+pain.
+
+### P20.3 — Hardware-aware model recommendation
+
+Priority: Tier 4 · Effort: M — parked, no concrete trigger
+
+Detect hardware, curate/recommend local models, offer `ollama pull`, surface via `/models`.
+From the Odysseus review. Competitive-inspired, no direct reported pain.
+
+### P13.3.2 — `@shell`/`@last` context token
+
+Priority: Tier 4 · Effort: S — parked, no concrete trigger
+
+Extend `@file`/`@image:` to inject the last N lines of terminal output.
+
+### P13.3.3 — ACP `terminal/*` capability passthrough
+
+Priority: Tier 4 · Effort: M/L — parked, no concrete trigger (deferred pending ACP-host usage)
+
+Let ACP hosts (Zed) supply a pty for agent shell calls.
+
+### P13.4 — Nebula-inspired security engagement tooling
+
+Priority: Tier 4 · Effort: M — parked, no concrete trigger
+
+Engagement notebook + `security_advise` tool + CVE lookup + status digest + guarded next-step
+suggestions. "Interesting, not urgent" per its own scoping.
+
+### P9.4 — Per-task model routing
+
+Priority: Tier 4 · Effort: M — parked, no concrete trigger
+
+Pick a cheaper model for simple turns, reserve the expensive one for hard ones. No evidence of
+demand.
+
+### P6.1 — Mid-turn state persistence
+
+Priority: Tier 4 · Effort: L — parked, no concrete trigger
+
+Persist partial turn state (text, tool calls) to SQLite during streaming. High complexity,
+low-probability failure mode.
 
 ---
 
