@@ -32,6 +32,11 @@ func newSessionsCmd() *cobra.Command {
 	return cmd
 }
 
+// dialClient builds an authenticated client for one CLI invocation. It
+// returns before that command's work is done, so it cannot scrub the token
+// itself (FIND-33/P24.21) — every call site below is a one-shot command that
+// does `cl, err := dialClient()` and then `defer cl.Zero()` once the error
+// check passes.
 func dialClient() (*client.Client, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -54,6 +59,7 @@ func newSessionsListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			var metas []api.SessionMeta
 			if showArchived {
 				metas, err = cl.ListArchivedSessions(cmd.Context())
@@ -104,6 +110,7 @@ func newSessionsExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			sess, err := cl.GetSession(cmd.Context(), args[0])
 			if err != nil {
 				return err
@@ -142,6 +149,7 @@ func newSessionsTraceCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			sess, err := cl.GetSession(cmd.Context(), args[0])
 			if err != nil {
 				return err
@@ -218,6 +226,7 @@ func newSessionsDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			if err := cl.DeleteSession(cmd.Context(), args[0]); err != nil {
 				return err
 			}
@@ -237,6 +246,7 @@ func newSessionsArchiveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			if err := cl.ArchiveSession(cmd.Context(), args[0]); err != nil {
 				return err
 			}
@@ -256,6 +266,7 @@ func newSessionsUnarchiveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			if err := cl.UnarchiveSession(cmd.Context(), args[0]); err != nil {
 				return err
 			}
@@ -275,6 +286,7 @@ func newSessionsPruneCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer cl.Zero()
 			resp, err := cl.PruneSessions(cmd.Context(), days)
 			if err != nil {
 				return err

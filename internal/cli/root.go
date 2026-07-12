@@ -142,6 +142,10 @@ Use "aegis <command> --help" for details on any command below.`,
 				}
 			}
 
+			// tui.Run scrubs cl's bearer token (Client.Zero) once the TUI
+			// event loop exits, since that's the last consumer of it before
+			// this process returns (FIND-33/P24.21) — no separate defer
+			// needed here.
 			runErr := tui.Run(tui.Config{
 				Client:         cl,
 				SessionID:      sessionID,
@@ -226,6 +230,12 @@ Use "aegis <command> --help" for details on any command below.`,
 // ensureDaemon returns a client connected to a running daemon, starting an
 // embedded one if none is reachable. The returned stop func shuts down any
 // daemon this call started (a no-op when an existing daemon was reused).
+//
+// Ownership of the returned client's lifetime — including whether/when to
+// call Client.Zero to scrub its bearer token (FIND-33/P24.21) — belongs to
+// the caller, since only the caller knows when it's actually done with the
+// client (a one-shot command can defer Zero immediately; a longer-lived
+// consumer needs to wait until its own natural completion point).
 func ensureDaemon(ctx context.Context, cfg *config.Config) (*client.Client, func(), error) {
 	cl := client.NewFromConfig(cfg)
 	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)

@@ -359,6 +359,9 @@ func doctorWorkdirCheck(cfg *config.Config) doctorCheck {
 func doctorDaemonChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	const name = "daemon"
 	cl := client.NewFromConfig(cfg)
+	// cl is local to this check and never escapes — scrub its token once the
+	// checks below are done (FIND-33/P24.21).
+	defer cl.Zero()
 	hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := cl.Health(hctx); err != nil {
