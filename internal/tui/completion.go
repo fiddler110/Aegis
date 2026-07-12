@@ -85,10 +85,14 @@ type completionState struct {
 const maxFileMatches = 50
 
 // refTypes are the non-file reference kinds offered in the @ popup. @image:
-// attaches an image (the daemon reads it); the others are textual references the
-// agent resolves with its tools (LSP diagnostics, web fetch, symbol search).
+// attaches an image (the daemon reads it); @shell is resolved client-side at
+// submit time into the embedded terminal pane's last output (see
+// extractShellRefs in tui.go, optionally "@shell:N" for the last N lines);
+// the others are textual references the agent resolves with its own tools
+// (LSP diagnostics, web fetch, symbol search).
 var refTypes = []cmdEntry{
 	{name: "image:", desc: "Attach an image file (vision models)"},
+	{name: "shell", desc: "Inject the last N lines of terminal output"},
 	{name: "diagnostics", desc: "Pull current LSP diagnostics"},
 	{name: "url:", desc: "Reference a URL to fetch"},
 	{name: "symbol:", desc: "Reference a code symbol to locate"},
