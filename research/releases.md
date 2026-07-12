@@ -9,14 +9,90 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-12 — **P24.21, P13.3.2, P9.4, P13.4** shipped as a user-selected batch
-of four Tier 4 parked items (see roadmap.md's [Parked](roadmap.md#open-work--parked-tier-4)
-section for the pre-existing scoping and why these had stayed parked despite "no concrete
-trigger" — the trigger here was explicit user request, not a discovered pain point). All four were
-implemented in parallel by isolated sub-agents in separate git worktrees, then merged into `main`
-sequentially; the only file touched by two branches (`internal/tui/tui.go`, P24.21 and P13.3.2)
-auto-merged cleanly with no manual conflict resolution. `go build ./...` and the full `go test
-./...` both pass clean on the merged tree.
+**Last updated:** 2026-07-12 — **P22.5, P22.6, P20.2, P20.3** shipped as a second user-selected
+batch of four Tier 4 parked items, same day as the first batch below. P25.9 and P6.1 were
+deliberately excluded from this round (both Effort L, both large/high-blast-radius — daemon
+singleton rescoping and the core engine streaming loop, respectively — better suited to focused
+solo work than parallel automation) and P13.3.3 stays excluded as its ACP-host-usage precondition
+still hasn't materialized. All four were implemented in parallel by isolated sub-agents in separate
+git worktrees, then merged into `main` sequentially; one doc-only conflict (`docs/tui-guide.md` —
+both P22.5 and P22.6 appended to the same table) was resolved by combining both additions, no code
+conflicts. `go build ./...` and the full `go test ./...` both pass clean on the merged tree.
+
+*P20.3 — hardware-aware local model recommendation.* New `internal/hwinfo` package detects CPU
+core count (`runtime.NumCPU()`, always reliable) and total system RAM via platform-specific,
+`//go:build`-tagged best-effort probes (`/proc/meminfo` on Linux, `sysctl -n hw.memsize` on macOS,
+Win32 `GlobalMemoryStatusEx` via `golang.org/x/sys/windows` on Windows — matching the existing
+syscall idiom in `internal/fsguard/fsguard_windows.go`), failing soft to an "unknown" source on any
+other platform or probe failure — never erroring. Deliberately excludes GPU/VRAM detection,
+following the precedent P17.5 already set for the exact same reason: "no VRAM/GPU/host
+introspection — Aegis would be reimplementing that heuristic blind from a fragile,
+platform-specific proxy signal." `internal/modelcatalog`'s `TierLocal` entries now carry a
+`MinRAMGB` floor (qwen3/qwen2.5-coder: 4, llama3.1: 8, deepseek-r1: 16 — qualitative rules of
+thumb, not measured benchmarks, matching `Curated()`'s existing framing) and a new
+`RecommendLocal(hw)` filters to what fits detected RAM, falling back to the full unnarrowed list
+when RAM is undetected. Surfaced via `aegis models --recommend` (detected hardware + narrowed
+table + `ollama pull <model>` suggestions for anything not already pulled, cross-referenced against
+`internal/discover`'s Ollama probe — printed only, never auto-executed, matching P13.4's
+`security_advise` guarded-suggestion precedent) and a per-entry hardware-fit badge in the TUI's
+`/models` picker (`internal/tui/modelpicker.go`). Tests: portable tests for the fail-soft/unknown
+path plus platform-guarded tests per OS (skip gracefully when the real facility isn't reachable);
+table-driven `RecommendLocal` coverage; build-tagged files verified to compile cleanly under
+cross-compiled `GOOS=linux`/`GOOS=darwin` in addition to the native Windows build. Docs:
+`docs/providers.md`, `docs/cli-reference.md`.
+
+*P20.2 — blind model compare (`aegis compare`).* New `aegis compare <model-A> <model-B> [prompt]`
+command (`internal/cli/compare.go`), a separate command rather than a `parallel` flag since its
+output contract — withhold identity, vote, reveal, optional synthesis — is different enough from
+`parallel`'s plain interleaved-progress contract to muddy both if merged. Mirrors
+`runOneParallel`'s create-session/PATCH-model/post-message/drain-events shape (`runOneCompare`),
+setting each session's model via the existing P14.7 `PATCH /sessions/{id}` mechanism. Identities
+are hidden during the run — progress is logged only by generic label ("Response 1"/"Response
+2"), with slot assignment randomized via `crypto/rand` so position isn't a tell — then revealed
+after the user votes (`1`/`2`/`tie`/`skip` read from stdin). `--synthesize` (default off, plus
+`--synth-model`) makes one further call combining both revealed answers, clearly labeled as a
+synthesis rather than a third blind response. Both underlying sessions persist and remain
+resumable via `aegis --resume <id>`, matching the existing convention `parallel.go` already
+established (it never deletes its sessions either). Tests: vote parsing, a regression test proving
+mid-run logs never leak model identity, randomization producing both slot orders, and command/flag
+construction. Docs: new `## aegis compare` section in `docs/cli-reference.md`.
+
+*P22.6 — raw scrollback mode.* `/scrollback [on|off]` releases the TUI's dashboard rendering for
+native terminal scrollback/selection/search. The investigation corrected the roadmap item's own
+framing: bubbletea v2 moved alt-screen/mouse-capture control from `tea.NewProgram` options to
+per-frame `tea.View()` fields, and this app's `View()` does set `AltScreen=true` /
+`MouseMode=CellMotion` on every frame — so alt-screen genuinely was on, contrary to what a grep for
+the v1-era `WithAltScreen`/`EnterAltScreen` APIs suggested. But alt-screen turned out to be only
+half the blocker: `transcriptPane.View()` (`internal/tui/transcript.go`) independently clips to a
+bounded, fixed-height, in-place-redrawn viewport regardless of alt-screen state — the same screen
+rows get reused every frame instead of old content ever scrolling into the terminal's real
+history. Raw scrollback mode flips both: `View()` sets `AltScreen=false`/`MouseMode=None`, and the
+transcript's rendered height tracks its own unbounded content height instead of the terminal
+window, so appended lines genuinely scroll off into terminal history as the conversation grows.
+The sidebar, scrollbar column, and terminal pane (`Ctrl+X`) are hidden while it's on (they assume a
+fixed-height dashboard) and restored — including prior sidebar open/closed state — when toggled
+back off. Off by default, resets on restart, same convention as `/tools` and `/humor`. Known
+cosmetic limitation (not pursued, S/M effort tier): dialog/picker overlays composite against a
+canvas sized to the terminal window, not the grown transcript frame, so one opened after the
+transcript has scrolled past a screenful renders near the top rather than the current bottom.
+Tests: `internal/tui/scrollback_test.go` (dispatcher sentinels, on/off/toggle transitions,
+`View()` field assertions, the unclipping rendering branch including content appended after the
+mode is already on, sidebar-hidden branch). Docs: `docs/tui-guide.md`.
+
+*P22.5 — `/side` ephemeral side conversation.* `/side <question>` answers a quick, unrelated
+question without touching the main conversation's history, cost counters, or active session id.
+`cmdSide` (`internal/tui/slash.go`) creates a genuinely separate session (`Mode: "plan"` —
+read-only, since the handler has no way to surface an interactive approval mid-flight — default
+persona/system prompt, not the current session's), posts the question, drains its SSE stream into
+an answer, and appends the Q&A to the main transcript as plain output clearly marked `[side <id8>]
+<question>`; `SwitchToSession`/`ReloadSession` are never set, so the main session is provably
+untouched (covered by a dedicated isolation test). The side session is kept rather than deleted —
+abrupt deletion would lose the answer if the user wants to revisit it, and it stays fully usable
+via `/session list`, `/fork`, `/rewind` like any other session — but its title is prefixed `"[side]
+"` so it's visually distinct in the session list rather than adding a new `Ephemeral` field that
+would need threading through the store and every session-management surface for what a title
+prefix already accomplishes. Tests: `internal/tui/side_test.go` (usage-error fast path,
+`commandDefs` registration guard, the isolation-invariant assertion). Docs: `docs/tui-guide.md`.
 
 *P13.4 — `security_advise` engagement tooling (notebook + CVE lookup + guarded suggestions +
 status digest).* New builtin tool `security_advise` (`internal/tool/builtin/advise.go`, capability
