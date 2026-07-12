@@ -61,6 +61,17 @@ func Run(cfg Config) error {
 	m := newModel(cfg)
 	p := tea.NewProgram(m)
 	_, err := p.Run()
+
+	// The daemon client's job ends with the TUI: this is the last consumer
+	// of the bearer token before the CLI process exits, so scrub it here
+	// (FIND-33/P24.21). Every quit path in this package cancels its
+	// in-flight request's context before triggering tea.Quit, so by the
+	// time p.Run() returns no goroutine should still be reading the token —
+	// but bubbletea does not guarantee a dispatched Cmd goroutine has fully
+	// unwound by then, so treat this as best-effort, not a hard guarantee
+	// (see the authToken doc comment in internal/client for the full
+	// caveat).
+	cfg.Client.Zero()
 	return err
 }
 

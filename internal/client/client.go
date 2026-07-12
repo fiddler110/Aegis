@@ -26,7 +26,28 @@ type Client struct {
 	base      string
 	http      *http.Client // no timeout — used for SSE streaming
 	httpShort *http.Client // 30s timeout — used for non-streaming RPCs
-	authToken string
+
+	// authToken holds the daemon's bearer credential as a mutable byte slice
+	// rather than an immutable Go string, so Zero (below) can overwrite the
+	// backing array in place once the Client is done being used
+	// (FIND-33/P24.21, 2026-07-10 STRIDE-A, Low severity / CVSS 2.8). This is
+	// best-effort defense in depth, not a hard guarantee — the finding
+	// itself notes that host/OS access sufficient to scrape this process's
+	// memory is already a significant compromise. Several things stay
+	// outside this type's control even when Zero is called promptly:
+	//   - the garbage collector may copy/move slice backing arrays over the
+	//     token's lifetime, leaving stale copies Zero never touches;
+	//   - if the token ever passes through a Go string (WithToken's
+	//     parameter is one, and the runtime may intern short strings), that
+	//     copy is immutable and unreachable from here;
+	//   - setAuth formats "Bearer <token>" as a new string, and
+	//     http.Request.Header.Set copies that string into the request's own
+	//     header map — both copies live outside this struct and are never
+	//     scrubbed.
+	// Zero narrows the window during which this struct's own backing array
+	// holds the token; it does not eliminate the token's presence in
+	// process memory.
+	authToken []byte
 }
 
 // New returns a client for the daemon at addr (host:port).
@@ -43,21 +64,29 @@ func New(addr string) *Client {
 }
 
 // WithToken returns a copy of c that authenticates with the given token.
-// The returned copy shares the underlying HTTP transports.
+// The returned copy shares the underlying HTTP transports. token arrives as
+// a string (the public API predates the []byte-backed storage added for
+// FIND-33/P24.21) so a copy is unavoidably made here; WithTokenFile avoids
+// that extra copy by writing the file's bytes into authToken directly.
 func (c *Client) WithToken(token string) *Client {
 	c2 := *c
-	c2.authToken = token
+	c2.authToken = []byte(token)
 	return &c2
 }
 
 // WithTokenFile reads the auth token from path and returns an authenticated
-// copy of c. If the file cannot be read, c is returned unchanged.
+// copy of c. If the file cannot be read, c is returned unchanged. Unlike
+// WithToken, the file's bytes are trimmed and stored directly without ever
+// materializing an intermediate Go string, keeping one fewer immutable copy
+// of the token in memory (FIND-33/P24.21).
 func (c *Client) WithTokenFile(path string) *Client {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return c
 	}
-	return c.WithToken(strings.TrimSpace(string(data)))
+	c2 := *c
+	c2.authToken = bytes.TrimSpace(data)
+	return &c2
 }
 
 // WithTLS returns a copy of c that trusts the daemon's certificate at
@@ -108,9 +137,26 @@ func NewFromConfig(cfg *config.Config) *Client {
 }
 
 func (c *Client) setAuth(req *http.Request) {
-	if c.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	if len(c.authToken) != 0 {
+		// The string conversion and concatenation here are exactly the kind
+		// of copy authToken's doc comment warns Zero cannot reach — see
+		// that comment for the full explanation.
+		req.Header.Set("Authorization", "Bearer "+string(c.authToken))
 	}
+}
+
+// Zero overwrites authToken's backing bytes with zeroes in place and clears
+// the field, so a Client that is done being used no longer holds the bearer
+// token in its own memory (FIND-33/P24.21). Call it once a Client's useful
+// life is over: at the end of a one-shot CLI command (typically via defer),
+// or when replacing a cached client with a freshly-authenticated one. Safe
+// to call multiple times, and a no-op on a Client with no token. See
+// authToken's doc comment for what Zero can and cannot guarantee.
+func (c *Client) Zero() {
+	for i := range c.authToken {
+		c.authToken[i] = 0
+	}
+	c.authToken = nil
 }
 
 // Health checks daemon reachability.
