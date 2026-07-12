@@ -1667,6 +1667,24 @@ func (d *SlashDispatcher) cmdSidebar(_ []string) SlashResult {
 	return SlashResult{Output: "\x00sidebar-toggle"}
 }
 
+// cmdScrollback toggles raw scrollback mode (P22.6): plain, unclipped
+// transcript text with alt-screen and mouse capture released, so the
+// terminal emulator's own scrollback/selection/search work natively.
+func (d *SlashDispatcher) cmdScrollback(args []string) SlashResult {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "off", "false", "0":
+			return SlashResult{Output: "\x00scrollback-off"}
+		case "on", "true", "1":
+			return SlashResult{Output: "\x00scrollback-on"}
+		default:
+			return SlashResult{Output: "Usage: /scrollback [on|off]", IsError: true}
+		}
+	}
+	// No arg: toggle current state
+	return SlashResult{Output: "\x00scrollback-toggle"}
+}
+
 // cmdCopy copies the last assistant message (or Nth code block) to the clipboard.
 func (d *SlashDispatcher) cmdCopy(args []string) SlashResult {
 	if len(args) > 0 {
