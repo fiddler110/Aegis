@@ -9,12 +9,139 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-12 — **P25.4 — Approval ergonomics, P25.5 — token-usage observability
-for local providers, and P25.6 — local-model prompt profile.** Previous: **P25.3 — output guard
-vs local/thinking models**, and before that **P25.1 — per-session working directory and P25.2 —
-sandbox backend name trap + untruthful `/config/sandbox`** (`6b76e5e`, 2026-07-11) — the full set
-are the findings from the same day's local-model live-evaluation session (see roadmap.md's P25
-section for the eval methodology, comparative-run table, and regression harness).
+**Last updated:** 2026-07-12 — **P15.13 — web UI session workdir picker + display**, closing out
+the entire 2026-07-11 roadmap review's promoted set. Before that, same day: **P26.1 — `aegis
+doctor` preflight self-diagnostic**, generalizing the P25 batch's "configured vs. actually active"
+pattern into one standalone command. Before that, same day: **P25.7 — promoted the live-eval
+harness into `internal/eval`, and P25.8 — threaded session workdir through the spawn/cron/debate
+seams**, closing out the Tier 1 P25 set. Previous, same day: **P25.4 — approval ergonomics, P25.5
+— token-usage observability for local providers, and P25.6 — local-model prompt profile.** Before
+that: **P25.3 — output guard vs local/thinking models**, and before that **P25.1 — per-session
+working directory and P25.2 — sandbox backend name trap + untruthful `/config/sandbox`**
+(`6b76e5e`, 2026-07-11) — the full set are the findings from the same day's local-model
+live-evaluation session (see roadmap.md's P25 section for the eval methodology, comparative-run
+table, and regression harness).
+
+*P15.13 — web UI session workdir picker + display.* P25.1 gave sessions a `Workdir` field over the
+API, but the web UI never sent one — a browser has no filesystem cwd of its own, so every web
+session silently fell back to the daemon's root, P25.1's exact failure mode surviving for the one
+client that most needed the fix. Backend: `api.StatusInfo` gained `Workspace` (already added for
+P26.1, unused by the frontend until now) and a new `WorkdirAllowlist` field
+(internal/api/api.go, internal/server/server.go's `handleStatusInfo`) mirroring
+`server.session_workdir_allowlist`, so the picker can suggest directories known to be accepted
+instead of guessing blind. Frontend (internal/server/webui/frontend/src): the sidebar's "+ New"
+button now expands an inline directory picker (`SessionList.tsx`) — a free-text input backed by a
+`<datalist>` of suggestions (the allowlist plus recently-used workdirs, deduped and sorted by
+recency, derived client-side from the already-loaded session list — no new endpoint needed for
+that half) — sent as `workdir` on `POST /sessions` when non-empty; leaving it blank keeps today's
+behavior (the daemon's default workspace, named in the hint text). The chat header
+(`app.tsx`'s topbar) now shows a `📁 <workdir>` chip next to the persona/model chip, falling back
+to the daemon's workspace label when the session has none. Error handling: `api()`'s shared fetch
+wrapper (`api.ts`) now unwraps the daemon's `{"error": "..."}` JSON body into the thrown `Error`'s
+message instead of surfacing the raw JSON blob — a small, backward-compatible improvement that
+benefits every existing toast, not just this one — so a rejected workdir (nonexistent path, or
+outside the allowlist once `server.allow_remote` is set) shows the daemon's actual 400/403 message
+in a toast; the picker's "Start chat" button keeps the dialog open (rather than silently falling
+back to the default workspace) until the user fixes the path or cancels. Tests: extended
+`TestServerStatusEndpoint` (internal/server/server_test.go) to assert `WorkdirAllowlist` round-
+trips through `GET /status`. Manually verified end-to-end against a real running daemon over the
+raw HTTP API (no browser available in this environment): `POST /sessions` with a valid absolute
+workdir creates the session with that `workdir` echoed back and persisted; the same request with a
+nonexistent path returns `400 {"error":"workdir does not exist or is not a directory"}` — the exact
+message the picker now surfaces instead of a silent fallback.
+
+*P26.1 — `aegis doctor` preflight self-diagnostic.* Each P25 fix addressed one silent-
+misconfiguration class the live eval hit (sandbox, workdir, guard, tokens) in its own corner of the
+codebase; `doctor` (internal/cli/doctor.go) generalizes the pattern into a single command an
+operator runs first. Every check but the last works standalone with no daemon required — a true
+preflight, safe to run before `aegis serve` — and prints a PASS/WARN/FAIL row plus a corrective
+config key or command for anything short of PASS: **provider** (Ollama `/api/tags` reachability
+and configured-model-is-pulled check via the existing `ollamaNativeBase` helper, or a cloud
+provider's API key actually present in the environment); **sandbox** (re-runs the exact
+`server.SelectSandbox` the daemon calls at startup — the same function the subprocess swarm worker
+already reconstructs — so a backend that silently falls back to unsandboxed local, P25.2's bug
+class, is caught before the daemon ever starts, not just after); **scanners** (`security.Resolve`
+across every *enabled* built-in scanner descriptor — opt-in tools left off are silently skipped,
+so an unconfigured DAST/zap scanner isn't a false alarm); **output guard** (warns when
+`output_guard.mode: llm` targets a model that looks like a thinking model — an explicit
+`provider.think`/`reasoning_effort`, or a name carrying a marker like "-deep"/"deepseek"/"-r1"/
+"qwq" — with no `provider.small_model` set, P25.3's failure mode); **workdir allowlist**
+(`server.session_workdir_allowlist` posture — a no-op on the default loopback bind, worth flagging
+once `server.allow_remote` is set and the allowlist is still empty); and, only if a daemon is
+reachable, **daemon** (`/healthz` reachability, degrading to a WARN rather than a FAIL when none is
+running), **daemon workspace** (new `Workspace` field on `GET /status`'s `api.StatusInfo`, set from
+`Server.workspace` — compared against the CLI's own cwd to catch P25.1's exact failure mode: a
+session created with no explicit `Workdir` silently getting the daemon's workspace instead of the
+caller's), and **daemon sandbox** (cross-checks the *running* daemon's live
+`SandboxFallback`/`SandboxFallbackReason` against what the standalone sandbox check just computed
+from the config on disk — a mismatch means the daemon is stale relative to a config edit and needs
+a restart). Nonzero exit on any FAIL row so it can gate scripts. Tests
+(internal/cli/doctor_test.go): `TestDoctorNamesPodmanMisconfig` reproduces P25.2's exact live-eval
+misconfig (`sandbox.backend: podman`, no podman runtime) and asserts both the WARN row and the
+named `sandbox.backend` config key; `TestDoctorCleanSetupExitsZero` asserts a nil error (no FAIL
+rows) on an unmodified config; `TestLooksLikeThinkingModel`/`TestDoctorGuardCheck`/
+`TestDoctorWorkdirCheck`/`TestSamePath`/`TestDoctorProviderCheckMissingAPIKey` cover the pure
+per-check logic directly. Manually verified end-to-end against a real running daemon: starting
+`aegis serve` from one directory and running `aegis doctor` from another reproduces P25.1's
+mismatch and names it correctly, alongside the daemon's own live sandbox-fallback state.
+
+*P25.8 — thread session workdir through the spawn/cron/debate seams.* P25.1 gave top-level
+sessions their own working directory, but three seams never received it and kept silently
+operating in the daemon's root regardless of which session drove them. (a) **Swarm sub-agents:**
+`swarm.SpawnConfig` gained a `Workdir` field; the `agent` tool (internal/tool/builtin/agent.go)
+captures the spawning turn's workdir via `tool.WorkdirFromContext` once per `Execute` call and
+sets it on every `SpawnConfig` it builds (single-agent, workflow, and debate-mode spawns alike);
+`subAgentRunner` (internal/server/server.go) now sets `engine.Options.Workdir` from `cfg.Workdir`
+explicitly instead of relying on the parent session's ctx value leaking through — the fix that
+actually matters for a detached/background spawn, whose job runs under a context derived from
+`context.Background()` (`task.Manager.Start`) and would otherwise silently lose it; the subprocess
+backend threads `Workdir` through `WorkerSpec` JSON (already automatic, being a `SpawnConfig`
+field) and `internal/cli/worker.go`'s new `resolveWorkerCwd` prefers it over the worker process's
+own cwd. (b) **Cron:** `cron.Job` gained an optional `Workdir` field (SQLite migration,
+`Scheduler.Create` parameter); `cron_create` (internal/tool/builtin/cron.go) captures the calling
+turn's workdir the same way the agent tool does; `cronShellRunner`/`newCronRunFunc`
+(internal/server/helpers.go) now take a per-fire `dir` argument that falls back to the daemon's
+default cwd when a job carries none. (c) **Debate:** `api.DebateRequest` gained a `Workdir` field
+(session-less, so it needs its own — there's no session to inherit from); `handleDebate`
+(internal/server/debate.go) validates it through the same `resolveSessionWorkdir` P25.1 uses, and
+`debateRoleRunner` sets `engine.Options.Workdir` from it so every role's tool calls — and
+`debate.WithFiles`-named fixture paths — resolve against the request's directory instead of always
+falling back to the daemon's default workspace. Tests: workdir-propagation coverage across all
+three swarm spawn shapes (foreground in-process, background/detached, subprocess) —
+`TestAgentToolCapturesSpawningWorkdir`/`TestAgentToolWorkflowCapturesSpawningWorkdir`/
+`TestAgentToolDebateCapturesSpawningWorkdir`/`TestAgentToolBackgroundSpawnCarriesWorkdir`
+(internal/tool/builtin), `TestSubAgentRunnerUsesSpawnConfigWorkdir` (internal/server),
+`TestSubprocessSpawnPropagatesWorkdir` (internal/swarm), `TestResolveWorkerCwdPrefersSpecWorkdir`
+(internal/cli); cron round-trip and fire-time propagation —
+`TestCronCreateCapturesCallingWorkdir` (internal/tool/builtin),
+`TestNewCronRunFuncPassesJobWorkdir` (internal/server), `TestStoreRoundTrip` workdir assertion
+(internal/cron); debate — `TestDebateRoleRunnerUsesRequestWorkdir` and
+`TestHandleDebateRejectsBadWorkdir` (internal/server).
+
+*P25.7 — promoted the live-eval harness into `internal/eval`.* Every P25 finding above was found
+by driving the running daemon over its real HTTP/SSE API against a live local model — the
+existing `internal/eval` scenario tier runs a scripted adapter (good for engine-loop regressions,
+blind to daemon/sandbox/guard integration) and the `live_eval` tier judges prompt/persona quality
+against a bare engine, neither of which touches the seam P25.1–P25.6 actually lived in. Ported
+`research/eval-harness-drive.py` to a `live_workflow`-tagged Go test
+(`internal/eval/live_workflow_test.go`, `TestLiveWorkflow`): it writes the seeded-bug
+`temps.py`/`temps.csv` fixture, `chdir`s into it (mirroring the harness recipe's `cd
+<target-project> && aegis serve` — the exact "daemon cwd wrong" failure mode P25.1 fixed), builds
+a real daemon via `server.New` (full production wiring, not the synthetic `newWithDeps` other
+`internal/server` tests use) served over an in-process `httptest.Server`, and drives it with
+`internal/client.Client` — the same HTTP/SSE seam the TUI and web UI use. Three subtests assert
+workflow-shape invariants rather than golden text: `FixSeededBug` (guard off) checks the task
+actually completed (re-running the fixture script itself rather than trusting the model's claim),
+≥2 shell calls (initial run + verification re-run), no `web_search`/`web_fetch`/`find /`-style
+detours, a tool-call ceiling, no unrequested files or `remember` calls (P25.6), non-zero token
+usage on `done` (P25.5), and ≤2 approval requests under auto-approve (P25.4); `GuardNoMetaLeak`
+(guard on) checks the final answer never leaks PASS/FAIL/VERDICT meta-text (P25.3);
+`LocalPromptProfileReducesFirstTurnTokens` runs an identical trivial prompt against a `local`- and
+a `default`-profile daemon and asserts the local profile's first-turn input tokens are strictly
+lower (P25.6). On-demand only, gated behind the `live_workflow` build tag, same
+no-scheduled-CI-job policy as `live_eval` — documented next to it in CLAUDE.md. Skips (not fails)
+when no `python3`/`python` is on PATH, since a missing interpreter is an environment gap, not a
+regression.
 
 *P25.4 — approval ergonomics: dead hotkeys, bad generated rules, read-only shell gating.* Three
 independent frictions from the live TUI run, all approval-related. (a) **Dead `y` hotkey:** the

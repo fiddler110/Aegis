@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -109,5 +110,60 @@ func TestSubAgentRunnerAppliesOperatorDenyRule(t *testing.T) {
 	}
 	if !strings.Contains(out, "BLOCKED") {
 		t.Fatalf("expected sub-agent's web_fetch call to be blocked by the operator's deny rule, got output: %q", out)
+	}
+}
+
+// TestSubAgentRunnerUsesSpawnConfigWorkdir is the P25.8 regression for gap
+// (a)'s foreground case: subAgentRunner must set engine.Options.Workdir from
+// cfg.Workdir explicitly, not rely on the parent session's tool.WithWorkdir
+// ctx value leaking through the spawn's context chain — a background/
+// detached spawn's job runs under a context derived from
+// context.Background() (task.Manager.Start) and would otherwise silently
+// fall back to the daemon's default workspace regardless of cfg.Workdir.
+// This test drives subAgentRunner directly with a bare context (no
+// tool.WithWorkdir set), so it only passes if cfg.Workdir itself reaches the
+// spawned engine.
+func TestSubAgentRunnerUsesSpawnConfigWorkdir(t *testing.T) {
+	daemonRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(daemonRoot, "target.txt"), []byte("daemon-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(otherDir, "target.txt"), []byte("other-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: daemonRoot}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store,
+		&toolResultEchoAdapter{path: "target.txt"}, reg)
+
+	// Deliberately a bare context — no tool.WithWorkdir set — so the only way
+	// the spawned engine reads otherDir is via cfg.Workdir itself.
+	out, err := srv.subAgentRunner()(context.Background(), swarm.SpawnConfig{
+		Name:    "teammate",
+		Prompt:  "read target.txt",
+		Mode:    "build",
+		Workdir: otherDir,
+	})
+	if err != nil {
+		t.Fatalf("subAgentRunner returned error: %v", err)
+	}
+	if !strings.Contains(out, "other-content") {
+		t.Errorf("sub-agent output = %q, want the fixture content from cfg.Workdir (%q)", out, otherDir)
+	}
+	if strings.Contains(out, "daemon-content") {
+		t.Errorf("sub-agent output = %q, must not read the daemon's default workspace", out)
 	}
 }

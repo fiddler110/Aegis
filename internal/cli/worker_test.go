@@ -170,3 +170,25 @@ func TestExecuteWorkerSandboxHonorsConfiguredStripEnv(t *testing.T) {
 		t.Errorf("configured extra secret leaked into worker shell env:\n%s", out)
 	}
 }
+
+// TestResolveWorkerCwdPrefersSpecWorkdir is the P25.8 regression for gap (a)'s
+// subprocess-backend case: a worker process's own cwd is inherited from the
+// daemon, not the spawning session, so without this a subprocess-mode
+// teammate silently operated in the daemon root regardless of
+// spec.Config.Workdir.
+func TestResolveWorkerCwdPrefersSpecWorkdir(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	processCwd := t.TempDir()
+	specWorkdir := t.TempDir()
+
+	if got := resolveWorkerCwd(processCwd, specWorkdir, logger); got != specWorkdir {
+		t.Errorf("resolveWorkerCwd = %q, want specWorkdir %q", got, specWorkdir)
+	}
+	if got := resolveWorkerCwd(processCwd, "", logger); got != processCwd {
+		t.Errorf("resolveWorkerCwd with empty spec workdir = %q, want processCwd %q", got, processCwd)
+	}
+	nonexistent := filepath.Join(processCwd, "does-not-exist")
+	if got := resolveWorkerCwd(processCwd, nonexistent, logger); got != processCwd {
+		t.Errorf("resolveWorkerCwd with a nonexistent spec workdir = %q, want fallback to processCwd %q", got, processCwd)
+	}
+}

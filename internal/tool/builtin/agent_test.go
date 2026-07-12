@@ -89,6 +89,33 @@ func TestAgentToolBuildParentKeepsBuild(t *testing.T) {
 	}
 }
 
+// TestAgentToolCapturesSpawningWorkdir is the P25.8 regression for gap (a):
+// the agent tool must capture the spawning turn's workdir at spawn time
+// (tool.WorkdirFromContext) and set it on SpawnConfig explicitly, rather than
+// leaving a spawned teammate to rely on the ctx value surviving whatever
+// context the backend actually runs it under (which a detached/background
+// spawn's context.Background()-derived job does not).
+func TestAgentToolCapturesSpawningWorkdir(t *testing.T) {
+	b := &fakeBackend{root: t.TempDir(), output: "ok"}
+	ctx := tool.WithWorkdir(context.Background(), "/session/root")
+	runAgent(t, ctx, b, `{"prompt":"do","subagent_type":"explore"}`)
+	if b.gotCfg.Workdir != "/session/root" {
+		t.Errorf("SpawnConfig.Workdir = %q, want /session/root", b.gotCfg.Workdir)
+	}
+}
+
+// TestAgentToolWorkflowCapturesSpawningWorkdir covers the sequential/parallel/
+// loop workflow spawn path (executeWorkflow), a separate SpawnConfig
+// construction site from the single-agent path above.
+func TestAgentToolWorkflowCapturesSpawningWorkdir(t *testing.T) {
+	b := &fakeBackend{root: t.TempDir(), output: "ok"}
+	ctx := tool.WithWorkdir(context.Background(), "/session/root")
+	runAgent(t, ctx, b, `{"mode":"sequential","agents":[{"prompt":"step 1","subagent_type":"explore"}]}`)
+	if b.gotCfg.Workdir != "/session/root" {
+		t.Errorf("workflow SpawnConfig.Workdir = %q, want /session/root", b.gotCfg.Workdir)
+	}
+}
+
 func TestAgentToolDepthGuard(t *testing.T) {
 	b := &fakeBackend{root: t.TempDir(), output: "ok"}
 	ctx := swarm.WithDepth(context.Background(), maxSpawnDepth)
@@ -216,6 +243,41 @@ func TestAgentToolBackgroundSpawnCarriesCostTracker(t *testing.T) {
 	got, _ := swarm.CostTrackerFromContext(b.gotCtx).(*stubCostTracker)
 	if got != tracker {
 		t.Errorf("background spawn ctx cost tracker = %v, want the shared tracker to survive the detach", got)
+	}
+}
+
+// TestAgentToolBackgroundSpawnCarriesWorkdir is the background/detached half
+// of the P25.8 regression: task.Manager.Start derives its RunFunc context
+// from context.Background(), which drops any tool.WithWorkdir ctx value the
+// exact same way it drops the cost tracker above. Because the agent tool
+// captures the workdir into cfg *before* handing off to spawnBackground
+// (not read again from the job's own context), the spawned engine still
+// sees it — this is the detached case the roadmap calls out as "the
+// regression that matters" since it passes today only by accident for the
+// foreground path.
+func TestAgentToolBackgroundSpawnCarriesWorkdir(t *testing.T) {
+	b := &fakeBackend{root: t.TempDir(), output: "ok"}
+	mgr := newTaskMgr(t)
+	ctx := tool.WithWorkdir(context.Background(), "/session/root")
+	at := NewAgentTool(b, mgr)
+	res, err := at.Execute(ctx, json.RawMessage(`{"prompt":"do","subagent_type":"general","background":true}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("background spawn failed: %+v", res)
+	}
+
+	_, after, found := strings.Cut(res.Content, "task id ")
+	if !found {
+		t.Fatalf("could not find task id in response: %q", res.Content)
+	}
+	id, _, _ := strings.Cut(after, ")")
+	if _, ok := mgr.Wait(id); !ok {
+		t.Fatalf("background task %q never finished", id)
+	}
+	if b.gotCfg.Workdir != "/session/root" {
+		t.Errorf("background SpawnConfig.Workdir = %q, want /session/root", b.gotCfg.Workdir)
 	}
 }
 

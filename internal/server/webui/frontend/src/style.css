@@ -114,6 +114,10 @@ button.danger{background:#b91c1c}
 .prune-confirm{display:flex;flex-direction:column;gap:6px;padding:8px;font-size:12.5px;border:1px solid var(--line);border-radius:10px}
 .prune-confirm input{width:56px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;font-size:12.5px}
 .prune-actions{display:flex;gap:6px}
+.new-chat-confirm{display:flex;flex-direction:column;gap:6px;padding:8px;margin:0 10px 10px;font-size:12.5px;border:1px solid var(--line);border-radius:10px}
+.new-chat-confirm label{display:flex;flex-direction:column;gap:4px}
+.new-chat-confirm input{width:100%;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;font-size:12.5px}
+.new-chat-confirm code{font-size:11.5px}
 
 /* wide popovers, background banner + toggle (P15.9) */
 .panel.wide{width:min(620px,calc(100vw - 32px))}

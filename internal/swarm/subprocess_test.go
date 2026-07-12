@@ -51,6 +51,15 @@ func fakeWorkerMain() {
 		mb, _ := OpenMailbox(spec.MailboxRoot, spec.Identity)
 		_ = mb.Send(Message{Type: MsgResult, Sender: spec.Identity.AgentID, Payload: map[string]any{"error": "deliberate failure"}})
 		os.Exit(1)
+	case "report-workdir":
+		// Echoes back spec.Config.Workdir (P25.8) so the parent test can
+		// assert it survived the parent-writes-JSON / worker-reads-JSON
+		// round trip that is the entire subprocess-backend contract — a
+		// worker process starts with its own cwd, so this field is the only
+		// way it learns the spawning session's directory.
+		mb, _ := OpenMailbox(spec.MailboxRoot, spec.Identity)
+		_ = mb.Send(Message{Type: MsgResult, Sender: spec.Identity.AgentID, Text: spec.Config.Workdir, Payload: map[string]any{"error": ""}})
+		os.Exit(0)
 	case "report-remaining":
 		// Echoes back what Spawn computed for this worker (P10.3), so the
 		// parent test can assert on the exact remaining-budget arithmetic
@@ -100,6 +109,25 @@ func TestSubprocessSpawnSuccess(t *testing.T) {
 	}
 	if m, ok := reg.Get(res.AgentID); !ok || m.Status != StatusDone {
 		t.Errorf("registry status = %+v", m)
+	}
+}
+
+// TestSubprocessSpawnPropagatesWorkdir is the P25.8 regression for gap (a)'s
+// subprocess-backend case: SpawnConfig.Workdir must reach the worker process
+// through the WorkerSpec JSON file, since a subprocess starts a whole
+// separate process with its own cwd and no other channel back to the parent.
+func TestSubprocessSpawnPropagatesWorkdir(t *testing.T) {
+	b, _ := newTestSubprocessBackend(t)
+	h, err := b.Spawn(context.Background(), SpawnConfig{Name: "w", Prompt: "report-workdir", Workdir: "/session/root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed() || res.Output != "/session/root" {
+		t.Errorf("result = %+v, want Output = /session/root", res)
 	}
 }
 

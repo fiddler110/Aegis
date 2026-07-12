@@ -184,6 +184,13 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return tool.Result{Content: "agent: invalid input: " + err.Error(), IsError: true}, nil
 	}
 
+	// Captured once at spawn time (P25.8) so every spawn shape below —
+	// foreground, background/detached, and workflow/debate sub-spawns —
+	// carries the spawning turn's workdir explicitly via SpawnConfig instead
+	// of relying on it surviving whatever context the backend actually runs
+	// the child under.
+	workdir, _ := tool.WorkdirFromContext(ctx)
+
 	if args.Mode == "debate" {
 		claim := args.Claim
 		if claim == "" {
@@ -193,7 +200,7 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 			return tool.Result{Content: "agent: 'claim' is required for debate mode", IsError: true}, nil
 		}
 		claim = debate.WithFiles(claim, args.Files)
-		return a.executeDebate(ctx, claim, args.Domain, args.ProposerPersona, args.CriticPersona, args.ArbiterPersona, args.MaxRounds)
+		return a.executeDebate(ctx, claim, args.Domain, args.ProposerPersona, args.CriticPersona, args.ArbiterPersona, args.MaxRounds, workdir)
 	}
 
 	// Workflow mode: mode field + agents array.
@@ -204,7 +211,7 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		if args.Mode == "loop" && args.Prompt == "" && len(args.Agents) == 0 {
 			return tool.Result{Content: "agent: 'prompt' or 'agents[0]' is required for loop mode", IsError: true}, nil
 		}
-		return a.executeWorkflow(ctx, args.Mode, args.Agents, args.Prompt, args.SubagentType, args.MaxIterations)
+		return a.executeWorkflow(ctx, args.Mode, args.Agents, args.Prompt, args.SubagentType, args.MaxIterations, workdir)
 	}
 
 	if args.Prompt == "" {
@@ -229,6 +236,7 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		Mode:         childMode,
 		Depth:        swarm.DepthFromContext(ctx) + 1,
 		CheckpointID: checkpointIDFrom(ctx),
+		Workdir:      workdir,
 	}
 
 	if args.Background {
@@ -262,7 +270,7 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	return tool.Result{Content: out}, nil
 }
 
-func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []workflowAgent, fallbackPrompt, fallbackType string, maxIter int) (tool.Result, error) {
+func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []workflowAgent, fallbackPrompt, fallbackType string, maxIter int, workdir string) (tool.Result, error) {
 	if depth := swarm.DepthFromContext(ctx); depth >= maxSpawnDepth {
 		return tool.Result{Content: fmt.Sprintf("agent: maximum sub-agent depth (%d) reached", maxSpawnDepth), IsError: true}, nil
 	}
@@ -288,6 +296,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 			Mode:         childMode,
 			Depth:        swarm.DepthFromContext(ctx) + 1,
 			CheckpointID: checkpointIDFrom(ctx),
+			Workdir:      workdir,
 		}
 		h, err := a.backend.Spawn(agentCtx, cfg)
 		if err != nil {
@@ -407,7 +416,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 // swarm.Backend seam — no new spawn mechanism — so the critic has the same
 // tool access (grep/read_file/security_scan) any other sub-agent gets under
 // its clamped permission mode.
-func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPersona, criticPersona, arbiterPersona string, maxRounds int) (tool.Result, error) {
+func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPersona, criticPersona, arbiterPersona string, maxRounds int, workdir string) (tool.Result, error) {
 	if depth := swarm.DepthFromContext(ctx); depth >= maxSpawnDepth {
 		return tool.Result{Content: fmt.Sprintf("agent: maximum sub-agent depth (%d) reached; not starting debate", maxSpawnDepth), IsError: true}, nil
 	}
@@ -422,6 +431,7 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 			Mode:         childMode,
 			Depth:        swarm.DepthFromContext(ctx) + 1,
 			CheckpointID: checkpointIDFrom(ctx),
+			Workdir:      workdir,
 		}
 		h, err := a.backend.Spawn(roleCtx, cfg)
 		if err != nil {

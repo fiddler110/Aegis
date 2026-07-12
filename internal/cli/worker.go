@@ -84,6 +84,26 @@ func runWorker(ctx context.Context, specPath string) error {
 	return runErr
 }
 
+// resolveWorkerCwd picks the directory a subprocess worker's tools and
+// sandbox root against (P25.8). A subprocess worker starts a whole separate
+// process with its own cwd — inherited from the daemon's own working
+// directory, not necessarily the spawning session's — so without this a
+// subprocess-backend teammate silently operated in the daemon root
+// regardless of the parent session's workdir, the exact failure mode P25.1
+// fixed for top-level sessions. specWorkdir is threaded through explicitly
+// by the spawning SpawnConfig; falls back to processCwd if unset or if the
+// directory no longer exists.
+func resolveWorkerCwd(processCwd, specWorkdir string, logger *slog.Logger) string {
+	if specWorkdir == "" {
+		return processCwd
+	}
+	if info, err := os.Stat(specWorkdir); err == nil && info.IsDir() {
+		return specWorkdir
+	}
+	logger.Warn("worker: spec workdir does not exist, falling back to process cwd", "workdir", specWorkdir)
+	return processCwd
+}
+
 // executeWorker builds a sub-engine and runs the teammate to completion,
 // returning its final text and its own cost.Snapshot (P10.3 — the caller
 // reports this back to the parent via the mailbox so a sibling spawned
@@ -99,10 +119,13 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		return "", cost.Snapshot{}, err
 	}
 
-	cwd, err := os.Getwd()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	processCwd, err := os.Getwd()
 	if err != nil {
 		return "", cost.Snapshot{}, err
 	}
+	cwd := resolveWorkerCwd(processCwd, spec.Config.Workdir, logger)
 	// Reconstruct the daemon's configured sandbox backend instead of running
 	// this worker's shell tool directly on the host: the subprocess backend is
 	// sold as giving real OS-level isolation, but without this it actually
@@ -111,7 +134,6 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	// env either (P10.2). Errors are non-fatal here — a worker is a background
 	// process with no interactive operator to show a strict-mode error to, so
 	// it logs and falls back rather than failing the whole spawn.
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	workerSandbox, _, fallbackReason, sbErr := server.SelectSandbox(cfg.Sandbox, cwd, logger)
 	if sbErr != nil {
 		logger.Warn("worker: sandbox selection failed, running unsandboxed", "err", sbErr)

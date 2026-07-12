@@ -86,6 +86,37 @@ func TestCronCreateAndList(t *testing.T) {
 	}
 }
 
+// TestCronCreateCapturesCallingWorkdir is the P25.8 regression for gap (b):
+// cron jobs always ran in the daemon's own cwd regardless of which session
+// scheduled them. cron_create must capture the calling turn's workdir (the
+// same tool.WorkdirFromContext mechanism the agent tool uses) and persist it
+// onto the job.
+func TestCronCreateCapturesCallingWorkdir(t *testing.T) {
+	sched := cronTestScheduler(t)
+	tools := CronTools(sched)
+	ctx := tool.WithWorkdir(context.Background(), "/session/root")
+
+	create := cronToolByName(tools, "cron_create")
+	res, err := create.Execute(ctx, json.RawMessage(`{"schedule":"@hourly","command":"echo hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	id := extractCronID(res.Content)
+	if id == "" {
+		t.Fatalf("could not extract id from: %s", res.Content)
+	}
+	j, err := sched.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(j) != 1 || j[0].Workdir != "/session/root" {
+		t.Errorf("job workdir = %+v, want /session/root", j)
+	}
+}
+
 func TestCronCreateBadSchedule(t *testing.T) {
 	sched := cronTestScheduler(t)
 	tools := CronTools(sched)

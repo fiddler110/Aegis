@@ -10,6 +10,7 @@ import (
 	"github.com/fiddler110/aegis/internal/debate"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // roleScriptedBackend is a swarm.Backend that returns a scripted response
@@ -84,6 +85,40 @@ func TestAgentToolDebateBasic(t *testing.T) {
 	}
 	if b.spawns != 3 {
 		t.Errorf("spawns = %d, want 3 (critic, proposer, arbiter)", b.spawns)
+	}
+}
+
+// TestAgentToolDebateCapturesSpawningWorkdir is the P25.8 regression for the
+// agent tool's debate mode: every spawned role must carry the calling turn's
+// workdir on its SpawnConfig, the same as the single-agent and workflow spawn
+// sites.
+func TestAgentToolDebateCapturesSpawningWorkdir(t *testing.T) {
+	b := debateRoleBackend(t,
+		"CONCEDE — no defensible flaw found.",
+		"(should not be spawned)",
+		"VERDICT: UPHOLD\nCONFIDENCE: high\nREASON: critic conceded.",
+	)
+	at := NewAgentTool(b, nil)
+
+	input, err := json.Marshal(map[string]any{
+		"mode":       "debate",
+		"claim":      "Token X allows full account takeover.",
+		"max_rounds": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := tool.WithWorkdir(context.Background(), "/session/root")
+	if _, execErr := at.Execute(ctx, input); execErr != nil {
+		t.Fatalf("Execute: %v", execErr)
+	}
+	if len(b.lastCfgs) == 0 {
+		t.Fatal("expected at least one spawned role")
+	}
+	for _, cfg := range b.lastCfgs {
+		if cfg.Workdir != "/session/root" {
+			t.Errorf("role %q SpawnConfig.Workdir = %q, want /session/root", cfg.Name, cfg.Workdir)
+		}
 	}
 }
 

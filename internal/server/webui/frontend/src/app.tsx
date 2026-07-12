@@ -217,17 +217,32 @@ export function App() {
     setPanel("none");
   };
 
-  const newSession = async () => {
-    const meta = (await (
-      await api("/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "build" }),
-      })
-    ).json()) as SessionMeta;
-    await loadSessions();
-    setListView("active");
-    openSession(meta.id);
+  // newSession creates a chat, optionally pinned to a workdir (P15.13) — a
+  // browser has no filesystem cwd of its own, so without this every web
+  // session silently fell back to the daemon's root (P25.1's failure mode,
+  // for exactly the audience the web UI targets). A rejected workdir (bad
+  // path, or outside server.session_workdir_allowlist once
+  // server.allow_remote is set) throws with the daemon's own validation
+  // message — surfaced as a toast and rethrown so the caller's dialog stays
+  // open instead of silently falling back to the default workspace.
+  const newSession = async (workdir?: string) => {
+    try {
+      const body: Record<string, unknown> = { mode: "build" };
+      if (workdir) body.workdir = workdir;
+      const meta = (await (
+        await api("/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      ).json()) as SessionMeta;
+      await loadSessions();
+      setListView("active");
+      openSession(meta.id);
+    } catch (e) {
+      addToast("Could not start a new chat: " + (e as Error).message, true);
+      throw e;
+    }
   };
 
   const openSession = async (id: string) => {
@@ -691,6 +706,21 @@ export function App() {
 
   const openTool = (tool: SidebarTool) => setPanel(panel === tool ? "none" : tool);
 
+  // workdirSuggestions (P15.13) feeds the new-chat directory picker: the
+  // configured allowlist first, then distinct workdirs recently used by
+  // other chats — both real, known-good directories, unlike a placeholder
+  // guess.
+  const recentWorkdirs = Array.from(
+    new Set(
+      sessions
+        .slice()
+        .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+        .map((s) => s.workdir)
+        .filter((w): w is string => !!w)
+    )
+  ).slice(0, 6);
+  const workdirSuggestions = Array.from(new Set([...(status?.workdir_allowlist || []), ...recentWorkdirs]));
+
   return (
     <>
       <SessionList
@@ -711,6 +741,8 @@ export function App() {
         onOpenTool={openTool}
         activityCount={runs.length}
         sandboxFallback={status?.sandbox_fallback}
+        workdirSuggestions={workdirSuggestions}
+        defaultWorkdir={status?.workspace}
       />
       <section id="main">
         <div id="topbar">
@@ -727,6 +759,14 @@ export function App() {
             <span class="costs" title={costTitle}>
               {fmtUSD(sessInfo?.cost_usd || 0)} · {fmtTokens(sessionTokens)} tok
               {status ? ` · today ${fmtUSD(status.daily_cost_usd)}` : ""}
+            </span>
+          )}
+          {currentId && (
+            <span
+              class="chip"
+              title="Working directory this chat's tools run in"
+            >
+              📁 {sessInfo?.workdir || status?.workspace || "default workspace"}
             </span>
           )}
           {currentId && (

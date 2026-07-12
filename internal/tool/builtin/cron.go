@@ -55,7 +55,12 @@ func (t *cronCreateTool) Execute(ctx context.Context, input json.RawMessage) (to
 	if strings.TrimSpace(args.Command) == "" {
 		return tool.Result{Content: "command is required", IsError: true}, nil
 	}
-	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title, args.AutoApprove)
+	// Captured from the calling turn's workdir (P25.8) so a job created from
+	// a session rooted outside the daemon's own workspace fires there too,
+	// instead of always running in the daemon's cwd regardless of which
+	// session scheduled it.
+	workdir, _ := tool.WorkdirFromContext(ctx)
+	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title, args.AutoApprove, workdir)
 	if err != nil {
 		return tool.Result{Content: "cron_create: " + err.Error(), IsError: true}, nil
 	}

@@ -55,6 +55,18 @@ type SpawnConfig struct {
 	// so this id crosses that boundary explicitly, letting the worker
 	// reconstruct an equivalent Snapshotter of its own.
 	CheckpointID string
+	// Workdir is the spawning turn's working directory (P25.8), captured
+	// explicitly at spawn time via tool.WorkdirFromContext rather than
+	// relying on the child inheriting it accidentally through ctx. A
+	// foreground in-process spawn's ctx does carry the parent's workdir
+	// value through its chain, but a detached/background spawn's job runs
+	// under a context derived from context.Background() (task.Manager.Start)
+	// and the entire subprocess backend starts a wholly separate process —
+	// both lose any ctx-carried value, silently falling back to the daemon's
+	// root. Threading it through SpawnConfig instead makes every backend and
+	// spawn shape carry it the same explicit way. Empty means "use the
+	// backend's own default root" (daemon workspace, or a worker's cwd).
+	Workdir string
 }
 
 // Result is a finished teammate's output.

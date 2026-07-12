@@ -98,6 +98,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	j := &Job{
 		ID: "j1", Schedule: "* * * * *", Command: "echo hi",
 		Title: "test", Enabled: true, Created: time.Now().Truncate(time.Millisecond),
+		Workdir: "/some/session/root",
 	}
 	if err := store.Save(ctx, j); err != nil {
 		t.Fatal(err)
@@ -109,6 +110,9 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if got.Command != "echo hi" || !got.Enabled {
 		t.Errorf("unexpected job: %+v", got)
+	}
+	if got.Workdir != "/some/session/root" {
+		t.Errorf("workdir = %q, want %q", got.Workdir, "/some/session/root")
 	}
 
 	jobs, err := store.List(ctx)
@@ -136,7 +140,7 @@ func TestSchedulerCreateAndToggle(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) {}, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo", false)
+	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +172,7 @@ func TestSchedulerCreateBadSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	sched := NewScheduler(store, func(j Job) {}, nil)
-	if _, err := sched.Create(context.Background(), "not a cron", "echo", "", false); err == nil {
+	if _, err := sched.Create(context.Background(), "not a cron", "echo", "", false, ""); err == nil {
 		t.Error("expected error for bad schedule")
 	}
 }
@@ -191,7 +195,7 @@ func TestTickFiresAndIdempotent(t *testing.T) {
 	sched := NewScheduler(store, run, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes", false)
+	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +359,7 @@ func TestTickSkipsDisabled(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) { fired = true }, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo", "", false)
+	j, err := sched.Create(ctx, "* * * * *", "echo", "", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}

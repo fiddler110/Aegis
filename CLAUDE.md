@@ -57,6 +57,18 @@ AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcros
 # is workflow_dispatch-only by decision, never scheduled. To run locally:
 ollama pull llama3.2
 go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v
+
+# Live-workflow eval tier (P25.7): drives a real daemon over the same HTTP
+# API + SSE seam the TUI/web UI use — not a scripted adapter — against a
+# real local model, running a seeded-bug fix/verify task and asserting
+# workflow-shape invariants (tool-call count, no web-search/`find /`
+# detours, non-zero token usage, no guard meta-text leakage, no unrequested
+# files). This is what actually caught the P25.1-P25.6 regressions; the
+# live_eval tier above never touches the daemon/sandbox/guard integration.
+# Needs a reachable Ollama server and python3/python on PATH. On-demand
+# only, same no-scheduled-CI-job policy as live_eval. To run locally:
+ollama pull qwen3.6:35b-a3b-deep   # or any tool-calling-capable local model
+go test -tags live_workflow ./internal/eval/... -run TestLiveWorkflow -v
 ```
 
 ## Architecture
