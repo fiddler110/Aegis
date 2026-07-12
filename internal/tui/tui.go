@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -761,6 +762,66 @@ func resolveAttachPath(path, workDir string) string {
 	return abs
 }
 
+// shellRefDefaultLines is how many trailing lines of the terminal pane's most
+// recent output an unqualified "@shell" token injects (P13.3.2).
+const shellRefDefaultLines = 50
+
+// shellRefRe matches "@shell" and "@shell:N" tokens (N = line count). \b
+// anchors the end so it doesn't fire inside a longer word like "@shellac".
+var shellRefRe = regexp.MustCompile(`@shell(?::(\d+))?\b`)
+
+// extractShellRefs resolves @shell / @shell:N tokens in text into the last N
+// lines of the embedded terminal pane's most recent command + output,
+// splicing the resolved text in place of each token (unlike @image:, this is
+// a textual injection, not an attachment). A missing terminal run never
+// fails submission — it substitutes a short placeholder instead.
+func extractShellRefs(text string, term termPane) string {
+	if !shellRefRe.MatchString(text) {
+		return text
+	}
+	return shellRefRe.ReplaceAllStringFunc(text, func(tok string) string {
+		n := shellRefDefaultLines
+		if sub := shellRefRe.FindStringSubmatch(tok); sub[1] != "" {
+			if v, err := strconv.Atoi(sub[1]); err == nil && v > 0 {
+				n = v
+			}
+		}
+		return shellRefText(term, n)
+	})
+}
+
+// shellRefText renders the resolved text for a single @shell token, mirroring
+// the phrasing of the P13.3.1 diagnose-on-failure prompt (tui.go
+// diagnoseLastFailureCmd) so the model sees a consistent framing for
+// terminal-pane activity it didn't run as a tool call.
+func shellRefText(term termPane, n int) string {
+	if term.lastCmd == "" {
+		return "(no terminal output yet)"
+	}
+	out := lastNLines(term.lastOutput, n)
+	status := "succeeded"
+	if term.lastFailed {
+		status = fmt.Sprintf("failed with exit code %d", term.lastExitCode)
+	}
+	return fmt.Sprintf(
+		"The following command (run in the terminal pane, not a tool call) %s:\n\n```\n%s\n```\n\nOutput (last %d lines):\n```\n%s\n```",
+		status, term.lastCmd, n, out)
+}
+
+// lastNLines returns the trailing n newline-delimited lines of s (fewer if s
+// has less), with any trailing blank line from a final "\n" trimmed first.
+func lastNLines(s string, n int) string {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // setSteerMode switches the textarea between normal input and steer mode.
 // In steer mode the placeholder and border colour signal that Enter will
 // inject a steering instruction into the running model turn rather than
@@ -794,6 +855,7 @@ func (m *model) sendUserMessage(text string) tea.Cmd {
 	m.histIdx = -1
 	m.draftInput = ""
 	cleanText, images := extractImageRefs(text, m.cfg.WorkDir)
+	cleanText = extractShellRefs(cleanText, m.term)
 	displayText := cleanText
 	if displayText == "" && len(images) > 0 {
 		suffix := ""
