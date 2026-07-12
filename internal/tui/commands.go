@@ -218,6 +218,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdFork,
 		},
 		{
+			name: "side", argHint: "<question>", needsArgs: true,
+			shortDesc:    "Ask a quick, unrelated question in a fresh throwaway session",
+			detailedHelp: "/side <question>\n  Runs the question through a brand-new, isolated session — no shared history with the current conversation — and prints the answer inline once it comes back.\n  The main session's messages, token/cost accounting, and on-screen view are completely untouched; nothing here counts against this conversation's context.\n  Always runs read-only (plan mode) with the default persona, regardless of the current session's mode/persona/model.\n  The side session is kept (not deleted) so the Q&A isn't lost — titled \"[side] ...\" so it's easy to spot and prune later via /session list or `aegis sessions delete`.\n  Blocks while the answer is generated, same as /debate.",
+			handler:      (*SlashDispatcher).cmdSide,
+		},
+		{
 			name: "detach", argHint: "[on|off]", needsArgs: true,
 			shortDesc:    "Run this session in the background (turn continues after TUI closes)",
 			detailedHelp: "/detach [on|off]\n  Toggle background (detached) mode for this session.\n  on (default): turns continue running after the TUI closes. Use `aegis bg events <id>` to check progress.\n  off: revert to normal foreground execution.",
