@@ -45,7 +45,7 @@ func TestWithTokenSetsAuthHeader(t *testing.T) {
 	base := New(srv.URL)
 	authed := base.WithToken("secret-token")
 
-	if base.authToken != "" {
+	if len(base.authToken) != 0 {
 		t.Error("New client should not have a token")
 	}
 	if _, err := authed.ListSessions(context.Background()); err != nil {
@@ -54,7 +54,10 @@ func TestWithTokenSetsAuthHeader(t *testing.T) {
 	if gotAuth != "Bearer secret-token" {
 		t.Errorf("Authorization header = %q, want \"Bearer secret-token\"", gotAuth)
 	}
-	if base.authToken == authed.authToken {
+	if string(authed.authToken) != "secret-token" {
+		t.Errorf("authed.authToken = %q, want %q", authed.authToken, "secret-token")
+	}
+	if len(base.authToken) != 0 {
 		t.Error("expected WithToken to not mutate the receiver")
 	}
 }
@@ -67,7 +70,7 @@ func TestWithTokenFileReadsToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := New("http://example.com").WithTokenFile(path)
-	if c.authToken != "file-token" {
+	if string(c.authToken) != "file-token" {
 		t.Errorf("authToken = %q, want \"file-token\"", c.authToken)
 	}
 }
@@ -78,8 +81,53 @@ func TestWithTokenFileReadsToken(t *testing.T) {
 func TestWithTokenFileMissingFallsBack(t *testing.T) {
 	c := New("http://example.com")
 	c2 := c.WithTokenFile(filepath.Join(t.TempDir(), "does-not-exist"))
-	if c2.authToken != "" {
+	if len(c2.authToken) != 0 {
 		t.Errorf("expected empty authToken, got %q", c2.authToken)
+	}
+}
+
+// TestZeroOverwritesBackingBytes verifies Zero actually scrubs the token's
+// backing byte array in place — not merely reassigning/nilling the authToken
+// field — since a memory scrape could otherwise still find the old bytes at
+// the same address after Zero "cleared" the field (FIND-33/P24.21).
+func TestZeroOverwritesBackingBytes(t *testing.T) {
+	c := New("http://example.com").WithToken("very-secret-token-value")
+
+	// Alias the same backing array c.authToken points at before Zero drops
+	// its own reference, so we can inspect the bytes after Zero runs.
+	backing := c.authToken
+
+	var sawNonZero bool
+	for _, b := range backing {
+		if b != 0 {
+			sawNonZero = true
+			break
+		}
+	}
+	if !sawNonZero {
+		t.Fatal("test setup: token bytes were already zero before Zero was called")
+	}
+
+	c.Zero()
+
+	for i, b := range backing {
+		if b != 0 {
+			t.Errorf("backing[%d] = %d, want 0 — Zero must overwrite the backing array in place", i, b)
+		}
+	}
+	if c.authToken != nil {
+		t.Errorf("authToken = %v, want nil after Zero", c.authToken)
+	}
+}
+
+// TestZeroSafeOnEmptyClient verifies Zero is a harmless no-op on a Client
+// with no token, since callers scrub unconditionally without checking
+// whether authentication was ever configured.
+func TestZeroSafeOnEmptyClient(t *testing.T) {
+	c := New("http://example.com")
+	c.Zero() // must not panic
+	if c.authToken != nil {
+		t.Errorf("authToken = %v, want nil", c.authToken)
 	}
 }
 

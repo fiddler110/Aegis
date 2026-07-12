@@ -61,6 +61,13 @@ func newACPCmd() *cobra.Command {
 				}
 				cl = client.NewFromConfig(cfg)
 			}
+			// cl (the final value, after any reassignment above) lives for
+			// the whole ACP session — agent.Serve blocks until the editor
+			// disconnects — so scrub its token once that returns, right
+			// before this command's process exits (FIND-33/P24.21). Placed
+			// after the reassignment so the defer captures the client that
+			// actually gets used, not the discarded pre-embedded-daemon one.
+			defer cl.Zero()
 
 			resolvedMode := cfg.Permission.Mode
 			if mode != "" {
