@@ -174,15 +174,23 @@ type Event struct {
 	// (runTools below), where results don't necessarily arrive in call order
 	// (P21.2).
 	ToolID      string
-	ToolResult  string           // KindToolResult
-	ToolIsError bool             // KindToolResult
-	Usage       *provider.Usage  // KindTurnDone
+	ToolResult  string // KindToolResult
+	ToolIsError bool   // KindToolResult
+	// Usage carries per-turn counts on KindTurnDone and the run-cumulative
+	// total (IsEstimated set if any contributing turn lacked real
+	// provider-reported usage) on the terminal KindDone (P25.5).
+	Usage       *provider.Usage
 	CostUSD     float64          // KindTurnDone: cumulative run cost (0 if untracked)
 	Trace       *trace.TurnTrace // KindTrace: per-turn observability record
 	Err         error            // KindError
 	GuardReason string           // KindGuard: why validation failed
 	GuardPassed bool             // KindGuard: whether the guard ultimately passed
 	GuardStatus string           // KindGuard: guard.Status value — "passed" | "failed" | "skipped_transport_error" — distinguishes a genuine pass/fail verdict from a fail-open skip that GuardPassed alone can't
+	// GuardRetrying marks a failed-guard event whose answer is about to be
+	// replaced by a corrective retry (P25.3). Consumers should withdraw the
+	// answer they just rendered rather than leaving it on screen — the retry's
+	// text replaces it, it doesn't follow it.
+	GuardRetrying bool
 }
 
 // EmitFunc receives engine events. It must not block for long.
@@ -375,6 +383,21 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	toolRoundsCompleted := 0
 	ctxFullWarned := false // one context-nearly-full notice per run, not one per turn
 
+	// runUsage accumulates token counts across every turn of this run so the
+	// terminal KindDone event can carry a total (P25.5) — previously it was
+	// emitted bare, so API/eval-harness clients that only look at the final
+	// event (unlike the TUI, which reads the per-turn KindTurnDone events)
+	// always saw zero, even though a local/Ollama run's per-turn estimate was
+	// computed and displayed live in the TUI status bar the whole time.
+	// runUsageEstimated is true when any contributing turn had no real
+	// provider-reported usage, so the total is flagged honestly rather than
+	// implying every turn's count came straight from the provider.
+	var (
+		runUsage          provider.Usage
+		runUsageSeen      bool
+		runUsageEstimated bool
+	)
+
 	for iter := 0; iter < e.maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
@@ -476,6 +499,16 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			}
 		}
 		emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
+		if usage != nil {
+			runUsageSeen = true
+			runUsage.InputTokens += usage.InputTokens
+			runUsage.OutputTokens += usage.OutputTokens
+			runUsage.CacheCreationTokens += usage.CacheCreationTokens
+			runUsage.CacheReadTokens += usage.CacheReadTokens
+			if usage.IsEstimated {
+				runUsageEstimated = true
+			}
+		}
 
 		// Assemble a structured trace for this turn. Tool calls (if any) are
 		// filled in after they run below; for a final turn it is emitted now.
@@ -508,8 +541,8 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					e.logger.Debug("output guard result", "passed", ok, "guard_status", string(status))
 					if !ok && guardRetries < maxRetries {
 						guardRetries++
-						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason, GuardStatus: string(status)})
-						corrective := "[Your previous response did not pass output validation: " + reason +
+						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason, GuardStatus: string(status), GuardRetrying: true})
+						corrective := guardCorrectivePrefix + reason +
 							". This means the actual deliverable is incomplete or unpolished, not just its" +
 							" description. Do not reply with only an acknowledgment, a plan, or a promise to" +
 							" fix it later — that will fail validation again."
@@ -517,7 +550,9 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 							corrective += " If you already wrote or edited a file for this task, call your file" +
 								" tools now (e.g. edit_file/write_file) to fix the real content directly."
 						}
-						corrective += " Finish the work now, then give a corrected final answer that reflects the fixed result.]"
+						corrective += " Finish the work now, then give a corrected final answer that reflects" +
+							" the fixed result. Address the original request only — never mention this" +
+							" validation step or include verdict words like PASS or FAIL in your answer.]"
 						conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 							provider.TextBlock{Text: corrective},
 						}})
@@ -536,7 +571,16 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					}
 				}
 			}
-			emit(Event{Kind: KindDone})
+			if guardRetries > 0 {
+				retractGuardCorrectives(conv)
+			}
+			doneEv := Event{Kind: KindDone}
+			if runUsageSeen {
+				u := runUsage
+				u.IsEstimated = runUsageEstimated
+				doneEv.Usage = &u
+			}
+			emit(doneEv)
 			return nil
 		}
 
@@ -591,6 +635,58 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	err := fmt.Errorf("engine: exceeded max iterations (%d)", e.maxIterations)
 	emit(Event{Kind: KindError, Err: err})
 	return err
+}
+
+// guardCorrectivePrefix opens every guard corrective message; besides framing
+// the retry prompt, it is the marker retractGuardCorrectives keys on to strip
+// retry scaffolding from the durable transcript once the run settles.
+const guardCorrectivePrefix = "[Your previous response did not pass output validation: "
+
+// retractGuardCorrectives removes guard-retry scaffolding — each corrective
+// prompt and the failed assistant answer it was scolding — from the
+// conversation after the run has settled on a final surfaced answer (P25.3),
+// so the durable transcript (and the model's context on later turns) contains
+// only the answer the user actually saw, with no validation meta-text for a
+// future turn to echo back. The scaffolding must stay in place *during* the
+// retry (the model corrects against it); this runs only once the outcome is
+// decided. Messages are identified by content rather than by indices recorded
+// at retry time so a compaction or prepare-step rewrite mid-run can't shift
+// the bookkeeping onto the wrong messages. Tool-use rounds a retry ran are
+// untouched — only the failed text answer and the corrective prompt go.
+func retractGuardCorrectives(conv *Conversation) {
+	kept := make([]provider.Message, 0, len(conv.Messages))
+	removed := false
+	for _, m := range conv.Messages {
+		if isGuardCorrective(m) {
+			if n := len(kept); n > 0 && kept[n-1].Role == provider.RoleAssistant && !hasToolUse(kept[n-1]) {
+				kept = kept[:n-1] // the failed answer this corrective was scolding
+			}
+			removed = true
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if removed {
+		conv.Messages = kept
+		conv.invalidate()
+	}
+}
+
+func isGuardCorrective(m provider.Message) bool {
+	if m.Role != provider.RoleUser || len(m.Content) != 1 {
+		return false
+	}
+	tb, ok := m.Content[0].(provider.TextBlock)
+	return ok && strings.HasPrefix(tb.Text, guardCorrectivePrefix)
+}
+
+func hasToolUse(m provider.Message) bool {
+	for _, b := range m.Content {
+		if _, ok := b.(provider.ToolUseBlock); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // turn performs a single model call, accumulating the assistant message and any
@@ -746,7 +842,7 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 				}
 			}()
 
-			if e.serializeTool(tu.Name) {
+			if e.serializeTool(tu.Name, tu.Input) {
 				execLock.Lock()
 				defer execLock.Unlock()
 			}
@@ -793,10 +889,14 @@ func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.Too
 	return results, traces, nil
 }
 
-// serializeTool reports whether a tool must run exclusively (write/execute
-// capabilities), preventing it from racing other tool calls in the same round.
-// Unknown tools are treated as serial out of caution.
-func (e *Engine) serializeTool(name string) bool {
+// serializeTool reports whether a tool call must run exclusively (write/
+// execute capabilities), preventing it from racing other tool calls in the
+// same round. Capability is evaluated per-call (tool.EffectiveCapability,
+// P25.4c) so a call a tool reclassifies as narrower than its usual
+// capability — e.g. a read-only shell command — isn't serialized behind
+// concurrent writes/execs for no reason. Unknown tools are treated as serial
+// out of caution.
+func (e *Engine) serializeTool(name string, input json.RawMessage) bool {
 	if e.tools == nil {
 		return true
 	}
@@ -804,7 +904,7 @@ func (e *Engine) serializeTool(name string) bool {
 	if !ok {
 		return true
 	}
-	switch t.Capability() {
+	switch tool.EffectiveCapability(t, input) {
 	case tool.CapWrite, tool.CapExecute:
 		return true
 	default:
@@ -934,14 +1034,15 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	if !isErr && t.Capability() == tool.CapWrite {
 		e.recordWrittenPaths(writtenPathsFromInput(tu.Input))
 	}
-	if !isErr && e.redactSecrets && t.Capability() == tool.CapRead {
+	if !isErr && e.redactSecrets && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
 		// P24.12 / FIND-09: opt-in scrub of tool-read file content for secret
 		// patterns before it's appended to the conversation sent to whichever
 		// provider is configured (a cloud API by default has no visibility
 		// restriction on what a file read surfaces). Strictly best-effort and
 		// never blocking — a scan failure or gitleaks being absent leaves
 		// content untouched, since the tool result must still reach the model
-		// either way.
+		// either way. Effective capability (P25.4c) so a `cat` of a
+		// secrets-bearing file gets the same scrub a read_file call would.
 		if redacted, findings, scanErr := redactSecretsFn(ctx, content); scanErr == nil && len(findings) > 0 {
 			content = redacted
 			e.logger.Info("redacted secret pattern(s) from tool output", "tool", tu.Name, "count", len(findings))

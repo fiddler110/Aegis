@@ -56,6 +56,27 @@ type OutputSchemer interface {
 	OutputSchema() json.RawMessage
 }
 
+// CapabilityOverrider is an optional Tool extension for a tool whose
+// effective capability depends on the specific call rather than being fixed
+// per tool (P25.4c). The shell tool is the motivating case: most invocations
+// are CapExecute, but a narrow read-only subset (ls, cat, git status/log/
+// diff, …) should be gated as CapRead instead — gating every invocation as
+// execute forces a full approval prompt even for commands that mutate
+// nothing.
+type CapabilityOverrider interface {
+	CapabilityFor(input json.RawMessage) Capability
+}
+
+// EffectiveCapability returns the capability that should gate a specific
+// call: t's static Capability(), unless t implements CapabilityOverrider and
+// reports a different capability for this input.
+func EffectiveCapability(t Tool, input json.RawMessage) Capability {
+	if o, ok := t.(CapabilityOverrider); ok {
+		return o.CapabilityFor(input)
+	}
+	return t.Capability()
+}
+
 // Registry holds registered tools and tracks which are exposed.
 type Registry struct {
 	mu          sync.RWMutex

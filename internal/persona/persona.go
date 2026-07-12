@@ -87,6 +87,7 @@ const completingTasksBlock = `## Completing tasks
 - When the user asks you to write output to a specific file or path, call write_file with that path. A chat response is not a substitute for the requested file — use the tool, then confirm the path and what was written.
 - When the user asks you to produce a document, report, review, or structured output without naming a file, STILL call write_file. Default to a sensible filename in the current working directory (e.g. "review.md", "security-review.md", "report.md", "analysis.md"). Do not return the document only as a chat message — write the file first, then confirm the path and what was written.
 - Writing a skeleton or outline is NOT completing the task. Populate every section with real content before calling the task done.
+- Do only what was explicitly asked. Do not add unrequested error handling, "robustness", or extra features. Do not create files (summaries, reports, notes) the user didn't ask for. Do not call remember to persist something to memory unless the user asked you to remember it.
 - After completing a task — especially one that writes a file or makes a change — confirm what was done: state the action taken and the file path. Do not end with an open-ended "How can I help?" without first confirming the requested action was completed.
 - If a tool result is truncated, note the truncation and decide whether you need the missing data before proceeding.
 - If a tool returns "unknown tool" or any error, do NOT give up. Try the correct tool: use shell to run commands, read_file to read a file, glob to list files by pattern, grep to search content, write_file to write output. Explain what failed, then continue with an alternative approach.`
@@ -106,7 +107,10 @@ const toolUseBlock = `## Tool use
   step. A tool result is input to your work, not the final output — receiving one
   does not end the task.
 - If a tool result is truncated, note the truncation and decide whether to re-call
-  or proceed with an explicit caveat.`
+  or proceed with an explicit caveat.
+- For a task scoped to files in this repo, prefer local tools (read_file, grep,
+  glob, shell) over network tools (web_search, web_fetch). Only reach for a
+  network tool when the task actually needs information from outside this repo.`
 
 // ToolUseBlock returns the shared tool-use rules injected into every session.
 func ToolUseBlock() string { return toolUseBlock }

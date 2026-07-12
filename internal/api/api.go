@@ -148,6 +148,10 @@ type Event struct {
 	// KindApprovalRequest fields
 	ApprovalReason string `json:"approval_reason,omitempty"`
 	ApprovalID     string `json:"approval_id,omitempty"` // run id to echo back when answering
+	// GuardRetrying marks a KindGuard failure whose answer is about to be
+	// replaced by a corrective retry (P25.3): clients should withdraw the
+	// answer text they just rendered — the retry replaces it, not follows it.
+	GuardRetrying bool `json:"guard_retrying,omitempty"`
 }
 
 // ApproveRequest is posted to /sessions/{id}/approve to answer a pending

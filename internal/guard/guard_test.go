@@ -162,6 +162,53 @@ func TestLLMGuardIncludesFileContent(t *testing.T) {
 	}
 }
 
+// TestParseVerdictShapes is the P25.3 regression suite for the parser
+// asymmetry that made the guard counterproductive with local/thinking models:
+// PASS was only matched at position 0 while FAIL matched anywhere, so a
+// reasoning preamble ahead of a passing verdict fail-closed every correct
+// answer into a corrective retry. A verdict is now recognized at the start OR
+// on the last non-empty line (after stripping <think> blocks); genuinely
+// ambiguous replies still fail closed.
+func TestParseVerdictShapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		reply  string
+		ok     bool
+		reason string // "" = don't check the exact reason
+	}{
+		{"bare pass", "PASS", true, ""},
+		{"bare fail", "FAIL: missing citations", false, "missing citations"},
+		{"reasoning preamble, pass on last line", "Let me check the rubric.\nThe answer covers every point and cites its sources.\n\nPASS", true, ""},
+		{"reasoning preamble, fail on last line", "The report looks complete at first glance.\nBut section 3 is a stub.\n\nFAIL: section 3 is a stub", false, "section 3 is a stub"},
+		{"think block then pass", "<think>weighing the rubric against the answer... it satisfies everything</think>PASS", true, ""},
+		{"thinking block then pass", "<thinking>the fix is verified by the re-run output</thinking>\nPASS", true, ""},
+		{"unclosed think block fails closed", "<think>hmm, it satisfies the rubric so I will reply PASS", false, ""},
+		{"markdown emphasis pass", "**PASS**", true, ""},
+		{"markdown emphasis fail", "**FAIL: no evidence cited**", false, "no evidence cited"},
+		{"verdict label pass on last line", "The rubric asks for completeness.\nVerdict: PASS", true, ""},
+		{"fail keyword mid-reasoning still fails", "The answer would FAIL a stricter rubric because the summary is truncated.", false, ""},
+		{"pass keyword mid-sentence is not trusted", "This does not pass the bar in my view, though parts are fine.", false, ""},
+		{"negated pass fails closed not open", "The answer does not PASS the rubric.", false, ""},
+		{"ambiguous fails closed", "I think maybe it is fine?", false, ""},
+		{"empty fails closed", "", false, ""},
+		{"pass despite fail earlier in reasoning", "One criterion nearly made this FAIL: the citation format. On inspection it is acceptable.\nPASS", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, reason := parseVerdict(tc.reply)
+			if ok != tc.ok {
+				t.Fatalf("parseVerdict(%q) ok = %v, want %v (reason=%q)", tc.reply, ok, tc.ok, reason)
+			}
+			if !ok && reason == "" {
+				t.Errorf("parseVerdict(%q) failed with empty reason", tc.reply)
+			}
+			if tc.reason != "" && reason != tc.reason {
+				t.Errorf("parseVerdict(%q) reason = %q, want %q", tc.reply, reason, tc.reason)
+			}
+		})
+	}
+}
+
 func TestResolve(t *testing.T) {
 	if g, _ := Resolve(Config{Disabled: true}, nil, ""); g != nil {
 		t.Error("disabled config returns nil guard")

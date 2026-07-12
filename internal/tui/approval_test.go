@@ -13,19 +13,71 @@ func TestSuggestRulePattern(t *testing.T) {
 	cases := []struct {
 		name, input, want string
 	}{
-		{"shell two words", `{"command":"npm test -v --run foo"}`, "npm test*"},
+		{"shell two words, subcommand", `{"command":"npm test -v --run foo"}`, "npm test*"},
 		{"shell one word", `{"command":"make"}`, "make*"},
+		{"shell binary + script argument", `{"command":"python3 temps.py"}`, "python3 *"},
 		{"file path", `{"path":"src/engine/loop.go"}`, "src/engine/*"},
 		{"windows path", `{"path":"D:\\dev\\aegis\\main.go"}`, `D:\dev\aegis\*`},
 		{"bare filename", `{"path":"main.go"}`, "main.go"},
 		{"url", `{"url":"https://example.com/a/b"}`, "https://example.com/*"},
 		{"unknown", `{"foo":1}`, "*"},
 		{"empty", ``, "*"},
+
+		// P25.4b: cd-prefix stripping — the working directory a command
+		// happened to run in isn't part of what's being approved, and
+		// keeping it produced rules narrow enough to never match again.
+		{"cd prefix stripped", `{"command":"cd /private/tmp/x/demo-project && python3 temps.py"}`, "python3 *"},
+		{"cd prefix, subcommand kept", `{"command":"cd /tmp && git status"}`, "git status*"},
+		{"nested cd prefixes stripped", `{"command":"cd /a && cd /b && ls"}`, "ls*"},
+		{"cd prefix only", `{"command":"cd /tmp &&"}`, "*"},
+
+		// P25.4b: env-var prefix stripping.
+		{"env prefix stripped", `{"command":"FOO=bar python3 script.py"}`, "python3 *"},
+		{"env and cd prefix stripped", `{"command":"cd /tmp && FOO=bar npm test"}`, "npm test*"},
+
+		// P25.4b: shell metacharacters — never suggest a pattern; the
+		// dangerous "allow shell(cat >*)" and useless "allow shell(cd
+		// ... && python3 temps.py*)" cases both come from here.
+		{"redirection refused", `{"command":"cat file.txt > /etc/passwd"}`, ""},
+		{"redirection-only refused", `{"command":"cat >out.txt"}`, ""},
+		{"pipe refused", `{"command":"ls | grep foo"}`, ""},
+		{"substitution refused", "{\"command\":\"echo $(whoami)\"}", ""},
+		{"backtick refused", "{\"command\":\"echo `whoami`\"}", ""},
+		{"chaining refused", `{"command":"ls; rm -rf /"}`, ""},
+		{"background refused", `{"command":"npm test &"}`, ""},
+		{"redirection after cd stripped", `{"command":"cd /tmp && cat f > /etc/x"}`, ""},
 	}
 	for _, c := range cases {
 		if got := suggestRulePattern(c.input); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestBuildApproveRequestEmptyPatternNeverAllowsAlways covers P25.4b's other
+// half: even if a caller selects "Allow always" for a call whose suggested
+// pattern is "" (shell metacharacters present), the resulting request must
+// not set AllowAlways/Pattern — sending AllowAlways with no pattern falls
+// back to the daemon's whole-tool session cache (sseApprover.Approve),
+// which is exactly the unbounded-whitelist hazard this guards against.
+func TestBuildApproveRequestEmptyPatternNeverAllowsAlways(t *testing.T) {
+	a := &approvalState{id: "run-1", toolName: "shell", pattern: ""}
+	req := buildApproveRequest(a, apprAllowAlways)
+	if !req.Approved {
+		t.Error("expected the call itself to still be approved")
+	}
+	if req.AllowAlways {
+		t.Error("expected AllowAlways to stay false when no safe pattern exists")
+	}
+	if req.Pattern != "" {
+		t.Errorf("expected empty Pattern, got %q", req.Pattern)
+	}
+
+	// Sanity check the non-empty case still persists a rule as before.
+	a2 := &approvalState{id: "run-2", toolName: "shell", pattern: "npm test*"}
+	req2 := buildApproveRequest(a2, apprAllowAlways)
+	if !req2.Approved || !req2.AllowAlways || req2.Pattern != "npm test*" {
+		t.Errorf("expected allow-always with pattern, got %+v", req2)
 	}
 }
 
@@ -95,5 +147,55 @@ func TestApprovalDialogFlow_NoPTY(t *testing.T) {
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
 	if m.approval != nil {
 		t.Fatal("expected approval state cleared after answering")
+	}
+}
+
+// TestApprovalDialogTakesKeyPriorityOverComposer verifies P25.4a: the
+// approval dialog consumes hotkeys even while the composer is mid-draft and
+// in "steer the model" mode — the state a live dialog opens on top of — and
+// that the composer's focus/content is left untouched by the dialog's keys.
+func TestApprovalDialogTakesKeyPriorityOverComposer(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.streaming = true
+	m.setSteerMode(true)
+
+	// The composer has focus and a partial draft before the dialog opens —
+	// the exact "steer the model" state the live bug report described. Set
+	// the draft directly (SetValue) rather than driving a keypress through
+	// Update, so the test doesn't depend on the completion popup's daemon
+	// client, which is unavailable in this unit test.
+	m.ta.SetValue("h")
+	if !m.ta.Focused() {
+		t.Fatal("expected composer focused before the approval dialog opens")
+	}
+	if m.ta.Value() != "h" {
+		t.Fatalf("expected composer draft %q, got %q", "h", m.ta.Value())
+	}
+
+	m.applyEvent(api.Event{
+		Kind:           api.KindApprovalRequest,
+		Tool:           "shell",
+		ToolInput:      []byte(`{"command":"rm -rf /"}`),
+		ApprovalReason: "execute capability requires approval",
+		ApprovalID:     "run-2",
+	})
+	if m.ta.Focused() {
+		t.Fatal("expected composer blurred once the approval dialog opens (P25.4a)")
+	}
+
+	// Repeated 'y' presses — the reported dead-hotkey symptom — must reach
+	// the dialog, not accumulate as text in the still-blurred composer.
+	for i := 0; i < 5 && m.approval != nil; i++ {
+		m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
+	}
+	if m.approval != nil {
+		t.Fatal("expected 'y' to resolve the approval dialog")
+	}
+	if m.ta.Value() != "h" {
+		t.Fatalf("expected composer draft untouched by dialog hotkeys, got %q", m.ta.Value())
+	}
+	if !m.ta.Focused() {
+		t.Fatal("expected composer focus restored after the dialog resolves")
 	}
 }

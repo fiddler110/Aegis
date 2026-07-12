@@ -1,12 +1,16 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-11 (late night) — P25.1 (per-session working directory) and P25.2
-(sandbox backend name trap) shipped (`6b76e5e`); writeups moved to
-[releases.md](releases.md#latest-changes). A same-day roadmap review added **P25.8** (workdir
-threading through spawn/cron/debate), Tier 2 **P26.1** (`aegis doctor`) and **P15.13** (web UI
-workdir picker), and parked **P25.9**; P25.7's acceptance was reworked to an on-demand suite —
-**no scheduled/nightly CI eval job, by decision.** Open: **Tier 1 P25.3–P25.8, Tier 2 P26.1 +
-P15.13.**
+**Last updated:** 2026-07-12 — P25.4 (approval ergonomics), P25.5 (token-usage observability for
+local providers), and P25.6 (local-model prompt profile) shipped: dialog focus/hotkey fix,
+safer generated Allow-always rules, a read-only shell classifier, `done`-event usage estimates,
+and an auto-detected local prompt profile (deferred network/scan tools + trimmed repo map +
+two scope-creep guardrail rules); writeup in [releases.md](releases.md#latest-changes).
+Previously (same day): P25.3 (output guard vs local/thinking models) shipped: verdict parsing
+symmetry, SmallModel routing for guard calls, retry-replaces-visible-answer + transcript
+retraction, and a guard-off `--first-init` template. Before that (2026-07-11): P25.1 and P25.2
+shipped (`6b76e5e`); roadmap review added **P25.8**, Tier 2 **P26.1** and **P15.13**, parked
+**P25.9**; P25.7's acceptance reworked to an on-demand suite — **no scheduled/nightly CI eval
+job, by decision.** Open: **Tier 1 P25.7–P25.8, Tier 2 P26.1 + P15.13.**
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -17,19 +21,22 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** Tier 1 — P25.3–P25.8 (P25.3–P25.7 from the local-model live-eval findings,
-2026-07-11; P25.8 from the same-day roadmap review; P25.1 and P25.2 shipped the same day).
-Tier 2 — P26.1 (`aegis doctor`) and P15.13 (web UI workdir picker), also from the roadmap
-review. Tier 3 is empty. Tier 4 is the parked set — see
-[Parked](#open-work--parked-tier-4).
+**Open items:** Tier 1 — P25.7–P25.8 (from the local-model live-eval findings and the same-day
+roadmap review, 2026-07-11; P25.1–P25.6 shipped). Tier 2 — P26.1 (`aegis doctor`) and P15.13
+(web UI workdir picker), also from the roadmap review. Tier 3 is empty. Tier 4 is the parked
+set — see [Parked](#open-work--parked-tier-4).
 
-**Next session:** work P25 top-to-bottom. P25.3 (output guard vs local/thinking models) is next —
-3× turn latency and meta-text leakage into user-visible answers. P25.5 (S) is a standalone quick
-win that can slot in anywhere; P25.7 lands late so each fix's invariant is regression-locked as it
-ships (the eval suite is on-demand only — no scheduled CI job, per 2026-07-11 decision); P25.8
-closes the remaining workdir seams after it. Re-run the harness (recipe in the P25 section) after
-each fix to confirm the corresponding failure mode is gone — including one re-run against P25.1's
-and P25.2's fixes, since the harness itself predates both. Tier 2 (P26.1, P15.13) follows once
+**Next session:** P25.7 (promote the live-eval harness into `internal/eval`) is next — it lands
+late deliberately, so each P25 fix's invariant is regression-locked as it ships (the eval suite
+is on-demand only — no scheduled CI job, per 2026-07-11 decision). P25.8 closes the remaining
+workdir seams (spawn/cron/debate) after it. Re-run the harness (recipe in the P25 section) after
+each fix to confirm the corresponding failure mode is gone — including re-runs against
+P25.1's/P25.2's/P25.3's fixes, since the harness itself predates them (for P25.3: guard **on**,
+deep model — expect no unrecognizable-verdict warnings, ≤ ~15 % latency overhead vs guard-off,
+no PASS/FAIL meta-text in the answer; for P25.4: seeded-bug task in build mode needs ≤ 2
+approvals; for P25.5: harness summary shows non-zero in/out tokens with the estimated flag on an
+Ollama run; for P25.6: first-turn prompt tokens measurably down under the local profile, no
+unrequested files/`remember` calls from `qwen3coder:30b`). Tier 2 (P26.1, P15.13) follows once
 Tier 1 is clear, or as breaks between larger items.
 
 ---
@@ -44,16 +51,9 @@ speculatively.
 
 **Tier 1** (work in order; full detail in the [P25 section](#open-work--p25-local-model-live-evaluation--2026-07-11)):
 
-1. **P25.3 — Output guard vs local/thinking models** (M) — 3× turn latency and meta-text leakage
-   into user-visible answers.
-2. **P25.4 — Approval ergonomics** (M) — dead `y` hotkey, useless-or-dangerous generated
-   Allow-always rules, read-only shell commands gated as execute.
-3. **P25.5 — Token-usage observability for local providers** (S).
-4. **P25.6 — Local-model profile: prompt weight + scope-creep guardrails** (S/M).
-5. **P25.7 — Promote the live-eval harness into `internal/eval`** (M) — deliberately late: it
-   regression-locks all of the above (including P25.1 and P25.2). On-demand only; no scheduled
-   CI job.
-6. **P25.8 — Thread session workdir through the spawn/cron/debate seams** (S/M) — P25.1 residue:
+1. **P25.7 — Promote the live-eval harness into `internal/eval`** (M) — deliberately late: it
+   regression-locks P25.1–P25.6. On-demand only; no scheduled CI job.
+2. **P25.8 — Thread session workdir through the spawn/cron/debate seams** (S/M) — P25.1 residue:
    detached/subprocess sub-agents, cron jobs, and debate still run in the daemon root.
 
 **Tier 2** (from the 2026-07-11 roadmap review):
@@ -116,118 +116,31 @@ P25.7 eval fixture.
 `/config/sandbox`)** shipped 2026-07-11 (`6b76e5e`) — implementation writeups, including what
 P25.1 deliberately deferred (per-session LSP/knowledge/repo-map scoping, `os`-backend write
 confinement), are in [releases.md](releases.md#latest-changes).
-
-### P25.3 — Output guard is counterproductive with local/thinking models
-
-Priority: Tier 1 · Effort: M
-
-- **Symptom:** with the default `output_guard.enabled: true` + `mode: llm`, a correct answer
-  from `qwen3.6:35b-a3b-deep` tripled turn time (26 s → 78 s): the guard verdict failed to
-  parse ("guard reply did not contain a recognizable PASS/FAIL verdict"), fail-closed forced a
-  corrective retry that **re-ran tools**, the retry's verdict failed to parse again, and the
-  surfaced answer contained leaked meta-text — literally "**PASS.** The fix is confirmed
-  working…" — because the retry turn saw guard feedback in context and answered the guard
-  instead of the user.
-- **Root cause:** three compounding issues. (1) `internal/guard/guard.go:209` —
-  `strings.HasPrefix(upper, "PASS")`: thinking-style local models preface verdicts with
-  reasoning, so a passing reply almost never *starts* with PASS (FAIL is matched anywhere,
-  PASS only at position 0 — asymmetric). (2) The guard call runs on the **full session model**
-  (the deep/thinking one); `Provider.SmallModel` exists and is already preferred for session
-  titles (internal/server/sessions.go:810) and compaction (server.go:491–492) but not the
-  guard. (3) The corrective retry appends to the same user-visible stream rather than replacing
-  the failed answer, and its prompt framing lets verdict language leak into the final text.
-- **Fix sketch:** route guard calls to `SmallModel` when set (a non-thinking model makes the
-  strict "reply exactly PASS" contract actually satisfiable); strip reasoning/`<think>` blocks
-  and/or parse the **last** non-empty line for the verdict before the fail-closed fallback
-  (keep fail-closed as the final posture — the asymmetry, not the strictness, is the bug);
-  make the retry replace, not append, the visible answer, and keep guard feedback out of any
-  text surfaced to the user; consider defaulting `output_guard.enabled: false` (or
-  `mode: schema`-only) when the provider base URL is a local endpoint, since a same-model
-  rubric self-check adds full-model latency for little signal. Note `--first-init` writes
-  `output_guard.enabled: true` into the Ollama-flavored global config — revisit that template
-  alongside this.
-- **Acceptance:** seeded-bug task with guard on: no unrecognizable-verdict warnings with the
-  deep model, ≤ ~15 % latency overhead vs guard-off, and no PASS/FAIL/rubric language in the
-  user-visible answer under forced retries.
-- **Tests:** unit tests for verdict parsing on replies with reasoning preambles /
-  verdict-on-last-line / genuinely ambiguous text (still fail-closed); engine test that a
-  guard-retry turn replaces the visible answer; config test for SmallModel routing.
-
-### P25.4 — Approval ergonomics: dead hotkeys, bad generated rules, read-only shell gating
-
-Priority: Tier 1 · Effort: M
-
-- **Symptom (a) — dead hotkey:** during the live TUI run the approval dialog's `y` hotkey went
-  unresponsive for ~7 minutes of repeated presses (keystrokes were being swallowed, most likely
-  by the "Steer the model" composer holding focus) while bare Enter confirmed instantly. No
-  visual cue distinguishes dialog-focus from composer-focus.
-- **Symptom (b) — generated Allow-always rules:** the dialog's suggested rules were either
-  uselessly narrow — `allow shell(cd /private/tmp/…/demo-project && python3 temps.py*)` (never
-  matches again once the command varies) — or dangerously broad — `allow shell(cat >*)`, which
-  whitelists arbitrary file writes via shell redirection in one keypress.
-- **Symptom (c) — read-only commands gated as execute:** because P25.1 pushed the model off the
-  `read_file`/`ls` tools, plain `cat`/`ls`/`git status` shell calls each raised a full execute
-  approval; six approvals for one bug-fix task is approval fatigue that trains users toward
-  `auto_approve_exec: true` (see P25.2 for why that is dangerous today).
-- **Fix sketch:** (a) route hotkeys reliably while a dialog is open (dialog takes key priority;
-  visible focus indicator; hotkey echo when a key is consumed by the composer instead). (b)
-  smarter rule generation: strip leading `cd <dir> &&` and env prefixes, key the suggestion on
-  the actual binary + subcommand (`allow shell(python3 *)`, `allow shell(git status*)`), and
-  never auto-suggest patterns containing shell-redirection/eval metacharacters (`>`, `|`,
-  `$( )`) — require hand-written rules for those. (c) a small read-only shell classifier
-  (allowlisted argv[0]+flags: `ls`, `cat`, `head`, `tail`, `wc`, `git status/log/diff` without
-  `-c`/hooks, etc., rejecting redirections/pipes/command-substitution) that maps classified
-  commands to the `read` capability path — auto-approved in build mode, still subject to
-  deny rules and the plan-mode read gate.
-- **Acceptance:** hotkeys always work (or visibly indicate why not) while a dialog is shown;
-  no generated rule ever contains a redirection wildcard; the seeded-bug task in build mode
-  with correct workspace root needs ≤ 2 approvals (the actual `python3` runs, or fewer with
-  the classifier + a `python3` rule).
-- **Tests:** TUI dialog focus/hotkey unit tests; table-driven tests for rule generation
-  (cd-stripping, metacharacter refusal); classifier tests including bypass attempts
-  (`cat f > /etc/x`, `git -c core.pager=sh log`, `ls; rm -rf /`).
-
-### P25.5 — Token-usage observability for local providers
-
-Priority: Tier 1 · Effort: S
-
-- **Symptom:** every API-driven run reported `done in=0 out=0` on the SSE `done` event, while
-  the TUI status bar showed live counts (e.g. `in:10038 out:104`) for the same engine. Cost/
-  budget features and the eval harness can't see usage over the API for Ollama runs.
-- **Root cause (suspected, verify first):** the estimated-token path (`TokensEstimated` /
-  character-length inference, api.go:138–140) feeds the TUI's per-turn display but the final
-  `done` event's `InputTokens`/`OutputTokens` are only populated from provider-reported usage,
-  which the Ollama OpenAI-compat endpoint doesn't always emit mid-stream. Trace where
-  `KindDone` is assembled in the engine/server SSE bridge.
-- **Fix sketch:** carry the same estimated counts (flagged `tokens_estimated: true`) onto the
-  `done` event and into `SessionMeta` totals so API clients, cost tracking, and the web UI cost
-  readout (P15.4) agree with the TUI.
-- **Acceptance/tests:** harness summary shows non-zero in/out (with the estimated flag) for an
-  Ollama run; engine/server test with a usage-less adapter asserting `done` carries estimates.
-
-### P25.6 — Local-model profile: prompt weight + scope-creep guardrails
-
-Priority: Tier 1 · Effort: S/M
-
-- **Symptom:** first model call carries ~10 k input tokens (system prompt + 19 exposed tool
-  schemas + repo map + skills preamble) before the user says a word — heavy for 3B-active MoE
-  models both in latency (prompt processing dominates short turns) and instruction-following
-  (the web-search detour happened while flailing under P25.1, but nothing in the prompt
-  discourages network tools for local file tasks). Separately, `qwen3coder:30b` over-delivered:
-  unrequested try/except "robustness", an unrequested `fix-summary.md`, and an **unprompted
-  `remember` call** that persisted to project memory — the system prompt never says "don't
-  create files or memories the user didn't ask for".
-- **Fix sketch:** (a) an opt-in "local" prompt profile (auto-suggested when base_url is
-  localhost): trim system-prompt sections, lean harder on the existing `tool_search` deferral
-  to cut always-exposed schemas (web_search/web_fetch, security_scan, git_pr, save_skill are
-  deferral candidates), and skip the repo map above a size threshold. (b) add two short
-  system-prompt rules for all profiles: prefer local file tools over network tools for
-  file-scoped tasks; don't write files / call `remember` / add features beyond what was asked.
-  (c) measure with the P25.7 harness: first-turn prompt tokens and time-to-first-tool-call,
-  before vs after.
-- **Acceptance:** first-turn input tokens for the fixture project measurably down (target
-  ≥ 30 % under the local profile); qwen3coder run produces no unrequested files or `remember`
-  calls; deep-model run still completes the fixture task in ≤ 5 tool calls.
+**P25.3 (output guard vs local/thinking models)** shipped 2026-07-12 — symmetric verdict
+parsing (last-line verdicts, `<think>`/`<thinking>` stripping, still fail-closed on ambiguity),
+guard verdict calls routed to `provider.small_model` when set, guard retries now replace the
+visible answer (`guard_retrying` event flag + TUI in-place withdrawal + engine transcript
+retraction of retry scaffolding), corrective prompt forbids verdict-language leakage, and the
+`--first-init` Ollama template ships the guard disabled with a `small_model` hint — writeup in
+[releases.md](releases.md#latest-changes). The latency-overhead acceptance run (guard on, deep
+model, ≤ ~15 % vs guard-off) still needs a live harness pass next eval session.
+**P25.4 (approval ergonomics)** shipped 2026-07-12 — approval-dialog composer-blur fix for the
+dead-hotkey symptom, `cd`/env-prefix-stripping + metacharacter-refusing rule generation
+(`suggestShellPattern`), and a new read-only shell classifier (`shell_readonly.go`) wired through
+`tool.CapabilityOverrider`/`EffectiveCapability` so `ls`/`cat`/`git status`-class calls no longer
+raise a full execute approval — writeup in [releases.md](releases.md#latest-changes).
+**P25.5 (token-usage observability for local providers)** shipped 2026-07-12 — the engine now
+accumulates per-turn usage (real or character-estimated) across a run and attaches it to the
+terminal `KindDone` event with `TokensEstimated` set correctly, so API/SSE clients (and the P25.7
+harness once built) see the same non-zero counts the TUI status bar already showed — writeup in
+[releases.md](releases.md#latest-changes).
+**P25.6 (local-model prompt profile)** shipped 2026-07-12 — `provider.prompt_profile`
+(auto-detected from a loopback `base_url`) defers `git_pr`/`web_fetch`/`web_search`/
+`security_scan` and skips an oversized repo map under the local profile only, plus two new
+scope-creep guardrail rules (prefer local tools over network tools for file-scoped tasks; don't
+write files/call `remember`/add unrequested robustness) injected into every session's system
+prompt regardless of profile — writeup in [releases.md](releases.md#latest-changes). Actual
+latency/token measurement against the fixture project is deferred to the P25.7 harness.
 
 ### P25.7 — Promote the live-eval harness into `internal/eval`
 
@@ -236,21 +149,23 @@ Priority: Tier 1 · Effort: M
 - **Why:** everything above was found by *driving the running system*, not by unit tests — the
   existing `internal/eval` scenario tier uses a deterministic adapter (good for engine-loop
   regressions, blind to provider/daemon/sandbox integration), and the `live_eval` tier judges
-  prompt/persona quality but not full tool-executing workflows. The gap is exactly where P25.1,
-  P25.2, and P25.3 lived.
+  prompt/persona quality but not full tool-executing workflows. The gap is exactly where
+  P25.1–P25.6 lived.
 - **Fix sketch:** port [research/eval-harness-drive.py](eval-harness-drive.py) to Go as a
   `live_eval`-tagged test (or a new `live_workflow` tag): spin up a daemon in a temp fixture
   project (seeded-bug `temps.py`/`temps.csv`), run the fix-the-bug task via the HTTP API with
   auto-approve + container (or `os`) sandbox, and assert workflow-shape invariants rather than
   golden text: task completes; file actually fixed on disk; re-run tool call observed; **no**
   `web_search`/`find /`-style detours; tool-call count ≤ N; wall-time budget; non-zero token
-  usage on `done` (P25.5); no guard meta-text ("PASS"/"FAIL:") in the final answer (P25.3).
-  On-demand only, no scheduled CI job (deliberate — the nightly-eval workflow stays
-  `workflow_dispatch`-only): document the single local command next to the existing `live_eval`
-  tier in CLAUDE.md; keep the Python script in research/ for ad-hoc use.
+  usage on `done` (P25.5); no guard meta-text ("PASS"/"FAIL:") in the final answer (P25.3);
+  ≤ 2 approvals in build mode (P25.4); first-turn prompt tokens measurably down under
+  `prompt_profile: local` vs default, no unrequested files/`remember` calls (P25.6). On-demand
+  only, no scheduled CI job (deliberate — the nightly-eval workflow stays `workflow_dispatch`-only):
+  document the single local command next to the existing `live_eval` tier in CLAUDE.md; keep the
+  Python script in research/ for ad-hoc use.
 - **Acceptance:** the suite runs green on demand against a local Ollama model via one documented
   `go test -tags live_eval ./internal/eval/... -run TestLiveWorkflow` command; each
-  P25.1/P25.2/P25.3 fix lands with its corresponding invariant enabled; re-running the suite is
+  P25.1–P25.6 fix lands with its corresponding invariant enabled; re-running the suite is
   the documented definition-of-done for changes touching the engine/server/sandbox/guard seams,
   so a regression in any locked behavior fails the suite on the next run.
 

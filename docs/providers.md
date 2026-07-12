@@ -343,10 +343,12 @@ Configure a fast, cheap secondary model for context compaction and quick operati
 ```yaml
 provider:
   model: "claude-opus-4-8"
-  small_model: "claude-haiku-4-5-20251001"   # used for compaction summaries
+  small_model: "claude-haiku-4-5-20251001"   # used for compaction summaries,
+                                             # session titles, and output-guard
+                                             # verdict calls
 ```
 
-If `small_model` is empty, the main model is used for compaction (more expensive but always available).
+If `small_model` is empty, the main model is used for these background calls (more expensive but always available). For local/Ollama setups, set `small_model` to a fast **non-thinking** model before enabling the output guard — a thinking model rarely satisfies the guard's strict PASS/FAIL reply contract quickly.
 
 ---
 

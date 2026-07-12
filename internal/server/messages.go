@@ -645,6 +645,7 @@ func toAPIEvent(ev engine.Event) api.Event {
 	}
 	if ev.Kind == engine.KindGuard {
 		out.Text = ev.GuardReason
+		out.GuardRetrying = ev.GuardRetrying
 	}
 	if ev.Usage != nil {
 		out.InputTokens = ev.Usage.InputTokens

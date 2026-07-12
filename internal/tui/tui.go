@@ -173,6 +173,13 @@ type model struct {
 	// lastAssistantText holds the most recent complete assistant message for /copy.
 	lastAssistantText string
 
+	// lastAnswerBlock is the transcript item holding the most recently flushed
+	// assistant answer, kept so a guard-retry event (P25.3) can withdraw the
+	// failed answer in place instead of leaving it above its replacement.
+	// Nil whenever no withdrawable answer is on screen (run finished, session
+	// switched, transcript reset).
+	lastAnswerBlock *transcriptItem
+
 	// todo strip — populated from todo_add/todo_update/todo_list tool events.
 	todoItems       []todoStripItem
 	pendingTodoText string // captured from todo_add call input, matched to result
@@ -1140,8 +1147,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		// TQ9: a pasted image path becomes an attachment token instead of raw
 		// text, replacing the typed @image:<path> incantation. Anything else
-		// falls through to the textarea's own paste handling.
-		if !m.termFocused {
+		// falls through to the textarea's own paste handling. The approval
+		// dialog owns all input while open (P25.4a), same as it does for
+		// tea.KeyMsg below, so a paste can't land silently in the composer.
+		if !m.termFocused && m.approval == nil {
 			p := strings.TrimSpace(msg.Content)
 			// Windows "Copy as path" and shell copies often quote the path.
 			if len(p) >= 2 && ((p[0] == '"' && p[len(p)-1] == '"') || (p[0] == '\'' && p[len(p)-1] == '\'')) {
@@ -1685,6 +1694,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Output == "\x00clear" {
 			m.transcript.Reset()
+			m.lastAnswerBlock = nil
 			m.thinkEntries = nil
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
@@ -1831,7 +1841,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	{
+	// The approval dialog owns all input while open (P25.4a): tea.KeyMsg
+	// already returns above before reaching here, but this guard covers
+	// every other message type too so no future case can leak a keystroke,
+	// paste, or other input into the composer out from under the dialog.
+	if m.approval == nil {
 		var cmd tea.Cmd
 		prevTAH := m.ta.Height()
 		m.ta, cmd = m.ta.Update(msg)
@@ -2251,7 +2265,10 @@ func (m *model) flushLiveText() {
 	m.liveText.Reset()
 	m.live.reset()
 	m.lastAssistantText = raw // TQ4: capture for /copy
-	m.transcript.Append(m.mdRender(raw))
+	// AppendBlock rather than Append so a guard-retry event can withdraw this
+	// answer in place (P25.3); nil when the render was empty or the block was
+	// immediately trimmed out.
+	m.lastAnswerBlock = m.transcript.AppendBlock(m.mdRender(raw))
 }
 
 // toggleTerminal opens the terminal pane (with keyboard focus) if it is
@@ -2368,6 +2385,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.slash.SetSession(sess.ID, sess.Mode)
 
 	m.transcript.Reset()
+	m.lastAnswerBlock = nil
 	m.thinkEntries = nil
 	m.tools = m.tools[:0]
 	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
@@ -2743,6 +2761,10 @@ func (m *model) applyEvent(ev api.Event) {
 			pattern:  suggestRulePattern(string(ev.ToolInput)),
 		}
 		m.status = "approval required"
+		// Blur the composer so its cursor stops implying it's the thing
+		// listening (P25.4a) — the approval dialog is the only visual and
+		// input focus target until it's answered.
+		m.ta.Blur()
 		m.applyViewportHeight() // dialog height varies with the preview (TQ6)
 		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + ev.Tool}
 
@@ -2758,10 +2780,27 @@ func (m *model) applyEvent(ev api.Event) {
 		m.transcript.Append(barLabel("Assistant", colAssistFg) + "\n")
 
 	case api.KindGuard:
-		// Output validation flagged the answer; surface it as a dim warning.
 		m.flushThinking()
 		m.flushLiveText()
-		m.transcript.Append("\n" + m.th.elapsedDim.Render("⚠ output guard: "+ev.Text) + "\n")
+		switch {
+		case ev.GuardRetrying:
+			// The engine is about to replace this answer with a corrective
+			// retry (P25.3): withdraw the failed answer in place so the retry
+			// renders as *the* answer, not as a second one below it.
+			note := m.th.elapsedDim.Render("⚠ output guard: answer withdrawn ("+ev.Text+") — retrying…") + "\n\n"
+			if m.lastAnswerBlock != nil {
+				m.transcript.SetItemRaw(m.lastAnswerBlock, note)
+				m.lastAnswerBlock = nil
+				m.lastAssistantText = ""
+			} else {
+				m.transcript.Append(note)
+			}
+		case ev.Text != "":
+			// Terminal validation failure (retries exhausted, answer surfaced
+			// anyway); surface it as a dim warning.
+			m.transcript.Append("\n" + m.th.elapsedDim.Render("⚠ output guard: "+ev.Text) + "\n")
+		}
+		// A pass event (empty Text) needs no transcript line at all.
 
 	case api.KindCostAlert:
 		// Spend crossed the configured alert threshold; surface it as a dim warning.
@@ -2781,11 +2820,18 @@ func (m *model) applyEvent(ev api.Event) {
 		// If the last action was a tool call with no follow-up text, this ensures
 		// the transcript is fully rendered before the run is marked complete.
 		m.flushLiveText()
+		m.lastAnswerBlock = nil // the surfaced answer is final; nothing left to withdraw
 
 	case api.KindError:
 		m.flushThinking()
 		m.flushLiveText()
-		m.approval = nil // clear any pending approval if the run aborts
+		m.lastAnswerBlock = nil
+		if m.approval != nil { // clear any pending approval if the run aborts
+			m.approval = nil
+			if !m.termFocused {
+				m.ta.Focus()
+			}
+		}
 		m.transcript.Append("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
 		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Error: " + truncate(ev.Error, 100)}
 		// P21.2: a turn that errors mid-round can leave a concurrently-run
@@ -3147,7 +3193,12 @@ func (m model) renderSidebar(h int) string {
 func (m model) renderInputArea() string {
 	// Left side: streaming indicator with elapsed time, toast, or ready dot.
 	var statusLeft string
-	if m.streaming && m.escPending {
+	if m.approval != nil {
+		// P25.4a: the composer is blurred while the dialog is open (no
+		// blinking cursor down here) — spell out where input goes instead of
+		// leaving that to be inferred from the missing cursor alone.
+		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⏸ respond to the approval dialog above")
+	} else if m.streaming && m.escPending {
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to stop")
 	} else if !m.streaming && m.escPending {
 		// P22.3: armed by a first ESC press on an already-empty input box;

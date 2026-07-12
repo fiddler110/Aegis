@@ -40,6 +40,19 @@ func (a fixedAdapter) Stream(ctx context.Context, req provider.Request) (<-chan 
 	return ch, nil
 }
 
+// zeroUsageAdapter simulates a local/Ollama model that reports no token
+// usage at all, forcing the engine's estimation fallback (P25.5).
+type zeroUsageAdapter struct{ text string }
+
+func (zeroUsageAdapter) Name() string { return "zero-usage" }
+func (a zeroUsageAdapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: a.text}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{}}
+	close(ch)
+	return ch, nil
+}
+
 func newTestServer(t *testing.T) (*client.Client, func()) {
 	t.Helper()
 	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
@@ -409,6 +422,66 @@ func TestDailyTokenCapBlocksTurn(t *testing.T) {
 	}
 }
 
+// TestDoneEventAndSessionMetaCarryEstimatedTokens is the P25.5 regression:
+// previously the terminal "done" SSE event carried no token fields at all
+// (in=0 out=0) for a provider that reports no usage (local/Ollama models),
+// even though the TUI's live status bar showed non-zero estimated counts for
+// the same run via the per-turn turn_done events. API clients (and the eval
+// harness, which only reads the final done event) now see the same estimate,
+// flagged tokens_estimated, and the session's persisted totals reflect it too.
+func TestDoneEventAndSessionMetaCarryEstimatedTokens(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, zeroUsageAdapter{text: "hello from local model"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := cl.PostMessage(ctx, meta.ID, "hello")
+	if err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	var doneEv *api.Event
+	for ev := range ch {
+		if ev.Kind == api.KindError {
+			t.Fatalf("error event: %s", ev.Error)
+		}
+		if ev.Kind == api.KindDone {
+			cp := ev
+			doneEv = &cp
+		}
+	}
+	if doneEv == nil {
+		t.Fatal("no done event")
+	}
+	if doneEv.InputTokens == 0 || doneEv.OutputTokens == 0 {
+		t.Errorf("done event tokens = in:%d out:%d, want both > 0", doneEv.InputTokens, doneEv.OutputTokens)
+	}
+	if !doneEv.TokensEstimated {
+		t.Error("done event TokensEstimated should be true when the provider reported no usage")
+	}
+
+	sess, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.InputTokens == 0 || sess.OutputTokens == 0 {
+		t.Errorf("session totals = in:%d out:%d, want both > 0", sess.InputTokens, sess.OutputTokens)
+	}
+}
+
 func TestServerHealthEndpoint(t *testing.T) {
 	cl, cleanup := newTestServer(t)
 	defer cleanup()
@@ -682,6 +755,61 @@ func TestEffectiveSystemCombinesMemory(t *testing.T) {
 	got = srv.effectiveSystem("base prompt", "")
 	if !strings.Contains(got, "base prompt") || !strings.Contains(got, "test fact") {
 		t.Errorf("effectiveSystem didn't include memory: %q", got)
+	}
+}
+
+// TestEffectiveSystem_localProfileTrimsPrompt covers P25.6(a)'s acceptance
+// criteria: the local prompt profile (auto-detected from a loopback
+// provider.base_url) omits a repo map larger than localRepoMapMaxBytes and
+// produces a measurably shorter assembled system prompt than the default
+// profile given the same base config, session state, and (large) repo map.
+// A remote base_url must keep the full repo map — the trim is opt-in/
+// localhost-triggered only, never applied globally.
+func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
+	bigRepoMap := "<repo_map>\n" + strings.Repeat("x", localRepoMapMaxBytes+500) + "\n</repo_map>"
+
+	newSrv := func(t *testing.T, baseURL string) *Server {
+		t.Helper()
+		root := t.TempDir()
+		store, err := session.Open(filepath.Join(root, "s.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { store.Close() })
+		cfg := &config.Config{
+			Provider:   config.ProviderConfig{Model: "test", BaseURL: baseURL},
+			Permission: config.PermissionConfig{Mode: "plan"},
+		}
+		srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+		srv.memory = memory.Sources{ProjectRoot: root, DataDir: filepath.Join(root, "data")}
+		srv.repoMap = bigRepoMap
+		return srv
+	}
+
+	localSrv := newSrv(t, "http://localhost:11434")
+	defaultSrv := newSrv(t, "https://api.anthropic.com")
+
+	localOut := localSrv.effectiveSystem("base prompt", "")
+	defaultOut := defaultSrv.effectiveSystem("base prompt", "")
+
+	if strings.Contains(localOut, "<repo_map>") {
+		t.Error("local profile: oversized repo map should be omitted, but is present")
+	}
+	if !strings.Contains(defaultOut, "<repo_map>") {
+		t.Error("default profile: repo map should still be injected regardless of size")
+	}
+	if len(localOut) >= len(defaultOut) {
+		t.Errorf("local profile prompt should be shorter than default: local=%d default=%d", len(localOut), len(defaultOut))
+	}
+
+	// Both profiles must still carry the two P25.6(b) shared rules.
+	for _, out := range []string{localOut, defaultOut} {
+		if !strings.Contains(out, "prefer local tools") {
+			t.Error("prefer-local-tools rule missing from effectiveSystem output")
+		}
+		if !strings.Contains(out, "only what was explicitly asked") {
+			t.Error("no-scope-creep rule missing from effectiveSystem output")
+		}
 	}
 }
 
@@ -1030,5 +1158,14 @@ func TestToAPIEventGuard(t *testing.T) {
 	}
 	if ev.Text != "missing citations" {
 		t.Errorf("text = %q, want the guard reason", ev.Text)
+	}
+	if ev.GuardRetrying {
+		t.Error("GuardRetrying should default to false")
+	}
+	// P25.3: the retry flag must survive the engine→API translation so clients
+	// know to withdraw the answer they just rendered.
+	ev = toAPIEvent(engine.Event{Kind: engine.KindGuard, GuardReason: "missing citations", GuardRetrying: true})
+	if !ev.GuardRetrying {
+		t.Error("GuardRetrying = false, want true")
 	}
 }

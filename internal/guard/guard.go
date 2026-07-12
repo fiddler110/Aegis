@@ -205,10 +205,26 @@ func Resolve(c Config, adapter provider.Adapter, model string) (Func, int) {
 
 func parseVerdict(s string) (bool, string) {
 	s = strings.TrimSpace(stripThink(s))
-	upper := strings.ToUpper(s)
-	if strings.HasPrefix(upper, "PASS") {
-		return true, ""
+	// Explicit verdict at the very start — the contract shape.
+	if ok, reason, found := verdictAt(s); found {
+		return ok, reason
 	}
+	// Thinking-style local models front-load reasoning and put the verdict on
+	// the final line, so a passing reply almost never *starts* with PASS.
+	// The pre-P25.3 parser matched PASS only at position 0 but FAIL anywhere —
+	// that asymmetry turned nearly every passing verdict from such a model
+	// into a fail-closed corrective retry. Check the last non-empty line
+	// before falling back.
+	if last := lastNonEmptyLine(s); last != "" {
+		if ok, reason, found := verdictAt(last); found {
+			return ok, reason
+		}
+	}
+	// FAIL anywhere in the reply still reads as a failure verdict (a reason
+	// sentence may bury the keyword mid-line); PASS gets no such treatment —
+	// "does not PASS the rubric" must not count as a pass, so an affirmative
+	// verdict is only trusted in the explicit positions above.
+	upper := strings.ToUpper(s)
 	if i := strings.Index(upper, "FAIL"); i >= 0 {
 		reason := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s[i+4:]), ":"))
 		if reason == "" {
@@ -224,6 +240,40 @@ func parseVerdict(s string) (bool, string) {
 	return false, "guard reply did not contain a recognizable PASS/FAIL verdict"
 }
 
+// verdictAt reports whether s *begins* with a PASS or FAIL verdict, tolerating
+// markdown emphasis/heading/list markup ("**PASS**", "# FAIL: …") and an
+// optional "VERDICT:" label before the keyword. found is false when neither
+// keyword leads, letting parseVerdict try its next position.
+func verdictAt(s string) (ok bool, reason string, found bool) {
+	t := strings.TrimLeft(s, "*_#>•-–— \t\"'`")
+	if upper := strings.ToUpper(t); strings.HasPrefix(upper, "VERDICT") {
+		t = strings.TrimLeft(t[len("VERDICT"):], ": \t")
+	}
+	upper := strings.ToUpper(t)
+	switch {
+	case strings.HasPrefix(upper, "PASS"):
+		return true, "", true
+	case strings.HasPrefix(upper, "FAIL"):
+		r := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t[len("FAIL"):]), ":"))
+		r = strings.TrimSpace(strings.Trim(r, "*_"))
+		if r == "" {
+			r = "output did not satisfy the rubric"
+		}
+		return false, r, true
+	}
+	return false, "", false
+}
+
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return l
+		}
+	}
+	return ""
+}
+
 // stripFence removes a single ```lang … ``` code fence if present.
 func stripFence(s string) string {
 	s = strings.TrimSpace(s)
@@ -236,17 +286,25 @@ func stripFence(s string) string {
 	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "```"))
 }
 
-// stripThink removes <think>…</think> reasoning blocks from a validator reply.
+// stripThink removes <think>…</think> and <thinking>…</thinking> reasoning
+// blocks from a validator reply. An unclosed block truncates from its opening
+// tag: the verdict may be lost with it, but parseVerdict then fails closed,
+// which is the right posture for a reply that never left its reasoning.
 func stripThink(s string) string {
-	for {
-		start := strings.Index(s, "<think>")
-		if start < 0 {
-			return s
+	for _, tag := range []string{"thinking", "think"} {
+		openTag, closeTag := "<"+tag+">", "</"+tag+">"
+		for {
+			start := strings.Index(s, openTag)
+			if start < 0 {
+				break
+			}
+			end := strings.Index(s[start:], closeTag)
+			if end < 0 {
+				s = strings.TrimSpace(s[:start])
+				break
+			}
+			s = s[:start] + s[start+end+len(closeTag):]
 		}
-		end := strings.Index(s[start:], "</think>")
-		if end < 0 {
-			return strings.TrimSpace(s[:start])
-		}
-		s = s[:start] + s[start+end+len("</think>"):]
 	}
+	return s
 }

@@ -82,6 +82,13 @@ type Options struct {
 	// targets and passive (baseline) scans.
 	DASTAllowedTargets []string
 	DASTAllowActive    bool
+	// LocalProfile is P25.6's local-model prompt profile: when true,
+	// web_search/web_fetch/security_scan/git_pr are registered deferred
+	// (name+description only, loaded on demand via tool_search) instead of
+	// always-exposed, cutting per-turn schema tokens for small local models
+	// that pay for every always-exposed schema in prompt-processing latency.
+	// False (the default profile) keeps today's behavior unchanged.
+	LocalProfile bool
 }
 
 // SearchOptions configures the web_search tool's provider.
@@ -112,8 +119,8 @@ func Register(reg *tool.Registry, opts Options) error {
 	}
 
 	ft := opts.FileTracker
-	// Core tools are always exposed: file ops, search, shell, git, web, and the
-	// two meta-tools (skill, tool_search) that unlock the rest.
+	// Core tools are always exposed: file ops, search, shell, git, and the two
+	// meta-tools (skill, tool_search) that unlock the rest.
 	tools := []tool.Tool{
 		&readTool{root: root, tracker: ft},
 		&writeTool{root: root, tracker: ft},
@@ -124,12 +131,8 @@ func Register(reg *tool.Registry, opts Options) error {
 		&grepTool{root: root},
 		&gitTool{root: root},
 		&gitCommitTool{root: root},
-		&gitPRTool{root: root},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
-		&fetchTool{userAgent: opts.HTTPUserAgent, scanOutput: opts.Search.ScanOutput},
-		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL, scanOutput: opts.Search.ScanOutput},
 		&modelsTool{},
-		&securityScanTool{root: root, opts: opts.SecurityScan},
 		NewSkillTool(root, opts.DataDir, opts.BuiltinSkills),
 		&toolSearchTool{reg: reg},
 	}
@@ -142,6 +145,22 @@ func Register(reg *tool.Registry, opts Options) error {
 		&latexNewDocumentTool{root: root},
 		&dastScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
 		&reconScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
+	}
+	// web_search/web_fetch/security_scan/git_pr are always-exposed in the
+	// default profile but move to deferred under LocalProfile (P25.6): they're
+	// the least likely tools a small-model, file-scoped local task needs on
+	// turn one, and their schemas are some of the heaviest always-exposed
+	// ones.
+	networkAndScanTools := []tool.Tool{
+		&gitPRTool{root: root},
+		&fetchTool{userAgent: opts.HTTPUserAgent, scanOutput: opts.Search.ScanOutput},
+		&searchTool{userAgent: opts.HTTPUserAgent, provider: opts.Search.Provider, apiKey: opts.Search.APIKey, baseURL: opts.Search.BaseURL, scanOutput: opts.Search.ScanOutput},
+		&securityScanTool{root: root, opts: opts.SecurityScan},
+	}
+	if opts.LocalProfile {
+		deferred = append(deferred, networkAndScanTools...)
+	} else {
+		tools = append(tools, networkAndScanTools...)
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}

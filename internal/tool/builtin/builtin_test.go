@@ -120,6 +120,66 @@ func TestRegisterAll(t *testing.T) {
 	}
 }
 
+// TestRegisterLocalProfileDefersNetworkAndScanTools covers P25.6(a): under
+// the local prompt profile, web_search/web_fetch/security_scan/git_pr are
+// registered but not exposed by default (moved to the tool_search deferral
+// path) to cut always-exposed schema tokens for small local models; the
+// default profile keeps them always-exposed, unchanged from before P25.6.
+func TestRegisterLocalProfileDefersNetworkAndScanTools(t *testing.T) {
+	deferCandidates := []string{"web_fetch", "web_search", "security_scan", "git_pr"}
+
+	regDefault := tool.NewRegistry()
+	if err := Register(regDefault, Options{Root: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range deferCandidates {
+		if _, ok := regDefault.Get(name); !ok {
+			t.Errorf("default profile: tool %q not registered at all", name)
+		}
+	}
+	defaultSchemaNames := map[string]bool{}
+	for _, s := range regDefault.Schemas() {
+		defaultSchemaNames[s.Name] = true
+	}
+	for _, name := range deferCandidates {
+		if !defaultSchemaNames[name] {
+			t.Errorf("default profile: %q should be always-exposed, is not in Schemas()", name)
+		}
+	}
+
+	regLocal := tool.NewRegistry()
+	if err := Register(regLocal, Options{Root: t.TempDir(), LocalProfile: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range deferCandidates {
+		if _, ok := regLocal.Get(name); !ok {
+			t.Errorf("local profile: tool %q not registered at all", name)
+		}
+	}
+	localSchemaNames := map[string]bool{}
+	for _, s := range regLocal.Schemas() {
+		localSchemaNames[s.Name] = true
+	}
+	for _, name := range deferCandidates {
+		if localSchemaNames[name] {
+			t.Errorf("local profile: %q should be deferred, but is always-exposed in Schemas()", name)
+		}
+	}
+	deferredNames := map[string]bool{}
+	for _, d := range regLocal.Deferred() {
+		deferredNames[d.Name] = true
+	}
+	for _, name := range deferCandidates {
+		if !deferredNames[name] {
+			t.Errorf("local profile: %q not advertised via Deferred()", name)
+		}
+	}
+
+	if len(regLocal.Schemas()) >= len(regDefault.Schemas()) {
+		t.Errorf("local profile should expose fewer schemas than default: local=%d default=%d", len(regLocal.Schemas()), len(regDefault.Schemas()))
+	}
+}
+
 func TestMultiEdit(t *testing.T) {
 	root := t.TempDir()
 	ctx := context.Background()

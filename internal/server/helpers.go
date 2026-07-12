@@ -27,6 +27,13 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
+// localRepoMapMaxBytes caps the repo map injected under the local prompt
+// profile (P25.6): a large repo map is one of the heavier always-injected
+// blocks, and small local models pay for it in prompt-processing latency on
+// every turn regardless of whether the task touches most of the repo. The
+// default profile never applies this cap.
+const localRepoMapMaxBytes = 4000
+
 // effectiveSystem combines the session's base system prompt with platform
 // context, loaded project/user memory, skills, and context files (AGENTS.md,
 // CLAUDE.md). sessionID selects which on-demand-activated built-in skills
@@ -52,7 +59,7 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 	s.repoMapMu.Lock()
 	repoMap := s.repoMap
 	s.repoMapMu.Unlock()
-	if repoMap != "" {
+	if repoMap != "" && !(s.cfg.Provider.LocalPromptProfile() && len(repoMap) > localRepoMapMaxBytes) {
 		parts = append(parts, repoMap)
 	}
 	if dt := deferredToolsBlock(s.tools); dt != "" {

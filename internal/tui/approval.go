@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/permission"
 )
 
 // Approval dialog options (TQ6), in display order.
@@ -28,11 +30,13 @@ const (
 const approvalPreviewMaxLines = 12
 
 // suggestRulePattern derives the permission-rule glob offered by the "allow
-// always" option from a pending tool call's input: shell commands are scoped
-// to their first two words ("npm test *" → "npm test*"), file tools to the
-// file's directory, network tools to the host. The pattern feeds a text rule
-// "allow <tool>(<pattern>)" (permission.Rules syntax), deliberately narrower
-// than the old whole-tool cache.
+// always" option from a pending tool call's input: shell commands are
+// reduced to their binary (or binary+subcommand — see suggestShellPattern),
+// file tools to the file's directory, network tools to the host. The pattern
+// feeds a text rule "allow <tool>(<pattern>)" (permission.Rules syntax),
+// deliberately narrower than the old whole-tool cache. An empty return means
+// no safe suggestion exists (P25.4b) — the caller must not offer an
+// allow-always rule in that case.
 func suggestRulePattern(inputJSON string) string {
 	var args struct {
 		Command  string `json:"command"`
@@ -43,13 +47,7 @@ func suggestRulePattern(inputJSON string) string {
 	_ = json.Unmarshal([]byte(inputJSON), &args)
 	switch {
 	case args.Command != "":
-		f := strings.Fields(args.Command)
-		if len(f) == 1 {
-			return f[0] + "*"
-		}
-		if len(f) >= 2 {
-			return f[0] + " " + f[1] + "*"
-		}
+		return suggestShellPattern(args.Command)
 	case args.Path != "" || args.FilePath != "":
 		p := args.Path
 		if p == "" {
@@ -63,6 +61,67 @@ func suggestRulePattern(inputJSON string) string {
 		return args.URL
 	}
 	return "*"
+}
+
+// cdPrefixRE matches one leading "cd <dir> &&" segment (P25.4b): the shell's
+// working directory at the moment of the call isn't part of what the user is
+// approving, and keeping it in the suggested pattern is what produced rules
+// narrow enough to never match again — e.g.
+// "cd /private/tmp/…/demo-project && python3 temps.py*".
+var cdPrefixRE = regexp.MustCompile(`^cd\s+\S+\s*&&\s*`)
+
+// envPrefixRE matches one leading "VAR=value" environment assignment.
+var envPrefixRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=\S*\s+`)
+
+// suggestShellPattern reduces a shell command to a rule pattern scoped to its
+// binary — widened to binary+subcommand only when the second word reads as a
+// verb rather than a file/argument, e.g. "git status*" but "python3 *" (not
+// "python3 temps.py*", which never matches again once the script name
+// changes) — after stripping leading cd/env prefixes (P25.4b). Returns "" if
+// the command, once stripped, still contains a shell chaining/redirection/
+// substitution metacharacter: no wildcard pattern can be offered safely for
+// it, so the caller must fall back to requiring a hand-written rule instead
+// of ever suggesting one that bakes in a redirection/pipe/backtick/
+// substitution/chaining character (">", "|", a backtick, "$(...)", ";", "&").
+func suggestShellPattern(command string) string {
+	rest := strings.TrimSpace(command)
+	for {
+		if m := cdPrefixRE.FindString(rest); m != "" {
+			rest = rest[len(m):]
+			continue
+		}
+		if m := envPrefixRE.FindString(rest); m != "" {
+			rest = rest[len(m):]
+			continue
+		}
+		break
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "*"
+	}
+	if strings.ContainsAny(rest, permission.ShellChainMetaChars) {
+		return ""
+	}
+	f := strings.Fields(rest)
+	if len(f) == 1 {
+		return f[0] + "*"
+	}
+	if looksLikeSubcommand(f[1]) {
+		return f[0] + " " + f[1] + "*"
+	}
+	return f[0] + " *"
+}
+
+// looksLikeSubcommand reports whether a shell argument reads as a verb
+// subcommand (git's "status", npm's "test") rather than a file path or
+// script argument (python3's "temps.py", which varies every call and
+// shouldn't be baked into the suggested rule).
+func looksLikeSubcommand(word string) bool {
+	if word == "" || strings.HasPrefix(word, "-") {
+		return false
+	}
+	return !strings.ContainsAny(word, `./\`)
 }
 
 // dirGlob widens a file path to its containing directory, preserving the
@@ -147,27 +206,47 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// answerApproval resolves the pending approval with the chosen option and
-// fires the daemon request. Deny-with-feedback sends the denial and then
-// injects the reason as a steering message so the model learns why it was
-// refused instead of just seeing a bare denial.
-func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
-	a := m.approval
+// buildApproveRequest translates a dialog option into the request sent to
+// the daemon. Split out of answerApproval so the AllowAlways/Pattern
+// decision — in particular the P25.4b empty-pattern case — is directly
+// testable without a live daemon connection.
+func buildApproveRequest(a *approvalState, opt int) api.ApproveRequest {
 	req := api.ApproveRequest{ID: a.id}
 	switch opt {
 	case apprAllowOnce:
 		req.Approved = true
 	case apprAllowAlways:
 		req.Approved = true
-		req.AllowAlways = true
-		req.Pattern = a.pattern
+		// An empty pattern means suggestRulePattern found no safe glob for
+		// this call (P25.4b: shell metacharacters). Sending AllowAlways with
+		// no pattern would fall back to the daemon's whole-tool session
+		// cache (sseApprover.Approve) — exactly the "one keypress whitelists
+		// arbitrary shell redirection" hazard this exists to close — so
+		// approve this call only and leave AllowAlways/Pattern unset.
+		if a.pattern != "" {
+			req.AllowAlways = true
+			req.Pattern = a.pattern
+		}
 	}
+	return req
+}
+
+// answerApproval resolves the pending approval with the chosen option and
+// fires the daemon request. Deny-with-feedback sends the denial and then
+// injects the reason as a steering message so the model learns why it was
+// refused instead of just seeing a bare denial.
+func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
+	a := m.approval
+	req := buildApproveRequest(a, opt)
 	var steerText string
 	if feedback != "" {
 		steerText = fmt.Sprintf("The user denied the %s call. Feedback: %s", a.toolName, feedback)
 	}
 	m.approval = nil
 	m.status = "thinking…"
+	if !m.termFocused {
+		m.ta.Focus()
+	}
 	m.applyViewportHeight()
 
 	cl, sessionID := m.cfg.Client, m.cfg.SessionID
@@ -209,9 +288,13 @@ func (m model) renderApprovalDialog() string {
 		return sep + "\n" + header + "\n" + preview + prompt
 	}
 
+	allowAlwaysLabel := "Allow always (once only — " + lipgloss.NewStyle().Foreground(colWarning).Render("no safe rule; write one by hand") + ")"
+	if a.pattern != "" {
+		allowAlwaysLabel = "Allow always  " + ruleLabel(a.toolName, a.pattern)
+	}
 	labels := [apprOptionCount]string{
 		apprAllowOnce:    "Allow once",
-		apprAllowAlways:  "Allow always  " + ruleLabel(a.toolName, a.pattern),
+		apprAllowAlways:  allowAlwaysLabel,
 		apprDeny:         "Deny",
 		apprDenyFeedback: "Deny with feedback…",
 	}
