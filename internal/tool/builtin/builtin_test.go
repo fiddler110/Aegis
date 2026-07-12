@@ -113,7 +113,7 @@ func TestRegisterAll(t *testing.T) {
 	if err := Register(reg, Options{Root: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"read_file", "write_file", "edit_file", "glob", "grep", "shell", "web_fetch", "web_search", "latex_build", "latex_new_document", "dast_scan", "recon_scan"} {
+	for _, name := range []string{"read_file", "write_file", "edit_file", "glob", "grep", "shell", "web_fetch", "web_search", "latex_build", "latex_new_document", "dast_scan", "recon_scan", "security_advise"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("tool %q not registered", name)
 		}

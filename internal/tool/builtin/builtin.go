@@ -145,6 +145,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&latexNewDocumentTool{root: root},
 		&dastScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
 		&reconScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
+		&adviseTool{root: opts.DataDir},
 	}
 	// web_search/web_fetch/security_scan/git_pr are always-exposed in the
 	// default profile but move to deferred under LocalProfile (P25.6): they're

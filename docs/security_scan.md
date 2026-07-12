@@ -1,6 +1,6 @@
 # Security Features
 
-Aegis includes several security-focused capabilities: static/dependency/secrets scanning (`security_scan`), dynamic web-app testing (`dast_scan`, OWASP ZAP), network/host reconnaissance (`recon_scan`, nmap + Nuclei), pluggable sandbox backends for shell execution isolation, and contextual policies that control tool behavior at runtime.
+Aegis includes several security-focused capabilities: static/dependency/secrets scanning (`security_scan`), dynamic web-app testing (`dast_scan`, OWASP ZAP), network/host reconnaissance (`recon_scan`, nmap + Nuclei), a persistent multi-day engagement notebook plus NVD CVE lookups and guarded next-step suggestions (`security_advise`), pluggable sandbox backends for shell execution isolation, and contextual policies that control tool behavior at runtime.
 
 ---
 
@@ -696,6 +696,40 @@ Security-focused personas are tuned to work with scanning results:
 aegis --persona appsec-engineer
 # Then: "run a security scan and give me a prioritized remediation plan"
 ```
+
+### Engagement Notebook, CVE Lookup & Guarded Suggestions (`security_advise`)
+
+`security_scan`/`dast_scan`/`recon_scan` find things; `security_advise` (P13.4) is bookkeeping and
+research support for a multi-day engagement built around what they find. Unlike everything above,
+its notebook is scoped to an operator-chosen **engagement name**, not the chat session — notes
+persist across sessions and daemon restarts under the daemon's per-user data directory, one
+append-only JSONL file per engagement (`internal/security/notebook.go`).
+
+- `action: "note"` appends a timestamped, optionally-tagged note (e.g. `tags: ["recon"]`).
+- `action: "list"` (alias `"log"`) returns every note for an engagement, oldest first.
+- `action: "cve_lookup"` queries the NVD REST API (`https://services.nvd.nist.gov/rest/json/cves/2.0`)
+  by `cve_id` or free-text `keyword`. The unauthenticated public API is rate-limited to roughly
+  5 requests/30s; a 403/429 response is surfaced as a clear error naming the limit and how to raise
+  it (set `NVD_API_KEY` in the environment — no config field, per this codebase's secrets-from-
+  environment-only convention), never a retry loop or a hang.
+- `action: "suggest"` returns plain-text next-step suggestions from simple, explainable rules over
+  the notebook's own content — e.g. "no recon_scan logged yet" or "a CVE is mentioned but nothing
+  documents it." This is **guarded**: it only ever returns text. It never calls `recon_scan`,
+  `dast_scan`, or anything else itself, and it is not a second LLM call — every rule is a direct,
+  inspectable keyword check, so the model or operator reading the output can see exactly why each
+  suggestion fired and stays fully in the loop on whether to act on it.
+- `action: "status"` returns a short digest (note count, date range, and how many notes reference
+  recon/dast/security_scan/findings/CVE lookups). This is a tool-action fallback rather than a field
+  on `/status` (`api.StatusInfo`, `internal/server/server.go`): that endpoint is daemon-global with
+  no existing per-entity-keyed field, so a per-engagement digest is one `security_advise` call away
+  instead.
+
+Capability is `network` (the CVE lookup's real risk surface — a fixed public host, not
+model-supplied, so none of `web_fetch`'s SSRF dialer applies here); the notebook actions are local
+file reads/appends, in the same low-risk vein as the always-available `remember` tool. `red-team`,
+the security architect persona (`security`), and `security-critic` all carry `security_advise` in
+their advisory `Tools` list; `security-arbiter` does not, since an arbiter round explicitly
+introduces no new claims or investigation of its own.
 
 ---
 
