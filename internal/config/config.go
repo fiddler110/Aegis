@@ -335,6 +335,16 @@ type ProviderConfig struct {
 	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
 	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
 	ContextWindow   int               `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
+	// TaskRouting opts a session's user-facing turns into per-turn model
+	// routing (P9.4): a local heuristic classifies each turn as "simple" or
+	// "complex" and simple turns run on SmallModel instead of Model. Off by
+	// default — this is speculative, opt-in-only work; a daemon that never
+	// sets this sees zero behavior change. Has no effect unless SmallModel is
+	// also set, mirroring the existing "no small_model configured = no
+	// behavior change" precedent guardModel/generateTitle/compaction already
+	// follow. Never applies when an explicit per-session /model override
+	// (P14.7) is in effect — that override always wins.
+	TaskRouting bool `koanf:"task_routing"`
 	// Fallback lists ordered (provider, model) pairs tried in order after the
 	// primary adapter exhausts its own retries (P5.9). Empty = no failover.
 	Fallback []ProviderFallbackConfig `koanf:"fallback"`
