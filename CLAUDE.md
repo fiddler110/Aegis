@@ -94,7 +94,7 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/provider` | Normalized `Adapter` interface (stream-based) + message types; adapters in `provider/anthropic` and `provider/openai` |
 | `internal/session` | SQLite-backed session store (conversations, turn traces, cost) |
 | `internal/tool` | `Tool` interface + `Registry` (register/expose separation lets permission modes gate capability without unregistering) |
-| `internal/tool/builtin` | All 39+ built-in tools (file ops, git, shell, web, memory, LSP, security scan, diagram, cron, agent spawning, etc.) |
+| `internal/tool/builtin` | All 50+ built-in tools (file ops, git, shell, web, memory, LSP, security scan, security engagement/CVE lookup, diagram, cron, agent spawning, etc.) |
 | `internal/permission` | Three modes: `plan` (read-only), `build` (read+write, execute gated), `auto` (all allowed); text-based allow/deny rules; `PersonaToolGate` advisory (never-enforcing) check on a persona's declared `Tools` |
 | `internal/persona` | 22 built-in named system prompts (general, security, developer, SRE, red-team, security-critic/security-arbiter and generic critic/arbiter debate roles, etc.); custom personas are `.md` files with YAML frontmatter, hot-reloaded via a signature-cached `Refresh` |
 | `internal/skills` | Progressive-disclosure skills: project/user `.md`/bundled-directory skill files, plus skills embedded in the binary (`go:embed`) that stay dormant until named in config/CLI/TUI |

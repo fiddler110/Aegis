@@ -9,20 +9,95 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-12 — **P26.2 — fixed a `sessionWorkdirs`/`sessionSkills` map leak on
-session delete**, found by the same day's routine roadmap review (landscape scan + internal audit,
-no live-eval/threat-model trigger). Before that, same day: **P15.13 — web UI session workdir picker
-+ display**, closing out the entire 2026-07-11 roadmap review's promoted set. Before that, same
-day: **P26.1 — `aegis doctor` preflight self-diagnostic**, generalizing the P25 batch's "configured
-vs. actually active" pattern into one standalone command. Before that, same day: **P25.7 —
-promoted the live-eval harness into `internal/eval`, and P25.8 — threaded session workdir through
-the spawn/cron/debate seams**, closing out the Tier 1 P25 set. Previous, same day: **P25.4 —
-approval ergonomics, P25.5 — token-usage observability for local providers, and P25.6 —
-local-model prompt profile.** Before that: **P25.3 — output guard vs local/thinking models**, and
-before that **P25.1 — per-session working directory and P25.2 — sandbox backend name trap and
-untruthful `/config/sandbox`** (`6b76e5e`, 2026-07-11) — the full set are the findings from the
-same day's local-model live-evaluation session (see roadmap.md's P25 section for the eval
-methodology, comparative-run table, and regression harness).
+**Last updated:** 2026-07-12 — **P24.21, P13.3.2, P9.4, P13.4** shipped as a user-selected batch
+of four Tier 4 parked items (see roadmap.md's [Parked](roadmap.md#open-work--parked-tier-4)
+section for the pre-existing scoping and why these had stayed parked despite "no concrete
+trigger" — the trigger here was explicit user request, not a discovered pain point). All four were
+implemented in parallel by isolated sub-agents in separate git worktrees, then merged into `main`
+sequentially; the only file touched by two branches (`internal/tui/tui.go`, P24.21 and P13.3.2)
+auto-merged cleanly with no manual conflict resolution. `go build ./...` and the full `go test
+./...` both pass clean on the merged tree.
+
+*P13.4 — `security_advise` engagement tooling (notebook + CVE lookup + guarded suggestions +
+status digest).* New builtin tool `security_advise` (`internal/tool/builtin/advise.go`, capability
+`network`) with an action-style interface: `note`/`list`/`log` against a file-backed, append-only
+JSONL **engagement notebook** (`internal/security/notebook.go`) keyed by a sanitized engagement
+name and rooted under the daemon's per-user data directory — deliberately a dedicated store rather
+than extending `internal/memory`'s single project/user file, which doesn't fit a
+named-multi-notebook, multi-day-persistent shape (the same conclusion the original 2026-07-06
+deferral reached: "a real idea, separate scoped item"). `cve_lookup` queries the NVD CVE 2.0 REST
+API by ID or keyword (`internal/security/cve.go`), with injectable base URL/HTTP client for
+tests and explicit 403/429 handling that surfaces a clear rate-limit error (naming the `NVD_API_KEY`
+env var for a higher limit) instead of hanging. `suggest` (`internal/security/suggest.go`) returns
+**guarded** next-step suggestions as plain text only, from simple explainable keyword rules over
+notebook content (no recon logged, findings undocumented, a CVE mentioned but never looked up) —
+it never auto-executes a tool and isn't a second LLM call, preserving human/model-in-the-loop
+judgment per the original "guarded" framing. `status` returns a digest of the current engagement
+rather than extending `api.StatusInfo`/`/status` as P13.4.4 originally sketched — that endpoint is
+daemon-global with no existing per-entity-key precedent, so folding a per-engagement digest into it
+would have been a bigger, differently-shaped change than the digest itself is worth; documented as
+a deliberate scope call, not an oversight. Wired into the `red-team`, `security`, and
+`security-critic` personas' advisory `Tools:` lists (matching how `dast_scan`/`recon_scan` were
+added for P13.5/P13.8); left off `security-arbiter` since that persona introduces no new claims and
+does no independent investigation, so a research/notebook tool doesn't fit its role. Tests:
+`internal/security/{notebook,cve,suggest}_test.go` (notebook persistence-across-restart and
+engagement-isolation, CVE lookup against a mocked HTTP transport — no live network calls — covering
+ID/keyword/403/429/500/malformed-args, and table-driven suggestion-rule coverage) plus
+`internal/tool/builtin/advise_test.go` for tool-level action dispatch. Docs:
+`docs/tools-reference.md` and a new section in `docs/security_scan.md`. This closes out P13 except
+P13.3 (terminal enhancements, still Tier 4/parked).
+
+*P9.4 — opt-in per-task model routing.* `ProviderConfig.TaskRouting` (`koanf:"task_routing"`,
+default `false`) lets a session route each user-facing turn between `Model` and the existing
+`SmallModel` (previously used only for title generation, compaction, and P25.3's output-guard
+verdicts — never for an actual answering turn). Routing only engages when both `TaskRouting` is
+enabled and `SmallModel` is configured, mirroring the existing "no SmallModel = no behavior
+change" precedent those three call sites already established; an explicit per-session `/model`
+override (P14.7) always short-circuits routing entirely; a turn continuing a session with prior
+tool calls stays on the big model rather than bouncing down, since a task the model already judged
+worth using tools for isn't a "simple turn" candidate. The classifier (`internal/server/routing.go`
+`classifyTurn`) is a purely local heuristic — no extra model call, which would defeat the point —
+biased toward the expensive model whenever uncertain: a false negative (big model on an easy turn)
+just costs a bit more, a false positive (small model on a hard turn) produces a wrong answer.
+Signals, in priority order: prior tool calls in the session (checked first), a code fence, ≥2
+multi-step list markers, message length (words or chars, to also catch dense single-token content
+like stack traces), and ≥3 sentence boundaries. Logs a `Debug` line with the routing outcome so
+this is observable rather than a silent behavior change. Tests: `internal/server/routing_test.go`
+(table-driven classifier cases plus a routing-resolution test proving the session override still
+wins, mirroring `TestGuardModelPrefersSmallModel`'s shape). Docs: `docs/configuration.md`.
+
+*P13.3.2 — `@shell` context token.* Extends the TUI's `@`-mention system (`internal/tui/completion.go`'s
+`refTypes`, previously `image:`/`diagnostics`/`url:`/`symbol:`, only `image:` locally resolved) with
+`@shell` (default last 50 lines) / `@shell:N` (explicit line count), resolved on submit by pulling
+the embedded terminal pane's most recent run (`termPane.lastCmd`/`lastOutput`/`lastExitCode`/
+`lastFailed`, tracked since P13.3.1's shell-aware error assist) and splicing formatted text in place
+of the token — the same clean-and-inject shape `extractImageRefs` already uses for `@image:`, just
+text instead of an image attachment. A word-boundary-anchored regex (`@shell(?::(\d+))?\b`) avoids
+false-matching `@shellac`; no terminal run yet substitutes a short placeholder rather than failing
+submission. Tests: `internal/tui/shellref_test.go` (placeholder case, default/explicit line counts,
+failed-command framing, multiple occurrences in one message, the token-boundary negative case).
+Docs: `docs/tui-guide.md`'s `@` references table and Terminal Pane section. `@diagnostics`/`@url:`/
+`@symbol:` are untouched — they stay textual, resolved by the agent's own tools, not locally.
+
+*P24.21 — bearer-token scrubbing in `Client` process memory (FIND-33).* The only one of 35 findings
+from the 2026-07-10 STRIDE-A threat model still open (the other 34 shipped as P24.1-P24.20/P24.22
+or were verified existing controls) — Low severity, CVSS 2.8, explicitly low priority per the
+finding itself ("host/OS access is already a significant compromise"). Best-effort defense-in-depth,
+not a hard guarantee, in a garbage-collected language with immutable strings — documented as such
+in code. `Client.authToken` changed from `string` to `[]byte`; `WithTokenFile` reads the token file
+straight into the byte slice, never round-tripping through a string; the public `WithToken(string)`
+API still takes one unavoidable copy at the boundary. New `Client.Zero()` overwrites the backing
+bytes in place and nils the field. `setAuth`'s own `"Bearer "+string(...)` concatenation and
+`http.Request.Header.Set`'s internal copy remain outside `Zero`'s reach — documented explicitly
+rather than oversold. Wired at real lifecycle points, each a judgment call commented in code:
+one-shot CLI commands `defer cl.Zero()` right after construction (`internal/cli/{sessions,bg,doctor,
+parallel,ui}.go` and others); the long-lived `acp`/`mcp-serve` stdio bridges defer `Zero` after the
+daemon-reachability reassignment so it captures the client actually used; the interactive TUI's
+client is scrubbed by `tui.Run` right after `p.Run()` returns. Daemon-side token generation/storage
+was left untouched — out of scope for this client-side finding. Tests:
+`TestZeroOverwritesBackingBytes` (aliases the backing array before calling `Zero`, asserts every
+byte was actually overwritten, not just the field nilled) and `TestZeroSafeOnEmptyClient`, plus a
+`-race` run on `internal/client`.
 
 *P26.2 — fixed a `sessionWorkdirs`/`sessionSkills` map leak on session delete.* A fresh regression
 in the very P25.1/P25.8 batch that just shipped: `handleCreateSession` (internal/server/sessions.go)
@@ -2066,8 +2141,15 @@ the `npm run build` step for frontend edits.
 
 ## Shipped — P13 items (Security & Capability Enhancements)
 
-The other P13 items (P13.3/P13.4) are still open — see
-[roadmap.md](roadmap.md#open-work--p13-security--capability-enhancements).
+The other P13 item (P13.3, terminal enhancements) is still open, Tier 4/parked — see
+[roadmap.md](roadmap.md#open-work--parked-tier-4).
+
+### P13.4 — SHIPPED 2026-07-12 — `security_advise` engagement tooling
+
+Nebula-inspired security engagement tooling, parked since 2026-07-06, shipped as part of a
+user-selected batch of four Tier 4 items. Full writeup under [Latest changes](#latest-changes)
+above — engagement notebook, NVD CVE lookup, guarded next-step suggestions, and a status digest,
+all behind the new `security_advise` builtin tool.
 
 ### P13.2 — SHIPPED 2026-07-06 — trufflehog secret scanner with opt-in live verification
 
