@@ -206,7 +206,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// registry every other session and persona shares.
 	sessionTools := s.sessionToolRegistry(id)
 	workdir := s.workdirFor(id)
-	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools, sess.Model, workdir)
+	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
