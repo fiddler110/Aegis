@@ -29,6 +29,23 @@ func newShellTool(root string, timeoutSec int, mgr *task.Manager, sb sandbox.Bac
 
 func (t *shellTool) Name() string                { return "shell" }
 func (t *shellTool) Capability() tool.Capability { return tool.CapExecute }
+
+// CapabilityFor implements tool.CapabilityOverrider (P25.4c): a narrow
+// allowlist of read-only commands (ls, cat, git status/log/diff, …) is
+// gated as CapRead instead of the tool's usual CapExecute, so it no longer
+// needs a full execute approval in build mode and is allowed outright (not
+// silently denied) under the plan-mode read gate. The static Capability()
+// above is unchanged and still governs anything readOnlyShellCommand
+// doesn't recognize as safe.
+func (t *shellTool) CapabilityFor(input json.RawMessage) tool.Capability {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(input, &args) == nil && readOnlyShellCommand(args.Command) {
+		return tool.CapRead
+	}
+	return tool.CapExecute
+}
 func (t *shellTool) Description() string {
 	if runtime.GOOS == "windows" {
 		return "Run a PowerShell command in the workspace directory and return combined stdout/stderr. Commands execute via: powershell -NoProfile -NonInteractive -Command <command>. Use PowerShell syntax — Unix commands (ls, cat, grep, find, rm, chmod, etc.) are not available; use Get-ChildItem, Get-Content, Select-String, Remove-Item, etc."

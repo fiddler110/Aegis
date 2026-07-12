@@ -140,6 +140,22 @@ func TestPersonaModelPrecedence(t *testing.T) {
 	}
 }
 
+// TestGuardModelPrefersSmallModel is the P25.3 SmallModel-routing regression:
+// output-guard verdict calls must run on provider.small_model when it is set
+// — the same preference session titles and compaction already have — because
+// judging on the session's own deep/thinking model made the strict PASS/FAIL
+// contract unsatisfiable and tripled turn latency in the live eval.
+func TestGuardModelPrefersSmallModel(t *testing.T) {
+	s := &Server{cfg: &config.Config{Provider: config.ProviderConfig{SmallModel: "small-fast"}}}
+	if m := s.guardModel("deep-thinking"); m != "small-fast" {
+		t.Errorf("guardModel with SmallModel set = %q, want small-fast", m)
+	}
+	s = &Server{cfg: &config.Config{}}
+	if m := s.guardModel("deep-thinking"); m != "deep-thinking" {
+		t.Errorf("guardModel without SmallModel = %q, want the session model", m)
+	}
+}
+
 // TestResolveModelSessionOverrideWins is the P14.7 regression: a per-session
 // /model override must outrank everything personaModel would otherwise
 // resolve, including a persona's own config-level pin — the same precedence

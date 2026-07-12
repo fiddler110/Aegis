@@ -57,6 +57,20 @@ func (s *Server) resolveModel(p persona.Persona, sessionModel string) string {
 	return s.personaModel(p)
 }
 
+// guardModel picks the model output-guard verdict calls run on: the configured
+// provider.small_model when set — the same preference session titles
+// (sessions.go) and compaction (server.go) already have — otherwise the
+// session model itself. A small non-thinking model makes the guard's strict
+// "reply exactly PASS" contract actually satisfiable and keeps the extra call
+// cheap; running the verdict on a deep/thinking session model tripled turn
+// latency and fail-closed nearly every passing answer in the P25.3 live eval.
+func (s *Server) guardModel(sessionModel string) string {
+	if s.cfg.Provider.SmallModel != "" {
+		return s.cfg.Provider.SmallModel
+	}
+	return sessionModel
+}
+
 // outputGuardConfig merges the global output-guard default with a persona's
 // override into a guard.Config.
 func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
@@ -184,7 +198,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	var guardFn guard.Func
 	var guardRetries int
 	if guardEnabled {
-		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, model)
+		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, s.guardModel(model))
 	}
 
 	if tracker == nil {

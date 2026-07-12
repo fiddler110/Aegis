@@ -8,6 +8,8 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -341,8 +343,54 @@ type ProviderConfig struct {
 	// and any-to-local failover never requires this flag. Guards against a
 	// local-only session silently sending data off the machine on an outage.
 	AllowCloudFallback bool `koanf:"allow_cloud_fallback"`
+	// PromptProfile selects the system-prompt/tool-exposure shape (P25.6):
+	// "auto" (default) infers from BaseURL — loopback/localhost gets the
+	// "local" profile (trimmed prompt, web_search/web_fetch/security_scan/
+	// git_pr deferred, repo map capped) tuned for small local models; any
+	// other value is the unchanged "default" profile. "local" or "default"
+	// force the choice regardless of BaseURL.
+	PromptProfile string `koanf:"prompt_profile"`
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
+}
+
+// LocalPromptProfile reports whether the "local" prompt profile (P25.6)
+// applies: a trimmed system prompt and deferred network/security tool
+// schemas, tuned for the latency and instruction-following limits of small
+// local models. An explicit PromptProfile of "local"/"default" wins;
+// otherwise this auto-detects from BaseURL resolving to loopback.
+func (p ProviderConfig) LocalPromptProfile() bool {
+	switch strings.ToLower(strings.TrimSpace(p.PromptProfile)) {
+	case "local":
+		return true
+	case "default":
+		return false
+	default:
+		return isLoopbackBaseURL(p.BaseURL)
+	}
+}
+
+// isLoopbackBaseURL reports whether raw is a URL whose host resolves to
+// loopback (127.0.0.0/8, ::1, or the literal "localhost") — the signal used
+// to auto-detect a local model server (e.g. Ollama's default
+// http://localhost:11434).
+func isLoopbackBaseURL(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ProviderFallbackConfig is one entry in ProviderConfig.Fallback.
@@ -653,6 +701,7 @@ func defaults() map[string]any {
 		"provider.model":              "claude-opus-4-8",
 		"provider.max_tokens":         32768,
 		"provider.max_retries":        4,
+		"provider.prompt_profile":     "auto",
 		"server.addr":                 "127.0.0.1:4127",
 		"server.max_concurrent_runs":  0,
 		"server.max_run_duration_sec": 0,

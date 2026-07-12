@@ -344,9 +344,11 @@ When extended thinking is enabled (Anthropic Claude or local reasoning models), 
 
 ## Output Guard
 
-When the output guard fires on a final answer, the TUI shows a dim `⚠ output guard: <reason>` line below the answer. The agent is asked to revise and re-try (up to `max_retries` attempts). If all retries fail, the raw answer is shown with the warning visible.
+When the output guard fails a final answer and a corrective retry is available, the failed answer is **withdrawn in place** — replaced by a dim `⚠ output guard: answer withdrawn (<reason>) — retrying…` note — and the corrected retry renders as *the* answer below it. The failed attempt and the correction prompt are also removed from the saved session history once the run settles, so a resumed session shows only the answer you actually kept. If all retries fail, the last answer is surfaced anyway with a dim `⚠ output guard: <reason>` warning below it. A passing check shows nothing.
 
-Use `/guard status` to check the current guard state; `/guard off` disables it for the rest of the session.
+The guard's verdict call runs on `provider.small_model` when configured (recommended for local setups — a fast non-thinking judge), otherwise on the session model.
+
+Use `/guard status` to check the current guard state; `/guard off` disables it for the rest of the session (`/guard on` enables it if your config ships it off).
 
 ---
 

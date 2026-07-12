@@ -24,8 +24,15 @@ import (
 // whatever the test process's cwd happens to be. Returns both the typed
 // client and the raw base URL + token, since one test needs to send a
 // deliberately malformed body the typed client can't produce.
+//
+// PATH is cleared for the duration of the test so exec.LookPath can't find
+// any scanner binaries: every test in this file assumes scanners resolve to
+// "skipped", and on a dev box that actually has trivy/grype/semgrep/etc.
+// installed a real scan would run instead and blow the client's 30s timeout
+// (same hermeticity trick as withEmptyPath in internal/security).
 func newScanTestServer(t *testing.T) (cl *client.Client, baseURL, token, workspace string) {
 	t.Helper()
+	t.Setenv("PATH", "")
 	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {
 		t.Fatal(err)

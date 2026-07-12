@@ -31,6 +31,40 @@ func (a *scriptAdapter) Stream(ctx context.Context, req provider.Request) (<-cha
 	return ch, nil
 }
 
+// reqCapturingAdapter wraps another adapter and snapshots every request it
+// receives. Needed since P25.3: retractGuardCorrectives strips the corrective
+// prompt (and the failed answer it scolded) from the conversation once the run
+// settles, so tests asserting on the corrective's wording must observe the
+// request the model actually saw mid-run, not conv.Messages afterwards.
+type reqCapturingAdapter struct {
+	inner provider.Adapter
+	reqs  []provider.Request
+}
+
+func (a *reqCapturingAdapter) Name() string { return a.inner.Name() }
+func (a *reqCapturingAdapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	a.reqs = append(a.reqs, req)
+	return a.inner.Stream(ctx, req)
+}
+
+// capturedCorrective returns the text of the first guard corrective message
+// seen in any captured request, or "".
+func (a *reqCapturingAdapter) capturedCorrective() string {
+	for _, req := range a.reqs {
+		for _, m := range req.Messages {
+			if m.Role != provider.RoleUser {
+				continue
+			}
+			for _, b := range m.Content {
+				if tb, ok := b.(provider.TextBlock); ok && strings.Contains(tb.Text, "did not pass output validation") {
+					return tb.Text
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func runWith(t *testing.T, opts Options) []Event {
 	t.Helper()
 	eng, err := New(opts)
@@ -192,8 +226,9 @@ func TestGuardCorrectiveMentionsToolsAfterToolRound(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	capture := &reqCapturingAdapter{inner: adapter}
 	eng, err := New(Options{
-		Adapter: adapter, Tools: reg, Model: "test",
+		Adapter: capture, Tools: reg, Model: "test",
 		OutputGuardMaxRetries: 1,
 		OutputGuard: func(_ context.Context, in guard.Input) (bool, string, guard.Status) {
 			if strings.Contains(in.Text, "TODO") {
@@ -212,25 +247,44 @@ func TestGuardCorrectiveMentionsToolsAfterToolRound(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 
-	var correctiveText string
-	for _, m := range conv.Messages {
-		if m.Role != provider.RoleUser {
-			continue
-		}
-		for _, b := range m.Content {
-			if tb, ok := b.(provider.TextBlock); ok && strings.Contains(tb.Text, "did not pass output validation") {
-				correctiveText = tb.Text
-			}
-		}
-	}
+	correctiveText := capture.capturedCorrective()
 	if correctiveText == "" {
-		t.Fatal("expected a corrective message to be appended to the conversation")
+		t.Fatal("expected a corrective message in the retry turn's request")
 	}
 	if !strings.Contains(correctiveText, "call your file tools now") {
 		t.Errorf("expected corrective prompt to direct tool use after a tool round, got: %q", correctiveText)
 	}
 	if !strings.Contains(correctiveText, "Do not reply with only an acknowledgment") {
 		t.Errorf("expected corrective prompt to forbid a content-free reply, got: %q", correctiveText)
+	}
+	// P25.3: the corrective must forbid echoing validation language, so a
+	// retry can't leak "PASS"/"FAIL" meta-text into the user-visible answer.
+	if !strings.Contains(correctiveText, "never mention this validation step") {
+		t.Errorf("expected corrective prompt to forbid mentioning validation, got: %q", correctiveText)
+	}
+	// P25.3: once the run settles, the retry scaffolding is retracted from the
+	// conversation — but the tool round the run performed must stay intact.
+	var hasToolRound bool
+	for _, m := range conv.Messages {
+		if hasToolUse(m) {
+			hasToolRound = true
+		}
+		for _, b := range m.Content {
+			if tb, ok := b.(provider.TextBlock); ok {
+				if strings.Contains(tb.Text, "did not pass output validation") {
+					t.Errorf("corrective message survived retraction: %q", tb.Text)
+				}
+				if strings.Contains(tb.Text, "still some TODOs") {
+					t.Errorf("failed answer survived retraction: %q", tb.Text)
+				}
+			}
+		}
+	}
+	if !hasToolRound {
+		t.Error("retraction must not remove tool-use messages")
+	}
+	if final := assistantText(conv.Messages[len(conv.Messages)-1]); final != "Done, the document is complete." {
+		t.Errorf("final message = %q, want the corrected answer", final)
 	}
 }
 
@@ -239,8 +293,9 @@ func TestGuardCorrectiveMentionsToolsAfterToolRound(t *testing.T) {
 // happened this run — a plain text-only conversation has nothing to "fix" via
 // file tools.
 func TestGuardCorrectiveOmitsToolMentionWithoutToolRound(t *testing.T) {
+	capture := &reqCapturingAdapter{inner: &scriptAdapter{replies: []string{"bad", "good"}}}
 	eng, err := New(Options{
-		Adapter: &scriptAdapter{replies: []string{"bad", "good"}}, Model: "m",
+		Adapter: capture, Model: "m",
 		OutputGuardMaxRetries: 2,
 		OutputGuard: func(_ context.Context, in guard.Input) (bool, string, guard.Status) {
 			if in.Text == "good" {
@@ -258,17 +313,12 @@ func TestGuardCorrectiveOmitsToolMentionWithoutToolRound(t *testing.T) {
 	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range conv.Messages {
-		if m.Role != provider.RoleUser {
-			continue
-		}
-		for _, b := range m.Content {
-			if tb, ok := b.(provider.TextBlock); ok && strings.Contains(tb.Text, "did not pass output validation") {
-				if strings.Contains(tb.Text, "call your file tools now") {
-					t.Errorf("did not expect tool-use instruction with no prior tool round, got: %q", tb.Text)
-				}
-			}
-		}
+	correctiveText := capture.capturedCorrective()
+	if correctiveText == "" {
+		t.Fatal("expected a corrective message in the retry turn's request")
+	}
+	if strings.Contains(correctiveText, "call your file tools now") {
+		t.Errorf("did not expect tool-use instruction with no prior tool round, got: %q", correctiveText)
 	}
 }
 
@@ -370,6 +420,88 @@ func TestGuardValidatesActualFileContentNotJustChatReply(t *testing.T) {
 	}
 	if !strings.Contains(seenFiles[0].Content, "TODO: fill in numbers") {
 		t.Errorf("expected guard to see actual file content, got: %q", seenFiles[0].Content)
+	}
+}
+
+// TestGuardRetryReplacesVisibleAnswer is the P25.3 "replace, not append"
+// regression: when a corrective retry succeeds, (a) the failure event is
+// flagged GuardRetrying so a client withdraws the answer it already rendered,
+// and (b) the failed answer and the corrective prompt are retracted from the
+// conversation, so the durable transcript — and the model's context on later
+// turns — holds only the answer the user actually saw.
+func TestGuardRetryReplacesVisibleAnswer(t *testing.T) {
+	eng, err := New(Options{
+		Adapter: &scriptAdapter{replies: []string{"bad", "good"}}, Model: "m",
+		OutputGuardMaxRetries: 2,
+		OutputGuard: func(_ context.Context, in guard.Input) (bool, string, guard.Status) {
+			if in.Text == "good" {
+				return true, "", guard.StatusPassed
+			}
+			return false, "needs work", guard.StatusFailed
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := &Conversation{Messages: []provider.Message{
+		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+	}}
+	conv.Persisted = 1
+	var evs []Event
+	if err := eng.Run(context.Background(), conv, func(ev Event) { evs = append(evs, ev) }); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	for _, e := range evs {
+		if e.Kind != KindGuard {
+			continue
+		}
+		if !e.GuardPassed && !e.GuardRetrying {
+			t.Error("failure event that triggers a retry must be flagged GuardRetrying")
+		}
+		if e.GuardPassed && e.GuardRetrying {
+			t.Error("pass event must not be flagged GuardRetrying")
+		}
+	}
+
+	if len(conv.Messages) != 2 {
+		t.Fatalf("conversation = %d messages after retraction, want 2 (user + final answer): %+v", len(conv.Messages), conv.Messages)
+	}
+	if got := assistantText(conv.Messages[1]); got != "good" {
+		t.Errorf("surviving assistant message = %q, want %q", got, "good")
+	}
+	// Retraction rewrites already-persisted messages in place, so the caller
+	// must be told to fall back to a full re-save (Persisted = -1), not append.
+	if conv.Persisted != -1 {
+		t.Errorf("Persisted = %d after retraction, want -1 (full re-save)", conv.Persisted)
+	}
+}
+
+// TestGuardExhaustedRetractsIntermediateAttempts: when retries run out and the
+// last attempt is surfaced anyway, the *intermediate* failed answers and their
+// corrective prompts are still retracted — only the surfaced answer stays.
+func TestGuardExhaustedRetractsIntermediateAttempts(t *testing.T) {
+	eng, err := New(Options{
+		Adapter: &scriptAdapter{replies: []string{"a", "b", "c"}}, Model: "m",
+		OutputGuardMaxRetries: 2,
+		OutputGuard: func(context.Context, guard.Input) (bool, string, guard.Status) {
+			return false, "always bad", guard.StatusFailed
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := &Conversation{Messages: []provider.Message{
+		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+	}}
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(conv.Messages) != 2 {
+		t.Fatalf("conversation = %d messages after retraction, want 2: %+v", len(conv.Messages), conv.Messages)
+	}
+	if got := assistantText(conv.Messages[1]); got != "c" {
+		t.Errorf("surviving assistant message = %q, want the surfaced final attempt %q", got, "c")
 	}
 }
 

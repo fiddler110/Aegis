@@ -94,6 +94,40 @@ func TestRuleGateAllowBypassesMode(t *testing.T) {
 	}
 }
 
+// TestRuleGateDenyStillBlocksReadClassifiedShellCall is a P25.4c regression:
+// a shell call the tool reclassifies as CapRead (e.g. via the read-only
+// allowlist) must still be checked against deny rules the same way any other
+// shell call is — rule matching keys off the tool's static shape (its
+// "command" subject field), not the per-call effective capability, so a
+// "deny shell(...)" rule can't be silently bypassed just because the
+// specific command also happens to look read-only.
+func TestRuleGateDenyStillBlocksReadClassifiedShellCall(t *testing.T) {
+	base := New(ModeBuild, AutoApprove{})
+	rules, err := ParseRules([]string{"deny shell(cat /etc/passwd*)"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := NewRuleGate(base, rules)
+	ctx := context.Background()
+
+	readClassified := fakeOverrideTool{
+		fakeTool:    fakeTool{name: "shell", cap: tool.CapExecute},
+		overrideCap: tool.CapRead,
+	}
+	if ok, reason := gate.Check(ctx, readClassified, json.RawMessage(`{"command":"cat /etc/passwd"}`)); ok {
+		t.Error("deny rule should still block a read-classified call matching its pattern")
+	} else if reason == "" {
+		t.Error("expected reason on deny")
+	}
+
+	// A read-classified call NOT matching the deny pattern falls through to
+	// the base gate, which — thanks to EffectiveCapability (P25.4c) — allows
+	// it outright instead of raising an execute Ask.
+	if ok, _ := gate.Check(ctx, readClassified, json.RawMessage(`{"command":"cat notes.txt"}`)); !ok {
+		t.Error("expected non-matching read-classified call to be allowed without approval")
+	}
+}
+
 // TestRuleGateAllowExecNotBypassedByChaining is the P7.3 regression: a
 // wildcard allow-rule scoped to one exec-capability command must not be
 // widened by shell chaining/substitution appended after the matched prefix.

@@ -32,8 +32,12 @@ func loadTemplate(t *testing.T, tmpl string) config.Config {
 func TestTemplatesParseAndUnmarshal(t *testing.T) {
 	loadTemplate(t, projectConfigTemplate)
 	cfg := loadTemplate(t, globalConfigTemplate)
-	if !cfg.OutputGuard.Enabled || cfg.OutputGuard.Mode != "llm" {
-		t.Errorf("output_guard not parsed from template: %+v", cfg.OutputGuard)
+	// P25.3: the Ollama-flavored global template ships the guard disabled — an
+	// llm rubric self-check on the session's own local (often thinking) model
+	// roughly doubles turn latency — but keeps mode: llm configured so /guard
+	// on (or enabled: true once small_model is set) works without more edits.
+	if cfg.OutputGuard.Enabled || cfg.OutputGuard.Mode != "llm" {
+		t.Errorf("output_guard not parsed as disabled-but-configured from template: %+v", cfg.OutputGuard)
 	}
 	if _, ok := cfg.Personas["security-architect"]; !ok {
 		t.Errorf("personas map missing security-architect: %+v", cfg.Personas)

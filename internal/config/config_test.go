@@ -237,3 +237,39 @@ func TestLoadDotEnvMissingFileNoOp(t *testing.T) {
 		t.Errorf("loadDotEnv on missing file: %v, want nil", err)
 	}
 }
+
+// TestProviderConfig_LocalPromptProfile covers P25.6's local-model prompt
+// profile auto-detection: loopback/localhost base URLs (with or without a
+// port, http or https, IPv6 loopback) select the "local" profile; a remote
+// host does not; and an explicit prompt_profile always wins over detection.
+func TestProviderConfig_LocalPromptProfile(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		profile string
+		want    bool
+	}{
+		{"empty base_url, auto", "", "", false},
+		{"ollama default, auto", "http://localhost:11434", "", true},
+		{"ollama default with path, auto", "http://localhost:11434/v1", "", true},
+		{"127.0.0.1, auto", "http://127.0.0.1:11434", "", true},
+		{"127.0.0.1 no port, auto", "http://127.0.0.1", "", true},
+		{"IPv6 loopback, auto", "http://[::1]:11434", "", true},
+		{"https localhost, auto", "https://localhost:8443/v1", "", true},
+		{"LOCALHOST case-insensitive, auto", "http://LOCALHOST:11434", "", true},
+		{"remote host, auto", "https://api.anthropic.com", "", false},
+		{"remote host with private-looking path, auto", "https://openrouter.ai/api/v1", "", false},
+		{"LAN IP is not loopback, auto", "http://192.168.1.10:11434", "", false},
+		{"explicit local overrides remote base_url", "https://api.anthropic.com", "local", true},
+		{"explicit default overrides loopback base_url", "http://localhost:11434", "default", false},
+		{"auto keyword behaves like empty", "http://localhost:11434", "auto", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := ProviderConfig{BaseURL: tt.baseURL, PromptProfile: tt.profile}
+			if got := p.LocalPromptProfile(); got != tt.want {
+				t.Errorf("LocalPromptProfile(base_url=%q, prompt_profile=%q) = %v, want %v", tt.baseURL, tt.profile, got, tt.want)
+			}
+		})
+	}
+}

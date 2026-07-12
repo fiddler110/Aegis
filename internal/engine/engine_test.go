@@ -392,6 +392,49 @@ func TestUsageFallbackEstimation(t *testing.T) {
 	}
 }
 
+// TestDoneEventCarriesEstimatedUsage is the P25.5 regression: previously the
+// terminal KindDone event was emitted bare (no Usage at all), so an API/eval
+// client that only reads the final "done" event — unlike the TUI, which reads
+// the live per-turn KindTurnDone events — always saw zero tokens for a
+// provider that reports no usage (local/Ollama models), even though the
+// estimate was computed and shown live in the TUI the whole time.
+func TestDoneEventCarriesEstimatedUsage(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "hello world"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{}},
+		},
+	}}
+	eng, _ := New(Options{Adapter: adapter, Model: "local"})
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}})
+
+	var doneEv *Event
+	if err := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindDone {
+			cp := ev
+			doneEv = &cp
+		}
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if doneEv == nil {
+		t.Fatal("no KindDone event")
+	}
+	if doneEv.Usage == nil {
+		t.Fatal("done event Usage is nil")
+	}
+	if !doneEv.Usage.IsEstimated {
+		t.Error("done event Usage.IsEstimated should be true when the provider reported no usage")
+	}
+	if doneEv.Usage.InputTokens == 0 {
+		t.Error("done event estimated InputTokens should be > 0")
+	}
+	if doneEv.Usage.OutputTokens == 0 {
+		t.Error("done event estimated OutputTokens should be > 0")
+	}
+}
+
 // TestEstimateTokensDenseScriptsCostMoreThanASCII proves the estimator
 // doesn't undercount CJK text the way a flat chars/4 heuristic would: the
 // same number of runes in a dense script (each carrying roughly a full
@@ -432,13 +475,13 @@ func TestIsDenseScript(t *testing.T) {
 		want bool
 	}{
 		{'a', false},
-		{'一', true},      // CJK Unified Ideographs
-		{'あ', true},      // Hiragana
-		{'ア', true},      // Katakana
-		{'한', true},      // Hangul syllable
-		{'п', false},     // Cyrillic
-		{'€', false},     // currency symbol
-		{'😀', false},     // emoji
+		{'一', true},  // CJK Unified Ideographs
+		{'あ', true},  // Hiragana
+		{'ア', true},  // Katakana
+		{'한', true},  // Hangul syllable
+		{'п', false}, // Cyrillic
+		{'€', false}, // currency symbol
+		{'😀', false}, // emoji
 	}
 	for _, tt := range tests {
 		if got := isDenseScript(tt.r); got != tt.want {

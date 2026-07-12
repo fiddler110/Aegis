@@ -83,8 +83,8 @@ provider:
   # LiteLLM:   http://localhost:4000/v1
   base_url: "http://localhost:11434/v1"
 
-  # Optional fast model for titles and context compaction.
-  # Falls back to `model` if empty.
+  # Optional fast model for titles, context compaction, and output-guard
+  # verdict calls. Falls back to `model` if empty.
   small_model: ""
 
   # Maximum tokens in the model's response. Capped by the model's own limits.
@@ -519,7 +519,9 @@ output_guard:
   # Toggle per-session with /guard on|off inside the TUI.
   enabled: true
 
-  # "llm"    — cheap second model call checks the answer against the rubric
+  # "llm"    — second model call checks the answer against the rubric. Runs on
+  #            provider.small_model when set (recommended, especially for local
+  #            setups — a fast non-thinking judge), otherwise the session model.
   # "schema" — the answer must be valid JSON containing the required keys
   mode: llm
 

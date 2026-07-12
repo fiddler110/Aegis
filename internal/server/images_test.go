@@ -22,12 +22,15 @@ var pngBytes = []byte{
 }
 
 func TestBuildImageBlocksFromPath(t *testing.T) {
+	// resolveSafeImagePath rejects absolute paths and resolves relative ones
+	// against the process cwd, so pin cwd to the temp dir and use a relative
+	// path.
 	dir := t.TempDir()
-	p := filepath.Join(dir, "shot.png")
-	if err := os.WriteFile(p, pngBytes, 0o644); err != nil {
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "shot.png"), pngBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	blocks, err := buildImageBlocks([]api.ImageInput{{Path: p}})
+	blocks, err := buildImageBlocks([]api.ImageInput{{Path: "shot.png"}})
 	if err != nil {
 		t.Fatalf("buildImageBlocks: %v", err)
 	}
@@ -59,12 +62,13 @@ func TestBuildImageBlocksFromData(t *testing.T) {
 
 func TestBuildImageBlocksRejectsUnsupported(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "note.txt")
-	if err := os.WriteFile(p, []byte("not an image"), 0o644); err != nil {
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("not an image"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildImageBlocks([]api.ImageInput{{Path: p}}); err == nil {
-		t.Fatal("expected error for unsupported media type")
+	_, err := buildImageBlocks([]api.ImageInput{{Path: "note.txt"}})
+	if err == nil || !strings.Contains(err.Error(), "unsupported media type") {
+		t.Fatalf("expected unsupported-media-type error, got %v", err)
 	}
 }
 

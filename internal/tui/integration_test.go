@@ -31,6 +31,44 @@ func plainView(m model) string {
 	return ansi.Strip(m.render())
 }
 
+// TestTUIGuardRetryWithdrawsAnswer (P25.3): a KindGuard event flagged
+// guard_retrying arrives after the failed answer has already been flushed to
+// the transcript; it must withdraw that answer in place (leaving a dim note)
+// so the corrected retry renders as *the* answer, not appended below the
+// failed one.
+func TestTUIGuardRetryWithdrawsAnswer(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m.appendUser("fix the bug", nil)
+	m.streaming = true
+	m.applyEvent(api.Event{Kind: api.KindText, Text: "PASS. The fix is confirmed working."})
+	m.applyEvent(api.Event{Kind: api.KindTurnDone})
+	m.refresh()
+	if got := plainView(m); !strings.Contains(got, "fix is confirmed working") {
+		t.Fatalf("expected the (soon-to-fail) answer on screen first, got:\n%s", got)
+	}
+
+	// Guard fails, engine retries: withdraw the failed answer, stream the
+	// corrected one.
+	m.applyEvent(api.Event{Kind: api.KindGuard, Text: "verdict not recognized", GuardRetrying: true})
+	m.applyEvent(api.Event{Kind: api.KindText, Text: "temps.py now parses the CSV value as an int."})
+	m.applyEvent(api.Event{Kind: api.KindTurnDone})
+	m.applyEvent(api.Event{Kind: api.KindDone})
+	m.refresh()
+
+	got := plainView(m)
+	if strings.Contains(got, "fix is confirmed working") {
+		t.Errorf("failed answer should have been withdrawn from the transcript, got:\n%s", got)
+	}
+	if !strings.Contains(got, "answer withdrawn") {
+		t.Errorf("expected a withdrawal note in place of the failed answer, got:\n%s", got)
+	}
+	if !strings.Contains(got, "parses the CSV value") {
+		t.Errorf("expected the corrected answer to render, got:\n%s", got)
+	}
+}
+
 // TestTUIFullTurn_NoPTY exercises the exact runtime path a live terminal
 // session drives — Update(WindowSizeMsg) -> layout/refresh, a user turn,
 // a streamed reply with thinking + a tool call + tool result, turn

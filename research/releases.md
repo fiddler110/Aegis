@@ -9,10 +9,122 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-11 (late night) — **P25.1 — per-session working directory and P25.2 —
-sandbox backend name trap + untruthful `/config/sandbox`** (`6b76e5e`). The two highest-priority
-findings from the same day's local-model live-evaluation session (see roadmap.md's P25 section for
-the eval methodology, comparative-run table, and regression harness).
+**Last updated:** 2026-07-12 — **P25.4 — Approval ergonomics, P25.5 — token-usage observability
+for local providers, and P25.6 — local-model prompt profile.** Previous: **P25.3 — output guard
+vs local/thinking models**, and before that **P25.1 — per-session working directory and P25.2 —
+sandbox backend name trap + untruthful `/config/sandbox`** (`6b76e5e`, 2026-07-11) — the full set
+are the findings from the same day's local-model live-evaluation session (see roadmap.md's P25
+section for the eval methodology, comparative-run table, and regression harness).
+
+*P25.4 — approval ergonomics: dead hotkeys, bad generated rules, read-only shell gating.* Three
+independent frictions from the live TUI run, all approval-related. (a) **Dead `y` hotkey:** the
+approval dialog already short-circuited key handling, but the "Steer the model" composer stayed
+visually focused (blinking cursor) and could still intercept input on some message types. Fixed
+by blurring the composer the instant a dialog opens and refocusing it on every resolution path
+(answer or run-abort); the shared textarea-update path is skipped entirely while a dialog is up,
+and the status bar shows "⏸ respond to the approval dialog above" so focus state is visible.
+(b) **Generated Allow-always rules:** `suggestRulePattern`/new `suggestShellPattern`
+(internal/tui/approval.go) now strip a leading `cd <dir> &&` and env-var prefixes before keying
+the suggestion on binary + subcommand (`git status*`, not the old useless
+`cd ... && python3 temps.py*`), and refuse to emit any pattern containing a
+redirection/pipe/substitution/chaining metacharacter — those fall back to "once only — no safe
+rule; write one by hand" rather than ever baking in something like `shell(cat >*)`.
+(c) **Read-only shell gating:** a new classifier (`internal/tool/builtin/shell_readonly.go`)
+allowlists read-only argv[0]+flag shapes (`ls`, `cat`, `head`, `tail`, `wc`, `pwd`, `stat`,
+`file`, PowerShell read cmdlets, `git status`/`log`/`diff` without config-override flags) and
+rejects outright on any shell metacharacter; wired through a new optional
+`tool.CapabilityOverrider` interface and `tool.EffectiveCapability` helper consumed by
+`permission.Gate.Check`, `engine.serializeTool`, and secret redaction — the shell tool's static
+`Capability()` (used for rule subject-matching) is untouched, so deny rules against `shell` still
+block a read-classified call. Tests: `TestApprovalDialogTakesKeyPriorityOverComposer`, table-driven
+rule-generation tests (cd/env stripping, metacharacter refusal), and classifier bypass-attempt
+tests (`cat f > /etc/x`, `git -c core.pager=sh log`, `ls; rm -rf /` all correctly rejected).
+
+*P25.5 — token-usage observability for local providers.* Every API-driven run reported
+`done in=0 out=0` on the SSE `done` event while the TUI status bar showed live counts for the
+same engine, because `internal/engine/engine.go`'s terminal `KindDone` emission
+(`emit(Event{Kind: KindDone})`) carried no usage at all — per-turn estimated usage
+(`provider.Usage`, `IsEstimated`) was already computed and emitted on each `KindTurnDone` event,
+but only the TUI's live status bar read it. `Run()` now accumulates each turn's usage (real or
+character-estimated) as turns complete, tracking whether any contributing turn lacked real
+provider-reported usage, and attaches the accumulated `*provider.Usage` to the final `KindDone`
+event — `IsEstimated` set accordingly, passed through the existing `toAPIEvent`/`TokensEstimated`
+wiring unchanged. `internal/server/messages.go` was already folding every `KindTurnDone`'s usage
+into session totals (a pre-existing P10.5 path), so `SessionMeta` needed no change — just test
+coverage confirming it. Tests: `TestDoneEventCarriesEstimatedUsage` (engine),
+`TestDoneEventAndSessionMetaCarryEstimatedTokens` (server, full HTTP/SSE round-trip with a
+zero-usage adapter). Live-harness verification against a real Ollama daemon (confirming the
+eval-harness summary now shows non-zero in/out) is deferred to the next live-eval session.
+
+*P25.6 — local-model profile: prompt weight + scope-creep guardrails.* The first model call
+carried ~10k input tokens (system prompt + always-exposed tool schemas + repo map + skills
+preamble) before the user said a word, and `qwen3coder:30b` over-delivered on a simple bug-fix
+task (unrequested try/except robustness, an unrequested summary file, an unprompted `remember`
+call) because nothing in the prompt said not to. Shipped: (a) `config.ProviderConfig` gained
+`PromptProfile` (`prompt_profile: local|default|auto`, default `auto`) and
+`LocalPromptProfile() bool`, which auto-detects from `base_url` (new `isLoopbackBaseURL` helper:
+`localhost`/`127.0.0.1`/`::1`, with or without port, http/https) unless explicitly overridden.
+`internal/tool/builtin/builtin.go` gained `Options.LocalProfile`: under the local profile,
+`git_pr`/`web_fetch`/`web_search`/`security_scan` move from always-exposed (`reg.Register`) to
+deferred (`reg.RegisterDeferred`, loaded on demand via `tool_search`) — the default profile is
+unaffected. `effectiveSystem` (internal/server/helpers.go) now skips injecting the repo map when
+it exceeds `localRepoMapMaxBytes` (4000) under the local profile only. (b) Two new rules were
+added to the shared `toolUseBlock`/`completingTasksBlock` (internal/persona/persona.go, injected
+into every session regardless of persona or profile): prefer local file tools over network tools
+for file-scoped tasks, and don't write files/call `remember`/add unrequested robustness beyond
+what was explicitly asked. Both new rules apply to every profile, not just local. Tests:
+`TestProviderConfig_LocalPromptProfile` (14-case detection table),
+`TestRegisterLocalProfileDefersNetworkAndScanTools`,
+`TestToolUseBlock_preferLocalOverNetwork`/`TestCompletingTasksBlock_noScopeCreep`, and
+`TestEffectiveSystem_localProfileTrimsPrompt` (oversized repo map dropped under a loopback
+`base_url` but kept under a remote one; local prompt strictly shorter; both profiles still carry
+the two new shared rules). Actual latency/instruction-following measurement needs the P25.7
+harness — deferred, per that item's acceptance criteria.
+
+*P25.3 — output guard vs local/thinking models.* In the live eval, a correct answer from
+`qwen3.6:35b-a3b-deep` with the default `output_guard.enabled: true` + `mode: llm` tripled turn
+time (26 s → 78 s): the verdict failed to parse, fail-closed forced a corrective retry that
+re-ran tools, the retry's verdict failed to parse again, and the surfaced answer opened with
+leaked meta-text ("**PASS.** The fix is confirmed working…") because the retry answered the
+guard instead of the user. Shipped, four parts. (a) **Verdict parsing symmetry**
+(internal/guard/guard.go): the old parser matched PASS only at position 0 but FAIL anywhere, so
+a thinking model's reasoning preamble fail-closed nearly every *passing* verdict. `parseVerdict`
+now recognizes a verdict at the reply's start OR on its last non-empty line (tolerating
+markdown emphasis and a "VERDICT:" label, via `verdictAt`), after stripping `<think>` **and**
+`<thinking>` blocks; FAIL-anywhere still counts as a failure, PASS mid-sentence is still never
+trusted ("does not PASS the rubric"), and a genuinely ambiguous reply still fails closed — the
+asymmetry was the bug, not the strictness. (b) **SmallModel routing** (new
+`Server.guardModel`, internal/server/engine_build.go): guard verdict calls now run on
+`provider.small_model` when set — the same preference session titles and compaction already
+had — so a fast non-thinking judge makes the strict "reply exactly PASS" contract satisfiable;
+falls back to the session model otherwise. (c) **Retry replaces, not appends, the visible
+answer**: the engine's failed-guard-with-retry event is flagged `GuardRetrying`
+(engine.Event/api.Event `guard_retrying`, threaded through `toAPIEvent`); the TUI now flushes
+assistant answers via `AppendBlock` and, on a retrying guard event, rewrites the failed
+answer's transcript item in place to a dim "answer withdrawn — retrying" note
+(`SetItemRaw`) so the retry renders as *the* answer; and after the run settles, the engine's
+new `retractGuardCorrectives` strips each failed answer + corrective prompt from the
+conversation (content-keyed on `guardCorrectivePrefix`, immune to mid-run
+compaction/prepare-step index drift; tool rounds a retry ran are kept), setting
+`Persisted = -1` so the server's existing flush path re-saves the cleaned transcript — durable
+history and later model context hold only the answer the user actually saw. The corrective
+prompt itself now ends by forbidding any mention of the validation step or PASS/FAIL verdict
+words, closing the leak. TUI pass events (empty reason) no longer print a stray "⚠ output
+guard:" line. (d) **`--first-init` template** (internal/cli/init.go): the Ollama-flavored
+global config now ships `output_guard.enabled: false` with a comment explaining the latency
+economics, plus a `small_model` hint in the provider block; built-in defaults are unchanged
+(`enabled: true` for configured/cloud setups), and `/guard on` still enables per session. Web
+UI ignores guard events (parity no-op), so no frontend change. Tests:
+`TestParseVerdictShapes` (16-case table incl. reasoning preambles, verdict-on-last-line,
+negated PASS, unclosed think block), engine `TestGuardRetryReplacesVisibleAnswer` /
+`TestGuardExhaustedRetractsIntermediateAttempts` (retraction + `GuardRetrying` flag +
+`Persisted=-1`), the two corrective-prompt tests reworked to observe the model-visible request
+via a capturing adapter (the corrective no longer survives in `conv.Messages` — that's the
+feature), `TestGuardModelPrefersSmallModel`, `TestToAPIEventGuard` retry-flag round-trip, and
+the template test now asserting disabled-but-configured. Acceptance beyond unit tests (guard-on
+latency ≤ ~15 % vs guard-off on the seeded-bug task) needs the live harness — re-run
+`research/eval-harness-drive.py` with guard on next live-eval session; the P25.7 suite locks
+the "no PASS/FAIL meta-text in the final answer" invariant.
 
 *P25.1 — per-session working directory.* A TUI session started in directory X against a daemon
 started in directory Y displayed `Dir X` in the welcome screen but executed every tool in Y — in

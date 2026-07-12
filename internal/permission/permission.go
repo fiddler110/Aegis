@@ -122,7 +122,12 @@ func New(mode Mode, approver Approver) Gate {
 // Check decides whether a tool call may proceed, returning a human-readable
 // reason when denied. It satisfies the engine's gate interface.
 func (g Gate) Check(ctx context.Context, t tool.Tool, input json.RawMessage) (bool, string) {
-	cap := t.Capability()
+	// EffectiveCapability, not the tool's static Capability() (P25.4c): a
+	// call a tool itself classifies as narrower than its usual capability —
+	// e.g. shell's read-only allowlist — should be gated (and, in plan
+	// mode, allowed) on that narrower basis instead of always paying the
+	// tool's worst-case capability.
+	cap := tool.EffectiveCapability(t, input)
 	switch g.Policy.Decide(cap) {
 	case Allow:
 		return true, ""

@@ -83,6 +83,11 @@ provider:
   max_retries: 3
   think: false               # true only for extended-thinking models such as
                              #   qwen3 or deepseek-r1 served via Ollama.
+  # small_model: "llama3.2"  # Optional fast model for background calls
+                             # (session titles, compaction, output-guard
+                             # verdicts). Strongly recommended before enabling
+                             # output_guard below — pick a small NON-thinking
+                             # model you have pulled.
 
 
 # ┌─────────────────────────────────────────────────────────────────────────────
@@ -215,11 +220,16 @@ permission:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Output validation  (on by default; toggle per session with /guard)
+#  Output validation  (off by default for local models; toggle per session with /guard)
 # ─────────────────────────────────────────────────────────────────────────────
+# The llm-mode guard makes one extra model call per final answer to judge it
+# against a rubric. On a local setup that call runs on the same (often slow or
+# thinking-style) model as the session unless provider.small_model is set, which
+# roughly doubles turn latency for little signal. Set small_model above to a
+# fast non-thinking model first, then flip enabled to true.
 
 output_guard:
-  enabled: true              # validate each final answer; /guard off disables per session
+  enabled: false             # validate each final answer; /guard on enables per session
   mode: llm                  # "llm" (rubric check) or "schema" (required JSON keys)
   max_retries: 1             # corrective retries before surfacing the raw answer
   # rubric: |                # uncomment to override the built-in generic rubric
