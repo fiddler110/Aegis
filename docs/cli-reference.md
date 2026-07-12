@@ -615,19 +615,22 @@ aegis bundle install ./my-bundle --scope user  # install to user data dir
 
 ## `aegis models`
 
-Show the curated model catalog and optionally probe for running local servers.
+Show the curated model catalog and optionally probe for running local servers or get a hardware-aware recommendation.
 
 ```bash
-aegis models [--local]
+aegis models [--local] [--recommend]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--local` | Probe localhost for Ollama, LM Studio, LiteLLM |
+| `--recommend` | Detect CPU/RAM and narrow local-model recommendations to what this machine can run |
 
-Without `--local`: prints a curated list of recommended models by tier (frontier / balanced / local) with context windows and notes.
+Without flags: prints a curated list of recommended models by tier (frontier / balanced / local) with context windows and notes.
 
 With `--local`: additionally probes `localhost:11434`, `localhost:1234`, `localhost:4000` and lists every available model found.
+
+With `--recommend` (P20.3): detects CPU core count and total system RAM (best-effort, platform-specific — no GPU/VRAM introspection, by design; see [providers.md](providers.md#aegis-models)), prints the detected hardware, and narrows the `local` tier to the entries a rule of thumb says will run without heavy swapping. RAM detection fails soft to "unknown" (falls back to the full unnarrowed local list) on unsupported platforms or sandboxed environments. For any recommended model not already pulled, prints the exact `ollama pull <model>` command as a suggestion — never runs it.
 
 ---
 

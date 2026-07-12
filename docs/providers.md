@@ -304,9 +304,36 @@ Changes are written to `config.yaml` and take effect on the next restart.
 ### `aegis models`
 
 ```bash
-aegis models          # curated model catalog with recommendations
-aegis models --local  # also probe localhost for running servers
+aegis models              # curated model catalog with recommendations
+aegis models --local      # also probe localhost for running servers
+aegis models --recommend  # detect this machine's hardware and narrow local recommendations
 ```
+
+`--recommend` (P20.3) detects CPU core count and total system RAM
+(`internal/hwinfo`) and narrows the `local` tier of the catalog to the
+entries a reasonable rule of thumb says will run without heavy swapping —
+see `modelcatalog.RecommendLocal`'s doc comment for the exact RAM
+thresholds. This deliberately does **not** attempt GPU/VRAM detection: Ollama
+doesn't expose the concurrency/VRAM budget it computes internally over its
+own API, so reimplementing that heuristic blind from a fragile,
+platform-specific proxy signal (`nvidia-smi`, vendor driver queries, etc.)
+was already evaluated and rejected for adaptive sub-agent concurrency
+(P17.5) and is rejected here for the same reason. RAM detection itself is
+best-effort and platform-specific (`/proc/meminfo` on Linux, `sysctl
+hw.memsize` on macOS, the Win32 `GlobalMemoryStatusEx` API on Windows) and
+fails soft to "unknown" — on an unsupported platform or in a sandboxed
+environment without the usual introspection paths, `--recommend` falls back
+to printing the full local catalog unnarrowed rather than erroring.
+
+For each recommended local model not already pulled (cross-checked against
+`aegis models --local`'s Ollama probe), `--recommend` prints the exact
+`ollama pull <model>` command as a suggestion. It never runs the pull
+itself — this is a printed suggestion you run yourself, the same
+guarded-suggestion posture as the `security_advise` tool.
+
+The TUI's `/models` picker shows the same hardware-fit information as a
+badge on each local-tier entry ("fits your ~16GB RAM" / "wants ~16GB RAM
+(you have ~8GB)") whenever RAM detection succeeds.
 
 ---
 
