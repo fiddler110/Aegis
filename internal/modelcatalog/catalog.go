@@ -4,6 +4,8 @@
 // availability change, so always confirm against the provider's own docs.
 package modelcatalog
 
+import "github.com/fiddler110/aegis/internal/hwinfo"
+
 // Tier is a rough capability/cost bracket.
 type Tier string
 
@@ -20,6 +22,15 @@ type Model struct {
 	Tier     Tier
 	Context  string // advertised context window, human-readable
 	Notes    string
+	// MinRAMGB is a rough minimum total system RAM, in GB, below which this
+	// TierLocal entry isn't worth recommending (heavy swapping, forced
+	// aggressive quantization, or the family simply not shipping a small
+	// enough variant). 0 for non-local entries, and for local entries
+	// believed to run adequately on any machine worth running Aegis on.
+	// Qualitative rule of thumb, not a measured benchmark — see
+	// RecommendLocal, which uses this to narrow ForTier(TierLocal) against
+	// detected hardware (internal/hwinfo).
+	MinRAMGB int
 }
 
 // Curated returns the recommendation list. Anthropic IDs are exact; local
@@ -28,20 +39,28 @@ type Model struct {
 func Curated() []Model {
 	return []Model{
 		// Anthropic (exact IDs).
-		{"anthropic", "claude-opus-4-8", TierFrontier, "200K", "Most capable; best for complex agentic and multi-step work."},
-		{"anthropic", "claude-sonnet-4-6", TierBalanced, "200K", "Strong general coding/agentic quality at lower cost than Opus."},
-		{"anthropic", "claude-haiku-4-5", TierBalanced, "200K", "Fast and inexpensive for routine edits and tool loops."},
-		{"anthropic", "claude-fable-5", TierFrontier, "200K", "Creative/long-form strengths; latest Fable line."},
+		{Provider: "anthropic", ID: "claude-opus-4-8", Tier: TierFrontier, Context: "200K", Notes: "Most capable; best for complex agentic and multi-step work."},
+		{Provider: "anthropic", ID: "claude-sonnet-4-6", Tier: TierBalanced, Context: "200K", Notes: "Strong general coding/agentic quality at lower cost than Opus."},
+		{Provider: "anthropic", ID: "claude-haiku-4-5", Tier: TierBalanced, Context: "200K", Notes: "Fast and inexpensive for routine edits and tool loops."},
+		{Provider: "anthropic", ID: "claude-fable-5", Tier: TierFrontier, Context: "200K", Notes: "Creative/long-form strengths; latest Fable line."},
 
 		// Hosted OpenAI-compatible (confirm current IDs with the provider).
-		{"openai", "gpt-5.x (see provider)", TierFrontier, "—", "Set provider.model to the current GPT-5-class ID from OpenAI's docs."},
-		{"gemini", "gemini-2.x (see provider)", TierFrontier, "1M", "Very large context; use the OpenAI-compatible endpoint or a gateway."},
+		{Provider: "openai", ID: "gpt-5.x (see provider)", Tier: TierFrontier, Context: "—", Notes: "Set provider.model to the current GPT-5-class ID from OpenAI's docs."},
+		{Provider: "gemini", ID: "gemini-2.x (see provider)", Tier: TierFrontier, Context: "1M", Notes: "Very large context; use the OpenAI-compatible endpoint or a gateway."},
 
-		// Local via Ollama (model families; pull a specific tag).
-		{"ollama", "qwen3", TierLocal, "32K+", "Solid local default; reasoning model — Aegis sets think=false by default."},
-		{"ollama", "deepseek-r1", TierLocal, "64K+", "Strong local reasoning; heavier. Disable think for plain output."},
-		{"ollama", "qwen2.5-coder", TierLocal, "32K+", "Code-focused; good for local editing tasks."},
-		{"ollama", "llama3.1", TierLocal, "128K", "General-purpose local model with a large context."},
+		// Local via Ollama (model families; pull a specific tag). MinRAMGB
+		// reflects the smallest widely-used tag for that family: qwen3 and
+		// qwen2.5-coder both ship distilled/quantized-friendly variants down
+		// to a few GB, so a conservative "runs acceptably" floor is ~4GB;
+		// llama3.1's smallest official tag is 8B, and its 128K context adds
+		// real KV-cache memory on top of the weights, so ~8GB; deepseek-r1's
+		// reasoning workloads and longer chains-of-thought push the usable
+		// floor to ~16GB even on smaller tags. See RecommendLocal's doc
+		// comment for how these floors turn into a recommendation.
+		{Provider: "ollama", ID: "qwen3", Tier: TierLocal, Context: "32K+", Notes: "Solid local default; reasoning model — Aegis sets think=false by default.", MinRAMGB: 4},
+		{Provider: "ollama", ID: "deepseek-r1", Tier: TierLocal, Context: "64K+", Notes: "Strong local reasoning; heavier. Disable think for plain output.", MinRAMGB: 16},
+		{Provider: "ollama", ID: "qwen2.5-coder", Tier: TierLocal, Context: "32K+", Notes: "Code-focused; good for local editing tasks.", MinRAMGB: 4},
+		{Provider: "ollama", ID: "llama3.1", Tier: TierLocal, Context: "128K", Notes: "General-purpose local model with a large context.", MinRAMGB: 8},
 	}
 }
 
@@ -50,6 +69,35 @@ func ForTier(t Tier) []Model {
 	var out []Model
 	for _, m := range Curated() {
 		if m.Tier == t {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// RecommendLocal narrows ForTier(TierLocal) to the entries whose MinRAMGB
+// floor the detected hardware clears. This is qualitative guidance, not a
+// measured benchmark (see the package doc comment) — MinRAMGB values are
+// rough floors set per curated model in Curated() above, not the result of
+// running anything.
+//
+// When RAM couldn't be detected (hw.RAMKnown() is false — see internal/hwinfo
+// for why detection can fail, e.g. an unsupported platform or a sandboxed
+// environment without /proc), this returns the full local list unnarrowed:
+// it's better to over-offer than to silently hide options because detection
+// failed. CPU core count is informational only and does not gate inclusion —
+// every curated local model runs on any modern multi-core CPU; RAM (fitting
+// weights + KV cache without heavy swapping) is what actually limits which
+// local models are worth recommending.
+func RecommendLocal(hw hwinfo.Info) []Model {
+	local := ForTier(TierLocal)
+	if !hw.RAMKnown() {
+		return local
+	}
+	gb := hw.TotalRAMGB()
+	out := make([]Model, 0, len(local))
+	for _, m := range local {
+		if float64(m.MinRAMGB) <= gb {
 			out = append(out, m)
 		}
 	}
