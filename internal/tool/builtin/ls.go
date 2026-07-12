@@ -26,7 +26,7 @@ func (t *lsTool) OutputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"tree":{"type":"string","description":"indented directory tree"}},"required":["tree"]}`)
 }
 
-func (t *lsTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+func (t *lsTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Path  string `json:"path"`
 		Depth int    `json:"depth"`
@@ -44,7 +44,7 @@ func (t *lsTool) Execute(_ context.Context, input json.RawMessage) (tool.Result,
 		args.Depth = 5
 	}
 
-	abs, err := resolvePath(t.root, args.Path)
+	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("invalid path: %v", err), IsError: true}, nil
 	}

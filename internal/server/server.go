@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -171,6 +172,12 @@ type Server struct {
 	// that session's turns so a loaded tool stays loaded turn to turn.
 	sessionTools sync.Map // string → *tool.Registry
 
+	// sessionWorkdirs maps session ID → that session's own working directory
+	// (P25.1), resolved and validated once at creation time in
+	// handleCreateSession. Missing/empty means the session uses the
+	// daemon's default workspace (s.workspace) — see workdirFor.
+	sessionWorkdirs sync.Map // string → string
+
 	// sessionSkills maps session ID → extra embedded built-in skill names
 	// activated on demand for that session (e.g. via /threat-model), layered
 	// on top of the persistent cfg.Skills.BuiltinEnabled list. In-memory only:
@@ -198,7 +205,7 @@ func (s *Server) activateSessionSkill(id, name string) {
 	s.sessionSkills.Store(id, extra)
 
 	enabled := append(append([]string{}, s.cfg.Skills.BuiltinEnabled...), extra...)
-	s.sessionToolRegistry(id).Upsert(builtin.NewSkillTool(s.workspace, s.cfg.DataDir, enabled))
+	s.sessionToolRegistry(id).Upsert(builtin.NewSkillTool(s.workdirFor(id), s.cfg.DataDir, enabled))
 }
 
 // sessionEnabledSkills returns the persistent config-level enabled built-ins
@@ -216,6 +223,66 @@ func (s *Server) sessionEnabledSkills(id string) []string {
 func (s *Server) sessionToolRegistry(id string) *tool.Registry {
 	v, _ := s.sessionTools.LoadOrStore(id, s.tools.Clone())
 	return v.(*tool.Registry)
+}
+
+// workdirFor returns the working directory session id was created with
+// (P25.1), or the daemon's default workspace when id is unset, unknown, or
+// was created without an explicit Workdir. Cheap in-memory lookup — see
+// sessionWorkdirs — so it can be called on every tool/system-prompt build
+// without hitting the session store.
+func (s *Server) workdirFor(id string) string {
+	if id != "" {
+		if v, ok := s.sessionWorkdirs.Load(id); ok {
+			if wd, _ := v.(string); wd != "" {
+				return wd
+			}
+		}
+	}
+	return s.workspace
+}
+
+// workdirAllowed reports whether workdir (already resolved to an absolute
+// path) is permitted for a session on this daemon, given how AllowRemote and
+// SessionWorkdirAllowlist are configured (P25.1). A remote-accessible daemon
+// must not become an arbitrary-filesystem oracle: once AllowRemote is set,
+// only the daemon's own default workspace (or a directory nested under it)
+// or a directory nested under an allowlisted root is accepted. The default
+// loopback-only bind trusts any existing directory, matching today's model
+// where a local client is already as trusted as a local shell user.
+func (s *Server) workdirAllowed(workdir string) bool {
+	if !s.cfg.Server.AllowRemote {
+		return true
+	}
+	if withinRoot(s.workspace, workdir) {
+		return true
+	}
+	for _, allowed := range s.cfg.Server.SessionWorkdirAllowlist {
+		abs, err := filepath.Abs(allowed)
+		if err != nil {
+			continue
+		}
+		if withinRoot(abs, workdir) {
+			return true
+		}
+	}
+	return false
+}
+
+// withinRoot reports whether target equals root or is nested under it. Both
+// arguments must already be absolute, cleaned paths.
+func withinRoot(root, target string) bool {
+	root, target = filepath.Clean(root), filepath.Clean(target)
+	if runtime.GOOS == "windows" {
+		root, target = strings.ToLower(root), strings.ToLower(target)
+	}
+	if root == target {
+		return true
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // approvalDecision carries the client's answer to an interactive approval prompt.
@@ -406,7 +473,26 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			logger.Warn("permission mode 'auto' with the local sandbox runs model-issued shell commands directly on the host with no approval; use the container sandbox backend or 'build' mode for untrusted work")
 		}
 		if cfg.Permission.AutoApproveExec {
-			logger.Warn("auto_approve_exec is enabled with the local sandbox: every shell command runs on the host without prompting")
+			// auto_approve_exec + an unsandboxed backend means every
+			// model-issued shell command runs on the host with no approval
+			// and no isolation whatsoever — unattended RCE by design. A WARN
+			// line alone (the pre-P25.2 behavior) is too easy to miss,
+			// especially since it's also the exact combo the docs suggest
+			// for containerized auto-runs, so a plain backend typo (e.g.
+			// sandbox.backend: podman before P25.2's aliasing) silently
+			// landed here. Refuse to start unless the operator has
+			// explicitly acknowledged the risk via the opt-out.
+			if err := unsandboxedAutoExecError(cfg.Permission, cfg.Sandbox.Backend, sandboxFallback, sandboxFallbackReason); err != nil {
+				if knowledgeStore != nil {
+					_ = knowledgeStore.Close()
+				}
+				if longMemStore != nil {
+					_ = longMemStore.Close()
+				}
+				store.Close()
+				return nil, err
+			}
+			logger.Warn("auto_approve_exec is enabled with the local sandbox: every shell command runs on the host without prompting (permission.allow_unsandboxed_auto_exec is set, so this is not blocking startup)")
 		}
 	}
 	if cfg.Security.EgressThenWrite || len(cfg.Security.NetworkAllowList) > 0 {
@@ -556,13 +642,22 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 // SelectSandbox picks the command-execution backend per cfg.Backend:
 // "container" forces a runtime (or auto-detects one); "auto" detects and
 // picks the best available; "os" uses OS-level isolation without a container
-// runtime; anything else (default) runs commands directly on the host.
+// runtime; "" or "local" runs commands directly on the host by design.
 //
 // A fallback to the unsandboxed local backend is a silent security downgrade
 // for an operator who believes sandboxing is active (P7.4): it is always
 // logged, reported back via the fallback/reason return values (surfaced by
 // the caller via /healthz for clients to warn the user), and — when
 // cfg.Strict is set — turned into a hard error instead of a silent fallback.
+//
+// cfg.Backend is expected to already be validated/aliased by
+// config.SandboxConfig.Normalize (config.Load calls it, so any cfg built by
+// the normal config path is covered); an unrecognized value reaching here
+// anyway is rejected rather than silently treated as "local" (P25.2) — a
+// container-runtime name typed straight into sandbox.backend (e.g. "podman"
+// instead of backend: container + runtime: podman) used to fall through to
+// this same default case and run every command unsandboxed on the host with
+// no warning at all.
 //
 // Exported (not just server-internal) so the subprocess swarm worker
 // (internal/cli/worker.go) can reconstruct the same sandbox backend the
@@ -612,9 +707,39 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 		}
 		logger.Info("sandbox backend", "mechanism", osb.Name(), "network", cfg.Network)
 		return osb, false, "", nil
-	default:
+	case "", "local":
 		return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), false, "", nil
+	default:
+		return nil, false, "", fmt.Errorf(
+			"sandbox: unknown sandbox.backend %q (want \"local\", \"container\", \"auto\", or \"os\"); "+
+				"if this names a container runtime, set sandbox.backend: container and sandbox.runtime: %q instead — "+
+				"config.Load() normally rejects this before startup, so this cfg was built outside the normal config path",
+			cfg.Backend, cfg.Backend,
+		)
 	}
+}
+
+// unsandboxedAutoExecError returns a startup-refusal error when
+// permission.auto_approve_exec is set while the effective sandbox backend is
+// the unsandboxed local one (P25.2), unless the operator has explicitly
+// opted out via permission.allow_unsandboxed_auto_exec. Callers only invoke
+// this once they've already established the backend is local (a
+// *sandbox.LocalBackend) — this function itself doesn't re-check that, so
+// it's a plain function of config rather than needing a sandbox.Backend,
+// which keeps it unit-testable without spinning up a real backend.
+func unsandboxedAutoExecError(perm config.PermissionConfig, configuredBackend string, sandboxFallback bool, sandboxFallbackReason string) error {
+	if perm.AllowUnsandboxedAutoExec {
+		return nil
+	}
+	why := fmt.Sprintf("sandbox.backend is %q", configuredBackend)
+	if sandboxFallback {
+		why = sandboxFallbackReason
+	}
+	return fmt.Errorf(
+		"refusing to start: permission.auto_approve_exec is enabled but the effective sandbox backend is unsandboxed local execution (%s) — every model-issued shell command would run on the host with no approval and no isolation. "+
+			"Configure a real sandbox (sandbox.backend: container or os), or set permission.allow_unsandboxed_auto_exec: true if this is intentional",
+		why,
+	)
 }
 
 // onSubagentStop records the SUBAGENT_STOP lifecycle event in the audit trail.

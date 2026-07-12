@@ -110,6 +110,7 @@ button.danger{background:#b91c1c}
 .tool-btn{display:flex;align-items:center;gap:6px;background:transparent;color:var(--fg);border:0;border-radius:8px;padding:7px 8px;font-size:13px;text-align:left}
 .tool-btn:hover{background:rgba(125,125,125,.08)}
 .act-count{margin-left:auto;background:var(--accent);color:#fff;border-radius:999px;font-size:11px;padding:0 7px}
+.warn-count{margin-left:auto;background:#d97706;color:#fff;border-radius:999px;font-size:11px;padding:0 7px}
 .prune-confirm{display:flex;flex-direction:column;gap:6px;padding:8px;font-size:12.5px;border:1px solid var(--line);border-radius:10px}
 .prune-confirm input{width:56px;padding:3px 6px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;font-size:12.5px}
 .prune-actions{display:flex;gap:6px}

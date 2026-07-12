@@ -28,7 +28,9 @@ func (t *rememberTool) Execute(ctx context.Context, input json.RawMessage) (tool
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
-	if err := memory.Append(t.src.ProjectMemoryPath(), args.Note); err != nil {
+	src := t.src
+	src.ProjectRoot = effectiveRoot(ctx, src.ProjectRoot)
+	if err := memory.Append(src.ProjectMemoryPath(), args.Note); err != nil {
 		return tool.Result{Content: fmt.Sprintf("could not save memory: %v", err), IsError: true}, nil
 	}
 	return tool.Result{Content: "saved to project memory"}, nil
@@ -54,7 +56,9 @@ func (t *saveSkillTool) Execute(ctx context.Context, input json.RawMessage) (too
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
-	path, err := t.src.SaveSkill(args.Name, args.Content)
+	src := t.src
+	src.ProjectRoot = effectiveRoot(ctx, src.ProjectRoot)
+	path, err := src.SaveSkill(args.Name, args.Content)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("could not save skill: %v", err), IsError: true}, nil
 	}

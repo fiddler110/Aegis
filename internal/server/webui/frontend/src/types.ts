@@ -52,6 +52,12 @@ export interface PersonaInfo {
 export interface StatusInfo {
   provider: string;
   model: string;
+  // sandbox_fallback (P25.2) is true when the configured sandbox backend
+  // failed to initialize (or was never a real sandbox to begin with) and
+  // the daemon fell back to running commands unsandboxed on the host;
+  // sandbox_fallback_reason explains why.
+  sandbox_fallback?: boolean;
+  sandbox_fallback_reason?: string;
   daily_cost_usd: number;
   daily_cap_usd?: number;
   daily_tokens: number;
@@ -156,6 +162,24 @@ export interface ConfigSkillsResponse {
   scope: string;
   builtin_enabled: string[] | null;
   available: BuiltinSkillInfo[] | null;
+}
+
+// ConfigSandboxResponse is the GET/PATCH /config/sandbox response (P25.2):
+// the configured sandbox.* values (backend/runtime/etc. — what was asked
+// for) alongside active_backend/fallback/fallback_reason (what the daemon
+// actually selected at startup). These can legitimately differ — an
+// unavailable container runtime, or (pre-P25.2) an unrecognized backend
+// name — silently degrades to the unsandboxed local backend.
+export interface ConfigSandboxResponse {
+  scope: string;
+  backend: string;
+  runtime?: string;
+  priority?: string[];
+  image?: string;
+  network: boolean;
+  active_backend?: string;
+  fallback?: boolean;
+  fallback_reason?: string;
 }
 
 // SecurityToolStatus is one scanner in GET /security/status: its configured

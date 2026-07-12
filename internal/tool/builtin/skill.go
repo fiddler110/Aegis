@@ -35,7 +35,7 @@ func (t *skillTool) Description() string {
 func (t *skillTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"name":{"type":"string","description":"the skill name as shown in <skills_available>"}},"required":["name"]}`)
 }
-func (t *skillTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+func (t *skillTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Name string `json:"name"`
 	}
@@ -46,9 +46,10 @@ func (t *skillTool) Execute(_ context.Context, input json.RawMessage) (tool.Resu
 	if args.Name == "" {
 		return tool.Result{Content: "skill name is required", IsError: true}, nil
 	}
-	sk, ok := skills.Load(t.root, t.dataDir, t.builtinEnabled, args.Name)
+	root := effectiveRoot(ctx, t.root)
+	sk, ok := skills.Load(root, t.dataDir, t.builtinEnabled, args.Name)
 	if !ok {
-		avail := skillNames(t.root, t.dataDir, t.builtinEnabled)
+		avail := skillNames(root, t.dataDir, t.builtinEnabled)
 		msg := fmt.Sprintf("no skill named %q", args.Name)
 		if avail != "" {
 			msg += "; available skills: " + avail

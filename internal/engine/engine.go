@@ -243,6 +243,11 @@ type Options struct {
 	// scrubs detected secret patterns in place.
 	RedactSecrets bool
 	Logger        *slog.Logger
+	// Workdir, when set, overrides the working directory workspace-confined
+	// tools (file ops, shell, git, ...) operate against for this run, via
+	// tool.WithWorkdir — without it they fall back to their own
+	// construction-time root (P25.1: per-session workdir).
+	Workdir string
 }
 
 // Engine runs the agent loop.
@@ -267,6 +272,7 @@ type Engine struct {
 	steerChan           <-chan string
 	redactSecrets       bool
 	logger              *slog.Logger
+	workdir             string
 
 	// writtenFiles tracks workspace-relative paths touched by a successful
 	// write-capability tool call during the current Run, so the output guard
@@ -325,6 +331,7 @@ func New(opts Options) (*Engine, error) {
 		steerChan:           opts.SteerChan,
 		redactSecrets:       opts.RedactSecrets,
 		logger:              logger,
+		workdir:             opts.Workdir,
 	}, nil
 }
 
@@ -899,6 +906,9 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	// this run — which, when the caller scopes exposure per session, is a
 	// clone rather than the tool's own construction-time reference.
 	ctx = tool.WithRegistry(ctx, e.tools)
+	if e.workdir != "" {
+		ctx = tool.WithWorkdir(ctx, e.workdir)
+	}
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
 		return fmt.Sprintf("unknown tool %q", tu.Name), true

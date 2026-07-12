@@ -13,6 +13,12 @@ type CreateSessionRequest struct {
 	System  string `json:"system"`
 	Mode    string `json:"mode"`
 	Persona string `json:"persona"` // named persona; sets the system prompt when System is empty
+	// Workdir is the client's own working directory (P25.1): an absolute or
+	// client-relative path the daemon resolves, validates (must exist, be a
+	// directory, and — for a remote-accessible daemon — fall within an
+	// allowed scope), and confines this session's tools/shell to. Empty
+	// keeps the daemon's own default workspace, matching pre-P25.1 behavior.
+	Workdir string `json:"workdir,omitempty"`
 }
 
 // SessionMeta describes a session without its messages.
@@ -20,6 +26,7 @@ type SessionMeta struct {
 	ID           string     `json:"id"`
 	Title        string     `json:"title"`
 	Mode         string     `json:"mode"`
+	Workdir      string     `json:"workdir,omitempty"`    // P25.1: session's working directory; "" = daemon's default workspace
 	Model        string     `json:"model,omitempty"`      // P14.7: per-session override; "" = persona/global default
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
@@ -473,13 +480,25 @@ type ConfigScope = string
 // daemon's currently effective sandbox.* settings (config.Load()'s merged
 // view across global/project/env layers), plus the scope a PATCH without an
 // explicit "scope" would default to.
+//
+// ActiveBackend/Fallback/FallbackReason (P25.2) report what the running
+// daemon actually selected via SelectSandbox at startup, which can differ
+// from Backend/Runtime above: an unrecognized backend value, a container
+// runtime that failed to initialize, etc. all silently degrade to the
+// unsandboxed local backend, and a client trusting the config echo alone
+// has no way to detect that. ActiveBackend is the real sandbox.Backend.Name()
+// currently in use ("local", "container:podman", "os:...", ...); Fallback is
+// true when it differs from what Backend/Runtime were configured to select.
 type ConfigSandboxResponse struct {
-	Scope    string   `json:"scope"`
-	Backend  string   `json:"backend"`
-	Runtime  string   `json:"runtime,omitempty"`
-	Priority []string `json:"priority,omitempty"`
-	Image    string   `json:"image,omitempty"`
-	Network  bool     `json:"network"`
+	Scope          string   `json:"scope"`
+	Backend        string   `json:"backend"`
+	Runtime        string   `json:"runtime,omitempty"`
+	Priority       []string `json:"priority,omitempty"`
+	Image          string   `json:"image,omitempty"`
+	Network        bool     `json:"network"`
+	ActiveBackend  string   `json:"active_backend,omitempty"`
+	Fallback       bool     `json:"fallback,omitempty"`
+	FallbackReason string   `json:"fallback_reason,omitempty"`
 }
 
 // ConfigSandboxPatchRequest partially updates the sandbox: config block

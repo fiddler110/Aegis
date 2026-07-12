@@ -65,6 +65,31 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // ─── /config/sandbox ────────────────────────────────────────────────────────
 
+// sandboxConfigResponse pairs the requested scope's configured sandbox.*
+// values with the daemon's actual, currently running sandbox backend
+// (P25.2). The configured values alone can't be trusted: an unrecognized
+// backend, a container runtime that failed to initialize at startup, etc.
+// all silently degrade to the unsandboxed local backend, and s.sandbox /
+// s.sandboxFallback(Reason) — set once at daemon startup by SelectSandbox —
+// are the only source of truth for what's actually live.
+func (s *Server) sandboxConfigResponse(scope, backend, runtime string, priority []string, image string, network bool) api.ConfigSandboxResponse {
+	active := ""
+	if s.sandbox != nil {
+		active = s.sandbox.Name()
+	}
+	return api.ConfigSandboxResponse{
+		Scope:          scope,
+		Backend:        backend,
+		Runtime:        runtime,
+		Priority:       priority,
+		Image:          image,
+		Network:        network,
+		ActiveBackend:  active,
+		Fallback:       s.sandboxFallback,
+		FallbackReason: s.sandboxFallbackReason,
+	}
+}
+
 func (s *Server) handleGetConfigSandbox(w http.ResponseWriter, r *http.Request) {
 	scope, ok := s.resolveScope(scopeFromQuery(r))
 	if !ok {
@@ -76,14 +101,9 @@ func (s *Server) handleGetConfigSandbox(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, api.ConfigSandboxResponse{
-		Scope:    scope,
-		Backend:  cfg.Sandbox.Backend,
-		Runtime:  cfg.Sandbox.Runtime,
-		Priority: cfg.Sandbox.Priority,
-		Image:    cfg.Sandbox.Image,
-		Network:  cfg.Sandbox.Network,
-	})
+	writeJSON(w, http.StatusOK, s.sandboxConfigResponse(
+		scope, cfg.Sandbox.Backend, cfg.Sandbox.Runtime, cfg.Sandbox.Priority, cfg.Sandbox.Image, cfg.Sandbox.Network,
+	))
 }
 
 func (s *Server) handlePatchConfigSandbox(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +144,17 @@ func (s *Server) handlePatchConfigSandbox(w http.ResponseWriter, r *http.Request
 		patch.Network = *req.Network
 	}
 
+	// Apply the same alias/validation table Load() uses (P25.2), so a PATCH
+	// naming a runtime directly ("podman") is normalized to the correct
+	// backend+runtime pair, and a genuinely unknown backend is rejected here
+	// rather than silently written to disk and only discovered next start.
+	normalized := config.SandboxConfig{Backend: patch.Backend, Runtime: patch.Runtime}
+	if err := normalized.Normalize(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	patch.Backend, patch.Runtime = normalized.Backend, normalized.Runtime
+
 	write := config.PatchGlobalSandbox
 	if scope == "project" {
 		write = config.PatchProjectSandbox
@@ -132,14 +163,9 @@ func (s *Server) handlePatchConfigSandbox(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, api.ConfigSandboxResponse{
-		Scope:    scope,
-		Backend:  patch.Backend,
-		Runtime:  patch.Runtime,
-		Priority: patch.Priority,
-		Image:    patch.Image,
-		Network:  patch.Network,
-	})
+	writeJSON(w, http.StatusOK, s.sandboxConfigResponse(
+		scope, patch.Backend, patch.Runtime, patch.Priority, patch.Image, patch.Network,
+	))
 }
 
 // ─── /config/security ───────────────────────────────────────────────────────

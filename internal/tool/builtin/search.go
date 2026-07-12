@@ -41,23 +41,24 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if strings.TrimSpace(args.Pattern) == "" {
 		return tool.Result{Content: "pattern is required", IsError: true}, nil
 	}
+	root := effectiveRoot(ctx, t.root)
 
 	if rgPath != "" {
-		return t.executeRg(ctx, args.Pattern)
+		return t.executeRg(ctx, root, args.Pattern)
 	}
 
 	var matches []string
-	walkErr := filepath.WalkDir(t.root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if skipDir(d.Name()) && path != t.root {
+			if skipDir(d.Name()) && path != root {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		rel, _ := filepath.Rel(t.root, path)
+		rel, _ := filepath.Rel(root, path)
 		rel = filepath.ToSlash(rel)
 		if matchGlob(args.Pattern, rel) {
 			matches = append(matches, rel)
@@ -77,8 +78,8 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	return tool.Result{Content: strings.Join(matches, "\n")}, nil
 }
 
-func (t *globTool) executeRg(ctx context.Context, pattern string) (tool.Result, error) {
-	cmd := exec.CommandContext(ctx, rgPath, "--files", "--hidden", "-g", pattern, "--", t.root)
+func (t *globTool) executeRg(ctx context.Context, root, pattern string) (tool.Result, error) {
+	cmd := exec.CommandContext(ctx, rgPath, "--files", "--hidden", "-g", pattern, "--", root)
 	out, _ := cmd.Output() // exit 1 = no matches, not an error
 	if len(bytes.TrimSpace(out)) == 0 {
 		return tool.Result{Content: "no files matched"}, nil
@@ -88,7 +89,7 @@ func (t *globTool) executeRg(ctx context.Context, pattern string) (tool.Result, 
 		if line == "" {
 			continue
 		}
-		rel, err := filepath.Rel(t.root, line)
+		rel, err := filepath.Rel(root, line)
 		if err != nil {
 			rel = line
 		}
@@ -174,8 +175,10 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		return tool.Result{}, err
 	}
 
+	root := effectiveRoot(ctx, t.root)
+
 	if rgPath != "" {
-		return t.executeRg(ctx, args.Pattern, args.Glob, args.IgnoreCase)
+		return t.executeRg(ctx, root, args.Pattern, args.Glob, args.IgnoreCase)
 	}
 
 	pat := args.Pattern
@@ -189,17 +192,17 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 
 	var out []string
 	const maxMatches = 500
-	walkErr := filepath.WalkDir(t.root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if skipDir(d.Name()) && path != t.root {
+			if skipDir(d.Name()) && path != root {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		rel, _ := filepath.Rel(t.root, path)
+		rel, _ := filepath.Rel(root, path)
 		rel = filepath.ToSlash(rel)
 		if args.Glob != "" && !matchGlob(args.Glob, rel) {
 			return nil
@@ -232,7 +235,7 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	return tool.Result{Content: strings.Join(out, "\n")}, nil
 }
 
-func (t *grepTool) executeRg(ctx context.Context, pattern, glob string, ignoreCase bool) (tool.Result, error) {
+func (t *grepTool) executeRg(ctx context.Context, root, pattern, glob string, ignoreCase bool) (tool.Result, error) {
 	argv := []string{"--line-number", "--no-heading", "--color=never", "--hidden", "-e", pattern}
 	if ignoreCase {
 		argv = append(argv, "-i")
@@ -240,7 +243,7 @@ func (t *grepTool) executeRg(ctx context.Context, pattern, glob string, ignoreCa
 	if glob != "" {
 		argv = append(argv, "-g", glob)
 	}
-	argv = append(argv, "--", t.root)
+	argv = append(argv, "--", root)
 
 	cmd := exec.CommandContext(ctx, rgPath, argv...)
 	raw, _ := cmd.Output() // exit 1 = no matches
@@ -256,7 +259,7 @@ func (t *grepTool) executeRg(ctx context.Context, pattern, glob string, ignoreCa
 		// rg outputs: /abs/path/file:lineno:content — strip root prefix
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) == 3 {
-			rel, err := filepath.Rel(t.root, parts[0])
+			rel, err := filepath.Rel(root, parts[0])
 			if err != nil {
 				rel = parts[0]
 			}

@@ -60,7 +60,9 @@ func (t *gitPRTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return tool.Result{Content: b.String(), IsError: true}, nil
 	}
 
-	branch, err := runGit(ctx, t.root, "rev-parse", "--abbrev-ref", "HEAD")
+	root := effectiveRoot(ctx, t.root)
+
+	branch, err := runGit(ctx, root, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("could not determine current branch: %v", err), IsError: true}, nil
 	}
@@ -71,7 +73,7 @@ func (t *gitPRTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 
 	var out strings.Builder
 	if args.Push == nil || *args.Push {
-		pushOut, err := runGit(ctx, t.root, "push", "-u", "origin", branch)
+		pushOut, err := runGit(ctx, root, "push", "-u", "origin", branch)
 		if err != nil {
 			return tool.Result{Content: fmt.Sprintf("git push failed: %v\n%s", err, pushOut), IsError: true}, nil
 		}
@@ -79,7 +81,7 @@ func (t *gitPRTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	}
 
 	if ghAvailable() {
-		url, err := t.createPRviaGH(ctx, args.Title, args.Body, args.Base, args.Draft)
+		url, err := t.createPRviaGH(ctx, root, args.Title, args.Body, args.Base, args.Draft)
 		if err != nil {
 			return tool.Result{Content: out.String() + fmt.Sprintf("gh pr create failed: %v", err), IsError: true}, nil
 		}
@@ -88,7 +90,7 @@ func (t *gitPRTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	}
 
 	// Fallback: build a compare URL from the origin remote.
-	url, err := t.compareURL(ctx, args.Base, branch)
+	url, err := t.compareURL(ctx, root, args.Base, branch)
 	if err != nil {
 		return tool.Result{Content: out.String() + fmt.Sprintf("gh CLI not found and could not build a PR URL: %v", err), IsError: true}, nil
 	}
@@ -101,7 +103,7 @@ func ghAvailable() bool {
 	return err == nil
 }
 
-func (t *gitPRTool) createPRviaGH(ctx context.Context, title, body, base string, draft bool) (string, error) {
+func (t *gitPRTool) createPRviaGH(ctx context.Context, root, title, body, base string, draft bool) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	ghArgs := []string{"pr", "create", "--title", title, "--body", body}
@@ -112,7 +114,7 @@ func (t *gitPRTool) createPRviaGH(ctx context.Context, title, body, base string,
 		ghArgs = append(ghArgs, "--draft")
 	}
 	cmd := exec.CommandContext(ctx, "gh", ghArgs...)
-	cmd.Dir = t.root
+	cmd.Dir = root
 	outBytes, err := cmd.CombinedOutput()
 	out := strings.TrimSpace(string(outBytes))
 	if err != nil {
@@ -127,8 +129,8 @@ func (t *gitPRTool) createPRviaGH(ctx context.Context, title, body, base string,
 
 // compareURL derives a GitHub compare URL from the origin remote so the user
 // can open a PR without gh installed.
-func (t *gitPRTool) compareURL(ctx context.Context, base, branch string) (string, error) {
-	remote, err := runGit(ctx, t.root, "remote", "get-url", "origin")
+func (t *gitPRTool) compareURL(ctx context.Context, root, base, branch string) (string, error) {
+	remote, err := runGit(ctx, root, "remote", "get-url", "origin")
 	if err != nil {
 		return "", fmt.Errorf("no origin remote: %w", err)
 	}

@@ -113,11 +113,14 @@ Use "aegis <command> --help" for details on any command below.`,
 				resolvedPersona = cfg.DefaultPersona
 			}
 
+			cwd, _ := os.Getwd()
+
 			sessionID := resume
 			if sessionID == "" {
 				meta, err := cl.CreateSession(context.Background(), api.CreateSessionRequest{
 					Mode:    resolvedMode,
 					Persona: resolvedPersona,
+					Workdir: cwd,
 				})
 				if err != nil {
 					return err
@@ -130,9 +133,15 @@ Use "aegis <command> --help" for details on any command below.`,
 					return err
 				}
 				resolvedMode = sess.Mode
+				// Sessions created before P25.1 (or without a client cwd)
+				// have no persisted Workdir; keep the local cwd in that case
+				// so the welcome banner and attach-path resolution still
+				// have a sensible default.
+				if sess.Workdir != "" {
+					cwd = sess.Workdir
+				}
 			}
 
-			cwd, _ := os.Getwd()
 			runErr := tui.Run(tui.Config{
 				Client:         cl,
 				SessionID:      sessionID,

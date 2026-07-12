@@ -46,7 +46,7 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 	if mem := s.memory.Load(); mem != "" {
 		parts = append(parts, mem)
 	}
-	if sk := skills.BuildIndex(s.workspace, s.cfg.DataDir, s.sessionEnabledSkills(sessionID)); sk != "" {
+	if sk := skills.BuildIndex(s.workdirFor(sessionID), s.cfg.DataDir, s.sessionEnabledSkills(sessionID)); sk != "" {
 		parts = append(parts, sk)
 	}
 	s.repoMapMu.Lock()

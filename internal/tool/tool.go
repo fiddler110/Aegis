@@ -245,6 +245,28 @@ func RegistryFromContext(ctx context.Context) (*Registry, bool) {
 	return r, ok
 }
 
+// workdirCtxKey is the context key for a per-call working-directory override.
+type workdirCtxKey struct{}
+
+// WithWorkdir returns a context carrying the working directory a tool call
+// should be confined to, overriding the tool's own construction-time root
+// (P25.1). This lets a single daemon-wide Registry — with its MCP
+// connections, plugins, and swarm backend wired once — serve sessions rooted
+// at different directories without rebuilding any of that per session: each
+// workspace-confined tool reads this value at Execute time (via
+// WorkdirFromContext) instead of only ever using its baked-in root.
+func WithWorkdir(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, workdirCtxKey{}, dir)
+}
+
+// WorkdirFromContext returns the working directory carried by ctx, if any.
+// ok is false when unset or empty, so callers can fall back to their own
+// default root with a single conditional.
+func WorkdirFromContext(ctx context.Context) (string, bool) {
+	dir, _ := ctx.Value(workdirCtxKey{}).(string)
+	return dir, dir != ""
+}
+
 // Get returns a registered tool by name.
 func (r *Registry) Get(name string) (Tool, bool) {
 	r.mu.RLock()

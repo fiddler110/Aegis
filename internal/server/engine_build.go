@@ -167,7 +167,7 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 // a per-session model pin (P14.7 /model) that takes precedence over the
 // persona's own Model and the global provider.model — same precedence a
 // persona-level override already has over the global default.
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride string) (*engine.Engine, error) {
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir string) (*engine.Engine, error) {
 	if s.adapter == nil {
 		return nil, s.providerUnconfiguredErr()
 	}
@@ -213,5 +213,6 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		OutputGuardMaxRetries: guardRetries,
 		RedactSecrets:         s.cfg.Security.RedactSecrets,
 		Logger:                s.logger,
+		Workdir:               workdir,
 	})
 }
