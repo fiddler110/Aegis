@@ -217,6 +217,33 @@ Progress is interleaved in the terminal, with per-session summaries and resume h
 
 ---
 
+## `aegis compare`
+
+Blind side-by-side comparison of two models on the same prompt (P20.2). Structurally the mirror image of `aegis parallel`: parallel fans the *same* model out over *different* prompts, compare fans *different* models out over the *same* prompt — each in its own persisted daemon session (created, then PATCHed to the requested model via the P14.7 per-session model override).
+
+```bash
+aegis compare <model-A> <model-B> [prompt] [flags]
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--mode <plan\|build\|auto>` | Permission mode for both sessions |
+| `--yes` | Auto-approve tool calls in both sessions (required for unattended use) |
+| `--synthesize` | After voting, ask a model to synthesize the best of both revealed responses (default off) |
+| `--synth-model <id>` | Model to use for `--synthesize`; defaults to the configured `provider.model` — a third model, not either compared one |
+
+```bash
+aegis compare claude-sonnet-4-6 gpt-5 "explain the CAP theorem"
+echo "explain the CAP theorem" | aegis compare claude-sonnet-4-6 gpt-5
+aegis compare claude-opus-4-8 qwen3 "review this diff" --synthesize
+```
+
+Both responses stream to completion labeled only "Response 1" / "Response 2" — in a randomized order, so which model landed in which slot isn't a positional tell — with which model produced which answer withheld until you vote. You're then prompted `Vote — which response is better? [1/2/tie/skip]:`; after voting, a reveal prints which model was actually Response 1 vs Response 2. With `--synthesize`, one further call (to `--synth-model`, or `provider.model` by default) combines the two revealed answers into a single, clearly labeled synthesis — not a third blind response. Both sessions persist and can be resumed with `aegis --resume <id>`, matching `aegis parallel`'s convention of never auto-deleting.
+
+---
+
 ## `aegis runs`
 
 List runs currently in flight across all sessions.
