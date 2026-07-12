@@ -14,11 +14,11 @@ import (
 
 // Job is a scheduled command.
 type Job struct {
-	ID       string    `json:"id"`
-	Schedule string    `json:"schedule"` // cron expression
-	Command  string    `json:"command"`  // shell command to run when due
-	Title    string    `json:"title"`
-	Enabled  bool      `json:"enabled"`
+	ID       string `json:"id"`
+	Schedule string `json:"schedule"` // cron expression
+	Command  string `json:"command"`  // shell command to run when due
+	Title    string `json:"title"`
+	Enabled  bool   `json:"enabled"`
 	// AutoApprove opts this job into firing unattended even when the daemon's
 	// current permission mode would otherwise require interactive approval for
 	// shell execution (build mode). No human is present when a scheduled job
@@ -27,6 +27,11 @@ type Job struct {
 	AutoApprove bool      `json:"auto_approve"`
 	LastRun     time.Time `json:"last_run"` // zero if never run
 	Created     time.Time `json:"created"`
+	// Workdir is the directory the job's command runs in (P25.8). Empty
+	// means the daemon's own working directory, matching the pre-P25.8
+	// behavior — jobs always fired in the daemon's cwd regardless of which
+	// session created them.
+	Workdir string `json:"workdir,omitempty"`
 }
 
 // ErrNotFound is returned for an unknown job id.
@@ -68,9 +73,11 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 );`); err != nil {
 		return nil, err
 	}
-	// Best-effort migration for DBs created before auto_approve existed;
-	// ALTER TABLE fails harmlessly (ignored) if the column is already there.
+	// Best-effort migration for DBs created before auto_approve/workdir
+	// existed; ALTER TABLE fails harmlessly (ignored) if the column is
+	// already there.
 	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN workdir TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS cron_runs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,23 +101,24 @@ func (s *Store) Save(ctx context.Context, j *Job) error {
 		last = j.LastRun.UnixMilli()
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created, auto_approve)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created, auto_approve, workdir)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     schedule     = excluded.schedule,
     command      = excluded.command,
     title        = excluded.title,
     enabled      = excluded.enabled,
     last_run     = excluded.last_run,
-    auto_approve = excluded.auto_approve`,
-		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli(), boolToInt(j.AutoApprove))
+    auto_approve = excluded.auto_approve,
+    workdir      = excluded.workdir`,
+		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli(), boolToInt(j.AutoApprove), j.Workdir)
 	return err
 }
 
 // Get loads a job by id.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve FROM cron_jobs WHERE id = ?`, id)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir FROM cron_jobs WHERE id = ?`, id)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -121,7 +129,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 // List returns all jobs, newest first.
 func (s *Store) List(ctx context.Context) ([]*Job, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve FROM cron_jobs ORDER BY created DESC`)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir FROM cron_jobs ORDER BY created DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +210,7 @@ func scanJob(sc scanner) (*Job, error) {
 		enabled, autoApprove int
 		last, created        int64
 	)
-	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created, &autoApprove); err != nil {
+	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created, &autoApprove, &j.Workdir); err != nil {
 		return nil, err
 	}
 	j.Enabled = enabled != 0
@@ -245,8 +253,10 @@ func NewScheduler(store *Store, run RunFunc, logger *slog.Logger) *Scheduler {
 // Create validates the schedule, persists a new enabled job, and returns it.
 // autoApprove opts the job into firing unattended even when the daemon's
 // current permission mode would otherwise require approval for shell
-// execution (see Job.AutoApprove).
-func (s *Scheduler) Create(ctx context.Context, schedule, command, title string, autoApprove bool) (*Job, error) {
+// execution (see Job.AutoApprove). workdir is the directory the job's
+// command runs in (P25.8); "" falls back to the daemon's own working
+// directory at fire time.
+func (s *Scheduler) Create(ctx context.Context, schedule, command, title string, autoApprove bool, workdir string) (*Job, error) {
 	if _, err := Parse(schedule); err != nil {
 		return nil, err
 	}
@@ -261,6 +271,7 @@ func (s *Scheduler) Create(ctx context.Context, schedule, command, title string,
 		Enabled:     true,
 		AutoApprove: autoApprove,
 		Created:     s.now(),
+		Workdir:     workdir,
 	}
 	if err := s.store.Save(ctx, j); err != nil {
 		return nil, err

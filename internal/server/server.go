@@ -821,6 +821,13 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			Model:           model,
 			MaxTokens:       s.cfg.Provider.MaxTokens,
 			Logger:          s.logger,
+			// Set explicitly from cfg.Workdir (P25.8) rather than relying on
+			// the parent session's tool.WithWorkdir ctx value leaking through
+			// the spawn's context chain — that accidental inheritance only
+			// ever reached foreground in-process spawns; a detached/
+			// background spawn's job runs under a context derived from
+			// context.Background() (task.Manager.Start) and loses it.
+			Workdir: cfg.Workdir,
 		})
 		if err != nil {
 			return "", err
@@ -1093,6 +1100,8 @@ func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
 		AgentConcurrencyMax:   builtin.MaxParallelAgents,
 		ContextWindow:         ctxWin,
 		ContextWindowSource:   ctxWinSrc,
+		Workspace:             s.workspace,
+		WorkdirAllowlist:      s.cfg.Server.SessionWorkdirAllowlist,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -211,6 +211,7 @@ Use "aegis <command> --help" for details on any command below.`,
 	cmd.AddCommand(group(newHardenCmd(), groupConfig))
 	cmd.AddCommand(group(newModelsCmd(), groupConfig))
 	cmd.AddCommand(group(newBundleCmd(), groupConfig))
+	cmd.AddCommand(group(newDoctorCmd(), groupConfig))
 
 	// Project tools.
 	cmd.AddCommand(group(newIndexCmd(), groupProject))

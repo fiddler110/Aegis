@@ -37,6 +37,15 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Debate is session-less, so it needs the same Workdir validation
+	// handleCreateSession applies (P25.1/P25.8): must exist and, on a
+	// remote-accessible daemon, fall within the configured trust boundary.
+	workdir, werr := s.resolveSessionWorkdir(req.Workdir)
+	if werr != nil {
+		writeError(w, werr.status, werr.msg)
+		return
+	}
+
 	// Debate is session-less, so no session cap applies — but it still spends
 	// real model turns (one per role per round), so the cross-session daily
 	// caps (P9.5/P10.5) must gate it exactly like a normal turn does. Before
@@ -60,7 +69,7 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 		MaxTokens:       s.cfg.Cost.MaxTokensPerRun,
 	}
 	claim := debate.WithFiles(req.Claim, req.Files)
-	transcript, err := debate.Run(r.Context(), claim, cfg, s.debateRoleRunner(tracker))
+	transcript, err := debate.Run(r.Context(), claim, cfg, s.debateRoleRunner(tracker, workdir))
 	// Record spend regardless of outcome: debate.Run returns the partial
 	// transcript (and whatever the tracker accumulated) even on error, so an
 	// aborted debate's spend must still count against the daily caps.
@@ -81,8 +90,11 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 // the same construction subAgentRunner uses for a spawned teammate, without
 // the swarm identity/mailbox machinery a direct (non-session) debate call has
 // no use for. Every role call shares tracker, so debate.Run's budget check
-// (P12.6) sees the run's true cumulative spend across rounds.
-func (s *Server) debateRoleRunner(tracker *cost.Tracker) debate.RunFunc {
+// (P12.6) sees the run's true cumulative spend across rounds. workdir (P25.8)
+// grounds every role's tool calls in the request's directory rather than
+// always falling back to the daemon's default workspace; "" keeps that
+// default.
+func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.RunFunc {
 	return func(ctx context.Context, systemPrompt, prompt string) (string, error) {
 		gate, engineHooks := s.buildGate("build", s.approver(), persona.Persona{})
 		eng, err := engine.New(engine.Options{
@@ -97,6 +109,7 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker) debate.RunFunc {
 			Model:           s.cfg.Provider.Model,
 			MaxTokens:       s.cfg.Provider.MaxTokens,
 			Logger:          s.logger,
+			Workdir:         workdir,
 		})
 		if err != nil {
 			return "", err

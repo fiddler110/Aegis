@@ -23,6 +23,8 @@ export function SessionList({
   onOpenTool,
   activityCount,
   sandboxFallback,
+  workdirSuggestions,
+  defaultWorkdir,
 }: {
   sessions: SessionMeta[];
   archivedSessions: SessionMeta[];
@@ -31,7 +33,10 @@ export function SessionList({
   currentId: string | null;
   runningIds: Set<string>;
   onSelect: (id: string) => void;
-  onNew: () => void;
+  // onNew creates a chat, optionally pinned to workdir (P15.13); it rejects
+  // when the daemon refuses the workdir, so the caller (this component)
+  // knows to keep the picker open rather than closing on a failed attempt.
+  onNew: (workdir?: string) => Promise<void> | void;
   onArchive: (id: string) => void;
   onUnarchive: (id: string) => void;
   onPrune: (days: number) => void;
@@ -42,21 +47,96 @@ export function SessionList({
   // easy to miss as a startup log line alone — badge the button that opens
   // the panel where the detail (and the reason) lives.
   sandboxFallback?: boolean;
+  // workdirSuggestions (P15.13) feeds the new-chat directory picker's
+  // datalist: the configured server.session_workdir_allowlist plus recent
+  // workdirs from other chats — real, known-good directories to suggest
+  // instead of a placeholder guess.
+  workdirSuggestions?: string[];
+  // defaultWorkdir is the daemon's own default workspace (GET /status's
+  // workspace, P26.1) — shown so "leave blank" has a concrete meaning.
+  defaultWorkdir?: string;
 }) {
   const [pruneOpen, setPruneOpen] = useState(false);
   const [pruneDays, setPruneDays] = useState("30");
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newChatWorkdir, setNewChatWorkdir] = useState("");
+  const [newChatBusy, setNewChatBusy] = useState(false);
 
   const list = view === "active" ? sessions : archivedSessions;
   const days = parseInt(pruneDays, 10);
+
+  // submitNewChat keeps the picker open on failure — onNew already toasts
+  // the daemon's rejection reason (P15.13's "surface the error, don't
+  // silently fall back" requirement), so all this needs to do is not close.
+  const submitNewChat = async () => {
+    setNewChatBusy(true);
+    try {
+      await onNew(newChatWorkdir.trim() || undefined);
+      setNewChatOpen(false);
+      setNewChatWorkdir("");
+    } catch {
+      // already surfaced as a toast by the caller
+    } finally {
+      setNewChatBusy(false);
+    }
+  };
 
   return (
     <aside id="sidebar">
       <header>
         <h1>Aegis</h1>
-        <button class="secondary" onClick={onNew}>
+        <button
+          class="secondary"
+          onClick={() => {
+            setNewChatOpen((v) => !v);
+            setNewChatWorkdir("");
+          }}
+        >
           + New
         </button>
       </header>
+      {newChatOpen && (
+        <div class="new-chat-confirm">
+          <label>
+            Working directory (optional)
+            <input
+              type="text"
+              list="workdir-suggestions"
+              placeholder={defaultWorkdir || "daemon's default workspace"}
+              value={newChatWorkdir}
+              onInput={(e) => setNewChatWorkdir((e.target as HTMLInputElement).value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitNewChat();
+              }}
+            />
+          </label>
+          {workdirSuggestions && workdirSuggestions.length > 0 && (
+            <datalist id="workdir-suggestions">
+              {workdirSuggestions.map((w) => (
+                <option value={w} key={w} />
+              ))}
+            </datalist>
+          )}
+          <span class="hint">
+            Leave blank to use {defaultWorkdir ? <code>{defaultWorkdir}</code> : "the daemon's default workspace"}.
+          </span>
+          <div class="prune-actions">
+            <button class="secondary" disabled={newChatBusy} onClick={submitNewChat}>
+              {newChatBusy ? "Starting…" : "Start chat"}
+            </button>
+            <button
+              class="secondary"
+              disabled={newChatBusy}
+              onClick={() => {
+                setNewChatOpen(false);
+                setNewChatWorkdir("");
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       <div class="list-tabs">
         <button class={"tab" + (view === "active" ? " active" : "")} onClick={() => onViewChange("active")}>
           Chats

@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,10 +16,12 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/debate"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
 
 // TestDebateIntegrationBlockOptInDefault is the P12.5 regression: with no
@@ -268,5 +273,93 @@ func TestHandleDebateRejectsBadJSON(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// toolResultEchoAdapter issues a single read_file tool call for a fixed path,
+// then echoes the tool result's content back as its final text answer — used
+// to prove which directory a role's tool calls actually resolved against,
+// the same "does it read the right target.txt" shape workdir_test.go uses
+// for sessions (P25.1), applied to debate roles (P25.8).
+type toolResultEchoAdapter struct{ path string }
+
+func (a *toolResultEchoAdapter) Name() string { return "echo" }
+
+func (a *toolResultEchoAdapter) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
+	for _, m := range req.Messages {
+		for _, b := range m.Content {
+			if tr, ok := b.(provider.ToolResultBlock); ok {
+				ch := make(chan provider.Event, 2)
+				ch <- provider.Event{Type: provider.EventTextDelta, Text: tr.Content}
+				ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{}}
+				close(ch)
+				return ch, nil
+			}
+		}
+	}
+	ch := make(chan provider.Event, 2)
+	input := json.RawMessage(fmt.Sprintf(`{"path":%q}`, a.path))
+	ch <- provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu1", Name: "read_file", Input: input}}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{}}
+	close(ch)
+	return ch, nil
+}
+
+// TestDebateRoleRunnerUsesRequestWorkdir is the P25.8 regression for gap (c):
+// debate is session-less, so before this fix every role's tool calls
+// resolved against the daemon's own default workspace regardless of the
+// request's intent. A role runner built with an explicit workdir must read a
+// fixture file from that directory, not the daemon's default root.
+func TestDebateRoleRunnerUsesRequestWorkdir(t *testing.T) {
+	daemonRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(daemonRoot, "target.txt"), []byte("daemon-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(otherDir, "target.txt"), []byte("other-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: daemonRoot}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store,
+		&toolResultEchoAdapter{path: "target.txt"}, reg)
+	srv.workspace = daemonRoot
+
+	tracker := cost.NewTracker()
+	out, err := srv.debateRoleRunner(tracker, otherDir)(context.Background(), "system prompt", "read target.txt")
+	if err != nil {
+		t.Fatalf("debateRoleRunner: %v", err)
+	}
+	if !strings.Contains(out, "other-content") {
+		t.Errorf("role output = %q, want the fixture content from the request workdir (%q)", out, otherDir)
+	}
+	if strings.Contains(out, "daemon-content") {
+		t.Errorf("role output = %q, must not read the daemon's default workspace", out)
+	}
+}
+
+// TestHandleDebateRejectsBadWorkdir mirrors
+// TestCreateSessionRejectsMissingWorkdir: a nonexistent Workdir on a /debate
+// request must be rejected before any role ever runs.
+func TestHandleDebateRejectsBadWorkdir(t *testing.T) {
+	cl := newDebateTestServer(t, roleScriptedAdapter{})
+	_, err := cl.Debate(context.Background(), api.DebateRequest{
+		Claim:   "Some finding.",
+		Workdir: filepath.Join(t.TempDir(), "does-not-exist"),
+	})
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent debate workdir")
 	}
 }

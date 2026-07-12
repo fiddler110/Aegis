@@ -503,6 +503,7 @@ func TestServerStatusEndpoint(t *testing.T) {
 		Provider:   config.ProviderConfig{Default: "anthropic", Model: "test-model"},
 		Permission: config.PermissionConfig{Mode: "plan"},
 		Cost:       config.CostConfig{DailyCapUSD: 5, DailyTokenCap: 1000},
+		Server:     config.ServerConfig{SessionWorkdirAllowlist: []string{"/srv/projects"}},
 	}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 	srv.authToken = "test-token"
@@ -539,6 +540,9 @@ func TestServerStatusEndpoint(t *testing.T) {
 	}
 	if info.AgentConcurrencyMax != builtin.MaxParallelAgents {
 		t.Errorf("AgentConcurrencyMax = %d, want %d", info.AgentConcurrencyMax, builtin.MaxParallelAgents)
+	}
+	if len(info.WorkdirAllowlist) != 1 || info.WorkdirAllowlist[0] != "/srv/projects" {
+		t.Errorf("WorkdirAllowlist = %v, want [/srv/projects]", info.WorkdirAllowlist)
 	}
 }
 

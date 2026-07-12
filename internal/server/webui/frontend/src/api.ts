@@ -45,7 +45,20 @@ export async function api(path: string, opts: RequestInit = {}): Promise<Respons
       ...(opts.headers as Record<string, string> | undefined),
     },
   });
-  if (!r.ok) throw new Error((await r.text()) || String(r.status));
+  if (!r.ok) {
+    const text = await r.text();
+    let msg = text || String(r.status);
+    // Every JSON error body the daemon writes (writeError) is {"error": "..."} —
+    // unwrap it so e.g. a rejected session workdir (P15.13) shows the actual
+    // validation message in a toast instead of the raw JSON blob.
+    try {
+      const body = JSON.parse(text) as { error?: string };
+      if (body && typeof body.error === "string" && body.error) msg = body.error;
+    } catch {
+      // not JSON — keep the raw text
+    }
+    throw new Error(msg);
+  }
   return r;
 }
 

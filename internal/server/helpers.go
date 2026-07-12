@@ -226,12 +226,19 @@ func buildSamplingHandler(adapter provider.Adapter, model string, maxTokens int,
 
 // cronShellRunner returns a function that runs a cron job's command using the
 // given sandbox backend, streaming output to the task buffer via emit.
-func cronShellRunner(sb sandbox.Backend, cwd string) func(ctx context.Context, command string, emit func(string)) error {
+// defaultCwd is the daemon's own working directory; the returned function
+// accepts a per-call dir override (P25.8's Job.Workdir) that, when non-empty,
+// takes precedence — without this every cron job fired in the daemon's cwd
+// regardless of which session's workdir created it.
+func cronShellRunner(sb sandbox.Backend, defaultCwd string) func(ctx context.Context, command, dir string, emit func(string)) error {
 	const cronJobTimeout = 10 * time.Minute
-	return func(ctx context.Context, command string, emit func(string)) error {
+	return func(ctx context.Context, command, dir string, emit func(string)) error {
 		ctx, cancel := context.WithTimeout(ctx, cronJobTimeout)
 		defer cancel()
-		return sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: cwd}, emit)
+		if dir == "" {
+			dir = defaultCwd
+		}
+		return sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: dir}, emit)
 	}
 }
 
@@ -247,7 +254,7 @@ func cronShellRunner(sb sandbox.Backend, cwd string) func(ctx context.Context, c
 func newCronRunFunc(
 	cronStore *cron.Store,
 	taskMgr *task.Manager,
-	runCronCmd func(ctx context.Context, command string, emit func(string)) error,
+	runCronCmd func(ctx context.Context, command, dir string, emit func(string)) error,
 	mode func() permission.Mode,
 	logger *slog.Logger,
 ) cron.RunFunc {
@@ -301,7 +308,7 @@ func newCronRunFunc(
 					return "", errors.New(reason)
 				}
 			}
-			runErr := runCronCmd(ctx, j.Command, capture)
+			runErr := runCronCmd(ctx, j.Command, j.Workdir, capture)
 			status := "ok"
 			if runErr != nil {
 				status = "error"

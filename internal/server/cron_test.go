@@ -65,7 +65,7 @@ func TestNewCronRunFuncRecordsSuccess(t *testing.T) {
 	cronStore, taskMgr := cronRunFuncTestDeps(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	runCronCmd := func(ctx context.Context, command string, emit func(string)) error {
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
 		emit("all good")
 		return nil
 	}
@@ -93,7 +93,7 @@ func TestNewCronRunFuncRecordsExecutionError(t *testing.T) {
 	cronStore, taskMgr := cronRunFuncTestDeps(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	runCronCmd := func(ctx context.Context, command string, emit func(string)) error {
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
 		emit("partial output before failure")
 		return errors.New("boom: command exited 1")
 	}
@@ -116,7 +116,7 @@ func TestNewCronRunFuncRecordsBlockedByPermissionMode(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	called := false
-	runCronCmd := func(ctx context.Context, command string, emit func(string)) error {
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
 		called = true
 		return nil
 	}
@@ -140,7 +140,7 @@ func TestNewCronRunFuncRecordsBlockedByAskWithoutAutoApprove(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	called := false
-	runCronCmd := func(ctx context.Context, command string, emit func(string)) error {
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
 		called = true
 		return nil
 	}
@@ -165,7 +165,7 @@ func TestNewCronRunFuncRunsWhenAskWithAutoApprove(t *testing.T) {
 	cronStore, taskMgr := cronRunFuncTestDeps(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	runCronCmd := func(ctx context.Context, command string, emit func(string)) error {
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
 		emit("ran despite build mode")
 		return nil
 	}
@@ -180,5 +180,28 @@ func TestNewCronRunFuncRunsWhenAskWithAutoApprove(t *testing.T) {
 	}
 	if rec.Output != "ran despite build mode" {
 		t.Errorf("output = %q, want %q", rec.Output, "ran despite build mode")
+	}
+}
+
+// TestNewCronRunFuncPassesJobWorkdir proves a job's Workdir (P25.8) reaches
+// runCronCmd's dir argument — without this, every cron job fired in the
+// daemon's own cwd regardless of which session's workdir created it.
+func TestNewCronRunFuncPassesJobWorkdir(t *testing.T) {
+	cronStore, taskMgr := cronRunFuncTestDeps(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var gotDir string
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
+		gotDir = dir
+		return nil
+	}
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, func() permission.Mode { return permission.ModeAuto }, logger)
+
+	job := cron.Job{ID: "job-workdir", Title: "t", Command: "echo hi", Workdir: "/some/session/root"}
+	runFn(job)
+
+	waitForRun(t, cronStore, job.ID)
+	if gotDir != "/some/session/root" {
+		t.Errorf("dir passed to runCronCmd = %q, want job.Workdir", gotDir)
 	}
 }

@@ -77,6 +77,22 @@ type StatusInfo struct {
 	// or "ollama:default".
 	ContextWindow       int    `json:"context_window,omitempty"`
 	ContextWindowSource string `json:"context_window_source,omitempty"`
+
+	// Workspace is the daemon's own default working directory root — what
+	// any session created without an explicit Workdir (CreateSessionRequest,
+	// P25.1) actually operates on. `aegis doctor` (P26.1) compares this
+	// against the CLI's own cwd to catch the P25.1 failure mode: a client
+	// running from a different directory than the daemon silently getting
+	// the daemon's workspace instead of its own.
+	Workspace string `json:"workspace,omitempty"`
+
+	// WorkdirAllowlist mirrors server.session_workdir_allowlist (P25.1) so a
+	// client choosing a session's working directory — the web UI's new-chat
+	// picker (P15.13) — can suggest directories known to be accepted instead
+	// of guessing. Empty on the default loopback-only bind, where
+	// workdirAllowed accepts any existing directory and this list is
+	// informational only, not enforced.
+	WorkdirAllowlist []string `json:"workdir_allowlist,omitempty"`
 }
 
 // PruneResponse reports how many sessions were deleted by a prune operation.
@@ -420,6 +436,13 @@ type DebateRequest struct {
 	ArbiterPersona  string `json:"arbiter_persona,omitempty"`
 	// MaxRounds overrides the default critique/rebuttal round bound (2).
 	MaxRounds int `json:"max_rounds,omitempty"`
+	// Workdir grounds Files and every debate role's tool calls in a specific
+	// directory (P25.8) — debate is session-less, so without this it always
+	// resolved against the daemon's own workspace regardless of which
+	// session's directory a caller (e.g. the web UI's "stress-test a claim"
+	// panel) actually meant. Empty keeps the pre-P25.8 behavior: the
+	// daemon's default workspace.
+	Workdir string `json:"workdir,omitempty"`
 }
 
 // DebateResponse carries the formatted transcript and the arbiter's parsed

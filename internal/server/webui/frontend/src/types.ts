@@ -2,6 +2,10 @@ export interface SessionMeta {
   id: string;
   title?: string;
   mode: string;
+  // workdir (P25.1) is the session's working directory; empty means the
+  // daemon's own default workspace. Surfaced in the web UI's new-chat
+  // picker and chat header (P15.13).
+  workdir?: string;
   model?: string;
   background?: boolean;
   archived?: boolean;
@@ -34,6 +38,7 @@ export interface Session {
   title?: string;
   mode: string;
   persona?: string;
+  workdir?: string; // P25.1/P15.13 — see SessionMeta.workdir
   model?: string;
   background?: boolean;
   archived?: boolean;
@@ -62,6 +67,14 @@ export interface StatusInfo {
   daily_cap_usd?: number;
   daily_tokens: number;
   daily_token_cap?: number;
+  // workspace (P26.1) is the daemon's own default working directory — what
+  // a session gets when created with no explicit workdir.
+  workspace?: string;
+  // workdir_allowlist (P15.13) mirrors server.session_workdir_allowlist:
+  // directories known to be accepted for a session's workdir once
+  // server.allow_remote is set. Empty on the default loopback-only bind,
+  // where any existing directory is accepted (informational, not exhaustive).
+  workdir_allowlist?: string[];
 }
 
 // CheckpointInfo is one per-turn restore point (GET /sessions/{id}/checkpoints).
