@@ -1,53 +1,54 @@
-# name: Nightly Live-Model Eval
+name: Nightly Live-Model Eval
 
-# # Runs the live-model eval tier (internal/eval's live_eval-tagged scenarios)
-# # against a real local model on a schedule. This is deliberately separate
-# # from ci.yml: it needs a pulled model and several minutes of inference time,
-# # neither of which belong gating every push/PR the way build+test+vet do.
-# on:
-#   schedule:
-#     # 04:00 UTC daily — off peak, and far from ci.yml's per-push cadence.
-#     - cron: "0 4 * * *"
-#   workflow_dispatch:
+# Runs the live-model eval tier (internal/eval's live_eval-tagged scenarios)
+# against a real local model. This is deliberately separate from ci.yml: it
+# needs a pulled model and several minutes of inference time, neither of
+# which belong gating every push/PR the way build+test+vet do.
+#
+# Schedule trigger disabled — was firing (and failing) on every push because
+# an earlier fully-commented-out version of this file was invalid YAML.
+# Kept as workflow_dispatch-only so it can still be run manually.
+on:
+  workflow_dispatch:
 
-# permissions:
-#   contents: read
+permissions:
+  contents: read
 
-# jobs:
-#   live-eval:
-#     runs-on: ubuntu-latest
-#     timeout-minutes: 30
-#     env:
-#       # llama3.2 (3B) balances CI runtime against judge reliability: the same
-#       # model both answers the prompt and judges its own answer against the
-#       # rubric (ExpectRubric reuses Options.Adapter/Model), so a much smaller
-#       # model (e.g. the 1B tag) risks flaky failures from a weak judge rather
-#       # than a real regression. Override locally via the same env var.
-#       AEGIS_EVAL_MODEL: "llama3.2"
-#     steps:
-#       - name: Checkout
-#         uses: actions/checkout@v4
+jobs:
+  live-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # llama3.2 (3B) balances CI runtime against judge reliability: the same
+      # model both answers the prompt and judges its own answer against the
+      # rubric (ExpectRubric reuses Options.Adapter/Model), so a much smaller
+      # model (e.g. the 1B tag) risks flaky failures from a weak judge rather
+      # than a real regression. Override locally via the same env var.
+      AEGIS_EVAL_MODEL: "llama3.2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-#       - name: Set up Go
-#         uses: actions/setup-go@v5
-#         with:
-#           go-version-file: go.mod
-#           check-latest: true
-#           cache: true
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
 
-#       - name: Install Ollama
-#         run: curl -fsSL https://ollama.com/install.sh | sh
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
 
-#       - name: Start Ollama
-#         run: |
-#           ollama serve &
-#           for i in $(seq 1 30); do
-#             curl -sf http://localhost:11434/api/tags >/dev/null && break
-#             sleep 1
-#           done
+      - name: Start Ollama
+        run: |
+          ollama serve &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags >/dev/null && break
+            sleep 1
+          done
 
-#       - name: Pull eval model
-#         run: ollama pull "${AEGIS_EVAL_MODEL}"
+      - name: Pull eval model
+        run: ollama pull "${AEGIS_EVAL_MODEL}"
 
-#       - name: Run live eval
-#         run: go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v -timeout 25m
+      - name: Run live eval
+        run: go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v -timeout 25m
