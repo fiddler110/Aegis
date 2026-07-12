@@ -1,15 +1,19 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-12 — **P15.13** (web UI session workdir picker + display) shipped,
-closing out the entire 2026-07-11 roadmap review's promoted set. Before that, same day: **P26.1**
-(`aegis doctor` preflight self-diagnostic). Before that, same day: **P25.7** (promoted the
-live-eval harness into `internal/eval` as the `live_workflow`-tagged `TestLiveWorkflow`) and
-**P25.8** (threaded session workdir through the swarm/cron/debate seams), closing out the entire
-P25 Tier 1 set. Previously (same day): P25.4 (approval ergonomics), P25.5 (token-usage
-observability for local providers), and P25.6 (local-model prompt profile) shipped. Before that:
-P25.3 (output guard vs local/thinking models), and before that (2026-07-11) P25.1 and P25.2
-(`6b76e5e`). Full writeups in [releases.md](releases.md#latest-changes). Open: **nothing** — see
-Status below for the next trigger.
+**Last updated:** 2026-07-12 — **P26.2** (fixed a `sessionWorkdirs`/`sessionSkills` map leak on
+session delete) shipped, closing out the 2026-07-12 routine roadmap review (competitive-landscape
+scan + internal code audit; no live-eval or threat-model trigger this round). Landscape scan
+against Claude Code/Codex CLI/opencode/Gemini CLI found nothing new since the 2026-07-02 review
+(convergent themes already closed; A2A and Dispatch/Channels remain correctly declined). The 11
+Tier 4 parked items were re-checked against the full P25/P26 batch and remain parked exactly as
+documented — see the note at the top of [Parked](#open-work--parked-tier-4). Before this review,
+same day: **P15.13** (web UI session workdir picker + display), closing out the entire 2026-07-11
+roadmap review's promoted set; before that, same day: **P26.1** (`aegis doctor` preflight
+self-diagnostic); before that, same day: **P25.7** (live-eval harness promoted into
+`internal/eval`) and **P25.8** (session workdir threaded through swarm/cron/debate), closing the
+P25 Tier 1 set; before that: P25.4-P25.6 (approval ergonomics, token observability, local-model
+profile), P25.3 (output guard vs local/thinking models), and P25.1-P25.2 (`6b76e5e`, 2026-07-11).
+Full writeups in [releases.md](releases.md#latest-changes). Open: **nothing** — see Status below.
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -20,16 +24,14 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** none. The 2026-07-11 roadmap review's promoted set (P26.1, P15.13) is fully
-shipped — see [releases.md](releases.md#latest-changes). Tier 4 is the parked set — see
-[Parked](#open-work--parked-tier-4).
+**Open items:** none. P26.2 shipped 2026-07-12 — see [releases.md](releases.md#latest-changes).
+Tier 4 is the parked set — see [Parked](#open-work--parked-tier-4).
 
 **Next session:** nothing queued. Next trigger: a new threat-model pass, a reported incident, a
 new feature evaluation, or a concrete pain point surfacing one of the Tier 4 parked items. Re-run
 `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
-engine/server/sandbox/guard/swarm/cron/debate seams — it's the regression lock for the whole P25
-batch; `aegis doctor` (P26.1) is the standalone preflight companion for the same misconfiguration
-classes.
+engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone
+preflight companion for the same misconfiguration classes.
 
 ---
 
@@ -41,10 +43,10 @@ hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or i
 work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
 speculatively.
 
-**Tier 1:** empty. P15.13 (web UI workdir picker) and P26.1 (`aegis doctor`), the 2026-07-11
-review's promoted set, both shipped 2026-07-12 — see [releases.md](releases.md#latest-changes).
+**Tier 1:** empty.
 
-**Tier 2:** empty.
+**Tier 2:** empty. P26.2 (`sessionWorkdirs`/`sessionSkills` map leak on session delete) shipped
+2026-07-12 — see [releases.md](releases.md#latest-changes).
 
 **Tier 3:** empty. The last items shipped 2026-07-11 (P24.20; P15 web-UI batches A/B/C; P24.14) —
 see [releases.md](releases.md#latest-changes). Next trigger: a new threat-model pass, a reported
@@ -55,23 +57,17 @@ P6.1. See [Parked](#open-work--parked-tier-4).
 
 ---
 
-## Shipped — P25 (Local-Model Live Evaluation — 2026-07-11)
-
-Full writeups for P25.1–P25.8 are in [releases.md](releases.md#latest-changes) (this document
-tracks only open work). Kept here only as a pointer for context: the whole tier was found by a
-live evaluation session that drove the real TUI and the daemon HTTP API/SSE against local Ollama
-models — headline result: **the local model is not the bottleneck — the harness is.** Its
-regression lock, [research/eval-harness-drive.py](eval-harness-drive.py)'s Go port
-`internal/eval/live_workflow_test.go` (`TestLiveWorkflow`, P25.7), documented in CLAUDE.md, is
-the way to re-verify any of the P25.1–P25.6 fixes or catch a regression in the
-engine/server/sandbox/guard/swarm/cron/debate seams they touched. The original Python script
-stays in research/ for ad-hoc one-off drives.
-
 ## Open Work — Parked (Tier 4)
 
 Low urgency, no trigger, or explicitly parked pending demand. Do not build speculatively —
 revisit only if a concrete trigger (user demand, reported pain, incident) appears, and check
-with the user before starting any of these.
+with the user before starting any of these. Re-verified 2026-07-12 against the full P25/P26 batch
+— no scope changes to any of the 11 items below. P25.9 in particular was checked line-by-line:
+P25.8 only threaded `Workdir` through `swarm.SpawnConfig`, `cron.Job`, and `api.DebateRequest`
+(which directory a *spawned engine's tool calls* resolve against) — it never touched the
+daemon-wide singletons P25.9 names (`lsp.Manager`, `knowledge.Store`, `longmem.Store`, the cached
+repo-map, persona/command/agent-def directory discovery, the `os` sandbox backend's
+write-confinement profile), so P25.9's scope is reconfirmed unchanged, not narrowed.
 
 ### P25.9 — Per-session scoping of daemon-singleton services
 
@@ -122,7 +118,9 @@ pain.
 Priority: Tier 4 · Effort: M — parked, no concrete trigger
 
 Detect hardware, curate/recommend local models, offer `ollama pull`, surface via `/models`.
-From the Odysseus review. Competitive-inspired, no direct reported pain.
+From the Odysseus review. Competitive-inspired, no direct reported pain. (Checked 2026-07-12:
+P25.6's local-model prompt profile routes by deployment shape — loopback vs. remote base_url —
+not by hardware/model choice, so it gives no overlap or trigger.)
 
 ### P13.3.2 — `@shell`/`@last` context token
 
@@ -148,14 +146,16 @@ suggestions. "Interesting, not urgent" per its own scoping.
 Priority: Tier 4 · Effort: M — parked, no concrete trigger
 
 Pick a cheaper model for simple turns, reserve the expensive one for hard ones. No evidence of
-demand.
+demand. (Checked 2026-07-12: P25.6's prompt-profile auto-detection routes by deployment shape,
+not by turn difficulty — a different axis, no trigger.)
 
 ### P6.1 — Mid-turn state persistence
 
 Priority: Tier 4 · Effort: L — parked, no concrete trigger
 
 Persist partial turn state (text, tool calls) to SQLite during streaming. High complexity,
-low-probability failure mode.
+low-probability failure mode. (Checked 2026-07-12: P25.5 added mid-turn token-usage accumulation
+in memory, not persistence to SQLite — no overlap, no trigger.)
 
 ---
 

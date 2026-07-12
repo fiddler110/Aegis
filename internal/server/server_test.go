@@ -98,6 +98,48 @@ func TestServerSessionLifecycle(t *testing.T) {
 	}
 }
 
+// TestServerDeleteSessionClearsWorkdirAndSkillMaps is a regression for P26.2:
+// handleDeleteSession only cleared sessionTools, leaking a sessionWorkdirs
+// and sessionSkills entry per deleted session on a long-lived daemon.
+func TestServerDeleteSessionClearsWorkdirAndSkillMaps(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Provider: config.ProviderConfig{Model: "test"}, Permission: config.PermissionConfig{Mode: "plan"}}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "test-token"
+
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	srv.activateSessionSkill(meta.ID, "content-review")
+
+	if _, ok := srv.sessionWorkdirs.Load(meta.ID); !ok {
+		t.Fatal("sessionWorkdirs not populated before delete; test setup is wrong")
+	}
+	if _, ok := srv.sessionSkills.Load(meta.ID); !ok {
+		t.Fatal("sessionSkills not populated before delete; test setup is wrong")
+	}
+
+	if err := cl.DeleteSession(ctx, meta.ID); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	if _, ok := srv.sessionWorkdirs.Load(meta.ID); ok {
+		t.Error("sessionWorkdirs entry survived session delete (P26.2 leak)")
+	}
+	if _, ok := srv.sessionSkills.Load(meta.ID); ok {
+		t.Error("sessionSkills entry survived session delete (P26.2 leak)")
+	}
+}
+
 func TestServerListTeammates(t *testing.T) {
 	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {

@@ -9,18 +9,33 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-12 — **P15.13 — web UI session workdir picker + display**, closing out
-the entire 2026-07-11 roadmap review's promoted set. Before that, same day: **P26.1 — `aegis
-doctor` preflight self-diagnostic**, generalizing the P25 batch's "configured vs. actually active"
-pattern into one standalone command. Before that, same day: **P25.7 — promoted the live-eval
-harness into `internal/eval`, and P25.8 — threaded session workdir through the spawn/cron/debate
-seams**, closing out the Tier 1 P25 set. Previous, same day: **P25.4 — approval ergonomics, P25.5
-— token-usage observability for local providers, and P25.6 — local-model prompt profile.** Before
-that: **P25.3 — output guard vs local/thinking models**, and before that **P25.1 — per-session
-working directory and P25.2 — sandbox backend name trap + untruthful `/config/sandbox`**
-(`6b76e5e`, 2026-07-11) — the full set are the findings from the same day's local-model
-live-evaluation session (see roadmap.md's P25 section for the eval methodology, comparative-run
-table, and regression harness).
+**Last updated:** 2026-07-12 — **P26.2 — fixed a `sessionWorkdirs`/`sessionSkills` map leak on
+session delete**, found by the same day's routine roadmap review (landscape scan + internal audit,
+no live-eval/threat-model trigger). Before that, same day: **P15.13 — web UI session workdir picker
++ display**, closing out the entire 2026-07-11 roadmap review's promoted set. Before that, same
+day: **P26.1 — `aegis doctor` preflight self-diagnostic**, generalizing the P25 batch's "configured
+vs. actually active" pattern into one standalone command. Before that, same day: **P25.7 —
+promoted the live-eval harness into `internal/eval`, and P25.8 — threaded session workdir through
+the spawn/cron/debate seams**, closing out the Tier 1 P25 set. Previous, same day: **P25.4 —
+approval ergonomics, P25.5 — token-usage observability for local providers, and P25.6 —
+local-model prompt profile.** Before that: **P25.3 — output guard vs local/thinking models**, and
+before that **P25.1 — per-session working directory and P25.2 — sandbox backend name trap and
+untruthful `/config/sandbox`** (`6b76e5e`, 2026-07-11) — the full set are the findings from the
+same day's local-model live-evaluation session (see roadmap.md's P25 section for the eval
+methodology, comparative-run table, and regression harness).
+
+*P26.2 — fixed a `sessionWorkdirs`/`sessionSkills` map leak on session delete.* A fresh regression
+in the very P25.1/P25.8 batch that just shipped: `handleCreateSession` (internal/server/sessions.go)
+populates `Server.sessionWorkdirs` (P25.1) and `activateSessionSkill` (internal/server/server.go)
+populates `Server.sessionSkills` per session, but `handleDeleteSession` only ever called
+`s.sessionTools.Delete(id)` — never `sessionWorkdirs.Delete(id)` or `sessionSkills.Delete(id)` — so
+both `sync.Map`s grew one entry per deleted session forever on a long-lived daemon. The same
+never-evicted-entry shape as the swarm-mailbox leak P8.3 already fixed, just in two more maps.
+Fix: `handleDeleteSession` now also calls `s.sessionWorkdirs.Delete(id)` and
+`s.sessionSkills.Delete(id)`. Test: new `TestServerDeleteSessionClearsWorkdirAndSkillMaps`
+(internal/server/server_test.go) creates a session with an explicit `Workdir`, activates a
+built-in skill on it, deletes it, and asserts both maps no longer hold an entry for that session ID
+— failed against the pre-fix code, passes now.
 
 *P15.13 — web UI session workdir picker + display.* P25.1 gave sessions a `Workdir` field over the
 API, but the web UI never sent one — a browser has no filesystem cwd of its own, so every web
