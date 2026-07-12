@@ -1164,6 +1164,89 @@ func (d *SlashDispatcher) cmdFork(args []string) SlashResult {
 	}
 }
 
+// cmdSide runs a quick, unrelated question through a brand-new session
+// (P22.5) — a scratch pad, not a full session switch. Unlike /fork (which
+// branches the current conversation and switches the TUI into it), /side
+// creates a genuinely isolated session with no accumulated history, asks it
+// exactly one question, and blocks (same non-interactive round-trip pattern
+// as /debate above) until the answer comes back — the main session's
+// messages, token/cost accounting, and on-screen view are never touched.
+//
+// The side session is a real, persisted session rather than something
+// deleted right after use: an abrupt delete would lose the Q&A if the user
+// later wants to revisit it, and it stays revisitable with /session list,
+// /fork, /rewind, etc. like any other session. To keep it from cluttering
+// that list indistinguishably from real conversations, its title is
+// prefixed "[side] " so it reads as disposable scratch work and is easy to
+// find and bulk-delete later — deliberately not a dedicated Ephemeral field
+// on SessionMeta, which would mean threading a new concept through the
+// store, the session list UI, and every session-management command for what
+// a title prefix already accomplishes.
+//
+// It always runs in plan (read-only) mode with the default persona/system
+// prompt: plan mode never raises interactive tool-approval prompts in the
+// first place (any that do slip through — e.g. network egress, still
+// gated in plan mode — are auto-denied below, since this handler runs
+// synchronously with no way to surface an approval dialog mid-flight), and
+// the default persona keeps a "quick, unrelated question" self-contained
+// rather than inheriting whatever persona/mode/model the main conversation
+// happens to be in.
+func (d *SlashDispatcher) cmdSide(args []string) SlashResult {
+	question := strings.TrimSpace(strings.Join(args, " "))
+	if question == "" {
+		return SlashResult{
+			Output:  "Usage: /side <question>\n  Ask a quick, unrelated question in a fresh throwaway session — the main conversation's history and context are left untouched.",
+			IsError: true,
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	title := "[side] " + truncate(oneLine(question), 60)
+	meta, err := d.client.CreateSession(ctx, api.CreateSessionRequest{Title: title, Mode: "plan"})
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("/side: failed to open a side session: %v", err), IsError: true}
+	}
+
+	events, err := d.client.PostMessage(ctx, meta.ID, question)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("/side: failed to ask: %v", err), IsError: true}
+	}
+
+	var answer strings.Builder
+	var runErr string
+	for ev := range events {
+		switch ev.Kind {
+		case api.KindText:
+			answer.WriteString(ev.Text)
+		case api.KindApprovalRequest:
+			// No interactive surface mid-dispatch (see doc comment above) —
+			// deny so the side turn never hangs waiting on a prompt nobody
+			// can answer.
+			actx, acancel := context.WithTimeout(ctx, 10*time.Second)
+			_ = d.client.SendApproval(actx, meta.ID, ev.ApprovalID, false, false)
+			acancel()
+		case api.KindError:
+			runErr = ev.Error
+		}
+	}
+
+	if runErr != "" {
+		return SlashResult{
+			Output:  fmt.Sprintf("[side %s] %s\n\n(failed: %s)\n\nSide session kept: %s (/session list to find it, /fork %s to continue it).", short(meta.ID), question, runErr, meta.ID, short(meta.ID)),
+			IsError: true,
+		}
+	}
+	ans := strings.TrimSpace(answer.String())
+	if ans == "" {
+		ans = "(no answer)"
+	}
+	return SlashResult{
+		Output: fmt.Sprintf("[side %s] %s\n\n%s\n\n(kept as a separate session — /session list to find it later)", short(meta.ID), question, ans),
+	}
+}
+
 // cmdRollback is like rewind but also resets git HEAD to the pre-turn commit,
 // providing a true "undo everything" for multi-file task failures (P3.4).
 func (d *SlashDispatcher) cmdRollback(args []string) SlashResult {

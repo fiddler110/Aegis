@@ -154,6 +154,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/session` | Show current session info (ID, mode, persona, token count) |
 | `/session list` | List all sessions |
 | `/persona [name]` | Switch persona interactively (without name) or directly |
+| `/side <question>` | Ask a quick, unrelated question in a fresh, isolated throwaway session — no shared history, and the main session's messages/tokens/cost are untouched; the side session is kept (titled `[side] ...`) so the Q&A isn't lost, but stays out of the current conversation |
 | `/rewind` | List checkpoints (newest first, with file counts) |
 | `/rewind <n> [code\|conversation\|both]` | Restore checkpoint n |
 | `/rollback [n]` | Restore checkpoint n and run `git reset --hard` |
