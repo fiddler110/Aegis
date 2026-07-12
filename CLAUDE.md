@@ -53,8 +53,8 @@ AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcros
 
 # Live-model eval tier: rubric-judged prompt/persona quality checks against a
 # real local model (not part of `go test ./...` — needs a reachable model
-# server). Runs nightly in CI (.github/workflows/nightly-eval.yml); to run
-# locally:
+# server). On-demand only — the CI workflow (.github/workflows/nightly-eval.yml)
+# is workflow_dispatch-only by decision, never scheduled. To run locally:
 ollama pull llama3.2
 go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v
 ```
