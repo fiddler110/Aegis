@@ -807,6 +807,32 @@ Shares its target-authorization gate with `dast_scan` (loopback/private allowed 
 
 ---
 
+### `security_advise` (deferred)
+
+**Capability:** network
+
+Security engagement assistant: a persistent, multi-day engagement notebook plus NVD CVE lookups and guarded, rule-based next-step suggestions. Notebooks are scoped to a named `engagement` string (not the chat session) so notes survive across sessions and daemon restarts.
+
+```json
+{
+  "action": "note",             // "note", "list" (alias "log"), "cve_lookup", "suggest", or "status"
+  "engagement": "acme-2026q3",  // required for note/list/log/suggest/status
+  "text": "recon_scan found an admin panel on 10.0.0.5",
+  "tags": ["recon"]             // optional, action: note
+}
+```
+
+```json
+{
+  "action": "cve_lookup",
+  "cve_id": "CVE-2021-44228"     // or "keyword": "log4j" (mutually exclusive), plus optional "limit"
+}
+```
+
+`note` appends a timestamped, optionally-tagged note to the named engagement's notebook (stored under the daemon's per-user data directory, one JSONL file per engagement). `list`/`log` returns every note, oldest first. `cve_lookup` queries the NVD REST API (`https://services.nvd.nist.gov/rest/json/cves/2.0`); the unauthenticated public API is rate-limited to roughly 5 requests/30s — a 403/429 comes back as a clear error, not a hang or crash — set `NVD_API_KEY` in the environment for a higher limit. `suggest` returns plain-text next-step suggestions derived from simple, explainable rules over the notebook's own content (e.g. no recon logged yet, or findings referenced but never documented) — it never executes another tool or scan itself; a human or the calling model decides whether to act on a suggestion. `status` returns a short digest (note count, date range, and how many notes reference recon/dast/security_scan/findings/cve lookups) — a tool-action fallback for the P13.4 status-digest scope rather than a `/status` (`api.StatusInfo`) field, since that endpoint is daemon-global with no precedent for a per-entity key.
+
+---
+
 ## Planning
 
 ### `todo_add`
