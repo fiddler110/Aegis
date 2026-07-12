@@ -117,7 +117,7 @@ func (t *gitTool) Execute(ctx context.Context, input json.RawMessage) (tool.Resu
 		return tool.Result{Content: reason, IsError: true}, nil
 	}
 
-	out, err := runGit(ctx, t.root, append([]string{sub}, args.Args...)...)
+	out, err := runGit(ctx, effectiveRoot(ctx, t.root), append([]string{sub}, args.Args...)...)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("git %s failed: %v\n%s", sub, err, out), IsError: true}, nil
 	}
@@ -197,24 +197,25 @@ func (t *gitCommitTool) Execute(ctx context.Context, input json.RawMessage) (too
 			return tool.Result{Content: fmt.Sprintf("invalid path %q", p), IsError: true}, nil
 		}
 	}
+	root := effectiveRoot(ctx, t.root)
 
 	// Staging.
 	switch {
 	case len(args.Paths) > 0:
 		stageArgs := append([]string{"add", "--"}, args.Paths...)
-		if out, err := runGit(ctx, t.root, stageArgs...); err != nil {
+		if out, err := runGit(ctx, root, stageArgs...); err != nil {
 			return tool.Result{Content: fmt.Sprintf("git add failed: %v\n%s", err, out), IsError: true}, nil
 		}
 	case args.All == nil || *args.All:
 		// Default: stage all tracked modifications (and new files).
-		if out, err := runGit(ctx, t.root, "add", "-A"); err != nil {
+		if out, err := runGit(ctx, root, "add", "-A"); err != nil {
 			return tool.Result{Content: fmt.Sprintf("git add failed: %v\n%s", err, out), IsError: true}, nil
 		}
 	}
 
 	// Commit. Use -- to terminate options; the message is a single arg so it is
 	// never shell-interpreted.
-	out, err := runGit(ctx, t.root, "commit", "-m", msg)
+	out, err := runGit(ctx, root, "commit", "-m", msg)
 	if err != nil {
 		// "nothing to commit" is a common, non-fatal outcome worth reporting
 		// clearly rather than as a hard error.
@@ -224,7 +225,7 @@ func (t *gitCommitTool) Execute(ctx context.Context, input json.RawMessage) (too
 		return tool.Result{Content: fmt.Sprintf("git commit failed: %v\n%s", err, out), IsError: true}, nil
 	}
 
-	hash, _ := runGit(ctx, t.root, "rev-parse", "--short", "HEAD")
-	stat, _ := runGit(ctx, t.root, "show", "--stat", "--oneline", "HEAD")
+	hash, _ := runGit(ctx, root, "rev-parse", "--short", "HEAD")
+	stat, _ := runGit(ctx, root, "show", "--stat", "--oneline", "HEAD")
 	return tool.Result{Content: fmt.Sprintf("committed %s\n%s", strings.TrimSpace(hash), strings.TrimSpace(stat))}, nil
 }

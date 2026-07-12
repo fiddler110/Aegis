@@ -2,6 +2,7 @@ import { Fragment } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../api";
 import type {
+  ConfigSandboxResponse,
   ScanFinding,
   ScanResponse,
   SecurityBaselineResponse,
@@ -20,7 +21,7 @@ import type {
 // install flow is always two-phase: show the exact command first, run it
 // only after an explicit confirmation click — never auto-confirmed.
 
-type Tab = "scan" | "scanners" | "risks";
+type Tab = "scan" | "scanners" | "risks" | "sandbox";
 
 // Severity display order and colors — security.Severity's exact value set,
 // highest first (the same order security.Report sorts findings in).
@@ -73,9 +74,12 @@ export function SecurityPanel({ onClose }: { onClose: () => void }) {
           <button class={"tab" + (tab === "risks" ? " active" : "")} onClick={() => setTab("risks")}>
             Accepted risks
           </button>
+          <button class={"tab" + (tab === "sandbox" ? " active" : "")} onClick={() => setTab("sandbox")}>
+            Sandbox
+          </button>
         </div>
-        {/* All three tabs stay mounted so a running scan isn't cancelled (and
-            its result isn't lost) by peeking at the other tabs. */}
+        {/* All tabs stay mounted so a running scan isn't cancelled (and its
+            result isn't lost) by peeking at the other tabs. */}
         <div style={{ display: tab === "scan" ? "" : "none" }}>
           <ScanSection onBusy={setScanBusy} />
         </div>
@@ -84,6 +88,9 @@ export function SecurityPanel({ onClose }: { onClose: () => void }) {
         </div>
         <div style={{ display: tab === "risks" ? "" : "none" }}>
           <RisksSection />
+        </div>
+        <div style={{ display: tab === "sandbox" ? "" : "none" }}>
+          <SandboxSection />
         </div>
       </div>
     </>
@@ -552,6 +559,78 @@ function RisksSection() {
         </table>
       )}
       {data?.path && <p class="hint">Kept in {data.path}.</p>}
+    </>
+  );
+}
+
+// ─── Sandbox (GET /config/sandbox) — read-only ──────────────────────────────
+
+// SandboxSection surfaces P25.2's fix: the configured sandbox.* values (what
+// was asked for) can silently differ from what's actually running — an
+// unavailable container runtime, or a plain backend-name typo, both degrade
+// to commands running unsandboxed on the host. Before this, that only showed
+// up as a startup log line (warnSandboxFallback in the CLI); this makes it
+// visible here too, next to the rest of the security posture.
+function SandboxSection() {
+  const [data, setData] = useState<ConfigSandboxResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await api("/config/sandbox");
+        setData((await r.json()) as ConfigSandboxResponse);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    })();
+  }, []);
+
+  return (
+    <>
+      <p class="hint">
+        Whether tool calls (shell commands the assistant runs) execute inside an isolated
+        container/OS sandbox, or directly on this computer.
+      </p>
+      {error && <p class="err">{error}</p>}
+      {!data && !error && <p class="hint">Checking the active sandbox…</p>}
+      {data && (
+        <>
+          {data.fallback && (
+            <p class="hint warn">
+              Commands are running unsandboxed, directly on this computer — not what
+              sandbox.backend below asks for.
+              {data.fallback_reason ? ` ${data.fallback_reason}` : ""}
+            </p>
+          )}
+          <table class="sec-table">
+            <tbody>
+              <tr>
+                <td>Actually running as</td>
+                <td>
+                  <span class={"avail" + (data.fallback ? " bad" : " ok")}>
+                    {data.active_backend || "unknown"}
+                  </span>
+                </td>
+              </tr>
+              <tr>
+                <td>Configured backend</td>
+                <td class="sec-loc">{data.backend || "local"}</td>
+              </tr>
+              {data.runtime && (
+                <tr>
+                  <td>Configured runtime</td>
+                  <td class="sec-loc">{data.runtime}</td>
+                </tr>
+              )}
+              <tr>
+                <td>Network access in sandbox</td>
+                <td>{data.network ? "allowed" : "blocked"}</td>
+              </tr>
+            </tbody>
+          </table>
+        </>
+      )}
     </>
   );
 }

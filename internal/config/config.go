@@ -20,6 +20,7 @@ import (
 	"github.com/knadh/koanf/v2"
 
 	"github.com/fiddler110/aegis/internal/fsguard"
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // Config is the fully resolved harness configuration.
@@ -179,6 +180,57 @@ type SandboxConfig struct {
 	StripEnv []string `koanf:"strip_env"`
 }
 
+// sandboxBackendAliases maps the container-runtime names CLAUDE.md/the docs
+// advertise ("Docker, Podman, WSL containers, Apple Containers") to the
+// backend+runtime pair that actually selects them. Before P25.2, typing one
+// of these directly into sandbox.backend (instead of the correct
+// `backend: container` + `runtime: <name>`) silently fell through
+// SelectSandbox's default case and ran every command unsandboxed on the
+// host, with no warning — sandbox.ParseRuntimes's vocabulary is the source
+// of truth these aliases resolve to.
+var sandboxBackendAliases = map[string]string{
+	"docker": string(sandbox.RuntimeDocker),
+	"podman": string(sandbox.RuntimePodman),
+	"wsl":    string(sandbox.RuntimeWSL),
+	"wslc":   string(sandbox.RuntimeWSL),
+	"apple":  string(sandbox.RuntimeAppleContainers),
+}
+
+// sandboxKnownBackends are the values SelectSandbox actually switches on
+// ("" and "local" both mean the unsandboxed local backend).
+var sandboxKnownBackends = map[string]bool{
+	"":          true,
+	"local":     true,
+	"container": true,
+	"auto":      true,
+	"os":        true,
+}
+
+// Normalize rewrites a runtime-name typed into Backend (e.g. "podman") into
+// the correct backend+runtime pair, and hard-errors on anything else
+// unrecognized rather than letting it silently reach SelectSandbox's
+// default case, which treats an unknown backend the same as "local" (P25.2).
+// Exported so callers that build a SandboxConfig outside of Load() — e.g.
+// the PATCH /config/sandbox handler validating a request before it's
+// written to disk — apply the identical alias/validation table.
+func (c *SandboxConfig) Normalize() error {
+	if canonicalRuntime, ok := sandboxBackendAliases[strings.ToLower(strings.TrimSpace(c.Backend))]; ok {
+		c.Backend = "container"
+		if c.Runtime == "" {
+			c.Runtime = canonicalRuntime
+		}
+		return nil
+	}
+	if !sandboxKnownBackends[c.Backend] {
+		return fmt.Errorf(
+			"sandbox.backend %q is not a valid backend; use \"local\", \"container\", \"auto\", or \"os\" "+
+				"— for a specific container runtime, set sandbox.backend: container and sandbox.runtime: %q",
+			c.Backend, c.Backend,
+		)
+	}
+	return nil
+}
+
 // CostConfig configures spend tracking.
 type CostConfig struct {
 	BudgetUSD float64 `koanf:"budget_usd"` // abort a run past this estimated cost; 0 = unlimited
@@ -313,6 +365,18 @@ type ServerConfig struct {
 	// this flag. Off by default.
 	AllowRemote bool `koanf:"allow_remote"`
 
+	// SessionWorkdirAllowlist bounds which directories a client may request
+	// as a session's working directory (P25.1) once AllowRemote is set: the
+	// resolved path must be the daemon's own default workspace (or nested
+	// under it) or nested under one of these entries. Ignored — every
+	// existing-directory request is accepted — on the default loopback-only
+	// bind, where a client is already as trusted as a local shell user.
+	// Without this, a remote-accessible daemon combined with per-session
+	// workdirs would let any bearer-token holder point a session at an
+	// arbitrary directory the daemon process can read, turning it into a
+	// filesystem oracle far beyond its own project.
+	SessionWorkdirAllowlist []string `koanf:"session_workdir_allowlist"`
+
 	// TLS optionally encrypts client<->daemon traffic (FIND-32/P24.18). Off
 	// by default: the default loopback-only bind (AllowRemote above) already
 	// limits exposure to other local accounts on the same host with
@@ -392,6 +456,16 @@ type PermissionConfig struct {
 	Mode            string   `koanf:"mode"`              // "plan" or "build"
 	AutoApproveExec bool     `koanf:"auto_approve_exec"` // auto-approve shell/execute tool calls
 	Rules           []string `koanf:"rules"`             // text-based allow/deny rules, e.g. "allow bash(npm test*)", "deny write(/etc/*)"
+
+	// AllowUnsandboxedAutoExec opts into the combination the daemon otherwise
+	// refuses to start with (P25.2): auto_approve_exec: true while the
+	// effective sandbox backend is the unsandboxed local one. That pairing
+	// means every model-issued shell command runs on the host with no
+	// approval and no isolation — previously only a startup WARN line, easy
+	// to miss, for what amounts to unattended remote code execution. Set
+	// this only when that's a deliberate, understood choice (e.g. an
+	// already-isolated CI container running Aegis itself).
+	AllowUnsandboxedAutoExec bool `koanf:"allow_unsandboxed_auto_exec"`
 }
 
 // SecurityConfig configures contextual security policies.
@@ -588,8 +662,9 @@ func defaults() map[string]any {
 		// (or are denied non-interactively). Use "plan" for read-only
 		// exploration and "auto" (with auto_approve_exec: true) only in
 		// fully trusted, sandboxed environments.
-		"permission.mode":              "build",
-		"permission.auto_approve_exec": false,
+		"permission.mode":                        "build",
+		"permission.auto_approve_exec":           false,
+		"permission.allow_unsandboxed_auto_exec": false,
 		"diagram.kroki_url":            "https://kroki.io",
 		"cost.budget_usd":              0.0,
 		"cost.max_tokens_per_run":      0,
@@ -753,6 +828,10 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	if err := cfg.Sandbox.Normalize(); err != nil {
+		return nil, err
 	}
 
 	cfg.Provider.APIKey = ProviderAPIKey(cfg.Provider.Default)

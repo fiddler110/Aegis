@@ -51,6 +51,6 @@ func (t *dastScanTool) Execute(ctx context.Context, input json.RawMessage) (tool
 	if err != nil {
 		return tool.Result{}, err
 	}
-	security.WriteReportArtifact(t.root, "dast", report)
+	security.WriteReportArtifact(effectiveRoot(ctx, t.root), "dast", report)
 	return tool.Result{Content: report.Format()}, nil
 }

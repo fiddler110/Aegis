@@ -50,6 +50,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 	if len(args.Edits) > maxEdits {
 		return tool.Result{Content: fmt.Sprintf("too many edits (%d, max %d)", len(args.Edits), maxEdits), IsError: true}, nil
 	}
+	root := effectiveRoot(ctx, t.root)
 
 	// Phase 1: validate all paths and load file contents.
 	type fileState struct {
@@ -59,7 +60,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 	files := make(map[string]*fileState)
 
 	for i, e := range args.Edits {
-		abs, err := resolvePath(t.root, e.Path)
+		abs, err := resolvePath(root, e.Path)
 		if err != nil {
 			return tool.Result{Content: fmt.Sprintf("edit %d: %v", i+1, err), IsError: true}, nil
 		}
@@ -79,7 +80,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 
 	// Phase 2: apply all edits in order (in memory).
 	for i, e := range args.Edits {
-		abs, _ := resolvePath(t.root, e.Path)
+		abs, _ := resolvePath(root, e.Path)
 		fs := files[abs]
 		n := strings.Count(fs.content, e.OldString)
 		if n == 0 {

@@ -50,7 +50,7 @@ func (t *taskCreateTool) Description() string {
 func (t *taskCreateTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"command":{"type":"string","description":"the command line to run in the background"},"title":{"type":"string","description":"optional short label for the job"},"timeout_sec":{"type":"integer","description":"optional max runtime in seconds"}},"required":["command"]}`)
 }
-func (t *taskCreateTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+func (t *taskCreateTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Command    string `json:"command"`
 		Title      string `json:"title"`
@@ -74,8 +74,9 @@ func (t *taskCreateTool) Execute(_ context.Context, input json.RawMessage) (tool
 	if sb == nil {
 		sb = sandbox.NewLocalBackend()
 	}
-	tk, err := t.mgr.Start(task.Spec{Kind: "shell", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
-		return "", sb.ExecStreaming(ctx, args.Command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout}, emit)
+	root := effectiveRoot(ctx, t.root)
+	tk, err := t.mgr.Start(task.Spec{Kind: "shell", Title: title}, func(jobCtx context.Context, emit func(string)) (string, error) {
+		return "", sb.ExecStreaming(jobCtx, args.Command, sandbox.ExecOpts{Dir: root, Timeout: timeout}, emit)
 	})
 	if err != nil {
 		return tool.Result{Content: "task_create: " + err.Error(), IsError: true}, nil

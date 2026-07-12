@@ -46,6 +46,6 @@ func (t *reconScanTool) Execute(ctx context.Context, input json.RawMessage) (too
 	if err != nil {
 		return tool.Result{}, err
 	}
-	security.WriteReportArtifact(t.root, "network", report)
+	security.WriteReportArtifact(effectiveRoot(ctx, t.root), "network", report)
 	return tool.Result{Content: report.Format()}, nil
 }

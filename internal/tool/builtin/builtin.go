@@ -4,6 +4,7 @@
 package builtin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -188,6 +189,19 @@ func Register(reg *tool.Registry, opts Options) error {
 // symlink-based workspace escapes.
 func resolvePath(root, p string) (string, error) {
 	return sandbox.ValidatePath(root, p)
+}
+
+// effectiveRoot returns the working directory a tool call should be confined
+// to: the session-scoped override carried on ctx (see tool.WithWorkdir), or
+// fallback — the tool's own construction-time root — when no override is
+// set (P25.1). This lets one daemon-wide Registry serve sessions rooted at
+// different directories without rebuilding the registry (and its MCP/
+// plugin/swarm wiring) per session.
+func effectiveRoot(ctx context.Context, fallback string) string {
+	if wd, ok := tool.WorkdirFromContext(ctx); ok {
+		return wd
+	}
+	return fallback
 }
 
 // parseArgs unmarshals tool input into v, returning a friendly error.

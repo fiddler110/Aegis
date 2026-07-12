@@ -13,6 +13,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/tool"
 )
@@ -78,6 +79,37 @@ func newConfigTestServer(t *testing.T, workspace string) *client.Client {
 	return client.New(ts.URL).WithToken("test-token")
 }
 
+// newConfigTestServerWithSandbox is newConfigTestServer plus a pre-set
+// active sandbox backend + fallback state (P25.2), so tests can assert that
+// GET /config/sandbox reports what SelectSandbox actually picked at startup
+// rather than echoing the configured values back unchecked.
+func newConfigTestServerWithSandbox(t *testing.T, workspace string, sb sandbox.Backend, fallback bool, reason string) *client.Client {
+	t.Helper()
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	if workspace == "" {
+		workspace = t.TempDir()
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	srv.workspace = workspace
+	srv.sandbox = sb
+	srv.sandboxFallback = fallback
+	srv.sandboxFallbackReason = reason
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return client.New(ts.URL).WithToken("test-token")
+}
+
 func strPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool    { return &b }
 
@@ -131,6 +163,113 @@ func TestConfigSandboxPatchGlobalAppliesAndPersists(t *testing.T) {
 	}
 	if got.Backend != "auto" || got.Image != "ubuntu:24.04" {
 		t.Errorf("GET after PATCH = %+v, want backend=auto image=ubuntu:24.04", got)
+	}
+}
+
+// TestConfigSandboxGetReportsActiveBackendAndFallback is the P25.2
+// regression test: the configured backend/runtime (what an operator wrote)
+// and the active backend (what SelectSandbox actually picked, and whether
+// it fell back to local) must both be visible, and can legitimately differ.
+func TestConfigSandboxGetReportsActiveBackendAndFallback(t *testing.T) {
+	redirectConfigDir(t)
+	const wantReason = "configured sandbox backend \"container\" unavailable (no runtime) — running unsandboxed on the host"
+	cl := newConfigTestServerWithSandbox(t, "", sandbox.NewLocalBackendWithEnv(nil), true, wantReason)
+
+	// The configured value on disk claims "container", but the daemon
+	// actually fell back to local at startup (simulated above) — a client
+	// trusting only Backend/Runtime would wrongly believe exec is sandboxed.
+	if _, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
+		Scope:   "global",
+		Backend: strPtr("container"),
+		Runtime: strPtr("docker"),
+	}); err != nil {
+		t.Fatalf("PatchConfigSandbox: %v", err)
+	}
+
+	resp, err := cl.GetConfigSandbox(context.Background(), "global")
+	if err != nil {
+		t.Fatalf("GetConfigSandbox: %v", err)
+	}
+	if resp.Backend != "container" || resp.Runtime != "docker" {
+		t.Errorf("configured Backend/Runtime = %q/%q, want container/docker", resp.Backend, resp.Runtime)
+	}
+	if resp.ActiveBackend != "local" {
+		t.Errorf("ActiveBackend = %q, want %q (the real running backend)", resp.ActiveBackend, "local")
+	}
+	if !resp.Fallback {
+		t.Error("Fallback = false, want true — configured container backend is not what's actually running")
+	}
+	if resp.FallbackReason != wantReason {
+		t.Errorf("FallbackReason = %q, want %q", resp.FallbackReason, wantReason)
+	}
+}
+
+// TestConfigSandboxGetNoFallbackWhenActiveMatchesConfigured covers the
+// non-degraded case: when SelectSandbox picked exactly what was configured,
+// Fallback must be false and ActiveBackend must reflect the real backend.
+func TestConfigSandboxGetNoFallbackWhenActiveMatchesConfigured(t *testing.T) {
+	redirectConfigDir(t)
+	cl := newConfigTestServerWithSandbox(t, "", sandbox.NewLocalBackendWithEnv(nil), false, "")
+
+	resp, err := cl.GetConfigSandbox(context.Background(), "global")
+	if err != nil {
+		t.Fatalf("GetConfigSandbox: %v", err)
+	}
+	if resp.ActiveBackend != "local" {
+		t.Errorf("ActiveBackend = %q, want %q", resp.ActiveBackend, "local")
+	}
+	if resp.Fallback {
+		t.Error("Fallback = true, want false")
+	}
+	if resp.FallbackReason != "" {
+		t.Errorf("FallbackReason = %q, want empty", resp.FallbackReason)
+	}
+}
+
+// TestConfigSandboxPatchRejectsUnknownBackend covers P25.2's PATCH-side
+// validation: writing an unrecognized backend must fail with 400, not be
+// silently persisted to disk.
+func TestConfigSandboxPatchRejectsUnknownBackend(t *testing.T) {
+	redirectConfigDir(t)
+	cl := newConfigTestServer(t, "")
+
+	_, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
+		Scope:   "global",
+		Backend: strPtr("kubernetes"),
+	})
+	if err == nil {
+		t.Fatal("expected an error for an unknown sandbox backend")
+	}
+}
+
+// TestConfigSandboxPatchAliasesRuntimeName covers P25.2's PATCH-side
+// aliasing: PATCHing backend="podman" directly (the mistake the docs'
+// runtime-name phrasing invites) must be written as backend=container,
+// runtime=podman, not literally as "podman".
+func TestConfigSandboxPatchAliasesRuntimeName(t *testing.T) {
+	redirectConfigDir(t)
+	cl := newConfigTestServer(t, "")
+
+	resp, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
+		Scope:   "global",
+		Backend: strPtr("podman"),
+	})
+	if err != nil {
+		t.Fatalf("PatchConfigSandbox: %v", err)
+	}
+	if resp.Backend != "container" || resp.Runtime != "podman" {
+		t.Errorf("response = backend=%q runtime=%q, want container/podman", resp.Backend, resp.Runtime)
+	}
+
+	data, err := os.ReadFile(config.GlobalConfigPath())
+	if err != nil {
+		t.Fatalf("read global config: %v", err)
+	}
+	if strings.Contains(string(data), "backend: podman") {
+		t.Errorf("global config wrote the unaliased backend name:\n%s", data)
+	}
+	if !strings.Contains(string(data), "backend: container") || !strings.Contains(string(data), "runtime: podman") {
+		t.Errorf("global config missing aliased backend: container / runtime: podman:\n%s", data)
 	}
 }
 

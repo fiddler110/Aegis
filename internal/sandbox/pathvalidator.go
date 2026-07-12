@@ -28,7 +28,7 @@ func ValidatePath(root, path string) (string, error) {
 
 	// Fast check before symlink resolution: reject obvious escapes.
 	if escapesRoot(root, abs) {
-		return "", fmt.Errorf("path %q escapes the workspace", path)
+		return "", fmt.Errorf("path %q escapes the workspace root %q", path, root)
 	}
 
 	// Resolve symlinks on the real filesystem. If the full path exists, resolve
@@ -44,7 +44,7 @@ func ValidatePath(root, path string) (string, error) {
 
 	full := filepath.Join(resolved, tail)
 	if escapesRoot(realRoot, full) {
-		return "", fmt.Errorf("path %q resolves outside the workspace (symlink escape)", path)
+		return "", fmt.Errorf("path %q resolves outside the workspace root %q (symlink escape)", path, root)
 	}
 
 	return full, nil

@@ -22,6 +22,7 @@ export function SessionList({
   onPrune,
   onOpenTool,
   activityCount,
+  sandboxFallback,
 }: {
   sessions: SessionMeta[];
   archivedSessions: SessionMeta[];
@@ -36,6 +37,11 @@ export function SessionList({
   onPrune: (days: number) => void;
   onOpenTool: (tool: SidebarTool) => void;
   activityCount: number;
+  // sandboxFallback (P25.2) surfaces GET /status's sandbox_fallback: the
+  // daemon fell back to running commands unsandboxed on the host, which is
+  // easy to miss as a startup log line alone — badge the button that opens
+  // the panel where the detail (and the reason) lives.
+  sandboxFallback?: boolean;
 }) {
   const [pruneOpen, setPruneOpen] = useState(false);
   const [pruneDays, setPruneDays] = useState("30");
@@ -128,6 +134,11 @@ export function SessionList({
         </button>
         <button class="tool-btn" onClick={() => onOpenTool("security")}>
           🛡️ Security check
+          {sandboxFallback ? (
+            <span class="warn-count" title="Commands are running unsandboxed on the host — see the Sandbox tab">
+              !
+            </span>
+          ) : null}
         </button>
         <button class="tool-btn" onClick={() => onOpenTool("skillsmem")}>
           🧠 Skills &amp; memory

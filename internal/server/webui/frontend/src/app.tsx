@@ -710,6 +710,7 @@ export function App() {
         onPrune={pruneOldSessions}
         onOpenTool={openTool}
         activityCount={runs.length}
+        sandboxFallback={status?.sandbox_fallback}
       />
       <section id="main">
         <div id="topbar">

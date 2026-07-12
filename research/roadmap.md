@@ -1,12 +1,15 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-11 (late night) — **a live local-model evaluation re-opened Tier 1.**
-A hands-on session driving the real TUI and the daemon HTTP API against local Ollama models
-(qwen3.6:35b-a3b-deep/fast, qwen3coder:30b-a3b-fast) confirmed five engine/daemon defects and two
-quality gaps that make Aegis look far less capable with local models than it actually is. All are
-now **P25.1–P25.7** below, with root causes verified at specific file:line locations and a
-repeatable regression harness preserved at
-[research/eval-harness-drive.py](eval-harness-drive.py). The Tier 3 pass (P24.14 + web-UI batches
+**Last updated:** 2026-07-11 (late night) — **P25.1 (per-session working directory) and P25.2
+(sandbox backend name trap) shipped.**
+A hands-on session earlier the same day, driving the real TUI and the daemon HTTP API against
+local Ollama models (qwen3.6:35b-a3b-deep/fast, qwen3coder:30b-a3b-fast), confirmed five
+engine/daemon defects and two quality gaps that make Aegis look far less capable with local models
+than it actually is — filed as **P25.1–P25.7**, with root causes verified at specific file:line
+locations and a repeatable regression harness preserved at
+[research/eval-harness-drive.py](eval-harness-drive.py). P25.1 and P25.2, the two highest-priority
+items, shipped this session (see their entries below for implementation detail and what's
+deliberately still deferred); **P25.3–P25.7 remain open.** The Tier 3 pass (P24.14 + web-UI batches
 A/B/C) completed earlier the same day — writeup in [releases.md](releases.md#latest-changes).
 
 This document tracks only **open** work and what's next. For shipped-feature history and full design
@@ -16,15 +19,16 @@ rationale, see [releases.md](releases.md).
 
 ## Status
 
-**Open items:** **Tier 1 — P25.1–P25.7** (local-model live-eval findings, 2026-07-11; see
+**Open items:** **Tier 1 — P25.3–P25.7** (local-model live-eval findings, 2026-07-11; P25.1 and
+P25.2 shipped 2026-07-11; see
 [Open Work — P25](#open-work--p25-local-model-live-evaluation--2026-07-11)), plus the long-standing
 Tier 4 parked set — P24.21 (threat-model residual), P22.5/P22.6, P20.2–P20.3,
 P13.3.2–P13.3.3/P13.4, P9.4, P6.1.
 
-**Next session:** work P25 top-to-bottom. P25.1 (per-session working directory) is the highest
-leverage; P25.2 (sandbox backend validation) is the most safety-urgent and smallest. Re-run the
-harness (recipe inside the P25 section) after each fix to confirm the corresponding failure mode
-is gone.
+**Next session:** work P25 top-to-bottom. P25.3 (output guard vs local/thinking models) is next —
+3× turn latency and meta-text leakage into user-visible answers. Re-run the harness (recipe inside
+the P25 section) after each fix to confirm the corresponding failure mode is gone — including a
+re-run against P25.1's and P25.2's fixes, since the harness itself predates both.
 
 **Priority order:** see [Priority Order](#priority-order) below — it is the authoritative "what's
 next" view, ordered by tier and effort.
@@ -45,18 +49,24 @@ All Critical/Important findings from the 2026-07-10 STRIDE-A threat model are sh
 2026-07-11 live evaluation (real TUI + daemon API runs against local Ollama models) is the new
 trigger; full detail in [Open Work — P25](#open-work--p25-local-model-live-evaluation--2026-07-11).
 
-1. **P25.2 — Sandbox backend name trap + untruthful `/config/sandbox`** (S) — do first: smallest,
-   and it is a live safety hole (`backend: podman` silently runs unsandboxed on the host).
-2. **P25.1 — Per-session working directory** (M/L) — highest leverage: fixes the dominant
-   "model looks dumb in the action phase" failure mode.
-3. **P25.3 — Output guard vs local/thinking models** (M) — 3× turn latency and meta-text leakage
+- ~~**P25.1 — Per-session working directory**~~ **SHIPPED 2026-07-11** — highest-leverage item:
+  fixed the dominant "model looks dumb in the action phase" failure mode. See the writeup at the
+  end of the [P25.1 entry below](#open-work--p25-local-model-live-evaluation--2026-07-11) for what
+  shipped vs. what's explicitly deferred.
+- ~~**P25.2 — Sandbox backend name trap + untruthful `/config/sandbox`**~~ **SHIPPED 2026-07-11** —
+  closed the live safety hole (`backend: podman` silently ran unsandboxed on the host). See the
+  writeup at the end of the
+  [P25.2 entry below](#open-work--p25-local-model-live-evaluation--2026-07-11) for implementation
+  detail.
+
+1. **P25.3 — Output guard vs local/thinking models** (M) — 3× turn latency and meta-text leakage
    into user-visible answers.
-4. **P25.4 — Approval ergonomics** (M) — dead `y` hotkey, useless-or-dangerous generated
+2. **P25.4 — Approval ergonomics** (M) — dead `y` hotkey, useless-or-dangerous generated
    Allow-always rules, read-only shell commands gated as execute.
-5. **P25.5 — Token-usage observability for local providers** (S).
-6. **P25.6 — Local-model profile: prompt weight + scope-creep guardrails** (S/M).
-7. **P25.7 — Promote the live-eval harness into `internal/eval`** (M) — regression-locks all of
-   the above.
+3. **P25.5 — Token-usage observability for local providers** (S).
+4. **P25.6 — Local-model profile: prompt weight + scope-creep guardrails** (S/M).
+5. **P25.7 — Promote the live-eval harness into `internal/eval`** (M) — regression-locks all of
+   the above (now including P25.1 and P25.2).
 
 ### Tier 2 — empty
 
@@ -144,7 +154,7 @@ P25.7 eval fixture.
 
 ---
 
-**P25.1 — Per-session working directory. [Tier 1]** (M/L)
+**P25.1 — Per-session working directory. [Tier 1]** (M/L) — **SHIPPED 2026-07-11**
 
 - **Symptom:** a TUI session started in directory X, connecting to a daemon that was started in
   directory Y, displays `Dir X` in the welcome screen but executes every tool in Y. In the live
@@ -178,8 +188,42 @@ P25.7 eval fixture.
 - **Tests:** server test — two sessions with different workdirs on one daemon each read their
   own `temps.py`; eval scenario asserting no `web_search`/`find /` tool calls for the fixture
   task; regression for the workspace-confinement error message pointing at the *session* root.
+- **Shipped implementation (differs from the fix sketch above):** rather than a per-root
+  `tool.Registry` cache — which would mean reconnecting MCP servers, re-registering plugins, and
+  rebuilding the swarm/agent tool once per distinct session directory — the daemon keeps one
+  shared, MCP/plugin/swarm-wired registry and threads the session's workdir through
+  `context.Context` (`tool.WithWorkdir`/`tool.WorkdirFromContext`, mirroring the existing
+  `tool.WithRegistry` pattern `tool_search` already relied on). `engine.Options.Workdir` sets it
+  once per turn (`executeTool`, right next to `tool.WithRegistry`); every workspace-confined tool
+  (file ops, `ls`/`glob`/`grep`, git, `shell`, security/diagram/latex/dast/recon tools,
+  `remember`/`save_skill`, background shell jobs) resolves its effective root from that context
+  value, falling back to its own construction-time root when unset. `sandbox.ExecOpts.Dir` was
+  already per-call for the local and container backends, so this reaches the shell tool with no
+  sandbox-package changes. `CreateSessionRequest`/`SessionMeta`/`session.Session`/`session.Meta`
+  gained `Workdir`; the session store persists it via the same idempotent
+  `ALTER TABLE ... ADD COLUMN` pattern as the P14.7 `Model` field. `handleCreateSession` resolves
+  and validates it (must exist, be a directory) and enforces the trust boundary: a new
+  `server.session_workdir_allowlist` config key (alongside `server.allow_remote`) restricts a
+  remote-accessible daemon to the daemon's own workspace or an explicitly allowlisted root;
+  loopback-only daemons (the default) accept any existing directory, matching today's trust model.
+  TUI (`internal/cli/root.go`) sends its cwd on create and prefers a resumed session's own
+  persisted `Workdir` over the local cwd; ACP (`internal/acp/agent.go`) now forwards the
+  `session/new` `cwd` param it was previously parsing and discarding. `aegis chat`, the web UI,
+  `mcp-serve`, and `parallel.go` are unchanged (see below).
+- **Deliberately deferred (documented gap, not a silent one):** `lsp.Manager`, `knowledge.Store`,
+  `longmem.Store`, the cached repo-map (`s.repoMap`), and persona/command/agent-def directory
+  discovery all remain scoped to the daemon's own default workspace regardless of a session's
+  Workdir — each is a daemon-wide singleton today (one set of language servers, one knowledge DB,
+  etc.) and re-scoping them per session is a materially larger change with no test/acceptance
+  criterion above actually requiring it. `sandbox.OSBackend` (seatbelt/bwrap) also bakes its
+  write-confinement profile to the daemon's workspace at construction — a session on a different
+  Workdir under the `os` sandbox backend won't get write access extended to its own directory;
+  `resolveSessionWorkdir` logs a one-time warning when this combination is detected. The web UI
+  (no filesystem cwd in a browser) and `aegis mcp-serve`/`parallel.go` session creation still omit
+  Workdir, falling back to the daemon's default exactly as before this change. Revisit if a
+  concrete pain point shows up in a future live-eval pass.
 
-**P25.2 — Sandbox backend name trap + untruthful `/config/sandbox`. [Tier 1]** (S) — **do first**
+**P25.2 — Sandbox backend name trap + untruthful `/config/sandbox`. [Tier 1]** (S) — **SHIPPED 2026-07-11**
 
 - **Symptom:** `sandbox.backend: podman` (or `docker`) is accepted everywhere — config file,
   `AEGIS_SANDBOX_BACKEND`, `PATCH /config/sandbox` — and `GET /config/sandbox` echoes
@@ -212,6 +256,26 @@ P25.7 eval fixture.
 - **Tests:** unit tests for the alias/validation table; server test asserting
   `/config/sandbox` reflects `SelectSandbox`'s actual result including the fallback reason;
   startup-refusal test for the auto-approve+local combo.
+- **Shipped implementation:** (a) `config.SandboxConfig.Normalize()` (internal/config/config.go),
+  called from `config.Load()` and reused by the `PATCH /config/sandbox` handler, aliases
+  `docker`/`podman`/`wsl`/`wslc`/`apple` → `backend: container` + the matching `runtime` (an
+  explicit `runtime` already set is preserved) and hard-errors on any other unrecognized
+  `backend` value naming the offending value and the correct keys; `SelectSandbox`
+  (internal/server/server.go) also hardened its own `default:` case as defense-in-depth for any
+  `SandboxConfig` built outside `config.Load()`, so an unrecognized backend is rejected there too
+  instead of silently becoming local. (b) `api.ConfigSandboxResponse` gained
+  `active_backend`/`fallback`/`fallback_reason`; both `/config/sandbox` handlers now report the
+  daemon's actual `s.sandbox.Name()` and `s.sandboxFallback(Reason)` alongside the configured
+  values, verified live (`AEGIS_SANDBOX_BACKEND=podman` with no podman installed correctly reports
+  `active_backend: "local", fallback: true` with the underlying error as the reason). (c) new
+  `permission.allow_unsandboxed_auto_exec` config key (default false); daemon startup now refuses
+  to start (`unsandboxedAutoExecError` in server.go) when `auto_approve_exec: true` and the
+  effective backend is local, unless the opt-out is set — verified live, including the opt-out
+  downgrading back to a WARN. (d) web UI: `StatusInfo`/new `ConfigSandboxResponse` TS types gained
+  the fallback fields; the sidebar's "Security check" button now shows a warning badge when
+  `/status` reports `sandbox_fallback`, and the Security panel gained a read-only "Sandbox" tab
+  (`SandboxSection` in SecurityPanel.tsx) showing configured vs. active backend and the fallback
+  reason via `GET /config/sandbox`; frontend rebuilt and `dist/` committed.
 
 **P25.3 — Output guard is counterproductive with local/thinking models. [Tier 1]** (M)
 

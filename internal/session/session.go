@@ -26,7 +26,8 @@ type Session struct {
 	System       string             `json:"system"`
 	Mode         string             `json:"mode"`
 	Persona      string             `json:"persona"`
-	Model        string             `json:"model,omitempty"` // P14.7: per-session model override; "" = persona/global default
+	Workdir      string             `json:"workdir,omitempty"`    // P25.1: session's working directory; "" = daemon's default workspace
+	Model        string             `json:"model,omitempty"`      // P14.7: per-session model override; "" = persona/global default
 	Background   bool               `json:"background,omitempty"` // P3.2: runs detached from TUI
 	Archived     bool               `json:"archived,omitempty"`   // soft-deleted; hidden from normal listings
 	Messages     []provider.Message `json:"messages"`
@@ -45,7 +46,8 @@ type Meta struct {
 	Title        string     `json:"title"`
 	Mode         string     `json:"mode"`
 	Persona      string     `json:"persona"`
-	Model        string     `json:"model,omitempty"` // P14.7
+	Workdir      string     `json:"workdir,omitempty"`    // P25.1
+	Model        string     `json:"model,omitempty"`      // P14.7
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
 	InputTokens  int        `json:"input_tokens"`
@@ -175,7 +177,8 @@ CREATE TABLE IF NOT EXISTS daily_tokens (
 		`ALTER TABLE sessions ADD COLUMN persona TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN background INTEGER NOT NULL DEFAULT 0`, // P3.2
 		`ALTER TABLE sessions ADD COLUMN archived_at INTEGER`,                   // NULL = active
-		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,       // P14.7: per-session override
+		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,        // P14.7: per-session override
+		`ALTER TABLE sessions ADD COLUMN workdir TEXT NOT NULL DEFAULT ''`,      // P25.1: per-session working directory
 	} {
 		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
 	}
@@ -276,8 +279,9 @@ func (s *Store) migrateSessionBlobs(id string, msgBlob, traceBlob []byte) error 
 	return tx.Commit()
 }
 
-// Create stores a new session and returns it.
-func (s *Store) Create(ctx context.Context, title, system, mode, persona string) (*Session, error) {
+// Create stores a new session and returns it. workdir is the session's own
+// working directory (P25.1); "" keeps the daemon's default workspace.
+func (s *Store) Create(ctx context.Context, title, system, mode, persona, workdir string) (*Session, error) {
 	now := time.Now()
 	sess := &Session{
 		ID:        uuid.NewString(),
@@ -285,12 +289,13 @@ func (s *Store) Create(ctx context.Context, title, system, mode, persona string)
 		System:    system,
 		Mode:      mode,
 		Persona:   persona,
+		Workdir:   workdir,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, title, system, mode, persona, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '[]', ?, ?)`,
-		sess.ID, sess.Title, sess.System, sess.Mode, sess.Persona, now.UnixMilli(), now.UnixMilli())
+		`INSERT INTO sessions (id, title, system, mode, persona, workdir, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?)`,
+		sess.ID, sess.Title, sess.System, sess.Mode, sess.Persona, sess.Workdir, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
@@ -300,14 +305,14 @@ func (s *Store) Create(ctx context.Context, title, system, mode, persona string)
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, persona, model, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, persona, workdir, model, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
 		sess         Session
 		created, upd int64
 		background   int
 		archivedAtMS sql.NullInt64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &sess.Model, &background, &archivedAtMS,
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &sess.Workdir, &sess.Model, &background, &archivedAtMS,
 		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -502,7 +507,7 @@ func (s *Store) ListAll(ctx context.Context) ([]Meta, error) {
 }
 
 func (s *Store) listSessions(ctx context.Context, includeArchived bool) ([]Meta, error) {
-	q := `SELECT id, title, mode, persona, model, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions`
+	q := `SELECT id, title, mode, persona, workdir, model, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions`
 	if !includeArchived {
 		q += ` WHERE archived_at IS NULL`
 	}
@@ -518,7 +523,7 @@ func (s *Store) listSessions(ctx context.Context, includeArchived bool) ([]Meta,
 		var created, upd int64
 		var background int
 		var archivedAtMS sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.Model, &background, &archivedAtMS, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
+		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.Workdir, &m.Model, &background, &archivedAtMS, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
 			return nil, err
 		}
 		m.Background = background == 1

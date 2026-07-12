@@ -164,7 +164,7 @@ func (a *Agent) handleNewSession(ctx context.Context, params json.RawMessage) (a
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, errorf(codeInvalidParams, "invalid session/new params: %v", err)
 	}
-	meta, err := a.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: a.mode})
+	meta, err := a.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: a.mode, Workdir: p.Cwd})
 	if err != nil {
 		return nil, errorf(codeInternalError, "create session: %v", err)
 	}

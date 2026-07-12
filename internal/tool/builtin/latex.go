@@ -61,7 +61,8 @@ func (t *latexBuildTool) Execute(ctx context.Context, input json.RawMessage) (to
 		args.Runs = 1
 	}
 
-	texAbs, err := resolvePath(t.root, args.Path)
+	root := effectiveRoot(ctx, t.root)
+	texAbs, err := resolvePath(root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -72,7 +73,7 @@ func (t *latexBuildTool) Execute(ctx context.Context, input json.RawMessage) (to
 	texDir := filepath.Dir(texAbs)
 	outDir := texDir
 	if args.OutputDir != "" {
-		outDir, err = resolvePath(t.root, args.OutputDir)
+		outDir, err = resolvePath(root, args.OutputDir)
 		if err != nil {
 			return tool.Result{}, err
 		}
@@ -125,7 +126,7 @@ func (t *latexBuildTool) Execute(ctx context.Context, input json.RawMessage) (to
 
 	// Derive workspace-relative PDF path for the summary.
 	base := strings.TrimSuffix(filepath.Base(texAbs), ".tex")
-	pdfRel, _ := filepath.Rel(t.root, filepath.Join(outDir, base+".pdf"))
+	pdfRel, _ := filepath.Rel(root, filepath.Join(outDir, base+".pdf"))
 
 	summary := parseLatexLog(lastLog, pdfRel, args.CheckOnly)
 	if runErr != nil && len(summary.errors) == 0 {
@@ -299,7 +300,7 @@ func (t *latexNewDocumentTool) Execute(ctx context.Context, input json.RawMessag
 		args.PageSize = "a4paper"
 	}
 
-	abs, err := resolvePath(t.root, args.Path)
+	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}

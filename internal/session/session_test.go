@@ -31,7 +31,7 @@ func TestLegacyBlobMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	sess, err := st.Create(context.Background(), "legacy", "sys", "build", "")
+	sess, err := st.Create(context.Background(), "legacy", "sys", "build", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestOpenAppliesPermissionHardening(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.Create(context.Background(), "hardening-check", "sys", "build", ""); err != nil {
+	if _, err := st.Create(context.Background(), "hardening-check", "sys", "build", "", ""); err != nil {
 		t.Fatalf("Create after Open: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "first", "be helpful", "build", "")
+	sess, err := st.Create(ctx, "first", "be helpful", "build", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -178,9 +178,58 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCreatePersistsWorkdir verifies a session's own working directory
+// (P25.1) round-trips through Create, Get, and List, and that leaving it
+// empty (the pre-P25.1 default) still round-trips as empty rather than some
+// other default.
+func TestCreatePersistsWorkdir(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	withWorkdir, err := st.Create(ctx, "with-workdir", "sys", "build", "", "/tmp/some-project")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	noWorkdir, err := st.Create(ctx, "no-workdir", "sys", "build", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := st.Get(ctx, withWorkdir.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Workdir != "/tmp/some-project" {
+		t.Errorf("Workdir = %q, want /tmp/some-project", got.Workdir)
+	}
+
+	got2, err := st.Get(ctx, noWorkdir.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got2.Workdir != "" {
+		t.Errorf("Workdir = %q, want empty", got2.Workdir)
+	}
+
+	list, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := make(map[string]string)
+	for _, m := range list {
+		found[m.ID] = m.Workdir
+	}
+	if found[withWorkdir.ID] != "/tmp/some-project" {
+		t.Errorf("List: Workdir for %s = %q, want /tmp/some-project", withWorkdir.ID, found[withWorkdir.ID])
+	}
+	if found[noWorkdir.ID] != "" {
+		t.Errorf("List: Workdir for %s = %q, want empty", noWorkdir.ID, found[noWorkdir.ID])
+	}
+}
+
 func TestCreatePersistsPersona(t *testing.T) {
 	store := newTestStore(t) // existing helper in this test file
-	s, err := store.Create(context.Background(), "t", "sys", "build", "security-architect")
+	s, err := store.Create(context.Background(), "t", "sys", "build", "security-architect", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,8 +245,8 @@ func TestCreatePersistsPersona(t *testing.T) {
 func TestListAndDelete(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	a, _ := st.Create(ctx, "a", "", "plan", "")
-	_, _ = st.Create(ctx, "b", "", "plan", "")
+	a, _ := st.Create(ctx, "a", "", "plan", "", "")
+	_, _ = st.Create(ctx, "b", "", "plan", "", "")
 
 	metas, err := st.List(ctx)
 	if err != nil {
@@ -226,7 +275,7 @@ func TestAppendTraces(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "traced", "sys", "build", "")
+	sess, err := st.Create(ctx, "traced", "sys", "build", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -283,7 +332,7 @@ func TestAppendMessagesIsIncremental(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "incremental", "sys", "build", "")
+	sess, err := st.Create(ctx, "incremental", "sys", "build", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -334,7 +383,7 @@ func TestSaveMessagesTruncates(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "truncate", "sys", "build", "")
+	sess, err := st.Create(ctx, "truncate", "sys", "build", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -382,7 +431,7 @@ func TestDeleteRemovesMessageAndTraceRows(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "del", "sys", "build", "")
+	sess, err := st.Create(ctx, "del", "sys", "build", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

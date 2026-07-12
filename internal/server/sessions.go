@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
 )
@@ -118,13 +120,62 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if system == "" {
 		system = p.System
 	}
-	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona)
+	workdir, werr := s.resolveSessionWorkdir(req.Workdir)
+	if werr != nil {
+		writeError(w, werr.status, werr.msg)
+		return
+	}
+	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona, workdir)
 	if err != nil {
 		s.logger.Error("create session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusCreated, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
+	if workdir != "" {
+		s.sessionWorkdirs.Store(sess.ID, workdir)
+	}
+	writeJSON(w, http.StatusCreated, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, Workdir: sess.Workdir, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
+}
+
+// workdirError pairs an HTTP status with a message for a rejected session
+// Workdir request, so handleCreateSession can report a 400 (malformed/
+// nonexistent path) or 403 (trust-boundary violation, P25.1) distinctly.
+type workdirError struct {
+	status int
+	msg    string
+}
+
+func (e *workdirError) Error() string { return e.msg }
+
+// resolveSessionWorkdir validates a client-supplied session Workdir (P25.1):
+// empty keeps today's behavior (the daemon's default workspace, via
+// workdirFor's fallback); otherwise it must resolve to an existing
+// directory and, on a remote-accessible daemon, fall within the trust
+// boundary workdirAllowed enforces. Logs once if the resolved sandbox
+// backend is OSBackend, whose write-confinement profile is fixed to the
+// daemon's own workspace at startup and won't extend to a different root
+// (a known limitation — see research/roadmap.md P25.1).
+func (s *Server) resolveSessionWorkdir(raw string) (string, *workdirError) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", &workdirError{http.StatusBadRequest, "invalid workdir"}
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return "", &workdirError{http.StatusBadRequest, "workdir does not exist or is not a directory"}
+	}
+	if !s.workdirAllowed(abs) {
+		return "", &workdirError{http.StatusForbidden, "workdir is not permitted for a remote-accessible daemon; add it to server.session_workdir_allowlist"}
+	}
+	if _, isOS := s.sandbox.(*sandbox.OSBackend); isOS && !withinRoot(s.workspace, abs) {
+		s.logger.Warn("session workdir differs from the daemon's workspace under the os sandbox backend; write confinement stays scoped to the daemon's own workspace, not this session's directory",
+			"workdir", abs, "daemon_workspace", s.workspace)
+	}
+	return abs, nil
 }
 
 func (s *Server) handleListTeammates(w http.ResponseWriter, _ *http.Request) {
@@ -483,7 +534,7 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 		// P3.4: git-native rollback — run `git reset --hard <sha>` before restoring
 		// snapshotted files so untracked changes and index state are also reset.
 		if req.GitRollback && cp.GitSHA != "" {
-			gitArgs := []string{"-C", s.workspace, "reset", "--hard", cp.GitSHA}
+			gitArgs := []string{"-C", s.workdirFor(id), "reset", "--hard", cp.GitSHA}
 			if out, err := execGitCmd(r.Context(), gitArgs...); err != nil {
 				s.logger.Warn("git rollback failed", "sha", cp.GitSHA, "out", out, "err", err)
 			} else {
@@ -592,7 +643,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	title := forkTitle(sess.Title)
-	forked, err := s.store.Create(r.Context(), title, sess.System, sess.Mode, sess.Persona)
+	forked, err := s.store.Create(r.Context(), title, sess.System, sess.Mode, sess.Persona, sess.Workdir)
 	if err != nil {
 		s.logger.Error("fork: create session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -782,6 +833,7 @@ func toMeta(m session.Meta) api.SessionMeta {
 		ID:           m.ID,
 		Title:        m.Title,
 		Mode:         m.Mode,
+		Workdir:      m.Workdir,
 		Model:        m.Model,
 		Background:   m.Background,
 		Archived:     m.Archived,

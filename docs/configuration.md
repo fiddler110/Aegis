@@ -153,6 +153,15 @@ permission:
   # Skip approval prompts for shell/execute calls even in build mode.
   auto_approve_exec: false
 
+  # auto_approve_exec: true combined with an unsandboxed local backend (the
+  # default sandbox.backend) means every model-issued shell command runs on
+  # the host with no approval and no isolation — the daemon refuses to start
+  # with that combination unless this is explicitly set to true. Configure a
+  # real sandbox (sandbox.backend: container or os) instead of setting this
+  # unless the daemon itself is already running inside an isolated
+  # environment (e.g. a CI container).
+  allow_unsandboxed_auto_exec: false
+
   # Fine-grained allow/deny rules evaluated before the mode gate.
   # Syntax: "allow <tool>(<pattern>)" or "deny <tool>(<pattern>)"
   # <tool>: tool name, capability alias (bash, write, read, network), or *
@@ -219,6 +228,15 @@ server:
   # bearer token with no rate limiting, so the daemon refuses to start on a
   # non-loopback address until this is explicitly acknowledged (FIND-08).
   allow_remote: false
+
+  # Bounds which directories a client may request as a session's working
+  # directory (P25.1) once allow_remote is set: the resolved path must be
+  # the daemon's own default workspace (or nested under it) or nested under
+  # one of these entries, else session creation is rejected. Ignored on the
+  # default loopback-only bind, where a client is already as trusted as a
+  # local shell user. Empty by default (no extra directories allowed beyond
+  # the daemon's own workspace).
+  session_workdir_allowlist: []
 
   # Optional transport encryption for client<->daemon traffic (FIND-32/
   # P24.18). Off by default: client<->daemon HTTP is plaintext, including the
@@ -413,6 +431,13 @@ sandbox:
   #               credentials); use "container" if you need read confinement too.
   # "container" — run inside a container (requires runtime)
   # "auto"      — detect available runtimes and pick the best one
+  #
+  # A container runtime name (docker, podman, wsl/wslc, apple) is also
+  # accepted here directly and is rewritten to backend: container + the
+  # matching runtime below (P25.2) — convenient, but the pair below is the
+  # canonical spelling. Any other value fails the daemon at startup with an
+  # error naming the offending value, rather than silently running
+  # unsandboxed (which is what happened before P25.2).
   backend: local
 
   # Force a specific runtime when backend=container or backend=auto:

@@ -205,7 +205,8 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// tool onto this session's own exposure state, not the daemon-wide
 	// registry every other session and persona shares.
 	sessionTools := s.sessionToolRegistry(id)
-	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools, sess.Model)
+	workdir := s.workdirFor(id)
+	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools, sess.Model, workdir)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
@@ -238,7 +239,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			snap = s.checkpoints.NewSnapshotter(cp.ID)
 			// P3.4: capture the HEAD commit SHA asynchronously so rollback can reset to it.
 			go func(cpID string) {
-				if sha := captureGitSHA(context.Background(), s.workspace); sha != "" {
+				if sha := captureGitSHA(context.Background(), workdir); sha != "" {
 					if err := s.checkpoints.SetGitSHA(context.Background(), cpID, sha); err != nil {
 						s.logger.Warn("set checkpoint git sha", "checkpoint", cpID, "err", err)
 					}
@@ -250,7 +251,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	content := make([]provider.Block, 0, 1+len(imageBlocks))
 	if strings.TrimSpace(req.Text) != "" {
 		// P5.5: expand @path#L10-40 file mentions to inline file excerpts.
-		content = append(content, provider.TextBlock{Text: expandFileMentions(req.Text, s.workspace)})
+		content = append(content, provider.TextBlock{Text: expandFileMentions(req.Text, workdir)})
 	}
 	content = append(content, imageBlocks...)
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: content})

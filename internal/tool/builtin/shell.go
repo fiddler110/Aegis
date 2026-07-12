@@ -64,13 +64,14 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if args.TimeoutSec > 0 {
 		timeout = time.Duration(min(args.TimeoutSec, maxTimeoutSec)) * time.Second
 	}
+	root := effectiveRoot(ctx, t.root)
 
 	if args.Background {
 		if t.mgr == nil {
 			return tool.Result{Content: "background jobs are not available in this context", IsError: true}, nil
 		}
 		tk, err := t.mgr.Start(task.Spec{Kind: "shell", Title: truncateTitle(args.Command)}, func(jobCtx context.Context, emit func(string)) (string, error) {
-			return "", t.execStreaming(jobCtx, args.Command, timeout, emit)
+			return "", t.execStreaming(jobCtx, root, args.Command, timeout, emit)
 		})
 		if err != nil {
 			return tool.Result{Content: "shell: " + err.Error(), IsError: true}, nil
@@ -79,7 +80,7 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	}
 
 	// Foreground execution.
-	text, err := t.exec(ctx, args.Command, timeout)
+	text, err := t.exec(ctx, root, args.Command, timeout)
 	const maxOutput = 200 << 10 // 200 KiB — prevent context flooding on large outputs
 	if len(text) > maxOutput {
 		text = text[:maxOutput] + fmt.Sprintf("\n[...%d bytes truncated — use background:true and task_output for large commands]", len(text)-maxOutput)
@@ -91,17 +92,17 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 }
 
 // exec runs a command synchronously, delegating to the sandbox backend if set.
-func (t *shellTool) exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
+func (t *shellTool) exec(ctx context.Context, root, command string, timeout time.Duration) (string, error) {
 	if t.sb != nil {
-		return t.sb.Exec(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout})
+		return t.sb.Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout})
 	}
-	return sandbox.NewLocalBackend().Exec(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout})
+	return sandbox.NewLocalBackend().Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout})
 }
 
 // execStreaming runs a command with streaming output.
-func (t *shellTool) execStreaming(ctx context.Context, command string, timeout time.Duration, emit func(string)) error {
+func (t *shellTool) execStreaming(ctx context.Context, root, command string, timeout time.Duration, emit func(string)) error {
 	if t.sb != nil {
-		return t.sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout}, emit)
+		return t.sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout}, emit)
 	}
-	return sandbox.NewLocalBackend().ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: t.root, Timeout: timeout}, emit)
+	return sandbox.NewLocalBackend().ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout}, emit)
 }

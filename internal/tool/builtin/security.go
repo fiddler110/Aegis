@@ -32,14 +32,15 @@ func (t *securityScanTool) Execute(ctx context.Context, input json.RawMessage) (
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
+	root := effectiveRoot(ctx, t.root)
 	if args.Image != "" {
 		report := security.ScanImage(ctx, args.Image, security.DefaultImageScanners(), t.opts)
-		security.WriteReportArtifact(t.root, "image", report)
+		security.WriteReportArtifact(root, "image", report)
 		return tool.Result{Content: report.Format()}, nil
 	}
-	dir := t.root
+	dir := root
 	if args.Path != "" {
-		resolved, err := resolvePath(t.root, args.Path)
+		resolved, err := resolvePath(root, args.Path)
 		if err != nil {
 			return tool.Result{}, err
 		}
