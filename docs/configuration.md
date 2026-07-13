@@ -249,15 +249,17 @@ server:
   # the daemon's own workspace).
   session_workdir_allowlist: []
 
-  # Optional transport encryption for client<->daemon traffic (FIND-32/
-  # P24.18). Off by default: client<->daemon HTTP is plaintext, including the
-  # bearer token and full conversation content — fine given the loopback-only
-  # default above, but observable by another local account on a shared host
-  # with packet-capture privilege. This is defense-in-depth, not a required
-  # control for the common single-user case.
+  # Transport encryption for client<->daemon traffic (FIND-32/P24.18). On by
+  # default since P27.5/FIND-13: without it, client<->daemon HTTP is
+  # plaintext, including the bearer token and full conversation content —
+  # fine against off-host attackers given the loopback-only default above,
+  # but observable by another local account on a shared host with
+  # packet-capture privilege. Set enabled: false (or AEGIS_SERVER_TLS_ENABLED
+  # =false) to opt back out, e.g. in a container/CI environment where the
+  # extra cert/handshake overhead isn't worth it and the host isn't shared.
   #
-  # When enabled with no cert_file/key_file set, the daemon generates a
-  # self-signed ECDSA P-256 certificate on first start and persists it as
+  # With no cert_file/key_file set, the daemon generates a self-signed
+  # ECDSA P-256 certificate on first start and persists it as
   # <data_dir>/daemon.crt and daemon.key (reused across restarts, same
   # convention as daemon.token). Every CLI client (`aegis`, `aegis ui`, `aegis
   # sessions`, `aegis acp`, `aegis mcp-serve`, ...) reads daemon.crt and pins
@@ -273,24 +275,27 @@ server:
   # account, which can already read daemon.token — and, with TLS enabled,
   # daemon.key — directly off disk.
   tls:
-    enabled: false
+    enabled: true
     cert_file: ""  # optional operator-supplied cert; auto-generated if empty
     key_file: ""   # optional operator-supplied key; auto-generated if empty
 
-  # 0 = unlimited (default). Caps how many message-turn runs may be actively
-  # executing across ALL sessions at once. A request past the cap is rejected
-  # immediately (429) rather than queued. The per-session serialization the
-  # daemon already does (at most one active run per session) doesn't bound
-  # total concurrency across sessions — set this when exposing the daemon to
-  # a lower-trust caller that can create many sessions, e.g. `aegis mcp-serve`.
-  max_concurrent_runs: 0
+  # Defaults to 10 (P27.12/FIND-14). Caps how many message-turn runs may be
+  # actively executing across ALL sessions at once. A request past the cap is
+  # rejected immediately (429) rather than queued. The per-session
+  # serialization the daemon already does (at most one active run per
+  # session) doesn't bound total concurrency across sessions — this exists to
+  # bound a lower-trust caller that can create many sessions, e.g. `aegis
+  # mcp-serve`. Only top-level HTTP-driven runs count against it; in-process
+  # sub-agents spawned by the `agent`/swarm tool don't. 0 = unlimited.
+  max_concurrent_runs: 10
 
-  # 0 = unlimited (default). Aborts a single run once it has been active this
-  # many seconds, the same clean way an interrupted request is handled.
-  # cost.max_tokens_per_run/budget_usd are the primary spend guardrails; this
-  # is a coarser wall-clock backstop for a run that never trips those (e.g. a
-  # local model stuck in a near-zero-cost tool-call loop).
-  max_run_duration_sec: 0
+  # Defaults to 1800/30 minutes (P27.12/FIND-14). Aborts a single run once it
+  # has been active this many seconds, the same clean way an interrupted
+  # request is handled. cost.max_tokens_per_run/budget_usd are the primary
+  # spend guardrails; this is a coarser wall-clock backstop for a run that
+  # never trips those (e.g. a local model stuck in a near-zero-cost tool-call
+  # loop). 0 = unlimited.
+  max_run_duration_sec: 1800
 
   # Per-connection cap on queued-but-not-yet-flushed SSE events. If a
   # consumer (TUI, web UI, or an mcp-serve client) reads slower than the
@@ -395,11 +400,13 @@ search:
   base_url: ""
 
   # Opts web_fetch/web_search output into the heuristic prompt-injection
-  # scan, mirroring the per-server mcp[].scan_output toggle (FIND-04). Off by
-  # default. The untrusted-content provenance marker is always applied to
-  # fetched/searched content regardless of this setting — see
-  # docs/mcp-trust-boundary.md.
-  scan_output: false
+  # scan, mirroring the per-server mcp[].scan_output toggle (FIND-04). On by
+  # default since P27.13/FIND-12 — a best-effort heuristic (invisible
+  # characters, base64-encoded payloads) that only adds a visible warning on
+  # a hit, never blocks or mutates content. The untrusted-content provenance
+  # marker is always applied to fetched/searched content regardless of this
+  # setting — see docs/mcp-trust-boundary.md.
+  scan_output: true
 
 
 # ── Background session notifications ──────────────────────────────────────────
@@ -620,11 +627,15 @@ lsp:
 # per remote tool name when a server exposes a known mix (e.g. a read-only
 # `search` tool alongside a `write_file` tool).
 #
-# `scan_output` (default false) opts a server's tool/resource/prompt output
-# into a heuristic prompt-injection scan before it reaches the model — for
-# MCP sources you haven't fully vetted. Every server's output is always
-# wrapped with a provenance marker regardless of this flag. See
-# docs/mcp-trust-boundary.md.
+# `scan_output` (default true, P27.13/FIND-12) opts a server's
+# tool/resource/prompt output into a heuristic prompt-injection scan before
+# it reaches the model — a best-effort check (invisible characters,
+# base64-encoded payloads) that only adds a visible warning on a hit, never
+# blocks or mutates content, so it's safe to leave on even for well-vetted
+# servers. Every server's output is always wrapped with a provenance marker
+# regardless of this flag. Set `scan_output: false` per server to opt out
+# (e.g. a high-volume trusted server where the extra scan pass isn't worth
+# it). See docs/mcp-trust-boundary.md.
 #
 # `scan_arguments` (default false) is the outbound mirror (FIND-12):
 # tool-call arguments are model-constructed and may carry anything the model
@@ -656,7 +667,7 @@ mcp:
     command: ""
     auth: "$MY_MCP_TOKEN"   # $VAR references expanded from environment / .aegis/.env
     # capability omitted → defaults to "execute", so calls hit the Ask gate in build mode
-    scan_output: true        # not fully vetted — flag suspicious tool output in-context
+    # scan_output omitted → defaults to true; not fully vetted, so leave it on
     scan_arguments: true     # not fully vetted — warn if credential-shaped data heads its way
 
 
@@ -890,17 +901,19 @@ default_persona: developer
 
 Or from the CLI: `aegis persona use developer` (add `--global` to set the user-wide default instead).
 
-### Bound daemon resources when exposing sessions to another harness (P21.5)
+### Bound daemon resources when exposing sessions to another harness (P21.5 / P27.12)
 
 `aegis mcp-serve` lets another MCP-speaking harness create sessions and drive
-runs through this daemon. Set a global concurrency ceiling and a wall-clock
-run timeout so a misbehaving or hostile caller can't fan out unbounded
-sessions/runs and exhaust the host:
+runs through this daemon. `server.max_concurrent_runs` (default 10) and
+`server.max_run_duration_sec` (default 1800/30 minutes) already give every
+daemon a global concurrency ceiling and a wall-clock run timeout out of the
+box, so a misbehaving or hostile caller can't fan out unbounded sessions/runs
+and exhaust the host. Tighten or loosen them for your own deployment:
 
 ```yaml
 server:
-  max_concurrent_runs: 10    # refuse (429) runs past this many active at once
-  max_run_duration_sec: 1800 # abort any single run past 30 minutes
+  max_concurrent_runs: 4     # refuse (429) runs past this many active at once
+  max_run_duration_sec: 900  # abort any single run past 15 minutes
 ```
 
 ### Enable a built-in skill for this project

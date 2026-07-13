@@ -139,10 +139,15 @@ type SearchConfig struct {
 	APIKey   string `koanf:"api_key"`  // may reference $ENV; expanded on load
 	BaseURL  string `koanf:"base_url"` // required for searxng self-host
 	// ScanOutput opts web_fetch/web_search output into the same heuristic
-	// prompt-injection scan used for opted-in MCP servers (FIND-04). Off by
-	// default — a best-effort check with false positives. The untrusted-
-	// content provenance marker on fetched/search output is always applied
-	// regardless of this setting.
+	// prompt-injection scan used for MCP servers (FIND-04/FIND-12). On by
+	// default since P27.13 — it's a best-effort heuristic (invisible/
+	// zero-width characters, base64-encoded payloads) that never blocks or
+	// mutates content on a hit, only adds a visible "[SECURITY WARNING]"
+	// note inside the existing untrusted-content wrapper (see
+	// internal/trust.Wrap), so a false positive costs nothing beyond an
+	// extra line of context; a false negative costs nothing beyond the
+	// status quo. The untrusted-content provenance marker on fetched/search
+	// output is always applied regardless of this setting.
 	ScanOutput bool `koanf:"scan_output"`
 }
 
@@ -336,11 +341,19 @@ type MCPServerConfig struct {
 	// that expose a known mix of tools with different risk levels.
 	ToolCapabilities map[string]string `koanf:"tool_capabilities"`
 	// ScanOutput opts this server's output into a heuristic prompt-injection
-	// scan before it reaches the model. Off by default (P21.6) — a
-	// best-effort check with false positives, meant for MCP sources you
-	// haven't explicitly trusted. The output's provenance marker noting it
-	// came from an external MCP server is always applied regardless.
-	ScanOutput bool `koanf:"scan_output"`
+	// scan before it reaches the model (P21.6). On by default since
+	// P27.13/FIND-12 — a best-effort heuristic (invisible/zero-width
+	// characters, base64-encoded payloads) that never blocks or mutates
+	// content on a hit, only adds a visible warning inside the existing
+	// untrusted-content wrapper, so a false positive is low-cost. A *bool
+	// (not bool), mirroring SecurityToolConfig.Enabled, so "unset" (use the
+	// default) is distinguishable from an explicit false when merging config
+	// layers — a plain bool field has no koanf-level default mechanism for
+	// elements of a list like MCP (unlike top-level scalar keys, which
+	// defaults() covers). Read via ScanOutputEnabled(), never this field
+	// directly. The output's provenance marker noting it came from an
+	// external MCP server is always applied regardless.
+	ScanOutput *bool `koanf:"scan_output"`
 	// ScanArguments opts outbound tool-call arguments bound for this server
 	// into a heuristic secret-pattern check before they are forwarded
 	// (P24.14, FIND-12). Tool-call arguments are model-constructed and may
@@ -350,6 +363,13 @@ type MCPServerConfig struct {
 	// the call is never blocked or mutated. The outbound mirror of
 	// ScanOutput.
 	ScanArguments bool `koanf:"scan_arguments"`
+}
+
+// ScanOutputEnabled reports whether c's output goes through the heuristic
+// prompt-injection scan (default true, P27.13/FIND-12 — see ScanOutput's
+// doc comment).
+func (c MCPServerConfig) ScanOutputEnabled() bool {
+	return c.ScanOutput == nil || *c.ScanOutput
 }
 
 // ProviderConfig selects and configures the model provider.
@@ -475,11 +495,14 @@ type ServerConfig struct {
 	// filesystem oracle far beyond its own project.
 	SessionWorkdirAllowlist []string `koanf:"session_workdir_allowlist"`
 
-	// TLS optionally encrypts client<->daemon traffic (FIND-32/P24.18). Off
-	// by default: the default loopback-only bind (AllowRemote above) already
-	// limits exposure to other local accounts on the same host with
-	// packet-capture privilege, so this is defense-in-depth rather than a
-	// required control for the common single-user case — see
+	// TLS encrypts client<->daemon traffic (FIND-32/P24.18). On by default
+	// since P27.5/FIND-13: the loopback-only bind (AllowRemote above) already
+	// limits exposure to off-host attackers, but plaintext HTTP still leaves
+	// the bearer token and full conversation content readable to another
+	// local account on a shared host with packet-capture privilege — a real,
+	// if narrow, gap defense-in-depth closes at effectively no cost (the
+	// pinned self-signed cert is auto-generated and every in-repo client
+	// already pins it transparently via client.NewFromConfig). See
 	// ServerTLSConfig's doc comment for exactly what enabling it does.
 	TLS ServerTLSConfig `koanf:"tls"`
 
@@ -490,16 +513,25 @@ type ServerConfig struct {
 	// sessionSems gate only prevents two runs racing on the *same* session,
 	// so with no global cap a caller that fans out many sessions (e.g. a
 	// hostile or misbehaving `aegis mcp-serve` client) could still exhaust
-	// host resources. 0 = unlimited (default).
+	// host resources. Defaults to 10 (P27.12/FIND-14): only top-level
+	// HTTP-driven runs consume a slot here — sub-agents spawned in-process by
+	// the `agent`/swarm tool run directly through the engine, not through
+	// this HTTP path, so a normal single-user TUI/web-UI session (which
+	// drives at most one or two runs at a time) never gets close to this
+	// ceiling; it exists to bound a lower-trust caller like `aegis
+	// mcp-serve`. 0 = unlimited; set explicitly to opt back out.
 	MaxConcurrentRuns int `koanf:"max_concurrent_runs"`
 
 	// MaxRunDurationSec aborts a single run once it has been active this many
-	// seconds, the same way an interrupted/cancelled request is handled. 0 =
-	// unlimited (default) — cost.max_tokens_per_run/budget_usd are the
-	// primary spend guardrails; this is a coarser wall-clock backstop for a
-	// run that never trips those (e.g. a local model stuck making tool calls
-	// with near-zero token cost, or a hostile caller trying to hold a run,
-	// and the session/global concurrency slot it occupies, open forever).
+	// seconds, the same way an interrupted/cancelled request is handled.
+	// cost.max_tokens_per_run/budget_usd are the primary spend guardrails;
+	// this is a coarser wall-clock backstop for a run that never trips those
+	// (e.g. a local model stuck making tool calls with near-zero token cost,
+	// or a hostile caller trying to hold a run, and the session/global
+	// concurrency slot it occupies, open forever). Defaults to 1800 (30
+	// minutes, P27.12/FIND-14) — generous enough for a long agentic run with
+	// many tool calls, short enough to reclaim a wedged slot well within a
+	// working session. 0 = unlimited; set explicitly to opt back out.
 	MaxRunDurationSec int `koanf:"max_run_duration_sec"`
 
 	// SSEBufferSize bounds how many not-yet-flushed SSE events are queued for
@@ -517,15 +549,14 @@ type ServerConfig struct {
 // used when ServerConfig.SSEBufferSize is left at 0 (P21.5).
 const DefaultSSEBufferSize = 256
 
-// ServerTLSConfig configures optional transport encryption for the daemon's
-// HTTP API (FIND-32/P24.18). client<->daemon traffic is plain HTTP over
-// loopback by default; this is Tier 3/low-severity because loopback binding
-// already keeps it off the network, but another local account on a shared
-// host with packet-capture privilege could still observe the bearer token
-// and full conversation content. Enabling TLS closes that gap; it does not
-// protect against Host/OS-level compromise of the same account, which can
-// already read daemon.token (and, with TLS enabled, daemon.key) directly off
-// disk — see docs/configuration.md.
+// ServerTLSConfig configures transport encryption for the daemon's HTTP API
+// (FIND-32/P24.18). Loopback binding already keeps client<->daemon traffic
+// off the network, but plain HTTP still leaves the bearer token and full
+// conversation content observable to another local account on a shared host
+// with packet-capture privilege. Enabled defaults to true since P27.5/
+// FIND-13 to close that gap; it does not protect against Host/OS-level
+// compromise of the same account, which can already read daemon.token (and,
+// with TLS enabled, daemon.key) directly off disk — see docs/configuration.md.
 //
 // When Enabled is true and CertFile/KeyFile are left empty, the daemon
 // generates a self-signed ECDSA P-256 certificate on first start and persists
@@ -534,11 +565,16 @@ const DefaultSSEBufferSize = 256
 // client must be told to trust that specific certificate (see
 // client.WithTLS); this is certificate pinning to a file that never leaves
 // the local machine, not verification against a public CA or hostname, so
-// there is no browser/OS trust store involved and no renewal workflow.
+// there is no browser/OS trust store involved and no renewal workflow. Every
+// in-repo client goes through client.NewFromConfig, which wires this up
+// automatically — a browser opening `aegis ui` is the one consumer that
+// isn't pinned and will show a self-signed-certificate warning, which the
+// CLI calls out explicitly when TLS is on (see internal/cli/ui.go).
 type ServerTLSConfig struct {
 	// Enabled turns on TLS for the daemon's HTTP listener and switches
-	// client.NewFromConfig to https:// with the pinned cert. Off by default —
-	// no new files are written and no scheme changes when this is unset.
+	// client.NewFromConfig to https:// with the pinned cert. On by default
+	// (P27.5/FIND-13); set to false to keep the pre-P27.5 plain-HTTP
+	// behavior (no cert/key files written, no scheme change).
 	Enabled bool `koanf:"enabled"`
 
 	// CertFile/KeyFile let an operator supply their own certificate instead
@@ -571,16 +607,21 @@ type SecurityConfig struct {
 	EgressThenWrite  bool     `koanf:"egress_then_write"` // require approval for writes after network egress
 	NetworkAllowList []string `koanf:"network_allowlist"` // restrict network calls to these domains (empty = no restriction)
 
-	// RedactSecrets opts in to running a read-capability tool's output
-	// through the same gitleaks-backed secret detection used for PR
-	// title/body scanning (security.ScanText, P24.6 / FIND-13) before it's
-	// appended to the conversation sent to the configured model provider
-	// (P24.12 / FIND-09). Any detected secret pattern is masked as
-	// "[REDACTED:<rule>]". Off by default: it's a best-effort, gitleaks-only
-	// pass (needs the binary on PATH, only catches its known secret
-	// patterns) and shells out per read-tool call, adding latency — local
-	// Ollama usage, which never sends file content off the machine at all,
-	// remains the primary mitigation for sensitive codebases. See
+	// RedactSecrets runs a read-capability tool's output through the same
+	// gitleaks-backed secret detection used for PR title/body scanning
+	// (security.ScanText, P24.6 / FIND-13) before it's appended to the
+	// conversation sent to the configured model provider (P24.12 /
+	// FIND-09). Any detected secret pattern is masked as
+	// "[REDACTED:<rule>]". Defaults to true (P27.3/FIND-05): sending file/
+	// conversation content carrying an unredacted secret to a cloud model
+	// provider is a real exposure with no other default control. It
+	// remains a best-effort, gitleaks-only pass (needs the binary on PATH,
+	// only catches its known secret patterns, fails open if the binary is
+	// missing) and shells out per read-tool call, adding latency — set
+	// redact_secrets: false only when that cost is unacceptable and
+	// content is otherwise known-safe, or prefer local Ollama usage, which
+	// never sends file content off the machine at all and remains the
+	// strongest mitigation for genuinely sensitive codebases. See
 	// docs/providers.md "Data Exposure & Redaction".
 	RedactSecrets bool `koanf:"redact_secrets"`
 
@@ -649,6 +690,15 @@ type DASTConfig struct {
 	// target's declared identity can't be silently changed by whatever it
 	// happens to resolve to at scan time (ZAP does its own resolution inside
 	// the container, outside Aegis's control).
+	//
+	// Sourced from user/global config only (P27.9/FIND-11): Load()
+	// unconditionally overwrites this field with the project-excluded
+	// baseline after unmarshalling, so a project .aegis/config.yaml can
+	// never widen it — not even once the directory is `aegis trust`-ed,
+	// unlike the P27.1 trust gate's other frozen-until-trusted keys. An
+	// active scanner authorized against arbitrary Internet hosts via a
+	// cloned repo's config is a materially different risk than that repo
+	// merely widening its own permission mode.
 	AllowedTargets []string `koanf:"allowed_targets"`
 	// AllowActive gates active/api scan modes (which send real attack
 	// payloads, not just passive observation) behind an explicit one-time
@@ -753,9 +803,15 @@ func defaults() map[string]any {
 		"provider.max_retries":        4,
 		"provider.prompt_profile":     "auto",
 		"server.addr":                 "127.0.0.1:4127",
-		"server.max_concurrent_runs":  0,
-		"server.max_run_duration_sec": 0,
+		// Conservative non-zero caps by default (P27.12/FIND-14) — see
+		// ServerConfig's doc comments for why these values are safe for a
+		// normal single-user session while still bounding a runaway/DoS case.
+		"server.max_concurrent_runs":  10,
+		"server.max_run_duration_sec": 1800,
 		"server.sse_buffer_size":      DefaultSSEBufferSize,
+		// Pinned-cert loopback TLS on by default (P27.5/FIND-13) — see
+		// ServerTLSConfig's doc comment.
+		"server.tls.enabled": true,
 		// "build" is the intentional default: the agent can read and write
 		// files freely, but shell/execute calls still prompt for approval
 		// (or are denied non-interactively). Use "plan" for read-only
@@ -777,6 +833,7 @@ func defaults() map[string]any {
 		"sandbox.image":                "ubuntu:22.04",
 		"sandbox.network":              false,
 		"security.egress_then_write":   false,
+		"security.redact_secrets":      true,
 		"security.default_method":      "auto",
 		"security.dast.allow_active":   false,
 		"security.debate.threat_model": false,
@@ -795,6 +852,10 @@ func defaults() map[string]any {
 		"embeddings.base_url":          "http://localhost:11434",
 		"mcp_server.auto_approve":      false,
 		"mcp_server.default_mode":      "plan",
+		// Heuristic invisible-char/base64 prompt-injection scan of
+		// web_fetch/web_search output on by default (P27.13/FIND-12) — see
+		// SearchConfig.ScanOutput's doc comment.
+		"search.scan_output": true,
 	}
 }
 
@@ -891,6 +952,16 @@ var envSections = map[string]bool{
 
 func envKeyCallback(s string) string {
 	s = strings.ToLower(strings.TrimPrefix(s, EnvPrefix))
+	// server.tls.* is the one config surface nested two levels deep that's
+	// also documented as AEGIS_*-overridable (AEGIS_SERVER_TLS_ENABLED, used
+	// to opt back out of P27.5's now-on-by-default TLS). The generic
+	// single-split heuristic below only ever inserts one dot
+	// (section.field), which can't reach a field nested under a nested
+	// struct — special-case its prefix so the env override actually reaches
+	// ServerTLSConfig's fields instead of silently landing on an unused key.
+	if rest, ok := strings.CutPrefix(s, "server_tls_"); ok && rest != "" {
+		return "server.tls." + rest
+	}
 	if idx := strings.Index(s, "_"); idx > 0 {
 		if envSections[s[:idx]] {
 			return s[:idx] + "." + s[idx+1:]
@@ -963,6 +1034,18 @@ func Load() (*Config, error) {
 	// itself defeat the trust gate meant to catch it; only the trusted
 	// (project-inclusive) config's Normalize error is fatal.
 	_ = baseCfg.Sandbox.Normalize()
+
+	// P27.9/FIND-11: recon_scan/dast_scan's target-authorization allowlist is
+	// sourced from the user/global baseline only, unconditionally — never
+	// from the project layer, trusted or not. This is stronger than the
+	// P27.1 trust gate above (which lets a *trusted* project widen
+	// permission/sandbox/mcp/hooks): a hostile or merely careless project
+	// .aegis/config.yaml widening this specific list would authorize an
+	// active scanner (recon_scan/dast_scan) against arbitrary Internet
+	// hosts, a different and broader risk shape than the project's own
+	// permission mode, so it stays out of the project's control even after
+	// `aegis trust`.
+	cfg.Security.DAST.AllowedTargets = baseCfg.Security.DAST.AllowedTargets
 
 	cfg.Provider.APIKey = ProviderAPIKey(cfg.Provider.Default)
 

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // clearEnv unsets the given env vars for the duration of the test.
@@ -75,16 +77,107 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.MCPServer.DefaultMode != "plan" {
 		t.Errorf("mcp_server.default_mode = %q, want %q", cfg.MCPServer.DefaultMode, "plan")
 	}
-	// P21.5: unlimited/off by default so existing single-user deployments see
-	// no behavior change; sse_buffer_size falls back to a sane built-in cap.
-	if cfg.Server.MaxConcurrentRuns != 0 {
-		t.Errorf("server.max_concurrent_runs = %d, want 0 (unlimited)", cfg.Server.MaxConcurrentRuns)
+	// P27.12/FIND-14: conservative non-zero caps by default — generous for a
+	// normal single-user session, still bounding a runaway/DoS case.
+	if cfg.Server.MaxConcurrentRuns != 10 {
+		t.Errorf("server.max_concurrent_runs = %d, want 10 (P27.12/FIND-14)", cfg.Server.MaxConcurrentRuns)
 	}
-	if cfg.Server.MaxRunDurationSec != 0 {
-		t.Errorf("server.max_run_duration_sec = %d, want 0 (unlimited)", cfg.Server.MaxRunDurationSec)
+	if cfg.Server.MaxRunDurationSec != 1800 {
+		t.Errorf("server.max_run_duration_sec = %d, want 1800 (P27.12/FIND-14)", cfg.Server.MaxRunDurationSec)
 	}
 	if cfg.Server.SSEBufferSize != DefaultSSEBufferSize {
 		t.Errorf("server.sse_buffer_size = %d, want %d", cfg.Server.SSEBufferSize, DefaultSSEBufferSize)
+	}
+	// P27.3/FIND-05: on by default — read-tool/conversation content reaches
+	// a cloud provider unredacted otherwise, with no other default control.
+	if !cfg.Security.RedactSecrets {
+		t.Error("security.redact_secrets default = false, want true (P27.3/FIND-05)")
+	}
+	// P27.5/FIND-13: pinned-cert loopback TLS on by default — plain HTTP
+	// otherwise leaves the bearer token and conversation content readable to
+	// another local account on a shared host with packet-capture privilege.
+	if !cfg.Server.TLS.Enabled {
+		t.Error("server.tls.enabled default = false, want true (P27.5/FIND-13)")
+	}
+	// P27.13/FIND-12: heuristic prompt-injection scan of web_fetch/web_search
+	// output on by default.
+	if !cfg.Search.ScanOutput {
+		t.Error("search.scan_output default = false, want true (P27.13/FIND-12)")
+	}
+}
+
+// TestMCPServerConfigScanOutputEnabledDefaultsTrue is the P27.13/FIND-12
+// regression for the per-server MCP scan_output toggle: unlike top-level
+// scalar keys, defaults() has no mechanism to apply a default to elements of
+// a list, so ScanOutput is a *bool (mirroring SecurityToolConfig.Enabled)
+// read via ScanOutputEnabled() rather than the field directly. An MCP server
+// declared with no scan_output key must still scan by default; an explicit
+// `scan_output: false` must still be honored.
+func TestMCPServerConfigScanOutputEnabledDefaultsTrue(t *testing.T) {
+	unset := MCPServerConfig{}
+	if !unset.ScanOutputEnabled() {
+		t.Error("ScanOutputEnabled() with unset ScanOutput = false, want true (default on)")
+	}
+	off := false
+	explicitFalse := MCPServerConfig{ScanOutput: &off}
+	if explicitFalse.ScanOutputEnabled() {
+		t.Error("ScanOutputEnabled() with explicit scan_output: false = true, want false")
+	}
+	on := true
+	explicitTrue := MCPServerConfig{ScanOutput: &on}
+	if !explicitTrue.ScanOutputEnabled() {
+		t.Error("ScanOutputEnabled() with explicit scan_output: true = false, want true")
+	}
+}
+
+// TestMCPServerScanOutputFromYAML confirms the *bool default flows correctly
+// through a real config.Load() round trip, not just direct struct
+// construction: a server with no scan_output key in YAML defaults to
+// enabled; a server with an explicit `scan_output: false` stays disabled.
+func TestMCPServerScanOutputFromYAML(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	writeProjectConfig(t, `
+mcp:
+  - name: unspecified
+    command: nc
+  - name: explicitly-off
+    command: nc
+    scan_output: false
+  - name: explicitly-on
+    command: nc
+    scan_output: true
+`)
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// mcp.* is a P27.1 trust-gated key; trust this directory so the project
+	// config's mcp: block actually applies for this test.
+	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.MCP) != 3 {
+		t.Fatalf("cfg.MCP = %d servers, want 3", len(cfg.MCP))
+	}
+	byName := map[string]MCPServerConfig{}
+	for _, m := range cfg.MCP {
+		byName[m.Name] = m
+	}
+	if !byName["unspecified"].ScanOutputEnabled() {
+		t.Error(`"unspecified" (no scan_output key) should default to scanning enabled`)
+	}
+	if byName["explicitly-off"].ScanOutputEnabled() {
+		t.Error(`"explicitly-off" (scan_output: false) should stay disabled`)
+	}
+	if !byName["explicitly-on"].ScanOutputEnabled() {
+		t.Error(`"explicitly-on" (scan_output: true) should be enabled`)
 	}
 }
 
@@ -108,6 +201,27 @@ func TestEnvOverrideServerLimits(t *testing.T) {
 	}
 	if cfg.Server.SSEBufferSize != 64 {
 		t.Errorf("sse_buffer_size = %d, want 64", cfg.Server.SSEBufferSize)
+	}
+}
+
+// TestEnvOverrideServerTLS is the P27.5 regression for the documented
+// AEGIS_SERVER_TLS_ENABLED escape hatch (see docs/configuration.md's env var
+// table): with server.tls.enabled now defaulting to true, an operator who
+// needs plain HTTP (e.g. a container/CI environment with no config file)
+// must be able to opt back out via env, not just by hand-editing YAML.
+// envKeyCallback's generic single-split heuristic can't reach a field nested
+// two levels deep (server.tls.enabled), so this exercises the server_tls_
+// special-case explicitly rather than relying on the generic path.
+func TestEnvOverrideServerTLS(t *testing.T) {
+	redirectConfigDir(t)
+	t.Setenv("AEGIS_SERVER_TLS_ENABLED", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.TLS.Enabled {
+		t.Error("AEGIS_SERVER_TLS_ENABLED=false did not disable TLS")
 	}
 }
 
