@@ -50,6 +50,7 @@ import (
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
+	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 const maxRequestBody = 10 << 20 // 10 MiB
@@ -85,10 +86,16 @@ type Server struct {
 	repoMap     string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
 	repoMapMu   sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
 	personaDirs []string          // directories rescanned by refreshPersonas for hot reload
-	workspace   string
-	logger      *slog.Logger
-	http        *http.Server
-	authToken   string // shared secret for API authentication
+	// personaProjectDir/personaProjectTrusted gate control-field trust for
+	// project-sourced persona files (P27.7/FIND-09) — see persona.LoadFromDirs.
+	// Computed once at startup from the workspace-trust store, matching how
+	// config.Load()'s own workspace-trust gate is only re-evaluated on restart.
+	personaProjectDir     string
+	personaProjectTrusted bool
+	workspace             string
+	logger                *slog.Logger
+	http                  *http.Server
+	authToken             string // shared secret for API authentication
 
 	// tlsCert is the daemon's TLS certificate/key pair, loaded or generated in
 	// New when server.tls.enabled is true (FIND-32/P24.18); nil when TLS is
@@ -545,8 +552,20 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// Load custom persona templates from user/project directories. Refresh
 	// (rather than LoadFromDirs) primes the change-detection signature so
 	// later refreshPersonas calls are cheap no-ops until a file changes.
+	//
+	// personaProjectDir/personaProjectTrusted gate the project-sourced
+	// persona directory's control fields (mode/tools/rules/output_guard) on
+	// the same workspace-trust decision applyWorkspaceTrust/`aegis trust`
+	// already governs for project config.yaml (P27.7/FIND-09), rather than
+	// applying an untrusted repo's persona frontmatter as real settings with
+	// no check. Queried directly against the trust store (not
+	// cfg.WorkspaceTrust.Trusted) because that field is forced true whenever
+	// no project config.yaml exists — a repo could ship only a persona file
+	// with no config.yaml and still need gating.
 	s.personaDirs = persona.DiscoverDirs(cfg.DataDir, cwd)
-	if n, _ := persona.Refresh(s.personaDirs...); n > 0 {
+	s.personaProjectDir = persona.ProjectDir(cwd)
+	s.personaProjectTrusted = workspacetrust.Open(config.WorkspaceTrustStorePath()).IsTrusted(cwd)
+	if n, _ := persona.Refresh(s.personaProjectDir, s.personaProjectTrusted, s.personaDirs...); n > 0 {
 		logger.Info("loaded custom personas", "count", n)
 	}
 

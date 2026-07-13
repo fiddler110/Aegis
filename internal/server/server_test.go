@@ -1018,7 +1018,7 @@ func TestPersonaHotReload(t *testing.T) {
 	dir := t.TempDir()
 	srv.personaDirs = []string{dir}
 	// Reset the package-global loaded persona set after the test.
-	t.Cleanup(func() { persona.Refresh() })
+	t.Cleanup(func() { persona.Refresh("", false) })
 
 	ts := httptest.NewServer(srv.Handler())
 	defer func() { ts.Close(); store.Close() }()

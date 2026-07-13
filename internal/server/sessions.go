@@ -94,7 +94,7 @@ func filterPersonaRules(rules []permission.Rule, p persona.Persona, logger *slog
 // makes this a cheap no-op when nothing changed, so persona-touching handlers
 // call it on every request.
 func (s *Server) refreshPersonas() {
-	if n, changed := persona.Refresh(s.personaDirs...); changed {
+	if n, changed := persona.Refresh(s.personaProjectDir, s.personaProjectTrusted, s.personaDirs...); changed {
 		s.logger.Info("reloaded persona files", "count", n)
 	}
 }
