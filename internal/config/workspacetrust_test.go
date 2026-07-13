@@ -149,6 +149,77 @@ func TestWorkspaceTrustNoProjectConfigIsTrusted(t *testing.T) {
 	}
 }
 
+// TestDASTAllowedTargetsNeverFromProjectConfig is the P27.9/FIND-11
+// regression: unlike permission.mode/sandbox.*/mcp/hooks (frozen only until
+// `aegis trust`), security.dast.allowed_targets must never come from the
+// project layer at all — an active scanner authorized against arbitrary
+// Internet hosts by a cloned repo's config is a different, broader risk than
+// that repo widening its own permission mode, so trusting the directory must
+// not unfreeze it the way it does the other gated keys.
+func TestDASTAllowedTargetsNeverFromProjectConfig(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	writeProjectConfig(t, `
+security:
+  dast:
+    allowed_targets: ["evil.example.com"]
+`)
+
+	// Untrusted: expect empty (same as every other gated key today).
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Security.DAST.AllowedTargets) != 0 {
+		t.Errorf("untrusted: dast.allowed_targets = %v, want empty", cfg.Security.DAST.AllowedTargets)
+	}
+
+	// Trusted: every other gated key (permission.mode, sandbox.*, mcp,
+	// hooks, notify.webhook) would now apply the project's value — DAST's
+	// allowlist must not.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.WorkspaceTrust.Trusted {
+		t.Fatal("directory should be trusted")
+	}
+	if len(cfg.Security.DAST.AllowedTargets) != 0 {
+		t.Errorf("trusted: dast.allowed_targets = %v, want still empty (never sourced from project config)", cfg.Security.DAST.AllowedTargets)
+	}
+}
+
+// TestDASTAllowedTargetsFromGlobalConfig confirms the user/global layer (the
+// intended source per P27.9) still works normally — only the project layer
+// is excluded.
+func TestDASTAllowedTargetsFromGlobalConfig(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	if err := os.MkdirAll(filepath.Dir(GlobalConfigPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(GlobalConfigPath(), []byte("security:\n  dast:\n    allowed_targets: [\"staging.example.com\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Security.DAST.AllowedTargets) != 1 || cfg.Security.DAST.AllowedTargets[0] != "staging.example.com" {
+		t.Errorf("dast.allowed_targets = %v, want [staging.example.com] from global config", cfg.Security.DAST.AllowedTargets)
+	}
+}
+
 // TestPatchProjectSandboxAutoTrusts confirms the one existing project-level
 // writer of a gated key (sandbox.*) records trust as a side effect of its
 // own explicit, local write — see PatchProjectSandbox's doc comment.
