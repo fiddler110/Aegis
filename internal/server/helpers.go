@@ -243,19 +243,20 @@ func cronShellRunner(sb sandbox.Backend, defaultCwd string) func(ctx context.Con
 }
 
 // newCronRunFunc builds the cron.RunFunc that fires a due job: it applies the
-// fire-time permission-mode gate (FIND-03/P24.3), runs the job's command via
+// fire-time permission check (permCheck), runs the job's command via
 // runCronCmd, and — independent of both — persists a durable cron_runs audit
 // record for every fire attempt: gate-blocked, executed-and-failed, or
 // executed-and-succeeded (FIND-34/P24.9). Extracted from Server.New's
 // construction so the fire-time logic (permission gate + run recording) can
-// be unit tested without standing up a full daemon. mode is a thunk rather
-// than a fixed value so each fire re-reads the daemon's *current* permission
-// mode, not whatever it was when the scheduler was constructed.
+// be unit tested without standing up a full daemon. permCheck is a thunk
+// rather than a fixed decision so each fire re-reads the daemon's *current*
+// permission mode/rules, not whatever they were when the scheduler was
+// constructed.
 func newCronRunFunc(
 	cronStore *cron.Store,
 	taskMgr *task.Manager,
 	runCronCmd func(ctx context.Context, command, dir string, emit func(string)) error,
-	mode func() permission.Mode,
+	permCheck func(ctx context.Context, j cron.Job) (bool, string),
 	logger *slog.Logger,
 ) cron.RunFunc {
 	return func(j cron.Job) {
@@ -287,26 +288,20 @@ func newCronRunFunc(
 
 			// Cron jobs fire unattended, with no session and no human present
 			// to resolve an approval prompt — so route the fire-time decision
-			// through the same mode-based policy interactive shell calls use
-			// instead of executing unconditionally. Ask-tier jobs need an
-			// explicit per-job auto_approve opt-in since nothing can answer
-			// an interactive prompt here.
-			m := mode()
-			switch (permission.Policy{Mode: m}).Decide(tool.CapExecute) {
-			case permission.Deny:
-				reason := fmt.Sprintf("cron job %q blocked: shell execution is not allowed in %s permission mode", j.Title, m)
-				logger.Warn("cron: job blocked by permission mode", "job", j.ID, "mode", m)
-				capture(reason)
+			// through the identical permission gate stack interactive shell
+			// calls get (mode + text allow/deny rules + contextual
+			// egress/network policy), not just the coarse mode check
+			// (P27.15/FIND-08 — extends FIND-03/P24.3's mode-only gate). A
+			// job's auto_approve opt-in resolves any Ask-tier decision within
+			// that stack since nothing can answer an interactive prompt here;
+			// an explicit deny rule or a Deny-mode decision still blocks
+			// regardless of auto_approve.
+			if ok, reason := permCheck(ctx, j); !ok {
+				blocked := fmt.Sprintf("cron job %q blocked: %s", j.Title, reason)
+				logger.Warn("cron: job blocked by permission check", "job", j.ID, "reason", reason)
+				capture(blocked)
 				recordRun("blocked")
-				return "", errors.New(reason)
-			case permission.Ask:
-				if !j.AutoApprove {
-					reason := fmt.Sprintf("cron job %q blocked: needs approval in %s mode and no one is present to grant it — set auto_approve on the job to allow unattended execution", j.Title, m)
-					logger.Warn("cron: job needs approval, auto_approve not set", "job", j.ID, "mode", m)
-					capture(reason)
-					recordRun("blocked")
-					return "", errors.New(reason)
-				}
+				return "", errors.New(blocked)
 			}
 			runErr := runCronCmd(ctx, j.Command, j.Workdir, capture)
 			status := "ok"
@@ -317,4 +312,36 @@ func newCronRunFunc(
 			return "", runErr
 		})
 	}
+}
+
+// cronPermCheck is the fire-time permission check for cron jobs
+// (P27.15/FIND-08): it runs the job's command through the exact same gate
+// stack buildGate assembles for every interactive engine run — mode, text
+// allow/deny rules, and the contextual egress/network policy — evaluated
+// against the real "shell" tool and the job's command, instead of the
+// coarse mode-only check FIND-03/P24.3 originally added. No persona is
+// passed (empty persona.Persona{}, matching sub-agent runs) since a cron job
+// has no persona of its own. The approver resolves any Ask-tier decision
+// from AutoApprove{} when the job opted in via auto_approve, or AutoDeny{}
+// otherwise — mirroring the pre-P27.15 behavior where auto_approve was the
+// only way past the mode-level Ask, now extended uniformly to every layer of
+// the stack (e.g. the egress-then-write contextual rule) rather than just
+// the top one.
+func (s *Server) cronPermCheck(ctx context.Context, j cron.Job) (bool, string) {
+	approver := permission.Approver(permission.AutoDeny{})
+	if j.AutoApprove {
+		approver = permission.AutoApprove{}
+	}
+	gate, _ := s.buildGate(s.cfg.Permission.Mode, approver, persona.Persona{})
+	shellTool, ok := s.tools.Get("shell")
+	if !ok {
+		return false, "shell tool is not registered"
+	}
+	input, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: j.Command})
+	if err != nil {
+		return false, "failed to encode command for permission check: " + err.Error()
+	}
+	return gate.Check(ctx, shellTool, input)
 }

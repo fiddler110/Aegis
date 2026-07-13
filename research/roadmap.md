@@ -1,8 +1,38 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-13 — **P27.14** (FIND-04, Tier 3, first item of the P27 threat model's
-Tier 3) shipped: the daemon (`internal/server/server.go`) now logs a persistent startup `WARN`
-recommending `sandbox.backend: os`/`container` any time the effective backend is the unconfined
+**Last updated:** 2026-07-13 — **P27.15** (FIND-08, Tier 3, CVSS 5.6) shipped: cron fire-time gating
+now applies the full permission stack — text allow/deny rules, then the contextual egress/network
+policy, then the coarse mode check — instead of just the mode check FIND-03/P24.3 originally added.
+`internal/server/helpers.go`'s `newCronRunFunc` no longer calls `permission.Policy.Decide` directly;
+it takes a `permCheck` thunk, and the new `Server.cronPermCheck` builds the exact same gate
+`buildGate` assembles for every interactive engine run (mode → contextual → rules, empty persona)
+and checks it against the real `"shell"` tool with the job's command as input. A job's `auto_approve`
+opt-in resolves any Ask-tier decision anywhere in that stack (mirroring pre-P27.15 behavior, now
+extended uniformly instead of only covering the top mode-level Ask); an explicit `deny` rule or a
+Deny-mode decision still blocks regardless of `auto_approve`, and an explicit `allow` rule lets a job
+fire unattended without needing `auto_approve` at all — matching how rules already override the mode
+gate for interactive tool calls. The `mode func() permission.Mode` construction previously happened
+before the `*Server` existed in `New()`'s constructor order (the scheduler is built early so the
+cron_* tools can be registered with it); resolved by predeclaring `var s *Server` and closing over it
+in the `permCheck` thunk, which is only invoked at actual fire time — long after `New()` finishes
+building `s` — rather than restructuring construction order or adding a scheduler-internal setter.
+
+Also new: a human-facing review view for persisted cron jobs (the roadmap item's "surface persisted
+auto-approve jobs in a review view"), since jobs were previously visible only to the model via the
+`cron_list` tool. `GET /cron/jobs` (`api.CronJobInfo`, `internal/server/sessions.go`), a
+`Client.ListCronJobs` method, and a new `aegis cron list` CLI command (`--auto-approve-only` to
+filter) — flags each `auto_approve` job inline as `[AUTO_APPROVE — fires unattended, bypassing
+interactive approval]`. Docs updated (`docs/tools-reference.md`). New tests:
+`TestNewCronRunFuncBlockedByDenyRuleEvenInAutoMode`, `TestNewCronRunFuncAllowedByRuleEvenInPlanMode`,
+`TestServerCronPermCheck`, `TestHandleListCronJobs` (`internal/server/cron_test.go`); the 6
+pre-existing `newCronRunFunc` tests were updated to the new `permCheck`-thunk signature via a
+`cronPermCheckFor` test helper rather than dropped. `go build ./...`, `go vet ./...`, and the full
+`go test ./...` pass clean. Next up: 3 remaining Tier 3 items, P27.16 first — see
+[Priority Order](#priority-order).
+
+Before that, same day (2026-07-13): **P27.14** (FIND-04, Tier 3, first item of the P27 threat
+model's Tier 3) shipped: the daemon (`internal/server/server.go`) now logs a persistent startup
+`WARN` recommending `sandbox.backend: os`/`container` any time the effective backend is the unconfined
 `local` one and permission mode isn't `plan` (i.e. shell/execute tool calls are reachable at all) —
 previously the default `build`-mode + local-backend combination, the most common install shape, got
 no signal at all; only the sharper `auto`-mode and `auto_approve_exec` cases did. `aegis doctor`'s
@@ -104,19 +134,19 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** P27.15–P27.18 (2026-07-13 threat-model findings, Tier 3 — see
-[Priority Order](#priority-order)). Tiers 1 and 2 (**P27.1–P27.13**) and Tier 3's **P27.14** shipped
-2026-07-13. Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20** (see
-[Parked](#open-work--parked-tier-4)).
+**Open items:** P27.16–P27.18 (2026-07-13 threat-model findings, Tier 3 — see
+[Priority Order](#priority-order)). Tiers 1 and 2 (**P27.1–P27.13**) and Tier 3's **P27.14–P27.15**
+shipped 2026-07-13. Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus
+**P27.19**/**P27.20** (see [Parked](#open-work--parked-tier-4)).
 
-**Next session:** continue Tier 3 — 4 remaining larger/sequence-dependent items, **P27.15** first
-(apply the full permission stack at cron fire time). These are less parallelizable than Tier 2 was:
-P27.15 (cron permission stack) and P27.17 (swarm budget propagation) each touch a single cohesive
-subsystem rather than splitting cleanly across packages, so evaluate per-item before assuming
-multi-agent parallelism helps. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change
-touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the
-standalone preflight companion for the same misconfiguration classes (now including a workspace
-trust check, P27.1, and the local-sandbox recommendation, P27.14).
+**Next session:** continue Tier 3 — 3 remaining larger/sequence-dependent items, **P27.16** first
+(pre-write guard check / quarantine on FAIL). These are less parallelizable than Tier 2 was: P27.17
+(swarm budget propagation) touches a single cohesive subsystem rather than splitting cleanly across
+packages, so evaluate per-item before assuming multi-agent parallelism helps. Re-run
+`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the engine/server/sandbox/guard/
+swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone preflight companion for the same
+misconfiguration classes (now including a workspace trust check, P27.1, and the local-sandbox
+recommendation, P27.14).
 
 ---
 
@@ -137,10 +167,8 @@ DAST-target sourcing both ended up folding into (or reusing the machinery of) th
 P27.1 built, as anticipated; P27.6's context/memory-file wrapping used the separate `trust.Wrap`
 provenance mechanism instead, matching the P24.4 precedent for persona/skill bodies.
 
-**Tier 3** (4 open items — real value, larger or sequence-dependent; **P27.14** shipped 2026-07-13,
-see [releases.md](releases.md#latest-changes)):
-- **P27.15 (FIND-08)** — Apply the full permission stack (mode + text rules + contextual gate) at
-  cron fire time, not just the coarse mode check.
+**Tier 3** (3 open items — real value, larger or sequence-dependent; **P27.14–P27.15** shipped
+2026-07-13, see [releases.md](releases.md#latest-changes)):
 - **P27.16 (FIND-15)** — Move (or add) a guard check before irreversible high-risk writes, or
   quarantine/roll back a file written under a subsequent guard FAIL rather than only retrying.
 - **P27.17 (FIND-16)** — Propagate a shared/proportional budget ceiling into detached swarm spawns
@@ -176,14 +204,11 @@ halves (quick ACL fix vs. optional encryption) are split across tiers.
 
 #### P27.14 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes))
 
-### P27.15 — FIND-08: apply the full permission stack at cron fire time
-
-Priority: Tier 3 · Effort: M, security, Moderate (CVSS 5.6)
-
-Cron fire-time gating re-checks only the coarse permission mode, not the text allow/deny rules or
-contextual egress gate applied to interactive tool calls — extends P24.3's mode-only fire-time
-gate to the full stack. Require a separately-confirmed flag for `auto_approve` jobs; surface
-persisted auto-approve jobs in a review view.
+#### P27.15 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes)) — scope note: the
+existing per-job `auto_approve` field already was the "separately-confirmed flag" the finding
+called for (explicit, boolean, distinct from the daemon's ambient permission mode); rather than add
+a second flag, its scope was extended in place to resolve Ask-tier decisions across the whole gate
+stack instead of only the mode-level one, and `aegis cron list` was added as the review view.
 
 ### P27.16 — FIND-15: pre-write guard check / quarantine on FAIL
 

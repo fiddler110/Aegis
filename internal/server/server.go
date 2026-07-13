@@ -418,7 +418,14 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
-	// Cron scheduler: fires due jobs as background tasks.
+	// Cron scheduler: fires due jobs as background tasks. s is declared here
+	// (nil) and assigned below by newWithDeps — the RunFunc closure only
+	// reads it at actual fire time, long after New returns, so capturing the
+	// not-yet-initialized variable is safe (P27.15/FIND-08: the fire-time
+	// permission check needs the fully assembled gate stack, which in turn
+	// needs the tool registry and parsed permission rules that don't exist
+	// until later in this constructor).
+	var s *Server
 	cronStore, err := cron.NewStore(store.DB())
 	if err != nil {
 		store.Close()
@@ -426,7 +433,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	runCronCmd := cronShellRunner(sb, cwd)
 	cronRun := newCronRunFunc(cronStore, taskMgr, runCronCmd,
-		func() permission.Mode { return permission.ParseMode(cfg.Permission.Mode) }, logger)
+		func(ctx context.Context, j cron.Job) (bool, string) { return s.cronPermCheck(ctx, j) }, logger)
 	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
 
 	// Shared team task list for agent-team coordination (P5.1); reuses the
@@ -543,7 +550,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		}
 	}
 
-	s := newWithDeps(cfg, logger, store, adapter, reg)
+	s = newWithDeps(cfg, logger, store, adapter, reg)
 	// Parse text-based permission rules once at startup. A malformed rule is
 	// logged and skipped rather than aborting the daemon.
 	if len(cfg.Permission.Rules) > 0 {
@@ -964,6 +971,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/unarchive", s.handleUnarchiveSession)
 	mux.HandleFunc("POST /sessions/prune", s.handlePruneSessions)
 	mux.HandleFunc("GET /runs", s.handleListRuns)
+	mux.HandleFunc("GET /cron/jobs", s.handleListCronJobs)
 	mux.HandleFunc("GET /teammates", s.handleListTeammates)
 	mux.HandleFunc("GET /commands", s.handleListCommands)
 	mux.HandleFunc("GET /memory", s.handleGetMemory)

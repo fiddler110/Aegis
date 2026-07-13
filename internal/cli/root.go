@@ -200,6 +200,7 @@ Use "aegis <command> --help" for details on any command below.`,
 	cmd.AddCommand(group(newSessionsCmd(), groupSession))
 	cmd.AddCommand(group(newBGCmd(), groupSession)) // P3.2: background session management
 	cmd.AddCommand(group(newRunsCmd(), groupSession))
+	cmd.AddCommand(group(newCronCmd(), groupSession))
 	cmd.AddCommand(group(newParallelCmd(), groupSession))
 	cmd.AddCommand(group(newCompareCmd(), groupSession))
 	cmd.AddCommand(group(newWorktreeCmd(), groupSession))
