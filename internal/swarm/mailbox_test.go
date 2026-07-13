@@ -3,6 +3,7 @@ package swarm
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -184,5 +185,84 @@ func TestMailboxMissingDirIsEmpty(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Errorf("expected no messages, got %d", len(msgs))
+	}
+}
+
+// TestMarkReadWritesProcessedFileOwnerOnly is the FIND-20/P27.11 regression:
+// the processed/ copy MarkRead writes used to be world-readable (0o644),
+// unlike every other message file in the mailbox (0o600 via Send, 0o700 via
+// the MkdirAll calls). On POSIX the mode bit itself is authoritative, so
+// assert it directly; on Windows the mode bit is not meaningful (see
+// fsguard's package doc), so this just confirms MarkRead still succeeds —
+// the ACL side of the hardening is covered by
+// TestOpenMailboxHardensRootDirectory below.
+func TestMarkReadWritesProcessedFileOwnerOnly(t *testing.T) {
+	root := t.TempDir()
+	id := NewIdentity("worker", "team-a", "sess-1")
+	mb, err := OpenMailbox(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mb.Send(Message{Type: MsgResult, Sender: id.AgentID, Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := mb.ReadAll(true)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("ReadAll: %v (n=%d)", err, len(msgs))
+	}
+	if err := mb.MarkRead(msgs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	processed, err := os.ReadDir(mb.processedDir())
+	if err != nil {
+		t.Fatalf("processed dir: %v", err)
+	}
+	if len(processed) != 1 {
+		t.Fatalf("processed dir has %d entries, want 1", len(processed))
+	}
+	info, err := processed[0].Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("processed file mode = %o, want 0600 (was 0644 before P27.11)", perm)
+		}
+	}
+}
+
+// TestOpenMailboxHardensRootDirectory is the directory-ACL half of
+// FIND-20/P27.11: OpenMailbox must apply fsguard.RestrictToOwner to the
+// mailbox root (the `teams/` tree), not just leave it to the MkdirAll mode
+// bit that Windows ignores. This is a smoke test in the same spirit as
+// session.TestOpenAppliesPermissionHardening and
+// config.TestLoadDotEnvAppliesPermissionHardening: the ACL mechanics
+// themselves are covered by internal/fsguard's own tests, so this only
+// confirms the call is wired in, doesn't error, and doesn't block repeated
+// opens of an already-existing root (e.g. one teammate opening its mailbox
+// after another already created the tree).
+func TestOpenMailboxHardensRootDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	root := MailboxRoot(dataDir)
+
+	id1 := NewIdentity("worker-1", "team-a", "sess-1")
+	if _, err := OpenMailbox(root, id1); err != nil {
+		t.Fatalf("OpenMailbox (first, creates root): %v", err)
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		t.Fatalf("mailbox root %s not created: %v", root, err)
+	}
+
+	// A second teammate opening its own mailbox re-hardens the
+	// already-existing root; this must not error or make the root
+	// inaccessible to the process that owns it.
+	id2 := NewIdentity("worker-2", "team-a", "sess-1")
+	mb2, err := OpenMailbox(root, id2)
+	if err != nil {
+		t.Fatalf("OpenMailbox (second, root pre-exists): %v", err)
+	}
+	if err := mb2.Send(Message{Type: MsgResult, Sender: id2.AgentID, Text: "hi"}); err != nil {
+		t.Fatalf("Send after root hardening: %v", err)
 	}
 }
