@@ -9,7 +9,43 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-13 — **P27.15** (FIND-08, Tier 3, CVSS 5.6) shipped: apply the full
+**Last updated:** 2026-07-13 — **P27.18** (FIND-19, Tier 3, CVSS 5.5) shipped: confine the `os`
+sandbox backend's file reads to the workspace plus a toolchain allowlist, instead of the entire host
+filesystem. Shipped ahead of the still-open P27.16/P27.17 (both Tier 3, but this one was
+self-contained and didn't depend on either).
+
+Seatbelt's profile was `(allow default)` with only `file-write*` denied outside the workspace, and
+bwrap's was `--ro-bind / /` — read-only-mounting the whole host root — so a compromised shell command
+running under `sandbox.backend: os` could still read (and, unless `network: false` was also set,
+exfiltrate) `~/.ssh`, cloud credential files, or any other host file, even though writes were already
+confined. `internal/sandbox/os_sandbox.go`: `seatbeltProfile` now adds a `(deny file-read*)` +
+`(allow file-read* ...)` pair mirroring the existing write-confinement rules — narrower than the
+`(allow default)` a from-scratch lockdown would need, since it leaves every other default-allowed
+operation (process exec, mach lookups, sysctl reads, signals) untouched and only tightens
+`file-read*`/`file-write*`; `bwrapArgs` drops `--ro-bind / /` entirely and instead `--ro-bind`s only
+the allowlisted paths, so an unlisted read gets `ENOENT` rather than the real host file. The allowlist
+(`defaultOSReadPaths`) is OS-specific system dirs (`/usr`, `/bin`, `/lib`, `/etc`, `/opt`, etc.) plus
+common per-language toolchain caches under `$HOME` (`go`, `.cargo`, `.rustup`, `.npm`, `.nvm`,
+`.pyenv`, `.gem`, `.bundle`, `.local`, `.cache`) — chosen so ordinary builds keep working — and
+deliberately omits credential directories (`~/.ssh`, `~/.aws`, `~/.config`, `~/.kube`, `~/.docker`,
+`~/.gnupg`): those are simply never bound/allowed, not detected-and-blocked, so they're unreadable
+from inside the sandbox regardless of what's in them. `mergeReadPaths` dedupes the built-in list
+against the new `sandbox.os_extra_read_paths` config field (`config.SandboxConfig.OSExtraReadPaths`,
+threaded through `NewOSBackend`'s new `extraReadPaths` param) and drops any entry that doesn't exist
+on the host, since bwrap fails to bind a missing source and a nonexistent seatbelt subpath is a
+silent no-op either way. The network-egress-deny-by-default half of this finding needed no change:
+`sandbox.network` already defaults to `false` and `NewOSBackend`'s `denyNet` is already `!allowNetwork`.
+
+This remains an allowlist, not a hard boundary the way write-confinement is — a toolchain cache
+directory that happens to also hold a stray credential file would still be readable, and the
+allowlist has to stay broad enough to cover real toolchains. Docs updated to stop describing the `os`
+backend's reads as fully unconfined (`docs/configuration.md`, `docs/security_scan.md`'s security
+properties table and "when to use" guidance). New/updated tests: `TestSeatbeltProfile` and
+`TestBwrapArgs` (`internal/sandbox/os_sandbox_test.go`) extended to assert the read-path allowlist
+entries and the absence of `--ro-bind / /`; new `TestMergeReadPaths`. `go build ./...`, `go vet
+./...`, and the full `go test ./...` pass clean.
+
+Before that, same day (2026-07-13): **P27.15** (FIND-08, Tier 3, CVSS 5.6) shipped: apply the full
 permission stack, not just the coarse mode check, at cron fire time.
 
 Cron fire-time gating (FIND-03/P24.3) previously re-checked only the coarse permission mode via

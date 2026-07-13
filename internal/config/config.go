@@ -216,6 +216,13 @@ type SandboxConfig struct {
 	// .aegis/.env for MCP server auth or gateway headers that the shell tool
 	// has no legitimate reason to read.
 	StripEnv []string `koanf:"strip_env"`
+	// OSExtraReadPaths names additional host paths the "os" backend
+	// (seatbelt/bwrap) may read from, on top of the workspace and the
+	// built-in toolchain defaults (FIND-19/P27.18) — see
+	// sandbox.defaultOSReadPaths. Use this when a project's build needs a
+	// toolchain installed somewhere non-standard. Each entry that doesn't
+	// exist on the host is silently skipped.
+	OSExtraReadPaths []string `koanf:"os_extra_read_paths"`
 }
 
 // sandboxBackendAliases maps the container-runtime names CLAUDE.md/the docs
