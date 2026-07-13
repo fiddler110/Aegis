@@ -10,30 +10,51 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// ProjectDir returns the project-level persona directory for projectRoot
+// (".aegis/personas"), the directory whose files are gated by workspace
+// trust (P27.7/FIND-09) — as opposed to the user/global directory, which is
+// operator-authored and always fully trusted.
+func ProjectDir(projectRoot string) string {
+	return filepath.Join(projectRoot, ".aegis", "personas")
+}
+
 // DiscoverDirs returns the standard directories searched for persona files:
 // user-global first, project-local second (project overrides global).
 func DiscoverDirs(dataDir, projectRoot string) []string {
 	return []string{
 		filepath.Join(dataDir, "personas"),
-		filepath.Join(projectRoot, ".aegis", "personas"),
+		ProjectDir(projectRoot),
 	}
 }
 
 // LoadFromDirs scans directories for *.md persona files and registers each.
-// Later directories override earlier ones, and file personas override built-ins
-// of the same name. Returns the number of personas loaded.
-func LoadFromDirs(dirs ...string) int {
+// Later directories override earlier ones, and file personas override
+// built-ins of the same name.
+//
+// projectDir, when non-empty, marks which of dirs is the project-level
+// persona directory (see ProjectDir/DiscoverDirs). Personas loaded from it
+// have their control fields — mode, tools, rules, output_guard — honored
+// only when projectTrusted is true (P27.7/FIND-09): a cloned repository can
+// plant a `.aegis/personas/foo.md` with `output_guard: none` and
+// `mode: auto` to silently disable guardrails, so those fields are ignored
+// (falling back to persona/session defaults) until the operator explicitly
+// trusts the workspace (`aegis trust`). Personas loaded from any other
+// directory (user/global, or when projectDir is "") are unaffected — the
+// system-prompt body still gets the untrusted-provenance wrap (P24.4)
+// regardless. Returns the number of personas loaded.
+func LoadFromDirs(projectDir string, projectTrusted bool, dirs ...string) int {
 	count := 0
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
+		honorControlFields := dir != projectDir || projectTrusted
 		for _, e := range entries {
 			if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".md") {
 				continue
 			}
-			p, err := parsePersonaFile(filepath.Join(dir, e.Name()))
+			p, err := parsePersonaFile(filepath.Join(dir, e.Name()), honorControlFields)
 			if err != nil {
 				continue
 			}
@@ -50,7 +71,13 @@ func LoadFromDirs(dirs ...string) int {
 // short-circuits the rescan when nothing changed, making it cheap enough to
 // call on every persona list or switch. Returns the number of file personas
 // now loaded and whether the set was rebuilt.
-func Refresh(dirs ...string) (int, bool) {
+//
+// projectDir/projectTrusted gate control-field trust exactly as documented on
+// LoadFromDirs (P27.7/FIND-09). Callers pass a fixed value for the lifetime
+// of the process (the workspace-trust decision is only re-evaluated on
+// restart, matching how config.Load()'s own workspace-trust gate behaves),
+// so it plays no part in the change-detection signature below.
+func Refresh(projectDir string, projectTrusted bool, dirs ...string) (int, bool) {
 	sig := dirSignature(dirs)
 
 	mu.RLock()
@@ -68,11 +95,12 @@ func Refresh(dirs ...string) (int, bool) {
 		if err != nil {
 			continue
 		}
+		honorControlFields := dir != projectDir || projectTrusted
 		for _, e := range entries {
 			if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".md") {
 				continue
 			}
-			p, err := parsePersonaFile(filepath.Join(dir, e.Name()))
+			p, err := parsePersonaFile(filepath.Join(dir, e.Name()), honorControlFields)
 			if err != nil {
 				continue
 			}
@@ -133,13 +161,13 @@ type frontmatter struct {
 	OutputGuard yaml.Node `yaml:"output_guard"`
 }
 
-func parsePersonaFile(path string) (Persona, error) {
+func parsePersonaFile(path string, honorControlFields bool) (Persona, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Persona{}, err
 	}
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	p, err := parsePersonaBytes(name, data)
+	p, err := parsePersonaBytes(name, data, honorControlFields)
 	if err != nil {
 		return Persona{}, err
 	}
@@ -170,7 +198,15 @@ func parsePersonaFile(path string) (Persona, error) {
 // parsePersonaBytes parses a persona's *.md content (YAML frontmatter + body)
 // into a Persona. The caller sets Loaded/Path since those differ between
 // disk-loaded custom personas and embedded built-ins.
-func parsePersonaBytes(name string, data []byte) (Persona, error) {
+//
+// honorControlFields gates mode/tools/rules/output_guard (P27.7/FIND-09):
+// when false, those frontmatter fields are dropped so the persona falls back
+// to persona/session defaults for them — the persona's description, model
+// choice, and system-prompt body (separately wrapped as untrusted, P24.4)
+// are unaffected either way. Model is deliberately not gated here: it only
+// selects among models the operator already permitted, not a permission or
+// guardrail change.
+func parsePersonaBytes(name string, data []byte, honorControlFields bool) (Persona, error) {
 	fmText, body := splitFrontmatter(string(data))
 	var fm frontmatter
 	if fmText != "" {
@@ -178,7 +214,7 @@ func parsePersonaBytes(name string, data []byte) (Persona, error) {
 			return Persona{}, err
 		}
 	}
-	return Persona{
+	p := Persona{
 		Name:        name,
 		Description: fm.Description,
 		System:      strings.TrimSpace(body),
@@ -187,7 +223,14 @@ func parsePersonaBytes(name string, data []byte) (Persona, error) {
 		Tools:       fm.Tools,
 		Rules:       fm.Rules,
 		Guard:       parseGuard(fm.OutputGuard),
-	}, nil
+	}
+	if !honorControlFields {
+		p.Mode = ""
+		p.Tools = nil
+		p.Rules = nil
+		p.Guard = nil
+	}
+	return p, nil
 }
 
 // parseGuard interprets the output_guard node: a scalar "none"/"false" disables
