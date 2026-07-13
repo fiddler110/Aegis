@@ -249,15 +249,17 @@ server:
   # the daemon's own workspace).
   session_workdir_allowlist: []
 
-  # Optional transport encryption for client<->daemon traffic (FIND-32/
-  # P24.18). Off by default: client<->daemon HTTP is plaintext, including the
-  # bearer token and full conversation content — fine given the loopback-only
-  # default above, but observable by another local account on a shared host
-  # with packet-capture privilege. This is defense-in-depth, not a required
-  # control for the common single-user case.
+  # Transport encryption for client<->daemon traffic (FIND-32/P24.18). On by
+  # default since P27.5/FIND-13: without it, client<->daemon HTTP is
+  # plaintext, including the bearer token and full conversation content —
+  # fine against off-host attackers given the loopback-only default above,
+  # but observable by another local account on a shared host with
+  # packet-capture privilege. Set enabled: false (or AEGIS_SERVER_TLS_ENABLED
+  # =false) to opt back out, e.g. in a container/CI environment where the
+  # extra cert/handshake overhead isn't worth it and the host isn't shared.
   #
-  # When enabled with no cert_file/key_file set, the daemon generates a
-  # self-signed ECDSA P-256 certificate on first start and persists it as
+  # With no cert_file/key_file set, the daemon generates a self-signed
+  # ECDSA P-256 certificate on first start and persists it as
   # <data_dir>/daemon.crt and daemon.key (reused across restarts, same
   # convention as daemon.token). Every CLI client (`aegis`, `aegis ui`, `aegis
   # sessions`, `aegis acp`, `aegis mcp-serve`, ...) reads daemon.crt and pins
@@ -273,7 +275,7 @@ server:
   # account, which can already read daemon.token — and, with TLS enabled,
   # daemon.key — directly off disk.
   tls:
-    enabled: false
+    enabled: true
     cert_file: ""  # optional operator-supplied cert; auto-generated if empty
     key_file: ""   # optional operator-supplied key; auto-generated if empty
 

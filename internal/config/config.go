@@ -475,11 +475,14 @@ type ServerConfig struct {
 	// filesystem oracle far beyond its own project.
 	SessionWorkdirAllowlist []string `koanf:"session_workdir_allowlist"`
 
-	// TLS optionally encrypts client<->daemon traffic (FIND-32/P24.18). Off
-	// by default: the default loopback-only bind (AllowRemote above) already
-	// limits exposure to other local accounts on the same host with
-	// packet-capture privilege, so this is defense-in-depth rather than a
-	// required control for the common single-user case — see
+	// TLS encrypts client<->daemon traffic (FIND-32/P24.18). On by default
+	// since P27.5/FIND-13: the loopback-only bind (AllowRemote above) already
+	// limits exposure to off-host attackers, but plaintext HTTP still leaves
+	// the bearer token and full conversation content readable to another
+	// local account on a shared host with packet-capture privilege — a real,
+	// if narrow, gap defense-in-depth closes at effectively no cost (the
+	// pinned self-signed cert is auto-generated and every in-repo client
+	// already pins it transparently via client.NewFromConfig). See
 	// ServerTLSConfig's doc comment for exactly what enabling it does.
 	TLS ServerTLSConfig `koanf:"tls"`
 
@@ -517,15 +520,14 @@ type ServerConfig struct {
 // used when ServerConfig.SSEBufferSize is left at 0 (P21.5).
 const DefaultSSEBufferSize = 256
 
-// ServerTLSConfig configures optional transport encryption for the daemon's
-// HTTP API (FIND-32/P24.18). client<->daemon traffic is plain HTTP over
-// loopback by default; this is Tier 3/low-severity because loopback binding
-// already keeps it off the network, but another local account on a shared
-// host with packet-capture privilege could still observe the bearer token
-// and full conversation content. Enabling TLS closes that gap; it does not
-// protect against Host/OS-level compromise of the same account, which can
-// already read daemon.token (and, with TLS enabled, daemon.key) directly off
-// disk — see docs/configuration.md.
+// ServerTLSConfig configures transport encryption for the daemon's HTTP API
+// (FIND-32/P24.18). Loopback binding already keeps client<->daemon traffic
+// off the network, but plain HTTP still leaves the bearer token and full
+// conversation content observable to another local account on a shared host
+// with packet-capture privilege. Enabled defaults to true since P27.5/
+// FIND-13 to close that gap; it does not protect against Host/OS-level
+// compromise of the same account, which can already read daemon.token (and,
+// with TLS enabled, daemon.key) directly off disk — see docs/configuration.md.
 //
 // When Enabled is true and CertFile/KeyFile are left empty, the daemon
 // generates a self-signed ECDSA P-256 certificate on first start and persists
@@ -534,11 +536,16 @@ const DefaultSSEBufferSize = 256
 // client must be told to trust that specific certificate (see
 // client.WithTLS); this is certificate pinning to a file that never leaves
 // the local machine, not verification against a public CA or hostname, so
-// there is no browser/OS trust store involved and no renewal workflow.
+// there is no browser/OS trust store involved and no renewal workflow. Every
+// in-repo client goes through client.NewFromConfig, which wires this up
+// automatically — a browser opening `aegis ui` is the one consumer that
+// isn't pinned and will show a self-signed-certificate warning, which the
+// CLI calls out explicitly when TLS is on (see internal/cli/ui.go).
 type ServerTLSConfig struct {
 	// Enabled turns on TLS for the daemon's HTTP listener and switches
-	// client.NewFromConfig to https:// with the pinned cert. Off by default —
-	// no new files are written and no scheme changes when this is unset.
+	// client.NewFromConfig to https:// with the pinned cert. On by default
+	// (P27.5/FIND-13); set to false to keep the pre-P27.5 plain-HTTP
+	// behavior (no cert/key files written, no scheme change).
 	Enabled bool `koanf:"enabled"`
 
 	// CertFile/KeyFile let an operator supply their own certificate instead
@@ -761,6 +768,9 @@ func defaults() map[string]any {
 		"server.max_concurrent_runs":  0,
 		"server.max_run_duration_sec": 0,
 		"server.sse_buffer_size":      DefaultSSEBufferSize,
+		// Pinned-cert loopback TLS on by default (P27.5/FIND-13) — see
+		// ServerTLSConfig's doc comment.
+		"server.tls.enabled": true,
 		// "build" is the intentional default: the agent can read and write
 		// files freely, but shell/execute calls still prompt for approval
 		// (or are denied non-interactively). Use "plan" for read-only
@@ -897,6 +907,16 @@ var envSections = map[string]bool{
 
 func envKeyCallback(s string) string {
 	s = strings.ToLower(strings.TrimPrefix(s, EnvPrefix))
+	// server.tls.* is the one config surface nested two levels deep that's
+	// also documented as AEGIS_*-overridable (AEGIS_SERVER_TLS_ENABLED, used
+	// to opt back out of P27.5's now-on-by-default TLS). The generic
+	// single-split heuristic below only ever inserts one dot
+	// (section.field), which can't reach a field nested under a nested
+	// struct — special-case its prefix so the env override actually reaches
+	// ServerTLSConfig's fields instead of silently landing on an unused key.
+	if rest, ok := strings.CutPrefix(s, "server_tls_"); ok && rest != "" {
+		return "server.tls." + rest
+	}
 	if idx := strings.Index(s, "_"); idx > 0 {
 		if envSections[s[:idx]] {
 			return s[:idx] + "." + s[idx+1:]
