@@ -757,7 +757,7 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 	case "os":
 		// OS-level isolation without a container runtime (P4.7): seatbelt on
 		// macOS, bwrap on Linux. Falls back to local when unavailable.
-		osb, oerr := sandbox.NewOSBackend(cwd, cfg.Network, cfg.StripEnv)
+		osb, oerr := sandbox.NewOSBackend(cwd, cfg.Network, cfg.StripEnv, cfg.OSExtraReadPaths)
 		if oerr != nil {
 			if cfg.Strict {
 				return nil, false, "", fmt.Errorf("sandbox: OS sandbox unavailable and sandbox.strict is set: %w", oerr)

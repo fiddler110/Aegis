@@ -5,28 +5,35 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
 
 // OSBackend confines command execution using OS-level sandboxing without a
 // container runtime (P4.7): macOS seatbelt (`sandbox-exec`) or Linux bubblewrap
-// (`bwrap`). Writes are restricted to the workspace (plus temp dirs) and network
-// egress can be denied. This closes the gap where the plain `local` backend
-// offered no isolation and containers required Docker.
+// (`bwrap`). Writes are restricted to the workspace (plus temp dirs), reads are
+// restricted to the workspace plus a bounded toolchain allowlist (P27.18/
+// FIND-19), and network egress can be denied. This closes the gap where the
+// plain `local` backend offered no isolation and containers required Docker.
 //
-// This is a write/network sandbox only, not a read sandbox: seatbelt's profile
-// is "(allow default)" with just file-write* denied outside the workspace, and
-// bwrap's is "--ro-bind / /", read-only-mounting the entire host filesystem
-// inside the sandbox. A compromised command can still read any host file
-// (SSH keys, cloud credentials) and exfiltrate it unless network is also
-// denied — materially weaker than the container backend, which the host
-// filesystem is never mounted into at all. See docs/security.md.
+// Read confinement is an allowlist, not "deny everything else": seatbelt
+// explicitly denies file-read* outside (workspace ∪ readPaths ∪ host temp
+// dirs), and bwrap only ro-binds readPaths plus the workspace instead of the
+// entire host root. readPaths defaults to standard system/toolchain
+// directories (see defaultOSReadPaths) and deliberately excludes credential
+// directories like ~/.ssh, ~/.aws, or ~/.config — those are simply never
+// bound/allowed, so they are unreadable from inside the sandbox even though
+// they exist on the host. This is still weaker than the container backend
+// (which never mounts the host filesystem at all): a toolchain directory that
+// happens to also hold a stray credential file would still be readable. See
+// docs/security_scan.md.
 type OSBackend struct {
-	workspace  string // absolute workspace root; writes are confined here
-	denyNet    bool   // deny network egress inside the sandbox
-	mechanism  string // "seatbelt" or "bwrap"
-	wrapperBin string // resolved path to sandbox-exec / bwrap
+	workspace  string   // absolute workspace root; writes are confined here
+	readPaths  []string // additional host paths readable inside the sandbox
+	denyNet    bool     // deny network egress inside the sandbox
+	mechanism  string   // "seatbelt" or "bwrap"
+	wrapperBin string   // resolved path to sandbox-exec / bwrap
 	// stripEnv lists env var names excluded from the spawned command's
 	// environment (P7.2). Always includes DefaultStripEnv. Seatbelt/bwrap
 	// confine the filesystem and network but do not touch the process
@@ -36,15 +43,20 @@ type OSBackend struct {
 
 // NewOSBackend builds an OS sandbox for the workspace. Network is denied unless
 // allowNetwork is true. strip lists additional env var names to exclude from
-// commands beyond DefaultStripEnv (P7.2). Returns an error when no OS sandbox
-// mechanism is available on this host (callers should fall back to local).
-func NewOSBackend(workspace string, allowNetwork bool, strip []string) (*OSBackend, error) {
+// commands beyond DefaultStripEnv (P7.2). extraReadPaths names additional host
+// paths (beyond the built-in toolchain defaults, see defaultOSReadPaths) that
+// commands may read from — use this when a project's toolchain lives
+// somewhere non-standard (P27.18/FIND-19). Returns an error when no OS
+// sandbox mechanism is available on this host (callers should fall back to
+// local).
+func NewOSBackend(workspace string, allowNetwork bool, strip []string, extraReadPaths []string) (*OSBackend, error) {
 	mech, bin, ok := detectOSSandbox()
 	if !ok {
 		return nil, fmt.Errorf("no OS sandbox available on %s (need sandbox-exec on macOS or bwrap on Linux)", runtime.GOOS)
 	}
 	return &OSBackend{
 		workspace:  workspace,
+		readPaths:  mergeReadPaths(defaultOSReadPaths(), extraReadPaths),
 		denyNet:    !allowNetwork,
 		mechanism:  mech,
 		wrapperBin: bin,
@@ -118,11 +130,11 @@ func (o *OSBackend) wrap(command string, opts ExecOpts) (string, []string) {
 	shell, shellArgs := shellCommand(command)
 	switch o.mechanism {
 	case "seatbelt":
-		profile := seatbeltProfile(o.workspace, o.denyNet)
+		profile := seatbeltProfile(o.workspace, o.denyNet, o.readPaths)
 		args := []string{"-p", profile, shell}
 		return o.wrapperBin, append(args, shellArgs...)
 	case "bwrap":
-		args := bwrapArgs(o.workspace, o.dir(opts), o.denyNet)
+		args := bwrapArgs(o.workspace, o.dir(opts), o.denyNet, o.readPaths)
 		args = append(args, shell)
 		return o.wrapperBin, append(args, shellArgs...)
 	default:
@@ -162,10 +174,15 @@ func OSSandboxInfo() (mechanism string, available bool, detail string) {
 }
 
 // seatbeltProfile builds a macOS sandbox profile that allows everything except
-// file writes outside the workspace (plus temp/dev), and optionally denies
-// network. Later rules override earlier ones in seatbelt, so the broad allow
-// comes first and the deny/allow refinements follow.
-func seatbeltProfile(workspace string, denyNet bool) string {
+// file writes outside the workspace (plus temp/dev) and file reads outside
+// (workspace ∪ readPaths ∪ host temp dirs) (P27.18/FIND-19), and optionally
+// denies network. Later rules override earlier ones in seatbelt, so the
+// broad allow comes first and the deny/allow refinements follow. Only
+// file-read*/file-write* are narrowed — every other default-allowed
+// operation (process exec, mach lookups, sysctl reads, signals) is left
+// alone, since tightening those is out of scope here and seatbelt profiles
+// that deny them are notoriously easy to break basic command execution with.
+func seatbeltProfile(workspace string, denyNet bool, readPaths []string) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString("(allow default)\n")
@@ -176,24 +193,40 @@ func seatbeltProfile(workspace string, denyNet bool) string {
 	b.WriteString("  (subpath \"/private/var/folders\")\n")
 	b.WriteString("  (subpath \"/dev\")\n")
 	b.WriteString("  (literal \"/dev/null\"))\n")
+	b.WriteString("(deny file-read*)\n")
+	b.WriteString("(allow file-read*\n")
+	fmt.Fprintf(&b, "  (subpath %q)\n", workspace)
+	b.WriteString("  (subpath \"/private/tmp\")\n")
+	b.WriteString("  (subpath \"/private/var/folders\")\n")
+	b.WriteString("  (subpath \"/dev\")\n")
+	b.WriteString("  (literal \"/dev/null\")\n")
+	for _, p := range readPaths {
+		fmt.Fprintf(&b, "  (subpath %q)\n", p)
+	}
+	b.WriteString(")\n")
 	if denyNet {
 		b.WriteString("(deny network*)\n")
 	}
 	return b.String()
 }
 
-// bwrapArgs builds bubblewrap arguments: the whole filesystem is read-only, the
-// workspace is bind-mounted read-write, /tmp is a fresh tmpfs, and network is
-// unshared when denied.
-func bwrapArgs(workspace, dir string, denyNet bool) []string {
-	args := []string{
-		"--ro-bind", "/", "/",
+// bwrapArgs builds bubblewrap arguments: only the workspace (read-write) and
+// readPaths (read-only) are bound into the sandbox's filesystem instead of
+// the entire host root (P27.18/FIND-19), /tmp is a fresh tmpfs, and network
+// is unshared when denied. A command that reads a path outside this
+// allowlist gets ENOENT rather than the real host file.
+func bwrapArgs(workspace, dir string, denyNet bool, readPaths []string) []string {
+	args := make([]string, 0, 8+4*len(readPaths))
+	for _, p := range readPaths {
+		args = append(args, "--ro-bind", p, p)
+	}
+	args = append(args,
 		"--dev", "/dev",
 		"--proc", "/proc",
 		"--tmpfs", "/tmp",
 		"--bind", workspace, workspace,
 		"--die-with-parent",
-	}
+	)
 	if dir != "" {
 		args = append(args, "--chdir", dir)
 	}
@@ -201,4 +234,58 @@ func bwrapArgs(workspace, dir string, denyNet bool) []string {
 		args = append(args, "--unshare-net")
 	}
 	return args
+}
+
+// defaultOSReadPaths returns host paths — beyond the workspace itself — that
+// the OS sandbox allows commands to read from, so common toolchains keep
+// working under the read confinement added by P27.18/FIND-19. This is an
+// allowlist: anything not returned here (or added via
+// sandbox.os_extra_read_paths) is simply never readable from inside the
+// sandbox — including credential directories like ~/.ssh, ~/.aws, or
+// ~/.config, which this list deliberately omits. Entries are not filtered
+// for existence here; mergeReadPaths does that once against the final
+// combined list.
+func defaultOSReadPaths() []string {
+	var paths []string
+	switch runtime.GOOS {
+	case "darwin":
+		paths = append(paths, "/usr", "/bin", "/sbin", "/System", "/Library", "/opt", "/private/etc")
+	case "linux":
+		paths = append(paths, "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		for _, sub := range []string{
+			"go", ".cargo", ".rustup", ".npm", ".nvm", ".pyenv", ".gem", ".bundle", ".local", ".cache",
+		} {
+			paths = append(paths, filepath.Join(home, sub))
+		}
+	}
+	return paths
+}
+
+// mergeReadPaths combines base (the toolchain defaults) with extra
+// (operator-configured, sandbox.os_extra_read_paths), deduping and dropping
+// any entry that doesn't exist on this host — bwrap fails to bind a missing
+// source path, and a nonexistent seatbelt subpath is a silent no-op, so
+// filtering once here keeps both mechanisms' behavior predictable.
+func mergeReadPaths(base, extra []string) []string {
+	seen := make(map[string]bool, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, paths := range [][]string{base, extra} {
+		for _, p := range paths {
+			if p == "" {
+				continue
+			}
+			clean := filepath.Clean(p)
+			if seen[clean] {
+				continue
+			}
+			seen[clean] = true
+			if _, err := os.Stat(clean); err != nil {
+				continue
+			}
+			out = append(out, clean)
+		}
+	}
+	return out
 }

@@ -11,20 +11,26 @@ import (
 )
 
 func TestSeatbeltProfile(t *testing.T) {
-	p := seatbeltProfile("/Users/x/proj", true)
+	p := seatbeltProfile("/Users/x/proj", true, []string{"/usr", "/opt"})
 	if !strings.Contains(p, `(subpath "/Users/x/proj")`) {
 		t.Errorf("profile missing workspace subpath:\n%s", p)
 	}
 	if !strings.Contains(p, "(deny network*)") {
 		t.Error("expected network deny when denyNet=true")
 	}
-	if strings.Contains(seatbeltProfile("/x", false), "(deny network*)") {
+	if strings.Contains(seatbeltProfile("/x", false, nil), "(deny network*)") {
 		t.Error("did not expect network deny when denyNet=false")
+	}
+	if !strings.Contains(p, "(deny file-read*)") {
+		t.Error("expected file-read* to be denied by default")
+	}
+	if !strings.Contains(p, `(subpath "/usr")`) || !strings.Contains(p, `(subpath "/opt")`) {
+		t.Errorf("profile missing read-path allowlist entries:\n%s", p)
 	}
 }
 
 func TestBwrapArgs(t *testing.T) {
-	args := bwrapArgs("/home/x/proj", "/home/x/proj/sub", true)
+	args := bwrapArgs("/home/x/proj", "/home/x/proj/sub", true, []string{"/usr", "/lib"})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--bind /home/x/proj /home/x/proj") {
 		t.Errorf("missing rw bind: %v", args)
@@ -35,6 +41,21 @@ func TestBwrapArgs(t *testing.T) {
 	if !strings.Contains(joined, "--chdir /home/x/proj/sub") {
 		t.Errorf("missing chdir: %v", args)
 	}
+	if !strings.Contains(joined, "--ro-bind /usr /usr") {
+		t.Errorf("missing read-only toolchain bind: %v", args)
+	}
+	if strings.Contains(joined, "--ro-bind / /") {
+		t.Errorf("whole host root should no longer be bound read-only: %v", args)
+	}
+}
+
+func TestMergeReadPaths(t *testing.T) {
+	tmp := t.TempDir()
+	missing := filepath.Join(tmp, "does-not-exist")
+	got := mergeReadPaths([]string{tmp}, []string{tmp, missing})
+	if len(got) != 1 || got[0] != filepath.Clean(tmp) {
+		t.Errorf("expected deduped single existing path, got %v", got)
+	}
 }
 
 // TestOSBackendConfinesWrites is an integration check that only runs when an OS
@@ -44,7 +65,7 @@ func TestOSBackendConfinesWrites(t *testing.T) {
 		t.Skip("no OS sandbox mechanism on this host")
 	}
 	ws := t.TempDir()
-	be, err := NewOSBackend(ws, false, nil)
+	be, err := NewOSBackend(ws, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

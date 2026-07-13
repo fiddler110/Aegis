@@ -746,7 +746,7 @@ Shell commands (`shell` tool) can run inside containers instead of directly on t
 | `podman` | Podman containers (rootless) |
 | `wslc` | WSL containers (Windows; preferred on Windows when available) |
 | `container` | Apple Containers (macOS) |
-| `os` | OS-level isolation without a container runtime: macOS `sandbox-exec` (seatbelt) or Linux `bwrap`. See the read-exposure caveat below — this is a materially weaker guarantee than `container`. |
+| `os` | OS-level isolation without a container runtime: macOS `sandbox-exec` (seatbelt) or Linux `bwrap`. Reads are confined to the workspace plus a toolchain allowlist (P27.18/FIND-19) — see the read-exposure caveat below, this is still a materially weaker guarantee than `container`. |
 | `auto` | Auto-detect: probe available runtimes, pick best; fall back to local |
 
 ### Configuration
@@ -789,13 +789,13 @@ aegis sandbox test            # run uname -a in configured sandbox to verify
 |----------|------------------|--------------------|
 | Process isolation | Yes | No — commands run as a child of the daemon, not in a separate namespace/VM |
 | Filesystem write isolation | Yes — workspace is mounted read-write; host is not accessible | Yes — writes outside the workspace (plus temp dirs) are denied |
-| Filesystem **read** isolation | Yes — host filesystem is not accessible at all | **No — the entire host filesystem is readable.** Seatbelt's profile is `(allow default)` with only `file-write*` denied outside the workspace; bwrap's is `--ro-bind / /`, read-only-mounting the whole host root. A compromised shell command can still read `~/.ssh`, cloud credential files, or any other host file and exfiltrate it (if network isn't separately denied via `network: false`) |
+| Filesystem **read** isolation | Yes — host filesystem is not accessible at all | **Partial (P27.18/FIND-19) — confined to an allowlist, not the whole host.** Seatbelt denies `file-read*` outside the workspace plus a built-in toolchain allowlist (system dirs, `~/go`, `~/.cargo`, `~/.npm`, etc. — see `sandbox.os_extra_read_paths`); bwrap only `--ro-bind`s that same allowlist instead of the whole host root. Credential dirs like `~/.ssh`, `~/.aws`, or `~/.config` are never on the allowlist, so they're unreadable from inside the sandbox even though they exist on the host. Still weaker than `container` (which never mounts the host filesystem at all): a toolchain dir that happens to also hold a stray credential file would still be readable, and the allowlist is necessarily broad enough to cover common toolchains |
 | Network isolation | Optional (`network: false` blocks container egress) | Optional (`network: false` denies network the same way) |
 | Root access on host | No | No |
 
-**Read this before treating `os` as equivalent to `container`:** "sandboxed" is not one property — confining writes, confining reads, and confining network are three independent guarantees, and the `os` backend only ever gives you the first (and third, if configured). It is a real and useful mitigation (it stops the agent from writing outside the workspace, which is the majority of accidental-damage scenarios), but do not rely on it to protect secrets or credentials readable by the host user — use `container` for that, or avoid running genuinely untrusted code under `os` mode at all.
+**Read this before treating `os` as equivalent to `container`:** "sandboxed" is not one property — confining writes, confining reads, and confining network are three independent guarantees. The `os` backend gives you all three, but the read guarantee is an allowlist bounded by what common toolchains need (system dirs plus per-language package-manager caches under `$HOME`), not a hard "nothing outside the workspace" boundary the way writes are. It is a real and useful mitigation, but do not rely on it to protect secrets or credentials readable by the host user if a toolchain cache directory could plausibly also hold one — use `container` for that, or avoid running genuinely untrusted code under `os` mode at all.
 
-**Path validation:** The sandbox backend validates that shell commands can't escape the workspace mount point (this governs the write-confinement above; it does not add read confinement to the `os` backend).
+**Path validation:** The sandbox backend validates that shell commands can't escape the workspace mount point (this governs the write-confinement above; it is independent of the `os` backend's read allowlist).
 
 **SSRF protection:** The `web_fetch` and `web_search` tools independently reject private IP addresses (10.x, 172.16–31.x, 192.168.x, 127.x, ::1) regardless of sandbox backend.
 
@@ -821,7 +821,7 @@ Aegis does not auto-detect or enforce rootless-vs-rootful at startup: there is n
 
 ### When to use
 
-- **Any time the agent runs genuinely untrusted code** (executing downloaded scripts, building user-provided packages) — use `container`. The `os` backend does not confine reads (see above), so a malicious script can still read and exfiltrate host secrets from under it.
+- **Any time the agent runs genuinely untrusted code** (executing downloaded scripts, building user-provided packages) — use `container`. The `os` backend's read confinement is an allowlist sized for legitimate toolchains, not a hard boundary (see above), so a malicious script could still find and exfiltrate a secret stashed inside an allowlisted toolchain directory.
 - **Preventing accidental damage from trusted-but-fallible agent output** (writes outside the workspace) without wanting the overhead of a container runtime — `os` is a reasonable, lighter-weight choice here.
 - **Enforcing network egress restrictions** — `network: false` prevents `curl`, `wget`, etc. from reaching the internet even if the permission rules allow `shell`
 - **CI/CD pipelines** — run `aegis chat --yes` with a container sandbox for safe automated runs

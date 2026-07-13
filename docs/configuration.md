@@ -450,10 +450,14 @@ sandbox:
   #               new installs to this (falls back to "local" with a startup WARN
   #               if unavailable, e.g. bubblewrap not installed on Linux, or on
   #               Windows where neither mechanism exists).
-  #               Confines WRITES (and network, if configured below) only — the entire host
-  #               filesystem is still readable inside the sandbox. See docs/security.md before
-  #               relying on this for anything that reads sensitive host files (SSH keys, cloud
-  #               credentials); use "container" if you need read confinement too.
+  #               Confines WRITES, network (if configured below), and READS (P27.18/FIND-19) to
+  #               the workspace plus a built-in toolchain allowlist (system dirs, ~/go, ~/.cargo,
+  #               ~/.npm, etc. — see os_extra_read_paths below); anything not on that allowlist,
+  #               including credential dirs like ~/.ssh or ~/.aws, is simply unreadable from
+  #               inside the sandbox. Still weaker than "container", which never mounts the host
+  #               filesystem at all — a toolchain dir that happens to also hold a stray credential
+  #               file would still be readable. See docs/security_scan.md before relying on this
+  #               for genuinely untrusted code.
   # "container" — run inside a container (requires runtime)
   # "auto"      — detect available runtimes and pick the best one
   #
@@ -496,6 +500,12 @@ sandbox:
   # has no legitimate reason to see. Container backend tools never inherit
   # host env at all, so this only applies to backend: local/os/auto(fallback).
   strip_env: []
+
+  # Additional host paths the "os" backend may read from, on top of the
+  # workspace and the built-in toolchain allowlist (P27.18/FIND-19). Use this
+  # when a project's toolchain lives somewhere non-standard. Entries that
+  # don't exist on the host are silently skipped. Only applies to backend: os.
+  os_extra_read_paths: []
 
 
 # ── Contextual security policies ──────────────────────────────────────────────
