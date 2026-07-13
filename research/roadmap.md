@@ -1,22 +1,36 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-13 — the P27 threat model's Tier 1 closed out: **P27.1** (workspace-trust
-gate, FIND-01/FIND-02) and **P27.2** (`provider.base_url` allowlist/warn, FIND-03) both shipped.
-**P27.1** adds `internal/workspacetrust` (a JSON store of per-directory trust decisions) and gates
-`config.Load()` on it — until a directory is explicitly trusted via the new `aegis trust` command,
-project-sourced `permission.*`, `sandbox.*`, `mcp.servers`, `notify.webhook`, and `hooks` are frozen
-back to their user/global values (computed via a second, project-excluded koanf load compared
-key-by-key against the merged one), with the diff surfaced through `cfg.WorkspaceTrust`, a startup
-WARN (daemon log + TUI stderr banner), and a new `aegis doctor` check. The two existing first-party
-project-config writers of a gated key — `config.PatchProjectSandbox` and
-`config.AppendProjectPermissionRule` (the TUI's "allow always" approval option) — auto-trust the
-directory they write to as a side effect, since that write is itself an explicit local operator
-action, not something silently inherited from a cloned repo. **P27.2** adds
-`providerfactory.validateBaseURL`: a non-loopback plaintext-HTTP `base_url` is refused outright when
-a real API key would be attached (CWE-522), while a non-default HTTPS host for a cloud provider is
-allowed through with a prominent startup WARN rather than a hard block, since legitimate
-gateway/proxy setups are common. `go build ./...` and `go test ./...` pass clean. Next up: Tier 2
-(P27.3, cheapest first) — see [Priority Order](#priority-order).
+**Last updated:** 2026-07-13 — the P27 threat model's entire Tier 2 shipped: all 11 items,
+**P27.3–P27.13**. Implemented in parallel by 7 isolated sub-agents in separate git worktrees,
+grouped by file-overlap risk rather than 1:1 with finding IDs — 6 agents each owned a fully
+disjoint package, and one agent bundled the 5 items that all needed to edit
+`internal/config/config.go`'s shared `defaults()` map/`Load()` path (P27.3, P27.5, P27.9, P27.12,
+P27.13) into a single branch to avoid map-literal collisions. All 7 branches merged into `main`
+with zero manual conflict resolution (git auto-merged every overlapping file, including both
+three-way merges touching `config.go` and `server.go`). Full `go build ./...`, `go vet ./...`, and
+`go test -count=1 ./...` pass clean on the fully integrated tree. Full per-item writeup in
+[releases.md](releases.md#latest-changes) — notable finds along the way: P27.5 (TLS-on-by-default)
+surfaced a real latent bug where `AEGIS_SERVER_TLS_ENABLED` silently did nothing (now fixed), and
+P27.11 (swarm mailbox hardening) surfaced a real Windows ACL bug where hardening a populated
+directory left descendant files with an effectively empty inherited DACL (now fixed with proper
+inheritance flags). Next up: Tier 3 (P27.14–P27.18) — see [Priority Order](#priority-order).
+
+Before that, same day (2026-07-13): the P27 threat model's Tier 1 closed out: **P27.1**
+(workspace-trust gate, FIND-01/FIND-02) and **P27.2** (`provider.base_url` allowlist/warn, FIND-03)
+both shipped. **P27.1** adds `internal/workspacetrust` (a JSON store of per-directory trust
+decisions) and gates `config.Load()` on it — until a directory is explicitly trusted via the new
+`aegis trust` command, project-sourced `permission.*`, `sandbox.*`, `mcp.servers`, `notify.webhook`,
+and `hooks` are frozen back to their user/global values (computed via a second, project-excluded
+koanf load compared key-by-key against the merged one), with the diff surfaced through
+`cfg.WorkspaceTrust`, a startup WARN (daemon log + TUI stderr banner), and a new `aegis doctor`
+check. The two existing first-party project-config writers of a gated key —
+`config.PatchProjectSandbox` and `config.AppendProjectPermissionRule` (the TUI's "allow always"
+approval option) — auto-trust the directory they write to as a side effect, since that write is
+itself an explicit local operator action, not something silently inherited from a cloned repo.
+**P27.2** adds `providerfactory.validateBaseURL`: a non-loopback plaintext-HTTP `base_url` is
+refused outright when a real API key would be attached (CWE-522), while a non-default HTTPS host
+for a cloud provider is allowed through with a prominent startup WARN rather than a hard block,
+since legitimate gateway/proxy setups are common. `go build ./...` and `go test ./...` pass clean.
 
 Before that, same day (2026-07-13): a fresh full-repo STRIDE-A threat model
 (`threat-model-20260712-200318/`, commit `7230aaf`) folded in as new track **P27**: 20 findings, 76
@@ -68,13 +82,16 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** P27.3–P27.18 (2026-07-12 threat-model findings, Tiers 2–3 — see
-[Priority Order](#priority-order)). Tier 1 (**P27.1**, **P27.2**) shipped 2026-07-13. Tier 4 is 5
+**Open items:** P27.14–P27.18 (2026-07-12 threat-model findings, Tier 3 — see
+[Priority Order](#priority-order)). Tiers 1 and 2 (**P27.1–P27.13**) shipped 2026-07-13. Tier 4 is 5
 items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20** (see
 [Parked](#open-work--parked-tier-4)).
 
-**Next session:** start at Tier 2 — 11 cheap, self-contained hardening items, **P27.3** first
-(default `security.redact_secrets` on). Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any
+**Next session:** start at Tier 3 — 5 larger/sequence-dependent items, **P27.14** first (warn/
+recommend against the unconfined `local` sandbox backend). These are less parallelizable than Tier 2
+was: P27.15 (cron permission stack) and P27.17 (swarm budget propagation) each touch a single
+cohesive subsystem rather than splitting cleanly across packages, so evaluate per-item before
+assuming multi-agent parallelism helps. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any
 change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is
 the standalone preflight companion for the same misconfiguration classes (now including a workspace
 trust check, P27.1).
@@ -90,31 +107,13 @@ work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand
 speculatively.
 
 **Tier 1:** empty — **P27.1** and **P27.2** shipped 2026-07-13 (see
-[releases.md](releases.md#latest-changes)). P27.6, P27.7, and P27.9 below can still fold their own
-project-content trust decision into the `aegis trust` gate P27.1 built.
+[releases.md](releases.md#latest-changes)).
 
-**Tier 2** (11 items — cheap, self-contained hardening, no dependency):
-- **P27.3 (FIND-05)** — Default `security.redact_secrets` on (or prompt on first cloud-provider use).
-- **P27.4 (FIND-06)** — Generate/require a shared-secret token by default for `aegis mcp-serve` and
-  `aegis acp` stdio interfaces.
-- **P27.5 (FIND-13)** — Enable the existing pinned-cert loopback TLS by default.
-- **P27.6 (FIND-07)** — Wrap project context/memory files (`AGENTS.md`/`CLAUDE.md`/
-  `.aegis/context.md`/`.aegis/memory.md`) in the same untrusted-provenance marker already used for
-  persona/skill bodies (mirrors shipped P24.4).
-- **P27.7 (FIND-09)** — Treat project-persona control fields (`output_guard`, `mode`, `tools`,
-  `rules`) as untrusted; ignore or require confirmation when sourced from a project-level persona.
-- **P27.8 (FIND-10)** — Route the HTTP MCP client through the existing `ssrfSafeDialer` (already
-  used by `web_fetch`).
-- **P27.9 (FIND-11)** — Source `recon_scan`/`dast_scan`'s `allowed_targets` from user/global config
-  only, not project config.
-- **P27.10 (FIND-18, ACL half)** — Apply `fsguard.RestrictToOwner` to `longmem.db` and
-  `knowledge.db` (and WAL/SHM sidecars), matching the session DB.
-- **P27.11 (FIND-20)** — Write processed swarm-mailbox files `0o600` (not `0o644`) and
-  `fsguard`-harden the `teams/` tree.
-- **P27.12 (FIND-14)** — Set conservative default `max_concurrent_runs`/per-run duration caps;
-  throttle repeated invalid-auth attempts.
-- **P27.13 (FIND-12, default-on half)** — Enable the invisible-char/base64 injection scan by
-  default for web/MCP content (currently opt-in per tool).
+**Tier 2:** empty — **P27.3–P27.13** (all 11 items) shipped 2026-07-13 (see
+[releases.md](releases.md#latest-changes)). P27.7's project-persona control-field gate and P27.9's
+DAST-target sourcing both ended up folding into (or reusing the machinery of) the `aegis trust` gate
+P27.1 built, as anticipated; P27.6's context/memory-file wrapping used the separate `trust.Wrap`
+provenance mechanism instead, matching the P24.4 precedent for persona/skill bodies.
 
 **Tier 3** (5 items — real value, larger or sequence-dependent):
 - **P27.14 (FIND-04)** — Warn/recommend against the unconfined `local` sandbox backend for
@@ -149,97 +148,8 @@ halves (quick ACL fix vs. optional encryption) are split across tiers.
 
 #### Tier 1 — shipped 2026-07-13 (P27.1, P27.2 — see [releases.md](releases.md#latest-changes))
 
-#### Tier 2 — cheap, self-contained hardening, no dependency
-
-### P27.3 — FIND-05: default `security.redact_secrets` on
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 6.1)
-
-Read-tool/conversation content (including secrets) is forwarded to the cloud model provider;
-`security.redact_secrets` (gitleaks-backed masking) already exists but is opt-in. Default it on,
-or prompt to enable on first cloud-provider use.
-
-### P27.4 — FIND-06: default token for `mcp-serve`/ACP stdio interfaces
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 6.0)
-
-`aegis mcp-serve` and the ACP stdio server support `AEGIS_MCP_TOKEN`/`AEGIS_ACP_TOKEN` but run
-unauthenticated when unset. Generate and require a token by default, mirroring the daemon's
-auto-generated bearer token, writing it to an owner-only file for the launching integration to
-read.
-
-### P27.5 — FIND-13: loopback TLS on by default
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 4.8)
-
-Client↔daemon loopback traffic is plaintext HTTP by default; pinned-cert TLS
-(`server.tls.enabled`) already exists but is off. Enable by default, or at minimum document the
-shared-host risk prominently.
-
-### P27.6 — FIND-07: trust-wrap project context/memory files
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 5.9)
-
-`AGENTS.md`/`CLAUDE.md`/`.aegis/context.md`/`.aegis/memory.md` are concatenated into the system
-prompt with no untrusted-provenance marker, unlike persona/skill bodies. Reuse
-`internal/trust.Wrap` the same way P24.4 already did for file-loaded persona/skill bodies.
-
-### P27.7 — FIND-09: treat project-persona control fields as untrusted
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 5.4)
-
-A project persona's frontmatter (`output_guard: none`, `mode`, `tools`, `rules`) is applied as
-real settings with no trust check, unlike the (already-wrapped) persona body. Ignore or require
-confirmation for control-field changes sourced from project-level personas; user/global personas
-keep full control.
-
-### P27.8 — FIND-10: SSRF-safe dialer for the HTTP MCP client
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 5.3)
-
-The HTTP/SSE MCP client uses a plain `http.Client` with no SSRF-safe dialer, unlike `web_fetch`.
-Route it through the existing `ssrfSafeDialer` (`internal/tool/builtin/web.go`).
-
-### P27.9 — FIND-11: source scan `allowed_targets` from user/global config only
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 5.1)
-
-`recon_scan`/`dast_scan`'s target-authorization `allowed_targets` is a config value and inherits
-the project-config trust weakness, letting a hostile repo widen it to scan arbitrary Internet
-hosts. Source the allowlist from user/global config only.
-
-### P27.10 — FIND-18 (ACL half): fsguard-harden `longmem.db`/`knowledge.db`
-
-Priority: Tier 2 · Effort: S, security, Moderate (CVSS 5.8 for the finding as a whole)
-
-`longmem.db` and `.aegis/knowledge.db` rely on directory permissions only, unlike the
-`fsguard`-hardened session DB. Apply `fsguard.RestrictToOwner` to both (and WAL/SHM sidecars) —
-same pattern as P24.16's session-DB/`.env` hardening.
-
-### P27.11 — FIND-20: harden swarm mailbox file permissions
-
-Priority: Tier 2 · Effort: S, security, Low (CVSS 3.5)
-
-Swarm mailbox messages carry no authentication, and processed files are written world-readable
-(`0o644`) with the `teams/` tree not `fsguard`-hardened. Write processed files `0o600`, harden the
-tree, and add a per-run shared secret/HMAC to mailbox messages.
-
-### P27.12 — FIND-14: default concurrency/rate caps
-
-Priority: Tier 2 · Effort: S, security, Low (CVSS 3.9)
-
-No rate limiting on the daemon API and `max_concurrent_runs` defaults to unlimited. Set
-conservative default caps; throttle repeated invalid-auth attempts (extends P24.5's invalid-token
-logging with actual throttling).
-
-### P27.13 — FIND-12 (default-on half): enable injection scan by default
-
-Priority: Tier 2 · Effort: S/M, security, Moderate (CVSS 5.0)
-
-The invisible-char/base64 prompt-injection scan of untrusted web/MCP content is best-effort and
-opt-in per tool, on top of the always-on provenance-marker wrapping. Enable it by default for
-network-sourced content; expanding detection beyond the current heuristics stays unscoped
-(open-ended, no trigger yet).
+#### Tier 2 — shipped 2026-07-13 (P27.3–P27.13, all 11 items — see
+[releases.md](releases.md#latest-changes))
 
 #### Tier 3 — real value, larger or sequence-dependent
 
