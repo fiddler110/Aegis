@@ -75,13 +75,13 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.MCPServer.DefaultMode != "plan" {
 		t.Errorf("mcp_server.default_mode = %q, want %q", cfg.MCPServer.DefaultMode, "plan")
 	}
-	// P21.5: unlimited/off by default so existing single-user deployments see
-	// no behavior change; sse_buffer_size falls back to a sane built-in cap.
-	if cfg.Server.MaxConcurrentRuns != 0 {
-		t.Errorf("server.max_concurrent_runs = %d, want 0 (unlimited)", cfg.Server.MaxConcurrentRuns)
+	// P27.12/FIND-14: conservative non-zero caps by default — generous for a
+	// normal single-user session, still bounding a runaway/DoS case.
+	if cfg.Server.MaxConcurrentRuns != 10 {
+		t.Errorf("server.max_concurrent_runs = %d, want 10 (P27.12/FIND-14)", cfg.Server.MaxConcurrentRuns)
 	}
-	if cfg.Server.MaxRunDurationSec != 0 {
-		t.Errorf("server.max_run_duration_sec = %d, want 0 (unlimited)", cfg.Server.MaxRunDurationSec)
+	if cfg.Server.MaxRunDurationSec != 1800 {
+		t.Errorf("server.max_run_duration_sec = %d, want 1800 (P27.12/FIND-14)", cfg.Server.MaxRunDurationSec)
 	}
 	if cfg.Server.SSEBufferSize != DefaultSSEBufferSize {
 		t.Errorf("server.sse_buffer_size = %d, want %d", cfg.Server.SSEBufferSize, DefaultSSEBufferSize)

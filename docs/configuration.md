@@ -279,20 +279,23 @@ server:
     cert_file: ""  # optional operator-supplied cert; auto-generated if empty
     key_file: ""   # optional operator-supplied key; auto-generated if empty
 
-  # 0 = unlimited (default). Caps how many message-turn runs may be actively
-  # executing across ALL sessions at once. A request past the cap is rejected
-  # immediately (429) rather than queued. The per-session serialization the
-  # daemon already does (at most one active run per session) doesn't bound
-  # total concurrency across sessions — set this when exposing the daemon to
-  # a lower-trust caller that can create many sessions, e.g. `aegis mcp-serve`.
-  max_concurrent_runs: 0
+  # Defaults to 10 (P27.12/FIND-14). Caps how many message-turn runs may be
+  # actively executing across ALL sessions at once. A request past the cap is
+  # rejected immediately (429) rather than queued. The per-session
+  # serialization the daemon already does (at most one active run per
+  # session) doesn't bound total concurrency across sessions — this exists to
+  # bound a lower-trust caller that can create many sessions, e.g. `aegis
+  # mcp-serve`. Only top-level HTTP-driven runs count against it; in-process
+  # sub-agents spawned by the `agent`/swarm tool don't. 0 = unlimited.
+  max_concurrent_runs: 10
 
-  # 0 = unlimited (default). Aborts a single run once it has been active this
-  # many seconds, the same clean way an interrupted request is handled.
-  # cost.max_tokens_per_run/budget_usd are the primary spend guardrails; this
-  # is a coarser wall-clock backstop for a run that never trips those (e.g. a
-  # local model stuck in a near-zero-cost tool-call loop).
-  max_run_duration_sec: 0
+  # Defaults to 1800/30 minutes (P27.12/FIND-14). Aborts a single run once it
+  # has been active this many seconds, the same clean way an interrupted
+  # request is handled. cost.max_tokens_per_run/budget_usd are the primary
+  # spend guardrails; this is a coarser wall-clock backstop for a run that
+  # never trips those (e.g. a local model stuck in a near-zero-cost tool-call
+  # loop). 0 = unlimited.
+  max_run_duration_sec: 1800
 
   # Per-connection cap on queued-but-not-yet-flushed SSE events. If a
   # consumer (TUI, web UI, or an mcp-serve client) reads slower than the
@@ -892,17 +895,19 @@ default_persona: developer
 
 Or from the CLI: `aegis persona use developer` (add `--global` to set the user-wide default instead).
 
-### Bound daemon resources when exposing sessions to another harness (P21.5)
+### Bound daemon resources when exposing sessions to another harness (P21.5 / P27.12)
 
 `aegis mcp-serve` lets another MCP-speaking harness create sessions and drive
-runs through this daemon. Set a global concurrency ceiling and a wall-clock
-run timeout so a misbehaving or hostile caller can't fan out unbounded
-sessions/runs and exhaust the host:
+runs through this daemon. `server.max_concurrent_runs` (default 10) and
+`server.max_run_duration_sec` (default 1800/30 minutes) already give every
+daemon a global concurrency ceiling and a wall-clock run timeout out of the
+box, so a misbehaving or hostile caller can't fan out unbounded sessions/runs
+and exhaust the host. Tighten or loosen them for your own deployment:
 
 ```yaml
 server:
-  max_concurrent_runs: 10    # refuse (429) runs past this many active at once
-  max_run_duration_sec: 1800 # abort any single run past 30 minutes
+  max_concurrent_runs: 4     # refuse (429) runs past this many active at once
+  max_run_duration_sec: 900  # abort any single run past 15 minutes
 ```
 
 ### Enable a built-in skill for this project

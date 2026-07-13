@@ -100,8 +100,29 @@ type Server struct {
 	// missing or mismatched bearer token (FIND-11). It is a single
 	// process-wide counter rather than a per-remote-address map so that the
 	// audit fix itself can't be turned into a memory-growth DoS by an
-	// attacker hammering the endpoint with spoofed/varying source data.
+	// attacker hammering the endpoint with spoofed/varying source data. This
+	// counter is cumulative for the whole process lifetime (used only for
+	// the logging cadence above) and is distinct from the consecutive-streak
+	// tracking authLockMu/authConsecutiveFailures/authLockedUntil use to
+	// drive the P27.12/FIND-14 lockout below.
 	invalidAuthAttempts atomic.Uint64
+
+	// authLockMu guards authConsecutiveFailures/authLockedUntil, the P27.12/
+	// FIND-14 throttle for repeated invalid-auth attempts (extends the
+	// FIND-11 counter above, which only logs, with an actual lockout). The
+	// daemon is loopback-only, so there's no meaningful per-IP concept to
+	// key this by — a simple process-wide streak counter with an
+	// exponentially growing lockout window is enough to slow down a local
+	// process guessing at the bearer token without adding real state.
+	authLockMu sync.Mutex
+	// authConsecutiveFailures counts invalid-auth attempts since the last
+	// successful authenticated request (or process start); reset to 0 on
+	// success so a legitimate client that briefly used a stale token never
+	// accumulates a permanent penalty.
+	authConsecutiveFailures int
+	// authLockedUntil is the time before which authMiddleware short-circuits
+	// every request (valid token or not) with 429, zero when not locked.
+	authLockedUntil time.Time
 
 	// pageTokens holds short-lived, single-use tokens minted per GET /ui load
 	// (P15.12), each paired with a CSRF nonce binding the exchange to the

@@ -41,7 +41,9 @@ func generateAndWriteToken(path string) (string, error) {
 }
 
 // authMiddleware checks for a valid Bearer token on all requests except
-// /healthz. Requests without a valid token receive 401.
+// /healthz. Requests without a valid token receive 401. While a P27.12/
+// FIND-14 lockout window is active (see registerAuthFailure), every request
+// — including one carrying a correct token — is rejected with 429 instead.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /healthz is public; the web UI page itself is served without a token
@@ -61,6 +63,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "server misconfigured: auth token missing")
 			return
 		}
+		if remaining, locked := s.authLockoutRemaining(); locked {
+			writeError(w, http.StatusTooManyRequests, fmt.Sprintf(
+				"too many invalid authentication attempts; try again in %s", remaining.Round(time.Second)))
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(auth, prefix) {
@@ -74,6 +81,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
+		s.resetAuthFailureStreak()
 		next.ServeHTTP(w, r)
 	})
 }
@@ -85,13 +93,33 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // whether this particular one is logged.
 const invalidAuthLogEvery = 5
 
+// authLockThreshold is the number of consecutive invalid-auth attempts
+// (since the last successful request, or process start) that engages a
+// P27.12/FIND-14 lockout window. Set well above ordinary operator error — a
+// stale token after a restart, a copy-paste mistake — so a normal client
+// never trips it, while still throttling a process methodically guessing at
+// the bearer token. Deliberately higher than invalidAuthLogEvery: logging
+// cadence and lockout are independent controls with independent tuning.
+const authLockThreshold = 10
+
+// authLockBaseDelay/authLockMaxDelay bound the P27.12/FIND-14 exponential
+// backoff: the first lockout lasts authLockBaseDelay; each additional
+// authLockThreshold-sized batch of failures beyond that doubles the window,
+// capped at authLockMaxDelay so a persistent attacker is throttled at a
+// bounded (not unbounded) rate.
+const (
+	authLockBaseDelay = 1 * time.Second
+	authLockMaxDelay  = 60 * time.Second
+)
+
 // recordInvalidAuthAttempt bumps the process-wide invalid-bearer-token
 // counter and, on a coarse cadence, emits a slog.Warn with the cumulative
 // count so a probe against the daemon's auth is auditable. It deliberately
 // never logs the attempted token value itself. Both authMiddleware failure
 // branches (missing "Bearer " prefix, and a token that doesn't match) call
 // this — a probe that never sends a Bearer prefix at all is just as worth
-// surfacing as one that guesses wrong.
+// surfacing as one that guesses wrong. Also feeds registerAuthFailure, the
+// P27.12/FIND-14 lockout tracker.
 func (s *Server) recordInvalidAuthAttempt(r *http.Request) {
 	n := s.invalidAuthAttempts.Add(1)
 	if n == 1 || n%invalidAuthLogEvery == 0 {
@@ -101,6 +129,61 @@ func (s *Server) recordInvalidAuthAttempt(r *http.Request) {
 			"cumulative_count", n,
 		)
 	}
+	s.registerAuthFailure()
+}
+
+// registerAuthFailure extends the FIND-11 logging-only counter above with
+// actual throttling (P27.12/FIND-14): once the consecutive-failure streak
+// reaches authLockThreshold, it opens (or extends) a lockout window with
+// exponential backoff. Requests arriving while already locked are rejected
+// by authLockoutRemaining before they ever reach here, so the streak — and
+// therefore the backoff — only grows from failures that land after a
+// previous window has fully expired, which is what produces the
+// exponential-not-linear growth for a persistent attacker.
+func (s *Server) registerAuthFailure() {
+	s.authLockMu.Lock()
+	defer s.authLockMu.Unlock()
+	s.authConsecutiveFailures++
+	if s.authConsecutiveFailures < authLockThreshold {
+		return
+	}
+	delay := authLockBaseDelay << uint(s.authConsecutiveFailures-authLockThreshold)
+	if delay <= 0 || delay > authLockMaxDelay { // <=0 guards a pathological shift overflow
+		delay = authLockMaxDelay
+	}
+	until := time.Now().Add(delay)
+	if until.After(s.authLockedUntil) {
+		s.authLockedUntil = until
+	}
+	s.logger.Warn("invalid-auth lockout engaged",
+		"consecutive_failures", s.authConsecutiveFailures,
+		"locked_for", delay,
+	)
+}
+
+// authLockoutRemaining reports whether a P27.12/FIND-14 lockout window is
+// currently active and, if so, how much longer it lasts.
+func (s *Server) authLockoutRemaining() (time.Duration, bool) {
+	s.authLockMu.Lock()
+	defer s.authLockMu.Unlock()
+	if s.authLockedUntil.IsZero() {
+		return 0, false
+	}
+	remaining := time.Until(s.authLockedUntil)
+	if remaining <= 0 {
+		return 0, false
+	}
+	return remaining, true
+}
+
+// resetAuthFailureStreak clears the consecutive-invalid-attempt streak after
+// a successful authenticated request, so a client that briefly presented a
+// stale token (e.g. mid-token-rotation) never carries a permanent penalty
+// toward the next lockout.
+func (s *Server) resetAuthFailureStreak() {
+	s.authLockMu.Lock()
+	defer s.authLockMu.Unlock()
+	s.authConsecutiveFailures = 0
 }
 
 // originMiddleware blocks requests with a non-loopback Origin header to
