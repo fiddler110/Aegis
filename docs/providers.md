@@ -480,18 +480,18 @@ Cloud→cloud and any→local failover are never gated behind this flag.
 
 Aegis streams the **full conversation** to whichever provider is configured — including the content of any file a tool has read. That content becomes part of the request body sent to `provider.Stream`, with no filtering step in between.
 
-For a cloud provider (Anthropic, OpenAI, or any OpenAI-compatible cloud endpoint — Azure OpenAI, Groq, OpenRouter, Vertex AI, an AI gateway, etc.) that means everything a read tool surfaces — including secrets a file happens to contain, like an API key or credential left in a config file, `.env`, or log — travels over the network to that third party as part of a normal turn. There is no default exposure control beyond whatever the provider itself does with request data.
+For a cloud provider (Anthropic, OpenAI, or any OpenAI-compatible cloud endpoint — Azure OpenAI, Groq, OpenRouter, Vertex AI, an AI gateway, etc.) that means everything a read tool surfaces — including secrets a file happens to contain, like an API key or credential left in a config file, `.env`, or log — travels over the network to that third party as part of a normal turn, unless the redaction pass below (on by default) catches and masks it first.
 
 **Local Ollama usage avoids this exposure entirely** — nothing leaves the machine — and is the recommended mitigation when working in a sensitive codebase. See [Local LLMs](#local-llms) above.
 
-When a cloud provider is required, Aegis offers an **opt-in** redaction pass as a partial mitigation:
+When a cloud provider is required, Aegis runs a redaction pass **by default** (P27.3/FIND-05) as a partial mitigation. Disable it only if the cost below is unacceptable and content is otherwise known-safe:
 
 ```yaml
 security:
-  redact_secrets: true
+  redact_secrets: false   # opt out; on by default
 ```
 
-With this enabled, the output of every read-capability tool call is run through the same gitleaks-backed secret detection already used to scan a PR title/body before `git_pr` opens a pull request (FIND-13) — any detected secret pattern (AWS keys, tokens, private keys, and gitleaks' other built-in rules) is masked as `[REDACTED:<rule-id>]` before that tool result is appended to the conversation sent to the model/provider.
+By default, the output of every read-capability tool call is run through the same gitleaks-backed secret detection already used to scan a PR title/body before `git_pr` opens a pull request (FIND-13) — any detected secret pattern (AWS keys, tokens, private keys, and gitleaks' other built-in rules) is masked as `[REDACTED:<rule-id>]` before that tool result is appended to the conversation sent to the model/provider.
 
 This is a **best-effort** mitigation, not a guarantee:
 - it requires the `gitleaks` binary on `PATH` — if it's missing, content passes through unredacted with no error (fail-open, same posture as the PR-scan check);
