@@ -493,16 +493,25 @@ type ServerConfig struct {
 	// sessionSems gate only prevents two runs racing on the *same* session,
 	// so with no global cap a caller that fans out many sessions (e.g. a
 	// hostile or misbehaving `aegis mcp-serve` client) could still exhaust
-	// host resources. 0 = unlimited (default).
+	// host resources. Defaults to 10 (P27.12/FIND-14): only top-level
+	// HTTP-driven runs consume a slot here — sub-agents spawned in-process by
+	// the `agent`/swarm tool run directly through the engine, not through
+	// this HTTP path, so a normal single-user TUI/web-UI session (which
+	// drives at most one or two runs at a time) never gets close to this
+	// ceiling; it exists to bound a lower-trust caller like `aegis
+	// mcp-serve`. 0 = unlimited; set explicitly to opt back out.
 	MaxConcurrentRuns int `koanf:"max_concurrent_runs"`
 
 	// MaxRunDurationSec aborts a single run once it has been active this many
-	// seconds, the same way an interrupted/cancelled request is handled. 0 =
-	// unlimited (default) — cost.max_tokens_per_run/budget_usd are the
-	// primary spend guardrails; this is a coarser wall-clock backstop for a
-	// run that never trips those (e.g. a local model stuck making tool calls
-	// with near-zero token cost, or a hostile caller trying to hold a run,
-	// and the session/global concurrency slot it occupies, open forever).
+	// seconds, the same way an interrupted/cancelled request is handled.
+	// cost.max_tokens_per_run/budget_usd are the primary spend guardrails;
+	// this is a coarser wall-clock backstop for a run that never trips those
+	// (e.g. a local model stuck making tool calls with near-zero token cost,
+	// or a hostile caller trying to hold a run, and the session/global
+	// concurrency slot it occupies, open forever). Defaults to 1800 (30
+	// minutes, P27.12/FIND-14) — generous enough for a long agentic run with
+	// many tool calls, short enough to reclaim a wedged slot well within a
+	// working session. 0 = unlimited; set explicitly to opt back out.
 	MaxRunDurationSec int `koanf:"max_run_duration_sec"`
 
 	// SSEBufferSize bounds how many not-yet-flushed SSE events are queued for
@@ -774,8 +783,11 @@ func defaults() map[string]any {
 		"provider.max_retries":        4,
 		"provider.prompt_profile":     "auto",
 		"server.addr":                 "127.0.0.1:4127",
-		"server.max_concurrent_runs":  0,
-		"server.max_run_duration_sec": 0,
+		// Conservative non-zero caps by default (P27.12/FIND-14) — see
+		// ServerConfig's doc comments for why these values are safe for a
+		// normal single-user session while still bounding a runaway/DoS case.
+		"server.max_concurrent_runs":  10,
+		"server.max_run_duration_sec": 1800,
 		"server.sse_buffer_size":      DefaultSSEBufferSize,
 		// Pinned-cert loopback TLS on by default (P27.5/FIND-13) — see
 		// ServerTLSConfig's doc comment.
