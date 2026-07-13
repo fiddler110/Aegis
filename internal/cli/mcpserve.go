@@ -31,7 +31,12 @@ func newMCPServeCmd() *cobra.Command {
 			"New sessions default to plan mode (read-only) unless a caller explicitly asks for " +
 			"build/auto. A tool call needing approval in that higher mode is denied by default " +
 			"(no human is in the loop to ask) — pass --auto-approve, or set mcp_server.auto_approve " +
-			"in config, to allow it instead.",
+			"in config, to allow it instead.\n\n" +
+			"Authentication is always required: set AEGIS_MCP_TOKEN in this process's environment " +
+			"to pin the shared secret yourself, or leave it unset and Aegis generates one on " +
+			"startup, writing it to <data_dir>/mcp.token (owner-only permissions) for your " +
+			"harness to read and send back via the \"aegis/authenticate\" request before " +
+			"tools/call.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -87,14 +92,17 @@ func newMCPServeCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()
 
-			// AEGIS_MCP_TOKEN, when set by the trusted parent process that
-			// spawns this subprocess, requires the calling harness to prove
-			// knowledge of the same value via "aegis/authenticate" before
-			// tools/call is allowed (FIND-02/P24.2). Unset by default, which
-			// preserves today's behavior for every existing integration.
-			authToken := os.Getenv("AEGIS_MCP_TOKEN")
-			if authToken != "" {
-				logger.Info("mcp-serve: authentication required (AEGIS_MCP_TOKEN set)")
+			// A shared secret is always required before tools/call is allowed
+			// (FIND-02/P24.2, hardened by FIND-06/P27.4): if the trusted
+			// parent process that spawns this subprocess set AEGIS_MCP_TOKEN,
+			// that value wins; otherwise a fresh token is generated and
+			// written to cfg.MCPTokenPath() for the launching harness to read
+			// after spawning us. This closes the previous unauthenticated
+			// default — any local process able to write to this subprocess's
+			// stdin could otherwise drive full agent turns.
+			authToken, err := resolveStdioAuthToken("AEGIS_MCP_TOKEN", cfg.MCPTokenPath(), "mcp-serve", logger)
+			if err != nil {
+				return err
 			}
 
 			logger.Info("mcp-serve starting", "default_mode", resolvedMode, "auto_approve", resolvedAutoApprove, "addr", cfg.Server.Addr)
