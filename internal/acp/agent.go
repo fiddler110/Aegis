@@ -40,8 +40,13 @@ type Agent struct {
 // to sessions it creates ("plan", "build", or "auto"). authToken, when
 // non-empty, requires the client to call "authenticate" with a matching
 // shared secret before session/new or session/prompt is allowed to proceed
-// (FIND-02/P24.2); empty leaves behavior unchanged (the pre-existing no-op
-// acknowledge), which is the default for every existing editor integration.
+// (FIND-02/P24.2); empty leaves session/new and session/prompt reachable
+// without authenticating first — this package's own default, kept for
+// callers embedding Agent directly, but never what `aegis acp` passes: that
+// command always resolves a non-empty token (AEGIS_ACP_TOKEN if set,
+// otherwise one it generates and writes to config.Config.ACPTokenPath)
+// before calling NewAgent, so the CLI interface itself is never
+// unauthenticated by default (FIND-06/P27.4).
 func NewAgent(backend Backend, mode string, logger *slog.Logger, authToken string) *Agent {
 	if logger == nil {
 		logger = slog.Default()
@@ -142,7 +147,7 @@ func (a *Agent) handleInitialize(params json.RawMessage) (any, *RPCError) {
 		authMethods = []authMethod{{
 			ID:          authMethodSharedSecret,
 			Name:        "Shared secret",
-			Description: "Token configured via AEGIS_ACP_TOKEN on the agent side",
+			Description: "Token set via AEGIS_ACP_TOKEN, or auto-generated and written to the agent's acp.token file",
 		}}
 	}
 	return initializeResult{

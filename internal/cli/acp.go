@@ -22,7 +22,12 @@ func newACPCmd() *cobra.Command {
 		Short: "Speak the Agent Client Protocol over stdio (for Zed, Neovim, and other ACP editors)",
 		Long: "Run Aegis as an ACP (Agent Client Protocol) agent. The editor launches this " +
 			"command as a subprocess and drives it over stdin/stdout with JSON-RPC. Protocol " +
-			"frames use stdout exclusively; logs go to the configured log file.",
+			"frames use stdout exclusively; logs go to the configured log file.\n\n" +
+			"Authentication is always required: set AEGIS_ACP_TOKEN in this process's environment " +
+			"to pin the shared secret yourself, or leave it unset and Aegis generates one on " +
+			"startup, writing it to <data_dir>/acp.token (owner-only permissions) for your " +
+			"editor to read and send back via the \"authenticate\" request before session/new " +
+			"or session/prompt.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -80,14 +85,18 @@ func newACPCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()
 
-			// AEGIS_ACP_TOKEN, when set by the trusted parent process that
-			// spawns this subprocess (the editor), requires the client to
-			// authenticate with the same value before driving a session
-			// (FIND-02/P24.2). Unset by default, which preserves today's
-			// behavior for every existing editor integration.
-			authToken := os.Getenv("AEGIS_ACP_TOKEN")
-			if authToken != "" {
-				logger.Info("acp: authentication required (AEGIS_ACP_TOKEN set)")
+			// A shared secret is always required before session/new or
+			// session/prompt is allowed (FIND-02/P24.2, hardened by
+			// FIND-06/P27.4): if the trusted parent process that spawns this
+			// subprocess (the editor) set AEGIS_ACP_TOKEN, that value wins;
+			// otherwise a fresh token is generated and written to
+			// cfg.ACPTokenPath() for the editor to read after spawning us.
+			// This closes the previous unauthenticated default — any local
+			// process able to write to this subprocess's stdin could
+			// otherwise drive full agent turns.
+			authToken, err := resolveStdioAuthToken("AEGIS_ACP_TOKEN", cfg.ACPTokenPath(), "acp", logger)
+			if err != nil {
+				return err
 			}
 
 			logger.Info("acp agent starting", "mode", resolvedMode, "addr", cfg.Server.Addr)
