@@ -57,6 +57,102 @@ fallback/cloud-gating tests unaffected (none of them set `BaseURL`).
 
 `go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
 
+**Last updated:** 2026-07-13 — the P27 threat model's entire Tier 2 shipped: **P27.3, P27.4, P27.5,
+P27.6, P27.7, P27.8, P27.9, P27.10, P27.11, P27.12, P27.13** (all 11 Tier 2 items; P27.1/P27.2 above
+already closed Tier 1). Implemented in parallel by
+7 isolated sub-agents in separate git worktrees, grouped by file-overlap risk rather than 1:1 with
+finding IDs — 6 agents each owned a fully disjoint package (no two agents ever touched the same
+file), and one agent bundled the 5 items that all needed to edit `internal/config/config.go`'s
+shared `defaults()` map/`Load()` path (P27.3, P27.5, P27.9, P27.12, P27.13) into a single branch to
+avoid the map-literal collisions that splitting them further would have caused. All 7 branches
+merged into `main` with **zero manual conflict resolution** (git auto-merged every overlapping file,
+including the two three-way merges touching `config.go` and `server.go`); full `go build ./...`,
+`go vet ./...`, and `go test -count=1 ./...` pass clean on the fully integrated tree.
+
+*P27.3 (FIND-05) — `security.redact_secrets` default on.* One-line default flip
+(`defaults()["security.redact_secrets"] = true`); gitleaks-backed masking now runs by default on
+read-tool/conversation content before it reaches a cloud provider. Fails open if gitleaks isn't on
+PATH, so this is low-risk to default on.
+
+*P27.4 (FIND-06) — default auth token for `mcp-serve`/ACP stdio.* Both interfaces previously ran
+fully unauthenticated when `AEGIS_MCP_TOKEN`/`AEGIS_ACP_TOKEN` was unset. New
+`config.GenerateAndWriteToken` (mirrors the daemon's own `generateAndWriteToken` for `daemon.token`)
+auto-generates a random token per process start and writes it to an owner-only
+`<data_dir>/mcp.token`/`acp.token` (`fsguard.RestrictToOwner`-hardened) when the env var isn't set;
+an explicit env var still always wins. `--help` text and the `.aegis/config.yaml` init template now
+document the token file path so a calling harness can discover it. `mcpserver`/`acp` library APIs
+are unchanged (empty token still means "open") — only the CLI wiring now guarantees a non-empty
+token by default.
+
+*P27.5 (FIND-13) — pinned-cert loopback TLS on by default.* The riskiest of the five bundled items:
+`defaults()["server.tls.enabled"] = true` turns on the pinned self-signed-cert TLS
+(`internal/server/tls.go`, P24.18) for client↔daemon loopback traffic that was previously plaintext.
+Verified end to end, not just via unit tests — built the binary, ran `aegis serve`, confirmed
+`daemon.crt`/`daemon.key` auto-generate and `aegis sessions list`/`aegis doctor` succeed over the
+pinned HTTPS connection with zero manual setup (`client.NewFromConfig` and the TUI's daemon
+auto-start path already had full TLS support wired in from P24.18). Along the way, found and fixed a
+real latent bug (noted again below): `envKeyCallback`'s single-split heuristic never reached the
+nested `server.tls.enabled` key, so the documented `AEGIS_SERVER_TLS_ENABLED` env-var escape hatch
+silently did nothing — now fixed with a regression test, which matters more once TLS is the default.
+
+*P27.6 (FIND-07) — trust-wrap project context/memory files.* `AGENTS.md`/`CLAUDE.md`/
+`.aegis/context.md`/`.aegis/memory.md` content is now wrapped with the same `internal/trust.Wrap`
+untrusted-provenance marker P24.4 already applied to persona/skill bodies, at the two live read
+sites (`internal/memory/context.go`'s `loadContextDirect`, `internal/memory/memory.go`'s
+`loadDirect`) — both project- and user/global-sourced files get the identical wrap, matching the
+P24.4 precedent of not distinguishing provenance for any disk-loaded file.
+
+*P27.7 (FIND-09) — gate project-persona control fields on workspace trust.* A project persona's
+`mode`/`tools`/`rules`/`output_guard` frontmatter is now dropped at parse time
+(`internal/persona/load.go`) unless the persona's project directory is trusted per the P27.1
+`workspacetrust` store — queried directly rather than via `cfg.WorkspaceTrust.Trusted`, since that
+config-level flag is forced true whenever no project `config.yaml` exists to freeze, which would
+have missed a hostile repo shipping only a persona file. `Model`/`Description`/`System` (already
+wrapped by P24.4) are untouched; user/global personas keep full control unconditionally.
+
+*P27.8 (FIND-10) — SSRF-safe dialer for the HTTP/SSE MCP client.* `internal/mcp/http.go` gained its
+own `mcpSSRFSafeDialer`/`mcpValidateNotPrivate`/private-CIDR table, deliberately a small duplicate
+of `internal/tool/builtin/web.go`'s `ssrfSafeDialer` rather than a cross-package import — matching
+existing precedent in `internal/security/target.go`, which already duplicates the same table rather
+than coupling `internal/sandbox` to `internal/config`. Both the MCP client's POST `/message` and GET
+`/sse` requests are now protected, with redirect targets re-validated the same way `web_fetch` does.
+
+*P27.9 (FIND-11) — DAST `allowed_targets` sourced from user/global config only.* `config.Load()` now
+unconditionally overwrites `cfg.Security.DAST.AllowedTargets` from the same project-excluded
+baseline layer the P27.1 trust gate already computes — reusing that machinery rather than a third
+koanf load. This is intentionally stronger than trust-gating: a hostile repo's `allowed_targets`
+never applies, even after the directory is `aegis trust`-ed, since project-controlled network-scan
+targets is a different risk shape than project-controlled permission mode.
+
+*P27.10 (FIND-18, ACL half) — fsguard-harden `longmem.db`/`knowledge.db`.* Both now call
+`fsguard.RestrictToOwner` on the main db file (fatal on error, since Aegis creates the file itself)
+and best-effort on `-wal`/`-shm` sidecars (logged, not fatal), exactly mirroring
+`internal/session/session.go`'s existing `hardenDBPermissions`.
+
+*P27.11 (FIND-20) — harden swarm mailbox file permissions.* Processed mailbox files now write
+`0o600` instead of `0o644`, and the `teams/` root directory is `fsguard`-hardened on every
+`OpenMailbox`. This surfaced a real pre-existing Windows ACL bug: `fsguard_windows.go`'s ACE had no
+inheritance flags, so hardening a populated directory left descendant files with an effectively
+empty inherited DACL — denying even the owner. Fixed by adding `OICI` (object-inherit/container-
+inherit) flags, a no-op for the pattern's other pre-existing file-only call sites (daemon token,
+session DB, `.env`, TLS key). The per-run shared-secret/HMAC message-authentication stretch goal was
+explicitly scoped out for a future item — the file-permission fix was the priority and is complete.
+
+*P27.12 (FIND-14) — default concurrency/rate caps + invalid-auth throttling.*
+`server.max_concurrent_runs` now defaults to 10 and `server.max_run_duration_sec` to 1800s (bounding
+only top-level HTTP-driven runs, not in-process swarm sub-agents — a normal single-user session
+never approaches either ceiling). `recordInvalidAuthAttempt` (`internal/server/auth.go`) gained a
+consecutive-failure-streak lockout (separate from the existing cumulative FIND-11 counter) with
+exponential backoff (1s→60s cap) past a threshold of 10 attempts, set above the pre-existing
+`TestServerInvalidAuthAttemptsLoggedAndCounted` test's 6 attempts.
+
+*P27.13 (FIND-12, default-on half) — injection scan on by default.* `search.scan_output` now
+defaults true via the `defaults()` map; the per-MCP-server `scan_output` (a list element with no
+koanf-defaults mechanism) was converted to `*bool` with a `ScanOutputEnabled()` resolver, mirroring
+the existing `SecurityToolConfig.Enabled` pattern, and now also defaults true. Confirmed via
+`internal/trust.Wrap` that a scan hit only adds a visible warning — it never blocks or mutates
+content — making this genuinely low-risk to default on.
+
 **Last updated:** 2026-07-12 — **P22.5, P22.6, P20.2, P20.3** shipped as a second user-selected
 batch of four Tier 4 parked items, same day as the first batch below. P25.9 and P6.1 were
 deliberately excluded from this round (both Effort L, both large/high-blast-radius — daemon
