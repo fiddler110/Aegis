@@ -634,7 +634,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			Auth:             m.Auth,
 			Capability:       m.Capability,
 			ToolCapabilities: m.ToolCapabilities,
-			ScanOutput:       m.ScanOutput,
+			ScanOutput:       m.ScanOutputEnabled(),
 			ScanArguments:    m.ScanArguments,
 		})
 	}

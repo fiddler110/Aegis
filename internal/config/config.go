@@ -139,10 +139,15 @@ type SearchConfig struct {
 	APIKey   string `koanf:"api_key"`  // may reference $ENV; expanded on load
 	BaseURL  string `koanf:"base_url"` // required for searxng self-host
 	// ScanOutput opts web_fetch/web_search output into the same heuristic
-	// prompt-injection scan used for opted-in MCP servers (FIND-04). Off by
-	// default — a best-effort check with false positives. The untrusted-
-	// content provenance marker on fetched/search output is always applied
-	// regardless of this setting.
+	// prompt-injection scan used for MCP servers (FIND-04/FIND-12). On by
+	// default since P27.13 — it's a best-effort heuristic (invisible/
+	// zero-width characters, base64-encoded payloads) that never blocks or
+	// mutates content on a hit, only adds a visible "[SECURITY WARNING]"
+	// note inside the existing untrusted-content wrapper (see
+	// internal/trust.Wrap), so a false positive costs nothing beyond an
+	// extra line of context; a false negative costs nothing beyond the
+	// status quo. The untrusted-content provenance marker on fetched/search
+	// output is always applied regardless of this setting.
 	ScanOutput bool `koanf:"scan_output"`
 }
 
@@ -336,11 +341,19 @@ type MCPServerConfig struct {
 	// that expose a known mix of tools with different risk levels.
 	ToolCapabilities map[string]string `koanf:"tool_capabilities"`
 	// ScanOutput opts this server's output into a heuristic prompt-injection
-	// scan before it reaches the model. Off by default (P21.6) — a
-	// best-effort check with false positives, meant for MCP sources you
-	// haven't explicitly trusted. The output's provenance marker noting it
-	// came from an external MCP server is always applied regardless.
-	ScanOutput bool `koanf:"scan_output"`
+	// scan before it reaches the model (P21.6). On by default since
+	// P27.13/FIND-12 — a best-effort heuristic (invisible/zero-width
+	// characters, base64-encoded payloads) that never blocks or mutates
+	// content on a hit, only adds a visible warning inside the existing
+	// untrusted-content wrapper, so a false positive is low-cost. A *bool
+	// (not bool), mirroring SecurityToolConfig.Enabled, so "unset" (use the
+	// default) is distinguishable from an explicit false when merging config
+	// layers — a plain bool field has no koanf-level default mechanism for
+	// elements of a list like MCP (unlike top-level scalar keys, which
+	// defaults() covers). Read via ScanOutputEnabled(), never this field
+	// directly. The output's provenance marker noting it came from an
+	// external MCP server is always applied regardless.
+	ScanOutput *bool `koanf:"scan_output"`
 	// ScanArguments opts outbound tool-call arguments bound for this server
 	// into a heuristic secret-pattern check before they are forwarded
 	// (P24.14, FIND-12). Tool-call arguments are model-constructed and may
@@ -350,6 +363,13 @@ type MCPServerConfig struct {
 	// the call is never blocked or mutated. The outbound mirror of
 	// ScanOutput.
 	ScanArguments bool `koanf:"scan_arguments"`
+}
+
+// ScanOutputEnabled reports whether c's output goes through the heuristic
+// prompt-injection scan (default true, P27.13/FIND-12 — see ScanOutput's
+// doc comment).
+func (c MCPServerConfig) ScanOutputEnabled() bool {
+	return c.ScanOutput == nil || *c.ScanOutput
 }
 
 // ProviderConfig selects and configures the model provider.
@@ -832,6 +852,10 @@ func defaults() map[string]any {
 		"embeddings.base_url":          "http://localhost:11434",
 		"mcp_server.auto_approve":      false,
 		"mcp_server.default_mode":      "plan",
+		// Heuristic invisible-char/base64 prompt-injection scan of
+		// web_fetch/web_search output on by default (P27.13/FIND-12) — see
+		// SearchConfig.ScanOutput's doc comment.
+		"search.scan_output": true,
 	}
 }
 
