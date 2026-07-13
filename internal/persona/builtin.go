@@ -49,7 +49,7 @@ func mustLoadBuiltins() map[string]Persona {
 		if err != nil {
 			panic(fmt.Sprintf("persona: reading embedded builtin %q: %v", e.Name(), err))
 		}
-		p, err := parsePersonaBytes(name, data)
+		p, err := parsePersonaBytes(name, data, true) // built-ins are compiled in, always fully trusted
 		if err != nil {
 			panic(fmt.Sprintf("persona: parsing embedded builtin %q: %v", e.Name(), err))
 		}
