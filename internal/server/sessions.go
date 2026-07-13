@@ -206,6 +206,31 @@ func (s *Server) handleListRuns(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleListCronJobs reports persisted cron jobs so an operator can review
+// what fires unattended — in particular which jobs carry auto_approve, since
+// those bypass interactive approval at fire time (P27.15/FIND-08). This is
+// the human-facing counterpart to the model-facing cron_list tool, reachable
+// without going through an engine turn.
+func (s *Server) handleListCronJobs(w http.ResponseWriter, r *http.Request) {
+	out := []api.CronJobInfo{}
+	if s.cronSched != nil {
+		jobs, err := s.cronSched.List(r.Context())
+		if err != nil {
+			s.logger.Error("list cron jobs", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		for _, j := range jobs {
+			out = append(out, api.CronJobInfo{
+				ID: j.ID, Schedule: j.Schedule, Command: j.Command, Title: j.Title,
+				Enabled: j.Enabled, AutoApprove: j.AutoApprove, LastRun: j.LastRun,
+				Created: j.Created, Workdir: j.Workdir,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	var (
 		metas []session.Meta

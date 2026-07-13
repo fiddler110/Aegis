@@ -310,6 +310,23 @@ type RunInfo struct {
 	LastKind  string    `json:"last_kind"` // most recent event kind
 }
 
+// CronJobInfo describes a persisted cron job, surfaced over the API so an
+// operator can review what fires unattended without going through the
+// model-facing cron_list tool — in particular which jobs carry auto_approve,
+// since those bypass interactive approval entirely at fire time
+// (P27.15/FIND-08 review-view requirement).
+type CronJobInfo struct {
+	ID          string    `json:"id"`
+	Schedule    string    `json:"schedule"`
+	Command     string    `json:"command"`
+	Title       string    `json:"title"`
+	Enabled     bool      `json:"enabled"`
+	AutoApprove bool      `json:"auto_approve"`
+	LastRun     time.Time `json:"last_run"`
+	Created     time.Time `json:"created"`
+	Workdir     string    `json:"workdir,omitempty"`
+}
+
 // SteerRequest injects a mid-run instruction into an active session run.
 type SteerRequest struct {
 	Text string `json:"text"`

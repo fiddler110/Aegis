@@ -359,6 +359,19 @@ Create a recurring cron job using a standard 5-field cron expression.
 }
 ```
 
+No one is present to approve a job when it fires unattended, so at fire time the command is
+checked against the full permission gate stack — the same one interactive shell calls get: text
+allow/deny rules, then the contextual egress/network policy, then the coarse permission mode
+(P27.15/FIND-08). An explicit `deny` rule blocks a job's command regardless of `auto_approve`; an
+explicit `allow` rule lets it fire unattended without needing `auto_approve` at all. Absent a
+matching rule, a mode-level or contextual-gate approval point (e.g. build-mode execute, or
+egress-then-write if enabled) resolves from the job's `auto_approve` flag, since nothing can answer
+an interactive prompt here — set it to allow the job to fire even when the daemon's mode would
+otherwise require approval.
+
+Run `aegis cron list` from the CLI (not a model-facing tool call) to review persisted jobs as an
+operator, including which ones carry `auto_approve`; add `--auto-approve-only` to see just those.
+
 ---
 
 ### `cron_list`

@@ -217,6 +217,17 @@ func (c *Client) ListRuns(ctx context.Context) ([]api.RunInfo, error) {
 	return out, nil
 }
 
+// ListCronJobs returns all persisted cron jobs, for operator review of what
+// fires unattended (P27.15/FIND-08) — in particular which jobs carry
+// auto_approve.
+func (c *Client) ListCronJobs(ctx context.Context) ([]api.CronJobInfo, error) {
+	var out []api.CronJobInfo
+	if err := c.do(ctx, http.MethodGet, "/cron/jobs", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetSession returns a full session including messages.
 func (c *Client) GetSession(ctx context.Context, id string) (*session.Session, error) {
 	var out session.Session

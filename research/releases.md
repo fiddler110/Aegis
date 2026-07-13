@@ -9,7 +9,52 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
-**Last updated:** 2026-07-13 — **P27.14** (FIND-04, Tier 3, CVSS 6.8) shipped: warn/recommend
+**Last updated:** 2026-07-13 — **P27.15** (FIND-08, Tier 3, CVSS 5.6) shipped: apply the full
+permission stack, not just the coarse mode check, at cron fire time.
+
+Cron fire-time gating (FIND-03/P24.3) previously re-checked only the coarse permission mode via
+`permission.Policy.Decide`, so an operator's text-based deny rule or the contextual egress/network
+policy — both fully enforced for interactive tool calls — had no effect on an unattended cron fire.
+`internal/server/helpers.go`'s `newCronRunFunc` now takes a `permCheck func(ctx, cron.Job) (bool,
+string)` thunk instead of a bare `mode func() permission.Mode`; the new `Server.cronPermCheck`
+builds the identical gate stack `buildGate` assembles for every interactive engine run — mode →
+contextual egress/network policy → text allow/deny rules, with an empty `persona.Persona{}` since a
+cron job has no persona of its own (matching how sub-agent runs skip the persona layers) — and
+checks it against the real `"shell"` tool with `{"command": job.Command}` as input. A job's
+`auto_approve` opt-in resolves any Ask-tier decision anywhere in that stack (previously it only
+covered the single mode-level Ask); an explicit `deny` rule or a Deny-mode decision still blocks
+regardless of `auto_approve`, and an explicit `allow` rule now lets a job fire unattended without
+needing `auto_approve` set at all — matching how rules already override the mode gate for
+interactive calls.
+
+Construction-order wrinkle: `newCronRunFunc`/`cron.NewScheduler` are built early in `Server.New()`,
+before the `*Server` exists, because the scheduler has to already exist when the tool registry
+registers `cron_create`/etc. with `Cron: cronSched`. Rather than add a setter to `cron.Scheduler` or
+restructure construction order, `New()` now predeclares `var s *Server` and the `permCheck` thunk
+passed to `newCronRunFunc` closes over that variable, calling `s.cronPermCheck` — since the thunk is
+only ever invoked at actual fire time (long after `New()` finishes assigning `s`), capturing the
+not-yet-initialized pointer is safe standard Go closure semantics, not a race.
+
+Also new: a human-facing review view for persisted cron jobs (the finding's "surface persisted
+auto-approve jobs in a review view") — previously a job's `auto_approve` status was visible only to
+the model itself via the `cron_list` tool, with no operator-facing surface at all. Added `GET
+/cron/jobs` (`api.CronJobInfo`, `internal/server/sessions.go`), `Client.ListCronJobs`
+(`internal/client/client.go`), and a new `aegis cron list` CLI command
+(`internal/cli/cron.go`, wired into `root.go`'s session group) that flags each auto_approve job
+inline (`--auto-approve-only` to filter to just those). The finding's other suggestion — "require a
+separately-confirmed flag for `auto_approve` jobs" — was satisfied by the existing per-job
+`auto_approve` field itself (already explicit, boolean, and distinct from the daemon's ambient
+permission mode) rather than adding a second flag; its scope was extended in place instead, per the
+scope note in [roadmap.md](roadmap.md#priority-order).
+
+Docs updated (`docs/tools-reference.md`, cron_create section). New tests:
+`TestNewCronRunFuncBlockedByDenyRuleEvenInAutoMode`, `TestNewCronRunFuncAllowedByRuleEvenInPlanMode`,
+`TestServerCronPermCheck`, `TestHandleListCronJobs` (`internal/server/cron_test.go`); the 6
+pre-existing `newCronRunFunc` tests were updated to the new signature via a `cronPermCheckFor` test
+helper (builds a gate from `permission` package primitives directly, no full daemon needed) rather
+than dropped. `go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
+
+Before that, same day (2026-07-13): **P27.14** (FIND-04, Tier 3, CVSS 6.8) shipped: warn/recommend
 against the unconfined `local` sandbox backend.
 
 The default `local` sandbox backend runs shell commands on the host with only env-var stripping —
