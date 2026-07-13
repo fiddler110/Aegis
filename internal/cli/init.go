@@ -492,10 +492,14 @@ const projectConfigTemplate = `# ═══════════════�
 # Files you should NOT commit from .aegis/:
 #   .aegis/sessions.db     — local session history
 #   .aegis/daemon.token    — auth token for the local daemon
+#   .aegis/mcp.token       — auth token for "aegis mcp-serve", auto-generated
+#                            when AEGIS_MCP_TOKEN is unset (P27.4)
+#   .aegis/acp.token       — auth token for "aegis acp", auto-generated
+#                            when AEGIS_ACP_TOKEN is unset (P27.4)
 #   .aegis/aegis.log       — daemon log
 #
 # Add these lines to your .gitignore if they are not already covered:
 #   .aegis/sessions.db
-#   .aegis/daemon.token
+#   .aegis/*.token
 #   .aegis/*.log
 `

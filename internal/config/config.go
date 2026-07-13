@@ -1098,6 +1098,20 @@ func (c *Config) AuthTokenPath() string {
 	return filepath.Join(c.DataDir, "daemon.token")
 }
 
+// MCPTokenPath returns the path to the auto-generated `aegis mcp-serve`
+// stdio auth token file, used when AEGIS_MCP_TOKEN is not set in the
+// environment (P27.4/FIND-06).
+func (c *Config) MCPTokenPath() string {
+	return filepath.Join(c.DataDir, "mcp.token")
+}
+
+// ACPTokenPath returns the path to the auto-generated `aegis acp` stdio
+// auth token file, used when AEGIS_ACP_TOKEN is not set in the environment
+// (P27.4/FIND-06).
+func (c *Config) ACPTokenPath() string {
+	return filepath.Join(c.DataDir, "acp.token")
+}
+
 // TLSCertPath returns the path to the daemon's TLS certificate (FIND-32/
 // P24.18): Server.TLS.CertFile if the operator configured one, otherwise
 // <DataDir>/daemon.crt, auto-generated on first start with TLS enabled.

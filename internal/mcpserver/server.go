@@ -47,9 +47,12 @@ type Options struct {
 	// reachable unauthenticated since they expose no session-driving
 	// capability. This closes FIND-02/P24.2: without it, any local process
 	// able to write to this subprocess's stdin can drive full agent turns.
-	// Empty (the default) leaves behavior unchanged — opt in by setting
-	// AEGIS_MCP_TOKEN and configuring the calling harness to send the same
-	// value back via aegis/authenticate.
+	// Empty leaves tools/call unauthenticated — this package's own default,
+	// kept for callers embedding Server directly, but never what `aegis
+	// mcp-serve` passes: that command always resolves a non-empty token
+	// (AEGIS_MCP_TOKEN if set, otherwise one it generates and writes to
+	// config.Config.MCPTokenPath) before constructing Options, so the CLI
+	// interface itself is never unauthenticated by default (FIND-06/P27.4).
 	AuthToken string
 }
 
