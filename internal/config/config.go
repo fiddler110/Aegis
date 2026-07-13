@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -23,6 +24,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/fsguard"
 	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // Config is the fully resolved harness configuration.
@@ -59,6 +61,35 @@ type Config struct {
 	Search         SearchConfig               `koanf:"search"`
 	Notify         NotifyConfig               `koanf:"notify"`
 	Embeddings     EmbeddingsConfig           `koanf:"embeddings"`
+
+	// WorkspaceTrust reports the P27.1 workspace-trust gate's outcome for
+	// this load. It is never read from a config file (computed by Load()
+	// itself) — callers that want to warn or gate on it (server startup,
+	// `aegis doctor`, the TUI) read this field rather than re-deriving it.
+	WorkspaceTrust WorkspaceTrustStatus `koanf:"-"`
+}
+
+// WorkspaceTrustStatus is Load()'s report of the workspace-trust decision for
+// the current directory (P27.1, FIND-01/FIND-02): whether it has been
+// explicitly trusted, and — if not — which security-relevant settings the
+// project's .aegis/config.yaml would have changed had it been honored, now
+// frozen back to their user/global values instead.
+type WorkspaceTrustStatus struct {
+	// Dir is the directory the trust decision applies to (the process's cwd,
+	// where .aegis/config.yaml is resolved from).
+	Dir string
+	// Trusted is true once `aegis trust` (or equivalent) has recorded an
+	// explicit trust decision for Dir.
+	Trusted bool
+	// Frozen is true when Trusted is false AND the project config would
+	// otherwise have changed a security-relevant setting — meaning Changes
+	// below were actually applied (reverted to the user/global baseline)
+	// rather than just computed for display.
+	Frozen bool
+	// Changes describes, one line each, which security-relevant settings the
+	// (untrusted) project config attempted to change. Empty when Trusted is
+	// true or the project config carries no security-relevant overrides.
+	Changes []string
 }
 
 // MCPServerModeConfig controls `aegis mcp-serve` (P6.3): exposing this
@@ -378,6 +409,15 @@ func (p ProviderConfig) LocalPromptProfile() bool {
 	default:
 		return isLoopbackBaseURL(p.BaseURL)
 	}
+}
+
+// IsLoopbackBaseURL reports whether raw is a URL whose host resolves to
+// loopback (127.0.0.0/8, ::1, or the literal "localhost"). Exported so
+// providerfactory can reuse the same loopback test for the P27.2
+// (FIND-03) provider.base_url validation as LocalPromptProfile's local-model
+// auto-detection below.
+func IsLoopbackBaseURL(raw string) bool {
+	return isLoopbackBaseURL(raw)
 }
 
 // isLoopbackBaseURL reports whether raw is a URL whose host resolves to
@@ -837,22 +877,45 @@ func loadDotEnv(path string) error {
 	return nil
 }
 
-// Load resolves configuration from all layers and returns the result.
-func Load() (*Config, error) {
-	k := koanf.New(".")
+// envKeyCallback maps AEGIS_<SECTION>_<FIELD> environment variables onto
+// koanf's dotted key space (e.g. AEGIS_PROVIDER_MODEL -> provider.model).
+// Only the first underscore after a known section prefix becomes a dot;
+// remaining underscores stay as-is so compound field names (base_url,
+// max_tokens, etc.) are preserved.
+var envSections = map[string]bool{
+	"provider": true, "server": true, "permission": true,
+	"diagram": true, "cost": true, "swarm": true,
+	"sandbox": true, "security": true, "output_guard": true,
+	"embeddings": true,
+}
 
+func envKeyCallback(s string) string {
+	s = strings.ToLower(strings.TrimPrefix(s, EnvPrefix))
+	if idx := strings.Index(s, "_"); idx > 0 {
+		if envSections[s[:idx]] {
+			return s[:idx] + "." + s[idx+1:]
+		}
+	}
+	return s
+}
+
+// loadLayers builds a koanf instance from defaults -> global config file ->
+// (optionally) project config file -> AEGIS_* env, in precedence order.
+// includeProject is false to build the "baseline" layer used by the P27.1
+// workspace-trust gate: what the effective config would be with the
+// project's .aegis/config.yaml ignored entirely (only user/global settings
+// and this process's own environment).
+func loadLayers(includeProject bool) (*koanf.Koanf, error) {
+	k := koanf.New(".")
 	if err := k.Load(confmap.Provider(defaults(), "."), nil); err != nil {
 		return nil, fmt.Errorf("load defaults: %w", err)
 	}
 
-	// Load .aegis/.env before other layers so secrets (MCP tokens, API keys)
-	// can be set there without living in version-controlled config files.
-	// Real environment variables always override values in the .env file.
-	if err := loadDotEnv(filepath.Join(".aegis", ".env")); err != nil {
-		return nil, fmt.Errorf("load .aegis/.env: %w", err)
+	paths := []string{GlobalConfigPath()}
+	if includeProject {
+		paths = append(paths, ProjectConfigPath())
 	}
-
-	for _, path := range []string{GlobalConfigPath(), ProjectConfigPath()} {
+	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
 			continue // missing config files are fine
 		}
@@ -861,37 +924,45 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// Env: AEGIS_PROVIDER_MODEL -> provider.model, AEGIS_PROVIDER_BASE_URL -> provider.base_url
-	// Only the first underscore after a known section prefix becomes a dot;
-	// remaining underscores stay as-is so compound field names (base_url,
-	// max_tokens, etc.) are preserved.
-	sections := map[string]bool{
-		"provider": true, "server": true, "permission": true,
-		"diagram": true, "cost": true, "swarm": true,
-		"sandbox": true, "security": true, "output_guard": true,
-		"embeddings": true,
-	}
-	envCb := func(s string) string {
-		s = strings.ToLower(strings.TrimPrefix(s, EnvPrefix))
-		if idx := strings.Index(s, "_"); idx > 0 {
-			if sections[s[:idx]] {
-				return s[:idx] + "." + s[idx+1:]
-			}
-		}
-		return s
-	}
-	if err := k.Load(env.Provider(EnvPrefix, ".", envCb), nil); err != nil {
+	if err := k.Load(env.Provider(EnvPrefix, ".", envKeyCallback), nil); err != nil {
 		return nil, fmt.Errorf("load env: %w", err)
 	}
+	return k, nil
+}
 
-	var cfg Config
-	if err := k.Unmarshal("", &cfg); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
+// Load resolves configuration from all layers and returns the result.
+func Load() (*Config, error) {
+	// Load .aegis/.env before other layers so secrets (MCP tokens, API keys)
+	// can be set there without living in version-controlled config files.
+	// Real environment variables always override values in the .env file.
+	if err := loadDotEnv(filepath.Join(".aegis", ".env")); err != nil {
+		return nil, fmt.Errorf("load .aegis/.env: %w", err)
 	}
 
+	full, err := loadLayers(true)
+	if err != nil {
+		return nil, err
+	}
+	var cfg Config
+	if err := full.Unmarshal("", &cfg); err != nil {
+		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
 	if err := cfg.Sandbox.Normalize(); err != nil {
 		return nil, err
 	}
+
+	baseline, err := loadLayers(false)
+	if err != nil {
+		return nil, err
+	}
+	var baseCfg Config
+	if err := baseline.Unmarshal("", &baseCfg); err != nil {
+		return nil, fmt.Errorf("unmarshal baseline config: %w", err)
+	}
+	// A project config asserting an invalid sandbox.backend alias must not
+	// itself defeat the trust gate meant to catch it; only the trusted
+	// (project-inclusive) config's Normalize error is fatal.
+	_ = baseCfg.Sandbox.Normalize()
 
 	cfg.Provider.APIKey = ProviderAPIKey(cfg.Provider.Default)
 
@@ -905,7 +976,84 @@ func Load() (*Config, error) {
 	cfg.Search.APIKey = os.ExpandEnv(cfg.Search.APIKey)
 	cfg.Notify.Webhook = os.ExpandEnv(cfg.Notify.Webhook)
 
+	applyWorkspaceTrust(&cfg, &baseCfg)
+
 	return &cfg, nil
+}
+
+// WorkspaceTrustStorePath returns the path to the JSON file recording
+// per-directory workspace-trust decisions (P27.1). Deliberately anchored to
+// the fixed user-level data directory rather than cfg.DataDir — cfg.DataDir
+// can itself be overridden by project config, and resolving the trust store
+// through a value the untrusted layer influences would let a hostile project
+// config point it at a location where an attacker controls the "trusted"
+// marker.
+func WorkspaceTrustStorePath() string {
+	return filepath.Join(defaultDataDir(), "workspace_trust.json")
+}
+
+// securityRelevantDiff returns a human-readable line for each
+// security-relevant setting (per FIND-01/FIND-02: permission.*, sandbox.*,
+// mcp.servers, notify.webhook, hooks) where full differs from base.
+func securityRelevantDiff(full, base *Config) []string {
+	var diffs []string
+	if !reflect.DeepEqual(full.Permission, base.Permission) {
+		diffs = append(diffs, fmt.Sprintf("permission: %+v -> %+v", base.Permission, full.Permission))
+	}
+	if !reflect.DeepEqual(full.Sandbox, base.Sandbox) {
+		diffs = append(diffs, fmt.Sprintf("sandbox: %+v -> %+v", base.Sandbox, full.Sandbox))
+	}
+	if !reflect.DeepEqual(full.MCP, base.MCP) {
+		diffs = append(diffs, fmt.Sprintf("mcp.servers: %d configured -> %d configured", len(base.MCP), len(full.MCP)))
+	}
+	if full.Notify.Webhook != base.Notify.Webhook {
+		diffs = append(diffs, fmt.Sprintf("notify.webhook: %q -> %q", base.Notify.Webhook, full.Notify.Webhook))
+	}
+	if !reflect.DeepEqual(full.Hooks, base.Hooks) {
+		diffs = append(diffs, fmt.Sprintf("hooks: %d configured -> %d configured", len(base.Hooks), len(full.Hooks)))
+	}
+	return diffs
+}
+
+// applyWorkspaceTrust implements the P27.1 workspace-trust gate: a project's
+// .aegis/config.yaml is auto-merged with no confirmation today (FIND-02),
+// letting a cloned repository silently widen permission.mode, add an
+// attacker MCP server, set a notify.webhook exfiltration channel, or run
+// session_start/pre_tool_use hooks (FIND-01). Until an operator explicitly
+// trusts the current directory (`aegis trust`), the security-relevant keys
+// are frozen to their user/global values — cfg (already unmarshalled with
+// the project layer applied) is mutated in place to fall back to baseline
+// (project layer excluded) for exactly those keys.
+func applyWorkspaceTrust(cfg, baseline *Config) {
+	dir, err := os.Getwd()
+	if err != nil {
+		dir = "."
+	}
+	cfg.WorkspaceTrust = WorkspaceTrustStatus{Dir: dir}
+
+	// Nothing to gate if there's no project config file — the diff would be
+	// empty anyway, but skip the trust-store lookup/allocation entirely.
+	if _, err := os.Stat(ProjectConfigPath()); err != nil {
+		cfg.WorkspaceTrust.Trusted = true
+		return
+	}
+
+	store := workspacetrust.Open(WorkspaceTrustStorePath())
+	trusted := store.IsTrusted(dir)
+	cfg.WorkspaceTrust.Trusted = trusted
+
+	diffs := securityRelevantDiff(cfg, baseline)
+	if trusted || len(diffs) == 0 {
+		return
+	}
+
+	cfg.Permission = baseline.Permission
+	cfg.Sandbox = baseline.Sandbox
+	cfg.MCP = baseline.MCP
+	cfg.Notify.Webhook = baseline.Notify.Webhook
+	cfg.Hooks = baseline.Hooks
+	cfg.WorkspaceTrust.Frozen = true
+	cfg.WorkspaceTrust.Changes = diffs
 }
 
 // ProviderAPIKey reads the API key for the given provider from the

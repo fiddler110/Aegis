@@ -104,6 +104,23 @@ func TestLooksLikeThinkingModel(t *testing.T) {
 	}
 }
 
+func TestDoctorWorkspaceTrustCheck(t *testing.T) {
+	pass := doctorWorkspaceTrustCheck(&config.Config{})
+	if pass.Severity != doctorPass {
+		t.Errorf("no frozen settings: got %v, want pass", pass.Severity)
+	}
+
+	warn := doctorWorkspaceTrustCheck(&config.Config{
+		WorkspaceTrust: config.WorkspaceTrustStatus{Frozen: true, Changes: []string{"permission: mode build -> auto"}},
+	})
+	if warn.Severity != doctorWarn {
+		t.Errorf("frozen settings: got %v, want warn", warn.Severity)
+	}
+	if !strings.Contains(warn.Fix, "aegis trust") {
+		t.Errorf("fix hint should point at `aegis trust`, got %q", warn.Fix)
+	}
+}
+
 func TestDoctorGuardCheck(t *testing.T) {
 	base := config.ProviderConfig{Model: "qwen3.6:35b-a3b-deep"}
 

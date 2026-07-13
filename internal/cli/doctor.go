@@ -108,6 +108,7 @@ func renderDoctorChecks(w io.Writer, checks []doctorCheck) {
 // passed — a syntactically invalid config never reaches here.
 func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	checks := []doctorCheck{
+		doctorWorkspaceTrustCheck(cfg),
 		doctorProviderCheck(ctx, cfg),
 		doctorSandboxCheck(cfg),
 		doctorScannerCheck(ctx, cfg),
@@ -115,6 +116,23 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 		doctorWorkdirCheck(cfg),
 	}
 	return append(checks, doctorDaemonChecks(ctx, cfg)...)
+}
+
+// doctorWorkspaceTrustCheck surfaces the P27.1 workspace-trust gate's
+// outcome for the current directory: whether project-sourced
+// permission.*/sandbox.*/mcp.servers/notify.webhook/hooks settings are
+// currently frozen to their user/global values because this directory
+// hasn't been explicitly trusted yet (`aegis trust`).
+func doctorWorkspaceTrustCheck(cfg *config.Config) doctorCheck {
+	const name = "workspace trust"
+	if !cfg.WorkspaceTrust.Frozen {
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: "no untrusted project security overrides"}
+	}
+	return doctorCheck{
+		Name: name, Severity: doctorWarn,
+		Detail: fmt.Sprintf("%d project config change(s) frozen: %s", len(cfg.WorkspaceTrust.Changes), strings.Join(cfg.WorkspaceTrust.Changes, "; ")),
+		Fix:    "run `aegis trust` to review and accept them",
+	}
 }
 
 // doctorProviderCheck checks the configured provider is actually reachable:

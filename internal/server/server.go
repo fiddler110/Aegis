@@ -468,6 +468,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	// Security posture warnings. These are easy to misconfigure in ways that
 	// silently weaken isolation, so surface them loudly at startup.
+	if cfg.WorkspaceTrust.Frozen {
+		logger.Warn("workspace not trusted: project .aegis/config.yaml security-relevant settings are frozen to user/global values",
+			"dir", cfg.WorkspaceTrust.Dir, "changes", cfg.WorkspaceTrust.Changes, "fix", "run `aegis trust` to review and accept them")
+	}
 	if _, isLocal := sb.(*sandbox.LocalBackend); isLocal {
 		if cfg.Permission.Mode == string(permission.ModeAuto) && !cfg.Permission.AutoApproveExec {
 			logger.Warn("permission mode 'auto' with the local sandbox runs model-issued shell commands directly on the host with no approval; use the container sandbox backend or 'build' mode for untrusted work")

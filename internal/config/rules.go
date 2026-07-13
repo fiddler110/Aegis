@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	yamlv3 "go.yaml.in/yaml/v3"
+
+	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // AppendProjectPermissionRule appends a text permission rule (e.g.
@@ -17,6 +19,12 @@ import (
 // This backs the TUI's "allow always for this pattern" approval option (TQ6):
 // the rule takes effect in the running daemon immediately and this write makes
 // it survive restarts.
+//
+// permission.rules is one of the P27.1 workspace-trust-gated keys (FIND-02):
+// a successful append here also records root as trusted, since the write
+// itself is an explicit, interactive, local operator decision — not
+// inherited from a cloned repository's pre-existing config — the exact
+// distinction the trust gate exists to make.
 func AppendProjectPermissionRule(root, rule string) error {
 	path := filepath.Join(root, ".aegis", "config.yaml")
 
@@ -56,5 +64,11 @@ func AppendProjectPermissionRule(root, rule string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
-	return os.WriteFile(path, out, 0o644)
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return err
+	}
+	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(root); err != nil {
+		return fmt.Errorf("trust %s: %w", root, err)
+	}
+	return nil
 }

@@ -90,6 +90,66 @@ func TestBuild_CloudToLocalFallbackNeverGated(t *testing.T) {
 	}
 }
 
+// TestBuild_RefusesPlaintextHTTPNonLoopbackWithRealKey is the P27.2/FIND-03
+// regression: a non-loopback plaintext-HTTP base_url must not be allowed to
+// carry a real API key.
+func TestBuild_RefusesPlaintextHTTPNonLoopbackWithRealKey(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "sk-real-secret", BaseURL: "http://attacker.example/v1", MaxRetries: 2,
+	}}
+	_, err := Build(cfg, nil)
+	if err == nil {
+		t.Fatal("expected an error for plaintext HTTP to a non-loopback host with a real API key")
+	}
+	if !strings.Contains(err.Error(), "plaintext HTTP") {
+		t.Errorf("error should explain the plaintext-HTTP refusal, got: %v", err)
+	}
+}
+
+// TestBuild_AllowsPlaintextHTTPLoopback confirms the refusal above doesn't
+// break the common local/LAN Ollama-over-HTTP setup, which never carries a
+// real credential.
+func TestBuild_AllowsPlaintextHTTPLoopback(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", BaseURL: "http://localhost:11434/v1", MaxRetries: 2,
+	}}
+	if _, err := Build(cfg, nil); err != nil {
+		t.Fatalf("loopback http base_url should be allowed: %v", err)
+	}
+}
+
+// TestBuild_WarnsOnNonDefaultCloudHost confirms a non-default HTTPS host for
+// a cloud provider is allowed through (many legitimate gateway/proxy setups
+// exist) but logs a prominent warning rather than silently sending the key
+// there.
+func TestBuild_WarnsOnNonDefaultCloudHost(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "sk-real-secret", BaseURL: "https://gateway.example.com/v1", MaxRetries: 2,
+	}}
+	if _, err := Build(cfg, testLogger(&buf)); err != nil {
+		t.Fatalf("non-default https host should be allowed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "overrides the default API host") {
+		t.Errorf("expected a warning about the non-default host, got log: %s", buf.String())
+	}
+}
+
+// TestBuild_NoWarningForDefaultHost confirms the warning above doesn't fire
+// for the provider's own real default host.
+func TestBuild_NoWarningForDefaultHost(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "sk-real-secret", BaseURL: "https://api.anthropic.com", MaxRetries: 2,
+	}}
+	if _, err := Build(cfg, testLogger(&buf)); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if strings.Contains(buf.String(), "overrides the default API host") {
+		t.Errorf("should not warn for the provider's own default host, got log: %s", buf.String())
+	}
+}
+
 func TestBuild_UnsupportedFallbackProviderSkippedNotFatal(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := &config.Config{
