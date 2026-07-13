@@ -134,3 +134,36 @@ func TestSemanticRankingIgnoresMismatchedModelVectors(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenAppliesPermissionHardening exercises the FIND-18/P27.10
+// hardenDBPermissions call Open makes on the knowledge database file and its
+// WAL-mode sidecars (-wal, -shm), mirroring
+// internal/session.TestOpenAppliesPermissionHardening. On POSIX this is a
+// no-op (fsguard's RestrictToOwner returns nil immediately there), so the
+// main assertion is simply that Open still succeeds and the store is usable
+// — a regression where the hardening call errors out (including on a
+// sidecar that hasn't been created yet) must not break every knowledge
+// store open.
+func TestOpenAppliesPermissionHardening(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "hardened-knowledge.db")
+
+	s, err := Open(dir, dbPath, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.upsert(context.Background(), "docs/hardening.md", "Hardening", "exists"); err != nil {
+		t.Fatalf("upsert after Open: %v", err)
+	}
+
+	// Re-open the same path: hardenDBPermissions runs again and must not
+	// error even though the -wal/-shm sidecars now exist from the first
+	// open's writes above.
+	s2, err := Open(dir, dbPath, nil)
+	if err != nil {
+		t.Fatalf("reopen after hardening: %v", err)
+	}
+	s2.Close()
+}

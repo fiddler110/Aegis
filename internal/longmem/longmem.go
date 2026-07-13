@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/embed"
+	"github.com/fiddler110/aegis/internal/fsguard"
 	_ "modernc.org/sqlite"
 )
 
@@ -74,7 +76,32 @@ func Open(project, dbPath string, embedder embed.Embedder) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := hardenDBPermissions(dbPath); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("restrict longmem db permissions: %w", err)
+	}
 	return s, nil
+}
+
+// hardenDBPermissions applies fsguard.RestrictToOwner (FIND-18/P27.10) to the
+// long-term memory database file and to its WAL-mode sidecars (-wal, -shm;
+// this store always runs in WAL mode — see the PRAGMA above). It mirrors
+// session.hardenDBPermissions: the main database file is created by Aegis
+// itself, so a genuine ACL-set failure on it propagates as an error from
+// Open, while the sidecars may not exist yet at open time — fsguard.RestrictToOwner
+// already treats a missing file as a no-op — so any other failure hardening
+// one of them is only logged, not fatal.
+func hardenDBPermissions(path string) error {
+	if err := fsguard.RestrictToOwner(path); err != nil {
+		return err
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		sidecar := path + suffix
+		if err := fsguard.RestrictToOwner(sidecar); err != nil {
+			slog.Default().Warn("failed to restrict longmem db sidecar permissions", "path", sidecar, "err", err)
+		}
+	}
+	return nil
 }
 
 // ProjectName returns the project scope this store is keyed to.
