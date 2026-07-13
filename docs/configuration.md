@@ -441,8 +441,15 @@ embeddings:
 
 # ── Shell sandbox ─────────────────────────────────────────────────────────────
 sandbox:
-  # "local"     — run directly on the host (default)
-  # "os"        — OS-level isolation: seatbelt on macOS, bwrap/Landlock on Linux; no container needed.
+  # "local"     — run directly on the host; no isolation at all (P27.14/FIND-04:
+  #               approval prompts and env-var stripping are the only
+  #               compensating controls — a shell tool call can still read/
+  #               write/exfiltrate anything the daemon's own user account can).
+  # "os"        — OS-level isolation: seatbelt on macOS, bwrap/Landlock on Linux; no
+  #               container needed. `aegis --first-init`'s generated config defaults
+  #               new installs to this (falls back to "local" with a startup WARN
+  #               if unavailable, e.g. bubblewrap not installed on Linux, or on
+  #               Windows where neither mechanism exists).
   #               Confines WRITES (and network, if configured below) only — the entire host
   #               filesystem is still readable inside the sandbox. See docs/security.md before
   #               relying on this for anything that reads sensitive host files (SSH keys, cloud
@@ -456,7 +463,7 @@ sandbox:
   # canonical spelling. Any other value fails the daemon at startup with an
   # error naming the offending value, rather than silently running
   # unsandboxed (which is what happened before P25.2).
-  backend: local
+  backend: os
 
   # Force a specific runtime when backend=container or backend=auto:
   # docker | podman | wslc | container (Apple Containers, macOS)

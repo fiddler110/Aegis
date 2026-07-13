@@ -501,6 +501,16 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			"dir", cfg.WorkspaceTrust.Dir, "changes", cfg.WorkspaceTrust.Changes, "fix", "run `aegis trust` to review and accept them")
 	}
 	if _, isLocal := sb.(*sandbox.LocalBackend); isLocal {
+		if cfg.Permission.Mode != string(permission.ModePlan) {
+			// FIND-04/P27.14: the local backend strips secrets from the
+			// spawned env (P7.2) but gives no fs/network/process isolation —
+			// an approval prompt (build mode) or auto-approval (auto mode) is
+			// the only compensating control once a command is approved. The
+			// sharper mode-specific warnings below cover auto/auto_approve_exec;
+			// this persistent one covers the default build-mode case too,
+			// which had no startup signal at all before this.
+			logger.Warn("sandbox backend is 'local' (unconfined): approved shell/execute tool calls run directly on the host with no filesystem/network isolation; consider sandbox.backend: os (macOS/Linux, no container runtime needed) or container for real isolation")
+		}
 		if cfg.Permission.Mode == string(permission.ModeAuto) && !cfg.Permission.AutoApproveExec {
 			logger.Warn("permission mode 'auto' with the local sandbox runs model-issued shell commands directly on the host with no approval; use the container sandbox backend or 'build' mode for untrusted work")
 		}

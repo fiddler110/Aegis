@@ -828,6 +828,8 @@ Aegis does not auto-detect or enforce rootless-vs-rootful at startup: there is n
 
 ### Startup warning
 
+**Local sandbox, execute-capable tools (P27.14/FIND-04):** whenever the effective backend is `local` and permission mode is not `plan` (i.e. shell/execute tool calls are reachable at all), the daemon logs a persistent `WARN` at startup recommending `os` or `container` instead — the local backend gives no fs/network/process isolation; an approval prompt (build mode) or auto-approval (auto mode) is the only compensating control once a command is approved. `aegis doctor`'s `sandbox` check surfaces the same recommendation. `aegis --first-init`'s generated config now defaults new installs to `sandbox.backend: os` for exactly this reason — it falls back to `local` (with this same warning) if no OS sandbox mechanism is available on the host.
+
 When `auto` mode runs with the local sandbox and the shell tool is present alongside network policies (`network_allowlist` or `egress_then_write`), the daemon logs a startup warning:
 
 ```

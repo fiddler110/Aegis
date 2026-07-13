@@ -245,7 +245,14 @@ func doctorSandboxCheck(cfg *config.Config) doctorCheck {
 	}
 	detail := fmt.Sprintf("configured %q, active %q", backend, active)
 	if active == "local" {
-		detail += " — no isolation, commands run directly on the host"
+		// FIND-04/P27.14: local gives no fs/network/process isolation — call
+		// this out as a WARN (not a silent PASS) so it surfaces every run,
+		// same as the daemon's own startup warning (server.New).
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: detail + " — no isolation, commands run directly on the host",
+			Fix:    "consider sandbox.backend: os (macOS/Linux, no container runtime needed) or container for isolation of shell/execute tool calls",
+		}
 	}
 	return doctorCheck{Name: name, Severity: doctorPass, Detail: detail}
 }
