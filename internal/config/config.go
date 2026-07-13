@@ -661,6 +661,15 @@ type DASTConfig struct {
 	// target's declared identity can't be silently changed by whatever it
 	// happens to resolve to at scan time (ZAP does its own resolution inside
 	// the container, outside Aegis's control).
+	//
+	// Sourced from user/global config only (P27.9/FIND-11): Load()
+	// unconditionally overwrites this field with the project-excluded
+	// baseline after unmarshalling, so a project .aegis/config.yaml can
+	// never widen it — not even once the directory is `aegis trust`-ed,
+	// unlike the P27.1 trust gate's other frozen-until-trusted keys. An
+	// active scanner authorized against arbitrary Internet hosts via a
+	// cloned repo's config is a materially different risk than that repo
+	// merely widening its own permission mode.
 	AllowedTargets []string `koanf:"allowed_targets"`
 	// AllowActive gates active/api scan modes (which send real attack
 	// payloads, not just passive observation) behind an explicit one-time
@@ -989,6 +998,18 @@ func Load() (*Config, error) {
 	// itself defeat the trust gate meant to catch it; only the trusted
 	// (project-inclusive) config's Normalize error is fatal.
 	_ = baseCfg.Sandbox.Normalize()
+
+	// P27.9/FIND-11: recon_scan/dast_scan's target-authorization allowlist is
+	// sourced from the user/global baseline only, unconditionally — never
+	// from the project layer, trusted or not. This is stronger than the
+	// P27.1 trust gate above (which lets a *trusted* project widen
+	// permission/sandbox/mcp/hooks): a hostile or merely careless project
+	// .aegis/config.yaml widening this specific list would authorize an
+	// active scanner (recon_scan/dast_scan) against arbitrary Internet
+	// hosts, a different and broader risk shape than the project's own
+	// permission mode, so it stays out of the project's control even after
+	// `aegis trust`.
+	cfg.Security.DAST.AllowedTargets = baseCfg.Security.DAST.AllowedTargets
 
 	cfg.Provider.APIKey = ProviderAPIKey(cfg.Provider.Default)
 

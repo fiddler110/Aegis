@@ -96,8 +96,18 @@ func TestSecurityConfigApplyEditUpdatesWorkingCopy(t *testing.T) {
 
 // TestSecurityConfigSaveCmdPreservesEgressSettings is the regression noted in
 // the model's own doc comment: saving scanner config must not silently drop
-// an existing egress_then_write/network_allowlist setting, since
-// patchSecurity replaces the whole security: block.
+// an existing egress_then_write/network_allowlist/dast.allow_active setting,
+// since patchSecurity replaces the whole security: block.
+//
+// dast.allowed_targets is deliberately excluded from that "must round-trip"
+// assertion: since P27.9/FIND-11, config.Load() sources it from the
+// user/global baseline only and always ignores the project layer, so a
+// project-scope save (this test uses global: false) writing it to
+// .aegis/config.yaml is inert on reload by design — the TUI dialog still
+// lets an operator type a value into a project-scope save (it doesn't know
+// about the read-side restriction), but Load() never surfaces it back. See
+// TestDASTAllowedTargetsNeverFromProjectConfig in internal/config for the
+// authoritative regression.
 func TestSecurityConfigSaveCmdPreservesEgressSettings(t *testing.T) {
 	redirectConfigDir(t)
 	chdirTempTUI(t)
@@ -135,8 +145,13 @@ func TestSecurityConfigSaveCmdPreservesEgressSettings(t *testing.T) {
 	if len(cfg.Security.NetworkAllowList) != 1 || cfg.Security.NetworkAllowList[0] != "api.github.com" {
 		t.Errorf("network_allowlist = %v, want [api.github.com]", cfg.Security.NetworkAllowList)
 	}
-	if !cfg.Security.DAST.AllowActive || len(cfg.Security.DAST.AllowedTargets) != 1 || cfg.Security.DAST.AllowedTargets[0] != "staging.example.com" {
-		t.Errorf("dast policy was dropped by saving scanner config: %+v", cfg.Security.DAST)
+	if !cfg.Security.DAST.AllowActive {
+		t.Error("dast.allow_active was dropped by saving scanner config")
+	}
+	// P27.9/FIND-11: never sourced from project config, so this project-scope
+	// save's allowed_targets value must NOT come back on reload.
+	if len(cfg.Security.DAST.AllowedTargets) != 0 {
+		t.Errorf("dast.allowed_targets = %v, want empty (P27.9: never sourced from project config)", cfg.Security.DAST.AllowedTargets)
 	}
 	if cfg.Security.Tools["gitleaks"].ToolEnabled() {
 		t.Error("expected gitleaks to be disabled after save")
