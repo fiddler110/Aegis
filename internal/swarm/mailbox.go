@@ -3,6 +3,7 @@ package swarm
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/fiddler110/aegis/internal/fsguard"
 )
 
 // MessageType classifies a mailbox message.
@@ -70,7 +73,25 @@ func OpenMailbox(root string, id Identity) (*Mailbox, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("swarm: create mailbox %s: %w", dir, err)
 	}
+	hardenMailboxRoot(root)
 	return &Mailbox{dir: dir}, nil
+}
+
+// hardenMailboxRoot applies fsguard.RestrictToOwner (FIND-20/P27.11) to the
+// mailbox root directory (the `teams/` tree), matching the pattern other
+// on-disk stores in this codebase use to lock their storage location down on
+// Windows — see session.hardenDBPermissions and workspacetrust.Store.save.
+// The mode bits passed to MkdirAll above already restrict every directory to
+// its owner on POSIX; Windows ignores MkdirAll's mode argument entirely and a
+// directory under a shared data dir otherwise inherits its parent's
+// (potentially broader) ACL. Best-effort and called on every OpenMailbox, not
+// just first creation, so an already-existing root created before this
+// hardening landed still gets locked down; a failure here is only logged
+// since it shouldn't block the mailbox open that already succeeded.
+func hardenMailboxRoot(root string) {
+	if err := fsguard.RestrictToOwner(root); err != nil {
+		slog.Default().Warn("failed to restrict swarm mailbox root permissions", "path", root, "err", err)
+	}
 }
 
 // Send appends a message atomically. ID and Timestamp are filled if unset.
@@ -199,7 +220,7 @@ func (m *Mailbox) MarkRead(id string) error {
 		}
 		dest := filepath.Join(m.processedDir(), e.Name())
 		tmp := dest + ".tmp"
-		if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		if err := os.WriteFile(tmp, out, 0o600); err != nil {
 			return err
 		}
 		if err := os.Rename(tmp, dest); err != nil {
