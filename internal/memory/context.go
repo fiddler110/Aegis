@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/trust"
 )
 
 // contextFiles are well-known context files loaded into the system prompt.
@@ -40,13 +42,29 @@ func (s Sources) loadContextDirect() string {
 		path := filepath.Join(s.ProjectRoot, name)
 		txt := readIfExists(path)
 		if txt != "" {
-			sections = append(sections, "# "+name+"\n\n"+txt)
+			sections = append(sections, "# "+name+"\n\n"+wrapContextFile(name, txt))
 		}
 	}
 	if len(sections) == 0 {
 		return ""
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+// wrapContextFile tags a project context file's (AGENTS.md/CLAUDE.md/
+// .aegis/context.md) content with the same untrusted-provenance marker used
+// for file-loaded personas and skills (FIND-05/P24.4). These files live at
+// the project root, not compiled into the binary — a cloned repo or
+// dependency could plant one to inject instructions into every session
+// opened against it, the same risk P24.4 addressed for persona/skill bodies.
+// scan=false for the same reason as the persona/skill wrap: this content is
+// re-injected every session and legitimately discusses its own
+// instructions/role often enough that the heuristic scan would be noisy
+// here; the provenance framing itself is the mitigation.
+func wrapContextFile(name, content string) string {
+	return trust.Wrap("context_untrusted_content", [][2]string{{"file", name}},
+		"a "+name+" file loaded from the project root, not authored by Aegis",
+		content, false)
 }
 
 // LoadIgnorePatterns reads a .aegisignore file from the project root
