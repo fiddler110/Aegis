@@ -84,9 +84,14 @@ func TestListenAndServeTLSRoundTrip(t *testing.T) {
 	}
 }
 
-// TestListenAndServeTLSDisabledUnchanged pins down that leaving
-// server.tls.enabled unset (the default) writes no cert/key files and serves
-// plain HTTP exactly as before this feature existed.
+// TestListenAndServeTLSDisabledUnchanged pins down that explicitly leaving
+// server.tls.enabled false (its pre-P27.5 value; config.Load() itself now
+// defaults it to true — see TestEnvOverrideServerTLS/TestLoadDefaults in
+// internal/config) writes no cert/key files and serves plain HTTP exactly as
+// before this feature existed. This test builds *Server directly from a
+// struct literal, bypassing config.Load()'s defaults entirely, so it is
+// unaffected by that default flip and still covers the explicit-opt-out path
+// (AEGIS_SERVER_TLS_ENABLED=false or server.tls.enabled: false in YAML).
 func TestListenAndServeTLSDisabledUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	addr := freeLoopbackAddr(t)
@@ -104,7 +109,7 @@ func TestListenAndServeTLSDisabledUnchanged(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	if srv.tlsCert != nil {
-		t.Fatal("expected tlsCert to stay nil when TLS is disabled (the default)")
+		t.Fatal("expected tlsCert to stay nil when TLS is explicitly disabled")
 	}
 	if _, err := os.Stat(cfg.TLSCertPath()); err == nil {
 		t.Fatal("expected no cert file to be written when TLS is disabled")

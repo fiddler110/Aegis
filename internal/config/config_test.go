@@ -91,6 +91,12 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.Security.RedactSecrets {
 		t.Error("security.redact_secrets default = false, want true (P27.3/FIND-05)")
 	}
+	// P27.5/FIND-13: pinned-cert loopback TLS on by default — plain HTTP
+	// otherwise leaves the bearer token and conversation content readable to
+	// another local account on a shared host with packet-capture privilege.
+	if !cfg.Server.TLS.Enabled {
+		t.Error("server.tls.enabled default = false, want true (P27.5/FIND-13)")
+	}
 }
 
 // TestEnvOverrideServerLimits is the P21.5 counterpart to TestEnvOverride:
@@ -113,6 +119,27 @@ func TestEnvOverrideServerLimits(t *testing.T) {
 	}
 	if cfg.Server.SSEBufferSize != 64 {
 		t.Errorf("sse_buffer_size = %d, want 64", cfg.Server.SSEBufferSize)
+	}
+}
+
+// TestEnvOverrideServerTLS is the P27.5 regression for the documented
+// AEGIS_SERVER_TLS_ENABLED escape hatch (see docs/configuration.md's env var
+// table): with server.tls.enabled now defaulting to true, an operator who
+// needs plain HTTP (e.g. a container/CI environment with no config file)
+// must be able to opt back out via env, not just by hand-editing YAML.
+// envKeyCallback's generic single-split heuristic can't reach a field nested
+// two levels deep (server.tls.enabled), so this exercises the server_tls_
+// special-case explicitly rather than relying on the generic path.
+func TestEnvOverrideServerTLS(t *testing.T) {
+	redirectConfigDir(t)
+	t.Setenv("AEGIS_SERVER_TLS_ENABLED", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.TLS.Enabled {
+		t.Error("AEGIS_SERVER_TLS_ENABLED=false did not disable TLS")
 	}
 }
 
