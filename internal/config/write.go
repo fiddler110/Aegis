@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // ProviderPatch holds the provider fields to write into the global config file.
@@ -84,8 +86,21 @@ func PatchGlobalSandbox(p SandboxPatch) error {
 
 // PatchProjectSandbox replaces the sandbox: block in the project-level
 // .aegis/config.yaml, preserving all other sections.
+//
+// sandbox.* is one of the P27.1 workspace-trust-gated keys (FIND-02): a
+// successful patch here also records the current directory as trusted,
+// since this write is an explicit, local operator action (e.g. `aegis
+// sandbox use --project`), not a setting silently inherited from a cloned
+// repository's pre-existing config.
 func PatchProjectSandbox(p SandboxPatch) error {
-	return patchSandbox(ProjectConfigPath(), p)
+	if err := patchSandbox(ProjectConfigPath(), p); err != nil {
+		return err
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	return workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir)
 }
 
 func patchSandbox(path string, p SandboxPatch) error {

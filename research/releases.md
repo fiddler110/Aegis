@@ -9,6 +9,54 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
+**Last updated:** 2026-07-13 — **P27.1** and **P27.2**, the P27 threat model's Tier 1, shipped.
+
+*P27.1 — workspace-trust gate (FIND-01 + FIND-02, CVSS 8.5/8.2).* A cloned repository's
+`.aegis/config.yaml` was merged with no confirmation and its `session_start`/`pre_tool_use` `hooks`
+ran automatically — silent code execution (CWE-94) and silent widening of
+`permission.mode`/`sandbox.*`/`mcp.servers`/`notify.webhook` (CWE-829) via config alone. New
+`internal/workspacetrust` package: a small JSON store (`<data_dir>/workspace_trust.json`,
+ACL-hardened via `fsguard.RestrictToOwner` like the session DB and `.env`) mapping normalized
+absolute directory paths to a trust decision, deliberately anchored to the fixed user-level data
+dir rather than `cfg.DataDir` — a hostile project config overriding `DataDir` must not be able to
+point the trust store somewhere it controls. `config.Load()` now loads two koanf layers — the
+normal one (defaults → global → project → env) and a "baseline" one with the project file excluded
+— unmarshals both, and for an untrusted directory (no `workspacetrust` entry) with any diff between
+them in `permission.*`/`sandbox.*`/`mcp.servers`/`notify.webhook`/`hooks`, overwrites the merged
+config's fields with the baseline's, exposing what happened via a new `cfg.WorkspaceTrust` field
+(`Dir`, `Trusted`, `Frozen`, `Changes []string`). Frozen state surfaces three ways: a daemon-log
+WARN (`internal/server/server.go`, alongside the existing local-sandbox/auto-exec posture
+warnings), a stderr banner printed before the TUI takes over the terminal
+(`cli.warnWorkspaceTrust`, mirroring the existing `warnSandboxFallback`), and a new `aegis doctor`
+check. New `aegis trust` command (`internal/cli/trust.go`) shows the diff and prompts before
+recording a trust decision for the current directory (`--yes` to skip the prompt, `--status` to
+inspect without prompting, `--revoke` to undo). The two pre-existing first-party writers of a gated
+key — `config.PatchProjectSandbox` (`aegis sandbox use --project`) and
+`config.AppendProjectPermissionRule` (the TUI's "allow always for this pattern" approval option,
+TQ6) — now auto-trust the directory they write to as a side effect of a successful write, since
+that write is an explicit local operator action in that exact directory, not a setting silently
+inherited from a cloned repo's pre-existing config; this is also what keeps their existing tests
+(which write-then-immediately-reload) passing unchanged. Tests: `internal/workspacetrust`
+(persistence, revoke, normalization), `internal/config` (freeze-on-untrusted, apply-after-trust,
+non-gated keys unaffected, no-project-config trivially trusted, both auto-trust call sites),
+`internal/cli` (`aegis trust` status/yes/revoke/declined-confirmation, the new doctor check).
+
+*P27.2 — `provider.base_url` allowlist/warn (FIND-03, CVSS 7.1).* `provider.base_url` had no
+destination validation, so a project-config-sourced value could redirect API-key-bearing requests
+to an attacker host (CWE-522) with no warning. New `providerfactory.validateBaseURL`, called from
+`buildOne` for both the primary adapter and every fallback target: a non-loopback plaintext-HTTP
+`base_url` is refused outright when a real API key would be attached (Ollama's non-secret
+`"ollama"` placeholder is exempted, so the common local/LAN Ollama-over-HTTP setup keeps working
+unchanged); a non-default host for a cloud provider (compared against `api.anthropic.com`/
+`api.openai.com`) isn't blocked — legitimate corporate-gateway/self-hosted-proxy setups are common —
+but logs a prominent WARN naming the override. `config.IsLoopbackBaseURL` exported (was already
+`isLoopbackBaseURL`, used internally by `LocalPromptProfile`) so `providerfactory` reuses the exact
+same loopback test rather than a second implementation. Tests: refuse-on-plaintext-non-loopback,
+allow-on-loopback, warn-on-non-default-host, no-warn-on-default-host, plus the existing
+fallback/cloud-gating tests unaffected (none of them set `BaseURL`).
+
+`go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
+
 **Last updated:** 2026-07-12 — **P22.5, P22.6, P20.2, P20.3** shipped as a second user-selected
 batch of four Tier 4 parked items, same day as the first batch below. P25.9 and P6.1 were
 deliberately excluded from this round (both Effort L, both large/high-blast-radius — daemon

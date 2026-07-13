@@ -99,6 +99,7 @@ Use "aegis <command> --help" for details on any command below.`,
 			}
 
 			warnSandboxFallback(cl)
+			warnWorkspaceTrust(cfg)
 
 			resolvedMode := cfg.Permission.Mode
 			if mode != "" {
@@ -217,6 +218,7 @@ Use "aegis <command> --help" for details on any command below.`,
 	cmd.AddCommand(group(newModelsCmd(), groupConfig))
 	cmd.AddCommand(group(newBundleCmd(), groupConfig))
 	cmd.AddCommand(group(newDoctorCmd(), groupConfig))
+	cmd.AddCommand(group(newTrustCmd(), groupConfig))
 
 	// Project tools.
 	cmd.AddCommand(group(newIndexCmd(), groupProject))
@@ -316,6 +318,23 @@ func warnSandboxFallback(cl *client.Client) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "\n⚠ sandbox fallback: %s\n\n", status.SandboxFallbackReason)
+}
+
+// warnWorkspaceTrust prints a visible warning to stderr, before the TUI takes
+// over the terminal, when the P27.1 workspace-trust gate has frozen this
+// directory's project-sourced security settings (config.go's daemon-log WARN
+// only reaches the log file, never stderr, so this is the interactive path's
+// only chance to surface it before the operator is inside the TUI).
+func warnWorkspaceTrust(cfg *config.Config) {
+	if !cfg.WorkspaceTrust.Frozen {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n⚠ workspace not trusted: %s's project config would change:\n", cfg.WorkspaceTrust.Dir)
+	for _, c := range cfg.WorkspaceTrust.Changes {
+		fmt.Fprintf(os.Stderr, "    %s\n", c)
+	}
+	fmt.Fprintln(os.Stderr, "  These are frozen to user/global values. Run `aegis trust` to review and accept them.")
+	fmt.Fprintln(os.Stderr)
 }
 
 // waitForDaemon polls the daemon health endpoint until it responds or the
