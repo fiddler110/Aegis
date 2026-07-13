@@ -37,6 +37,36 @@ func TestAppendAndLoad(t *testing.T) {
 	}
 }
 
+// TestLoadWrapsUntrustedProvenance verifies both project and user/global
+// memory.md content are wrapped in the same untrusted-provenance marker
+// used for file-loaded personas/skills/context files (FIND-05/P24.4,
+// P27.6). The persona/skill precedent doesn't distinguish project from
+// user/global provenance — only compiled-in built-ins are exempt — so both
+// memory scopes are expected to carry the marker here too.
+func TestLoadWrapsUntrustedProvenance(t *testing.T) {
+	s := Sources{ProjectRoot: t.TempDir(), DataDir: t.TempDir()}
+	if err := Append(s.ProjectMemoryPath(), "prefers Go over Python"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(s.GlobalMemoryPath(), "name is Scott"); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Load()
+
+	if !strings.Contains(got, "memory_untrusted_content") {
+		t.Errorf("expected memory content to carry the untrusted-provenance marker, got %q", got)
+	}
+	if !strings.Contains(got, "untrusted data") {
+		t.Errorf("expected the untrusted-provenance framing text, got %q", got)
+	}
+	if !strings.Contains(got, `scope="project"`) || !strings.Contains(got, `scope="user"`) {
+		t.Errorf("expected both project and user scopes to be wrapped, got %q", got)
+	}
+	if !strings.Contains(got, "prefers Go over Python") || !strings.Contains(got, "name is Scott") {
+		t.Errorf("expected original memory content to still be present verbatim, got %q", got)
+	}
+}
+
 // TestSaveSkillAndLoad checks that SaveSkill writes the file where
 // internal/skills expects to find it (that package, not this one, is
 // responsible for loading and injecting skill content with progressive

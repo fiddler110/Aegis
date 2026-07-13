@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/trust"
 )
 
 const cacheMaxAge = 5 * time.Second
@@ -96,11 +98,19 @@ func (s Sources) loadDirect() string {
 	// Aegis itself writes to via Append — so it's the one file where an
 	// integrity sidecar makes sense. readMemoryFileChecked prepends a warning
 	// if the file was edited outside that write path.
+	//
+	// P27.6 (FIND-07): memory.md content (global and project alike) can also
+	// be hand-edited or planted by anything with filesystem access — same
+	// untrusted-provenance risk P24.4 addressed for persona/skill bodies —
+	// so wrap it in the same marker before it re-enters the system prompt.
+	// The persona/skill precedent doesn't distinguish project from user/
+	// global provenance (only compiled-in built-ins are exempt), so both
+	// sections are wrapped here too.
 	if txt := readMemoryFileChecked(s.GlobalMemoryPath()); txt != "" {
-		sections = append(sections, "# User memory\n\n"+txt)
+		sections = append(sections, "# User memory\n\n"+wrapMemoryFile("user", txt))
 	}
 	if txt := readMemoryFileChecked(s.ProjectMemoryPath()); txt != "" {
-		sections = append(sections, "# Project memory\n\n"+txt)
+		sections = append(sections, "# Project memory\n\n"+wrapMemoryFile("project", txt))
 	}
 
 	if len(sections) == 0 {
@@ -160,6 +170,16 @@ func (s Sources) SaveSkill(name, content string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// wrapMemoryFile tags a memory.md file's content with the same
+// untrusted-provenance marker used for file-loaded personas, skills, and
+// context files (FIND-05/P24.4, P27.6). scope is "user" or "project" and
+// is surfaced both as a tag attribute and in the source description so a
+// reviewer can tell which memory file a given block came from.
+func wrapMemoryFile(scope, content string) string {
+	return trust.Wrap("memory_untrusted_content", [][2]string{{"scope", scope}},
+		"the "+scope+" memory.md file", content, false)
 }
 
 func readIfExists(path string) string {
