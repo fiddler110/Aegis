@@ -955,17 +955,19 @@ See [Permission System](permissions.md) for full rule syntax.
 
 ## Client<->Daemon Transport
 
-By default, all traffic between a CLI client (`aegis`, `aegis ui`, `aegis sessions`, `aegis acp`,
-`aegis mcp-serve`, ...) and the daemon is plain HTTP over the loopback interface, protected only by
-a bearer token (`daemon.token`). The daemon refuses to bind a non-loopback address unless
-`server.allow_remote: true` is set (FIND-08), which keeps this traffic off the network by default —
-but on a shared multi-user host, another local account with packet-capture privilege (raw socket
-access) could still observe the loopback interface, including the bearer token and full
-conversation content (FIND-32, CVSS 3.3, Tier 3/defense-in-depth given the loopback-only default).
+All traffic between a CLI client (`aegis`, `aegis ui`, `aegis sessions`, `aegis acp`,
+`aegis mcp-serve`, ...) and the daemon is pinned-cert TLS by default (`server.tls.enabled: true`,
+on since P27.5/FIND-13): the daemon auto-generates a self-signed certificate on first start and
+every in-repo client pins it explicitly (no `InsecureSkipVerify`, no public CA involved), so this
+needs no operator setup. The daemon also refuses to bind a non-loopback address unless
+`server.allow_remote: true` is set (FIND-08), keeping this traffic off the network by default.
 
-Set `server.tls.enabled: true` to close that gap: the daemon auto-generates a self-signed
-certificate the client pins explicitly (no `InsecureSkipVerify`, no public CA involved). This is
-off by default and does not change any existing user's behavior. See `server.tls.*` in
+Before P27.5, this traffic was plain HTTP over loopback, protected only by the bearer token
+(`daemon.token`) — on a shared multi-user host, another local account with packet-capture privilege
+(raw socket access) could observe the loopback interface, including the bearer token and full
+conversation content (FIND-32, CVSS 3.3, Tier 3/defense-in-depth given the loopback-only default).
+Set `server.tls.enabled: false` (or `AEGIS_SERVER_TLS_ENABLED=false`) to opt back out, e.g. in a
+container/CI environment where the extra handshake overhead isn't worth it. See `server.tls.*` in
 [configuration.md](configuration.md#full-config-reference) for the full option set, the
 auto-generated cert/key file locations, and what this protects against — notably, it does **not**
 protect against Host/OS-level compromise of the same account, which can already read

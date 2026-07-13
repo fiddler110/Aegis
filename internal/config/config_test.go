@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // clearEnv unsets the given env vars for the duration of the test.
@@ -96,6 +98,86 @@ func TestLoadDefaults(t *testing.T) {
 	// another local account on a shared host with packet-capture privilege.
 	if !cfg.Server.TLS.Enabled {
 		t.Error("server.tls.enabled default = false, want true (P27.5/FIND-13)")
+	}
+	// P27.13/FIND-12: heuristic prompt-injection scan of web_fetch/web_search
+	// output on by default.
+	if !cfg.Search.ScanOutput {
+		t.Error("search.scan_output default = false, want true (P27.13/FIND-12)")
+	}
+}
+
+// TestMCPServerConfigScanOutputEnabledDefaultsTrue is the P27.13/FIND-12
+// regression for the per-server MCP scan_output toggle: unlike top-level
+// scalar keys, defaults() has no mechanism to apply a default to elements of
+// a list, so ScanOutput is a *bool (mirroring SecurityToolConfig.Enabled)
+// read via ScanOutputEnabled() rather than the field directly. An MCP server
+// declared with no scan_output key must still scan by default; an explicit
+// `scan_output: false` must still be honored.
+func TestMCPServerConfigScanOutputEnabledDefaultsTrue(t *testing.T) {
+	unset := MCPServerConfig{}
+	if !unset.ScanOutputEnabled() {
+		t.Error("ScanOutputEnabled() with unset ScanOutput = false, want true (default on)")
+	}
+	off := false
+	explicitFalse := MCPServerConfig{ScanOutput: &off}
+	if explicitFalse.ScanOutputEnabled() {
+		t.Error("ScanOutputEnabled() with explicit scan_output: false = true, want false")
+	}
+	on := true
+	explicitTrue := MCPServerConfig{ScanOutput: &on}
+	if !explicitTrue.ScanOutputEnabled() {
+		t.Error("ScanOutputEnabled() with explicit scan_output: true = false, want true")
+	}
+}
+
+// TestMCPServerScanOutputFromYAML confirms the *bool default flows correctly
+// through a real config.Load() round trip, not just direct struct
+// construction: a server with no scan_output key in YAML defaults to
+// enabled; a server with an explicit `scan_output: false` stays disabled.
+func TestMCPServerScanOutputFromYAML(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	writeProjectConfig(t, `
+mcp:
+  - name: unspecified
+    command: nc
+  - name: explicitly-off
+    command: nc
+    scan_output: false
+  - name: explicitly-on
+    command: nc
+    scan_output: true
+`)
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// mcp.* is a P27.1 trust-gated key; trust this directory so the project
+	// config's mcp: block actually applies for this test.
+	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.MCP) != 3 {
+		t.Fatalf("cfg.MCP = %d servers, want 3", len(cfg.MCP))
+	}
+	byName := map[string]MCPServerConfig{}
+	for _, m := range cfg.MCP {
+		byName[m.Name] = m
+	}
+	if !byName["unspecified"].ScanOutputEnabled() {
+		t.Error(`"unspecified" (no scan_output key) should default to scanning enabled`)
+	}
+	if byName["explicitly-off"].ScanOutputEnabled() {
+		t.Error(`"explicitly-off" (scan_output: false) should stay disabled`)
+	}
+	if !byName["explicitly-on"].ScanOutputEnabled() {
+		t.Error(`"explicitly-on" (scan_output: true) should be enabled`)
 	}
 }
 

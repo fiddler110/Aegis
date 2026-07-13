@@ -16,8 +16,8 @@ process for a server you may not fully trust.
 The same mechanism (`internal/trust`) also wraps `web_fetch`/`web_search`
 output (FIND-04): a fetched page or search result is just as much
 externally-controlled content as an MCP server's response, so it gets the
-same provenance marker and opt-in scan — see the `search.scan_output`
-example in [§2](#2-opt-in-heuristic-output-scan) below.
+same provenance marker and heuristic scan — see the `search.scan_output`
+example in [§2](#2-heuristic-output-scan-on-by-default) below.
 
 It also wraps the body of any **project- or user-local persona/skill `.md`
 file** (FIND-05): those files live on disk, not in the binary, so a
@@ -86,21 +86,22 @@ call (`internal/tool/builtin/web.go`), just with a `<web_untrusted_output
 url="...">` / `<web_untrusted_output query="...">` tag instead of
 `<mcp_untrusted_output ...>` — same framing text, same always-on behavior.
 
-### 2. Opt-in heuristic output scan
+### 2. Heuristic output scan (on by default)
 
-For MCP servers you haven't fully vetted, you can turn on a coarse
-heuristic scan of their output:
+Since P27.13/FIND-12, every MCP server and `web_fetch`/`web_search` output
+runs through a coarse heuristic scan by default — no configuration needed:
 
 ```yaml
 mcp:
   - name: some-server
     command: npx
     args: ["-y", "some-untrusted-mcp-package"]
-    scan_output: true   # off by default
+    # scan_output omitted → true (default)
+    scan_output: false   # opt out for a specific, well-vetted server
 ```
 
 `scan_output` (per server, `internal/config.MCPServerConfig.ScanOutput` /
-`internal/mcp.ServerConfig.ScanOutput`) is **off by default**. It is a
+`internal/mcp.ServerConfig.ScanOutput`) is **on by default**. It is a
 best-effort pattern match (`internal/trust.ScanForInjection`, shared with
 `web_fetch`/`web_search` — see below) against phrasing commonly seen in
 prompt-injection payloads — instructions
@@ -109,18 +110,18 @@ to ignore/disregard/forget prior instructions, role-override attempts
 attempts to exfiltrate secrets (API keys, tokens, passwords) to an external
 destination. It is intentionally coarse and will have both false positives
 (legitimate content that happens to discuss these topics — e.g. a security
-article) and false negatives (a sufficiently subtly-worded attack). That is
-why it defaults to off and is scoped per server: enable it for MCP sources
-you don't fully trust yet, where a false positive is an acceptable cost;
-leave it off for servers you've already vetted, where the extra noise isn't
-worth it.
+article) and false negatives (a sufficiently subtly-worded attack). A false
+positive is low-cost — see below, it never blocks or rewrites the result,
+only adds a visible warning — so it defaults on for every server; set
+`scan_output: false` per server to opt back out where the extra note isn't
+worth it (e.g. a high-volume, fully-vetted server).
 
 `web_fetch`/`web_search` have the equivalent toggle, scoped to the whole web
 tool set rather than per-server since there's only one fetcher/searcher:
 
 ```yaml
 search:
-  scan_output: true   # off by default, mirrors mcp[].scan_output
+  scan_output: false   # opt out; on by default, mirrors mcp[].scan_output
 ```
 
 (`internal/config.SearchConfig.ScanOutput` / `internal/tool/builtin.SearchOptions.ScanOutput`.)
@@ -183,7 +184,7 @@ mcp:
   - name: some-server
     command: npx
     args: ["-y", "some-untrusted-mcp-package"]
-    scan_output: true      # inbound: flag injection-shaped output
+    # scan_output omitted → true (default): inbound, flag injection-shaped output
     scan_arguments: true   # outbound: flag credential-shaped arguments
 ```
 
@@ -304,14 +305,18 @@ for everyone who hasn't opted in.
   substitute for it. **Every configured server receives whatever the model
   puts in a tool call's arguments** — evaluate each server as a place your
   session's context could end up, not just as a code-execution risk.
-- Turn on `scan_output` for any MCP server that talks to an external,
-  attacker-influenceable data source (web search, ticket trackers, shared
-  databases, anything ingesting user-generated content).
-- Turn on `scan_arguments` for the same class of server — and especially
-  for any remote (HTTP) server operated by a third party, where an
-  argument that leaves the process is unrecoverable. A server trustworthy
-  enough to leave `scan_output` off for is usually trustworthy enough to
-  leave this off too; they're two halves of the same vetting judgment.
+- Leave `scan_output` on (the default since P27.13/FIND-12) for any MCP
+  server that talks to an external, attacker-influenceable data source (web
+  search, ticket trackers, shared databases, anything ingesting
+  user-generated content) — it's the common case, so this usually means
+  doing nothing. Only opt a specific server out (`scan_output: false`)
+  where you've fully vetted it and the extra warning note is pure noise.
+- Turn on `scan_arguments` (still opt-in) for the same class of server —
+  and especially for any remote (HTTP) server operated by a third party,
+  where an argument that leaves the process is unrecoverable. A server
+  trustworthy enough to opt `scan_output` off for is usually trustworthy
+  enough to leave `scan_arguments` off too; they're two halves of the same
+  vetting judgment.
 - Keep MCP tool capabilities as restrictive as the tool actually needs
   (see [Extensibility](extensibility.md#mcp-servers)) — capability gating
   and output provenance/scanning address different halves of the same

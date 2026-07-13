@@ -400,11 +400,13 @@ search:
   base_url: ""
 
   # Opts web_fetch/web_search output into the heuristic prompt-injection
-  # scan, mirroring the per-server mcp[].scan_output toggle (FIND-04). Off by
-  # default. The untrusted-content provenance marker is always applied to
-  # fetched/searched content regardless of this setting — see
-  # docs/mcp-trust-boundary.md.
-  scan_output: false
+  # scan, mirroring the per-server mcp[].scan_output toggle (FIND-04). On by
+  # default since P27.13/FIND-12 — a best-effort heuristic (invisible
+  # characters, base64-encoded payloads) that only adds a visible warning on
+  # a hit, never blocks or mutates content. The untrusted-content provenance
+  # marker is always applied to fetched/searched content regardless of this
+  # setting — see docs/mcp-trust-boundary.md.
+  scan_output: true
 
 
 # ── Background session notifications ──────────────────────────────────────────
@@ -625,11 +627,15 @@ lsp:
 # per remote tool name when a server exposes a known mix (e.g. a read-only
 # `search` tool alongside a `write_file` tool).
 #
-# `scan_output` (default false) opts a server's tool/resource/prompt output
-# into a heuristic prompt-injection scan before it reaches the model — for
-# MCP sources you haven't fully vetted. Every server's output is always
-# wrapped with a provenance marker regardless of this flag. See
-# docs/mcp-trust-boundary.md.
+# `scan_output` (default true, P27.13/FIND-12) opts a server's
+# tool/resource/prompt output into a heuristic prompt-injection scan before
+# it reaches the model — a best-effort check (invisible characters,
+# base64-encoded payloads) that only adds a visible warning on a hit, never
+# blocks or mutates content, so it's safe to leave on even for well-vetted
+# servers. Every server's output is always wrapped with a provenance marker
+# regardless of this flag. Set `scan_output: false` per server to opt out
+# (e.g. a high-volume trusted server where the extra scan pass isn't worth
+# it). See docs/mcp-trust-boundary.md.
 #
 # `scan_arguments` (default false) is the outbound mirror (FIND-12):
 # tool-call arguments are model-constructed and may carry anything the model
@@ -661,7 +667,7 @@ mcp:
     command: ""
     auth: "$MY_MCP_TOKEN"   # $VAR references expanded from environment / .aegis/.env
     # capability omitted → defaults to "execute", so calls hit the Ask gate in build mode
-    scan_output: true        # not fully vetted — flag suspicious tool output in-context
+    # scan_output omitted → defaults to true; not fully vetted, so leave it on
     scan_arguments: true     # not fully vetted — warn if credential-shaped data heads its way
 
 
