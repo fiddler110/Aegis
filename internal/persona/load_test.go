@@ -50,7 +50,7 @@ output_guard:
 ---
 You are a strict secure code reviewer.`)
 
-	n := LoadFromDirs(dir)
+	n := LoadFromDirs("", false, dir)
 	if n != 1 {
 		t.Fatalf("expected 1 persona loaded, got %d", n)
 	}
@@ -81,7 +81,7 @@ You are a strict secure code reviewer.`)
 func TestLoadGuardDisabledScalar(t *testing.T) {
 	dir := t.TempDir()
 	writePersona(t, dir, "fast.md", "---\noutput_guard: none\n---\nBody.")
-	LoadFromDirs(dir)
+	LoadFromDirs("", false, dir)
 	p, _ := Get("fast")
 	if p.Guard == nil || !p.Guard.Disabled {
 		t.Errorf("expected disabled guard, got %+v", p.Guard)
@@ -103,7 +103,7 @@ func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
 	if err := os.WriteFile(path, []byte("---\ndescription: v1\n---\nFirst body."), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if n, changed := Refresh(dir); n != 1 || !changed {
+	if n, changed := Refresh("", false, dir); n != 1 || !changed {
 		t.Fatalf("after add: n=%d changed=%v", n, changed)
 	}
 	p, ok := Get("hotswap")
@@ -112,7 +112,7 @@ func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
 	}
 
 	// Unchanged directory short-circuits.
-	if _, changed := Refresh(dir); changed {
+	if _, changed := Refresh("", false, dir); changed {
 		t.Error("Refresh reported a rebuild for an unchanged directory")
 	}
 
@@ -122,13 +122,13 @@ func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, changed := Refresh(dir); !changed {
+	if _, changed := Refresh("", false, dir); !changed {
 		t.Fatal("Refresh missed an mtime change")
 	}
 	if err := os.WriteFile(path, []byte("---\ndescription: v2\n---\nSecond body."), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, changed := Refresh(dir); !changed {
+	if _, changed := Refresh("", false, dir); !changed {
 		t.Fatal("Refresh missed a file update")
 	}
 	if p, _ := Get("hotswap"); !strings.Contains(p.System, "Second body.") {
@@ -139,7 +139,7 @@ func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if n, changed := Refresh(dir); n != 0 || !changed {
+	if n, changed := Refresh("", false, dir); n != 0 || !changed {
 		t.Fatalf("after delete: n=%d changed=%v", n, changed)
 	}
 	if _, ok := Get("hotswap"); ok {
@@ -150,7 +150,7 @@ func TestRefreshPicksUpAddUpdateDelete(t *testing.T) {
 func TestLoadNameFromFilename(t *testing.T) {
 	dir := t.TempDir()
 	writePersona(t, dir, "my-helper.md", "---\ndescription: x\n---\nBody.")
-	LoadFromDirs(dir)
+	LoadFromDirs("", false, dir)
 	if _, ok := Get("my-helper"); !ok {
 		t.Error("persona should be registered under its filename stem")
 	}
