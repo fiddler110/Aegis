@@ -308,9 +308,18 @@ swarm:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Shell execution sandbox
 # ─────────────────────────────────────────────────────────────────────────────
+# Defaults to "os": OS-level isolation (macOS seatbelt / Linux bubblewrap) with
+# no container runtime needed. Falls back to unsandboxed "local" with a
+# startup warning if unavailable on this host (e.g. bubblewrap isn't
+# installed, or on Windows, which has neither mechanism) — set backend: local
+# below to silence that warning once you've made the unsandboxed choice
+# intentionally (P27.14/FIND-04).
 
 sandbox:
-  backend: local             # "local"     = run commands directly on the host
+  backend: os                # "os"        = OS-level isolation, no container needed
+                             #               (seatbelt/macOS, bwrap/Linux; falls back
+                             #               to local if unavailable)
+                             # "local"     = run commands directly on the host, unconfined
                              # "container" = isolate each command in a chosen runtime
                              # "auto"      = detect & use the best available runtime,
                              #               falling back to local if none is found

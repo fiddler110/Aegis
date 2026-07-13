@@ -1,6 +1,28 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-13 — the P27 threat model's entire Tier 2 shipped: all 11 items,
+**Last updated:** 2026-07-13 — **P27.14** (FIND-04, Tier 3, first item of the P27 threat model's
+Tier 3) shipped: the daemon (`internal/server/server.go`) now logs a persistent startup `WARN`
+recommending `sandbox.backend: os`/`container` any time the effective backend is the unconfined
+`local` one and permission mode isn't `plan` (i.e. shell/execute tool calls are reachable at all) —
+previously the default `build`-mode + local-backend combination, the most common install shape, got
+no signal at all; only the sharper `auto`-mode and `auto_approve_exec` cases did. `aegis doctor`'s
+`sandbox` check now reports the same local-backend case as a `WARN` (with a `Fix` naming `os`/
+`container`) instead of a silent `PASS`. `aegis --first-init`'s generated global config template now
+defaults new installs to `sandbox.backend: os` (seatbelt on macOS, bwrap on Linux) instead of
+`local` — `SelectSandbox` already gracefully falls back to unsandboxed `local` (logging the same
+warning) when no OS sandbox mechanism is available, e.g. bubblewrap not installed on Linux, or on
+Windows, which has neither mechanism — so this is a zero-risk-of-breakage default for a real
+isolation win at no cost on macOS. Existing installs' on-disk configs are untouched; only the
+generated template and the base `config.Load()` fallback-when-nothing-is-configured default (used
+by callers with no config file at all, e.g. tests/embedders) still default to `local`, deliberately
+left alone as the conservative base case. Docs updated (`docs/configuration.md`,
+`docs/security_scan.md`). New regression tests: `TestNewWarnsLocalSandboxBuildMode`,
+`TestNewSkipsLocalSandboxWarningInPlanMode` (`internal/server/sandbox_startup_test.go`),
+`TestDoctorCleanSetupExitsZero` updated to assert the new WARN. `go build ./...`, `go vet ./...`,
+and the full `go test ./...` pass clean. Next up: the remaining 4 Tier 3 items, P27.15 first — see
+[Priority Order](#priority-order).
+
+Before that, same day (2026-07-13): the P27 threat model's entire Tier 2 shipped: all 11 items,
 **P27.3–P27.13**. Implemented in parallel by 7 isolated sub-agents in separate git worktrees,
 grouped by file-overlap risk rather than 1:1 with finding IDs — 6 agents each owned a fully
 disjoint package, and one agent bundled the 5 items that all needed to edit
@@ -82,19 +104,19 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** P27.14–P27.18 (2026-07-12 threat-model findings, Tier 3 — see
-[Priority Order](#priority-order)). Tiers 1 and 2 (**P27.1–P27.13**) shipped 2026-07-13. Tier 4 is 5
-items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20** (see
+**Open items:** P27.15–P27.18 (2026-07-13 threat-model findings, Tier 3 — see
+[Priority Order](#priority-order)). Tiers 1 and 2 (**P27.1–P27.13**) and Tier 3's **P27.14** shipped
+2026-07-13. Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20** (see
 [Parked](#open-work--parked-tier-4)).
 
-**Next session:** start at Tier 3 — 5 larger/sequence-dependent items, **P27.14** first (warn/
-recommend against the unconfined `local` sandbox backend). These are less parallelizable than Tier 2
-was: P27.15 (cron permission stack) and P27.17 (swarm budget propagation) each touch a single
-cohesive subsystem rather than splitting cleanly across packages, so evaluate per-item before
-assuming multi-agent parallelism helps. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any
-change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is
-the standalone preflight companion for the same misconfiguration classes (now including a workspace
-trust check, P27.1).
+**Next session:** continue Tier 3 — 4 remaining larger/sequence-dependent items, **P27.15** first
+(apply the full permission stack at cron fire time). These are less parallelizable than Tier 2 was:
+P27.15 (cron permission stack) and P27.17 (swarm budget propagation) each touch a single cohesive
+subsystem rather than splitting cleanly across packages, so evaluate per-item before assuming
+multi-agent parallelism helps. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change
+touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the
+standalone preflight companion for the same misconfiguration classes (now including a workspace
+trust check, P27.1, and the local-sandbox recommendation, P27.14).
 
 ---
 
@@ -115,9 +137,8 @@ DAST-target sourcing both ended up folding into (or reusing the machinery of) th
 P27.1 built, as anticipated; P27.6's context/memory-file wrapping used the separate `trust.Wrap`
 provenance mechanism instead, matching the P24.4 precedent for persona/skill bodies.
 
-**Tier 3** (5 items — real value, larger or sequence-dependent):
-- **P27.14 (FIND-04)** — Warn/recommend against the unconfined `local` sandbox backend for
-  execute-capable tool use; consider defaulting new installs to the OS sandbox where available.
+**Tier 3** (4 open items — real value, larger or sequence-dependent; **P27.14** shipped 2026-07-13,
+see [releases.md](releases.md#latest-changes)):
 - **P27.15 (FIND-08)** — Apply the full permission stack (mode + text rules + contextual gate) at
   cron fire time, not just the coarse mode check.
 - **P27.16 (FIND-15)** — Move (or add) a guard check before irreversible high-risk writes, or
@@ -153,15 +174,7 @@ halves (quick ACL fix vs. optional encryption) are split across tiers.
 
 #### Tier 3 — real value, larger or sequence-dependent
 
-### P27.14 — FIND-04: warn/recommend against the unconfined `local` sandbox backend
-
-Priority: Tier 3 · Effort: M, security, Moderate (CVSS 6.8)
-
-The default `local` sandbox backend runs shell commands on the host with only env-var stripping,
-no fs/net/process isolation (the build-mode approval prompt and `ValidatePath` are today's
-compensating controls). Recommend/document the OS or container backends for untrusted workloads;
-consider a persistent warning banner when `local` is active with execute-capable tools enabled, or
-defaulting new installs to the OS sandbox where available.
+#### P27.14 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes))
 
 ### P27.15 — FIND-08: apply the full permission stack at cron fire time
 

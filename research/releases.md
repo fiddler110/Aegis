@@ -9,6 +9,43 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
+**Last updated:** 2026-07-13 — **P27.14** (FIND-04, Tier 3, CVSS 6.8) shipped: warn/recommend
+against the unconfined `local` sandbox backend.
+
+The default `local` sandbox backend runs shell commands on the host with only env-var stripping —
+no fs/net/process isolation; the build-mode approval prompt and `ValidatePath` are the only
+compensating controls. `internal/server/server.go`'s `New()` now logs a persistent startup `WARN`
+("sandbox backend is 'local' (unconfined): ... consider sandbox.backend: os ... or container")
+any time the effective backend is local and `permission.mode` isn't `plan` (i.e. execute-capable
+tools are reachable at all) — this covers the default `build`-mode case, which previously got no
+startup signal whatsoever; only the sharper `auto`-mode-with-no-approval and `auto_approve_exec`
+cases already warned. `internal/cli/doctor.go`'s `doctorSandboxCheck` now reports the same
+local-backend case as a `WARN` (with a `Fix` naming `sandbox.backend: os`/`container`) instead of a
+silent `PASS` it previously buried in the detail text.
+
+`aegis --first-init`'s generated global config template (`internal/cli/init.go`) now defaults new
+installs to `sandbox.backend: os` — OS-level isolation (macOS seatbelt / Linux bubblewrap) with no
+container runtime required — instead of `local`. This is a zero-risk-of-breakage change:
+`SelectSandbox` already gracefully falls back to the unsandboxed `local` backend (logging the new
+warning above) rather than hard-failing when no OS sandbox mechanism is available on the host
+(bubblewrap not installed on Linux, or Windows, which has neither mechanism) unless
+`sandbox.strict` is set. macOS installs — where `sandbox-exec` ships by default — get real write/
+network confinement for free; Linux installs without bubblewrap and all Windows installs fall back
+to exactly today's behavior plus the new warning. Existing on-disk configs are untouched (the
+template only affects a fresh `--first-init`); the base `config.Load()` default used when no config
+file exists at all (tests, embedders) deliberately stays `local` as the conservative absolute
+fallback. "Defaulting new installs to the OS sandbox where available" was one of two options the
+finding suggested (the other being a persistent warning banner) — both were implemented, since the
+OS-sandbox default carries no downside given the graceful fallback.
+
+Docs updated: `docs/configuration.md` (sandbox section default + rationale), `docs/security_scan.md`
+(new "Local sandbox, execute-capable tools" note under Startup warning). Tests:
+`TestNewWarnsLocalSandboxBuildMode` and `TestNewSkipsLocalSandboxWarningInPlanMode`
+(`internal/server/sandbox_startup_test.go`, the latter confirming `plan` mode — which denies
+execute entirely — is correctly exempted from the new warning); `TestDoctorCleanSetupExitsZero`
+updated to assert the sandbox row is now a `WARN` naming "no isolation" rather than a silent `PASS`.
+`go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
+
 **Last updated:** 2026-07-13 — **P27.1** and **P27.2**, the P27 threat model's Tier 1, shipped.
 
 *P27.1 — workspace-trust gate (FIND-01 + FIND-02, CVSS 8.5/8.2).* A cloned repository's

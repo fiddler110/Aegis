@@ -27,7 +27,9 @@ func runDoctor(t *testing.T, args ...string) (string, error) {
 // TestDoctorCleanSetupExitsZero exercises the acceptance criterion directly:
 // a config with nothing misconfigured (cloud provider + API key present,
 // sandbox left at its "local" default, every scanner disabled) reports no
-// FAIL rows and a nil error (main.go maps that to exit 0).
+// FAIL rows and a nil error (main.go maps that to exit 0). The sandbox row
+// itself is expected to be a WARN, not a PASS, since P27.14/FIND-04: local
+// gives no isolation and doctor now says so rather than passing silently.
 func TestDoctorCleanSetupExitsZero(t *testing.T) {
 	redirectConfigDir(t)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test-fake")
@@ -39,6 +41,9 @@ func TestDoctorCleanSetupExitsZero(t *testing.T) {
 	}
 	if strings.Contains(out, "FAIL") {
 		t.Errorf("expected no FAIL rows in clean setup, got:\n%s", out)
+	}
+	if !strings.Contains(out, "WARN") || !strings.Contains(out, "no isolation") {
+		t.Errorf("expected the local-backend sandbox row to WARN about no isolation, got:\n%s", out)
 	}
 }
 

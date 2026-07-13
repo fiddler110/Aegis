@@ -73,6 +73,64 @@ func closeTestServerStores(srv *Server) {
 	srv.store.Close()
 }
 
+// TestNewWarnsLocalSandboxBuildMode is the P27.14/FIND-04 regression test:
+// the default install (mode: build, sandbox.backend unset -> local) used to
+// log nothing at all about running unconfined on the host — only the auto
+// mode and auto_approve_exec cases below got a startup warning. New() must
+// now log a persistent recommendation to use "os" or "container" any time
+// the local backend is reachable with execute-capable tools (i.e. mode !=
+// plan), not just those two sharper cases.
+func TestNewWarnsLocalSandboxBuildMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:    dir,
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+		// Sandbox left zero-value -> "local".
+	}
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	srv, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New: unexpected error: %v", err)
+	}
+	defer closeTestServerStores(srv)
+
+	out := buf.String()
+	if !strings.Contains(out, "sandbox backend is 'local'") {
+		t.Errorf("expected a local-sandbox recommendation warning in build mode, got:\n%s", out)
+	}
+	if !strings.Contains(out, "sandbox.backend: os") {
+		t.Errorf("expected the warning to name sandbox.backend: os as a fix, got:\n%s", out)
+	}
+}
+
+// TestNewSkipsLocalSandboxWarningInPlanMode verifies the new persistent
+// warning is gated on execute capability actually being reachable: plan mode
+// denies shell/execute tool calls entirely, so warning about the local
+// backend there would be noise.
+func TestNewSkipsLocalSandboxWarningInPlanMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:    dir,
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	srv, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New: unexpected error: %v", err)
+	}
+	defer closeTestServerStores(srv)
+
+	if out := buf.String(); strings.Contains(out, "sandbox backend is 'local'") {
+		t.Errorf("expected no local-sandbox warning in plan mode, got:\n%s", out)
+	}
+}
+
 // TestUnsandboxedAutoExecError covers the extracted decision function
 // directly (New() only calls it once sb is already known to be the local
 // backend — a real container/OS backend isn't reliably available in test
