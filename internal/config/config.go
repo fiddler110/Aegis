@@ -571,16 +571,21 @@ type SecurityConfig struct {
 	EgressThenWrite  bool     `koanf:"egress_then_write"` // require approval for writes after network egress
 	NetworkAllowList []string `koanf:"network_allowlist"` // restrict network calls to these domains (empty = no restriction)
 
-	// RedactSecrets opts in to running a read-capability tool's output
-	// through the same gitleaks-backed secret detection used for PR
-	// title/body scanning (security.ScanText, P24.6 / FIND-13) before it's
-	// appended to the conversation sent to the configured model provider
-	// (P24.12 / FIND-09). Any detected secret pattern is masked as
-	// "[REDACTED:<rule>]". Off by default: it's a best-effort, gitleaks-only
-	// pass (needs the binary on PATH, only catches its known secret
-	// patterns) and shells out per read-tool call, adding latency — local
-	// Ollama usage, which never sends file content off the machine at all,
-	// remains the primary mitigation for sensitive codebases. See
+	// RedactSecrets runs a read-capability tool's output through the same
+	// gitleaks-backed secret detection used for PR title/body scanning
+	// (security.ScanText, P24.6 / FIND-13) before it's appended to the
+	// conversation sent to the configured model provider (P24.12 /
+	// FIND-09). Any detected secret pattern is masked as
+	// "[REDACTED:<rule>]". Defaults to true (P27.3/FIND-05): sending file/
+	// conversation content carrying an unredacted secret to a cloud model
+	// provider is a real exposure with no other default control. It
+	// remains a best-effort, gitleaks-only pass (needs the binary on PATH,
+	// only catches its known secret patterns, fails open if the binary is
+	// missing) and shells out per read-tool call, adding latency — set
+	// redact_secrets: false only when that cost is unacceptable and
+	// content is otherwise known-safe, or prefer local Ollama usage, which
+	// never sends file content off the machine at all and remains the
+	// strongest mitigation for genuinely sensitive codebases. See
 	// docs/providers.md "Data Exposure & Redaction".
 	RedactSecrets bool `koanf:"redact_secrets"`
 
@@ -777,6 +782,7 @@ func defaults() map[string]any {
 		"sandbox.image":                "ubuntu:22.04",
 		"sandbox.network":              false,
 		"security.egress_then_write":   false,
+		"security.redact_secrets":      true,
 		"security.default_method":      "auto",
 		"security.dast.allow_active":   false,
 		"security.debate.threat_model": false,

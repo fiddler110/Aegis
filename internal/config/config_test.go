@@ -86,6 +86,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Server.SSEBufferSize != DefaultSSEBufferSize {
 		t.Errorf("server.sse_buffer_size = %d, want %d", cfg.Server.SSEBufferSize, DefaultSSEBufferSize)
 	}
+	// P27.3/FIND-05: on by default — read-tool/conversation content reaches
+	// a cloud provider unredacted otherwise, with no other default control.
+	if !cfg.Security.RedactSecrets {
+		t.Error("security.redact_secrets default = false, want true (P27.3/FIND-05)")
+	}
 }
 
 // TestEnvOverrideServerLimits is the P21.5 counterpart to TestEnvOverride:
