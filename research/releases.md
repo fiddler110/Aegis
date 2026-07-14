@@ -8,7 +8,12 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — both remaining P27 threat-model needs-verification items (hook
+**Last updated:** 2026-07-14 — **P25.9** (Tier 4, user-triggered off the parked backlog) shipped in
+scoped form: five of the six P25.1-deferred daemon singletons (`knowledge.Store`, `longmem.Store`,
+the repo-map cache, persona/agent-def directory discovery, and the `os` sandbox backend's
+write-confinement profile) are now session-Workdir-aware — see below. `lsp.Manager` stays parked
+under the same P25.9 heading in roadmap.md, its resource-growth tradeoff judged worse than the gap
+it would close. Also on 2026-07-14: both remaining P27 threat-model needs-verification items (hook
 execution timing, cron fire-time rule application) were checked against the real code and existing
 tests and confirmed already resolved, with no production change needed — see below. Also on
 2026-07-14: the **P29** batch (6 items, doc drift found by a full parallel audit of every docs/*.md
@@ -19,6 +24,84 @@ day's **P28.3** (Tier 3, engine nudge/retry on a zero-tool-call actionable turn)
 persistent connection/model-health indicator), **P28.2** (Tier 2, local-model tool-calling guidance +
 `aegis doctor` smoke test), **P28.4** (Tier 2, compaction robustness), and **P28.6** (Tier 2,
 `TestLiveWorkflow` harness-quality fix).
+
+### P25.9 — per-session scoping of five daemon-singleton services (LSP excluded)
+
+P25.1 gave each session its own `Workdir` but explicitly deferred re-scoping six daemon-wide
+singletons that stayed fixed to the daemon's own default workspace regardless of which Workdir a
+session actually carried: `lsp.Manager`, `knowledge.Store`, `longmem.Store`, the cached repo-map,
+persona/command/agent-def directory discovery, and the `os` sandbox backend's write-confinement
+profile. User-triggered off the Tier 4 parked backlog; scoped down to five of the six after
+discussion (`lsp.Manager` stays parked — see roadmap.md's P25.9 entry) and the `/knowledge`,
+`/repomap/index`, and `/commands` HTTP admin endpoints were left untouched (documented as
+daemon-wide by design; `/commands` turned out to have no session-scoped consumer at all, only the
+admin listing).
+
+Shipped, on branch `feat/p25.9-session-scoped-singletons`:
+- **Shared infra**: a small generic `rootCache[T]` (`internal/server/rootcache.go`) — lazily
+  create-and-cache one `T` per root directory under one mutex per cache — backs both the
+  knowledge-store and repo-map fixes below, avoiding writing the same lock/lazy-init logic twice.
+- **`knowledge.Store`**: `Server.knowledgeStoreFor(root)` returns the daemon's own store unchanged
+  for its default workspace, else lazily opens and caches one at `root/.aegis/knowledge.db` (the
+  DB path was already per-project by path; only the live `*Store` instance was the singleton). A
+  new `builtin.KnowledgeProvider` interface (implemented via a closure over the not-yet-constructed
+  `*Server`, mirroring the existing `cronRun`/`s.cronPermCheck` deferred-capture pattern in `New()`)
+  lets `project_knowledge` resolve the right store from the call's context workdir instead of a
+  store fixed at tool-registration time.
+- **`longmem.Store`**: two independent fixes, since the store is intentionally one shared file
+  across every project a daemon has ever pointed at (project is a data column, not a path).
+  `entity_remember`/`entity_recall` (`internal/tool/builtin/longmem.go`) now derive their project
+  tag from the call's context workdir instead of the daemon's own project baked in at construction.
+  `SearchMemory`/`bm25Search`/`semanticRanking` (`internal/longmem/longmem.go`) gained an optional
+  `project` parameter that filters on the existing packed `key` column's `@project`/`:project`
+  suffix (no schema migration — `kind`/`key` were already `UNINDEXED` FTS5 columns) — without this,
+  `entity_recall` from one project's session could surface another project's facts.
+- **Repo-map cache**: `s.repoMapFor(root)` extends the existing `rootCache` pattern to the
+  system-prompt repo-map block; `effectiveSystem` now resolves it from the session's own root
+  (`s.workdirFor(sessionID)`) instead of always reading the single `s.repoMap` field — bringing it
+  in line with the skills block two lines above it in the same function, which was already
+  session-scoped.
+- **Persona directory discovery**: the risky part, since `persona.Refresh` *atomically replaces*
+  the entire shared persona set keyed only by name — a naive per-session `Refresh` call with a
+  different root's dirs would evict whatever the daemon's own project (or a concurrent session's
+  root) just loaded, not merge with it. Instead, `persona.GetForRoot` (`internal/persona/load.go`)
+  does a pure, non-caching scan of just the session's own `root/.aegis/personas/` directory,
+  falling through to the existing `Get` (still serving the daemon's own project, user-level, and
+  built-in personas unchanged) when not found there — it never touches the shared
+  `loaded`/`loadedOrder`/`refreshSig` state `Refresh` manages. `Server.personaFor(root, name)`
+  wires this in at the session-creation, persona-switch, and per-turn persona lookups
+  (`internal/server/sessions.go`, `messages.go`), reordering each to resolve the session's Workdir
+  before the persona lookup instead of after.
+- **Agent-def discovery**: safe to refresh per-session unlike persona, since `agentdef`'s `custom`
+  map is additive-only (`Register` overwrites by name, never clears). `agentTool.resolveDef`
+  (`internal/tool/builtin/agent.go`) rescans the session's own `.aegis/agents` directory via
+  `agentdef.LoadFromDirs` before both `agentdef.Resolve` call sites when a context workdir is set.
+- **`os` sandbox write-confinement**: the actual gap was narrow — `OSBackend.dir(opts)` already
+  returned `opts.Dir` (correctly session-scoped via the shell tool's `effectiveRoot`) when set, but
+  `seatbeltProfile`/`bwrapArgs` only ever allow-listed the backend's own `workspace`, built once at
+  construction. `wrap()` (`internal/sandbox/os_sandbox.go`) now computes an `extraRoot` from
+  `opts.Dir` per call when it differs from `workspace` and both functions allow-list it too, safe to
+  trust because `opts.Dir` only ever originates from a session's own already-validated Workdir (no
+  tool exposes a user-suppliable directory argument). This resolves the mismatch
+  `resolveSessionWorkdir` used to warn about once per session-creation request; that warning (and
+  its doc-comment caveat) is removed.
+
+Tests: new `rootcache_test.go` (cache hit/miss, failed-create not cached, concurrent create-once
+under `-race`); `internal/longmem`'s `TestSearchMemoryProjectScoping`; `internal/persona`'s
+`TestGetForRootDoesNotMutateSharedState` (asserts `Names()`/`refreshSig` are byte-for-byte
+unchanged by a foreign-root lookup); `internal/agentdef`'s `TestLoadFromDirsMergesAcrossRoots`;
+`internal/sandbox`'s extra-root seatbelt/bwrap-arg tests plus an OS-gated
+`TestOSBackendConfinesWritesToSessionWorkdir` integration test; `internal/server`'s
+`session_scoping_test.go` (knowledge-store isolation, repo-map-differs-per-root, and an
+end-to-end persona-resolution check through the real HTTP `CreateSession`/`GetSession` path); and
+new `internal/tool/builtin` tests for `KnowledgeProvider` context-workdir resolution and
+`entity_remember`/`entity_recall` project tagging/scoping. Full suite (`go test ./...`) and
+`-race` on every touched package pass with no regressions; manually verified end-to-end against a
+real running daemon (`aegis serve` built from this branch, a live local Ollama model): a session
+created with `Workdir` pointed at a second directory (its own `.aegis/personas/session-reviewer.md`)
+resolved that project's persona in its system prompt via the real `POST /sessions` →
+`GET /sessions/{id}` round trip, while a default session (no Workdir) created immediately after
+was unaffected.
 
 ### P27 threat model — last two needs-verification items, confirmed resolved (no code change)
 

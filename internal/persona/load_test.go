@@ -155,3 +155,67 @@ func TestLoadNameFromFilename(t *testing.T) {
 		t.Error("persona should be registered under its filename stem")
 	}
 }
+
+// TestGetForRootDoesNotMutateSharedState is the P25.9 regression: GetForRoot
+// must let a session on a foreign root see that root's own project persona
+// without ever touching the shared loaded/loadedOrder/refreshSig state
+// Refresh manages — a naive per-session Refresh call would instead evict
+// whatever the daemon's own project (or a concurrent session's root) just
+// loaded, since Refresh atomically replaces the whole set.
+func TestGetForRootDoesNotMutateSharedState(t *testing.T) {
+	// Seed the shared state as if the daemon's own project had already
+	// loaded a persona via the normal Refresh path.
+	daemonDir := t.TempDir()
+	writePersona(t, daemonDir, "daemon-persona.md", "---\ndescription: daemon\n---\nDaemon body.")
+	if _, changed := Refresh("", false, daemonDir); !changed {
+		t.Fatal("Refresh did not pick up the daemon persona")
+	}
+	namesBefore := append([]string{}, Names()...)
+	sigBefore := refreshSig
+
+	// A foreign root (a session Workdir different from the daemon's own)
+	// with its own project persona of a different name.
+	foreignRoot := t.TempDir()
+	writePersona(t, ProjectDir(foreignRoot), "foreign-persona.md", "---\ndescription: foreign\n---\nForeign body.")
+
+	p, ok := GetForRoot(foreignRoot, true, "foreign-persona")
+	if !ok {
+		t.Fatal("expected foreign-persona to resolve via GetForRoot")
+	}
+	if !strings.Contains(p.System, "Foreign body.") {
+		t.Errorf("got system %q, want it to contain the foreign persona's body", p.System)
+	}
+
+	// The shared state must be byte-for-byte unchanged: no eviction, no
+	// leakage of the foreign persona into Names()/Get().
+	if refreshSig != sigBefore {
+		t.Error("GetForRoot must not touch refreshSig")
+	}
+	if got := Names(); strings.Join(got, ",") != strings.Join(namesBefore, ",") {
+		t.Errorf("Names() changed: before=%v after=%v", namesBefore, got)
+	}
+	if _, ok := Get("foreign-persona"); ok {
+		t.Error("foreign-persona must not leak into the shared Get() lookup")
+	}
+	if p, ok := Get("daemon-persona"); !ok || !strings.Contains(p.System, "Daemon body.") {
+		t.Error("daemon's own persona must still resolve unchanged via Get()")
+	}
+
+	// A name not present in the foreign root's project dir falls through to
+	// the shared set (still sees the daemon's own project persona).
+	p2, ok := GetForRoot(foreignRoot, true, "daemon-persona")
+	if !ok || !strings.Contains(p2.System, "Daemon body.") {
+		t.Error("GetForRoot should fall through to Get for names not in the foreign project dir")
+	}
+
+	// Untrusted foreign project dir: control fields are dropped, matching
+	// LoadFromDirs' honorControlFields semantics for an untrusted project dir.
+	writePersona(t, ProjectDir(foreignRoot), "foreign-mode.md", "---\ndescription: x\nmode: build\n---\nBody.")
+	p3, ok := GetForRoot(foreignRoot, false, "foreign-mode")
+	if !ok {
+		t.Fatal("expected foreign-mode to resolve")
+	}
+	if p3.Mode != "" {
+		t.Errorf("untrusted foreign project dir: mode = %q, want empty (control fields dropped)", p3.Mode)
+	}
+}

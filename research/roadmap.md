@@ -55,17 +55,20 @@ Low urgency, no trigger, or explicitly parked pending demand. Do not build specu
 revisit only if a concrete trigger (user demand, reported pain, incident) appears, and check
 with the user before starting any of these.
 
-### P25.9 — Per-session scoping of daemon-singleton services
+### P25.9 — Per-session scoping of `lsp.Manager`
 
 Priority: Tier 4 · Effort: L — parked, no concrete trigger
 
-The P25.1 deliberately-deferred gaps, tracked here so they aren't lost in releases.md prose:
-`lsp.Manager`, `knowledge.Store`, `longmem.Store`, the cached repo-map (`s.repoMap`),
-persona/command/agent-def directory discovery, and the `os` sandbox backend's write-confinement
-profile (baked at construction; `resolveSessionWorkdir` warns once on the mismatch) all remain
-scoped to the daemon's default workspace regardless of a session's Workdir. Each is a
-daemon-wide singleton; re-scoping is a materially larger change. Trigger: a concrete pain point
-in a future live-eval pass.
+The P25.1 deliberately-deferred gap list originally named six daemon-wide singletons; five
+shipped (see [releases.md](releases.md#latest-changes)): `knowledge.Store`, `longmem.Store`, the
+cached repo-map, persona/agent-def directory discovery, and the `os` sandbox backend's
+write-confinement profile are all now session-Workdir-aware. `lsp.Manager` alone remains parked —
+re-scoping it means starting a second set of real language-server subprocesses per distinct
+session root, with no natural bound (P25.8 already threads Workdir through cron/swarm/debate, so
+a long-lived daemon could accumulate many distinct roots). That's either an unbounded resource
+leak (no cap) or a new eviction/restart failure surface (capped LRU) for a narrower benefit than
+the other five. Trigger: a concrete pain point in a future live-eval pass, or a deliberate design
+for capped/LRU per-root manager pooling.
 
 ---
 

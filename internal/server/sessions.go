@@ -17,13 +17,14 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/compaction"
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
-	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 func permModeRank(mode string) int {
@@ -99,6 +100,20 @@ func (s *Server) refreshPersonas() {
 	}
 }
 
+// personaFor resolves a persona by name, scoped to root (P25.9): root == ""
+// or the daemon's own workspace takes the fast, unchanged path (persona.Get,
+// serving the shared Refresh-managed set); any other root additionally
+// consults that root's own project persona directory via
+// persona.GetForRoot's pure, non-mutating scan — see that function's doc
+// comment for why a session-scoped persona.Refresh call would be unsafe.
+func (s *Server) personaFor(root, name string) (persona.Persona, bool) {
+	if root == "" || root == s.workspace {
+		return persona.Get(name)
+	}
+	trusted := workspacetrust.Open(config.WorkspaceTrustStorePath()).IsTrusted(root)
+	return persona.GetForRoot(root, trusted, name)
+}
+
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	var req api.CreateSessionRequest
@@ -106,8 +121,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	workdir, werr := s.resolveSessionWorkdir(req.Workdir)
+	if werr != nil {
+		writeError(w, werr.status, werr.msg)
+		return
+	}
 	s.refreshPersonas()
-	p, _ := persona.Get(req.Persona)
+	p, _ := s.personaFor(workdir, req.Persona)
 	mode := s.resolveSessionMode(req.Mode, p)
 	if mode == "" {
 		mode = s.cfg.Permission.Mode
@@ -119,11 +139,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	system := req.System
 	if system == "" {
 		system = p.System
-	}
-	workdir, werr := s.resolveSessionWorkdir(req.Workdir)
-	if werr != nil {
-		writeError(w, werr.status, werr.msg)
-		return
 	}
 	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona, workdir)
 	if err != nil {
@@ -151,10 +166,7 @@ func (e *workdirError) Error() string { return e.msg }
 // empty keeps today's behavior (the daemon's default workspace, via
 // workdirFor's fallback); otherwise it must resolve to an existing
 // directory and, on a remote-accessible daemon, fall within the trust
-// boundary workdirAllowed enforces. Logs once if the resolved sandbox
-// backend is OSBackend, whose write-confinement profile is fixed to the
-// daemon's own workspace at startup and won't extend to a different root
-// (a known limitation — see research/roadmap.md P25.1).
+// boundary workdirAllowed enforces.
 func (s *Server) resolveSessionWorkdir(raw string) (string, *workdirError) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -170,10 +182,6 @@ func (s *Server) resolveSessionWorkdir(raw string) (string, *workdirError) {
 	}
 	if !s.workdirAllowed(abs) {
 		return "", &workdirError{http.StatusForbidden, "workdir is not permitted for a remote-accessible daemon; add it to server.session_workdir_allowlist"}
-	}
-	if _, isOS := s.sandbox.(*sandbox.OSBackend); isOS && !withinRoot(s.workspace, abs) {
-		s.logger.Warn("session workdir differs from the daemon's workspace under the os sandbox backend; write confinement stays scoped to the daemon's own workspace, not this session's directory",
-			"workdir", abs, "daemon_workspace", s.workspace)
 	}
 	return abs, nil
 }
@@ -313,7 +321,7 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if personaName != "" {
 		s.refreshPersonas()
-		p, found := persona.Get(personaName)
+		p, found := s.personaFor(s.workdirFor(id), personaName)
 		if !found {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown persona %q", personaName))
 			return
