@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 9, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
+**Open items:** 8, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
 TODO/stub/skip/robustness markers, and a docs-vs-implementation drift scan of every docs/*.md file
 against current source) run after the P29 batch closed out all prior open work, plus the P31 batch
 (GitHub CodeQL code-scanning alerts pulled from the `fiddler110/Aegis` repo — 24 open alerts across
@@ -22,15 +22,16 @@ Tier 4 also still has 1 parked item with no active trigger (see [Parked](#open-w
 The P27 threat model's needs-verification list remains fully closed — see
 [releases.md](releases.md#latest-changes) for the 2026-07-14 verification pass that confirmed the
 last two items (hook execution timing, cron fire-time rule application) were already resolved by
-shipped mechanisms, no code change needed. **P31.1** (nuclei `templates_version` path traversal /
-git-arg injection), **P31.2** (session-workdir existence-oracle gate ordering), **P30.1** (LSP
-client hang on transport death), and **P30.2** (hooks hardcoded `sh -c` on Windows) shipped
-2026-07-14 — see [releases.md](releases.md#latest-changes).
+shipped mechanisms, no code change needed. All four Tier 1 items shipped 2026-07-14: **P31.1**
+(nuclei `templates_version` path traversal / git-arg injection), **P31.2** (session-workdir
+existence-oracle gate ordering), **P30.1** (LSP client hang on transport death), and **P30.2** and
+**P30.3** (hooks and TUI bang command both hardcoded `sh -c` on Windows) — see
+[releases.md](releases.md#latest-changes).
 
-**Next session:** start with P30.3 (the TUI's `!` bang command hardcodes `sh -c`, same fix as
-P30.2 applied to a different call site), the last Tier 1 item. Re-run `TestLiveWorkflow` (recipe in
-CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams;
-`aegis doctor` is the standalone preflight companion for the same misconfiguration classes.
+**Next session:** no Tier 1 work remains — pick up Tier 2 starting with P31.3 (Web UI CSRF cookie
+`Secure` flag), first in priority order below. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md)
+after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor`
+is the standalone preflight companion for the same misconfiguration classes.
 
 ---
 
@@ -42,8 +43,7 @@ hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or i
 work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
 speculatively.
 
-**Tier 1:** P30.3 — the last remaining Windows-portability bug. (P31.1, P31.2, P30.1, and P30.2
-shipped 2026-07-14.)
+**Tier 1:** none open. (P31.1, P31.2, P30.1, P30.2, and P30.3 shipped 2026-07-14.)
 
 **Tier 2:** P31.3, P31.4, P31.5, P30.4, P30.5, P30.6, P30.7, P30.8 — in priority order: real
 security hardening (P31.3) and alert-noise reduction (P31.4, P31.5) ahead of pure docs-drift
@@ -56,17 +56,6 @@ cleanup (P30.4-P30.8).
 ---
 
 ## Open Work
-
-### P30.3 — TUI's `!`-prefixed bang command hardcodes `sh -c`, same Windows gap
-
-Priority: Tier 1 · Effort: S
-
-`internal/tui/tui.go:603` (`execBangCmd`, the TUI's `!<command>` passthrough — the same mechanism
-CLAUDE.md tells users to invoke for things like `gcloud auth login`) also hardcodes
-`exec.CommandContext(ctx, "sh", "-c", cmd)`, with no Windows branch. Same root cause and same fix as
-P30.2 — reuse `sandbox.shellCommand`/`WindowsShellBinary()` instead of a second hardcoded `sh -c`.
-File alongside P30.2 since both call sites should converge on the same helper rather than each
-growing an independent `runtime.GOOS` branch.
 
 ### P31.3 — Web UI CSRF cookie never sets `Secure`, even when TLS is enabled
 
