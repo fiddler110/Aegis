@@ -960,6 +960,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /sessions/{id}/steer", s.handleSteer)
+	mux.HandleFunc("POST /sessions/{id}/stop", s.handleStopRun) // P28.5: stop a resumable run out of band
 	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
 	mux.HandleFunc("POST /sessions/{id}/fork", s.handleFork) // P22.3

@@ -122,6 +122,16 @@ type PostMessageRequest struct {
 	// GuardEnabled overrides the configured output_guard.enabled default for this
 	// turn when non-nil (per-session /guard toggle).
 	GuardEnabled *bool `json:"guard_enabled,omitempty"`
+	// Resumable opts this run into surviving an SSE connection drop (P28.5):
+	// the run keeps executing server-side on a daemon-rooted context instead
+	// of being cancelled when the HTTP request context is, and every event is
+	// additionally buffered (like a Background session's) so a client can
+	// reattach via GET /sessions/{id}/events?since=N. Since a dropped
+	// connection can no longer be used to stop the run, a client that sets
+	// this must explicitly stop it via POST /sessions/{id}/stop instead of
+	// just aborting the request. The TUI/CLI leave this false and keep
+	// today's disconnect-cancels-the-run behavior; the web UI sets it.
+	Resumable bool `json:"resumable,omitempty"`
 }
 
 // ImageInput attaches an image to a user turn. Provide either a Path (the daemon

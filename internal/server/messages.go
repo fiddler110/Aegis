@@ -39,6 +39,11 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "text or images required")
 		return
 	}
+	// resumable (P28.5): this run should survive an SSE connection drop, like
+	// an explicitly-backgrounded session already does. Both cases need the
+	// same daemon-rooted context + event buffering, so they share one flag
+	// below rather than duplicating every check against sess.Background.
+	resumable := req.Resumable
 
 	imageBlocks, err := buildImageBlocks(req.Images)
 	if err != nil {
@@ -214,11 +219,14 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	conv := &engine.Conversation{System: s.effectiveSystem(sess.System, id), Messages: sess.Messages, Persisted: len(sess.Messages)}
 
-	// P3.2: background (detached) sessions run the engine in a goroutine bound to
-	// a server-level context so the turn continues even after the HTTP client
-	// disconnects. All events are buffered to SQLite in addition to being sent
-	// over SSE while the client is still connected.
-	if sess.Background {
+	// P3.2/P28.5: a background session or a resumable run keeps executing on a
+	// server-level context (below) after the HTTP client disconnects. Either
+	// way, every event is also buffered to SQLite so a client can reattach
+	// and catch up via GET /sessions/{id}/events?since=N — a resumable run's
+	// web UI reconnect (P28.5) and a background session's reattach (P3.2) are
+	// literally the same catch-up mechanism, just triggered differently.
+	detached := sess.Background || resumable
+	if detached {
 		origSend := send
 		send = func(ev api.Event) {
 			origSend(ev) // best-effort SSE while client is connected
@@ -257,10 +265,11 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: content})
 
 	// Carry the session's permission mode so the `agent` tool can clamp any
-	// sub-agents it spawns to no more than this posture. P3.2: background sessions
-	// use a server-level context so the run continues after the HTTP client drops.
+	// sub-agents it spawns to no more than this posture. P3.2/P28.5: a
+	// detached (background or resumable) run uses a server-level context so
+	// it continues after the HTTP client drops.
 	baseRunCtx := r.Context()
-	if sess.Background {
+	if detached {
 		baseRunCtx = context.Background()
 	}
 	// Optional wall-clock ceiling (P21.5): off by default (0). A coarse
@@ -274,6 +283,19 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		var cancel context.CancelFunc
 		baseRunCtx, cancel = context.WithTimeout(baseRunCtx, time.Duration(d)*time.Second)
 		defer cancel()
+	}
+	// A detached run's context is no longer tied to the HTTP request, so
+	// disconnecting can no longer stop it — register an explicit cancel func
+	// so POST /sessions/{id}/stop has something to call (P28.5). A plain run
+	// keeps stopping the way it always has: the client tears down its
+	// request, which cancels baseRunCtx (= r.Context()) directly.
+	if detached {
+		var stopCancel context.CancelFunc
+		baseRunCtx, stopCancel = context.WithCancel(baseRunCtx)
+		defer stopCancel()
+		if s.runs != nil {
+			s.runs.setCancel(runID, stopCancel)
+		}
 	}
 	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)
 	runCtx = swarm.WithCostTracker(runCtx, tracker)
@@ -619,6 +641,21 @@ func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusTooManyRequests, "steer buffer full; try again momentarily")
 	}
+}
+
+// handleStopRun cancels the active resumable run for a session (P28.5).
+// Needed because a resumable run's context is deliberately decoupled from its
+// HTTP request context (so a dropped connection doesn't kill it) — a plain
+// (non-resumable) run has no registered cancel and is instead stopped the
+// usual way, by the client tearing down its request. Returns 404 if no
+// resumable run is currently active for the session.
+func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.runs == nil || !s.runs.stopSession(id) {
+		writeError(w, http.StatusNotFound, "no resumable run active for session")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // newRunID returns a short random identifier for a single message run.

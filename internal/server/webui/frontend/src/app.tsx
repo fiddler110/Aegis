@@ -543,17 +543,28 @@ export function App() {
 
     const controller = new AbortController();
     controllerRef.current = controller;
+    // reconnect (P28.5) stays false whenever the stream ended the normal way
+    // (the fetch resolved with no exception — which only happens once the
+    // daemon has actually closed the response, i.e. the run is genuinely
+    // over, success or not) or via a deliberate Stop (AbortError). Any other
+    // exception means the connection itself was severed — a network blip,
+    // backgrounded-tab throttling, or a daemon restart — while the run keeps
+    // going server-side (every web UI send is resumable), so it's worth
+    // reattaching instead of just giving up with a terminal error.
+    let reconnect = false;
     try {
       const r = await api(`/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, resumable: true }),
         signal: controller.signal,
       });
       await consumeSSE(r, sink.handleEvent);
     } catch (e) {
       sink.finish();
       const err = e as Error;
+      const stopped = err.name === "AbortError";
+      reconnect = !stopped;
       setItems((prev) =>
         prev.map((it) =>
           it.id === asstId
@@ -561,7 +572,9 @@ export function App() {
                 ...it,
                 blocks: [
                   ...it.blocks,
-                  { kind: "error", text: err.name === "AbortError" ? "Stopped." : "Error: " + err.message },
+                  stopped
+                    ? { kind: "error", text: "Stopped." }
+                    : { kind: "error", text: "Connection lost — reconnecting…" },
                 ],
               }
             : it
@@ -579,6 +592,12 @@ export function App() {
       loadSessions();
       refreshSessionInfo(sessionId); // P15.4: pick up this turn's cost/tokens
       loadStatus();
+    }
+    if (reconnect) {
+      // Reuses watchLive's own buffered-event catch-up/finished-detection
+      // rather than a second implementation: from the daemon's point of
+      // view this is identical to reattaching to a background session.
+      watchLive(sessionId);
     }
   };
 
@@ -890,7 +909,15 @@ export function App() {
           disabled={!currentId || watching || detachedRun}
           streaming={streaming}
           onSend={send}
-          onStop={() => controllerRef.current?.abort()}
+          onStop={() => {
+            controllerRef.current?.abort();
+            // Every web UI send is resumable (P28.5): its context no longer
+            // dies with the request, so stopping it also needs an explicit
+            // server-side cancel — abort() alone only stops this tab from
+            // listening, not the run itself. Best-effort: if the run already
+            // ended (e.g. lost the race with abort), this 404s harmlessly.
+            if (currentId) api(`/sessions/${currentId}/stop`, { method: "POST" }).catch(() => {});
+          }}
         />
       </section>
       <div id="toasts">

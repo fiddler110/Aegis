@@ -8,11 +8,67 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P28.3** (Tier 3, engine nudge/retry on a zero-tool-call actionable
-turn) shipped, on top of the same day's **P28.7** (Tier 2, persistent connection/model-health
-indicator), **P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test), **P28.4**
-(Tier 2, compaction robustness), and **P28.6** (Tier 2, `TestLiveWorkflow` harness-quality fix) —
-closing out Tier 2 entirely and starting on Tier 3.
+**Last updated:** 2026-07-14 — **P28.5** (Tier 3, resumable web UI SSE stream) shipped, closing out
+the entire P28 batch (all 7 items filed from the 2026-07-14 live evaluation). Built on the same
+day's **P28.3** (Tier 3, engine nudge/retry on a zero-tool-call actionable turn), **P28.7** (Tier 2,
+persistent connection/model-health indicator), **P28.2** (Tier 2, local-model tool-calling guidance +
+`aegis doctor` smoke test), **P28.4** (Tier 2, compaction robustness), and **P28.6** (Tier 2,
+`TestLiveWorkflow` harness-quality fix).
+
+**P28.5** (Tier 3, Effort M/L) shipped: a resumable-run design so a web UI SSE stream that drops
+mid-turn (network blip, backgrounded-tab throttling, daemon restart) reattaches and catches up
+instead of surfacing a dead-end "Error: ..." — the gap flagged by the same 2026-07-14 live
+evaluation, where local-model turns routinely ran 30s-150s+, making a mid-turn drop meaningfully
+more likely than with fast cloud round-trips.
+
+Investigated first (per the roadmap item's own note): the existing detached-run infrastructure —
+`runRegistry` (`internal/server/runs.go`), the `bg_events` SQLite buffer
+(`Store.AppendBGEvent`/`ListBGEvents`), and the web UI's `watchLive` reattach poller
+(`app.tsx`) — already solves this completely for sessions explicitly marked `background` (P3.2): a
+background session's run runs on a `context.Background()`-rooted context so a client disconnect
+can't cancel it, and every event is buffered to SQLite so `watchLive` can catch up via
+`GET /sessions/{id}/events?since=N`. The gap was that a normal (non-background) session's run uses
+`r.Context()` as its base context, so a dropped connection cancels it via the engine's existing
+`ctx.Done()` check (`engine.ErrInterrupted`) — there was nothing left running to reconnect *to*.
+Generalizing background's survive-disconnect + event-buffering behavior to every run would have
+also broken Stop: today, aborting the fetch is the *only* way either the TUI or the web UI stops a
+run, by tearing down the same request context the engine runs on — both clients share this pattern
+(`internal/tui/tui.go`'s `m.cancel`, the web UI's `controllerRef`). So resumability had to be opt-in
+per request, not a blanket change to every run's lifetime.
+
+Fix: `api.PostMessageRequest` gained `Resumable bool` (`internal/api/api.go`) — off by default, so
+the TUI/CLI/mcp-serve keep today's exact disconnect-cancels-the-run behavior; only the web UI's
+`send()` (`app.tsx`) sets it. In `handlePostMessage` (`internal/server/messages.go`), a `detached :=
+sess.Background || resumable` local now gates both the context root (`context.Background()` instead
+of `r.Context()`) and the event-buffering `send` wrapper that used to be `sess.Background`-only —
+the two mechanisms were already identical in shape, this just extends who gets them. Because a
+detached run's context is no longer tied to its request, disconnecting can no longer stop it either
+— so `runRegistry` (`internal/server/runs.go`) gained a `cancel context.CancelFunc` per run
+(`setCancel`) and a `stopSession` lookup, and a new endpoint, `POST /sessions/{id}/stop`
+(`handleStopRun`), cancels the active resumable run for a session. The web UI's Stop button now
+calls both `controller.abort()` (stop listening) and this endpoint (stop the run) — a plain
+TUI/CLI run is unaffected, since it has no registered cancel and keeps stopping via disconnect. As a
+side effect, an explicitly-`background` session — previously unstoppable once its owning client had
+disconnected — can now also be stopped this way.
+
+Client side (`internal/server/webui/frontend/src`): `api.ts`'s `consumeSSE` is unchanged; `app.tsx`'s
+`send()` now sends `resumable: true` and distinguishes three stream-exit cases — a clean resolve
+(the daemon closed the response itself, meaning the run is genuinely over, success or not: no
+action), an `AbortError` (the user's own Stop click: show "Stopped." as before), and any other
+exception (the connection was actually severed while the run may still be executing server-side: show
+"Connection lost — reconnecting…" and hand off to the existing `watchLive(sessionId)` reattach
+poller instead of building a second implementation of the same catch-up logic).
+
+Tested: `internal/server/runs_test.go` — `TestRunRegistryStopSession` (cancel registration/lookup in
+isolation), `TestResumableRunSurvivesClientDisconnect` (end-to-end over the real HTTP+SSE seam via
+`httptest.NewServer` + `internal/client`: a `blockingAdapter` mid-stream run keeps executing and
+buffering events after the client request is cancelled, confirmed via `GET /runs` staying non-empty
+and `GetBGEvents` containing the terminal `done` event once released), and
+`TestStopRunCancelsResumableRun` (`POST /sessions/{id}/stop` actually interrupts the run, and 404s
+on a session with nothing resumable to stop). `internal/client/client.go` gained `StopRun` to drive
+the new endpoint from tests (and any future non-web-UI caller). Frontend: `tsc --noEmit` and
+`npm run build` both pass clean; `dist/` regenerated and committed. `go build ./...`, `go vet ./...`,
+and the full `go test ./...` (plus `-race` on the touched packages) pass clean.
 
 **P28.3** (Tier 3, Effort M) shipped: the engine now detects a suspicious zero-tool-call completion
 on a plainly actionable task and nudges the model to reconsider and act, instead of silently

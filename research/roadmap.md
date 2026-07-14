@@ -1,14 +1,9 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-14 — **P28.3** (Tier 3, engine nudge/retry on a zero-tool-call actionable
-turn) shipped. **P28.7** (Tier 2, persistent connection/model-health indicator in the TUI and web UI)
-also shipped, closing out Tier 2 entirely. **P28.2** (local-model tool-calling guidance +
-`aegis doctor` smoke test), **P28.4** (compaction fallback when the LLM summarizer fails twice in a
-row), and **P28.6** (harness-quality fix for `TestLiveWorkflow`'s local-prompt-profile subtest) also
-shipped earlier the same day; see [releases.md](releases.md#latest-changes) for the full writeups.
-**P28.1** (Tier 1, TUI escape-sequence sanitization for untrusted tool output) also shipped
-2026-07-14. All other completed history (the full P27 threat-model batch, P27.1–P27.19, plus
-everything before it) also lives there.
+**Last updated:** 2026-07-14 — **P28.5** (Tier 3, resumable web UI SSE stream) shipped, closing out
+the entire P28 batch: all 7 items filed 2026-07-14 (**P28.1**–**P28.7**) are now shipped — see
+[releases.md](releases.md#latest-changes) for the full writeups. All other completed history (the
+full P27 threat-model batch, P27.1–P27.19, plus everything before it) also lives there.
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -19,22 +14,21 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 remaining item (P28.5) of the 7 filed 2026-07-14 from a full interactive
+**Open items:** none from the 2026-07-14 batch — all 7 items filed that day from a full interactive
 evaluation of the TUI, web UI, and daemon against three live Ollama models (`qwythos:latest`,
-`deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via `TestLiveWorkflow` — see
-[Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence sanitization), **P28.2**,
-**P28.3**, **P28.4**, **P28.6**, and **P28.7** all shipped 2026-07-14, closing out Tiers 1 and 2
-entirely and leaving only one Tier 3 item — see [releases.md](releases.md#latest-changes). Tier 4
-has 4 parked items with no active trigger (see [Parked](#open-work--parked-tier-4)), plus 2 remaining
-unresolved needs-verification notes carried over from the P27 threat model (see below); the third
-(TUI escape-sequence neutralization) is now resolved by P28.1.
+`deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via `TestLiveWorkflow` have shipped —
+see [releases.md](releases.md#latest-changes). Tiers 1 through 3 are all clear. Tier 4 has 4 parked
+items with no active trigger (see [Parked](#open-work--parked-tier-4)), plus 2 remaining unresolved
+needs-verification notes carried over from the P27 threat model (see below); the third (TUI
+escape-sequence neutralization) is resolved by P28.1.
 
-**Next session:** the one remaining item, **P28.5**, still needs a resumable-stream design (checked
-2026-07-14: the existing `runRegistry`, `internal/server/runs.go`, is purely informational — no event
-buffering/replay to piggyback on). Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change
-touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the
-standalone preflight companion for the same misconfiguration classes (including the workspace trust
-check, P27.1, the local-sandbox recommendation, P27.14, and the tool-calling smoke test, P28.2).
+**Next session:** no open item from this batch — pick the next thing from user demand, a fresh
+live-eval pass, or one of the Tier 4 parked items if a concrete trigger shows up (see
+[Parked](#open-work--parked-tier-4)). Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any
+change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is
+the standalone preflight companion for the same misconfiguration classes (including the workspace
+trust check, P27.1, the local-sandbox recommendation, P27.14, and the tool-calling smoke test,
+P28.2).
 
 ---
 
@@ -51,7 +45,8 @@ speculatively.
 **Tier 2:** none open — P28.2, P28.4, P28.6, P28.7 all shipped 2026-07-14, see
 [releases.md](releases.md#latest-changes).
 
-**Tier 3:** P28.5. P28.3 shipped 2026-07-14, see [releases.md](releases.md#latest-changes).
+**Tier 3:** none open — P28.3 and P28.5 both shipped 2026-07-14, see
+[releases.md](releases.md#latest-changes).
 
 **Tier 4:** parked — P25.9, P13.3.3, P6.1, P27.20. See [Parked](#open-work--parked-tier-4).
 
@@ -79,29 +74,15 @@ See `0-assessment.md`'s "Needs Verification" table in the report folder for the 
 
 ## Open Work
 
-Filed 2026-07-14 from a full interactive evaluation of the TUI, web UI, and daemon — driving real
-sessions over the HTTP+SSE seam (the same one the TUI/web UI use) against three live Ollama
-models via `TestLiveWorkflow`, plus a read of the TUI render paths and web UI streaming client.
-Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization), all four
-Tier 2 items — **P28.2** (local-model tool-calling guidance + `aegis doctor` smoke test), **P28.4**
-(compaction fallback on repeated summarizer failure), **P28.6** (`TestLiveWorkflow` harness-quality
-fix), and **P28.7** (persistent connection/model-health indicator) — and **P28.3** (Tier 3, engine
-nudge/retry on a zero-tool-call actionable turn) all shipped 2026-07-14 — see
-[releases.md](releases.md#latest-changes) — leaving only **P28.5** open.
-
-### P28.5 — Web UI SSE stream has no reconnect/resume on drop
-
-Priority: Tier 3 · Effort: M/L — real value, larger, needs design
-
-`consumeSSE` (`internal/server/webui/frontend/src/api.ts`) has no retry/reconnect logic: a dropped
-connection mid-turn (network blip, backgrounded-tab throttling, daemon restart) surfaces as a
-terminal "Error: ..." with no automatic resume, even though the underlying engine run may still be
-executing server-side (the daemon already tracks in-flight/background runs — see `app.tsx`'s
-`loadRuns()`). Local-model turns routinely ran 30s-150s+ in live evaluation and can run much
-longer for harder tasks, making a mid-turn drop meaningfully more likely than with fast cloud
-round-trips. Needs a resumable-stream design (reconnect and replay/attach to the same run ID) —
-investigate how much of the existing detached-run infrastructure already supports resumption
-before committing to effort size.
+None currently. The full 7-item batch filed 2026-07-14 from a live interactive evaluation of the
+TUI, web UI, and daemon — driving real sessions over the HTTP+SSE seam (the same one the TUI/web UI
+use) against three live Ollama models via `TestLiveWorkflow`, plus a read of the TUI render paths
+and web UI streaming client — has all shipped: **P28.1** (Tier 1, TUI escape-sequence sanitization),
+all four Tier 2 items (**P28.2** local-model tool-calling guidance + `aegis doctor` smoke test,
+**P28.4** compaction fallback on repeated summarizer failure, **P28.6** `TestLiveWorkflow`
+harness-quality fix, **P28.7** persistent connection/model-health indicator), and both Tier 3 items
+(**P28.3** engine nudge/retry on a zero-tool-call actionable turn, **P28.5** resumable web UI SSE
+stream) — see [releases.md](releases.md#latest-changes) for the full writeups.
 
 ---
 
