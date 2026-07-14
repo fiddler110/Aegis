@@ -43,12 +43,67 @@ checkpoint_test.go`). `go build ./...`, `go vet ./...`, and the full `go test ./
 
 ---
 
-**Date:** 2026-06-29
-**Last updated:** 2026-07-13 — **P27.18** (FIND-19, Tier 3, CVSS 5.5) shipped: confine the `os`
+Before that, same day (2026-07-13): **P27.17** (FIND-16, Tier 3, CVSS 3.4) shipped: propagate a
+shared/proportional budget ceiling into detached swarm sub-agent spawns, so they can't escape the
+fan-out tree's cost cap.
+
+The finding's own evidence pointed at `internal/swarm/agent.go`, but investigation before writing
+any code found the actual production spawn path was `internal/tool/builtin/agent.go`'s
+`spawnBackground` — the only place a detached/background sub-agent spawn (`agent` tool with
+`background: true`) is created — and that it *already* carried the shared cost tracker forward
+correctly: `task.Manager.Start` runs its job under a context derived from `context.Background()`
+(severed from the request that created it), so `spawnBackground` reads `swarm.CostTrackerFromContext`
+off the caller's ctx *before* calling `Start`, then explicitly re-attaches it (`swarm.WithCostTracker`)
+onto the job's own context before handing off to the swarm backend — a fix that traces back to commit
+`c368b4b`, well predating this threat-model pass, with an explanatory comment already in place at
+`agent.go:476-484`. `internal/swarm/subprocess.go`'s `SubprocessBackend.Spawn` — the backend a
+detached spawn actually reaches when running in subprocess mode — already used that carried-forward
+tracker to compute a fair-share-reduced `WorkerSpec.RemainingBudgetUSD`/`RemainingTokens` (P10.3's
+`remainingBudget`/`remainingTokens`, with P24.15's fair-share floor), and `internal/cli/worker.go`'s
+`runWorker` already uses those spec fields as the spawned engine's actual budget/token caps in place
+of the daemon's full configured ones. Each half already had its own unit coverage
+(`TestAgentToolBackgroundSpawnCarriesCostTracker` against a stub backend; several
+`TestSubprocessSpawn*RemainingBudget*`/`*FairShareFloor*` tests calling `Spawn` directly with a
+context that already carried a tracker) — but nothing had ever exercised both halves together,
+through the real production entry point, with a real (non-stub) subprocess backend actually
+receiving the reduced ceiling. New `TestAgentToolBackgroundSpawnRespectsSharedBudgetCeiling`
+(`internal/tool/builtin/agent_subprocess_test.go`) closes exactly that gap: it drives the real
+`agentTool.Execute` with `background: true` through a real `task.Manager` and a real
+`*swarm.SubprocessBackend` (backed by a small fake-worker `TestMain`, mirroring the pattern
+`internal/swarm/subprocess_test.go` already uses to let the test binary double as the headless
+worker process SubprocessBackend re-execs), with a shared `*cost.Tracker` that already has
+significant prior spend attached to the caller's ctx before the detach point, and asserts the
+detached child's `WorkerSpec` actually carries the fair-share-reduced remaining ceiling rather than
+the daemon's full configured cap. To confirm the new test isn't vacuous, the carry-forward in
+`spawnBackground` was temporarily disabled locally and the test observed to fail with
+`RemainingBudgetUSD`/`RemainingTokens` both at zero (the daemon's full cap, unreduced) before the
+carry-forward was restored and the test re-verified passing — i.e., this is a real, confirmed
+regression test, not one that happens to pass regardless. **No production code changes were
+needed**; this shipped as a verification/hardening item, closing a real "never verified end-to-end"
+test-coverage gap rather than a live bug (mirroring how P27.15's writeup below found an existing
+mechanism — the per-job `auto_approve` field — already satisfied that finding's core ask). Also
+corrected a stale comment at `internal/swarm/subprocess.go:155-157`, which claimed the ctx-carried
+tracker is nil for "some background paths" — no longer accurate given the above, and now says so
+with a pointer to the new test. `go build ./...`, `go vet ./...`, the full `go test ./...`, and
+`go test -race ./internal/swarm/... ./internal/tool/builtin/...` all pass clean.
+
+Investigation also confirmed `internal/tool/builtin/agent.go`'s `spawnBackground` is the sole
+production entry point for a detached/background sub-agent spawn — the only other `task.Manager.Start`
+callers outside this package are `internal/server/helpers.go`'s cron job runner (runs a shell
+command, not an agent spawn — no cost tracker involved) and `internal/tool/builtin/task.go`/`shell.go`
+(backgrounded shell commands, same). `internal/debate` never detaches: its role runs happen
+synchronously inline on the caller's own ctx, so they inherit the tracker through normal ctx
+propagation without needing this carry-forward pattern at all. The in-process backend path
+(`internal/server/server.go`'s `subAgentRunner`) needed no change either — every sub-agent's engine,
+foreground or (once `spawnBackground` reattaches it) detached, shares the literal same `*cost.Tracker`
+pointer, so `engine`'s budget gate checking cumulative `TotalUSD()` against one `BudgetUSD` already
+bounds total spend across the whole in-process fan-out tree.
+
+Before that, same day (2026-07-13): **P27.18** (FIND-19, Tier 3, CVSS 5.5) shipped: confine the `os`
 sandbox backend's file reads to the workspace plus a toolchain allowlist, instead of the entire host
 filesystem. Shipped ahead of the then-still-open P27.16/P27.17 (both Tier 3, but this one was
 self-contained and didn't depend on either) — both have since shipped too, closing out Tier 3
-entirely; see their own entries above.
+entirely; see their entries above.
 
 Seatbelt's profile was `(allow default)` with only `file-write*` denied outside the workspace, and
 bwrap's was `--ro-bind / /` — read-only-mounting the whole host root — so a compromised shell command

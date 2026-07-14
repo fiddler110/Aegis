@@ -152,9 +152,16 @@ func (b *SubprocessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle
 	// P10.3: hand the worker what's left of the fan-out tree's shared budget,
 	// not the daemon's full configured cap — otherwise every subprocess
 	// teammate enforces its own fresh ceiling, so N spawns allow N times the
-	// intended spend. tracker is nil for a spawn whose context was severed
-	// from the top-level request (e.g. some background paths), in which case
-	// the worker just falls back to its own unmodified cfg.Cost.* values.
+	// intended spend. tracker is nil for a spawn whose context genuinely never
+	// carried one (e.g. Spawn called directly with a bare context.Background(),
+	// as some tests do) — in which case the worker falls back to its own
+	// unmodified cfg.Cost.* values. As of FIND-16/P27.17 this is NOT the case
+	// for a detached/background agent-tool spawn: agent.go's spawnBackground
+	// reads the tracker off the caller's ctx before task.Manager.Start severs
+	// it, then re-attaches it onto the job's own ctx before calling Spawn here
+	// — verified end-to-end by
+	// TestAgentToolBackgroundSpawnRespectsSharedBudgetCeiling
+	// (internal/tool/builtin/agent_subprocess_test.go).
 	if tracker, ok := CostTrackerFromContext(ctx).(costTracker); ok {
 		if b.budgetUSD > 0 {
 			spec.RemainingBudgetUSD = remainingBudget(b.budgetUSD, tracker.TotalUSD())
