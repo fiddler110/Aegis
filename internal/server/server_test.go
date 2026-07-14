@@ -586,6 +586,15 @@ func TestServerStatusEndpoint(t *testing.T) {
 	if len(info.WorkdirAllowlist) != 1 || info.WorkdirAllowlist[0] != "/srv/projects" {
 		t.Errorf("WorkdirAllowlist = %v, want [/srv/projects]", info.WorkdirAllowlist)
 	}
+	// P28.7: a cloud provider ("anthropic") with no API key resolved into
+	// config (none set here) reports unreachable, mirroring `aegis doctor`'s
+	// provider check for the same case.
+	if info.ProviderReachable {
+		t.Errorf("ProviderReachable = true, want false (no API key configured)")
+	}
+	if info.ProviderLatencyMS != 0 {
+		t.Errorf("ProviderLatencyMS = %d, want 0 (unmeasured for a cloud provider)", info.ProviderLatencyMS)
+	}
 }
 
 func TestServerGetSessionNotFound(t *testing.T) {

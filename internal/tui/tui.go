@@ -141,6 +141,14 @@ type model struct {
 	srvCtxWin           int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
 	srvCtxWinSrc        string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default"
 
+	// Connection/model-health indicator (P28.7): last known daemon /status
+	// result, refreshed periodically (see statusTickMsg) rather than only at
+	// startup/after a run, so "is the model reachable" is answerable at a
+	// glance without spending a prompt on it.
+	connKnown     bool  // false until the first /status round trip completes
+	connReachable bool  // provider reachable per Server.probeProviderReachability
+	connLatencyMS int64 // last measured latency in ms; 0 when unmeasured (cloud provider)
+
 	streamStart time.Time // when the current stream began; zero when idle
 	thinkStart  time.Time // when extended thinking began this turn; zero when idle
 	turnCount   int       // conversation turns sent; guards turn separator logic
@@ -421,10 +429,29 @@ type forkedMsg struct {
 
 // statusInfoMsg carries the daemon /status payload; fetched at startup (and
 // after runs while the value can still improve) for the effective context
-// window driving the usage bar (P23.1).
+// window driving the usage bar (P23.1), and periodically (P28.7, see
+// statusTickMsg) for the connection/model-health indicator.
 type statusInfoMsg struct {
 	info api.StatusInfo
 	err  error
+}
+
+// statusRefreshInterval is how often the TUI re-polls GET /status for the
+// P28.7 connection/model-health indicator. Cheap enough to poll this often —
+// the daemon-side probe (probeProviderReachability) is a 2s-timeout local
+// call for Ollama, or a config-only check for a cloud provider — and frequent
+// enough that a dropped connection shows up quickly without user action.
+const statusRefreshInterval = 20 * time.Second
+
+// statusTickMsg fires statusRefreshInterval after the previous one to
+// re-fetch /status in the background (P28.7), independent of the
+// after-a-run refresh statusInfoMsg's handler already does for the context
+// window.
+type statusTickMsg struct{}
+
+// statusTickCmd schedules the next periodic /status refresh.
+func statusTickCmd() tea.Cmd {
+	return tea.Tick(statusRefreshInterval, func(time.Time) tea.Msg { return statusTickMsg{} })
 }
 
 func newModel(cfg Config) model {
@@ -522,7 +549,7 @@ func newModel(cfg Config) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.sp.Tick, m.fetchStatusInfo())
+	return tea.Batch(textarea.Blink, m.sp.Tick, m.fetchStatusInfo(), statusTickCmd())
 }
 
 // fetchStatusInfo pulls the daemon /status payload for the effective context
@@ -1603,7 +1630,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.srvCtxWin = msg.info.ContextWindow
 			m.srvCtxWinSrc = msg.info.ContextWindowSource
 		}
+		// P28.7 connection/model-health indicator: a request error means the
+		// daemon itself is unreachable, distinct from the daemon being up but
+		// reporting its configured provider as unreachable.
+		m.connKnown = true
+		if msg.err != nil {
+			m.connReachable, m.connLatencyMS = false, 0
+		} else {
+			m.connReachable = msg.info.ProviderReachable
+			m.connLatencyMS = msg.info.ProviderLatencyMS
+		}
 		return m, nil
+
+	case statusTickMsg:
+		return m, tea.Batch(m.fetchStatusInfo(), statusTickCmd())
 
 	case sessionsLoadedMsg:
 		if msg.err != nil {
@@ -3233,12 +3273,15 @@ func (m model) renderTitleBar() string {
 	// glyph column beside the transcript (see renderScrollbar) — this bar no
 	// longer carries scroll state.
 	rightW := max(m.width-brandW, 0)
+	// P28.7: a colored dot (+ latency once measured) ahead of the model name
+	// gives an always-visible, glance-only connection/model-health signal —
+	// no /status command or wasted "is the model connected" prompt needed.
 	right := lipgloss.NewStyle().
 		Background(colSurface).
 		Foreground(colTextMuted).
 		Width(rightW).
 		Align(lipgloss.Right).
-		Render(m.cfg.Model + " ")
+		Render(m.renderConnBadge(colSurface) + " " + m.cfg.Model + " ")
 
 	return brand + right
 }
@@ -3265,6 +3308,7 @@ func (m model) renderSidebar(h int) string {
 
 	section("MODEL")
 	add(m.th.sideMuted.Render(truncate(m.cfg.Model, w)))
+	add(m.renderConnDetail()) // P28.7: reachable/unreachable + latency at a glance
 	add("")
 
 	if m.streaming && !m.streamStart.IsZero() {
@@ -3466,6 +3510,51 @@ func (m model) toastStyle(level toastLevel) lipgloss.Style {
 		return m.th.errLine
 	default:
 		return m.th.statusText
+	}
+}
+
+// connColor picks the P28.7 connection-indicator color: muted while the
+// first /status round trip is still in flight, green when the daemon
+// reports its configured provider reachable, red otherwise.
+func (m model) connColor() color.Color {
+	switch {
+	case !m.connKnown:
+		return colTextMuted
+	case m.connReachable:
+		return colSuccess
+	default:
+		return colError
+	}
+}
+
+// renderConnBadge renders the compact P28.7 connection/model-health glyph
+// used in the always-visible title bar: a colored dot, plus a latency
+// suffix once one has been measured. bg must match the enclosing
+// Background() so the nested style's reset doesn't leave a stray
+// mismatched-background segment on the line.
+func (m model) renderConnBadge(bg color.Color) string {
+	dot := lipgloss.NewStyle().Foreground(m.connColor()).Background(bg).Bold(true).Render("●")
+	if m.connKnown && m.connReachable && m.connLatencyMS > 0 {
+		dot += lipgloss.NewStyle().Foreground(colTextMuted).Background(bg).Render(fmt.Sprintf(" %dms", m.connLatencyMS))
+	}
+	return dot
+}
+
+// renderConnDetail renders the fuller P28.7 connection-status line for the
+// sidebar's MODEL section: reachable/unreachable/checking, plus latency once
+// measured (0/unmeasured for a cloud provider, where reachability is just an
+// API-key-present check — see Server.probeProviderReachability).
+func (m model) renderConnDetail() string {
+	style := lipgloss.NewStyle().Foreground(m.connColor())
+	switch {
+	case !m.connKnown:
+		return style.Render("◌ checking…")
+	case m.connReachable && m.connLatencyMS > 0:
+		return style.Render(fmt.Sprintf("● reachable · %dms", m.connLatencyMS))
+	case m.connReachable:
+		return style.Render("● reachable")
+	default:
+		return style.Render("● unreachable")
 	}
 }
 

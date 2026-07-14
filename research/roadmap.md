@@ -1,6 +1,14 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-13 — **P27.19** (FIND-17, Tier 4, CVSS 5.9, doc-only) shipped: the
+**Last updated:** 2026-07-14 — **P28.7** (Tier 2, Effort S) shipped: a lightweight, persistent
+connection/model-health indicator (reachable, model name, last-probed latency) in both the TUI
+status area and the web UI header, refreshed periodically in the background rather than requiring
+a wasted conversational turn just to check daemon-to-model connectivity. Reuses the existing
+`GET /status` endpoint (`internal/server/server.go`), extended with a cheap `probeProviderReachability`
+check, rather than adding a new one. See [releases.md](releases.md#latest-changes) for the full
+writeup.
+
+Before that (2026-07-13): **P27.19** (FIND-17, Tier 4, CVSS 5.9, doc-only) shipped: the
 "Docker/Podman socket privilege equivalence" section in `docs/security_scan.md` (added by
 P24.10/FIND-06) already covered `--cap-drop=ALL`/`--security-opt=no-new-privileges` and recommended
 rootless Podman / userns-remapped Docker as mitigations for socket-access privilege equivalence —
@@ -196,17 +204,20 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** none — Tiers 1-3 are fully closed, and Tier 4's **P27.19** shipped 2026-07-13
-(doc-only). Tiers 1 and 2 (**P27.1–P27.13**) and all of Tier 3 (**P27.14–P27.18**) shipped
-2026-07-13; P27.18 shipped out of order, ahead of P27.16/P27.17, since it was fully self-contained,
-and P27.16/P27.17 shipped together via two parallel worktree agents. Tier 4 has 4 remaining parked
-items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.20** (see
-[Parked](#open-work--parked-tier-4)).
+**Open items:** none — Tiers 1-3 of the P27 threat-model batch are fully closed, and Tier 4's
+**P27.19** shipped 2026-07-13 (doc-only). Tiers 1 and 2 (**P27.1–P27.13**) and all of Tier 3
+(**P27.14–P27.18**) shipped 2026-07-13; P27.18 shipped out of order, ahead of P27.16/P27.17, since
+it was fully self-contained, and P27.16/P27.17 shipped together via two parallel worktree agents.
+Tier 4 has 4 remaining parked items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.20** (see
+[Parked](#open-work--parked-tier-4)). Separately, **P28.7** (Tier 2, Effort S — TUI/web UI
+connection-health indicator) shipped 2026-07-14, filed and closed the same day from live-usage
+evidence (recurring "test that the model is connected" sessions) rather than as part of the P27
+threat-model batch — see [releases.md](releases.md#latest-changes).
 
 **Next session:** nothing queued — the entire P27 threat-model batch (Tiers 1-3 plus P27.19, 19
-items) is shipped. Next trigger: a new threat-model pass, a reported incident, a new feature
-evaluation, or a concrete pain point surfacing one of the remaining Tier 4 parked items. Re-run
-`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+items) plus P28.7 are shipped. Next trigger: a new threat-model pass, a reported incident, a new
+feature evaluation, or a concrete pain point surfacing one of the remaining Tier 4 parked items.
+Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
 engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone
 preflight companion for the same misconfiguration classes (now including a workspace trust check,
 P27.1, and the local-sandbox recommendation, P27.14).

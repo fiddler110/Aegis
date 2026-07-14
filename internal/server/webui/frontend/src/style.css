@@ -51,6 +51,12 @@ button:disabled{opacity:.5;cursor:default}
 .chip:hover{border-color:var(--accent);color:var(--accent)}
 .costs{font-size:12px;color:var(--muted);white-space:nowrap;cursor:default}
 
+/* P28.7: connection/model-health chip — reuses the ok/bad palette already
+   established for scanner availability (.avail.ok/.avail.bad) and sandbox
+   fallback status elsewhere in this file. */
+.chip.conn-ok{cursor:default;border-color:#16a34a;color:#16a34a}
+.chip.conn-down{cursor:default;border-color:#b91c1c;color:#b91c1c}
+
 /* popover panels (assistant settings, restore points) */
 .panel-anchor{position:relative}
 .backdrop{position:fixed;inset:0;z-index:9}

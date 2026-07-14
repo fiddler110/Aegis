@@ -663,6 +663,7 @@ export function App() {
 
   useEffect(() => {
     let runsTimer: number | undefined;
+    let statusTimer: number | undefined;
     exchangeToken()
       .then(() => {
         loadSessions();
@@ -673,10 +674,17 @@ export function App() {
         // Keep the sidebar "working" indicators and the reattach banner
         // honest even when this tab isn't the one driving the run.
         runsTimer = window.setInterval(loadRuns, 5000);
+        // P28.7: keep the header's connection/model-health indicator fresh
+        // without requiring a run or a manual refresh — same 20s cadence as
+        // the TUI's own periodic /status poll (internal/tui/tui.go,
+        // statusRefreshInterval), cheap enough on the daemon side to poll
+        // this often (see Server.probeProviderReachability).
+        statusTimer = window.setInterval(loadStatus, 20000);
       })
       .catch((e) => setAuthError((e as Error).message || "authentication failed"));
     return () => {
       if (runsTimer) window.clearInterval(runsTimer);
+      if (statusTimer) window.clearInterval(statusTimer);
     };
   }, []);
 
@@ -790,6 +798,28 @@ export function App() {
             >
               ⏪ Restore
             </button>
+          )}
+          {status && (
+            // P28.7: at-a-glance connection/model-health indicator — daemon
+            // reachability + configured model + last-probed latency — so
+            // checking connectivity doesn't need a chat turn or a separate
+            // `aegis doctor` invocation. Not gated on currentId: /status is
+            // daemon-wide, not per-session.
+            <span
+              class={"chip " + (status.provider_reachable ? "conn-ok" : "conn-down")}
+              title={
+                (status.provider_reachable ? "Provider reachable" : "Provider unreachable") +
+                ` — ${status.provider}/${status.model}` +
+                (status.provider_reachable && status.provider_latency_ms
+                  ? ` · last checked ${status.provider_latency_ms}ms`
+                  : "")
+              }
+            >
+              ● {status.model}
+              {status.provider_reachable && status.provider_latency_ms
+                ? ` · ${status.provider_latency_ms}ms`
+                : ""}
+            </span>
           )}
           <span class="badge" id="mode">
             {mode}
