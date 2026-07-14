@@ -9,6 +9,323 @@ or next, see [roadmap.md](roadmap.md).
 ## Latest changes
 
 **Date:** 2026-06-29
+**Last updated:** 2026-07-13 — **P27.17** (FIND-16, Tier 3, CVSS 3.4) shipped: propagate a
+shared/proportional budget ceiling into detached swarm sub-agent spawns, so they can't escape the
+fan-out tree's cost cap.
+
+The finding's own evidence pointed at `internal/swarm/agent.go`, but investigation before writing
+any code found the actual production spawn path was `internal/tool/builtin/agent.go`'s
+`spawnBackground` — the only place a detached/background sub-agent spawn (`agent` tool with
+`background: true`) is created — and that it *already* carried the shared cost tracker forward
+correctly: `task.Manager.Start` runs its job under a context derived from `context.Background()`
+(severed from the request that created it), so `spawnBackground` reads `swarm.CostTrackerFromContext`
+off the caller's ctx *before* calling `Start`, then explicitly re-attaches it (`swarm.WithCostTracker`)
+onto the job's own context before handing off to the swarm backend — a fix that traces back to commit
+`c368b4b`, well predating this threat-model pass, with an explanatory comment already in place at
+`agent.go:476-484`. `internal/swarm/subprocess.go`'s `SubprocessBackend.Spawn` — the backend a
+detached spawn actually reaches when running in subprocess mode — already used that carried-forward
+tracker to compute a fair-share-reduced `WorkerSpec.RemainingBudgetUSD`/`RemainingTokens` (P10.3's
+`remainingBudget`/`remainingTokens`, with P24.15's fair-share floor), and `internal/cli/worker.go`'s
+`runWorker` already uses those spec fields as the spawned engine's actual budget/token caps in place
+of the daemon's full configured ones. Each half already had its own unit coverage
+(`TestAgentToolBackgroundSpawnCarriesCostTracker` against a stub backend; several
+`TestSubprocessSpawn*RemainingBudget*`/`*FairShareFloor*` tests calling `Spawn` directly with a
+context that already carried a tracker) — but nothing had ever exercised both halves together,
+through the real production entry point, with a real (non-stub) subprocess backend actually
+receiving the reduced ceiling. New `TestAgentToolBackgroundSpawnRespectsSharedBudgetCeiling`
+(`internal/tool/builtin/agent_subprocess_test.go`) closes exactly that gap: it drives the real
+`agentTool.Execute` with `background: true` through a real `task.Manager` and a real
+`*swarm.SubprocessBackend` (backed by a small fake-worker `TestMain`, mirroring the pattern
+`internal/swarm/subprocess_test.go` already uses to let the test binary double as the headless
+worker process SubprocessBackend re-execs), with a shared `*cost.Tracker` that already has
+significant prior spend attached to the caller's ctx before the detach point, and asserts the
+detached child's `WorkerSpec` actually carries the fair-share-reduced remaining ceiling rather than
+the daemon's full configured cap. To confirm the new test isn't vacuous, the carry-forward in
+`spawnBackground` was temporarily disabled locally and the test observed to fail with
+`RemainingBudgetUSD`/`RemainingTokens` both at zero (the daemon's full cap, unreduced) before the
+carry-forward was restored and the test re-verified passing — i.e., this is a real, confirmed
+regression test, not one that happens to pass regardless. **No production code changes were
+needed**; this shipped as a verification/hardening item, closing a real "never verified end-to-end"
+test-coverage gap rather than a live bug (mirroring how P27.15's writeup below found an existing
+mechanism — the per-job `auto_approve` field — already satisfied that finding's core ask). Also
+corrected a stale comment at `internal/swarm/subprocess.go:155-157`, which claimed the ctx-carried
+tracker is nil for "some background paths" — no longer accurate given the above, and now says so
+with a pointer to the new test. `go build ./...`, `go vet ./...`, the full `go test ./...`, and
+`go test -race ./internal/swarm/... ./internal/tool/builtin/...` all pass clean.
+
+Investigation also confirmed `internal/tool/builtin/agent.go`'s `spawnBackground` is the sole
+production entry point for a detached/background sub-agent spawn — the only other `task.Manager.Start`
+callers outside this package are `internal/server/helpers.go`'s cron job runner (runs a shell
+command, not an agent spawn — no cost tracker involved) and `internal/tool/builtin/task.go`/`shell.go`
+(backgrounded shell commands, same). `internal/debate` never detaches: its role runs happen
+synchronously inline on the caller's own ctx, so they inherit the tracker through normal ctx
+propagation without needing this carry-forward pattern at all. The in-process backend path
+(`internal/server/server.go`'s `subAgentRunner`) needed no change either — every sub-agent's engine,
+foreground or (once `spawnBackground` reattaches it) detached, shares the literal same `*cost.Tracker`
+pointer, so `engine`'s budget gate checking cumulative `TotalUSD()` against one `BudgetUSD` already
+bounds total spend across the whole in-process fan-out tree.
+
+Before that, same day (2026-07-13): **P27.18** (FIND-19, Tier 3, CVSS 5.5) shipped: confine the `os`
+sandbox backend's file reads to the workspace plus a toolchain allowlist, instead of the entire host
+filesystem. Shipped ahead of the still-open P27.16 (Tier 3, sequence-independent of this one).
+
+Seatbelt's profile was `(allow default)` with only `file-write*` denied outside the workspace, and
+bwrap's was `--ro-bind / /` — read-only-mounting the whole host root — so a compromised shell command
+running under `sandbox.backend: os` could still read (and, unless `network: false` was also set,
+exfiltrate) `~/.ssh`, cloud credential files, or any other host file, even though writes were already
+confined. `internal/sandbox/os_sandbox.go`: `seatbeltProfile` now adds a `(deny file-read*)` +
+`(allow file-read* ...)` pair mirroring the existing write-confinement rules — narrower than the
+`(allow default)` a from-scratch lockdown would need, since it leaves every other default-allowed
+operation (process exec, mach lookups, sysctl reads, signals) untouched and only tightens
+`file-read*`/`file-write*`; `bwrapArgs` drops `--ro-bind / /` entirely and instead `--ro-bind`s only
+the allowlisted paths, so an unlisted read gets `ENOENT` rather than the real host file. The allowlist
+(`defaultOSReadPaths`) is OS-specific system dirs (`/usr`, `/bin`, `/lib`, `/etc`, `/opt`, etc.) plus
+common per-language toolchain caches under `$HOME` (`go`, `.cargo`, `.rustup`, `.npm`, `.nvm`,
+`.pyenv`, `.gem`, `.bundle`, `.local`, `.cache`) — chosen so ordinary builds keep working — and
+deliberately omits credential directories (`~/.ssh`, `~/.aws`, `~/.config`, `~/.kube`, `~/.docker`,
+`~/.gnupg`): those are simply never bound/allowed, not detected-and-blocked, so they're unreadable
+from inside the sandbox regardless of what's in them. `mergeReadPaths` dedupes the built-in list
+against the new `sandbox.os_extra_read_paths` config field (`config.SandboxConfig.OSExtraReadPaths`,
+threaded through `NewOSBackend`'s new `extraReadPaths` param) and drops any entry that doesn't exist
+on the host, since bwrap fails to bind a missing source and a nonexistent seatbelt subpath is a
+silent no-op either way. The network-egress-deny-by-default half of this finding needed no change:
+`sandbox.network` already defaults to `false` and `NewOSBackend`'s `denyNet` is already `!allowNetwork`.
+
+This remains an allowlist, not a hard boundary the way write-confinement is — a toolchain cache
+directory that happens to also hold a stray credential file would still be readable, and the
+allowlist has to stay broad enough to cover real toolchains. Docs updated to stop describing the `os`
+backend's reads as fully unconfined (`docs/configuration.md`, `docs/security_scan.md`'s security
+properties table and "when to use" guidance). New/updated tests: `TestSeatbeltProfile` and
+`TestBwrapArgs` (`internal/sandbox/os_sandbox_test.go`) extended to assert the read-path allowlist
+entries and the absence of `--ro-bind / /`; new `TestMergeReadPaths`. `go build ./...`, `go vet
+./...`, and the full `go test ./...` pass clean.
+
+Before that, same day (2026-07-13): **P27.15** (FIND-08, Tier 3, CVSS 5.6) shipped: apply the full
+permission stack, not just the coarse mode check, at cron fire time.
+
+Cron fire-time gating (FIND-03/P24.3) previously re-checked only the coarse permission mode via
+`permission.Policy.Decide`, so an operator's text-based deny rule or the contextual egress/network
+policy — both fully enforced for interactive tool calls — had no effect on an unattended cron fire.
+`internal/server/helpers.go`'s `newCronRunFunc` now takes a `permCheck func(ctx, cron.Job) (bool,
+string)` thunk instead of a bare `mode func() permission.Mode`; the new `Server.cronPermCheck`
+builds the identical gate stack `buildGate` assembles for every interactive engine run — mode →
+contextual egress/network policy → text allow/deny rules, with an empty `persona.Persona{}` since a
+cron job has no persona of its own (matching how sub-agent runs skip the persona layers) — and
+checks it against the real `"shell"` tool with `{"command": job.Command}` as input. A job's
+`auto_approve` opt-in resolves any Ask-tier decision anywhere in that stack (previously it only
+covered the single mode-level Ask); an explicit `deny` rule or a Deny-mode decision still blocks
+regardless of `auto_approve`, and an explicit `allow` rule now lets a job fire unattended without
+needing `auto_approve` set at all — matching how rules already override the mode gate for
+interactive calls.
+
+Construction-order wrinkle: `newCronRunFunc`/`cron.NewScheduler` are built early in `Server.New()`,
+before the `*Server` exists, because the scheduler has to already exist when the tool registry
+registers `cron_create`/etc. with `Cron: cronSched`. Rather than add a setter to `cron.Scheduler` or
+restructure construction order, `New()` now predeclares `var s *Server` and the `permCheck` thunk
+passed to `newCronRunFunc` closes over that variable, calling `s.cronPermCheck` — since the thunk is
+only ever invoked at actual fire time (long after `New()` finishes assigning `s`), capturing the
+not-yet-initialized pointer is safe standard Go closure semantics, not a race.
+
+Also new: a human-facing review view for persisted cron jobs (the finding's "surface persisted
+auto-approve jobs in a review view") — previously a job's `auto_approve` status was visible only to
+the model itself via the `cron_list` tool, with no operator-facing surface at all. Added `GET
+/cron/jobs` (`api.CronJobInfo`, `internal/server/sessions.go`), `Client.ListCronJobs`
+(`internal/client/client.go`), and a new `aegis cron list` CLI command
+(`internal/cli/cron.go`, wired into `root.go`'s session group) that flags each auto_approve job
+inline (`--auto-approve-only` to filter to just those). The finding's other suggestion — "require a
+separately-confirmed flag for `auto_approve` jobs" — was satisfied by the existing per-job
+`auto_approve` field itself (already explicit, boolean, and distinct from the daemon's ambient
+permission mode) rather than adding a second flag; its scope was extended in place instead, per the
+scope note in [roadmap.md](roadmap.md#priority-order).
+
+Docs updated (`docs/tools-reference.md`, cron_create section). New tests:
+`TestNewCronRunFuncBlockedByDenyRuleEvenInAutoMode`, `TestNewCronRunFuncAllowedByRuleEvenInPlanMode`,
+`TestServerCronPermCheck`, `TestHandleListCronJobs` (`internal/server/cron_test.go`); the 6
+pre-existing `newCronRunFunc` tests were updated to the new signature via a `cronPermCheckFor` test
+helper (builds a gate from `permission` package primitives directly, no full daemon needed) rather
+than dropped. `go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
+
+Before that, same day (2026-07-13): **P27.14** (FIND-04, Tier 3, CVSS 6.8) shipped: warn/recommend
+against the unconfined `local` sandbox backend.
+
+The default `local` sandbox backend runs shell commands on the host with only env-var stripping —
+no fs/net/process isolation; the build-mode approval prompt and `ValidatePath` are the only
+compensating controls. `internal/server/server.go`'s `New()` now logs a persistent startup `WARN`
+("sandbox backend is 'local' (unconfined): ... consider sandbox.backend: os ... or container")
+any time the effective backend is local and `permission.mode` isn't `plan` (i.e. execute-capable
+tools are reachable at all) — this covers the default `build`-mode case, which previously got no
+startup signal whatsoever; only the sharper `auto`-mode-with-no-approval and `auto_approve_exec`
+cases already warned. `internal/cli/doctor.go`'s `doctorSandboxCheck` now reports the same
+local-backend case as a `WARN` (with a `Fix` naming `sandbox.backend: os`/`container`) instead of a
+silent `PASS` it previously buried in the detail text.
+
+`aegis --first-init`'s generated global config template (`internal/cli/init.go`) now defaults new
+installs to `sandbox.backend: os` — OS-level isolation (macOS seatbelt / Linux bubblewrap) with no
+container runtime required — instead of `local`. This is a zero-risk-of-breakage change:
+`SelectSandbox` already gracefully falls back to the unsandboxed `local` backend (logging the new
+warning above) rather than hard-failing when no OS sandbox mechanism is available on the host
+(bubblewrap not installed on Linux, or Windows, which has neither mechanism) unless
+`sandbox.strict` is set. macOS installs — where `sandbox-exec` ships by default — get real write/
+network confinement for free; Linux installs without bubblewrap and all Windows installs fall back
+to exactly today's behavior plus the new warning. Existing on-disk configs are untouched (the
+template only affects a fresh `--first-init`); the base `config.Load()` default used when no config
+file exists at all (tests, embedders) deliberately stays `local` as the conservative absolute
+fallback. "Defaulting new installs to the OS sandbox where available" was one of two options the
+finding suggested (the other being a persistent warning banner) — both were implemented, since the
+OS-sandbox default carries no downside given the graceful fallback.
+
+Docs updated: `docs/configuration.md` (sandbox section default + rationale), `docs/security_scan.md`
+(new "Local sandbox, execute-capable tools" note under Startup warning). Tests:
+`TestNewWarnsLocalSandboxBuildMode` and `TestNewSkipsLocalSandboxWarningInPlanMode`
+(`internal/server/sandbox_startup_test.go`, the latter confirming `plan` mode — which denies
+execute entirely — is correctly exempted from the new warning); `TestDoctorCleanSetupExitsZero`
+updated to assert the sandbox row is now a `WARN` naming "no isolation" rather than a silent `PASS`.
+`go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
+
+**Last updated:** 2026-07-13 — **P27.1** and **P27.2**, the P27 threat model's Tier 1, shipped.
+
+*P27.1 — workspace-trust gate (FIND-01 + FIND-02, CVSS 8.5/8.2).* A cloned repository's
+`.aegis/config.yaml` was merged with no confirmation and its `session_start`/`pre_tool_use` `hooks`
+ran automatically — silent code execution (CWE-94) and silent widening of
+`permission.mode`/`sandbox.*`/`mcp.servers`/`notify.webhook` (CWE-829) via config alone. New
+`internal/workspacetrust` package: a small JSON store (`<data_dir>/workspace_trust.json`,
+ACL-hardened via `fsguard.RestrictToOwner` like the session DB and `.env`) mapping normalized
+absolute directory paths to a trust decision, deliberately anchored to the fixed user-level data
+dir rather than `cfg.DataDir` — a hostile project config overriding `DataDir` must not be able to
+point the trust store somewhere it controls. `config.Load()` now loads two koanf layers — the
+normal one (defaults → global → project → env) and a "baseline" one with the project file excluded
+— unmarshals both, and for an untrusted directory (no `workspacetrust` entry) with any diff between
+them in `permission.*`/`sandbox.*`/`mcp.servers`/`notify.webhook`/`hooks`, overwrites the merged
+config's fields with the baseline's, exposing what happened via a new `cfg.WorkspaceTrust` field
+(`Dir`, `Trusted`, `Frozen`, `Changes []string`). Frozen state surfaces three ways: a daemon-log
+WARN (`internal/server/server.go`, alongside the existing local-sandbox/auto-exec posture
+warnings), a stderr banner printed before the TUI takes over the terminal
+(`cli.warnWorkspaceTrust`, mirroring the existing `warnSandboxFallback`), and a new `aegis doctor`
+check. New `aegis trust` command (`internal/cli/trust.go`) shows the diff and prompts before
+recording a trust decision for the current directory (`--yes` to skip the prompt, `--status` to
+inspect without prompting, `--revoke` to undo). The two pre-existing first-party writers of a gated
+key — `config.PatchProjectSandbox` (`aegis sandbox use --project`) and
+`config.AppendProjectPermissionRule` (the TUI's "allow always for this pattern" approval option,
+TQ6) — now auto-trust the directory they write to as a side effect of a successful write, since
+that write is an explicit local operator action in that exact directory, not a setting silently
+inherited from a cloned repo's pre-existing config; this is also what keeps their existing tests
+(which write-then-immediately-reload) passing unchanged. Tests: `internal/workspacetrust`
+(persistence, revoke, normalization), `internal/config` (freeze-on-untrusted, apply-after-trust,
+non-gated keys unaffected, no-project-config trivially trusted, both auto-trust call sites),
+`internal/cli` (`aegis trust` status/yes/revoke/declined-confirmation, the new doctor check).
+
+*P27.2 — `provider.base_url` allowlist/warn (FIND-03, CVSS 7.1).* `provider.base_url` had no
+destination validation, so a project-config-sourced value could redirect API-key-bearing requests
+to an attacker host (CWE-522) with no warning. New `providerfactory.validateBaseURL`, called from
+`buildOne` for both the primary adapter and every fallback target: a non-loopback plaintext-HTTP
+`base_url` is refused outright when a real API key would be attached (Ollama's non-secret
+`"ollama"` placeholder is exempted, so the common local/LAN Ollama-over-HTTP setup keeps working
+unchanged); a non-default host for a cloud provider (compared against `api.anthropic.com`/
+`api.openai.com`) isn't blocked — legitimate corporate-gateway/self-hosted-proxy setups are common —
+but logs a prominent WARN naming the override. `config.IsLoopbackBaseURL` exported (was already
+`isLoopbackBaseURL`, used internally by `LocalPromptProfile`) so `providerfactory` reuses the exact
+same loopback test rather than a second implementation. Tests: refuse-on-plaintext-non-loopback,
+allow-on-loopback, warn-on-non-default-host, no-warn-on-default-host, plus the existing
+fallback/cloud-gating tests unaffected (none of them set `BaseURL`).
+
+`go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
+
+**Last updated:** 2026-07-13 — the P27 threat model's entire Tier 2 shipped: **P27.3, P27.4, P27.5,
+P27.6, P27.7, P27.8, P27.9, P27.10, P27.11, P27.12, P27.13** (all 11 Tier 2 items; P27.1/P27.2 above
+already closed Tier 1). Implemented in parallel by
+7 isolated sub-agents in separate git worktrees, grouped by file-overlap risk rather than 1:1 with
+finding IDs — 6 agents each owned a fully disjoint package (no two agents ever touched the same
+file), and one agent bundled the 5 items that all needed to edit `internal/config/config.go`'s
+shared `defaults()` map/`Load()` path (P27.3, P27.5, P27.9, P27.12, P27.13) into a single branch to
+avoid the map-literal collisions that splitting them further would have caused. All 7 branches
+merged into `main` with **zero manual conflict resolution** (git auto-merged every overlapping file,
+including the two three-way merges touching `config.go` and `server.go`); full `go build ./...`,
+`go vet ./...`, and `go test -count=1 ./...` pass clean on the fully integrated tree.
+
+*P27.3 (FIND-05) — `security.redact_secrets` default on.* One-line default flip
+(`defaults()["security.redact_secrets"] = true`); gitleaks-backed masking now runs by default on
+read-tool/conversation content before it reaches a cloud provider. Fails open if gitleaks isn't on
+PATH, so this is low-risk to default on.
+
+*P27.4 (FIND-06) — default auth token for `mcp-serve`/ACP stdio.* Both interfaces previously ran
+fully unauthenticated when `AEGIS_MCP_TOKEN`/`AEGIS_ACP_TOKEN` was unset. New
+`config.GenerateAndWriteToken` (mirrors the daemon's own `generateAndWriteToken` for `daemon.token`)
+auto-generates a random token per process start and writes it to an owner-only
+`<data_dir>/mcp.token`/`acp.token` (`fsguard.RestrictToOwner`-hardened) when the env var isn't set;
+an explicit env var still always wins. `--help` text and the `.aegis/config.yaml` init template now
+document the token file path so a calling harness can discover it. `mcpserver`/`acp` library APIs
+are unchanged (empty token still means "open") — only the CLI wiring now guarantees a non-empty
+token by default.
+
+*P27.5 (FIND-13) — pinned-cert loopback TLS on by default.* The riskiest of the five bundled items:
+`defaults()["server.tls.enabled"] = true` turns on the pinned self-signed-cert TLS
+(`internal/server/tls.go`, P24.18) for client↔daemon loopback traffic that was previously plaintext.
+Verified end to end, not just via unit tests — built the binary, ran `aegis serve`, confirmed
+`daemon.crt`/`daemon.key` auto-generate and `aegis sessions list`/`aegis doctor` succeed over the
+pinned HTTPS connection with zero manual setup (`client.NewFromConfig` and the TUI's daemon
+auto-start path already had full TLS support wired in from P24.18). Along the way, found and fixed a
+real latent bug (noted again below): `envKeyCallback`'s single-split heuristic never reached the
+nested `server.tls.enabled` key, so the documented `AEGIS_SERVER_TLS_ENABLED` env-var escape hatch
+silently did nothing — now fixed with a regression test, which matters more once TLS is the default.
+
+*P27.6 (FIND-07) — trust-wrap project context/memory files.* `AGENTS.md`/`CLAUDE.md`/
+`.aegis/context.md`/`.aegis/memory.md` content is now wrapped with the same `internal/trust.Wrap`
+untrusted-provenance marker P24.4 already applied to persona/skill bodies, at the two live read
+sites (`internal/memory/context.go`'s `loadContextDirect`, `internal/memory/memory.go`'s
+`loadDirect`) — both project- and user/global-sourced files get the identical wrap, matching the
+P24.4 precedent of not distinguishing provenance for any disk-loaded file.
+
+*P27.7 (FIND-09) — gate project-persona control fields on workspace trust.* A project persona's
+`mode`/`tools`/`rules`/`output_guard` frontmatter is now dropped at parse time
+(`internal/persona/load.go`) unless the persona's project directory is trusted per the P27.1
+`workspacetrust` store — queried directly rather than via `cfg.WorkspaceTrust.Trusted`, since that
+config-level flag is forced true whenever no project `config.yaml` exists to freeze, which would
+have missed a hostile repo shipping only a persona file. `Model`/`Description`/`System` (already
+wrapped by P24.4) are untouched; user/global personas keep full control unconditionally.
+
+*P27.8 (FIND-10) — SSRF-safe dialer for the HTTP/SSE MCP client.* `internal/mcp/http.go` gained its
+own `mcpSSRFSafeDialer`/`mcpValidateNotPrivate`/private-CIDR table, deliberately a small duplicate
+of `internal/tool/builtin/web.go`'s `ssrfSafeDialer` rather than a cross-package import — matching
+existing precedent in `internal/security/target.go`, which already duplicates the same table rather
+than coupling `internal/sandbox` to `internal/config`. Both the MCP client's POST `/message` and GET
+`/sse` requests are now protected, with redirect targets re-validated the same way `web_fetch` does.
+
+*P27.9 (FIND-11) — DAST `allowed_targets` sourced from user/global config only.* `config.Load()` now
+unconditionally overwrites `cfg.Security.DAST.AllowedTargets` from the same project-excluded
+baseline layer the P27.1 trust gate already computes — reusing that machinery rather than a third
+koanf load. This is intentionally stronger than trust-gating: a hostile repo's `allowed_targets`
+never applies, even after the directory is `aegis trust`-ed, since project-controlled network-scan
+targets is a different risk shape than project-controlled permission mode.
+
+*P27.10 (FIND-18, ACL half) — fsguard-harden `longmem.db`/`knowledge.db`.* Both now call
+`fsguard.RestrictToOwner` on the main db file (fatal on error, since Aegis creates the file itself)
+and best-effort on `-wal`/`-shm` sidecars (logged, not fatal), exactly mirroring
+`internal/session/session.go`'s existing `hardenDBPermissions`.
+
+*P27.11 (FIND-20) — harden swarm mailbox file permissions.* Processed mailbox files now write
+`0o600` instead of `0o644`, and the `teams/` root directory is `fsguard`-hardened on every
+`OpenMailbox`. This surfaced a real pre-existing Windows ACL bug: `fsguard_windows.go`'s ACE had no
+inheritance flags, so hardening a populated directory left descendant files with an effectively
+empty inherited DACL — denying even the owner. Fixed by adding `OICI` (object-inherit/container-
+inherit) flags, a no-op for the pattern's other pre-existing file-only call sites (daemon token,
+session DB, `.env`, TLS key). The per-run shared-secret/HMAC message-authentication stretch goal was
+explicitly scoped out for a future item — the file-permission fix was the priority and is complete.
+
+*P27.12 (FIND-14) — default concurrency/rate caps + invalid-auth throttling.*
+`server.max_concurrent_runs` now defaults to 10 and `server.max_run_duration_sec` to 1800s (bounding
+only top-level HTTP-driven runs, not in-process swarm sub-agents — a normal single-user session
+never approaches either ceiling). `recordInvalidAuthAttempt` (`internal/server/auth.go`) gained a
+consecutive-failure-streak lockout (separate from the existing cumulative FIND-11 counter) with
+exponential backoff (1s→60s cap) past a threshold of 10 attempts, set above the pre-existing
+`TestServerInvalidAuthAttemptsLoggedAndCounted` test's 6 attempts.
+
+*P27.13 (FIND-12, default-on half) — injection scan on by default.* `search.scan_output` now
+defaults true via the `defaults()` map; the per-MCP-server `scan_output` (a list element with no
+koanf-defaults mechanism) was converted to `*bool` with a `ScanOutputEnabled()` resolver, mirroring
+the existing `SecurityToolConfig.Enabled` pattern, and now also defaults true. Confirmed via
+`internal/trust.Wrap` that a scan hit only adds a visible warning — it never blocks or mutates
+content — making this genuinely low-risk to default on.
+
 **Last updated:** 2026-07-12 — **P22.5, P22.6, P20.2, P20.3** shipped as a second user-selected
 batch of four Tier 4 parked items, same day as the first batch below. P25.9 and P6.1 were
 deliberately excluded from this round (both Effort L, both large/high-blast-radius — daemon
