@@ -75,6 +75,13 @@ export interface StatusInfo {
   // server.allow_remote is set. Empty on the default loopback-only bind,
   // where any existing directory is accepted (informational, not exhaustive).
   workdir_allowlist?: string[];
+  // provider_reachable/provider_latency_ms (P28.7) are a lightweight
+  // connection/model-health probe — see Server.probeProviderReachability
+  // (internal/server/provider_health.go) for exactly what "reachable" means
+  // per provider type. Surfaced in the header so checking connectivity
+  // doesn't require spending a chat turn on it.
+  provider_reachable: boolean;
+  provider_latency_ms?: number;
 }
 
 // CheckpointInfo is one per-turn restore point (GET /sessions/{id}/checkpoints).
