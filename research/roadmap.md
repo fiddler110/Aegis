@@ -1,7 +1,11 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-14 — **P28.1** (Tier 1, TUI escape-sequence sanitization for untrusted tool
-output) shipped; see [releases.md](releases.md#latest-changes) for the full writeup. All other
+**Last updated:** 2026-07-14 — **P28.6** (Tier 2, harness-quality fix) shipped:
+`TestLiveWorkflow/LocalPromptProfileReducesFirstTurnTokens` now uses a dedicated fixture large
+enough to actually trip the local prompt profile's repo-map cap, so the local-vs-default token
+comparison is a real signal instead of live-model token-accounting noise; see
+[releases.md](releases.md#latest-changes) for the full writeup. **P28.1** (Tier 1, TUI
+escape-sequence sanitization for untrusted tool output) also shipped 2026-07-14. All other
 completed history (the full P27 threat-model batch, P27.1–P27.19, plus everything before it) also
 lives there.
 
@@ -14,20 +18,22 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 6 remaining items (P28.2-P28.7) of the 7 filed 2026-07-14 from a full interactive
-evaluation of the TUI, web UI, and daemon against three live Ollama models (`qwythos:latest`,
-`deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via `TestLiveWorkflow` — see
-[Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence sanitization) shipped
-2026-07-14, closing out Tier 1 entirely — see [releases.md](releases.md#latest-changes). Tier 4 has
-4 parked items with no active trigger (see [Parked](#open-work--parked-tier-4)), plus 2 remaining
-unresolved needs-verification notes carried over from the P27 threat model (see below); the third
-(TUI escape-sequence neutralization) is now resolved by P28.1.
+**Open items:** 5 remaining items (P28.2, P28.3, P28.4, P28.5, P28.7) of the 7 filed 2026-07-14 from
+a full interactive evaluation of the TUI, web UI, and daemon against three live Ollama models
+(`qwythos:latest`, `deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via
+`TestLiveWorkflow` — see [Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence
+sanitization) shipped 2026-07-14, closing out Tier 1 entirely — see
+[releases.md](releases.md#latest-changes). **P28.6** (Tier 2, `TestLiveWorkflow` harness-quality
+fix) also shipped 2026-07-14. Tier 4 has 4 parked items with no active trigger (see
+[Parked](#open-work--parked-tier-4)), plus 2 remaining unresolved needs-verification notes carried
+over from the P27 threat model (see below); the third (TUI escape-sequence neutralization) is now
+resolved by P28.1.
 
-**Next session:** start with Tier 2 — **P28.2**, **P28.4**, **P28.6**, or **P28.7** (all cheap,
-no-dependency wins; no particular order between them). Re-run `TestLiveWorkflow` (recipe in
-CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams;
-`aegis doctor` (P26.1) is the standalone preflight companion for the same misconfiguration classes
-(including the workspace trust check, P27.1, and the local-sandbox recommendation, P27.14).
+**Next session:** start with Tier 2 — **P28.2**, **P28.4**, or **P28.7** (all cheap, no-dependency
+wins; no particular order between them). Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any
+change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is
+the standalone preflight companion for the same misconfiguration classes (including the workspace
+trust check, P27.1, and the local-sandbox recommendation, P27.14).
 
 ---
 
@@ -41,7 +47,8 @@ speculatively.
 
 **Tier 1:** none open — P28.1 shipped 2026-07-14, see [releases.md](releases.md#latest-changes).
 
-**Tier 2:** P28.2, P28.4, P28.6, P28.7.
+**Tier 2:** P28.2, P28.4, P28.7. P28.6 shipped 2026-07-14, see
+[releases.md](releases.md#latest-changes).
 
 **Tier 3:** P28.3, P28.5.
 
@@ -76,6 +83,8 @@ sessions over the HTTP+SSE seam (the same one the TUI/web UI use) against three 
 models via `TestLiveWorkflow`, plus a read of the TUI render paths and web UI streaming client.
 Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization) shipped
 2026-07-14 — see [releases.md](releases.md#latest-changes) — leaving Tier 2 as the current front.
+**P28.6** (Tier 2, `TestLiveWorkflow` harness-quality fix) also shipped 2026-07-14, see the same
+writeup.
 
 ### P28.2 — Guidance/config for tool-calling-capable local models
 
@@ -133,22 +142,6 @@ longer for harder tasks, making a mid-turn drop meaningfully more likely than wi
 round-trips. Needs a resumable-stream design (reconnect and replay/attach to the same run ID) —
 investigate how much of the existing detached-run infrastructure already supports resumption
 before committing to effort size.
-
-### P28.6 — live_workflow eval's local-prompt-profile subtest is unreliable for small fixtures
-
-Priority: Tier 2 · Effort: S — cheap, no-dependency, harness-quality fix (not a product bug)
-
-Traced `TestLiveWorkflow/LocalPromptProfileReducesFirstTurnTokens`
-(`internal/eval/live_workflow_test.go:199`): the "local" prompt profile's only actual effect
-anywhere in the code is capping the injected repo map at 4000 bytes
-(`internal/server/helpers.go:35,62`) — nothing else differs between "local" and "default". The
-eval's fixture is a 2-file temp directory, nowhere near that cap, so both profiles produce
-byte-identical system prompts for this fixture, meaning the subtest's pass/fail is just noise in
-the live model's own token accounting rather than a real signal about the feature. Observed:
-passed for `gpt-oss:20b` (5638<5942 tokens), failed for `deepseek-r1:8b` (3183>2567) — consistent
-with noise, not a capability difference. Fix the eval itself: use a fixture large enough to
-actually trigger the repo-map cap, or assert directly on the constructed system-prompt string
-length rather than round-tripping through a live model's variable token accounting.
 
 ### P28.7 — No persistent connection/model-health indicator in TUI or web UI
 

@@ -8,7 +8,62 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P28.1** (Tier 1, real exploitable robustness gap) shipped: the TUI
+**Last updated:** 2026-07-14 — **P28.6** (Tier 2, harness-quality fix, not a product bug) shipped:
+`TestLiveWorkflow/LocalPromptProfileReducesFirstTurnTokens` (`internal/eval/live_workflow_test.go`)
+compared first-turn input token counts between the daemon's `local` and `default` prompt profiles,
+expecting `local` to come out lower. Investigation traced the "local" prompt profile's only actual
+effect anywhere in the code: `effectiveSystem` (`internal/server/helpers.go:62`) omits the injected
+repo map entirely when `LocalPromptProfile()` is true *and* the rendered map exceeds
+`localRepoMapMaxBytes` (4000 bytes, `helpers.go:35`) — nothing else differs between the two
+profiles. The subtest's shared fixture (`writeSeededBugFixture`, a 2-file temp directory with no
+`.aegis/repomap.json` cache) never gets a repo map injected at all regardless of profile — the
+daemon's own `loadRepoMap` (`internal/server/server.go:583`) returns `""` when no cache file exists
+— so `local` and `default` produced byte-identical system prompts for this fixture. The observed
+pass/fail was therefore just noise in the live model's own reported token usage, not a signal about
+the feature: passed for `gpt-oss:20b` (5638<5942 tokens), failed for `deepseek-r1:8b`
+(3183>2567) on the same code, with nothing else changed between runs.
+
+Fix, per the roadmap item's option (a) — a fixture large enough to actually trigger the cap, kept
+inside the live daemon+HTTP+SSE integration path rather than moved to a plain unit test (a
+non-live-tagged unit test doing exactly that already exists,
+`TestEffectiveSystem_localProfileTrimsPrompt` in `internal/server/server_test.go`, so duplicating it
+inside the live-tagged file would add nothing; the point of this specific subtest is verifying the
+profile's effect survives the real daemon-to-live-model round trip, which only this tier can check).
+New `writeBigRepoMapFixture` (`internal/eval/live_workflow_test.go`) writes 15 filler `.py` files
+(10 functions each) into a dedicated workspace, then pre-builds and saves a `repomap.json` cache
+directly via `repomap.Build`/`Map.Save` — what `aegis index` or the daemon's own startup
+`loadRepoMap` would produce — so the daemon picks up a real, cached repo map on process start. The
+fixture self-checks its own rendered-block size against a local `bigRepoMapCapBytes` constant
+(4000, mirroring the unexported `localRepoMapMaxBytes`) and fails loudly if a future repo-map
+format change ever shrinks it back under the cap, rather than silently reintroducing the original
+bug. Verified standalone (outside the gated test, since it needs no live model): the generated
+fixture renders a 5934-byte `<repo_map>` block — comfortably above the 4000-byte cap and below
+repomap's own 8000-byte internal truncation budget, so the two profiles end up "full map" vs. "no
+map" rather than "full map" vs. "truncated map" — a large, deterministic difference that should
+dominate any live-model token-accounting noise. The `LocalPromptProfileReducesFirstTurnTokens`
+subtest now chdir's into this dedicated workspace for its own duration only (restored after,
+matching the file's existing single-process-chdir convention) rather than reusing the shared
+`FixSeededBug`/`GuardNoMetaLeak` fixture, so this change doesn't affect those other subtests.
+`internal/server/helpers.go`'s actual repo-map-cap behavior was deliberately left untouched — this
+is a harness fix only.
+
+Tested: `go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean, plus
+`go build -tags live_workflow ./...` and `go vet -tags live_workflow ./...` to confirm the
+tagged file still compiles. The fixture's byte-size math was independently verified by running its
+exact generation logic in a throwaway, non-tagged test inside `internal/repomap` (deleted after
+confirming the 5934-byte result above) — not by executing `TestLiveWorkflow` itself, since that
+needs a reachable Ollama server this environment doesn't have. The live-tagged
+`LocalPromptProfileReducesFirstTurnTokens` subtest was therefore reasoned about and compiled, not
+run end-to-end; the reasoning rests on: (1) `effectiveSystem`'s cap-check logic
+(`internal/server/helpers.go:62`) is unchanged and already covered by
+`TestEffectiveSystem_localProfileTrimsPrompt`, which passes non-live and confirms the omit/include
+split at this exact threshold; (2) the new fixture's cache is built with the same `repomap.Build`/
+`Map.Save`/`Load` path production code uses, not a hand-rolled stand-in; (3) the chdir scoping was
+checked by hand against the subtest ordering (this is the last of the three subtests in
+`TestLiveWorkflow`, so scoping the extra chdir to it doesn't disturb `FixSeededBug`/
+`GuardNoMetaLeak`, which run first and already completed against the original fixture).
+
+Before that, same day (2026-07-14): **P28.1** (Tier 1, real exploitable robustness gap) shipped: the TUI
 now strips dangerous terminal escape sequences from untrusted tool output before it reaches the
 real terminal. This closed the P27 threat model's last open needs-verification question — whether
 the TUI fully neutralizes terminal escape sequences in untrusted tool output — which this same pass
