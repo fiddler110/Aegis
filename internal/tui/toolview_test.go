@@ -1,11 +1,18 @@
 package tui
 
 import (
+	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
 )
+
+// sgrBeforeWord matches an SGR CSI sequence immediately preceding "red",
+// used to confirm colour survives sanitization+remapping without pinning
+// down remapANSI16's specific truecolor rewrite of the original code.
+var sgrBeforeWord = regexp.MustCompile("\x1b\\[[0-9;]*mred")
 
 func TestDiffLines_HunkHeaderPrecedesContent(t *testing.T) {
 	th := newTheme()
@@ -152,5 +159,81 @@ func TestRenderToolResult_ReadFileWithoutPathFallsBackToGenericBlock(t *testing.
 	out := renderToolResult(th, "read_file", result, false, 80, 16, "")
 	if !strings.Contains(ansi.Strip(out), "package main") {
 		t.Errorf("expected generic block fallback to still show content, got:\n%s", out)
+	}
+}
+
+// TestRenderToolResult_SanitizesDangerousSeqs covers P28.1: untrusted tool
+// output reaching renderToolResult must have OSC/cursor/alt-screen sequences
+// stripped, across every branch (single-line, multi-line generic block, and
+// read_file), while legitimate SGR colour still passes through.
+func TestRenderToolResult_SanitizesDangerousSeqs(t *testing.T) {
+	th := newTheme()
+
+	t.Run("single-line shell output with OSC 52 clipboard hijack", func(t *testing.T) {
+		result := "safe output\x1b]52;c;ZXZpbA==\x07"
+		out := renderToolResult(th, "shell", result, false, 80, 16, "")
+		if strings.Contains(out, "\x1b]52") {
+			t.Errorf("expected OSC 52 sequence stripped, got: %q", out)
+		}
+	})
+
+	t.Run("multi-line shell output with cursor manipulation and alt screen", func(t *testing.T) {
+		result := "line one\x1b[2J\x1b[?1049hline two\nline three\x1b]0;spoofed title\x07"
+		out := renderToolResult(th, "shell", result, false, 80, 16, "")
+		for _, bad := range []string{"\x1b[2J", "\x1b[?1049h", "\x1b]0;"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("expected dangerous sequence %q stripped, got: %q", bad, out)
+			}
+		}
+		if !strings.Contains(ansi.Strip(out), "line two") || !strings.Contains(ansi.Strip(out), "line three") {
+			t.Errorf("expected surrounding text preserved, got:\n%s", ansi.Strip(out))
+		}
+	})
+
+	t.Run("multi-line shell output preserves SGR color", func(t *testing.T) {
+		result := "\x1b[31mred\x1b[0m line\nsecond line"
+		out := renderToolResult(th, "shell", result, false, 80, 16, "")
+		// remapANSI16 legitimately rewrites 31 (basic ANSI red) to an explicit
+		// truecolor SGR — the point here is that stripDangerousSeqs doesn't
+		// remove the *colour* CSI outright, not that the raw code 31 survives
+		// verbatim, so check for an SGR sequence directly preceding "red".
+		if !sgrBeforeWord.MatchString(out) {
+			t.Errorf("expected an SGR colour sequence still applied to \"red\", got: %q", out)
+		}
+	})
+
+	t.Run("read_file content with hyperlink spoofing sequence", func(t *testing.T) {
+		result := "1\tpackage main\n2\t\x1b]8;;http://evil.example\x1b\\func main() {}\x1b]8;;\x1b\\\n"
+		out := renderToolResult(th, "read_file", result, false, 80, 16, "main.go")
+		if strings.Contains(out, "evil.example") {
+			t.Errorf("expected OSC 8 hyperlink target stripped, got: %q", out)
+		}
+		if !strings.Contains(ansi.Strip(out), "func main") {
+			t.Errorf("expected file content preserved, got:\n%s", ansi.Strip(out))
+		}
+	})
+}
+
+// TestRenderShellCall_SanitizesDangerousSeqs covers P28.1 for the tool-call
+// preview path (renderShellCall), which highlights the model-supplied
+// command via chroma and bypasses renderToolResult entirely.
+func TestRenderShellCall_SanitizesDangerousSeqs(t *testing.T) {
+	th := newTheme()
+	command := "echo hi" + string(rune(0x1b)) + "]52;c;ZXZpbA==" + string(rune(0x07))
+	input, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: command})
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	out, ok := renderShellCall(th, "shell", input, 80)
+	if !ok {
+		t.Fatal("expected renderShellCall to succeed")
+	}
+	if strings.Contains(out, "\x1b]52") {
+		t.Errorf("expected OSC 52 sequence stripped from rendered command, got: %q", out)
+	}
+	if !strings.Contains(ansi.Strip(out), "echo hi") {
+		t.Errorf("expected command text preserved, got:\n%s", ansi.Strip(out))
 	}
 }
