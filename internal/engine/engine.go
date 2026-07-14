@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -251,15 +252,23 @@ type Options struct {
 	PrepareStep           PrepareStepFunc // optional; called before every model turn
 	OutputGuard           guard.Func      // optional; validates the final answer (and any files written this turn)
 	OutputGuardMaxRetries int             // corrective retries on guard failure; 0 -> 1 when a guard is set
-	BudgetUSD             float64         // optional; >0 aborts the run past this cost
-	MaxTokensPerRun       int             // optional; >0 aborts the run past this cumulative token count (P10.5) — always enforceable, unlike BudgetUSD which is a no-op for unpriced/estimated usage
-	Model                 string
-	MaxTokens             int
-	Temperature           *float64
-	MaxIterations         int           // safety cap on tool-call rounds; 0 -> default
-	LoopThreshold         int           // identical tool-call turns before aborting; 0 -> default, <0 disables
-	ContextWindowTokens   int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
-	SteerChan             <-chan string // optional; steering messages injected between tool rounds
+	// ZeroToolNudgeMaxRetries (P28.3) bounds the corrective-nudge retries fired
+	// when the model's first response to a task produces zero tool calls even
+	// though the request plainly reads as actionable (looksActionable) and
+	// tools are available — the deepseek-r1:8b live-eval failure mode where a
+	// model's reasoning gets dumped as the final answer instead of being
+	// followed by a real tool call. 0 -> default of 1; negative disables the
+	// nudge entirely.
+	ZeroToolNudgeMaxRetries int
+	BudgetUSD               float64 // optional; >0 aborts the run past this cost
+	MaxTokensPerRun         int     // optional; >0 aborts the run past this cumulative token count (P10.5) — always enforceable, unlike BudgetUSD which is a no-op for unpriced/estimated usage
+	Model                   string
+	MaxTokens               int
+	Temperature             *float64
+	MaxIterations           int           // safety cap on tool-call rounds; 0 -> default
+	LoopThreshold           int           // identical tool-call turns before aborting; 0 -> default, <0 disables
+	ContextWindowTokens     int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
+	SteerChan               <-chan string // optional; steering messages injected between tool rounds
 	// RedactSecrets opts in to running a read-capability tool's output through
 	// gitleaks-backed secret detection (security.RedactText) before it's
 	// appended to the conversation sent to the model provider (P24.12 /
@@ -286,6 +295,7 @@ type Engine struct {
 	prepareStep         PrepareStepFunc
 	outputGuard         guard.Func
 	outputGuardMax      int
+	zeroToolNudgeMax    int
 	budgetUSD           float64
 	maxTokensPerRun     int
 	model               string
@@ -331,6 +341,10 @@ func New(opts Options) (*Engine, error) {
 	if loopThreshold == 0 {
 		loopThreshold = 5
 	}
+	zeroToolNudgeMax := opts.ZeroToolNudgeMaxRetries
+	if zeroToolNudgeMax == 0 {
+		zeroToolNudgeMax = 1
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -345,6 +359,7 @@ func New(opts Options) (*Engine, error) {
 		prepareStep:         opts.PrepareStep,
 		outputGuard:         opts.OutputGuard,
 		outputGuardMax:      opts.OutputGuardMaxRetries,
+		zeroToolNudgeMax:    zeroToolNudgeMax,
 		budgetUSD:           opts.BudgetUSD,
 		maxTokensPerRun:     opts.MaxTokensPerRun,
 		model:               opts.Model,
@@ -397,6 +412,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	e.writtenFilesMu.Unlock()
 
 	guardRetries := 0
+	zeroToolNudges := 0
 	toolRoundsCompleted := 0
 	ctxFullWarned := false // one context-nearly-full notice per run, not one per turn
 	// compactionFailures counts consecutive proactive-compaction failures
@@ -576,6 +592,23 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				}})
 				continue
 			}
+			// P28.3: nothing has been done yet this run (no tool round has
+			// completed), tools are actually available, retries remain, and the
+			// triggering request plainly reads as an actionable task — the
+			// deepseek-r1:8b live-eval failure mode, where the model's
+			// reasoning gets dumped as a text-only final answer instead of
+			// being followed by a real tool call. Ask it to reconsider and act
+			// rather than silently accepting the text-only turn as done.
+			if e.zeroToolNudgeMax >= 0 && toolRoundsCompleted == 0 && zeroToolNudges < e.zeroToolNudgeMax &&
+				e.tools != nil && len(e.tools.Schemas()) > 0 &&
+				looksActionable(lastUserText(conv.Messages)) {
+				zeroToolNudges++
+				emit(Event{Kind: KindNotice, Text: "model answered in text only on what looks like an actionable task — asking it to reconsider and act"})
+				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+					provider.TextBlock{Text: zeroToolNudgeText},
+				}})
+				continue
+			}
 			if e.outputGuard != nil {
 				maxRetries := e.outputGuardMax
 				if maxRetries <= 0 {
@@ -637,6 +670,9 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			}
 			if guardRetries > 0 {
 				retractGuardCorrectives(conv)
+			}
+			if zeroToolNudges > 0 {
+				retractZeroToolNudges(conv)
 			}
 			doneEv := Event{Kind: KindDone}
 			if runUsageSeen {
@@ -751,6 +787,103 @@ func hasToolUse(m provider.Message) bool {
 		}
 	}
 	return false
+}
+
+// zeroToolNudgePrefix opens the P28.3 corrective-nudge prompt; besides framing
+// the retry, it is the marker retractZeroToolNudges keys on to strip the
+// scaffolding from the durable transcript once the run settles — the same
+// pattern guardCorrectivePrefix/retractGuardCorrectives already use.
+const zeroToolNudgePrefix = "[Your previous response didn't call any tools"
+
+const zeroToolNudgeText = zeroToolNudgePrefix + ", but this task plainly reads as one that" +
+	" requires taking action (editing a file, running a command, searching the repo, etc.), not" +
+	" just describing or promising it. If you already know what needs to be done, call the" +
+	" appropriate tool now to actually do it, then give a final answer once the action is" +
+	" complete. Do not just explain what you would do — do it.]"
+
+// retractZeroToolNudges removes P28.3 nudge scaffolding — each nudge prompt
+// and the text-only assistant answer it was reacting to — from the
+// conversation once the run has settled, mirroring retractGuardCorrectives:
+// the scaffolding must stay in place *during* the retry (the model reconsiders
+// against it) but has no business surviving into the durable transcript or a
+// future turn's context.
+func retractZeroToolNudges(conv *Conversation) {
+	kept := make([]provider.Message, 0, len(conv.Messages))
+	removed := false
+	for _, m := range conv.Messages {
+		if isZeroToolNudge(m) {
+			if n := len(kept); n > 0 && kept[n-1].Role == provider.RoleAssistant && !hasToolUse(kept[n-1]) {
+				kept = kept[:n-1] // the text-only answer this nudge was reacting to
+			}
+			removed = true
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if removed {
+		conv.Messages = kept
+		conv.invalidate()
+	}
+}
+
+func isZeroToolNudge(m provider.Message) bool {
+	if m.Role != provider.RoleUser || len(m.Content) != 1 {
+		return false
+	}
+	tb, ok := m.Content[0].(provider.TextBlock)
+	return ok && strings.HasPrefix(tb.Text, zeroToolNudgePrefix)
+}
+
+// leadingPolitenessRe strips a leading politeness/indirection wrapper so the
+// imperative-verb check in looksActionable sees "fix the bug" instead of
+// "could you please fix the bug" — polite phrasing is near-universal for task
+// requests and shouldn't defeat the check.
+var leadingPolitenessRe = regexp.MustCompile(`(?i)^(?:please|can you|could you|would you|will you|` +
+	`i need you to|i want you to|i'd like you to|i would like you to)[\s,]+`)
+
+// actionVerbRe matches a leading verb from the vocabulary of imperative
+// coding-agent tasks — a cheap, purely local signal (same "regex, never an
+// extra model call" philosophy as routing.go's classifyTurn) that a message is
+// asking the model to *do* something, which almost always requires a tool
+// call, rather than answer a question in prose. Biased toward missing a real
+// task (safe: today's no-nudge behavior) over firing on a genuine question —
+// the nudge would waste a turn but not corrupt anything.
+var actionVerbRe = regexp.MustCompile(`(?i)^(?:fix|implement|add|create|write|edit|refactor|delete|remove|` +
+	`rename|move|run|execute|install|update|upgrade|downgrade|generate|build|debug|apply|commit|push|` +
+	`revert|merge|rebase|search|find|grep|list|read|check|test|call|configure|deploy|migrate|scan|` +
+	`review|clean up|set up|change|modify|rewrite|convert|extract|replace|optimize|document)\b`)
+
+// looksActionable reports whether userText reads like a request that plainly
+// requires the model to take action via tools rather than a question or
+// discussion prompt a prose answer legitimately satisfies (P28.3).
+func looksActionable(userText string) bool {
+	text := strings.TrimSpace(userText)
+	if text == "" {
+		return false
+	}
+	text = leadingPolitenessRe.ReplaceAllString(text, "")
+	return actionVerbRe.MatchString(text)
+}
+
+// lastUserText returns the text content of the most recent user message in
+// msgs that carries a text block — the triggering request for the current
+// turn — skipping any trailing tool-result-only messages.
+func lastUserText(msgs []provider.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != provider.RoleUser {
+			continue
+		}
+		var sb strings.Builder
+		for _, b := range msgs[i].Content {
+			if tb, ok := b.(provider.TextBlock); ok {
+				sb.WriteString(tb.Text)
+			}
+		}
+		if sb.Len() > 0 {
+			return sb.String()
+		}
+	}
+	return ""
 }
 
 // turn performs a single model call, accumulating the assistant message and any

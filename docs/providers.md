@@ -74,9 +74,11 @@ Takeaways:
   (never fails hard — safe for offline/CI use) if it comes back with zero tool calls. Run it after
   switching models to catch this before it costs you a real task.
 - If a model diagnoses correctly but doesn't act on it (the `qwythos:latest` pattern above), a more
-  directive follow-up prompt ("now call `edit_file` to apply the fix") often unsticks it — the engine
-  itself does not yet automatically detect and nudge/retry a suspicious zero-tool-call completion on an
-  actionable turn; that's tracked as a larger follow-up item (P28.3), not yet built.
+  directive follow-up prompt ("now call `edit_file` to apply the fix") often unsticks it — and as of
+  P28.3, the engine does this automatically: when the first response to a plainly actionable request
+  produces zero tool calls, it nudges the model to reconsider and act (one retry by default,
+  configurable via `provider.zero_tool_nudge`; negative disables it) before accepting a text-only
+  turn as done.
 
 ### LM Studio
 

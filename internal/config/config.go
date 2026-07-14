@@ -381,14 +381,19 @@ func (c MCPServerConfig) ScanOutputEnabled() bool {
 
 // ProviderConfig selects and configures the model provider.
 type ProviderConfig struct {
-	Default         string            `koanf:"default"`          // adapter name: "anthropic", "openai", "ollama"
-	Model           string            `koanf:"model"`            // model id
-	SmallModel      string            `koanf:"small_model"`      // optional fast model for title gen + compaction (falls back to Model)
-	MaxTokens       int               `koanf:"max_tokens"`       // response token cap
-	BaseURL         string            `koanf:"base_url"`         // optional API base override
-	MaxRetries      int               `koanf:"max_retries"`      // transient-failure retries; 0 disables
-	MaxIterations   int               `koanf:"max_iterations"`   // max engine turns per run; 0 = harness default (40)
-	LoopThreshold   int               `koanf:"loop_threshold"`   // identical-turn abort count; 0 = harness default (5)
+	Default       string `koanf:"default"`        // adapter name: "anthropic", "openai", "ollama"
+	Model         string `koanf:"model"`          // model id
+	SmallModel    string `koanf:"small_model"`    // optional fast model for title gen + compaction (falls back to Model)
+	MaxTokens     int    `koanf:"max_tokens"`     // response token cap
+	BaseURL       string `koanf:"base_url"`       // optional API base override
+	MaxRetries    int    `koanf:"max_retries"`    // transient-failure retries; 0 disables
+	MaxIterations int    `koanf:"max_iterations"` // max engine turns per run; 0 = harness default (40)
+	LoopThreshold int    `koanf:"loop_threshold"` // identical-turn abort count; 0 = harness default (5)
+	// ZeroToolNudge (P28.3) bounds the corrective-nudge retries fired when a
+	// turn that plainly reads as actionable produces zero tool calls (a model
+	// dumping its reasoning as prose instead of calling a tool). 0 = harness
+	// default (1 retry); negative disables the nudge entirely.
+	ZeroToolNudge   int               `koanf:"zero_tool_nudge"`
 	Headers         map[string]string `koanf:"headers"`          // extra HTTP headers sent with every request (e.g. gateway auth)
 	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
 	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
@@ -802,14 +807,14 @@ const (
 
 func defaults() map[string]any {
 	return map[string]any{
-		"data_dir":                    defaultDataDir(),
-		"log_level":                   "info",
-		"provider.default":            "anthropic",
-		"provider.model":              "claude-opus-4-8",
-		"provider.max_tokens":         32768,
-		"provider.max_retries":        4,
-		"provider.prompt_profile":     "auto",
-		"server.addr":                 "127.0.0.1:4127",
+		"data_dir":                defaultDataDir(),
+		"log_level":               "info",
+		"provider.default":        "anthropic",
+		"provider.model":          "claude-opus-4-8",
+		"provider.max_tokens":     32768,
+		"provider.max_retries":    4,
+		"provider.prompt_profile": "auto",
+		"server.addr":             "127.0.0.1:4127",
 		// Conservative non-zero caps by default (P27.12/FIND-14) — see
 		// ServerConfig's doc comments for why these values are safe for a
 		// normal single-user session while still bounding a runaway/DoS case.
@@ -827,38 +832,38 @@ func defaults() map[string]any {
 		"permission.mode":                        "build",
 		"permission.auto_approve_exec":           false,
 		"permission.allow_unsandboxed_auto_exec": false,
-		"diagram.kroki_url":            "https://kroki.io",
-		"cost.budget_usd":              0.0,
-		"cost.max_tokens_per_run":      0,
-		"cost.session_cap_usd":         0.0,
-		"cost.daily_cap_usd":           0.0,
-		"cost.session_token_cap":       0,
-		"cost.daily_token_cap":         0,
-		"cost.alert_threshold":         0.8,
-		"swarm.backend":                "in_process",
-		"sandbox.backend":              "local",
-		"sandbox.image":                "ubuntu:22.04",
-		"sandbox.network":              false,
-		"security.egress_then_write":   false,
-		"security.redact_secrets":      true,
-		"security.default_method":      "auto",
-		"security.dast.allow_active":   false,
-		"security.debate.threat_model": false,
-		"security.debate.triage":       false,
-		"output_guard.enabled":         true,
-		"output_guard.mode":            "llm",
-		"output_guard.max_retries":     1,
-		"output_guard.rubric":          DefaultGuardRubric,
-		"tui.humor_mode":               true,
-		"tui.theme":                    "dark",
-		"tui.notifications":            "both",
-		"tui.image_rendering":          "auto",
-		"embeddings.enabled":           false,
-		"embeddings.provider":          "ollama",
-		"embeddings.model":             "nomic-embed-text",
-		"embeddings.base_url":          "http://localhost:11434",
-		"mcp_server.auto_approve":      false,
-		"mcp_server.default_mode":      "plan",
+		"diagram.kroki_url":                      "https://kroki.io",
+		"cost.budget_usd":                        0.0,
+		"cost.max_tokens_per_run":                0,
+		"cost.session_cap_usd":                   0.0,
+		"cost.daily_cap_usd":                     0.0,
+		"cost.session_token_cap":                 0,
+		"cost.daily_token_cap":                   0,
+		"cost.alert_threshold":                   0.8,
+		"swarm.backend":                          "in_process",
+		"sandbox.backend":                        "local",
+		"sandbox.image":                          "ubuntu:22.04",
+		"sandbox.network":                        false,
+		"security.egress_then_write":             false,
+		"security.redact_secrets":                true,
+		"security.default_method":                "auto",
+		"security.dast.allow_active":             false,
+		"security.debate.threat_model":           false,
+		"security.debate.triage":                 false,
+		"output_guard.enabled":                   true,
+		"output_guard.mode":                      "llm",
+		"output_guard.max_retries":               1,
+		"output_guard.rubric":                    DefaultGuardRubric,
+		"tui.humor_mode":                         true,
+		"tui.theme":                              "dark",
+		"tui.notifications":                      "both",
+		"tui.image_rendering":                    "auto",
+		"embeddings.enabled":                     false,
+		"embeddings.provider":                    "ollama",
+		"embeddings.model":                       "nomic-embed-text",
+		"embeddings.base_url":                    "http://localhost:11434",
+		"mcp_server.auto_approve":                false,
+		"mcp_server.default_mode":                "plan",
 		// Heuristic invisible-char/base64 prompt-injection scan of
 		// web_fetch/web_search output on by default (P27.13/FIND-12) — see
 		// SearchConfig.ScanOutput's doc comment.
