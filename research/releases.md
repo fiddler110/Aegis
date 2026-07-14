@@ -8,7 +8,38 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-13 — **P27.19** (FIND-17, Tier 4, CVSS 5.9) shipped: documentation-only
+**Last updated:** 2026-07-14 — **P28.1** (Tier 1, real exploitable robustness gap) shipped: the TUI
+now strips dangerous terminal escape sequences from untrusted tool output before it reaches the
+real terminal. This closed the P27 threat model's last open needs-verification question — whether
+the TUI fully neutralizes terminal escape sequences in untrusted tool output — which this same pass
+confirmed it did not. `stripControlSeqs` (P24.20/FIND-17) only ever ran on the model's own generated
+prose inside `mdRender`; raw tool output (`shell` stdout/stderr, `read_file` contents,
+`grep`/`web_fetch`/`web_search` results) rendered via `renderBlock`/`renderLinesBlock`
+(`internal/tui/toolview.go`) only ever passed through `remapANSI16` (`internal/tui/ansi16.go`), which
+rewrites SGR colour codes and leaves every other escape sequence untouched — OSC 8 hyperlink-text
+spoofing, OSC 52 clipboard hijack, cursor-hide, alternate-screen-buffer switches, OSC 0/2 title-bar
+spoofing all reached the terminal unfiltered from a malicious/compromised file read or
+shell/web_fetch/web_search result.
+
+Fix: a new `stripDangerousSeqs` (`internal/tui/sanitize.go`) — a sibling to `stripControlSeqs` that
+keeps CSI SGR sequences (`ESC [ ... m`, needed for `remapANSI16` to have something to rewrite) but
+strips everything else recognized: OSC/DCS/APC/PM/SOS strings, other 7-bit C1 forms, and any non-SGR
+CSI (cursor movement/hiding, alternate-screen-buffer switches). Wired in at three points so no
+raw-tool-output path is missed: `renderToolResult` (`internal/tui/toolview.go`) — the single funnel
+every rendered tool result (single-line, multi-line generic block, and `read_file`) passes through —
+sanitizes `result` once up front; `renderBlock` sanitizes independently too, since it's also called
+from `renderShellCall`'s fallback path outside `renderToolResult`; and `renderShellCall` itself
+sanitizes the model-supplied command before handing it to chroma for syntax highlighting, since a
+successful highlight match bypasses `renderBlock` entirely via `renderLinesBlock`. New tests:
+`TestStripDangerousSeqs`, `TestStripDangerousSeqsIdempotent` (`internal/tui/sanitize_test.go`),
+`TestRenderToolResult_SanitizesDangerousSeqs`, `TestRenderShellCall_SanitizesDangerousSeqs`
+(`internal/tui/toolview_test.go`) — covering OSC 52 clipboard hijack, OSC 8 hyperlink-target
+spoofing, cursor manipulation, and alternate-screen switches across the single-line, multi-line, and
+`read_file` render branches, plus confirming SGR colour still survives sanitization plus
+`remapANSI16`'s truecolor rewrite. `go build ./...`, `go vet ./...`, and the full `go test ./...`
+pass clean. This was the roadmap's sole Tier 1 item; next up is Tier 2 (P28.2, P28.4, P28.6, P28.7).
+
+Before that, same day (2026-07-13): **P27.19** (FIND-17, Tier 4, CVSS 5.9) shipped: documentation-only
 close-out of the P27 threat model's container-socket-trust finding. FIND-17 flagged that
 Docker/Podman socket access is root-equivalent on the host and asked for docs recommending
 "rootless Podman or a socket-proxy." The rootless-Podman half, along with the

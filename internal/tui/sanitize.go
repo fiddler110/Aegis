@@ -69,6 +69,63 @@ func stripControlSeqs(s string) string {
 	return b.String()
 }
 
+// stripDangerousSeqs removes terminal control sequences that can manipulate
+// the terminal beyond text colour — OSC/DCS/APC/PM/SOS strings (OSC 8
+// hyperlink-text spoofing, OSC 52 clipboard hijack, OSC 0/2 title-bar
+// spoofing), other C1 control forms, and any CSI sequence other than SGR
+// ("select graphic rendition", ESC '[' ... 'm') — which covers cursor
+// movement/hiding and alternate-screen-buffer switches. SGR sequences are
+// left untouched so a subsequent remapANSI16 pass still has colour codes to
+// rewrite.
+//
+// Unlike stripControlSeqs (which strips SGR too, since it only ever runs on
+// the model's own generated prose where no legitimate colour is expected),
+// this is for untrusted raw tool output — shell stdout/stderr, read_file
+// contents, grep/web_fetch/web_search results (P28.1) — that legitimately
+// carries ANSI colour from the tool it came from.
+func stripDangerousSeqs(s string) string {
+	if !strings.ContainsRune(s, 0x1b) && !strings.ContainsAny(s, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1c\x1d\x1e\x1f\x7f") {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+
+	i := 0
+	n := len(s)
+	for i < n {
+		c := s[i]
+
+		if c == 0x1b { // ESC
+			if consumed := escSeqLen(s[i:]); consumed > 0 {
+				// Keep only CSI SGR sequences (ESC '[' ... 'm'); every other
+				// recognized form — CSI cursor/mode changes, OSC, DCS/APC/PM/SOS,
+				// other 7-bit C1 forms — is dropped.
+				if s[i+1] == '[' && s[i+consumed-1] == 'm' {
+					b.WriteString(s[i : i+consumed])
+				}
+				i += consumed
+				continue
+			}
+			i++
+			continue
+		}
+
+		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+			i++
+			continue
+		}
+		if c == 0x7f {
+			i++
+			continue
+		}
+
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
+}
+
 // escSeqLen returns the number of bytes of s (which starts with ESC, 0x1b)
 // that make up a recognized escape sequence, or 0 if s doesn't start with
 // one it recognizes (in which case the caller drops just the ESC byte).

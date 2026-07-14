@@ -107,7 +107,10 @@ func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyL
 	if isErr {
 		tag, style = "×", th.toolErr
 	}
-	result = strings.TrimRight(result, "\n")
+	// Untrusted raw tool output (P28.1) — strip anything beyond SGR colour
+	// before it reaches the real terminal, covering every branch below
+	// (single-line, read_file, and the generic renderBlock path).
+	result = stripDangerousSeqs(strings.TrimRight(result, "\n"))
 
 	if !strings.Contains(result, "\n") {
 		budget := max(width-len(name)-6, 20)
@@ -137,6 +140,12 @@ func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyL
 // renderBlock renders text as an indented, gutter-marked block capped at max
 // lines, with a "… N more lines" footer when truncated.
 func renderBlock(th theme, text string, maxLines, width int) string {
+	// Strip anything beyond SGR colour before it reaches the terminal (P28.1;
+	// idempotent, so this is a no-op for text renderToolResult already
+	// sanitized — this also covers the renderShellCall call site, which
+	// renders the model's own tool-input command and doesn't route through
+	// renderToolResult).
+	text = stripDangerousSeqs(text)
 	// Raw terminal output (shell tools) may carry ANSI-16 colour codes. Remap
 	// them onto the on-brand palette and preserve them: in that case we skip the
 	// uniform toolBody foreground so the command's own colours show through.
@@ -628,6 +637,10 @@ func renderShellCall(th theme, name string, input json.RawMessage, width int) (s
 	if a.Background {
 		header += " " + th.diffMeta.Render("(background)")
 	}
+	// P28.1: sanitize before highlighting — chroma tokenizes the raw command
+	// text verbatim, so a dangerous sequence embedded in it would otherwise
+	// reach renderLinesBlock (which doesn't itself sanitize) unfiltered.
+	a.Command = stripDangerousSeqs(a.Command)
 	var b strings.Builder
 	b.WriteString(header + "\n")
 	// P16.2: highlight the command as shell syntax ("fenced code in tool
