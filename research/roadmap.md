@@ -1,9 +1,10 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-14 — **P28.1** (Tier 1, TUI escape-sequence sanitization for untrusted tool
-output) shipped; see [releases.md](releases.md#latest-changes) for the full writeup. All other
-completed history (the full P27 threat-model batch, P27.1–P27.19, plus everything before it) also
-lives there.
+**Last updated:** 2026-07-14 — **P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor`
+smoke test) shipped; see [releases.md](releases.md#latest-changes) for the full writeup. **P28.1**
+(Tier 1, TUI escape-sequence sanitization for untrusted tool output) also shipped 2026-07-14. All
+other completed history (the full P27 threat-model batch, P27.1–P27.19, plus everything before it)
+also lives there.
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -14,20 +15,23 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 6 remaining items (P28.2-P28.7) of the 7 filed 2026-07-14 from a full interactive
+**Open items:** 5 remaining items (P28.3-P28.7) of the 7 filed 2026-07-14 from a full interactive
 evaluation of the TUI, web UI, and daemon against three live Ollama models (`qwythos:latest`,
 `deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via `TestLiveWorkflow` — see
-[Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence sanitization) shipped
-2026-07-14, closing out Tier 1 entirely — see [releases.md](releases.md#latest-changes). Tier 4 has
-4 parked items with no active trigger (see [Parked](#open-work--parked-tier-4)), plus 2 remaining
-unresolved needs-verification notes carried over from the P27 threat model (see below); the third
-(TUI escape-sequence neutralization) is now resolved by P28.1.
+[Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence sanitization) and **P28.2**
+(Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test) both shipped 2026-07-14,
+closing out Tier 1 entirely — see [releases.md](releases.md#latest-changes). Tier 4 has 4 parked
+items with no active trigger (see [Parked](#open-work--parked-tier-4)), plus 2 remaining unresolved
+needs-verification notes carried over from the P27 threat model (see below); the third (TUI
+escape-sequence neutralization) is now resolved by P28.1.
 
-**Next session:** start with Tier 2 — **P28.2**, **P28.4**, **P28.6**, or **P28.7** (all cheap,
-no-dependency wins; no particular order between them). Re-run `TestLiveWorkflow` (recipe in
-CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams;
-`aegis doctor` (P26.1) is the standalone preflight companion for the same misconfiguration classes
-(including the workspace trust check, P27.1, and the local-sandbox recommendation, P27.14).
+**Next session:** start with Tier 2 — **P28.4**, **P28.6**, or **P28.7** (all cheap, no-dependency
+wins; no particular order between them). **P28.3** (Tier 3) builds on P28.2's smoke test and needs
+investigation into Ollama's `tool_choice` support before committing to an approach — don't start it
+speculatively. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone
+preflight companion for the same misconfiguration classes (including the workspace trust check,
+P27.1, the local-sandbox recommendation, P27.14, and the tool-calling smoke test, P28.2).
 
 ---
 
@@ -41,7 +45,7 @@ speculatively.
 
 **Tier 1:** none open — P28.1 shipped 2026-07-14, see [releases.md](releases.md#latest-changes).
 
-**Tier 2:** P28.2, P28.4, P28.6, P28.7.
+**Tier 2:** P28.4, P28.6, P28.7. (P28.2 shipped 2026-07-14, see [releases.md](releases.md#latest-changes).)
 
 **Tier 3:** P28.3, P28.5.
 
@@ -74,37 +78,25 @@ See `0-assessment.md`'s "Needs Verification" table in the report folder for the 
 Filed 2026-07-14 from a full interactive evaluation of the TUI, web UI, and daemon — driving real
 sessions over the HTTP+SSE seam (the same one the TUI/web UI use) against three live Ollama
 models via `TestLiveWorkflow`, plus a read of the TUI render paths and web UI streaming client.
-Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization) shipped
-2026-07-14 — see [releases.md](releases.md#latest-changes) — leaving Tier 2 as the current front.
-
-### P28.2 — Guidance/config for tool-calling-capable local models
-
-Priority: Tier 2 · Effort: S — cheap, no-dependency win
-
-Live evaluation (`TestLiveWorkflow` against `qwythos:latest`, `deepseek-r1:8b`, `gpt-oss:20b`,
-2026-07-14) found wide variance in local-model tool-calling reliability: `qwythos:latest` (this
-repo's own configured `provider.model` default) diagnosed a seeded bug but never called
-`edit_file`/`write_file` to fix it; `deepseek-r1:8b` made **zero tool calls** on an explicit
-run/fix/verify task, answering in prose instead (a known R1-distill failure mode — reasoning
-dumped as the final answer instead of a structured `tool_call`); only `gpt-oss:20b` completed the
-task end-to-end (13 tool calls, 2m28s). `aegis doctor`'s provider check only verifies reachability
-and model availability, not tool-calling competence. Add: (a) doc guidance on which
-locally-runnable model families reliably drive Aegis's tool-calling loop, (b) consider a doctor
-check that does a cheap live round-trip tool-call smoke test against the configured model and
-warns if it returns zero tool calls for an obviously-actionable prompt.
+Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization) and
+**P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test) both shipped
+2026-07-14 — see [releases.md](releases.md#latest-changes) — leaving the rest of Tier 2 as the
+current front.
 
 ### P28.3 — Engine nudge/retry when an actionable turn produces zero tool calls
 
 Priority: Tier 3 · Effort: M — real value, larger, needs design/investigation first
 
-Building on P28.2: when a model responds text-only to a task that plainly requires tool use, the
-engine currently just accepts the text-only turn as done — the `deepseek-r1:8b` failure mode
-observed live. Consider a corrective nudge (similar in spirit to the existing output-guard retry)
-that detects a suspicious zero-tool-call completion on a task-shaped prompt and asks the model to
-reconsider/act, or investigate whether the OpenAI-compatible adapter should send
-`tool_choice: "required"` rather than `"auto"` when the persona/tools make tool use expected.
-Needs investigation into what Ollama's OpenAI-compat endpoint actually supports for `tool_choice`
-before committing to an approach — do not build speculatively until that's confirmed.
+Building on **P28.2** (shipped 2026-07-14 — doc guidance plus an `aegis doctor` smoke test that
+detects and warns about this failure mode; see [releases.md](releases.md#latest-changes)): when a
+model responds text-only to a task that plainly requires tool use, the engine currently just
+accepts the text-only turn as done — the `deepseek-r1:8b` failure mode observed live. Consider a
+corrective nudge (similar in spirit to the existing output-guard retry) that detects a suspicious
+zero-tool-call completion on a task-shaped prompt and asks the model to reconsider/act, or
+investigate whether the OpenAI-compatible adapter should send `tool_choice: "required"` rather
+than `"auto"` when the persona/tools make tool use expected. Needs investigation into what
+Ollama's OpenAI-compat endpoint actually supports for `tool_choice` before committing to an
+approach — do not build speculatively until that's confirmed.
 
 ### P28.4 — Compaction has no fallback when the local summarizer returns empty output
 
