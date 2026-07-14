@@ -1,14 +1,32 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-13 — **P27.18** (FIND-19, Tier 3, CVSS 5.5) shipped: the `os` sandbox
+**Last updated:** 2026-07-13 — **P27.16** (FIND-15, Tier 3, CVSS 3.6) shipped: quarantine-on-FAIL
+for the output guard. Previously, a FAIL verdict that exhausted the guard's corrective retries only
+ever led to the failing response being surfaced anyway — any `write_file`/`edit_file` call the turn
+made already landed on disk and stayed there untouched. The engine's per-turn checkpoint
+`Snapshotter` (`internal/checkpoint`) already captures pre-write content for every path
+`write_file`/`edit_file` touch before the write happens — the same primitive `/rewind` uses — so the
+exhausted-retries branch in `internal/engine/engine.go`'s guard check now calls
+`checkpoint.SnapshotterFrom(ctx).RestoreFiles(ctx)` (new `Snapshotter` method delegating to the
+existing `Store.RestoreFiles`) to roll every file the turn wrote back to its pre-turn state before
+surfacing the failing answer, rather than leaving the bad write in place. A nil Snapshotter (no
+checkpoint store wired in) makes the call a no-op, so a caller without one keeps today's
+retry-then-surface behavior unchanged. The rollback is surfaced to the caller two ways: a new
+`Engine.Event.GuardFilesRestored` count on the terminal `KindGuard` failure event, and the
+restored-file count appended to that event's `GuardReason` text, which the TUI's existing
+output-guard warning line already renders verbatim — no new UI wiring needed. Full writeup in
+[releases.md](releases.md#latest-changes). This was implemented in parallel with **P27.17** (swarm
+sub-agent budget propagation) in a separate worktree/branch — see that item's own history entry below
+for its status.
+
+Before that, same day (2026-07-13): **P27.18** (FIND-19, Tier 3, CVSS 5.5) shipped: the `os` sandbox
 backend (seatbelt/bwrap) now confines file reads to the workspace plus a bounded toolchain allowlist
 instead of the entire host filesystem — `seatbeltProfile` adds a `file-read*` deny/allow pair
 mirroring the existing write-confinement rules, and `bwrapArgs` replaces `--ro-bind / /` with
 per-path read-only binds. New `sandbox.os_extra_read_paths` config lets operators extend the
-allowlist for non-standard toolchain locations. This was shipped ahead of the still-open P27.16/
-P27.17 since it was fully self-contained. Full writeup in
-[releases.md](releases.md#latest-changes). Remaining open: **P27.16** and **P27.17** — see
-[Priority Order](#priority-order).
+allowlist for non-standard toolchain locations. This was shipped ahead of the then-still-open
+P27.16/P27.17 since it was fully self-contained; both have since shipped too. Full writeup in
+[releases.md](releases.md#latest-changes).
 
 Before that, same day (2026-07-13): **P27.15** (FIND-08, Tier 3, CVSS 5.6) shipped: cron fire-time gating
 now applies the full permission stack — text allow/deny rules, then the contextual egress/network
@@ -144,20 +162,19 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** P27.16–P27.17 (2026-07-13 threat-model findings, Tier 3 — see
-[Priority Order](#priority-order)). Tiers 1 and 2 (**P27.1–P27.13**) and Tier 3's
-**P27.14–P27.15, P27.18** shipped 2026-07-13 (P27.18 shipped out of order, ahead of P27.16/P27.17,
-since it was fully self-contained). Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus
-**P27.19**/**P27.20** (see [Parked](#open-work--parked-tier-4)).
+**Open items:** P27.17 (2026-07-13 threat-model finding, Tier 3 — see
+[Priority Order](#priority-order); shipping in parallel via a separate worktree merge, reconcile this
+line after that lands). Tiers 1 and 2 (**P27.1–P27.13**) and Tier 3's **P27.14–P27.16, P27.18**
+shipped 2026-07-13 (P27.18 shipped out of order, ahead of P27.16/P27.17, since it was fully
+self-contained). Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20**
+(see [Parked](#open-work--parked-tier-4)).
 
-**Next session:** continue Tier 3 — 2 remaining larger/sequence-dependent items, **P27.16** first
-(pre-write guard check / quarantine on FAIL). These are less parallelizable than Tier 2 was: P27.17
-(swarm budget propagation) touches a single cohesive subsystem rather than splitting cleanly across
-packages, so evaluate per-item before assuming multi-agent parallelism helps. Re-run
-`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the engine/server/sandbox/guard/
-swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone preflight companion for the same
-misconfiguration classes (now including a workspace trust check, P27.1, and the local-sandbox
-recommendation, P27.14).
+**Next session:** P27.17 (swarm budget propagation) is the last Tier 3 item; check whether it has
+already shipped via its own parallel worktree before starting anything. Re-run `TestLiveWorkflow`
+(recipe in CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate
+seams; `aegis doctor` (P26.1) is the standalone preflight companion for the same misconfiguration
+classes (now including a workspace trust check, P27.1, and the local-sandbox recommendation,
+P27.14).
 
 ---
 
@@ -178,10 +195,8 @@ DAST-target sourcing both ended up folding into (or reusing the machinery of) th
 P27.1 built, as anticipated; P27.6's context/memory-file wrapping used the separate `trust.Wrap`
 provenance mechanism instead, matching the P24.4 precedent for persona/skill bodies.
 
-**Tier 3** (2 open items — real value, larger or sequence-dependent; **P27.14–P27.15, P27.18**
+**Tier 3** (1 open item — real value, larger or sequence-dependent; **P27.14–P27.16, P27.18**
 shipped 2026-07-13, see [releases.md](releases.md#latest-changes)):
-- **P27.16 (FIND-15)** — Move (or add) a guard check before irreversible high-risk writes, or
-  quarantine/roll back a file written under a subsequent guard FAIL rather than only retrying.
 - **P27.17 (FIND-16)** — Propagate a shared/proportional budget ceiling into detached swarm spawns
   so they can't escape the fan-out tree's cost cap.
 
@@ -219,13 +234,10 @@ called for (explicit, boolean, distinct from the daemon's ambient permission mod
 a second flag, its scope was extended in place to resolve Ask-tier decisions across the whole gate
 stack instead of only the mode-level one, and `aegis cron list` was added as the review view.
 
-### P27.16 — FIND-15: pre-write guard check / quarantine on FAIL
-
-Priority: Tier 3 · Effort: M, security, Low (CVSS 3.6)
-
-The output guard runs after files are already written, so a FAIL verdict can only drive a retry,
-not undo a bad write. Move a check (or add a lighter pre-write pass) before irreversible writes
-for high-risk deliverables, or quarantine/roll back a written file on FAIL.
+#### P27.16 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes)) — scope note:
+chose the "quarantine/roll back a written file on FAIL" remediation over the alternative "lighter
+pre-write pass," reusing the existing checkpoint/rewind `Snapshotter`/`RestoreFiles` machinery
+rather than adding a new pre-write validation mechanism.
 
 ### P27.17 — FIND-16: propagate budget ceiling into detached swarm spawns
 

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
@@ -191,6 +192,12 @@ type Event struct {
 	// answer they just rendered rather than leaving it on screen — the retry's
 	// text replaces it, it doesn't follow it.
 	GuardRetrying bool
+	// GuardFilesRestored is set on the terminal (retries-exhausted) KindGuard
+	// failure event to the number of files rolled back to their pre-turn
+	// state via the run's checkpoint Snapshotter (P27.16 quarantine-on-FAIL).
+	// Zero means either nothing was written this turn or no checkpoint store
+	// was wired in, in which case the bad write is left on disk as before.
+	GuardFilesRestored int
 }
 
 // EmitFunc receives engine events. It must not block for long.
@@ -559,8 +566,27 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 						continue
 					}
 					if !ok {
+						finalReason := "surfacing the response after " + itoa(maxRetries) + " failed validation attempt(s): " + reason
+						// P27.16 (FIND-15): retries are exhausted and the failing
+						// response is about to be surfaced anyway — quarantine any
+						// file(s) this turn wrote rather than leaving the bad write
+						// on disk. Reuses the same per-turn checkpoint Snapshotter
+						// write_file/edit_file already capture pre-write content
+						// into (internal/checkpoint), so this is a plain restore,
+						// not a new mechanism. A nil Snapshotter (no checkpoint
+						// store wired in, e.g. tests or an embedded engine without
+						// one) makes RestoreFiles a no-op — skip rollback rather
+						// than error, preserving today's retry-then-surface
+						// behavior in that case.
+						restored, rerr := checkpoint.SnapshotterFrom(ctx).RestoreFiles(ctx)
+						if rerr != nil {
+							e.logger.Warn("guard fail: rollback of files written this turn failed", "err", rerr)
+						} else if restored > 0 {
+							e.logger.Warn("guard fail: rolled back files written this turn", "files_restored", restored)
+							finalReason += fmt.Sprintf(" — rolled back %d file(s) written this turn", restored)
+						}
 						emit(Event{Kind: KindGuard, GuardPassed: false, GuardStatus: string(status),
-							GuardReason: "surfacing the response after " + itoa(maxRetries) + " failed validation attempt(s): " + reason})
+							GuardReason: finalReason, GuardFilesRestored: restored})
 					} else {
 						// Genuine pass and fail-open-skip both set ok=true, but the
 						// caller can now tell them apart via GuardStatus — without
