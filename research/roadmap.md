@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 11, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
+**Open items:** 10, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
 TODO/stub/skip/robustness markers, and a docs-vs-implementation drift scan of every docs/*.md file
 against current source) run after the P29 batch closed out all prior open work, plus the P31 batch
 (GitHub CodeQL code-scanning alerts pulled from the `fiddler110/Aegis` repo — 24 open alerts across
@@ -23,12 +23,12 @@ The P27 threat model's needs-verification list remains fully closed — see
 [releases.md](releases.md#latest-changes) for the 2026-07-14 verification pass that confirmed the
 last two items (hook execution timing, cron fire-time rule application) were already resolved by
 shipped mechanisms, no code change needed. **P31.1** (nuclei `templates_version` path traversal /
-git-arg injection) and **P31.2** (session-workdir existence-oracle gate ordering) shipped
-2026-07-14 — see [releases.md](releases.md#latest-changes).
+git-arg injection), **P31.2** (session-workdir existence-oracle gate ordering), and **P30.1** (LSP
+client hang on transport death) shipped 2026-07-14 — see [releases.md](releases.md#latest-changes).
 
-**Next session:** start with P30.1 (LSP client hang on transport death — a near-identical patch
-already exists as a reference in `internal/mcp/mcp.go`), first in document/priority order below.
-Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+**Next session:** start with P30.2 (hooks hardcode `sh -c`, breaking on native Windows), first in
+document/priority order below; P30.3 is the same fix applied to the TUI's `!` bang command. Re-run
+`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
 engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
 companion for the same misconfiguration classes.
 
@@ -42,8 +42,8 @@ hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or i
 work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
 speculatively.
 
-**Tier 1:** P30.1, P30.2, P30.3 — the three remaining robustness/portability bugs, in priority
-order. (P31.1 and P31.2 shipped 2026-07-14.)
+**Tier 1:** P30.2, P30.3 — the two remaining Windows-portability bugs, in priority order. (P31.1,
+P31.2, and P30.1 shipped 2026-07-14.)
 
 **Tier 2:** P31.3, P31.4, P31.5, P30.4, P30.5, P30.6, P30.7, P30.8 — in priority order: real
 security hardening (P31.3) and alert-noise reduction (P31.4, P31.5) ahead of pure docs-drift
@@ -56,21 +56,6 @@ cleanup (P30.4-P30.8).
 ---
 
 ## Open Work
-
-### P30.1 — LSP client hangs forever on transport death instead of failing loud
-
-Priority: Tier 1 · Effort: S
-
-`internal/lsp/client.go`'s `readLoop` (lines 145-186) returns silently when the LSP server process
-dies or its stdio pipe breaks (EOF, transport error, or an oversized-line abort), but never notifies
-any request already parked in `c.pending` waiting on its response channel. Every in-flight `call()`
-(client.go:115-139) then blocks until the *caller's* context happens to have its own deadline — and
-nothing in `internal/engine` sets a per-tool timeout, so a dead language server can hang an LSP tool
-call indefinitely. `internal/mcp/mcp.go` has the structurally identical stdio JSON-RPC client and
-already fixes exactly this via a `failPending` method (mcp.go:261-277) with a comment describing this
-exact bug ("every request still in c.pending would otherwise block on its response channel forever
-... Fail loud instead."). Port the same pattern: mark the client closed, drain `pending` with a
-synthetic error response on any transport-loop exit.
 
 ### P30.2 — Hooks hardcode `sh -c`, breaking all hook events on native Windows
 
