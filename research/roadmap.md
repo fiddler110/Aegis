@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 12, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
+**Open items:** 11, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
 TODO/stub/skip/robustness markers, and a docs-vs-implementation drift scan of every docs/*.md file
 against current source) run after the P29 batch closed out all prior open work, plus the P31 batch
 (GitHub CodeQL code-scanning alerts pulled from the `fiddler110/Aegis` repo — 24 open alerts across
@@ -23,14 +23,14 @@ The P27 threat model's needs-verification list remains fully closed — see
 [releases.md](releases.md#latest-changes) for the 2026-07-14 verification pass that confirmed the
 last two items (hook execution timing, cron fire-time rule application) were already resolved by
 shipped mechanisms, no code change needed. **P31.1** (nuclei `templates_version` path traversal /
-git-arg injection) shipped 2026-07-14 — see [releases.md](releases.md#latest-changes).
+git-arg injection) and **P31.2** (session-workdir existence-oracle gate ordering) shipped
+2026-07-14 — see [releases.md](releases.md#latest-changes).
 
-**Next session:** start with P31.2 (session-workdir existence check running before the
-remote-access allowlist gate, first in document/priority order below) — a real info-disclosure
-gap, small effort. P30.1 (LSP client hang on transport death — a near-identical patch already
-exists as a reference in `internal/mcp/mcp.go`) follows. Re-run `TestLiveWorkflow` (recipe in
-CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams;
-`aegis doctor` is the standalone preflight companion for the same misconfiguration classes.
+**Next session:** start with P30.1 (LSP client hang on transport death — a near-identical patch
+already exists as a reference in `internal/mcp/mcp.go`), first in document/priority order below.
+Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
+companion for the same misconfiguration classes.
 
 ---
 
@@ -42,8 +42,8 @@ hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or i
 work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
 speculatively.
 
-**Tier 1:** P31.2, P30.1, P30.2, P30.3 — in priority order: P31.2 is a real but lower-severity
-info-disclosure gap, then the three robustness/portability bugs. (P31.1 shipped 2026-07-14.)
+**Tier 1:** P30.1, P30.2, P30.3 — the three remaining robustness/portability bugs, in priority
+order. (P31.1 and P31.2 shipped 2026-07-14.)
 
 **Tier 2:** P31.3, P31.4, P31.5, P30.4, P30.5, P30.6, P30.7, P30.8 — in priority order: real
 security hardening (P31.3) and alert-noise reduction (P31.4, P31.5) ahead of pure docs-drift
@@ -56,20 +56,6 @@ cleanup (P30.4-P30.8).
 ---
 
 ## Open Work
-
-### P31.2 — Session-workdir existence check runs before the remote-access allowlist gate
-
-Priority: Tier 1 · Effort: S · [CodeQL alert #4](https://github.com/fiddler110/Aegis/security/code-scanning/4), `go/path-injection`, high
-
-`internal/server/sessions.go:170-187` (`resolveSessionWorkdir`, the P25.1 session-Workdir validator)
-calls `os.Stat(abs)` on the client-supplied path (line 179) *before* calling `s.workdirAllowed(abs)`
-(line 183). For a remote-accessible daemon, this lets an authenticated-but-not-workdir-allowlisted
-client use `POST /sessions` as a filesystem-existence oracle for any host path — the 400
-("workdir does not exist") vs. 403 ("not permitted") response distinguishes existence from
-disallowal before the allowlist gate ever runs. Reorder: check `workdirAllowed(abs)` first (it's a
-pure string/prefix comparison, no disk I/O) and only `os.Stat` a path that's already inside the
-allowlist boundary; local (non-remote-accessible) daemons are unaffected since `workdirAllowed`
-short-circuits true for them.
 
 ### P30.1 — LSP client hangs forever on transport death instead of failing loud
 

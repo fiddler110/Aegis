@@ -272,4 +272,13 @@ func TestCreateSessionWorkdirTrustBoundary(t *testing.T) {
 	if got := post(""); got != http.StatusCreated {
 		t.Errorf("empty workdir (default behavior): status = %d, want 201", got)
 	}
+
+	// P31.2: a nonexistent path outside the allowlist must still be 403, not
+	// 400 — otherwise a remote client could use the existence-vs-permission
+	// status code to probe for arbitrary paths on the host before ever
+	// clearing the allowlist gate.
+	nonexistentOutside := filepath.Join(outsideDir, "does-not-exist")
+	if got := post(nonexistentOutside); got != http.StatusForbidden {
+		t.Errorf("nonexistent workdir outside workspace/allowlist: status = %d, want 403 (not 400 — must not leak existence before the allowlist gate)", got)
+	}
 }
