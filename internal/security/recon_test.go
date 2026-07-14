@@ -133,6 +133,28 @@ func TestResolveNucleiTemplatesRequiresPinnedVersion(t *testing.T) {
 	}
 }
 
+// TestResolveNucleiTemplatesRejectsUnsafeVersion covers P31.1: templates_version
+// is used unsanitized in a filepath.Join and as a `git clone --branch` arg, so
+// path-traversal and git-flag-injection shaped values must be rejected before
+// either use.
+func TestResolveNucleiTemplatesRejectsUnsafeVersion(t *testing.T) {
+	for _, version := range []string{
+		"../../../etc/passwd",
+		"..",
+		"v1.0.0/../../escape",
+		"-oProxyCommand=evil",
+		"--upload-pack=evil",
+		"v1.0.0 && rm -rf /",
+	} {
+		_, err := resolveNucleiTemplates(context.Background(), Options{
+			Tools: map[string]ToolPolicy{"nuclei": {TemplatesVersion: version}},
+		})
+		if err == nil {
+			t.Errorf("templates_version = %q: expected an error, got nil", version)
+		}
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	return slices.Contains(args, want)
 }

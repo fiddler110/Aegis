@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -382,6 +383,14 @@ func nucleiArgs(targets []string, active bool, templatesDir, sarifOutPath string
 	return append(args, "-sarif-export", sarifOutPath)
 }
 
+// nucleiTemplatesVersionPattern restricts security.tools.nuclei.
+// templates_version to a safe git tag/ref shape (P31.1): the value is used
+// unsanitized both as a filepath.Join path segment (the per-version cache
+// dir) and as the `git clone --branch <version>` argument, so without this
+// a value containing "../" would escape nucleiTemplatesBaseDir() and a
+// leading "-" could be interpreted as a git flag.
+var nucleiTemplatesVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 // resolveNucleiTemplates enforces P13.5.6's template pinning: nuclei never
 // runs against an implicit "latest" template pull. security.tools.nuclei.
 // templates_version must name a nuclei-templates release tag; the tag is
@@ -391,6 +400,9 @@ func resolveNucleiTemplates(ctx context.Context, opts Options) (string, error) {
 	version := strings.TrimSpace(opts.Tools["nuclei"].TemplatesVersion)
 	if version == "" {
 		return "", errors.New("nuclei requires a pinned template set — set security.tools.nuclei.templates_version to a nuclei-templates release tag (e.g. \"v9.9.0\"); templates are executable network-probe logic and are never pulled at an unpinned \"latest\"")
+	}
+	if strings.HasPrefix(version, "-") || !nucleiTemplatesVersionPattern.MatchString(version) {
+		return "", fmt.Errorf("security.tools.nuclei.templates_version %q is not a valid release tag — only letters, digits, '.', '_', '-' are allowed, and it must not start with '-'", version)
 	}
 	dir := filepath.Join(nucleiTemplatesBaseDir(), version)
 	if info, err := os.Stat(dir); err == nil && info.IsDir() {

@@ -8,7 +8,38 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P25.9** (Tier 4, user-triggered off the parked backlog) shipped in
+**Last updated:** 2026-07-14 — shipped **P31.1** (Tier 1, critical): nuclei's
+`security.tools.nuclei.templates_version` config value (settable via config file or the daemon's
+config-update API) reached both a `filepath.Join` (the per-version template cache/clone directory)
+and a `git clone --branch <version>` argument with no format validation, so a value containing
+`../` could escape the intended cache directory and a leading `-` could be interpreted as a git
+flag. `internal/security/recon.go`'s `resolveNucleiTemplates` now rejects any `templates_version`
+that doesn't match `^[A-Za-z0-9._-]+$` or that starts with `-`, before either use. Tested via a new
+`TestResolveNucleiTemplatesRejectsUnsafeVersion` (`internal/security/recon_test.go`) covering
+path-traversal (`../../../etc/passwd`, `..`, `v1.0.0/../../escape`), git-flag-injection
+(`-oProxyCommand=evil`, `--upload-pack=evil`), and shell-metacharacter (`v1.0.0 && rm -rf /`)
+shaped values, alongside the existing pinned-version test; `go build ./...`, `go vet ./...`, and
+`go test ./internal/security/...` all pass. Closes [CodeQL alert
+#6](https://github.com/fiddler110/Aegis/security/code-scanning/6). See roadmap.md for the
+remaining P31/P30 open items (P31.2 next).
+
+**Previously, same day:** filed **P30.1-P30.8** (8 items) from a fresh parallel audit run
+after the P29 batch closed all prior open work: a code-gap scan of internal/ and cmd/ for
+TODO/stub/skip/robustness markers, and a docs-vs-implementation drift scan of every docs/*.md file
+against current source. Three Tier 1 findings (P30.1-P30.3): the LSP client
+(`internal/lsp/client.go`) can hang a tool call forever on transport death because, unlike the
+structurally identical `internal/mcp` client, it never fails pending requests when its read loop
+exits; and both `internal/hooks/exec.go` and the TUI's `!`-prefixed bang command
+(`internal/tui/tui.go`) hardcode `sh -c` with no Windows branch, breaking on native Windows despite
+the codebase already having an established `runtime.GOOS`-branching convention
+(`sandbox.WindowsShellBinary()`) that these two call sites missed. Five Tier 2 doc-drift findings
+(P30.4-P30.8): a stale `docs/security.md` link (file renamed to `security_scan.md`) in six docs
+files, four shipped CLI commands (`aegis trust`, `aegis doctor`, `aegis cron list`, `aegis config
+update`) and two shipped TUI slash commands (`/fork`, `/notify`) missing from their reference docs,
+a few smaller tools-reference/configuration.md omissions, and a stale code comment in
+`internal/server/webui.go` still describing the P15 web-UI-parity gap as open after that entire
+track shipped. None of the eight are shipped yet — see roadmap.md for the open item list and
+suggested pickup order (P30.1 first). Previously, on the same day, **P25.9** (Tier 4, user-triggered off the parked backlog) shipped in
 scoped form: five of the six P25.1-deferred daemon singletons (`knowledge.Store`, `longmem.Store`,
 the repo-map cache, persona/agent-def directory discovery, and the `os` sandbox backend's
 write-confinement profile) are now session-Workdir-aware — see below. `lsp.Manager` stays parked
