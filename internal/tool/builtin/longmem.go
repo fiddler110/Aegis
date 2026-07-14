@@ -4,17 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/longmem"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
+// projectFor derives the long-term-memory project scope from this call's
+// effective root (P25.9): the basename of the session's own Workdir when
+// set, falling back to root's basename otherwise. Computed per call rather
+// than once at construction so entity_remember/entity_recall tag and scope
+// by the calling session's own project, not whichever project the daemon
+// itself happened to start in.
+func projectFor(ctx context.Context, root string) string {
+	return filepath.Base(effectiveRoot(ctx, root))
+}
+
 // --- entity_remember ---
 
 type entityRememberTool struct {
-	store   *longmem.Store
-	project string
+	store *longmem.Store
+	root  string
 }
 
 func (t *entityRememberTool) Name() string                { return "entity_remember" }
@@ -40,7 +51,8 @@ func (t *entityRememberTool) Execute(ctx context.Context, input json.RawMessage)
 	if strings.TrimSpace(args.Facts) == "" {
 		return tool.Result{Content: "facts are required", IsError: true}, nil
 	}
-	if err := t.store.UpsertEntity(ctx, t.project, args.EntityType, args.EntityName, args.Facts); err != nil {
+	project := projectFor(ctx, t.root)
+	if err := t.store.UpsertEntity(ctx, project, args.EntityType, args.EntityName, args.Facts); err != nil {
 		return tool.Result{Content: fmt.Sprintf("failed to save entity: %v", err), IsError: true}, nil
 	}
 	return tool.Result{Content: fmt.Sprintf("saved entity %s:%s", args.EntityType, args.EntityName)}, nil
@@ -49,8 +61,8 @@ func (t *entityRememberTool) Execute(ctx context.Context, input json.RawMessage)
 // --- entity_recall ---
 
 type entityRecallTool struct {
-	store   *longmem.Store
-	project string
+	store *longmem.Store
+	root  string
 }
 
 func (t *entityRecallTool) Name() string                { return "entity_recall" }
@@ -79,7 +91,8 @@ func (t *entityRecallTool) Execute(ctx context.Context, input json.RawMessage) (
 		args.Limit = 5
 	}
 
-	results, err := t.store.SearchMemory(ctx, args.Query, args.Limit)
+	project := projectFor(ctx, t.root)
+	results, err := t.store.SearchMemory(ctx, args.Query, project, args.Limit)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("search failed: %v", err), IsError: true}, nil
 	}
@@ -95,10 +108,13 @@ func (t *entityRecallTool) Execute(ctx context.Context, input json.RawMessage) (
 }
 
 // LongMemTools returns the entity memory tools backed by a longmem store.
-func LongMemTools(store *longmem.Store) []tool.Tool {
-	project := store.ProjectName()
+// root is the fallback root used to derive the project scope when no
+// context workdir is set (P25.9); each call resolves its own project from
+// the calling session's effective root instead of a project fixed at
+// construction time.
+func LongMemTools(store *longmem.Store, root string) []tool.Tool {
 	return []tool.Tool{
-		&entityRememberTool{store: store, project: project},
-		&entityRecallTool{store: store, project: project},
+		&entityRememberTool{store: store, root: root},
+		&entityRecallTool{store: store, root: root},
 	}
 }

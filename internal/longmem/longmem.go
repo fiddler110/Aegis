@@ -203,7 +203,14 @@ func (s *Store) AddSession(ctx context.Context, sessionID, project, summary stri
 // embedder is configured (P5.8), results are the reciprocal-rank fusion of
 // the BM25 ranking and a cosine-similarity ranking over stored embeddings;
 // otherwise it is BM25-only (the zero-config default).
-func (s *Store) SearchMemory(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+//
+// project, when non-empty, scopes results to that project only (P25.9): the
+// store is intentionally one shared file across every project a daemon has
+// ever been pointed at (see Open), so without this a search from one
+// project's session can surface another project's facts/entities. Pass ""
+// to search unscoped (today's pre-P25.9 behavior), e.g. for a caller that
+// deliberately wants cross-project recall.
+func (s *Store) SearchMemory(ctx context.Context, query, project string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -211,7 +218,7 @@ func (s *Store) SearchMemory(ctx context.Context, query string, limit int) ([]Se
 	if poolSize < 20 {
 		poolSize = 20
 	}
-	bm25Results, err := s.bm25Search(ctx, query, poolSize)
+	bm25Results, err := s.bm25Search(ctx, query, project, poolSize)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +237,7 @@ func (s *Store) SearchMemory(ctx context.Context, query string, limit int) ([]Se
 		bm25Ranking = append(bm25Ranking, fk)
 	}
 
-	semRanking, semFallback, err := s.semanticRanking(ctx, query, poolSize)
+	semRanking, semFallback, err := s.semanticRanking(ctx, query, project, poolSize)
 	if err != nil {
 		if len(bm25Results) > limit {
 			bm25Results = bm25Results[:limit]
@@ -267,13 +274,23 @@ func (s *Store) SearchMemory(ctx context.Context, query string, limit int) ([]Se
 }
 
 // bm25Search runs the raw FTS5 query and returns up to limit results ranked
-// by BM25 only.
-func (s *Store) bm25Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT kind, key, snippet(mem_fts, 2, '<b>', '</b>', '…', 30), bm25(mem_fts)
-         FROM mem_fts WHERE mem_fts MATCH ?
-         ORDER BY bm25(mem_fts)
-         LIMIT ?`, ftsEscape(query), limit)
+// by BM25 only, optionally scoped to project (see SearchMemory).
+func (s *Store) bm25Search(ctx context.Context, query, project string, limit int) ([]SearchResult, error) {
+	q := `SELECT kind, key, snippet(mem_fts, 2, '<b>', '</b>', '…', 30), bm25(mem_fts)
+         FROM mem_fts WHERE mem_fts MATCH ?`
+	args := []any{ftsEscape(query)}
+	if project != "" {
+		// kind/key are UNINDEXED FTS5 columns, so this filters without
+		// affecting the MATCH ranking. Entity keys are "type:name@project";
+		// session-fact keys are "sessionID:project" — no shared column to
+		// filter on, so match either packed-key suffix.
+		q += ` AND (key LIKE '%@' || ? ESCAPE '\' OR key LIKE '%:' || ? ESCAPE '\')`
+		esc := escapeLike(project)
+		args = append(args, esc, esc)
+	}
+	q += ` ORDER BY bm25(mem_fts) LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +309,10 @@ func (s *Store) bm25Search(ctx context.Context, query string, limit int) ([]Sear
 // semanticRanking embeds query and ranks all stored (kind, key) vectors by
 // cosine similarity, returning the top `limit` "kind:key" fused-keys (best
 // first) plus a fallback SearchResult for any not already in the BM25 pool.
-func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([]string, map[string]SearchResult, error) {
+// project, when non-empty, scopes candidates to that project (see
+// SearchMemory) — filtered before the sort+truncate below so limit still
+// applies to the scoped set, not the full cross-project one.
+func (s *Store) semanticRanking(ctx context.Context, query, project string, limit int) ([]string, map[string]SearchResult, error) {
 	vecs, err := s.embedder.Embed(ctx, []string{query})
 	if err != nil || len(vecs) == 0 {
 		return nil, nil, fmt.Errorf("embed query: %w", err)
@@ -324,6 +344,9 @@ func (s *Store) semanticRanking(ctx context.Context, query string, limit int) ([
 		// return a meaningless similarity score instead of no score at all.
 		// The row self-heals the next time its content is upserted.
 		if model != s.embedder.Model() {
+			continue
+		}
+		if project != "" && !keyMatchesProject(key, project) {
 			continue
 		}
 		all = append(all, scored{kind: kind, key: key, score: embed.Cosine(qv, embed.DecodeVector(raw))})
@@ -376,6 +399,24 @@ func (s *Store) GetEntity(ctx context.Context, project, entityType, entityName s
 		return "", nil
 	}
 	return facts, err
+}
+
+// escapeLike escapes LIKE wildcards (%, _) and the escape character itself
+// in a value that will be interpolated into a "... LIKE '...' || ? ESCAPE
+// '\'" pattern, so a project name containing a literal wildcard character
+// can't broaden the match beyond that exact project.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+// keyMatchesProject reports whether a mem_fts/mem_vec key belongs to
+// project, mirroring the packed key formats AddSession ("sessionID:project")
+// and UpsertEntity ("type:name@project") write.
+func keyMatchesProject(key, project string) bool {
+	return strings.HasSuffix(key, "@"+project) || strings.HasSuffix(key, ":"+project)
 }
 
 func ftsEscape(q string) string {

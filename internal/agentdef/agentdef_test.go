@@ -177,3 +177,38 @@ func TestDiscoverDirs(t *testing.T) {
 		t.Fatalf("expected 2 dirs, got %d", len(dirs))
 	}
 }
+
+// TestLoadFromDirsMergesAcrossRoots is the P25.9 regression: a session on a
+// different root than the daemon's own workspace should be able to make
+// that root's own ".aegis/agents" definitions resolvable by rescanning that
+// root — without a ClearCustom, and without evicting a definition already
+// loaded from a different root (agentdef's custom map only ever overwrites
+// by name, so this is safe unlike persona's full-replace Refresh).
+func TestLoadFromDirsMergesAcrossRoots(t *testing.T) {
+	ClearCustom()
+	defer ClearCustom()
+
+	daemonDir := filepath.Join(t.TempDir(), "agents")
+	os.MkdirAll(daemonDir, 0o755)
+	os.WriteFile(filepath.Join(daemonDir, "daemon-agent.md"), []byte("---\nmode: plan\n---\nDaemon agent.\n"), 0o644)
+	if n := LoadFromDirs(daemonDir); n != 1 {
+		t.Fatalf("daemon load: got %d, want 1", n)
+	}
+
+	// Simulate resolveDef rescanning a session's own, different project root.
+	sessionDir := filepath.Join(t.TempDir(), "agents")
+	os.MkdirAll(sessionDir, 0o755)
+	os.WriteFile(filepath.Join(sessionDir, "session-agent.md"), []byte("---\nmode: build\n---\nSession agent.\n"), 0o644)
+	if n := LoadFromDirs(sessionDir); n != 1 {
+		t.Fatalf("session load: got %d, want 1", n)
+	}
+
+	if _, ok := Resolve("session-agent"); !ok {
+		t.Error("session-agent should resolve after LoadFromDirs against its own root")
+	}
+	// The daemon's own definition must still resolve — merging session-agent
+	// in must not have evicted it.
+	if def, ok := Resolve("daemon-agent"); !ok || def.Mode != "plan" {
+		t.Errorf("daemon-agent should still resolve unchanged, got %+v ok=%v", def, ok)
+	}
+}

@@ -54,6 +54,10 @@ type Options struct {
 	Questioner Questioner
 	// Knowledge, when set, enables the project_knowledge search tool (P3.3).
 	Knowledge *knowledge.Store
+	// KnowledgeProvider, when set, resolves a session-scoped knowledge store
+	// per call from the effective root (P25.9) instead of always using the
+	// fixed Knowledge store above. Optional — nil keeps today's behavior.
+	KnowledgeProvider KnowledgeProvider
 	// LongMem, when set, enables entity_remember and entity_recall tools (P3.1).
 	LongMem *longmem.Store
 	// Search selects the web_search provider (P5.3). Empty provider uses the
@@ -183,10 +187,10 @@ func Register(reg *tool.Registry, opts Options) error {
 		tools = append(tools, &askTool{questioner: opts.Questioner})
 	}
 	if opts.Knowledge != nil {
-		tools = append(tools, KnowledgeTools(opts.Knowledge)...)
+		tools = append(tools, KnowledgeTools(opts.Knowledge, opts.KnowledgeProvider, root)...)
 	}
 	if opts.LongMem != nil {
-		deferred = append(deferred, LongMemTools(opts.LongMem)...)
+		deferred = append(deferred, LongMemTools(opts.LongMem, root)...)
 	}
 	if opts.TeamTasks != nil && opts.MailboxRoot != "" {
 		deferred = append(deferred, TeamTools(opts.TeamTasks, opts.MailboxRoot)...)

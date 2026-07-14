@@ -53,12 +53,11 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 	if mem := s.memory.Load(); mem != "" {
 		parts = append(parts, mem)
 	}
-	if sk := skills.BuildIndex(s.workdirFor(sessionID), s.cfg.DataDir, s.sessionEnabledSkills(sessionID)); sk != "" {
+	workdir := s.workdirFor(sessionID)
+	if sk := skills.BuildIndex(workdir, s.cfg.DataDir, s.sessionEnabledSkills(sessionID)); sk != "" {
 		parts = append(parts, sk)
 	}
-	s.repoMapMu.Lock()
-	repoMap := s.repoMap
-	s.repoMapMu.Unlock()
+	repoMap := s.repoMapFor(workdir)
 	if repoMap != "" && !(s.cfg.Provider.LocalPromptProfile() && len(repoMap) > localRepoMapMaxBytes) {
 		parts = append(parts, repoMap)
 	}

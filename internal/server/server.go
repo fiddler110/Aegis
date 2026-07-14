@@ -74,6 +74,7 @@ type Server struct {
 	fileTracker *filetracker.Tracker
 	knowledge   *knowledge.Store // project knowledge base (P3.3); nil when unavailable
 	longMem     *longmem.Store   // long-term entity memory (P3.1); nil when unavailable
+	embedder    embed.Embedder   // shared semantic-recall embedder (P5.8); nil = BM25-only
 	runs        *runRegistry
 	sandbox     sandbox.Backend
 	lspMgr      *lsp.Manager
@@ -86,6 +87,18 @@ type Server struct {
 	repoMap     string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
 	repoMapMu   sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
 	personaDirs []string          // directories rescanned by refreshPersonas for hot reload
+
+	// knowledgeStores/repoMaps cache a per-session-Workdir instance of each
+	// daemon-wide singleton (P25.9): s.knowledge/s.repoMap above remain the
+	// fast path for the daemon's own default workspace (root == s.workspace),
+	// unchanged from before; a session on a different Workdir gets its own
+	// lazily-created entry here instead of silently seeing the daemon's own
+	// project. See knowledgeStoreFor/repoMapFor. (s.cmdReg has no per-turn,
+	// session-scoped consumer — its only reader is the daemon-wide GET
+	// /commands admin listing — so commands directory discovery needs no
+	// per-root cache here.)
+	knowledgeStores rootCache[*knowledge.Store]
+	repoMaps        rootCache[string]
 	// personaProjectDir/personaProjectTrusted gate control-field trust for
 	// project-sourced persona files (P27.7/FIND-09) — see persona.LoadFromDirs.
 	// Computed once at startup from the workspace-trust store, matching how
@@ -267,6 +280,36 @@ func (s *Server) workdirFor(id string) string {
 		}
 	}
 	return s.workspace
+}
+
+// knowledgeStoreFor returns the knowledge store for root (P25.9): the
+// daemon's own store unchanged when root is its default workspace (the
+// common case, and the only case before P25.9), or a lazily-opened,
+// cached store scoped to root's own ".aegis/knowledge.db" otherwise. Errors
+// opening a non-default root's store are returned rather than logged so
+// callers (project_knowledge) can fall back to their own fixed default.
+func (s *Server) knowledgeStoreFor(root string) (*knowledge.Store, error) {
+	if root == "" || root == s.workspace {
+		return s.knowledge, nil
+	}
+	return s.knowledgeStores.getOrCreate(root, func() (*knowledge.Store, error) {
+		return knowledge.Open(root, s.cfg.KnowledgeDBPath(root), s.embedder)
+	})
+}
+
+// repoMapFor returns the cached repository-map system-prompt block for
+// root (P25.9), lazily loading and caching it on first use for a root other
+// than the daemon's own default workspace.
+func (s *Server) repoMapFor(root string) string {
+	if root == "" || root == s.workspace {
+		s.repoMapMu.Lock()
+		defer s.repoMapMu.Unlock()
+		return s.repoMap
+	}
+	v, _ := s.repoMaps.getOrCreate(root, func() (string, error) {
+		return loadRepoMap(root, s.logger), nil
+	})
+	return v
 }
 
 // workdirAllowed reports whether workdir (already resolved to an absolute
@@ -479,7 +522,12 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
 	todoList := builtin.NewTodoList()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile()}); err != nil {
+	// KnowledgeProvider is a closure over s (nil here, assigned below by
+	// newWithDeps) rather than a direct method value, so the deferred read at
+	// actual tool-call time sees the fully constructed Server — same pattern
+	// as cronRun/s.cronPermCheck above.
+	knowledgeProvider := builtin.KnowledgeProviderFunc(func(root string) (*knowledge.Store, error) { return s.knowledgeStoreFor(root) })
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, KnowledgeProvider: knowledgeProvider, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile()}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -578,9 +626,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.lspMgr = lspMgr
 	s.knowledge = knowledgeStore
 	s.longMem = longMemStore
+	s.embedder = embedder
 	s.workspace = cwd
 	s.memory = memory.NewSources(cwd, cfg.DataDir)
 	s.repoMap = loadRepoMap(cwd, logger)
+	_, _ = s.repoMaps.getOrCreate(cwd, func() (string, error) { return s.repoMap, nil })
 
 	// Load custom agent definitions from user/project directories.
 	if n := agentdef.LoadFromDirs(agentdef.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
@@ -692,6 +742,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	if err := reg.Register(builtin.NewAgentTool(s.swarm, s.tasks,
 		builtin.WithCostCaps(cfg.Cost.BudgetUSD, cfg.Cost.MaxTokensPerRun),
 		builtin.WithConcurrencyLimiter(s.agentLimiter),
+		builtin.WithDataDir(cfg.DataDir),
 	)); err != nil {
 		store.Close()
 		return nil, err
@@ -1030,6 +1081,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		if s.longMem != nil {
 			_ = s.longMem.Close()
+		}
+		// Session-scoped knowledge stores opened for a non-default Workdir
+		// (P25.9) — s.knowledge above only covers the daemon's own workspace.
+		for _, ks := range s.knowledgeStores.values() {
+			_ = ks.Close()
 		}
 	}()
 	defer func() {

@@ -69,6 +69,12 @@ type agentTool struct {
 	// run simultaneously (P17), separate from MaxParallelAgents which bounds
 	// how many may be requested at all.
 	limiter *swarm.AdaptiveLimiter
+
+	// dataDir is the per-user data directory, used to rescan a session's own
+	// project agent-definition directory before resolving subagent_type
+	// (P25.9) — see resolveDef. Empty disables the rescan (agentdef.Resolve
+	// still serves whatever New()'s startup load registered).
+	dataDir string
 }
 
 // AgentToolOption configures optional behavior on the `agent` tool.
@@ -91,6 +97,16 @@ func WithCostCaps(budgetUSD float64, maxTokensPerRun int) AgentToolOption {
 func WithConcurrencyLimiter(l *swarm.AdaptiveLimiter) AgentToolOption {
 	return func(a *agentTool) {
 		a.limiter = l
+	}
+}
+
+// WithDataDir sets the per-user data directory (P25.9), enabling
+// resolveDef to rescan a session's own project ".aegis/agents" directory
+// before resolving subagent_type. Pass the same value as
+// builtin.Options.DataDir.
+func WithDataDir(dataDir string) AgentToolOption {
+	return func(a *agentTool) {
+		a.dataDir = dataDir
 	}
 }
 
@@ -163,6 +179,22 @@ type workflowAgent struct {
 	SubagentType string `json:"subagent_type"`
 }
 
+// resolveDef resolves subagentType, first rescanning workdir's own project
+// agent-definition directory (P25.9) when it's set and a.dataDir is
+// configured: agentdef's custom map is a global, additive-by-name registry
+// (Register only ever overwrites by name, never clears — unlike persona's
+// full-replace Refresh), so merging in a session's own root here is safe —
+// it can only add or override a same-named definition, never evict another
+// session's or the daemon's own. LoadFromDirs re-parses a small number of
+// *.md files per call, only paid when an agent tool call actually fires
+// from a session, not on every tool call.
+func (a *agentTool) resolveDef(subagentType, workdir string) (agentdef.Definition, bool) {
+	if workdir != "" && a.dataDir != "" {
+		agentdef.LoadFromDirs(agentdef.DiscoverDirs(a.dataDir, workdir)...)
+	}
+	return agentdef.Resolve(subagentType)
+}
+
 func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
 		Description     string          `json:"description"`
@@ -225,7 +257,7 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		}, nil
 	}
 
-	def, known := agentdef.Resolve(args.SubagentType)
+	def, known := a.resolveDef(args.SubagentType, workdir)
 	childMode := clampMode(swarm.ParentModeFromContext(ctx), def.Mode)
 
 	cfg := swarm.SpawnConfig{
@@ -286,7 +318,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 		if extraContext != "" {
 			prompt = extraContext + "\n\n---\n\n" + prompt
 		}
-		def, _ := agentdef.Resolve(wa.SubagentType)
+		def, _ := a.resolveDef(wa.SubagentType, workdir)
 		childMode := clampMode(swarm.ParentModeFromContext(ctx), def.Mode)
 		cfg := swarm.SpawnConfig{
 			Name:         fmt.Sprintf("%s-%s", def.Name, uuid.NewString()[:8]),
