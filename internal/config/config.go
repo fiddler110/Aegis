@@ -1159,7 +1159,18 @@ func ProviderAPIKey(provider string) string {
 	case "anthropic":
 		return os.Getenv("ANTHROPIC_API_KEY")
 	case "openai":
-		return os.Getenv("OPENAI_API_KEY")
+		if k := os.Getenv("OPENAI_API_KEY"); k != "" {
+			return k
+		}
+		// Groq and OpenRouter are OpenAI-compatible endpoints reached via
+		// provider.default: openai + a custom base_url (see docs/providers.md),
+		// not distinct provider names — fall back to their named env vars so
+		// docs/configuration.md's GROQ_API_KEY/OPENROUTER_API_KEY entries (P29.4)
+		// actually work without requiring OPENAI_API_KEY reuse.
+		if k := os.Getenv("GROQ_API_KEY"); k != "" {
+			return k
+		}
+		return os.Getenv("OPENROUTER_API_KEY")
 	case "ollama":
 		if k := os.Getenv("OPENAI_API_KEY"); k != "" {
 			return k

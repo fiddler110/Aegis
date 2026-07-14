@@ -519,7 +519,7 @@ Persist structured facts about a named entity to the long-term cross-session sto
   "project": "Aegis",
   "entity_type": "system",       // system | file | api | person | decision
   "entity_name": "daemon",
-  "facts": "The daemon owns sessions and runs on 127.0.0.1:4127. Auth via bearer token in ~/.local/share/aegis/auth."
+  "facts": "The daemon owns sessions and runs on 127.0.0.1:4127. Auth via bearer token in ~/.config/aegis/auth."
 }
 ```
 
@@ -962,7 +962,7 @@ Recursion depth is limited to 3 levels.
 
 Agent teams use a SQLite-backed shared task list and a file mailbox for peer-to-peer messaging. Multiple agents claim and complete tasks independently without a parent-child hierarchy. All team tools are deferred — load them with `tool_search`.
 
-### `team_task_create`
+### `team_task_add`
 
 **Capability:** write  *(deferred)*
 

@@ -60,6 +60,12 @@ API keys use their native names (not the `AEGIS_` prefix):
 | `GROQ_API_KEY` | Groq |
 | `OPENROUTER_API_KEY` | OpenRouter |
 
+Groq and OpenRouter aren't distinct `provider.default` values — both are reached with
+`provider.default: openai` plus a `base_url` pointing at their OpenAI-compatible endpoint (see
+docs/providers.md). `ProviderAPIKey` checks `OPENAI_API_KEY` first, then falls back to
+`GROQ_API_KEY`, then `OPENROUTER_API_KEY` — so either the shared `OPENAI_API_KEY` or the
+provider-specific var works.
+
 ---
 
 ## Full Config Reference
@@ -152,6 +158,14 @@ provider:
   # sending data off the machine on an outage. Cloud-to-cloud and any-to-local
   # failover are always allowed and never need this flag.
   allow_cloud_fallback: false
+
+  # Selects the system-prompt/tool-exposure shape (P25.6). "auto" (default)
+  # infers from base_url: loopback/localhost gets the "local" profile
+  # (trimmed prompt, web_search/web_fetch/security_scan/git_pr deferred, repo
+  # map capped) tuned for small local models; any other base_url gets the
+  # unchanged "default" profile. Set "local" or "default" to force the choice
+  # regardless of base_url.
+  prompt_profile: auto
 
 
 # ── Permission ────────────────────────────────────────────────────────────────
@@ -318,7 +332,7 @@ tui:
   # intellectual phrases while the model is reasoning, and separate
   # investigation/crafting/combat/travel/party banks while a tool call is
   # in flight (read/write/execute/network/spawn respectively).
-  humor_mode: false
+  humor_mode: true
 
   # Color scheme: "dark" (default), "light", an embedded builtin (catppuccin,
   # dracula, gruvbox, tokyonight), or a custom name loaded from
@@ -467,6 +481,11 @@ sandbox:
   # canonical spelling. Any other value fails the daemon at startup with an
   # error naming the offending value, rather than silently running
   # unsandboxed (which is what happened before P25.2).
+  #
+  # NOTE: shown here as "os" because that's what `aegis --first-init` writes
+  # into a fresh global config. If this key is absent entirely (no config
+  # file, or a config file that doesn't set it), the built-in default is
+  # "local", not "os".
   backend: os
 
   # Force a specific runtime when backend=container or backend=auto:
@@ -523,6 +542,17 @@ security:
     # - "api.github.com"
     # - "registry.npmjs.org"
 
+  # Runs a read-capability tool's output through gitleaks-backed secret
+  # detection before it's added to the conversation sent to the model
+  # provider; any match is masked as "[REDACTED:<rule>]". Defaults to true —
+  # sending file/conversation content carrying an unredacted secret to a
+  # cloud provider is a real exposure with no other default control. Needs
+  # gitleaks on PATH (fails open, i.e. no redaction, if missing) and adds
+  # per-call latency; local Ollama usage never sends content off the machine
+  # at all and remains the stronger mitigation. See docs/providers.md "Data
+  # Exposure & Redaction".
+  redact_secrets: true
+
   # Security-scanner availability (P11.11): controls `aegis scan`/security_scan.
   # "auto" (host binary if present, else a configured container image) |
   # "host" (never fall back to a container) | "container" (always prefer it).
@@ -540,6 +570,35 @@ security:
     #   method: host
     # gitleaks:
     #   install: prompt   # prompt (default) | always | never
+
+  # Names a specific registered WSL distro (e.g. "kali-linux") to target for
+  # every WSL-capable scanner (nmap, nuclei, opengrep, kubescape), instead of
+  # whatever `wsl --set-default` currently points at. Empty (default) uses
+  # WSL's own default-distro selection. Windows-only; a security-tooling
+  # distro like Kali is recommended for red-team/recon work — see
+  # docs/security.md.
+  wsl_distro: ""
+
+  # Hard authorization gate for the dast_scan tool (P11.7), enforced inside
+  # the tool itself regardless of permission mode — an active scanner
+  # pointed at an arbitrary host is an abuse primitive. Loopback and
+  # RFC-1918 private addresses are always allowed with no config needed.
+  # Sourced from user/global config only: a project .aegis/config.yaml can
+  # never widen this, even once trusted.
+  dast:
+    # Exact hostnames, ".suffix" subdomain wildcards, or CIDR ranges
+    # authorized for scanning, in addition to the loopback/RFC-1918
+    # default-allow. Hostnames are matched literally, never DNS-resolved.
+    allowed_targets: []
+      # - "staging.example.com"
+      # - ".internal.example.com"
+      # - "10.0.0.0/8"
+
+    # Gates active/api scan modes (real attack payloads, not just passive
+    # observation) behind an explicit opt-in, on top of the per-call
+    # approval prompt every dast_scan call already gets from its execute
+    # capability. Default false.
+    allow_active: false
 
   # Opt-in P12 debate integration (P12.5): both default false. See
   # multi-agent.md#debate-p12.
@@ -742,8 +801,8 @@ cleanup:
 # ── Data directory ────────────────────────────────────────────────────────────
 # Where Aegis stores its databases, logs, and user-scoped files.
 # Leave empty for the OS default:
-#   macOS/Linux: ~/.local/share/aegis/
-#   Windows:     %LocalAppData%\aegis\
+#   macOS/Linux: ~/.config/aegis/
+#   Windows:     %AppData%\aegis\
 data_dir: ""
 ```
 

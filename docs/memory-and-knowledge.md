@@ -9,10 +9,10 @@ Aegis has several systems for persisting information across sessions. Together t
 | System | Scope | Storage | Loaded into | Purpose |
 |--------|-------|---------|-------------|---------|
 | Project memory | Project | `.aegis/memory.md` | System prompt | Facts about this project |
-| User memory | Global | `~/.local/share/aegis/memory.md` | System prompt | Facts that apply everywhere |
+| User memory | Global | `~/.config/aegis/memory.md` | System prompt | Facts that apply everywhere |
 | Skills | Project or global | `*.md` files | System prompt | Reusable procedures |
 | Project knowledge base | Project | `.aegis/knowledge.db` | `project_knowledge` tool | FTS5-indexed docs and code comments, optionally hybrid BM25+semantic |
-| Long-term entity store | Global | `~/.local/share/aegis/longmem.db` | `entity_recall` tool | Cross-session structured facts, optionally hybrid BM25+semantic |
+| Long-term entity store | Global | `~/.config/aegis/longmem.db` | `entity_recall` tool | Cross-session structured facts, optionally hybrid BM25+semantic |
 
 ---
 
@@ -51,7 +51,7 @@ The agent can call `remember` to persist facts:
 ## Project: Aegis
 
 - Go 1.25+, built with Cobra (CLI) and Bubble Tea (TUI)
-- Daemon runs on 127.0.0.1:4127; auth token at ~/.local/share/aegis/auth
+- Daemon runs on 127.0.0.1:4127; auth token at ~/.config/aegis/auth
 - SQLite for sessions, tasks, and knowledge base (modernc.org/sqlite driver)
 - Provider adapters: internal/provider/anthropic and internal/provider/openai
 - Permission gate in internal/permission/; audit trail as JSONL files
@@ -63,7 +63,7 @@ The agent can call `remember` to persist facts:
 
 ## User Memory
 
-**File:** `~/.local/share/aegis/memory.md` (Linux/macOS) or `%LocalAppData%\aegis\memory.md` (Windows)
+**File:** `~/.config/aegis/memory.md` (Linux/macOS) or `%AppData%\aegis\memory.md` (Windows)
 
 User memory stores facts that apply across all projects — working preferences, personal conventions, and context about you.
 
@@ -208,7 +208,7 @@ If the embedder is unreachable or misconfigured at search time, both stores sile
 
 ## Long-Term Entity Store
 
-**Database:** `~/.local/share/aegis/longmem.db`
+**Database:** `~/.config/aegis/longmem.db`
 
 The entity store holds cross-session structured facts about named entities — systems, files, APIs, people, or decisions. Unlike project memory (which is a flat text file), entities are keyed and searchable.
 
@@ -246,7 +246,7 @@ The entity store persists across projects. It is not loaded into the system prom
 
 At session start, Aegis loads memory in this order:
 
-1. User memory (`~/.local/share/aegis/memory.md`)
+1. User memory (`~/.config/aegis/memory.md`)
 2. Project memory (`.aegis/memory.md`)
 3. Project skills (`.aegis/skills/*.md`) — checked first, so a project skill shadows a same-named user skill
 4. User skills (`~/.aegis/skills/*.md`)

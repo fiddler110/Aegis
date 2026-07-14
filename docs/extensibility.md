@@ -150,7 +150,7 @@ Custom slash commands are markdown files that define prompt templates. They appe
 | Scope | Directory |
 |-------|-----------|
 | Project | `.aegis/commands/*.md` |
-| User (global) | `~/.local/share/aegis/commands/*.md` |
+| User (global) | `~/.config/aegis/commands/*.md` |
 
 Project commands override user commands with the same name.
 
@@ -255,7 +255,7 @@ Agent definitions are reusable sub-agent configurations. They let you define spe
 | Scope | Directory |
 |-------|-----------|
 | Project | `.aegis/agents/*.md` |
-| User (global) | `~/.local/share/aegis/agents/*.md` |
+| User (global) | `~/.config/aegis/agents/*.md` |
 
 Project agents override user agents with the same name.
 

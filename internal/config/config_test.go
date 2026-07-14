@@ -318,6 +318,33 @@ func TestAPIKeyFromEnv(t *testing.T) {
 	}
 }
 
+// TestProviderAPIKeyGroqOpenRouterFallback confirms the "openai" provider
+// case falls back to GROQ_API_KEY then OPENROUTER_API_KEY when
+// OPENAI_API_KEY is unset (P29.4) — Groq/OpenRouter are reached via
+// provider.default: openai + a custom base_url, not their own provider name.
+func TestProviderAPIKeyGroqOpenRouterFallback(t *testing.T) {
+	clearEnv(t, "OPENAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY")
+
+	if got := ProviderAPIKey("openai"); got != "" {
+		t.Errorf("with no env vars set, got %q, want empty", got)
+	}
+
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-test")
+	if got := ProviderAPIKey("openai"); got != "sk-or-test" {
+		t.Errorf("OPENROUTER_API_KEY fallback: got %q, want sk-or-test", got)
+	}
+
+	t.Setenv("GROQ_API_KEY", "gsk-test")
+	if got := ProviderAPIKey("openai"); got != "gsk-test" {
+		t.Errorf("GROQ_API_KEY should take priority over OPENROUTER_API_KEY: got %q, want gsk-test", got)
+	}
+
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	if got := ProviderAPIKey("openai"); got != "sk-test" {
+		t.Errorf("OPENAI_API_KEY should take priority over both: got %q, want sk-test", got)
+	}
+}
+
 // TestLoadDotEnvAppliesPermissionHardening exercises the FIND-29/P24.16
 // fsguard.RestrictToOwner call loadDotEnv makes on a successful read. On
 // POSIX, fsguard.RestrictToOwner is a no-op, so this mainly guards against a

@@ -345,7 +345,7 @@ Agent teams are a peer-to-peer coordination model distinct from the parent-child
 
 ```json
 // Create a task
-{"tool": "team_task_create", "title": "Review internal/permission/", "priority": "high"}
+{"tool": "team_task_add", "title": "Review internal/permission/", "priority": "high"}
 
 // Claim it (atomic — only one agent succeeds)
 {"tool": "team_task_claim", "task_id": "teamtask-abc123"}
