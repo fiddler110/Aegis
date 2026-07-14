@@ -8,7 +8,52 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — shipped **P30.3** (Tier 1), the last open Tier 1 item: the TUI's
+**Last updated:** 2026-07-14 — shipped **P31.4** (Tier 2), with a scope correction from the
+original plan. The roadmap's plan was "dismiss both `go/command-injection` alerts as
+argv-exec/by-design." Re-verifying alert #7 (`internal/tool/builtin/git.go:68`) against source
+confirmed the narrow CodeQL claim (never shell-interpreted — a false positive for classic command
+injection) but surfaced a real, unrelated vulnerability on the same code path during that check:
+the `git` tool's `remote` subcommand was allowlisted for "read-only listing" with no mutation
+guard (unlike `branch`/`tag`/`stash`, which each have one), so `remote add <name> <url>` could
+write an arbitrary URL into `.git/config` and `remote show`/`update`/`prune` would then contact
+it — a `file://` URL walks to any git repo the daemon process can read, and the result (via the
+already-allowlisted `log`/`show` subcommands) is a full sandbox escape reading file contents
+outside the session's Workdir; any URL scheme is also an unapproved network-egress path, since the
+tool is declared `CapRead` and so never reaches the `CapNetwork` `Ask` gate `permission.go` added
+specifically to close silent read+exfil side channels. Confirmed exploitable with a PoC in an
+isolated scratch repo (`file://` remote pointing at an unrelated repo elsewhere on disk; `remote
+show`/`update` then `log`/`show` read its full history and file contents). `ext::` shell-transport
+RCE was also tested but is blocked by default on git 2.54; the read/network-escape stands
+independent of that. Fixed by adding a `"remote"` case to `rejectMutatingReadArgs`
+(`internal/tool/builtin/git.go`) blocking `add`, `set-url`, `set-branches`, `set-head`, `rename`,
+`remove`, `rm`, `update`, `prune` — mirroring the existing `branch`/`tag` guard shape — so no
+attacker-controlled URL can ever enter `.git/config`; plain listing (`remote`, `remote -v`,
+`remote show <existing>`, `remote get-url`) still works. New `TestGitReadRejectsRemoteMutation`
+(`internal/tool/builtin/git_test.go`) covers all nine blocked subverbs plus the `-v` allow case.
+Alert #7 can now be dismissed with a justification that references this fix rather than only the
+argv-vector reasoning. Alert #5 (`internal/hooks/exec.go:95`) was re-verified independently —
+traced `ExecSpec.Command` to its only source (`config.Config.Hooks`, koanf-loaded from
+`config.yaml`/`.aegis/config.yaml`; no builtin tool writes to it) — and dismissed as originally
+planned, no code change. `go build ./...`, `go test ./internal/tool/...` pass. P31.5's nineteen
+`go/path-injection` alerts were also re-verified by reading five of the referenced files
+(`persona/load.go`, `skills/skills.go`, `memory/memory.go`, `memory/integrity.go`,
+`security/sbom.go`) against the two claimed safe shapes (directory-enumeration re-join;
+`filepath.Join(validatedRoot, fixed-or-sanitized-suffix)`) — both held up, no vulnerability found,
+dismiss/suppress as originally planned with no code change. See roadmap.md for the remaining Tier
+2 items (P31.5's suppression bookkeeping next, then P30.4-P30.8).
+
+**Previously, same day:** shipped **P31.3** (Tier 2): `internal/server/webui.go`'s
+`handleWebUI` set the `HttpOnly`/`SameSite=Strict` double-submit CSRF cookie (FIND-01/P24.1)
+without `Secure`, unconditionally — fine on the default loopback-only plaintext deployment, but a
+gap on the `server.tls.enabled` (P24.18) remote-accessible path, where the cookie should never be
+sent back over a downgraded plaintext connection. Changed the handler's unused `_ *http.Request`
+parameter to `r` and set `Secure: r.TLS != nil` on the cookie. New
+`TestWebUICSRFCookieSecureFlag` (`internal/server/webui_test.go`) asserts `Secure=false` over a
+plain `httptest.NewServer` and `Secure=true` over `httptest.NewTLSServer`. `go build ./...` and
+`go test ./internal/server/...` both pass. See roadmap.md for the remaining Tier 2 items (P31.4
+next).
+
+**Previously, same day:** shipped **P30.3** (Tier 1), the last open Tier 1 item: the TUI's
 `!`-prefixed bang command (`execBangCmd`, `internal/tui/tui.go`) hardcoded
 `exec.CommandContext(ctx, "sh", "-c", cmd)`, the same Windows gap as P30.2 in a different call
 site. Added a `bangShellCommand` helper following the identical
