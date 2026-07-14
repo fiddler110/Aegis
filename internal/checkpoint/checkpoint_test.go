@@ -148,3 +148,63 @@ func TestNilSnapshotterCapture(t *testing.T) {
 	var s *Snapshotter
 	s.Capture("/nonexistent") // must not panic
 }
+
+// TestSnapshotterRestoreFiles is the P27.16 regression: Snapshotter.RestoreFiles
+// must delegate to Store.RestoreFiles for its own checkpoint ID, giving callers
+// (the engine's guard-FAIL quarantine path) a way to roll back a turn's writes
+// without needing direct access to the underlying Store.
+func TestSnapshotterRestoreFiles(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	existing := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(existing, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created := filepath.Join(dir, "b.txt")
+
+	cp, err := st.Create(ctx, "s1", 0, "do the thing")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	snap := st.NewSnapshotter(cp.ID)
+	snap.Capture(existing)
+	snap.Capture(created)
+
+	if err := os.WriteFile(existing, []byte("bad write"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(created, []byte("bad new file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := snap.RestoreFiles(ctx)
+	if err != nil {
+		t.Fatalf("RestoreFiles: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("restored %d files, want 2", n)
+	}
+	got, err := os.ReadFile(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Errorf("existing file = %q, want %q", got, "original")
+	}
+	if _, err := os.Stat(created); !os.IsNotExist(err) {
+		t.Errorf("created file should have been removed, stat err = %v", err)
+	}
+}
+
+// TestNilSnapshotterRestoreFiles mirrors TestNilSnapshotterCapture: a nil
+// Snapshotter (no checkpoint store wired in) must not panic and must report
+// zero files restored, so a caller can invoke it unconditionally.
+func TestNilSnapshotterRestoreFiles(t *testing.T) {
+	var s *Snapshotter
+	n, err := s.RestoreFiles(context.Background())
+	if err != nil || n != 0 {
+		t.Errorf("nil Snapshotter.RestoreFiles = (%d, %v), want (0, nil)", n, err)
+	}
+}
