@@ -16,6 +16,8 @@ import (
 
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/server"
 	"github.com/spf13/cobra"
@@ -110,6 +112,7 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	checks := []doctorCheck{
 		doctorWorkspaceTrustCheck(cfg),
 		doctorProviderCheck(ctx, cfg),
+		doctorToolCallCheck(ctx, cfg),
 		doctorSandboxCheck(cfg),
 		doctorScannerCheck(ctx, cfg),
 		doctorGuardCheck(cfg),
@@ -202,6 +205,112 @@ func doctorProviderCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	return doctorCheck{
 		Name: name, Severity: doctorPass,
 		Detail: fmt.Sprintf("provider %q configured, API key present", cfg.Provider.Default),
+	}
+}
+
+// doctorToolCallSmokePrompt is the obviously-actionable prompt sent to the
+// model for the P28.2 tool-calling smoke test: it names a concrete tool and
+// leaves no ambiguity that calling it (not describing it) is the expected
+// response.
+const doctorToolCallSmokePrompt = "Call the `list_files` tool now to list the files in the current directory. Do not describe what you would do — call the tool."
+
+// doctorToolCallCheck (P28.2) does a cheap live round-trip smoke test against
+// the configured model: send a single obviously-actionable prompt with one
+// trivial tool schema and check whether the response contains at least one
+// tool call. Live evaluation (`TestLiveWorkflow`, 2026-07-14) found wide
+// variance in local-model tool-calling reliability — `qwythos:latest` (this
+// repo's own configured default) diagnosed a bug but never called
+// edit_file/write_file to fix it, and `deepseek-r1:8b` made zero tool calls
+// on an explicit task, answering in prose instead — while doctorProviderCheck
+// above only verifies reachability and model availability, not tool-calling
+// competence.
+//
+// Scoped to local (Ollama-style) providers only, the same gate
+// doctorProviderCheck uses via ollamaNativeBase: this is where the observed
+// variance lives, cloud providers (Anthropic/OpenAI) have well-established
+// tool-calling support, and skipping them keeps this check free of network
+// cost/latency for the common cloud-provider case. When no local provider is
+// configured, or doctorProviderCheck's own reachability/model-availability
+// check already failed for this config, this check silently skips (PASS,
+// not a duplicate failure) rather than re-diagnosing the same gap — the same
+// "unreachable/unconfigured provider is not this check's problem" pattern
+// doctorProviderCheck itself follows for a missing cloud API key. Any
+// failure past that point (timeout, transport error, malformed stream)
+// degrades to WARN, never FAIL: a flaky or slow smoke test must never make
+// `aegis doctor` non-zero-exit in an offline/CI context, matching how
+// doctorDaemonChecks degrades to WARN rather than FAIL when no daemon is
+// reachable.
+func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
+	const name = "tool-calling"
+
+	if ollamaNativeBase(cfg) == "" {
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — only checked for local Ollama-style providers"}
+	}
+	if cfg.Provider.Model == "" || cfg.Provider.Model == "auto" {
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — no model resolved yet"}
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adapter, err := providerfactory.Build(cfg, logger)
+	if err != nil {
+		// doctorProviderCheck already reports provider misconfiguration.
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — provider not configured"}
+	}
+
+	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	req := provider.Request{
+		Model:  cfg.Provider.Model,
+		System: "You are a coding agent. When a task requires a tool, call it immediately instead of describing it in prose.",
+		Messages: []provider.Message{{
+			Role:    provider.RoleUser,
+			Content: []provider.Block{provider.TextBlock{Text: doctorToolCallSmokePrompt}},
+		}},
+		Tools: []provider.ToolSchema{{
+			Name:        "list_files",
+			Description: "List the files in a directory.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"directory to list"}},"required":["path"]}`),
+		}},
+		MaxTokens: 256,
+	}
+
+	events, err := adapter.Stream(rctx, req)
+	if err != nil {
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: fmt.Sprintf("tool-call smoke test could not run: %v", err),
+			Fix:    "best-effort check, not fatal — retry `aegis doctor` once the model server is responsive",
+		}
+	}
+
+	toolCalls := 0
+	var streamErr error
+	for ev := range events {
+		switch ev.Type {
+		case provider.EventToolUse:
+			toolCalls++
+		case provider.EventError:
+			streamErr = ev.Err
+		}
+	}
+	if streamErr != nil {
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: fmt.Sprintf("tool-call smoke test failed: %v", streamErr),
+			Fix:    "best-effort check, not fatal — retry `aegis doctor` once the model server is responsive",
+		}
+	}
+	if toolCalls == 0 {
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: fmt.Sprintf("model %q answered an obviously-actionable smoke-test prompt with zero tool calls", cfg.Provider.Model),
+			Fix:    "some local models unreliably drive Aegis's tool-calling loop — see docs/providers.md's \"Tool-calling reliability for local models\" section for model families that have and haven't proven reliable",
+		}
+	}
+	return doctorCheck{
+		Name: name, Severity: doctorPass,
+		Detail: fmt.Sprintf("model %q made %d tool call(s) on the smoke-test prompt", cfg.Provider.Model, toolCalls),
 	}
 }
 
