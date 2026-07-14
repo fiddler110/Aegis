@@ -44,6 +44,40 @@ ollama pull deepseek-r1:14b    # reasoning model
 
 **Shared-host note:** Ollama serves over plain HTTP by default (no TLS), so daemon↔Ollama traffic is unencrypted. On a single-user machine this is no different from any other localhost loopback traffic. On a **shared multi-user host**, another local account could observe or tamper with that traffic; where Ollama supports it, enable TLS, or prefer a single-user host for sensitive work.
 
+### Tool-calling reliability for local models
+
+Not every locally-runnable model reliably drives Aegis's agent loop. The engine's tool-dispatch loop
+depends on the model actually emitting a structured `tool_call` in its response — a model that instead
+*describes* the action it would take, in prose, never triggers `edit_file`/`write_file`/etc., and the
+turn just ends with nothing done. A live evaluation (`TestLiveWorkflow`, 2026-07-14) drove three local
+models through identical run/fix/verify tasks over the real HTTP+SSE seam the TUI/web UI use and found
+wide variance:
+
+- **`gpt-oss:20b`** completed the task end-to-end (13 tool calls, ~2m28s) — reliable tool-calling.
+- **`qwythos:latest`** (this repo's own template default `provider.model`) correctly diagnosed the
+  seeded bug in its response text but never called `edit_file`/`write_file` to actually fix it —
+  partial reliability: it reasons well but doesn't consistently close the loop into action.
+- **`deepseek-r1:8b`** made **zero tool calls** on an explicit, unambiguous task, answering entirely in
+  prose instead. This is a known R1-distill failure mode: the model's reasoning gets dumped as the
+  final answer instead of being followed by a structured tool call.
+
+Takeaways:
+
+- Prefer models explicitly instruction-tuned for tool/function calling (`gpt-oss:20b`-class models,
+  `qwen2.5:32b`+) for agentic tasks over small reasoning-distilled models. Reasoning-distilled models —
+  the `-r1`/`deepseek-r1` family in particular — are prone to answering in prose even when a tool call
+  is clearly required; see [Extended Thinking](#extended-thinking) for more on thinking-model quirks
+  (a separate concern from tool-calling reliability — a model can support tool calls fine while its
+  thinking preamble leaks stray text, or vice versa).
+- `aegis doctor` (see [CLI Reference](cli-reference.md)) includes a "tool-calling" check (P28.2) that
+  sends a cheap, obviously-actionable smoke-test prompt to the configured local model and **warns**
+  (never fails hard — safe for offline/CI use) if it comes back with zero tool calls. Run it after
+  switching models to catch this before it costs you a real task.
+- If a model diagnoses correctly but doesn't act on it (the `qwythos:latest` pattern above), a more
+  directive follow-up prompt ("now call `edit_file` to apply the fix") often unsticks it — the engine
+  itself does not yet automatically detect and nudge/retry a suspicious zero-tool-call completion on an
+  actionable turn; that's tracked as a larger follow-up item (P28.3), not yet built.
+
 ### LM Studio
 
 ```yaml

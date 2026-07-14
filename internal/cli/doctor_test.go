@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,5 +203,122 @@ func TestDoctorProviderCheckMissingAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(got.Fix, "ANTHROPIC_API_KEY") {
 		t.Errorf("fix hint missing env var name: %q", got.Fix)
+	}
+}
+
+// TestDoctorToolCallCheckSkipsCloudProvider confirms the P28.2 smoke test
+// never fires a live network call for a cloud provider — it's scoped to
+// local (Ollama-style) providers only, where the tool-calling reliability
+// variance was actually observed. This is also what keeps
+// TestDoctorCleanSetupExitsZero (which configures a fake ANTHROPIC_API_KEY,
+// no reachable model) free of any live-network dependency in CI.
+func TestDoctorToolCallCheckSkipsCloudProvider(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "anthropic", APIKey: "sk-test-fake", Model: "claude-x"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got := doctorToolCallCheck(ctx, cfg)
+	if got.Severity != doctorPass {
+		t.Errorf("cloud provider: got %v, want pass (skipped)", got.Severity)
+	}
+	if !strings.Contains(got.Detail, "skipped") {
+		t.Errorf("expected a skipped detail message, got %q", got.Detail)
+	}
+}
+
+// TestDoctorToolCallCheckSkipsUnresolvedModel confirms the check skips
+// rather than making a live call when model is still "auto"/unresolved.
+func TestDoctorToolCallCheckSkipsUnresolvedModel(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", Model: "auto"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got := doctorToolCallCheck(ctx, cfg)
+	if got.Severity != doctorPass {
+		t.Errorf("unresolved model: got %v, want pass (skipped)", got.Severity)
+	}
+}
+
+// sseServer starts an httptest server that answers any POST with the given
+// SSE-formatted body, mimicking an OpenAI-compatible /chat/completions
+// streaming response (the shape internal/provider/openai consumes).
+func sseServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestDoctorToolCallCheckDetectsZeroToolCalls reproduces the P28.2 live-eval
+// failure mode directly: a model that answers an obviously-actionable
+// prompt in prose, with no tool_calls in the response, must WARN (never
+// FAIL — this must stay non-fatal for offline/CI use) and name the doc
+// pointer in Fix.
+func TestDoctorToolCallCheckDetectsZeroToolCalls(t *testing.T) {
+	const body = `data: {"choices":[{"delta":{"content":"I would list the files by running ls."},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+	srv := sseServer(t, body)
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: srv.URL, Model: "deepseek-r1:8b"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	got := doctorToolCallCheck(ctx, cfg)
+	if got.Severity != doctorWarn {
+		t.Fatalf("zero tool calls: got %v, want warn; detail=%q", got.Severity, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "zero tool calls") {
+		t.Errorf("expected detail to call out zero tool calls, got %q", got.Detail)
+	}
+	if !strings.Contains(got.Fix, "docs/providers.md") {
+		t.Errorf("expected fix to point at docs/providers.md, got %q", got.Fix)
+	}
+}
+
+// TestDoctorToolCallCheckPassesOnToolCall confirms a model that does call
+// the smoke-test tool reports PASS with the observed call count.
+func TestDoctorToolCallCheckPassesOnToolCall(t *testing.T) {
+	const body = `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"list_files","arguments":"{\"path\":\".\"}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+`
+	srv := sseServer(t, body)
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: srv.URL, Model: "gpt-oss:20b"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	got := doctorToolCallCheck(ctx, cfg)
+	if got.Severity != doctorPass {
+		t.Fatalf("one tool call: got %v, want pass; detail=%q", got.Severity, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "1 tool call") {
+		t.Errorf("expected detail to report the call count, got %q", got.Detail)
+	}
+}
+
+// TestDoctorToolCallCheckWarnsOnTransportFailure confirms an unreachable
+// local model server degrades to WARN, not FAIL — this check must never be
+// able to make `aegis doctor` exit non-zero on its own.
+func TestDoctorToolCallCheckWarnsOnTransportFailure(t *testing.T) {
+	srv := sseServer(t, "")
+	unreachable := srv.URL
+	srv.Close() // close immediately so the port is refused
+
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: unreachable, Model: "qwythos:latest"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	got := doctorToolCallCheck(ctx, cfg)
+	if got.Severity != doctorWarn {
+		t.Fatalf("unreachable server: got %v, want warn (never fail); detail=%q", got.Severity, got.Detail)
 	}
 }

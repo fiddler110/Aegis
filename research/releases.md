@@ -8,7 +8,10 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P28.4** (Tier 2, compaction robustness) shipped: proactive
+**Last updated:** 2026-07-14 — **P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor`
+smoke test) and **P28.4** (Tier 2, compaction robustness) shipped.
+
+**P28.4** (Tier 2, compaction robustness) shipped: proactive
 per-turn context compaction now falls back to a deterministic, non-LLM shortening pass after the
 LLM summarizer fails twice in a row for the same run, instead of skipping compaction indefinitely.
 
@@ -69,8 +72,56 @@ existing `Compact`/`ForceCompact` coverage for the new deterministic path) and
 `failingFallbackCompactor` test double that always fails `Compact` but implements
 `FallbackCompact` — asserts the fallback fires on exactly the 2nd consecutive failure, not the 1st,
 and that the resulting notice mentions the fallback). `go build ./...`, `go vet ./...`, and the full
-`go test ./...` pass clean. This was one of Tier 2's four items (P28.2, P28.4, P28.6, P28.7); three
+`go test ./...` pass clean. This was one of Tier 2's four items (P28.2, P28.4, P28.6, P28.7); two
 remain — see [roadmap.md](roadmap.md).
+
+Same day (2026-07-14): **P28.2** (Tier 2, cheap no-dependency win) shipped: guidance on which
+locally-runnable model families reliably drive Aegis's tool-calling loop, plus a new `aegis doctor`
+check that catches the failure mode live. Live evaluation (`TestLiveWorkflow` against
+`qwythos:latest`, `deepseek-r1:8b`, `gpt-oss:20b`, 2026-07-14) found wide variance in local-model
+tool-calling reliability: `qwythos:latest` (this repo's own configured `provider.model` default)
+correctly diagnosed a seeded bug in its response text but never called `edit_file`/`write_file` to
+actually fix it; `deepseek-r1:8b` made **zero tool calls** on an explicit run/fix/verify task,
+answering entirely in prose instead (a known R1-distill failure mode — reasoning dumped as the final
+answer instead of a structured `tool_call`); only `gpt-oss:20b` completed the task end-to-end (13
+tool calls, 2m28s). `aegis doctor`'s existing provider check (`doctorProviderCheck`) only verifies
+reachability and model availability, never tool-calling competence, so this class of failure was
+invisible until a real task hit it.
+
+Fix, part (a): a new "Tool-calling reliability for local models" section in `docs/providers.md`
+(right after the Ollama setup section, alongside the existing "better tool use" model-pull hints)
+documents the three live-eval outcomes above and recommends instruction-tuned/tool-calling-marketed
+models (`gpt-oss:20b`-class, `qwen2.5:32b`+) over small reasoning-distilled models for agentic tasks,
+cross-references the doctor check below, and notes the `qwythos:latest` diagnose-but-don't-act pattern
+responds well to a more directive follow-up prompt while the underlying engine has no automatic
+nudge/retry yet (that's **P28.3**, deliberately out of scope here — investigation-gated, not built
+speculatively).
+
+Fix, part (b): a new `doctorToolCallCheck` (`internal/cli/doctor.go`), wired into `runDoctorChecks`
+right after `doctorProviderCheck`, sends a single cheap live request — one trivial `list_files` tool
+schema plus an unambiguous "call the tool now, don't describe it" prompt (`MaxTokens: 256`, 20s
+timeout) — through the same `providerfactory.Build` adapter construction the daemon uses, and counts
+`provider.EventToolUse` events in the response stream. Scoped to local (Ollama-style) providers only,
+via the same `ollamaNativeBase` gate `doctorProviderCheck` already uses: this is where the observed
+variance lives, cloud providers have well-established tool-calling support, and skipping them keeps
+the check free of live network cost for the common cloud-provider case — it silently returns PASS
+("skipped") for a cloud provider, an unresolved (`auto`/empty) model, or an adapter-construction
+failure `doctorProviderCheck` already reports. Any failure past that point — transport error, stream
+error, or a genuine zero-tool-call response — degrades to WARN, **never FAIL**: this check must not be
+able to make `aegis doctor` exit non-zero on its own, matching how `doctorDaemonChecks` already
+degrades to WARN (not FAIL) when no daemon is reachable, and keeping it safe for offline/CI use. A
+zero-tool-call WARN's `Fix` field points at the new `docs/providers.md` section by name.
+
+Tested: new `TestDoctorToolCallCheckSkipsCloudProvider`, `TestDoctorToolCallCheckSkipsUnresolvedModel`,
+`TestDoctorToolCallCheckDetectsZeroToolCalls`, `TestDoctorToolCallCheckPassesOnToolCall`,
+`TestDoctorToolCallCheckWarnsOnTransportFailure` (`internal/cli/doctor_test.go`) — the latter three
+drive a real `httptest.Server` emitting hand-written OpenAI-compatible SSE chunks (no live model
+needed) to exercise the zero-tool-call, one-tool-call, and unreachable-server paths deterministically,
+reproducing the `deepseek-r1:8b`/`gpt-oss:20b` outcomes observed live without a network dependency in
+CI. Existing `TestDoctorCleanSetupExitsZero` and `TestDoctorNamesPodmanMisconfig` (which configure a
+cloud provider) continue to pass unchanged, confirming the cloud-skip path adds no new network
+dependency to the existing suite. `go build ./...`, `go vet ./...`, and `go test ./...` pass clean.
+This was the second of Tier 2's four remaining items; **P28.6**, **P28.7** remain open.
 
 Before that, same day (2026-07-14): **P28.1** (Tier 1, real exploitable robustness gap) shipped: the TUI
 now strips dangerous terminal escape sequences from untrusted tool output before it reaches the
@@ -101,7 +152,7 @@ successful highlight match bypasses `renderBlock` entirely via `renderLinesBlock
 spoofing, cursor manipulation, and alternate-screen switches across the single-line, multi-line, and
 `read_file` render branches, plus confirming SGR colour still survives sanitization plus
 `remapANSI16`'s truecolor rewrite. `go build ./...`, `go vet ./...`, and the full `go test ./...`
-pass clean. This was the roadmap's sole Tier 1 item; next up is Tier 2 (P28.2, P28.4, P28.6, P28.7).
+pass clean. This was the roadmap's sole Tier 1 item.
 
 Before that, same day (2026-07-13): **P27.19** (FIND-17, Tier 4, CVSS 5.9) shipped: documentation-only
 close-out of the P27 threat model's container-socket-trust finding. FIND-17 flagged that
