@@ -1,6 +1,27 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-13 — **P27.16** (FIND-15, Tier 3, CVSS 3.6) shipped: quarantine-on-FAIL
+**Last updated:** 2026-07-13 — **P27.17** (FIND-16, Tier 3, CVSS 3.4) shipped: investigation found the
+finding's core mechanism was already in place — `internal/tool/builtin/agent.go`'s `spawnBackground`
+(the sole production entry point for a detached/background sub-agent spawn) already read the shared
+cost tracker off the caller's request ctx and re-attached it onto the job's severed context before
+handing off to the swarm backend, and `internal/swarm/subprocess.go`'s `SubprocessBackend.Spawn`
+already applied P24.15's fair-share floor to compute a reduced `WorkerSpec.RemainingBudgetUSD`/
+`RemainingTokens` from that carried-forward tracker — but neither half had ever been exercised
+together end to end, through the real production path, with a real (non-stub) subprocess backend. New
+`TestAgentToolBackgroundSpawnRespectsSharedBudgetCeiling`
+(`internal/tool/builtin/agent_subprocess_test.go`) closes that gap: it spawns a detached background
+sub-agent through the real `agentTool`, a real `task.Manager`, and a real `*swarm.SubprocessBackend`,
+with a shared tracker already carrying significant prior spend, and asserts the detached child's
+`WorkerSpec` actually receives the fair-share-reduced ceiling rather than a fresh full budget —
+confirmed to actually catch a regression (verified by temporarily reverting the carry-forward locally
+and observing the new test fail, then restoring it). No production code changes were needed. Also
+corrected a stale comment at `internal/swarm/subprocess.go:155-157` claiming the tracker is nil for
+"some background paths" — no longer true given the above, and now says so with a pointer to the new
+test. Full writeup in [releases.md](releases.md#latest-changes). This closes out Tier 3 — this item
+was implemented in parallel with **P27.16** (output-guard quarantine-on-FAIL) in a separate
+worktree/branch; see that item's own history entry below.
+
+Before that, same day (2026-07-13): **P27.16** (FIND-15, Tier 3, CVSS 3.6) shipped: quarantine-on-FAIL
 for the output guard. Previously, a FAIL verdict that exhausted the guard's corrective retries only
 ever led to the failing response being surfaced anyway — any `write_file`/`edit_file` call the turn
 made already landed on disk and stayed there untouched. The engine's per-turn checkpoint
@@ -15,9 +36,7 @@ retry-then-surface behavior unchanged. The rollback is surfaced to the caller tw
 `Engine.Event.GuardFilesRestored` count on the terminal `KindGuard` failure event, and the
 restored-file count appended to that event's `GuardReason` text, which the TUI's existing
 output-guard warning line already renders verbatim — no new UI wiring needed. Full writeup in
-[releases.md](releases.md#latest-changes). This was implemented in parallel with **P27.17** (swarm
-sub-agent budget propagation) in a separate worktree/branch — see that item's own history entry below
-for its status.
+[releases.md](releases.md#latest-changes).
 
 Before that, same day (2026-07-13): **P27.18** (FIND-19, Tier 3, CVSS 5.5) shipped: the `os` sandbox
 backend (seatbelt/bwrap) now confines file reads to the workspace plus a bounded toolchain allowlist
@@ -162,19 +181,18 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** P27.17 (2026-07-13 threat-model finding, Tier 3 — see
-[Priority Order](#priority-order); shipping in parallel via a separate worktree merge, reconcile this
-line after that lands). Tiers 1 and 2 (**P27.1–P27.13**) and Tier 3's **P27.14–P27.16, P27.18**
-shipped 2026-07-13 (P27.18 shipped out of order, ahead of P27.16/P27.17, since it was fully
-self-contained). Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20**
-(see [Parked](#open-work--parked-tier-4)).
+**Open items:** none — Tier 3 is fully closed. Tiers 1 and 2 (**P27.1–P27.13**) and all of Tier 3
+(**P27.14–P27.18**) shipped 2026-07-13; P27.18 shipped out of order, ahead of P27.16/P27.17, since
+it was fully self-contained, and P27.16/P27.17 shipped together via two parallel worktree agents.
+Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20** (see
+[Parked](#open-work--parked-tier-4)).
 
-**Next session:** P27.17 (swarm budget propagation) is the last Tier 3 item; check whether it has
-already shipped via its own parallel worktree before starting anything. Re-run `TestLiveWorkflow`
-(recipe in CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate
-seams; `aegis doctor` (P26.1) is the standalone preflight companion for the same misconfiguration
-classes (now including a workspace trust check, P27.1, and the local-sandbox recommendation,
-P27.14).
+**Next session:** nothing queued — the entire P27 threat-model batch (Tiers 1-3, 18 items) is
+shipped. Next trigger: a new threat-model pass, a reported incident, a new feature evaluation, or a
+concrete pain point surfacing one of the Tier 4 parked items. Re-run `TestLiveWorkflow` (recipe in
+CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis
+doctor` (P26.1) is the standalone preflight companion for the same misconfiguration classes (now
+including a workspace trust check, P27.1, and the local-sandbox recommendation, P27.14).
 
 ---
 
@@ -195,10 +213,10 @@ DAST-target sourcing both ended up folding into (or reusing the machinery of) th
 P27.1 built, as anticipated; P27.6's context/memory-file wrapping used the separate `trust.Wrap`
 provenance mechanism instead, matching the P24.4 precedent for persona/skill bodies.
 
-**Tier 3** (1 open item — real value, larger or sequence-dependent; **P27.14–P27.16, P27.18**
-shipped 2026-07-13, see [releases.md](releases.md#latest-changes)):
-- **P27.17 (FIND-16)** — Propagate a shared/proportional budget ceiling into detached swarm spawns
-  so they can't escape the fan-out tree's cost cap.
+**Tier 3:** empty — all 5 items (**P27.14–P27.18**) shipped 2026-07-13 (see
+[releases.md](releases.md#latest-changes)). P27.17's investigation found its core mechanism (shared
+cost-tracker propagation into detached swarm spawns) already in place from an earlier phase; it
+shipped as a verification/test-coverage item rather than a production-code fix.
 
 **Tier 4:** parked — P25.9, P13.3.3, P6.1, P27.19, P27.20. See
 [Parked](#open-work--parked-tier-4).
@@ -239,24 +257,15 @@ chose the "quarantine/roll back a written file on FAIL" remediation over the alt
 pre-write pass," reusing the existing checkpoint/rewind `Snapshotter`/`RestoreFiles` machinery
 rather than adding a new pre-write validation mechanism.
 
-### P27.17 — FIND-16: propagate budget ceiling into detached swarm spawns
+#### P27.17 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes)) — scope note: the
+finding's core mechanism (a shared/proportional budget ceiling carried into detached swarm spawns)
+turned out to already exist — `agent.go`'s `spawnBackground` and `subprocess.go`'s
+`SubprocessBackend.Spawn` already did the carry-forward and fair-share-floor computation
+respectively, tracing back to a pre-threat-model fix (D1/P10.3/P24.15); what was missing was
+end-to-end regression coverage proving the two halves actually connect through the real production
+path, which the new test now provides. No production code changed.
 
-Priority: Tier 3 · Effort: M, security, Low (CVSS 3.4)
-
-Detached/background swarm sub-agent spawns lose the shared cost tracker and fall back to a fresh
-full budget, escaping the fan-out tree's ceiling — the in-context-spawn equivalent of this was
-already fixed by P24.15's fair-share floor. Propagate a shared/proportional budget ceiling into
-detached spawns too.
-
-### P27.18 — FIND-19: OS sandbox read-path confinement
-
-Priority: Tier 3 · Effort: M, security, Moderate (CVSS 5.5, Host/OS-Access defense-in-depth tier)
-
-The OS sandbox (seatbelt/bwrap) restricts writes/network but leaves the entire host filesystem
-readable, so a command running under it can read (and, unless network is also denied, exfiltrate)
-SSH keys/cloud credentials — matters once a command is already running untrusted code under the
-sandbox. Restrict readable paths to the workspace plus required toolchain paths; deny network
-egress by default under this backend.
+#### P27.18 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes))
 
 **Tier 4 (2 items, headings live in [Parked](#open-work--parked-tier-4) since that's the canonical
 open-item list for that tier):**
