@@ -93,6 +93,20 @@ type StatusInfo struct {
 	// workdirAllowed accepts any existing directory and this list is
 	// informational only, not enforced.
 	WorkdirAllowlist []string `json:"workdir_allowlist,omitempty"`
+
+	// ProviderReachable/ProviderLatencyMS (P28.7) surface a lightweight
+	// connection-health probe so the TUI status area and web UI header can
+	// show "is the model actually reachable" at a glance instead of a user
+	// spending a conversational turn on it (the recurring "test that the
+	// model is connected" session pattern that motivated this field). For an
+	// Ollama-style provider this is a live, short-timeout probe timed for
+	// latency; for a cloud provider a live call on every /status poll would
+	// be wasteful/costly, so reachability there mirrors `aegis doctor`'s
+	// check — an API key present in the resolved config — and
+	// ProviderLatencyMS stays 0 (unmeasured). See
+	// Server.probeProviderReachability for the exact rule.
+	ProviderReachable bool  `json:"provider_reachable"`
+	ProviderLatencyMS int64 `json:"provider_latency_ms,omitempty"`
 }
 
 // PruneResponse reports how many sessions were deleted by a prune operation.
