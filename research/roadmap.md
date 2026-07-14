@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 10, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
+**Open items:** 9, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
 TODO/stub/skip/robustness markers, and a docs-vs-implementation drift scan of every docs/*.md file
 against current source) run after the P29 batch closed out all prior open work, plus the P31 batch
 (GitHub CodeQL code-scanning alerts pulled from the `fiddler110/Aegis` repo — 24 open alerts across
@@ -23,14 +23,14 @@ The P27 threat model's needs-verification list remains fully closed — see
 [releases.md](releases.md#latest-changes) for the 2026-07-14 verification pass that confirmed the
 last two items (hook execution timing, cron fire-time rule application) were already resolved by
 shipped mechanisms, no code change needed. **P31.1** (nuclei `templates_version` path traversal /
-git-arg injection), **P31.2** (session-workdir existence-oracle gate ordering), and **P30.1** (LSP
-client hang on transport death) shipped 2026-07-14 — see [releases.md](releases.md#latest-changes).
+git-arg injection), **P31.2** (session-workdir existence-oracle gate ordering), **P30.1** (LSP
+client hang on transport death), and **P30.2** (hooks hardcoded `sh -c` on Windows) shipped
+2026-07-14 — see [releases.md](releases.md#latest-changes).
 
-**Next session:** start with P30.2 (hooks hardcode `sh -c`, breaking on native Windows), first in
-document/priority order below; P30.3 is the same fix applied to the TUI's `!` bang command. Re-run
-`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
-engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
-companion for the same misconfiguration classes.
+**Next session:** start with P30.3 (the TUI's `!` bang command hardcodes `sh -c`, same fix as
+P30.2 applied to a different call site), the last Tier 1 item. Re-run `TestLiveWorkflow` (recipe in
+CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams;
+`aegis doctor` is the standalone preflight companion for the same misconfiguration classes.
 
 ---
 
@@ -42,8 +42,8 @@ hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or i
 work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
 speculatively.
 
-**Tier 1:** P30.2, P30.3 — the two remaining Windows-portability bugs, in priority order. (P31.1,
-P31.2, and P30.1 shipped 2026-07-14.)
+**Tier 1:** P30.3 — the last remaining Windows-portability bug. (P31.1, P31.2, P30.1, and P30.2
+shipped 2026-07-14.)
 
 **Tier 2:** P31.3, P31.4, P31.5, P30.4, P30.5, P30.6, P30.7, P30.8 — in priority order: real
 security hardening (P31.3) and alert-noise reduction (P31.4, P31.5) ahead of pure docs-drift
@@ -56,19 +56,6 @@ cleanup (P30.4-P30.8).
 ---
 
 ## Open Work
-
-### P30.2 — Hooks hardcode `sh -c`, breaking all hook events on native Windows
-
-Priority: Tier 1 · Effort: S
-
-`internal/hooks/exec.go:95` runs every configured `pre_tool_use`/`post_tool_use`/`session_start`/
-`stop`/`subagent_stop` hook command via `exec.CommandContext(ctx, "sh", "-c", s.Command)` with no
-Windows branch, so hooks silently fail to launch on a native Windows host without a POSIX `sh` on
-PATH. The rest of the codebase already solved this: `internal/sandbox/sandbox.go`'s `shellCommand`
-branches on `runtime.GOOS` and uses the exported `sandbox.WindowsShellBinary()` (prefers `pwsh` over
-`powershell.exe` — see that function's doc comment for why), and `internal/security/install.go`'s
-`shellInvocation` follows the same convention. `hooks/exec.go` is a missed call site for an already-
-established fix; reuse `sandbox.WindowsShellBinary()`/the same branch shape rather than reimplementing.
 
 ### P30.3 — TUI's `!`-prefixed bang command hardcodes `sh -c`, same Windows gap
 

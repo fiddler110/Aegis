@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // Lifecycle event names for user-configured hooks (P4.4). These mirror Claude
@@ -92,7 +95,8 @@ func (e *Exec) run(ctx context.Context, s ExecSpec, ev hookEvent) (exitCode int,
 	defer cancel()
 
 	payload, _ := json.Marshal(ev)
-	cmd := exec.CommandContext(ctx, "sh", "-c", s.Command)
+	shell, args := shellCommand(s.Command)
+	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.Stdin = bytes.NewReader(payload)
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
@@ -175,6 +179,19 @@ func (e *Exec) SubagentStop(ctx context.Context, agentID, status, summary string
 	for _, s := range e.byEvent[EventSubagentStop] {
 		e.run(ctx, s, hookEvent{Event: EventSubagentStop, AgentID: agentID, Status: status, Summary: summary, IsError: isErr})
 	}
+}
+
+// shellCommand returns the platform shell binary and argument list for running
+// a hook command string, mirroring sandbox.shellCommand's and
+// security.shellInvocation's own invocation convention (P30.2) so hook
+// commands configured via pre_tool_use/post_tool_use/session_start/stop/
+// subagent_stop actually launch on a native Windows host, which has no
+// POSIX `sh` on PATH.
+func shellCommand(command string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return sandbox.WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", command}
+	}
+	return "/bin/sh", []string{"-c", command}
 }
 
 // asExitError is a tiny errors.As helper kept local to avoid importing errors

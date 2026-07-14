@@ -8,7 +8,21 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — shipped **P30.1** (Tier 1): `internal/lsp/client.go`'s `readLoop`
+**Last updated:** 2026-07-14 — shipped **P30.2** (Tier 1): `internal/hooks/exec.go` ran every
+configured `pre_tool_use`/`post_tool_use`/`session_start`/`stop`/`subagent_stop` hook command via
+a hardcoded `exec.CommandContext(ctx, "sh", "-c", s.Command)`, silently failing to launch on a
+native Windows host with no POSIX `sh` on PATH. Added a `shellCommand` helper mirroring
+`internal/sandbox/sandbox.go`'s `shellCommand` and `internal/security/install.go`'s
+`shellInvocation` convention: `sandbox.WindowsShellBinary()` (prefers `pwsh`) with
+`-NoProfile -NonInteractive -Command <cmd>` on Windows, `/bin/sh -c <cmd>` elsewhere. Also fixed
+`TestExecPreToolUseVeto` (`internal/hooks/exec_test.go`), which used POSIX-only `1>&2; exit 2`
+syntax that fails to parse under PowerShell's reserved `1>&2` operator — replaced with a
+GOOS-branching `vetoCommand` helper. New `TestShellCommandPlatformBranch` exercises the
+`shellCommand` helper directly (GOOS-independent assertion). `go build ./...`,
+`go test ./internal/hooks/...`, and `go vet ./internal/hooks/...` all pass. See roadmap.md for the
+remaining P30.3 open item.
+
+**Previously, same day:** shipped **P30.1** (Tier 1): `internal/lsp/client.go`'s `readLoop`
 returned silently when the LSP server process died or its stdio pipe broke, never notifying any
 request parked in `c.pending` — every in-flight `call()` then blocked until the caller's own
 context deadline, and nothing in `internal/engine` sets a per-tool timeout, so a dead language
@@ -24,8 +38,7 @@ Tested via a new `TestCallFailsPromptlyWhenTransportDies` (`internal/lsp/client_
 the transport mid-call and asserts the blocked `call()` returns a non-nil error within 5s (a real
 safety net, not relied on by the fix) rather than hanging on the request's own long-lived context;
 `go build ./...`, `go vet ./internal/lsp/...`, `go test ./internal/lsp/...`, and
-`go test ./internal/tool/...` (downstream consumer) all pass. See roadmap.md for the remaining
-P30.2/P30.3 open items (P30.2 next).
+`go test ./internal/tool/...` (downstream consumer) all pass.
 
 **Previously, same day:** shipped **P31.2** (Tier 1, high): `internal/server/sessions.go`'s
 `resolveSessionWorkdir` (the P25.1 session-Workdir validator) called `os.Stat` on a client-supplied
