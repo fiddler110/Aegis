@@ -8,10 +8,57 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P28.7** (Tier 2, persistent connection/model-health indicator),
-**P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test), **P28.4** (Tier 2,
-compaction robustness), and **P28.6** (Tier 2, `TestLiveWorkflow` harness-quality fix) shipped —
-closing out Tier 2 entirely.
+**Last updated:** 2026-07-14 — **P28.3** (Tier 3, engine nudge/retry on a zero-tool-call actionable
+turn) shipped, on top of the same day's **P28.7** (Tier 2, persistent connection/model-health
+indicator), **P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test), **P28.4**
+(Tier 2, compaction robustness), and **P28.6** (Tier 2, `TestLiveWorkflow` harness-quality fix) —
+closing out Tier 2 entirely and starting on Tier 3.
+
+**P28.3** (Tier 3, Effort M) shipped: the engine now detects a suspicious zero-tool-call completion
+on a plainly actionable task and nudges the model to reconsider and act, instead of silently
+accepting a text-only turn as done — the `deepseek-r1:8b` failure mode from the same 2026-07-14
+live evaluation that filed the whole P28 batch, where the model's reasoning got dumped as the final
+answer instead of being followed by a structured tool call.
+
+Investigated first (per the roadmap item's own note): Ollama's OpenAI-compatible endpoint
+(`docs.ollama.com/api/openai-compatibility`) explicitly does not support `tool_choice`, ruling out
+sending `tool_choice: "required"` from the OpenAI adapter for this repo's primary local-model
+target. That left the corrective-nudge/retry path — the same shape as the existing output-guard
+retry (P25.3) — as the one to build.
+
+Fix, `internal/engine/engine.go`: in the `len(toolUses) == 0` branch of `Engine.Run`, after the
+existing max-tokens-continuation check and before the output-guard check, a new condition fires the
+nudge: no tool round has completed yet this run (`toolRoundsCompleted == 0` — a text-only wrap-up
+*after* real tool use is a legitimate final answer, not a suspicious non-action), tools are actually
+registered (`len(e.tools.Schemas()) > 0`), a retry budget remains (new `Options.ZeroToolNudgeMaxRetries`,
+0 → default 1, negative disables), and the triggering request `looksActionable` — a new purely local
+heuristic (same "regex/word-count, never an extra model call" philosophy as `routing.go`'s
+`classifyTurn`) that strips a leading politeness wrapper ("could you please...") and checks for a
+leading imperative verb from a fixed vocabulary (fix, implement, add, write, run, refactor, ...)
+against the most recent user message (`lastUserText`). Deliberately biased toward missing a real task
+(the safe, today's-behavior default) over firing on a genuine question — a wrong nudge wastes one
+turn but corrupts nothing. On a match, the engine appends a corrective prompt (`zeroToolNudgeText`)
+telling the model to call the appropriate tool now rather than just describing the action, and loops.
+Once the run settles (whether the nudge succeeded or the single retry was also text-only and gets
+surfaced anyway), `retractZeroToolNudges` strips the nudge prompt and the text-only answer it was
+reacting to from the durable transcript — mirroring `retractGuardCorrectives` exactly, including the
+same marker-prefix-based matching so a mid-run compaction or prepare-step rewrite can't desync
+index-based bookkeeping.
+
+Wired end to end: `ProviderConfig` gained `zero_tool_nudge` (`internal/config/config.go`, 0 = default
+1 retry, negative disables, mirroring `loop_threshold`'s convention), and `s.newEngine`
+(`internal/server/engine_build.go`) passes it through as `ZeroToolNudgeMaxRetries`.
+
+Tested: new `internal/engine/nudge_test.go` — `TestLooksActionable` (table-driven heuristic cases,
+including polite phrasing and plain questions that must *not* match), `TestZeroToolNudgeRetriesOnActionableTextOnlyTurn`
+(full nudge-then-tool-call-then-final-answer round trip via a `scriptedAdapter`, asserting the nudge
+text reached the retry request and was retracted from the final transcript),
+`TestZeroToolNudgeSkippedOnNonActionablePrompt`, `TestZeroToolNudgeSkippedWithoutTools`,
+`TestZeroToolNudgeSkippedAfterToolRound` (three no-nudge-fires regressions),
+`TestZeroToolNudgeExhaustedSurfacesTextAnswer` (retry budget exhausted still surfaces an answer
+rather than looping), and `TestZeroToolNudgeDisabledByNegativeOption`. `go build ./...`, `go vet
+./...`, and the full `go test ./...` pass clean. `docs/providers.md`'s tool-calling-reliability
+section, which previously noted this as "not yet built," now points at the shipped behavior instead.
 
 **P28.7** (Tier 2, Effort S) shipped: a persistent connection/model-health indicator in the TUI
 status area and the web UI header.
