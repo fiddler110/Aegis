@@ -8,11 +8,72 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor`
-smoke test), **P28.4** (Tier 2, compaction robustness), and **P28.6** (Tier 2, `TestLiveWorkflow`
-harness-quality fix) shipped.
+**Last updated:** 2026-07-14 — **P28.7** (Tier 2, persistent connection/model-health indicator),
+**P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test), **P28.4** (Tier 2,
+compaction robustness), and **P28.6** (Tier 2, `TestLiveWorkflow` harness-quality fix) shipped —
+closing out Tier 2 entirely.
 
-**P28.4** (Tier 2, compaction robustness) shipped: proactive
+**P28.7** (Tier 2, Effort S) shipped: a persistent connection/model-health indicator in the TUI
+status area and the web UI header.
+
+Real usage evidence, not a hypothetical: this daemon's own `GET /sessions` history contained at
+least 6 near-duplicate sessions from 2026-06-26/27 titled things like "test that the model is
+connected," "validate model is connected," "confirm that the model is connected," and "Check that
+the model is connected" — a recorded pattern of users spending a full conversational turn just to
+sanity-check daemon-to-model connectivity. `aegis doctor` and `GET /status`
+(`internal/server/server.go`'s `handleStatusInfo`) already answered this server-side, but neither
+client surfaced it passively — a user had to know to run one of them.
+
+Fix, server side: `GET /status`'s response (`api.StatusInfo`, `internal/api/api.go`) gained two
+fields, `provider_reachable` and `provider_latency_ms`, populated by a new
+`Server.probeProviderReachability` (`internal/server/provider_health.go`). This mirrors `aegis
+doctor`'s existing provider check (`doctorProviderCheck`/`ollamaNativeBase` in
+`internal/cli/doctor.go`) rather than inventing new semantics: for an Ollama-style provider
+(`provider.default: ollama`, or a `base_url` containing the default Ollama port — the same
+detection doctor.go uses) it's a live `GET /api/version` with a 2-second timeout, timed for
+latency (reusing `internal/ollamainfo.IsOllama`, already used by the context-window
+auto-detection path); for a cloud provider, a live call on every `/status` poll would be wasteful
+or, for a paid API, costly, so reachability there is just "an API key is present in the resolved
+config" — the same signal doctor uses — with latency left unmeasured (0). `handleStatusInfo` calls
+this and adds the two fields to its response; no new endpoint was added.
+
+Fix, TUI side (`internal/tui/tui.go`): the daemon `/status` payload was already fetched at startup
+and after each run (for the effective-context-window fallback, P23.1) but never polled
+continuously. Added a new `statusTickMsg`/`statusTickCmd` pair that reschedules a `/status`
+re-fetch every 20 seconds (`statusRefreshInterval`), independent of run activity, so the indicator
+stays current without user action. New model fields `connKnown`/`connReachable`/`connLatencyMS`
+are set from each `statusInfoMsg` (a request error — the daemon itself unreachable — is
+distinguished from the daemon reporting its configured provider unreachable, both rendering as
+"down"). Rendered in two places: a compact colored-dot glyph (`renderConnBadge`, green/red/muted
+for reachable/unreachable/unknown, plus a `NNms` suffix once latency is measured) in the
+always-visible title bar next to the model name, and a fuller `reachable · NNms` /
+`unreachable` / `checking…` line (`renderConnDetail`) under the sidebar's existing MODEL section.
+
+Fix, web UI side (`internal/server/webui/frontend/src`): `types.ts`'s `StatusInfo` interface
+gained the two new fields. `app.tsx`'s existing `loadStatus()` poll (previously only called at
+mount and after specific actions) now also runs on a 20-second `setInterval`, mirroring the TUI's
+cadence. A new chip in the topbar — not gated on `currentId`, since `/status` is daemon-wide, not
+per-session — shows a colored dot, the configured model name, and the latency when measured, with
+a tooltip carrying the full detail (provider/model, reachable/unreachable, latency). New
+`.chip.conn-ok`/`.chip.conn-down` CSS rules in `style.css` reuse the green/red palette already
+established for scanner availability (`.avail.ok`/`.avail.bad`) and other status chips elsewhere
+in the same file, rather than inventing new colors.
+
+Tested: `go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean, including new
+`TestProbeProviderReachability_Ollama` (fake Ollama server via `httptest`, live `/api/version`
+round trip), `TestProbeProviderReachability_OllamaUnreachable`, `TestProbeProviderReachability_Cloud`
+(API-key-present/absent), and `TestProbeProviderReachability_BaseURLPortDetection`
+(`internal/server/provider_health_test.go`), plus an extended `TestServerStatusEndpoint`
+(`internal/server/server_test.go`) asserting `ProviderReachable`/`ProviderLatencyMS` for a
+no-API-key cloud provider; and new `TestStatusInfoMsgUpdatesConnectionState`,
+`TestStatusTickMsgReschedules`, `TestRenderConnBadgeAndDetail`
+(`internal/tui/status_health_test.go`) covering the TUI's state transitions and rendering.
+Frontend: `npm --prefix internal/server/webui/frontend run build` (`tsc -b && vite build`) passed
+clean — TypeScript type-checked the new `StatusInfo` fields and topbar chip — and the regenerated
+`internal/server/webui/dist/` output is committed alongside the source change per this repo's
+embedded-webui convention. This was the last of Tier 2's four items — see [roadmap.md](roadmap.md).
+
+Same day (2026-07-14): **P28.4** (Tier 2, compaction robustness) shipped: proactive
 per-turn context compaction now falls back to a deterministic, non-LLM shortening pass after the
 LLM summarizer fails twice in a row for the same run, instead of skipping compaction indefinitely.
 

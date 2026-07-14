@@ -1,0 +1,96 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/fiddler110/aegis/internal/api"
+)
+
+// TestStatusInfoMsgUpdatesConnectionState covers the P28.7 connection/
+// model-health indicator's state transitions in Update(): a successful
+// /status round trip records reachability + latency, and a failed one
+// (daemon itself unreachable) marks the connection down without touching
+// the srvCtxWin fallback logic that statusInfoMsg also drives.
+func TestStatusInfoMsgUpdatesConnectionState(t *testing.T) {
+	var m model
+	if m.connKnown {
+		t.Fatal("connKnown should start false")
+	}
+
+	next, cmd := m.Update(statusInfoMsg{info: api.StatusInfo{ProviderReachable: true, ProviderLatencyMS: 42}})
+	m = next.(model)
+	if cmd != nil {
+		t.Errorf("expected nil cmd from statusInfoMsg, got %v", cmd)
+	}
+	if !m.connKnown {
+		t.Fatal("connKnown should be true after a /status response")
+	}
+	if !m.connReachable {
+		t.Error("connReachable should be true")
+	}
+	if m.connLatencyMS != 42 {
+		t.Errorf("connLatencyMS = %d, want 42", m.connLatencyMS)
+	}
+
+	// A daemon-unreachable error (the client.StatusInfo call itself failing)
+	// must flip to unreachable even though info.ProviderReachable is unset.
+	next, _ = m.Update(statusInfoMsg{err: errTestDaemonDown})
+	m = next.(model)
+	if !m.connKnown {
+		t.Fatal("connKnown should remain true")
+	}
+	if m.connReachable {
+		t.Error("connReachable should be false after a /status request error")
+	}
+	if m.connLatencyMS != 0 {
+		t.Errorf("connLatencyMS = %d, want 0 after an error", m.connLatencyMS)
+	}
+}
+
+// TestStatusTickMsgReschedules covers the P28.7 periodic refresh: handling
+// statusTickMsg must return a non-nil Cmd (it batches a re-fetch plus the
+// next tick) so the indicator keeps updating without user action.
+func TestStatusTickMsgReschedules(t *testing.T) {
+	var m model
+	_, cmd := m.Update(statusTickMsg{})
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd from statusTickMsg to reschedule the next poll")
+	}
+}
+
+// TestRenderConnBadgeAndDetail sanity-checks the P28.7 indicator's three
+// states render distinguishable, non-empty text (exact ANSI styling is not
+// asserted — just that each state is represented and latency shows up when
+// known).
+func TestRenderConnBadgeAndDetail(t *testing.T) {
+	cases := []struct {
+		name    string
+		m       model
+		wantSub string // substring expected in renderConnDetail's output
+	}{
+		{"unknown", model{}, "checking"},
+		{"reachable with latency", model{connKnown: true, connReachable: true, connLatencyMS: 7}, "7ms"},
+		{"reachable no latency", model{connKnown: true, connReachable: true}, "reachable"},
+		{"unreachable", model{connKnown: true, connReachable: false}, "unreachable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := tc.m.renderConnDetail()
+			if !strings.Contains(detail, tc.wantSub) {
+				t.Errorf("renderConnDetail() = %q, want substring %q", detail, tc.wantSub)
+			}
+			// renderConnBadge must never panic/empty out regardless of state.
+			if badge := tc.m.renderConnBadge(colSurface); badge == "" {
+				t.Error("renderConnBadge() returned empty string")
+			}
+		})
+	}
+}
+
+// errTestDaemonDown is a stand-in for a client.StatusInfo transport error.
+var errTestDaemonDown = &testError{"daemon unreachable"}
+
+type testError struct{ msg string }
+
+func (e *testError) Error() string { return e.msg }

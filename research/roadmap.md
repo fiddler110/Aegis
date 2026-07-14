@@ -1,13 +1,13 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-14 — **P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor`
-smoke test), **P28.4** (Tier 2, compaction fallback when the LLM summarizer fails twice in a row),
-and **P28.6** (Tier 2, harness-quality fix — `TestLiveWorkflow/LocalPromptProfileReducesFirstTurnTokens`
-now uses a dedicated fixture large enough to actually trip the local prompt profile's repo-map cap)
-all shipped; see [releases.md](releases.md#latest-changes) for the full writeups. **P28.1** (Tier 1,
-TUI escape-sequence sanitization for untrusted tool output) also shipped 2026-07-14. All other
-completed history (the full P27 threat-model batch, P27.1–P27.19, plus everything before it) also
-lives there.
+**Last updated:** 2026-07-14 — **P28.7** (Tier 2, persistent connection/model-health indicator in the
+TUI and web UI) shipped, closing out Tier 2 entirely. **P28.2** (local-model tool-calling guidance +
+`aegis doctor` smoke test), **P28.4** (compaction fallback when the LLM summarizer fails twice in a
+row), and **P28.6** (harness-quality fix for `TestLiveWorkflow`'s local-prompt-profile subtest) also
+shipped earlier the same day; see [releases.md](releases.md#latest-changes) for the full writeups.
+**P28.1** (Tier 1, TUI escape-sequence sanitization for untrusted tool output) also shipped
+2026-07-14. All other completed history (the full P27 threat-model batch, P27.1–P27.19, plus
+everything before it) also lives there.
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -18,23 +18,23 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 3 remaining items (P28.3, P28.5, P28.7) of the 7 filed 2026-07-14 from a full
-interactive evaluation of the TUI, web UI, and daemon against three live Ollama models
-(`qwythos:latest`, `deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via
-`TestLiveWorkflow` — see [Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence
-sanitization), **P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test),
-**P28.4** (Tier 2, compaction fallback on repeated summarizer failure), and **P28.6** (Tier 2,
-`TestLiveWorkflow` harness-quality fix) all shipped 2026-07-14, closing out Tier 1 entirely — see
-[releases.md](releases.md#latest-changes). Tier 4 has 4 parked items with no active trigger (see
-[Parked](#open-work--parked-tier-4)), plus 2 remaining unresolved needs-verification notes carried
-over from the P27 threat model (see below); the third (TUI escape-sequence neutralization) is now
-resolved by P28.1.
+**Open items:** 2 remaining items (P28.3, P28.5) of the 7 filed 2026-07-14 from a full interactive
+evaluation of the TUI, web UI, and daemon against three live Ollama models (`qwythos:latest`,
+`deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via `TestLiveWorkflow` — see
+[Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence sanitization), **P28.2**,
+**P28.4**, **P28.6**, and **P28.7** (all Tier 2) all shipped 2026-07-14, closing out Tiers 1 and 2
+entirely — see [releases.md](releases.md#latest-changes). Tier 4 has 4 parked items with no active
+trigger (see [Parked](#open-work--parked-tier-4)), plus 2 remaining unresolved needs-verification
+notes carried over from the P27 threat model (see below); the third (TUI escape-sequence
+neutralization) is now resolved by P28.1.
 
-**Next session:** finish Tier 2 with **P28.7** (cheap, no-dependency win). **P28.3**'s investigation
-blocker is now resolved (checked 2026-07-14: Ollama's OpenAI-compatible endpoint does not support
-`tool_choice` at all, per `docs.ollama.com/api/openai-compatibility`'s supported-fields list — the
-corrective-nudge/retry approach is the one to pursue, not `tool_choice: "required"`), so it's ready
-to implement. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+**Next session:** both remaining items are Tier 3. **P28.3**'s investigation blocker is now resolved
+(checked 2026-07-14: Ollama's OpenAI-compatible endpoint does not support `tool_choice` at all, per
+`docs.ollama.com/api/openai-compatibility`'s supported-fields list — the corrective-nudge/retry
+approach is the one to pursue, not `tool_choice: "required"`), so it's ready to implement. **P28.5**
+still needs a resumable-stream design (checked 2026-07-14: the existing `runRegistry`,
+`internal/server/runs.go`, is purely informational — no event buffering/replay to piggyback on).
+Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
 engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone
 preflight companion for the same misconfiguration classes (including the workspace trust check,
 P27.1, the local-sandbox recommendation, P27.14, and the tool-calling smoke test, P28.2).
@@ -51,8 +51,8 @@ speculatively.
 
 **Tier 1:** none open — P28.1 shipped 2026-07-14, see [releases.md](releases.md#latest-changes).
 
-**Tier 2:** P28.7. (P28.2, P28.4, P28.6 shipped 2026-07-14, see
-[releases.md](releases.md#latest-changes).)
+**Tier 2:** none open — P28.2, P28.4, P28.6, P28.7 all shipped 2026-07-14, see
+[releases.md](releases.md#latest-changes).
 
 **Tier 3:** P28.3, P28.5.
 
@@ -85,11 +85,11 @@ See `0-assessment.md`'s "Needs Verification" table in the report folder for the 
 Filed 2026-07-14 from a full interactive evaluation of the TUI, web UI, and daemon — driving real
 sessions over the HTTP+SSE seam (the same one the TUI/web UI use) against three live Ollama
 models via `TestLiveWorkflow`, plus a read of the TUI render paths and web UI streaming client.
-Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization),
-**P28.2** (Tier 2, local-model tool-calling guidance + `aegis doctor` smoke test), **P28.4**
-(Tier 2, compaction fallback on repeated summarizer failure), and **P28.6** (Tier 2, `TestLiveWorkflow`
-harness-quality fix) all shipped 2026-07-14 — see [releases.md](releases.md#latest-changes) —
-leaving **P28.7** as the last open Tier 2 item.
+Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization), and all
+four Tier 2 items — **P28.2** (local-model tool-calling guidance + `aegis doctor` smoke test),
+**P28.4** (compaction fallback on repeated summarizer failure), **P28.6** (`TestLiveWorkflow`
+harness-quality fix), and **P28.7** (persistent connection/model-health indicator) — all shipped
+2026-07-14 — see [releases.md](releases.md#latest-changes) — leaving only Tier 3 open.
 
 ### P28.3 — Engine nudge/retry when an actionable turn produces zero tool calls
 
@@ -121,19 +121,6 @@ longer for harder tasks, making a mid-turn drop meaningfully more likely than wi
 round-trips. Needs a resumable-stream design (reconnect and replay/attach to the same run ID) —
 investigate how much of the existing detached-run infrastructure already supports resumption
 before committing to effort size.
-
-### P28.7 — No persistent connection/model-health indicator in TUI or web UI
-
-Priority: Tier 2 · Effort: S
-
-Real usage evidence (not hypothetical): this instance's own `GET /sessions` history contains at
-least 6 near-duplicate sessions from 2026-06-26/27 titled "test that the model is connected,"
-"validate model is connected," "confirm that the model is connected," "Check that the model is
-connected" — a recorded pattern of spending a full conversational turn just to sanity-check
-daemon-to-model connectivity. `aegis doctor` and `GET /status` already answer this server-side.
-Add a lightweight, persistent connection/model-health indicator to the TUI status area and web UI
-header (reachable/model-name/last-latency at a glance) so this doesn't require a wasted prompt or
-a separate CLI invocation.
 
 ---
 
