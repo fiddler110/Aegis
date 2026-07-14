@@ -5,6 +5,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http/httptest"
 	"os"
@@ -17,8 +18,18 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/server"
 )
+
+// bigRepoMapCapBytes mirrors localRepoMapMaxBytes (internal/server/helpers.go:35)
+// — kept as its own constant here rather than importing the unexported
+// value, since that cap is an implementation detail of internal/server, not
+// a public API this package should depend on. writeBigRepoMapFixture
+// self-checks its generated fixture against this value so a future change
+// to the repo-map render format (or to the cap itself) fails loudly here
+// instead of silently reintroducing the P28.6 false-signal bug.
+const bigRepoMapCapBytes = 4000
 
 // TestLiveWorkflow (P25.7) promotes research/eval-harness-drive.py into a Go
 // test: it drives a real daemon over the exact HTTP API + SSE seam the TUI
@@ -204,6 +215,29 @@ func TestLiveWorkflow(t *testing.T) {
 		// prompt shape alone.
 		const trivialPrompt = "Reply with only the single word OK."
 
+		// P28.6: the shared fixtureDir this whole test chdir'd into (temps.py
+		// + temps.csv, a couple hundred bytes) never comes close to tripping
+		// the local profile's repo-map cap (internal/server/helpers.go:35),
+		// so both profiles produced byte-identical system prompts here and
+		// the token comparison below degenerated into pure live-model
+		// token-accounting noise (observed: passed for gpt-oss:20b, failed
+		// for deepseek-r1:8b on the same code). Swap in a dedicated, larger
+		// workspace that actually crosses the cap so "local" and "default"
+		// produce genuinely different prompts — local omits the oversized
+		// repo map entirely, default injects it in full — and the token
+		// comparison is a real signal again. Scoped to this subtest only
+		// (chdir restored on cleanup); FixSeededBug/GuardNoMetaLeak above
+		// already ran against the original small fixture.
+		bigDir := writeBigRepoMapFixture(t)
+		origWD, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(bigDir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(origWD) })
+
 		localCl := newLiveWorkflowDaemon(t, baseURL, model, "local")
 		defaultCl := newLiveWorkflowDaemon(t, baseURL, model, "default")
 
@@ -304,6 +338,61 @@ if __name__ == "__main__":
 	}
 	if err := os.WriteFile(filepath.Join(dir, "temps.py"), []byte(pyContent), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	return dir
+}
+
+// writeBigRepoMapFixture (P28.6) builds a workspace whose indexed repo map
+// comfortably exceeds bigRepoMapCapBytes, so the "local" and "default"
+// prompt profiles actually diverge: local (internal/server/helpers.go:62)
+// omits an oversized repo map entirely, default always injects it in full.
+// It writes enough filler Python files/functions for that, then pre-builds
+// and saves the repomap.json cache directly — what `aegis index` (or the
+// daemon's own startup loadRepoMap) would produce — so the daemon picks up
+// the map on process start without an extra round trip through the index
+// endpoint.
+//
+// Deliberately not t.TempDir(), matching writeSeededBugFixture: this
+// directory becomes the daemon's own workspace and gets a
+// `.aegis/knowledge.db` opened under it that nothing in this test closes.
+func writeBigRepoMapFixture(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "aegis-live-workflow-bigrepo-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if rmErr := os.RemoveAll(dir); rmErr != nil {
+			t.Logf("cleanup: could not remove big-repo-map fixture dir %s: %v", dir, rmErr)
+		}
+	})
+
+	// 15 files x 10 functions each: comfortably clears bigRepoMapCapBytes
+	// (4000) while staying under repomap's own internal render budget
+	// (repomap.DefaultMaxBytes, 8000) so the map isn't itself truncated —
+	// the two profiles end up genuinely "full map" vs. "no map", not "full
+	// map" vs. "truncated map".
+	for i := 0; i < 15; i++ {
+		var b strings.Builder
+		for j := 0; j < 10; j++ {
+			fmt.Fprintf(&b, "def handler_%02d_%02d(request, context):\n    pass\n\n", i, j)
+		}
+		path := filepath.Join(dir, fmt.Sprintf("module_%02d.py", i))
+		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m, err := repomap.Build(dir, repomap.Options{})
+	if err != nil {
+		t.Fatalf("repomap.Build: %v", err)
+	}
+	cache := filepath.Join(dir, ".aegis", "repomap.json")
+	if err := m.Save(cache); err != nil {
+		t.Fatalf("repomap.Save: %v", err)
+	}
+	if got := len(repomap.Block(m.Render())); got <= bigRepoMapCapBytes {
+		t.Fatalf("fixture repo map too small to trigger the local-profile cap: rendered block is %d bytes, want > %d", got, bigRepoMapCapBytes)
 	}
 	return dir
 }
