@@ -128,13 +128,25 @@ func (o *OSBackend) dir(opts ExecOpts) string {
 // wrap builds the argv that runs the shell command inside the OS sandbox.
 func (o *OSBackend) wrap(command string, opts ExecOpts) (string, []string) {
 	shell, shellArgs := shellCommand(command)
+	dir := o.dir(opts)
+	// extraRoot extends write/read confinement to a session's own Workdir
+	// when it differs from the daemon's own workspace (P25.9): dir already
+	// comes only from effectiveRoot/tool.WorkdirFromContext, which the
+	// engine sets from a session's Workdir already validated (existence +
+	// trust boundary) by resolveSessionWorkdir at session-creation time — no
+	// tool exposes a user-suppliable directory argument that could smuggle
+	// an unvalidated path in here.
+	extraRoot := ""
+	if dir != "" && escapesRoot(o.workspace, dir) {
+		extraRoot = dir
+	}
 	switch o.mechanism {
 	case "seatbelt":
-		profile := seatbeltProfile(o.workspace, o.denyNet, o.readPaths)
+		profile := seatbeltProfile(o.workspace, extraRoot, o.denyNet, o.readPaths)
 		args := []string{"-p", profile, shell}
 		return o.wrapperBin, append(args, shellArgs...)
 	case "bwrap":
-		args := bwrapArgs(o.workspace, o.dir(opts), o.denyNet, o.readPaths)
+		args := bwrapArgs(o.workspace, extraRoot, dir, o.denyNet, o.readPaths)
 		args = append(args, shell)
 		return o.wrapperBin, append(args, shellArgs...)
 	default:
@@ -182,13 +194,21 @@ func OSSandboxInfo() (mechanism string, available bool, detail string) {
 // operation (process exec, mach lookups, sysctl reads, signals) is left
 // alone, since tightening those is out of scope here and seatbelt profiles
 // that deny them are notoriously easy to break basic command execution with.
-func seatbeltProfile(workspace string, denyNet bool, readPaths []string) string {
+//
+// extraRoot, when non-empty, is allow-listed for both read and write
+// alongside workspace (P25.9): a session running under a Workdir outside
+// the daemon's own workspace needs write/read access to its own directory
+// too, not just the daemon's.
+func seatbeltProfile(workspace, extraRoot string, denyNet bool, readPaths []string) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString("(allow default)\n")
 	b.WriteString("(deny file-write*)\n")
 	b.WriteString("(allow file-write*\n")
 	fmt.Fprintf(&b, "  (subpath %q)\n", workspace)
+	if extraRoot != "" {
+		fmt.Fprintf(&b, "  (subpath %q)\n", extraRoot)
+	}
 	b.WriteString("  (subpath \"/private/tmp\")\n")
 	b.WriteString("  (subpath \"/private/var/folders\")\n")
 	b.WriteString("  (subpath \"/dev\")\n")
@@ -196,6 +216,9 @@ func seatbeltProfile(workspace string, denyNet bool, readPaths []string) string 
 	b.WriteString("(deny file-read*)\n")
 	b.WriteString("(allow file-read*\n")
 	fmt.Fprintf(&b, "  (subpath %q)\n", workspace)
+	if extraRoot != "" {
+		fmt.Fprintf(&b, "  (subpath %q)\n", extraRoot)
+	}
 	b.WriteString("  (subpath \"/private/tmp\")\n")
 	b.WriteString("  (subpath \"/private/var/folders\")\n")
 	b.WriteString("  (subpath \"/dev\")\n")
@@ -215,8 +238,11 @@ func seatbeltProfile(workspace string, denyNet bool, readPaths []string) string 
 // the entire host root (P27.18/FIND-19), /tmp is a fresh tmpfs, and network
 // is unshared when denied. A command that reads a path outside this
 // allowlist gets ENOENT rather than the real host file.
-func bwrapArgs(workspace, dir string, denyNet bool, readPaths []string) []string {
-	args := make([]string, 0, 8+4*len(readPaths))
+//
+// extraRoot, when non-empty, is bound read-write alongside workspace
+// (P25.9), same rationale as seatbeltProfile's extraRoot.
+func bwrapArgs(workspace, extraRoot, dir string, denyNet bool, readPaths []string) []string {
+	args := make([]string, 0, 10+4*len(readPaths))
 	for _, p := range readPaths {
 		args = append(args, "--ro-bind", p, p)
 	}
@@ -225,8 +251,11 @@ func bwrapArgs(workspace, dir string, denyNet bool, readPaths []string) []string
 		"--proc", "/proc",
 		"--tmpfs", "/tmp",
 		"--bind", workspace, workspace,
-		"--die-with-parent",
 	)
+	if extraRoot != "" {
+		args = append(args, "--bind", extraRoot, extraRoot)
+	}
+	args = append(args, "--die-with-parent")
 	if dir != "" {
 		args = append(args, "--chdir", dir)
 	}

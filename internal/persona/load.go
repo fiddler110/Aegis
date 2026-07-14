@@ -119,6 +119,57 @@ func Refresh(projectDir string, projectTrusted bool, dirs ...string) (int, bool)
 	return len(fresh), true
 }
 
+// GetForRoot behaves like Get, but first looks directly in root's own
+// project persona directory (P25.9) via a pure, non-caching scan that never
+// touches the shared loaded/loadedOrder/refreshSig state Refresh manages.
+// This lets a session whose Workdir differs from the directories the daemon
+// last called Refresh with still see its own project's personas, without
+// the thrashing or cross-session races a naive per-session Refresh call
+// would cause: Refresh atomically *replaces* the entire shared persona set
+// keyed only by name, so calling it with a different root's dirs per
+// request would evict — not merge with — whatever the daemon's own project
+// (or another concurrent session's root) just loaded.
+//
+// root == "" behaves exactly like Get (falls straight through). A persona
+// found in root's project directory takes precedence over the shared set
+// (matching LoadFromDirs' "later/project directories override" rule);
+// otherwise this falls through to Get, which still serves the daemon's own
+// project, user-level, and built-in personas unchanged.
+func GetForRoot(root string, projectTrusted bool, name string) (Persona, bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(name))
+	if trimmed != "" && root != "" {
+		if p, ok := scanProjectDir(ProjectDir(root), projectTrusted, trimmed); ok {
+			return p, true
+		}
+	}
+	return Get(name)
+}
+
+// scanProjectDir looks for name's *.md persona file directly in dir. Unlike
+// LoadFromDirs/Refresh, this never registers into the shared loaded map —
+// it's a one-off, uncached read for GetForRoot.
+func scanProjectDir(dir string, honorControlFields bool, name string) (Persona, bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return Persona{}, false
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".md") {
+			continue
+		}
+		stem := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		if !strings.EqualFold(stem, name) {
+			continue
+		}
+		p, err := parsePersonaFile(filepath.Join(dir, e.Name()), honorControlFields)
+		if err != nil {
+			return Persona{}, false
+		}
+		return p, true
+	}
+	return Persona{}, false
+}
+
 // dirSignature builds a change-detection key from every persona file's name,
 // size, and mtime across dirs. Any edit, add, or delete produces a new key.
 func dirSignature(dirs []string) string {

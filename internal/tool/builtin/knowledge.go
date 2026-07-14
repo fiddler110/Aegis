@@ -10,10 +10,28 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
+// KnowledgeProvider resolves the knowledge store for a given root directory
+// (P25.9), letting project_knowledge follow a session's own Workdir instead
+// of always querying the daemon's default-workspace store. Implemented by
+// *server.Server; passed in via Options.KnowledgeProvider so this package
+// doesn't need to import internal/server.
+type KnowledgeProvider interface {
+	KnowledgeStoreFor(root string) (*knowledge.Store, error)
+}
+
+// KnowledgeProviderFunc adapts a plain function to KnowledgeProvider.
+type KnowledgeProviderFunc func(root string) (*knowledge.Store, error)
+
+func (f KnowledgeProviderFunc) KnowledgeStoreFor(root string) (*knowledge.Store, error) {
+	return f(root)
+}
+
 // --- project_knowledge ---
 
 type projectKnowledgeTool struct {
-	store *knowledge.Store
+	store    *knowledge.Store // fallback store, used when provider is nil or errors
+	provider KnowledgeProvider
+	root     string // fallback root, used when no per-call context workdir is set
 }
 
 func (t *projectKnowledgeTool) Name() string                { return "project_knowledge" }
@@ -42,12 +60,13 @@ func (t *projectKnowledgeTool) Execute(ctx context.Context, input json.RawMessag
 		args.Limit = 5
 	}
 
-	results, err := t.store.Search(ctx, args.Query, args.Limit)
+	store := t.storeFor(ctx)
+	results, err := store.Search(ctx, args.Query, args.Limit)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("search failed: %v", err), IsError: true}, nil
 	}
 	if len(results) == 0 {
-		total, _ := t.store.DocCount(ctx)
+		total, _ := store.DocCount(ctx)
 		return tool.Result{Content: fmt.Sprintf("no results for %q (index contains %d documents — run `aegis knowledge index` to rebuild)", args.Query, total)}, nil
 	}
 
@@ -58,7 +77,23 @@ func (t *projectKnowledgeTool) Execute(ctx context.Context, input json.RawMessag
 	return tool.Result{Content: strings.TrimRight(b.String(), "\n")}, nil
 }
 
-// KnowledgeTools returns the tools backed by a knowledge store.
-func KnowledgeTools(store *knowledge.Store) []tool.Tool {
-	return []tool.Tool{&projectKnowledgeTool{store: store}}
+// storeFor resolves the knowledge store for this call's effective root: the
+// session-scoped store via provider when one is wired and resolves cleanly,
+// else the fixed fallback store (today's pre-P25.9 behavior).
+func (t *projectKnowledgeTool) storeFor(ctx context.Context) *knowledge.Store {
+	if t.provider != nil {
+		root := effectiveRoot(ctx, t.root)
+		if store, err := t.provider.KnowledgeStoreFor(root); err == nil && store != nil {
+			return store
+		}
+	}
+	return t.store
+}
+
+// KnowledgeTools returns the tools backed by a knowledge store. provider, when
+// non-nil, resolves a session-scoped store per call (P25.9); store is the
+// fallback used when provider is nil or a lookup fails, and root is the
+// fallback root used when no context workdir is set.
+func KnowledgeTools(store *knowledge.Store, provider KnowledgeProvider, root string) []tool.Tool {
+	return []tool.Tool{&projectKnowledgeTool{store: store, provider: provider, root: root}}
 }

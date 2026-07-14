@@ -52,7 +52,7 @@ func TestSearchMemoryBM25Only(t *testing.T) {
 		t.Fatalf("UpsertEntity: %v", err)
 	}
 
-	results, err := s.SearchMemory(ctx, "Stripe", 5)
+	results, err := s.SearchMemory(ctx, "Stripe", "", 5)
 	if err != nil {
 		t.Fatalf("SearchMemory: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSearchMemoryHybridSemanticFallback(t *testing.T) {
 	// "payments" never appears literally in the stored facts, so BM25 alone
 	// would return nothing; the fake embedder's synonym group should still
 	// rank billing-api first via the semantic ranking.
-	results, err := s.SearchMemory(ctx, "payments", 5)
+	results, err := s.SearchMemory(ctx, "payments", "", 5)
 	if err != nil {
 		t.Fatalf("SearchMemory: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestSemanticRankingIgnoresMismatchedModelVectors(t *testing.T) {
 		t.Fatalf("plant stale vector: %v", err)
 	}
 
-	ranking, _, err := s.semanticRanking(ctx, "payments", 5)
+	ranking, _, err := s.semanticRanking(ctx, "payments", "", 5)
 	if err != nil {
 		t.Fatalf("semanticRanking: %v", err)
 	}
@@ -132,6 +132,64 @@ func TestSemanticRankingIgnoresMismatchedModelVectors(t *testing.T) {
 		if k == "entity:system:stale-entity@proj" {
 			t.Errorf("mismatched-model vector should be excluded from semantic ranking, got %v", ranking)
 		}
+	}
+}
+
+// TestSearchMemoryProjectScoping is the P25.9 regression: the store is one
+// shared file across every project a daemon has ever been pointed at (see
+// Open's doc comment), so a project-scoped search must not leak another
+// project's facts/entities, while an unscoped ("") search still sees
+// everything (today's pre-P25.9 behavior, kept for any caller that wants
+// cross-project recall).
+func TestSearchMemoryProjectScoping(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open("unused", filepath.Join(dir, "longmem.db"), nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	if err := s.UpsertEntity(ctx, "projectA", "system", "billing-api", "handles Stripe webhooks"); err != nil {
+		t.Fatalf("UpsertEntity projectA: %v", err)
+	}
+	if err := s.UpsertEntity(ctx, "projectB", "system", "billing-api", "handles PayPal webhooks"); err != nil {
+		t.Fatalf("UpsertEntity projectB: %v", err)
+	}
+	if err := s.AddSession(ctx, "sess-a", "projectA", "discussed Stripe billing-api"); err != nil {
+		t.Fatalf("AddSession projectA: %v", err)
+	}
+	if err := s.AddSession(ctx, "sess-b", "projectB", "discussed PayPal billing-api"); err != nil {
+		t.Fatalf("AddSession projectB: %v", err)
+	}
+
+	resultsA, err := s.SearchMemory(ctx, "billing-api", "projectA", 10)
+	if err != nil {
+		t.Fatalf("SearchMemory projectA: %v", err)
+	}
+	for _, r := range resultsA {
+		if !strings.HasSuffix(r.Key, "@projectA") && !strings.HasSuffix(r.Key, ":projectA") {
+			t.Errorf("projectA-scoped search leaked result %+v", r)
+		}
+	}
+	if len(resultsA) != 2 {
+		t.Fatalf("got %d projectA results, want 2 (one entity, one session fact)", len(resultsA))
+	}
+
+	resultsB, err := s.SearchMemory(ctx, "billing-api", "projectB", 10)
+	if err != nil {
+		t.Fatalf("SearchMemory projectB: %v", err)
+	}
+	if len(resultsB) != 2 {
+		t.Fatalf("got %d projectB results, want 2", len(resultsB))
+	}
+
+	all, err := s.SearchMemory(ctx, "billing-api", "", 10)
+	if err != nil {
+		t.Fatalf("SearchMemory unscoped: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("got %d unscoped results, want 4 (both projects)", len(all))
 	}
 }
 

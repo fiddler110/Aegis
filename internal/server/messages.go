@@ -21,7 +21,6 @@ import (
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/notify"
 	"github.com/fiddler110/aegis/internal/permission"
-	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/trace"
@@ -195,8 +194,9 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	s.pendingSteers.Store(id, steerCh)
 	defer s.pendingSteers.Delete(id)
 
+	workdir := s.workdirFor(id)
 	s.refreshPersonas() // pick up persona file edits without a daemon restart
-	p, _ := persona.Get(sess.Persona)
+	p, _ := s.personaFor(workdir, sess.Persona)
 	guardEnabled := s.cfg.OutputGuard.Enabled
 	if req.GuardEnabled != nil {
 		guardEnabled = *req.GuardEnabled
@@ -210,7 +210,6 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// tool onto this session's own exposure state, not the daemon-wide
 	// registry every other session and persona shares.
 	sessionTools := s.sessionToolRegistry(id)
-	workdir := s.workdirFor(id)
 	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
