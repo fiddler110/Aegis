@@ -216,6 +216,16 @@ type Compactor interface {
 	Compact(ctx context.Context, system string, msgs []provider.Message) (out []provider.Message, changed bool, err error)
 }
 
+// FallbackCompactor is an optional capability of a Compactor: a
+// deterministic, non-LLM shortening pass used when Compact has failed twice
+// in a row for the same run (P28.4) — e.g. a local-model summarizer that
+// intermittently returns empty output. The engine type-asserts for this on
+// e.compactor, so a Compactor that only implements Compact keeps today's
+// warn-and-skip behavior on repeated failure.
+type FallbackCompactor interface {
+	FallbackCompact(msgs []provider.Message) (out []provider.Message, changed bool)
+}
+
 // Hooks observe and can veto tool calls. PreToolUse runs after the permission
 // gate but before execution; returning an error blocks the call (the error is
 // reported to the model). PostToolUse runs after execution. This is the
@@ -389,6 +399,12 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	guardRetries := 0
 	toolRoundsCompleted := 0
 	ctxFullWarned := false // one context-nearly-full notice per run, not one per turn
+	// compactionFailures counts consecutive proactive-compaction failures
+	// within this run (P28.4). Reset to 0 on any successful compaction
+	// (LLM-summarized or deterministic-fallback); never carries across runs,
+	// since a single Run already loops through every tool round of a long
+	// local-model task (the failure mode this guards against).
+	compactionFailures := 0
 
 	// runUsage accumulates token counts across every turn of this run so the
 	// terminal KindDone event can carry a total (P25.5) — previously it was
@@ -456,12 +472,34 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				if e.compactor != nil {
 					if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
 						e.logger.Warn("proactive compaction failed", "err", compErr)
+						compactionFailures++
+						// P28.4: the LLM summarizer has now failed twice in a row for
+						// this run — a local model unreliably returning empty output
+						// (the observed live-eval failure mode) would otherwise skip
+						// compaction indefinitely and drift toward the hard
+						// context-window ceiling with no safety valve. Fall back to a
+						// deterministic, non-LLM shortening pass instead, if the
+						// configured Compactor supports one.
+						if compactionFailures >= 2 {
+							if fc, ok := e.compactor.(FallbackCompactor); ok {
+								if out, changed := fc.FallbackCompact(conv.Messages); changed {
+									e.logger.Warn("proactive compaction: summarizer failed twice in a row, applied deterministic fallback",
+										"before", len(conv.Messages), "after", len(out))
+									emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — summarizer unavailable, applied deterministic fallback compaction (%d→%d messages)", pct, len(conv.Messages), len(out))})
+									conv.Messages = out
+									conv.invalidate()
+									compacted = true
+									compactionFailures = 0
+								}
+							}
+						}
 					} else if changed {
 						e.logger.Info("proactive compaction", "before", len(conv.Messages), "after", len(out))
 						emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — compacted %d→%d messages", pct, len(conv.Messages), len(out))})
 						conv.Messages = out
 						conv.invalidate()
 						compacted = true
+						compactionFailures = 0
 					}
 				}
 				if !compacted && !ctxFullWarned && pct >= 95 {

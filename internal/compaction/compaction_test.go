@@ -133,6 +133,91 @@ func TestForceCompactTooShortIsNoop(t *testing.T) {
 	}
 }
 
+// TestFallbackCompactShrinksWithoutLLM is the P28.4 regression: when the LLM
+// summarizer is unusable, FallbackCompact must still shrink the conversation
+// deterministically — no adapter call, no chance of empty output — while
+// preserving the same keepRecent-tail/tool-pairing invariants as Compact.
+func TestFallbackCompactShrinksWithoutLLM(t *testing.T) {
+	a := &summaryAdapter{summary: "unused"}
+	s := New(Options{Adapter: a, Model: "m", MaxBudget: 5, KeepRecent: 2})
+	msgs := []provider.Message{
+		text(provider.RoleUser, "msg one is fairly long here"),
+		text(provider.RoleAssistant, "reply one is also long"),
+		text(provider.RoleUser, "msg two continues"),
+		text(provider.RoleAssistant, "reply two continues"),
+		text(provider.RoleUser, "msg three"),
+		text(provider.RoleAssistant, "final reply kept"),
+	}
+	out, changed := s.FallbackCompact(msgs)
+	if !changed {
+		t.Fatal("expected fallback compaction to occur")
+	}
+	if a.called != 0 {
+		t.Errorf("FallbackCompact must never call the adapter, called=%d", a.called)
+	}
+	if len(out) >= len(msgs) {
+		t.Errorf("fallback compaction did not shrink conversation: %d -> %d", len(msgs), len(out))
+	}
+	first, ok := out[0].Content[0].(provider.TextBlock)
+	if !ok || first.Text == "" {
+		t.Fatalf("first message should hold a non-empty deterministic note, got %+v", out[0])
+	}
+	if !strings.Contains(first.Text, "deterministic fallback") {
+		t.Errorf("note should identify itself as a fallback, got %q", first.Text)
+	}
+	// The final assistant message must still be preserved verbatim.
+	last, ok := out[len(out)-1].Content[0].(provider.TextBlock)
+	if !ok || last.Text != "final reply kept" {
+		t.Errorf("recent message not preserved: %+v", out[len(out)-1])
+	}
+}
+
+// TestFallbackCompactPreservesToolPair mirrors
+// TestCompactionPreservesToolPair for the deterministic fallback path.
+func TestFallbackCompactPreservesToolPair(t *testing.T) {
+	a := &summaryAdapter{summary: "unused"}
+	s := New(Options{Adapter: a, Model: "m", MaxBudget: 5, KeepRecent: 2})
+	msgs := []provider.Message{
+		text(provider.RoleUser, "do something big and long here to exceed"),
+		text(provider.RoleAssistant, "ok working on it now in detail"),
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			provider.ToolUseBlock{ID: "t1", Name: "grep", Input: json.RawMessage(`{"pattern":"x"}`)},
+		}},
+		{Role: provider.RoleUser, Content: []provider.Block{
+			provider.ToolResultBlock{ToolUseID: "t1", Content: "match found here"},
+		}},
+	}
+	out, changed := s.FallbackCompact(msgs)
+	if !changed {
+		t.Fatal("expected fallback compaction to occur")
+	}
+	if out[1].Role != provider.RoleAssistant {
+		t.Fatalf("kept suffix should start with assistant, got %s", out[1].Role)
+	}
+	if _, ok := out[1].Content[0].(provider.ToolUseBlock); !ok {
+		t.Errorf("expected tool_use to be preserved, got %T", out[1].Content[0])
+	}
+	if _, ok := out[2].Content[0].(provider.ToolResultBlock); !ok {
+		t.Errorf("expected tool_result to follow tool_use, got %T", out[2].Content[0])
+	}
+}
+
+// TestFallbackCompactTooShortIsNoop mirrors TestForceCompactTooShortIsNoop:
+// nothing safe to cut must report changed=false, not a fabricated note.
+func TestFallbackCompactTooShortIsNoop(t *testing.T) {
+	a := &summaryAdapter{summary: "unused"}
+	s := New(Options{Adapter: a, Model: "m", MaxBudget: 1000000, KeepRecent: 8})
+	msgs := []provider.Message{text(provider.RoleUser, "hi"), text(provider.RoleAssistant, "hello")}
+
+	out, changed := s.FallbackCompact(msgs)
+	if changed {
+		t.Error("expected no-op for a conversation shorter than KeepRecent")
+	}
+	if len(out) != len(msgs) || a.called != 0 {
+		t.Errorf("conversation altered unexpectedly (len=%d called=%d)", len(out), a.called)
+	}
+}
+
 func TestCompactionPreservesToolPair(t *testing.T) {
 	a := &summaryAdapter{summary: "summary"}
 	s := New(Options{Adapter: a, Model: "m", MaxBudget: 5, KeepRecent: 2})
