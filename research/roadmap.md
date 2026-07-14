@@ -1,9 +1,10 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-14 — **P28.1** (Tier 1, TUI escape-sequence sanitization for untrusted tool
-output) shipped; see [releases.md](releases.md#latest-changes) for the full writeup. All other
-completed history (the full P27 threat-model batch, P27.1–P27.19, plus everything before it) also
-lives there.
+**Last updated:** 2026-07-14 — **P28.4** (Tier 2, compaction fallback when the LLM summarizer fails
+twice in a row) shipped; see [releases.md](releases.md#latest-changes) for the full writeup. Before
+that, same day: **P28.1** (Tier 1, TUI escape-sequence sanitization for untrusted tool output)
+shipped. All other completed history (the full P27 threat-model batch, P27.1–P27.19, plus everything
+before it) also lives there.
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -14,17 +15,19 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 6 remaining items (P28.2-P28.7) of the 7 filed 2026-07-14 from a full interactive
-evaluation of the TUI, web UI, and daemon against three live Ollama models (`qwythos:latest`,
-`deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via `TestLiveWorkflow` — see
-[Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence sanitization) shipped
-2026-07-14, closing out Tier 1 entirely — see [releases.md](releases.md#latest-changes). Tier 4 has
-4 parked items with no active trigger (see [Parked](#open-work--parked-tier-4)), plus 2 remaining
-unresolved needs-verification notes carried over from the P27 threat model (see below); the third
-(TUI escape-sequence neutralization) is now resolved by P28.1.
+**Open items:** 5 remaining items (P28.2, P28.3, P28.5, P28.6, P28.7) of the 7 filed 2026-07-14 from
+a full interactive evaluation of the TUI, web UI, and daemon against three live Ollama models
+(`qwythos:latest`, `deepseek-r1:8b`, `gpt-oss:20b`) over the real HTTP+SSE seam via
+`TestLiveWorkflow` — see [Open Work](#open-work) below. **P28.1** (Tier 1, TUI escape-sequence
+sanitization) shipped 2026-07-14, closing out Tier 1 entirely, and **P28.4** (Tier 2, compaction
+fallback on repeated summarizer failure) shipped 2026-07-14 too — see
+[releases.md](releases.md#latest-changes). Tier 4 has 4 parked items with no active trigger (see
+[Parked](#open-work--parked-tier-4)), plus 2 remaining unresolved needs-verification notes carried
+over from the P27 threat model (see below); the third (TUI escape-sequence neutralization) is now
+resolved by P28.1.
 
-**Next session:** start with Tier 2 — **P28.2**, **P28.4**, **P28.6**, or **P28.7** (all cheap,
-no-dependency wins; no particular order between them). Re-run `TestLiveWorkflow` (recipe in
+**Next session:** start with the remaining Tier 2 items — **P28.2**, **P28.6**, or **P28.7** (all
+cheap, no-dependency wins; no particular order between them). Re-run `TestLiveWorkflow` (recipe in
 CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams;
 `aegis doctor` (P26.1) is the standalone preflight companion for the same misconfiguration classes
 (including the workspace trust check, P27.1, and the local-sandbox recommendation, P27.14).
@@ -41,7 +44,8 @@ speculatively.
 
 **Tier 1:** none open — P28.1 shipped 2026-07-14, see [releases.md](releases.md#latest-changes).
 
-**Tier 2:** P28.2, P28.4, P28.6, P28.7.
+**Tier 2:** P28.2, P28.6, P28.7. P28.4 shipped 2026-07-14, see
+[releases.md](releases.md#latest-changes).
 
 **Tier 3:** P28.3, P28.5.
 
@@ -74,8 +78,9 @@ See `0-assessment.md`'s "Needs Verification" table in the report folder for the 
 Filed 2026-07-14 from a full interactive evaluation of the TUI, web UI, and daemon — driving real
 sessions over the HTTP+SSE seam (the same one the TUI/web UI use) against three live Ollama
 models via `TestLiveWorkflow`, plus a read of the TUI render paths and web UI streaming client.
-Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization) shipped
-2026-07-14 — see [releases.md](releases.md#latest-changes) — leaving Tier 2 as the current front.
+Ordered by tier, most urgent first. **P28.1** (Tier 1, TUI escape-sequence sanitization) and
+**P28.4** (Tier 2, compaction fallback on repeated summarizer failure) both shipped 2026-07-14 —
+see [releases.md](releases.md#latest-changes).
 
 ### P28.2 — Guidance/config for tool-calling-capable local models
 
@@ -105,20 +110,6 @@ reconsider/act, or investigate whether the OpenAI-compatible adapter should send
 `tool_choice: "required"` rather than `"auto"` when the persona/tools make tool use expected.
 Needs investigation into what Ollama's OpenAI-compat endpoint actually supports for `tool_choice`
 before committing to an approach — do not build speculatively until that's confirmed.
-
-### P28.4 — Compaction has no fallback when the local summarizer returns empty output
-
-Priority: Tier 2 · Effort: S/M
-
-Live evaluation observed `proactive compaction failed: summarizer returned empty output`
-(`internal/compaction/compaction.go:212`) against both `qwythos:latest` and `gpt-oss:20b`. The
-engine (`internal/engine/engine.go:456-465`) logs a warning and skips compaction for that turn
-entirely — no retry, no fallback. Long local-model sessions run far more turns/tokens per task
-than cloud sessions (observed: 87k input / 2.4k output tokens over 13 tool calls for one bug fix
-with `gpt-oss:20b`), so a summarizer that unreliably returns empty output can repeatedly fail to
-shrink context, drifting toward the hard context-window ceiling with no safety valve. Add a
-fallback (e.g. deterministic truncation/drop-oldest-tool-output) when the LLM summarizer fails
-twice in a row for the same session.
 
 ### P28.5 — Web UI SSE stream has no reconnect/resume on drop
 

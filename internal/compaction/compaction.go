@@ -167,6 +167,68 @@ func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider
 	return out, true, nil
 }
 
+// FallbackCompact deterministically shortens the conversation without an LLM
+// call, for use when the LLM summarizer has failed repeatedly (P28.4 —
+// observed live against local models like qwythos:latest/gpt-oss:20b, which
+// intermittently return empty output from the summarization prompt). It
+// reuses the same boundary selection as Compact/ForceCompact — protecting
+// the keepRecent tail and never splitting a tool_use/tool_result pair — but
+// replaces the summarized prefix with a terse, deterministically generated
+// note (message/tool-call counts) instead of an AI-generated summary, so a
+// broken summarizer can never block context from shrinking. Unlike Compact,
+// this cannot itself fail: worst case is changed=false when there is nothing
+// safe to cut, matching Compact/ForceCompact's own no-op case.
+func (s *Summarizer) FallbackCompact(msgs []provider.Message) ([]provider.Message, bool) {
+	boundary := s.boundary(msgs)
+	if boundary <= 0 {
+		return msgs, false
+	}
+	prefix := msgs[:boundary]
+	out := make([]provider.Message, 0, len(msgs)-boundary+1)
+	out = append(out, provider.Message{
+		Role: provider.RoleUser,
+		Content: []provider.Block{provider.TextBlock{Text: "Earlier conversation was dropped by deterministic fallback " +
+			"compaction (the AI summarizer failed repeatedly, so no AI-generated summary is available):\n\n" + fallbackNote(prefix)}},
+	})
+	out = append(out, msgs[boundary:]...)
+	return out, true
+}
+
+// fallbackNote describes what a deterministic fallback compaction dropped —
+// message and tool-call counts, and which tools were used — so the model at
+// least knows something happened here, even without the verbatim content or
+// an LLM's interpretation of it.
+func fallbackNote(msgs []provider.Message) string {
+	var userTurns, assistantTurns, toolCalls int
+	var toolNames []string
+	seen := make(map[string]bool)
+	for _, m := range msgs {
+		switch m.Role {
+		case provider.RoleUser:
+			userTurns++
+		case provider.RoleAssistant:
+			assistantTurns++
+		}
+		for _, blk := range m.Content {
+			if tu, ok := blk.(provider.ToolUseBlock); ok {
+				toolCalls++
+				if !seen[tu.Name] {
+					seen[tu.Name] = true
+					toolNames = append(toolNames, tu.Name)
+				}
+			}
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d earlier message(s) (%d user, %d assistant) covering %d tool call(s) were dropped.",
+		len(msgs), userTurns, assistantTurns, toolCalls)
+	if len(toolNames) > 0 {
+		fmt.Fprintf(&b, " Tools used: %s.", strings.Join(toolNames, ", "))
+	}
+	b.WriteString(" Earlier file contents, decisions, and open tasks from this span are no longer available verbatim — re-read files or ask the user if needed.")
+	return b.String()
+}
+
 // boundary returns the index of the first assistant message at or after the
 // keep-recent cutoff, so the kept suffix starts cleanly and the summarized
 // prefix never splits a tool_use/tool_result pair.
