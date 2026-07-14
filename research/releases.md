@@ -8,7 +8,26 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — shipped **P31.2** (Tier 1, high): `internal/server/sessions.go`'s
+**Last updated:** 2026-07-14 — shipped **P30.1** (Tier 1): `internal/lsp/client.go`'s `readLoop`
+returned silently when the LSP server process died or its stdio pipe broke, never notifying any
+request parked in `c.pending` — every in-flight `call()` then blocked until the caller's own
+context deadline, and nothing in `internal/engine` sets a per-tool timeout, so a dead language
+server could hang an LSP tool call indefinitely. Ported the `failPending` pattern already used by
+the structurally identical `internal/mcp` stdio JSON-RPC client: `pending` now carries a
+`callResult{result, err}` pair instead of a bare `json.RawMessage`, and a new `failPending` method
+marks the client closed and drains every pending channel with a synthetic connection error on any
+`readLoop` exit (header-read EOF/error, oversized-body abort, or body-read error); `call()` checks
+`closed` up front so post-death calls fail immediately instead of enqueueing into a pending map
+nothing will ever drain again. As a side effect of the necessary channel-type change, RPC-level
+errors (`resp.Error != nil`) are now also propagated to the caller instead of silently discarded.
+Tested via a new `TestCallFailsPromptlyWhenTransportDies` (`internal/lsp/client_test.go`): closes
+the transport mid-call and asserts the blocked `call()` returns a non-nil error within 5s (a real
+safety net, not relied on by the fix) rather than hanging on the request's own long-lived context;
+`go build ./...`, `go vet ./internal/lsp/...`, `go test ./internal/lsp/...`, and
+`go test ./internal/tool/...` (downstream consumer) all pass. See roadmap.md for the remaining
+P30.2/P30.3 open items (P30.2 next).
+
+**Previously, same day:** shipped **P31.2** (Tier 1, high): `internal/server/sessions.go`'s
 `resolveSessionWorkdir` (the P25.1 session-Workdir validator) called `os.Stat` on a client-supplied
 path *before* checking `s.workdirAllowed`, so a remote-accessible daemon let an
 authenticated-but-not-allowlisted client use `POST /sessions` as a filesystem-existence oracle — the
@@ -20,8 +39,7 @@ short-circuits true for them. Tested via a new case appended to
 `TestCreateSessionWorkdirTrustBoundary` (`internal/server/workdir_test.go`): a nonexistent path
 outside the allowlist, with remote access enabled, must return 403 not 400; `go build ./...` and
 `go test ./internal/server/...` pass. Closes [CodeQL alert
-#4](https://github.com/fiddler110/Aegis/security/code-scanning/4). See roadmap.md for the
-remaining P30 open items (P30.1 next).
+#4](https://github.com/fiddler110/Aegis/security/code-scanning/4).
 
 **Previously, same day:** shipped **P31.1** (Tier 1, critical): nuclei's
 `security.tools.nuclei.templates_version` config value (settable via config file or the daemon's

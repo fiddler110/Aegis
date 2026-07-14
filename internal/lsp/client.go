@@ -23,10 +23,20 @@ type Client struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 
-	mu      sync.Mutex
-	nextID  int
-	pending map[int]chan json.RawMessage
-	initd   bool
+	mu       sync.Mutex
+	nextID   int
+	pending  map[int]chan callResult
+	initd    bool
+	closed   bool
+	closeErr error
+}
+
+// callResult is what a pending call's response channel carries: either the
+// raw JSON result of a successful response, or an error (a server-reported
+// RPC error, or a synthetic one from failPending when the transport dies).
+type callResult struct {
+	result json.RawMessage
+	err    error
 }
 
 // NewClient launches command as an LSP server and connects over stdio.
@@ -48,7 +58,7 @@ func NewClient(ctx context.Context, name, command string, args []string, rootURI
 		cmd:     cmd,
 		stdin:   stdin,
 		stdout:  stdout,
-		pending: make(map[int]chan json.RawMessage),
+		pending: make(map[int]chan callResult),
 	}
 	go c.readLoop()
 
@@ -114,9 +124,14 @@ type rpcError struct {
 
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
+	if c.closed {
+		err := c.closeErr
+		c.mu.Unlock()
+		return nil, err
+	}
 	c.nextID++
 	id := c.nextID
-	ch := make(chan json.RawMessage, 1)
+	ch := make(chan callResult, 1)
 	c.pending[id] = ch
 	c.mu.Unlock()
 
@@ -133,8 +148,8 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, ctx.Err()
-	case result := <-ch:
-		return result, nil
+	case res := <-ch:
+		return res.result, res.err
 	}
 }
 
@@ -148,6 +163,9 @@ func (c *Client) readLoop() {
 	for {
 		header, err := tp.ReadMIMEHeader()
 		if err != nil {
+			// EOF or a transport error — the server process died or its
+			// stdio pipe broke. See failPending.
+			c.failPending(err)
 			return
 		}
 		lengthStr := header.Get("Content-Length")
@@ -160,10 +178,12 @@ func (c *Client) readLoop() {
 		}
 		const maxLSPBody = 32 << 20 // 32 MiB
 		if length > maxLSPBody {
+			c.failPending(fmt.Errorf("lsp: message body of %d bytes exceeds %d byte limit", length, maxLSPBody))
 			return
 		}
 		body := make([]byte, length)
 		if _, err := io.ReadFull(reader, body); err != nil {
+			c.failPending(err)
 			return
 		}
 
@@ -177,11 +197,37 @@ func (c *Client) readLoop() {
 		c.mu.Unlock()
 		if ch != nil {
 			if resp.Error != nil {
-				ch <- nil
+				ch <- callResult{err: fmt.Errorf("lsp: %s", resp.Error.Message)}
 			} else {
-				ch <- resp.Result
+				ch <- callResult{result: resp.Result}
 			}
 		}
+	}
+}
+
+// failPending marks the connection dead and immediately fails every
+// in-flight call with connErr (defaulting to a plain EOF wrapper when the
+// read loop ended on ordinary stream closure). Every request still in
+// c.pending would otherwise block on its response channel forever — and,
+// absent a per-call context deadline, so would every future call silently
+// enqueued into a pending map nothing will ever drain again. Fail loud
+// instead. Mirrors internal/mcp's Client.failPending for the structurally
+// identical stdio JSON-RPC transport-death scenario.
+func (c *Client) failPending(readErr error) {
+	if readErr == nil {
+		readErr = io.EOF
+	}
+	connErr := fmt.Errorf("lsp: connection to %q closed: %w", c.name, readErr)
+
+	c.mu.Lock()
+	c.closed = true
+	c.closeErr = connErr
+	pending := c.pending
+	c.pending = map[int]chan callResult{}
+	c.mu.Unlock()
+
+	for _, ch := range pending {
+		ch <- callResult{err: connErr}
 	}
 }
 
