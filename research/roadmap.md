@@ -1,6 +1,21 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-13 — **P27.17** (FIND-16, Tier 3, CVSS 3.4) shipped: investigation found the
+**Last updated:** 2026-07-13 — **P27.19** (FIND-17, Tier 4, CVSS 5.9, doc-only) shipped: the
+"Docker/Podman socket privilege equivalence" section in `docs/security_scan.md` (added by
+P24.10/FIND-06) already covered `--cap-drop=ALL`/`--security-opt=no-new-privileges` and recommended
+rootless Podman / userns-remapped Docker as mitigations for socket-access privilege equivalence —
+but FIND-17's remediation also names a **socket-proxy** as an option, and nothing in the docs
+mentioned one. Added a new bullet to that section recommending a socket-proxy (e.g.
+`docker-socket-proxy`) in front of a rootful Docker daemon for deployments that can't move to
+rootless Podman, restricting it to only the container-create/start/stop endpoints Aegis needs
+rather than the full Docker API. No code changes — this closes the one concrete gap between
+FIND-17's remediation text and the pre-existing FIND-06 documentation; the `--network none` default
+and cap-drop hardening FIND-17 also cites were already shipped and already documented, so this item
+was purely additive to close the socket-proxy mention. `docs/security_scan.md` is documentation
+only, no tests affected. This closes out Tier 4's P27.19; P27.20 remains parked (no trigger beyond
+the threat model's own suggestion).
+
+Before that, same day (2026-07-13): **P27.17** (FIND-16, Tier 3, CVSS 3.4) shipped: investigation found the
 finding's core mechanism was already in place — `internal/tool/builtin/agent.go`'s `spawnBackground`
 (the sole production entry point for a detached/background sub-agent spawn) already read the shared
 cost tracker off the caller's request ctx and re-attached it onto the job's severed context before
@@ -181,18 +196,20 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** none — Tier 3 is fully closed. Tiers 1 and 2 (**P27.1–P27.13**) and all of Tier 3
-(**P27.14–P27.18**) shipped 2026-07-13; P27.18 shipped out of order, ahead of P27.16/P27.17, since
-it was fully self-contained, and P27.16/P27.17 shipped together via two parallel worktree agents.
-Tier 4 is 5 items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.19**/**P27.20** (see
+**Open items:** none — Tiers 1-3 are fully closed, and Tier 4's **P27.19** shipped 2026-07-13
+(doc-only). Tiers 1 and 2 (**P27.1–P27.13**) and all of Tier 3 (**P27.14–P27.18**) shipped
+2026-07-13; P27.18 shipped out of order, ahead of P27.16/P27.17, since it was fully self-contained,
+and P27.16/P27.17 shipped together via two parallel worktree agents. Tier 4 has 4 remaining parked
+items — the pre-existing P25.9/P13.3.3/P6.1 plus **P27.20** (see
 [Parked](#open-work--parked-tier-4)).
 
-**Next session:** nothing queued — the entire P27 threat-model batch (Tiers 1-3, 18 items) is
-shipped. Next trigger: a new threat-model pass, a reported incident, a new feature evaluation, or a
-concrete pain point surfacing one of the Tier 4 parked items. Re-run `TestLiveWorkflow` (recipe in
-CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis
-doctor` (P26.1) is the standalone preflight companion for the same misconfiguration classes (now
-including a workspace trust check, P27.1, and the local-sandbox recommendation, P27.14).
+**Next session:** nothing queued — the entire P27 threat-model batch (Tiers 1-3 plus P27.19, 19
+items) is shipped. Next trigger: a new threat-model pass, a reported incident, a new feature
+evaluation, or a concrete pain point surfacing one of the remaining Tier 4 parked items. Re-run
+`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone
+preflight companion for the same misconfiguration classes (now including a workspace trust check,
+P27.1, and the local-sandbox recommendation, P27.14).
 
 ---
 
@@ -218,8 +235,8 @@ provenance mechanism instead, matching the P24.4 precedent for persona/skill bod
 cost-tracker propagation into detached swarm spawns) already in place from an earlier phase; it
 shipped as a verification/test-coverage item rather than a production-code fix.
 
-**Tier 4:** parked — P25.9, P13.3.3, P6.1, P27.19, P27.20. See
-[Parked](#open-work--parked-tier-4).
+**Tier 4:** parked — P25.9, P13.3.3, P6.1, P27.20. **P27.19** shipped 2026-07-13 (doc-only, see
+above). See [Parked](#open-work--parked-tier-4).
 
 ---
 
@@ -267,13 +284,8 @@ path, which the new test now provides. No production code changed.
 
 #### P27.18 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes))
 
-**Tier 4 (2 items, headings live in [Parked](#open-work--parked-tier-4) since that's the canonical
-open-item list for that tier):**
-- **P27.19 (FIND-17)** — Container backend's Docker/Podman socket access is root-equivalent on the
-  host (CWE-269, CVSS 5.9); existing hardening (`--cap-drop=ALL`, `--security-opt=no-new-privileges`,
-  `--network none` default) already applied per P24.10, so the residual is inherent to the
-  runtime's own socket-trust model. Remediation is documentation (recommend rootless
-  Podman/socket-proxy) — no further code action currently scoped.
+**Tier 4 (1 item remaining open; P27.19 shipped 2026-07-13, heading lives in
+[Parked](#open-work--parked-tier-4) since that's the canonical open-item list for that tier):**
 - **P27.20 (FIND-18, encryption half)** — Optional at-rest encryption (e.g., SQLCipher) for the
   conversation/checkpoint SQLite stores, beyond the ACL fix already covered by P27.10. Larger, no
   concrete trigger beyond the threat model's own suggestion.
@@ -290,9 +302,11 @@ to P27.15). See `0-assessment.md`'s "Needs Verification" table in the report fol
 
 Low urgency, no trigger, or explicitly parked pending demand. Do not build speculatively —
 revisit only if a concrete trigger (user demand, reported pain, incident) appears, and check
-with the user before starting any of these. **P27.19 and P27.20** (added 2026-07-13, from the new
-threat model) are parked for a different reason than the original 3 — not "no trigger" but "the
-finding's own remediation is documentation-only or explicitly optional," see their entries below.
+with the user before starting any of these. **P27.20** (added 2026-07-13, from the new threat
+model) is parked for a different reason than the original 3 — not "no trigger" but "the finding's
+own remediation is explicitly optional," see its entry below. Its sibling **P27.19** was the
+same shape (documentation-only remediation) but shipped 2026-07-13 on explicit user request — see
+[above](#priority-order).
 Re-verified 2026-07-12 against the full P25/P26 batch — no scope changes to any of the original 3
 items below. P25.9 in particular was checked line-by-line:
 P25.8 only threaded `Workdir` through `swarm.SpawnConfig`, `cron.Job`, and `api.DebateRequest`
@@ -337,15 +351,11 @@ Persist partial turn state (text, tool calls) to SQLite during streaming. High c
 low-probability failure mode. (Checked 2026-07-12: P25.5 added mid-turn token-usage accumulation
 in memory, not persistence to SQLite — no overlap, no trigger.)
 
-### P27.19 — FIND-17: container socket trust (documentation only)
-
-Priority: Tier 4 · Effort: S, doc-only — remediation has no further code action currently scoped
-
-Docker/Podman socket access is root-equivalent on the host. Aegis already applies
-`--cap-drop=ALL`, `--security-opt=no-new-privileges`, and a `--network none` default (shipped as
-P24.10) — the residual risk is inherent to the container runtime's own socket-trust model, not a
-missing Aegis control. Remediation is documenting the socket-privilege caveat and recommending
-rootless Podman or a socket-proxy where available.
+#### P27.19 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes)) — scope note:
+FIND-17's `--cap-drop=ALL`/`--security-opt=no-new-privileges`/rootless-Podman guidance was already
+documented via P24.10/FIND-06; the only gap was FIND-17's remediation also naming a socket-proxy as
+an option, which the existing docs didn't mention. Closed with a doc-only addition to the same
+section rather than a new one.
 
 ### P27.20 — FIND-18 (encryption half): optional at-rest encryption for SQLite stores
 
