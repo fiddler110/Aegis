@@ -891,32 +891,25 @@ An empty list (`[]`) means unrestricted.
 
 ## Audit Trail
 
-Every tool call and permission decision is recorded to a JSONL audit trail:
+The daemon writes a single, global JSONL audit trail shared by every session — there is no per-session audit file.
 
-**Location:** `~/.local/share/aegis/audit/<session-id>.jsonl`
+**Location:** `<data_dir>/audit.jsonl` (`~/.config/aegis/audit.jsonl` on macOS/Linux, `%AppData%\aegis\audit.jsonl` on Windows, by default; see `internal/config/config.go`'s `defaultDataDir()`).
 
-**Entry format:**
+Each line is a JSON object, and the fields present depend on the record's `phase`:
+
+- **`pre`** — logged for every tool call before it runs: `time`, `phase`, `tool`, `input` (the raw tool input, replaced with a `"[N bytes, truncated]"` string if larger than 1024 bytes).
+- **`post`** — logged for every tool call after it runs: `time`, `phase`, `tool`, `is_error`.
+- **`policy_decision`** — logged when a contextual security policy (`egress_then_write`, `network_allowlist`), a text-based permission rule, or the persona-tool advisory gate makes a decision: `time`, `phase`, `tool`, `cap` (the tool's capability), `rule`, `decision`, `reason`.
+- **`subagent_stop`** — logged when a spawned sub-agent finishes: `time`, `phase`, `agent_id`, `status`, `summary`, `is_error`.
+
 ```json
-{
-  "ts": "2026-07-02T10:00:00Z",
-  "session_id": "abc12345",
-  "tool": "shell",
-  "capability": "execute",
-  "input": {"command": "npm install malicious-package"},
-  "decision": "ask_denied",
-  "rule": null
-}
+{"time":"2026-07-02T10:00:00Z","phase":"pre","tool":"shell","input":{"command":"npm install malicious-package"}}
+{"time":"2026-07-02T10:00:01Z","phase":"policy_decision","tool":"shell","cap":"execute","rule":"deny bash(npm install*)","decision":"deny","reason":"denied by rule"}
 ```
 
-**Decision values:**
-| Value | Meaning |
-|-------|---------|
-| `allow` | Allowed by mode or rule, no prompt |
-| `deny` | Denied by rule or mode, no prompt |
-| `ask_approved` | Prompted; user approved |
-| `ask_denied` | Prompted; user denied |
+**Decision values** (`policy_decision` records only): `allow`, `deny`, `ask`.
 
-The audit trail is append-only and persists when sessions are deleted. Keep it for compliance and incident review.
+The audit trail is append-only and never rewritten. It persists even when sessions are deleted, since it is not tied to any single session. See docs/permissions.md#audit-trail for the canonical description.
 
 ---
 

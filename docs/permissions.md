@@ -145,26 +145,26 @@ permission:
 
 ## Audit Trail
 
-Every tool call and permission decision is appended to an audit trail file:
+The daemon writes a single, global JSONL audit trail shared by every session — there is no per-session audit file.
 
-**Location:** `~/.local/share/aegis/audit/<session-id>.jsonl`
+**Location:** `<data_dir>/audit.jsonl` (`~/.config/aegis/audit.jsonl` on macOS/Linux, `%AppData%\aegis\audit.jsonl` on Windows, by default; see `internal/config/config.go`'s `defaultDataDir()`).
 
-Each line is a JSON object:
+Each line is a JSON object, and the fields present depend on the record's `phase`:
+
+- **`pre`** — logged for every tool call before it runs: `time`, `phase`, `tool`, `input` (the raw tool input, replaced with a `"[N bytes, truncated]"` string if larger than 1024 bytes).
+- **`post`** — logged for every tool call after it runs: `time`, `phase`, `tool`, `is_error`.
+- **`policy_decision`** — logged when a contextual security policy (`egress_then_write`, `network_allowlist`), a text-based permission rule, or the persona-tool advisory gate makes a decision: `time`, `phase`, `tool`, `cap` (the tool's capability), `rule`, `decision`, `reason`.
+- **`subagent_stop`** — logged when a spawned sub-agent finishes: `time`, `phase`, `agent_id`, `status`, `summary`, `is_error`.
+
 ```json
-{
-  "ts": "2026-07-02T10:00:00Z",
-  "tool": "shell",
-  "capability": "execute",
-  "input": {"command": "rm -rf dist/"},
-  "decision": "allow",
-  "rule": "allow bash(rm -rf dist/)",
-  "session_id": "abc12345"
-}
+{"time":"2026-07-02T10:00:00Z","phase":"pre","tool":"shell","input":{"command":"rm -rf dist/"}}
+{"time":"2026-07-02T10:00:00Z","phase":"post","tool":"shell","is_error":false}
+{"time":"2026-07-02T10:00:01Z","phase":"policy_decision","tool":"write_file","cap":"write","rule":"egress_then_write","decision":"ask","reason":"write follows a network call in this session"}
 ```
 
-**Decision values:** `allow`, `deny`, `ask_approved`, `ask_denied`.
+**Decision values** (`policy_decision` records only): `allow`, `deny`, `ask`.
 
-The audit trail is append-only and never rewritten. It persists even when sessions are deleted.
+The audit trail is append-only and never rewritten. It persists even when sessions are deleted, since it is not tied to any single session.
 
 ---
 

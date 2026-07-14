@@ -23,7 +23,8 @@ Sessions are the core persistence unit in Aegis. Every conversation is a session
 | `archived_at` | Set when archived; null when active |
 | `background` | Whether the session runs detached from the TUI |
 
-Sessions are stored in `~/.local/share/aegis/sessions.db` (SQLite).
+Sessions are stored in `~/.config/aegis/sessions.db` (SQLite) on macOS/Linux, or
+`%AppData%\aegis\sessions.db` on Windows.
 
 ---
 
@@ -267,7 +268,8 @@ curl -X POST -H "Authorization: Bearer <token>" \
   http://127.0.0.1:4127/sessions/<id>/compact
 ```
 
-The bearer token is stored at `~/.local/share/aegis/auth`.
+The bearer token is stored at `~/.config/aegis/auth` (macOS/Linux) or
+`%AppData%\aegis\auth` (Windows).
 
 ---
 

@@ -135,10 +135,10 @@ Aegis has several memory systems that persist facts across sessions:
 | System | Scope | Storage | Purpose |
 |--------|-------|---------|---------|
 | Project memory | Project | `.aegis/memory.md` | Facts the agent should always know about this project |
-| User memory | Global | `~/.local/share/aegis/memory.md` | Facts that apply across all projects |
+| User memory | Global | `~/.config/aegis/memory.md` | Facts that apply across all projects |
 | Skills | Project or global | `*.md` files | Reusable procedures; index injected at session start, full body loaded on demand via `skill` tool |
 | Project knowledge base | Project | `.aegis/knowledge.db` | FTS5-indexed README, docs, and code comments (`aegis knowledge index` to populate); optional hybrid semantic recall |
-| Long-term entity store | Global | `~/.local/share/aegis/longmem.db` | Cross-session structured facts about named entities; optional hybrid semantic recall |
+| Long-term entity store | Global | `~/.config/aegis/longmem.db` | Cross-session structured facts about named entities; optional hybrid semantic recall |
 
 See [Memory & Knowledge](memory-and-knowledge.md) for full detail.
 

@@ -125,7 +125,7 @@ Or drop a markdown file into either of these directories yourself:
 | Scope | Directory |
 |-------|-----------|
 | Project | `.aegis/personas/<name>.md` |
-| User (global) | `~/.local/share/aegis/personas/<name>.md` |
+| User (global) | `~/.config/aegis/personas/<name>.md` |
 
 Project files take precedence over user files on name collision. The persona's name is the **filename stem** (`secure-reviewer.md` → `secure-reviewer`); file personas shadow built-ins of the same name.
 

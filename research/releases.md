@@ -8,12 +8,106 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P28.5** (Tier 3, resumable web UI SSE stream) shipped, closing out
-the entire P28 batch (all 7 items filed from the 2026-07-14 live evaluation). Built on the same
+**Last updated:** 2026-07-14 — both remaining P27 threat-model needs-verification items (hook
+execution timing, cron fire-time rule application) were checked against the real code and existing
+tests and confirmed already resolved, with no production change needed — see below. Also on
+2026-07-14: the **P29** batch (6 items, doc drift found by a full parallel audit of every docs/*.md
+file against the actual implementation) shipped in full, closing out every open roadmap item.
+Also on 2026-07-14: **P28.5** (Tier 3, resumable web UI SSE stream) shipped, closing
+out the entire P28 batch (all 7 items filed from the same day's live evaluation). Built on that same
 day's **P28.3** (Tier 3, engine nudge/retry on a zero-tool-call actionable turn), **P28.7** (Tier 2,
 persistent connection/model-health indicator), **P28.2** (Tier 2, local-model tool-calling guidance +
 `aegis doctor` smoke test), **P28.4** (Tier 2, compaction robustness), and **P28.6** (Tier 2,
 `TestLiveWorkflow` harness-quality fix).
+
+### P27 threat model — last two needs-verification items, confirmed resolved (no code change)
+
+The roadmap's needs-verification list (carried over from the P27 threat model,
+`threat-model-20260712-200318/0-assessment.md`) had two items left after P28.1 closed the terminal-
+escape-sequence question. Both were checked by reading the actual code path end-to-end and running
+the tests that exercise it — not just re-reading the original static-review notes — and both turned
+out to already be fully resolved by mechanisms that shipped with P27.1 and P27.15 respectively;
+neither needed a code fix here.
+
+- **Hook execution timing** (relevant to P27.1, the workspace-trust gate). The original concern was
+  whether a project's `session_start`/`pre_tool_use` hooks could run before any trust decision is
+  consulted. They can't, and there's no timing race to have: `applyWorkspaceTrust`
+  (`internal/config/config.go:1122`) freezes `cfg.Hooks` back to the baseline (project layer
+  excluded) synchronously inside `config.Load()`, which completes before `Server.New` ever
+  constructs the hook executor (`s.execHook = hooks.NewExec(toExecSpecs(cfg.Hooks), logger)`,
+  `internal/server/server.go:630`) — in turn well before any session (and therefore any
+  `session_start` fire, `internal/server/messages.go:306`) exists. An untrusted directory's project
+  hooks are never loaded into `s.execHook` in the first place, not merely delayed behind a prompt.
+  `TestWorkspaceTrustFreezesUntrustedProjectConfig` (`internal/config/workspacetrust_test.go:28`)
+  already asserts `cfg.Hooks` is empty when frozen, using a project config that declares a
+  `session_start` hook — re-ran it (`go test ./internal/config/... -run TestWorkspaceTrust -v`) to
+  confirm it still passes.
+- **Cron fire-time gating** (relevant to P27.15). The original concern was whether text allow/deny
+  rules are truly applied at cron fire time or only the coarse mode check. They are:
+  `Server.cronPermCheck` (`internal/server/helpers.go:330`) runs the job through
+  `s.buildGate(s.cfg.Permission.Mode, approver, persona.Persona{})` — the identical gate stack
+  (mode → contextual egress/network policy → text allow/deny rules) `buildGate` assembles for every
+  interactive tool call — against the real `shell` tool and the job's command, not a mode-only
+  shortcut. `TestServerCronPermCheck` (`internal/server/cron_test.go:323`) exercises this exact
+  production method (not just the test-mirrored helper the other cron tests use) with a real `deny
+  shell(rm -rf*)` rule and confirms it blocks even when the job has `AutoApprove: true`; ran it
+  alongside `TestNewCronRunFuncBlockedByDenyRuleEvenInAutoMode` and
+  `TestNewCronRunFuncAllowedByRuleEvenInPlanMode` (`go test ./internal/server/... -run
+  'TestServerCronPermCheck|TestNewCronRunFuncBlockedByDenyRuleEvenInAutoMode|TestNewCronRunFuncAllowedByRuleEvenInPlanMode'
+  -v`) — all pass.
+
+This closes the P27 threat model's needs-verification list entirely (the third item, TUI
+escape-sequence neutralization, was already closed by P28.1).
+
+### P29 batch — docs-vs-implementation drift (all 6 items, Tier 2/3, Effort S/M)
+
+Filed 2026-07-14 from a full parallel audit comparing every `docs/*.md` file against the actual
+implementation (`internal/tool/builtin`, `internal/permission`, `internal/config`,
+`internal/provider`, plus persona/skills/swarm/debate/MCP/session/memory, which matched the code
+exactly — no items filed there). All were pure documentation drift except P29.4, which the user
+chose to resolve by changing behavior instead of docs.
+
+- **P29.1** — `docs/tools-reference.md` and `docs/multi-agent.md` named the team-task-creation tool
+  `team_task_create`; the real registered name is `team_task_add`
+  (`internal/tool/builtin/team.go:40`). Corrected both docs; the tool itself was already correctly
+  named everywhere in code and tests, so no code change.
+- **P29.2** — `docs/permissions.md` (and, found during the same pass, `docs/security_scan.md`)
+  described a fabricated per-session audit mechanism (`~/.local/share/aegis/audit/<session-id>.jsonl`,
+  fields including `session_id`/`capability`, decision values `ask_approved`/`ask_denied`) that
+  doesn't exist. Rewrote both to describe the real single global file, `<data_dir>/audit.jsonl`
+  (`internal/server/server.go:628`), with its real phase-keyed schema
+  (`internal/hooks/hooks.go:67-82`: `pre`/`post`/`policy_decision`/`subagent_stop` phases, real
+  decision values `allow`/`deny`/`ask`).
+- **P29.3** — `docs/sessions.md` and `docs/configuration.md` claimed the default data directory is
+  `~/.local/share/aegis` (macOS/Linux) / `%LocalAppData%\aegis` (Windows); the real
+  `defaultDataDir()` (`internal/config/config.go:874-890`) uses `~/.config/aegis` /
+  `%AppData%\aegis` — a different XDG category on both platforms. Corrected both named files, plus
+  the same stale path found in `docs/extensibility.md`, `docs/memory-and-knowledge.md`,
+  `docs/overview.md`, `docs/personas.md`, and `docs/tools-reference.md` during the sweep.
+- **P29.4** — `docs/configuration.md` listed `GROQ_API_KEY`/`OPENROUTER_API_KEY` as native provider
+  env vars, but `config.ProviderAPIKey` only ever read `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/the
+  hardcoded `"ollama"` fallback. Asked the user which fix path they wanted (doc-only correction vs.
+  actually wiring the vars); they chose to wire them. `ProviderAPIKey`'s `"openai"` case
+  (`internal/config/config.go`) now falls back to `GROQ_API_KEY` then `OPENROUTER_API_KEY` when
+  `OPENAI_API_KEY` is unset — Groq/OpenRouter are reached via `provider.default: openai` plus a
+  custom `base_url` (see `docs/providers.md`), not distinct provider names, so the fallback lives in
+  the `"openai"` branch rather than as new provider cases. `docs/configuration.md` gained a short
+  note clarifying the mechanism. Tested: `TestProviderAPIKeyGroqOpenRouterFallback`
+  (`internal/config/config_test.go`) exercises the priority order
+  (`OPENAI_API_KEY` > `GROQ_API_KEY` > `OPENROUTER_API_KEY` > empty) purely via env vars — no live
+  API keys needed, matching how the rest of the package's env-driven config tests work.
+- **P29.5** — `provider.prompt_profile`, `security.wsl_distro`, `security.dast.allowed_targets`,
+  `security.dast.allow_active`, and `security.redact_secrets` were implemented and functional
+  (some documented only in `docs/providers.md`) but missing from `docs/configuration.md`'s main
+  reference. Added all five with their real defaults and behavior.
+- **P29.6** — `docs/configuration.md`'s sample config showed `tui.humor_mode: false` (built-in
+  default is `true`, `internal/config/config.go:857`) and `sandbox.backend: os` unqualified (built-in
+  default is `local`, `internal/config/config.go:844` — `os` is only what `aegis --first-init`'s
+  generated template writes). Corrected the humor_mode sample value and added an inline note next to
+  `backend: os` explaining it reflects the first-init template, not the built-in default.
+
+Tested: `go build ./...`, `go test ./internal/config/... ./internal/providerfactory/...` pass clean;
+the rest of the batch is documentation-only with no runtime surface to exercise.
 
 **P28.5** (Tier 3, Effort M/L) shipped: a resumable-run design so a web UI SSE stream that drops
 mid-turn (network blip, backgrounded-tab throttling, daemon restart) reattaches and catches up
