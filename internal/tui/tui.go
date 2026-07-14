@@ -31,6 +31,7 @@ import (
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/commands"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/tui/notify"
 )
@@ -595,12 +596,25 @@ func (m model) fetchTeammatesQuiet() tea.Cmd {
 }
 
 // execBangCmd runs a ! shell command and returns its output (P2.2).
+// bangShellCommand picks the shell binary and argv used to run a `!<command>`
+// passthrough, mirroring internal/sandbox.shellCommand and
+// internal/security.shellInvocation: PowerShell (preferring "pwsh" via
+// sandbox.WindowsShellBinary) on Windows, where a POSIX "sh" is not
+// guaranteed to be on PATH, and "/bin/sh -c" elsewhere.
+func bangShellCommand(cmd string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return sandbox.WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", cmd}
+	}
+	return "/bin/sh", []string{"-c", cmd}
+}
+
 func (m model) execBangCmd(cmd string) tea.Cmd {
 	workDir := m.workDir
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		c := exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec
+		shell, args := bangShellCommand(cmd)
+		c := exec.CommandContext(ctx, shell, args...) //nolint:gosec
 		c.Dir = workDir
 		out, err := c.CombinedOutput()
 		code := 0

@@ -8,7 +8,18 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — shipped **P30.2** (Tier 1): `internal/hooks/exec.go` ran every
+**Last updated:** 2026-07-14 — shipped **P30.3** (Tier 1), the last open Tier 1 item: the TUI's
+`!`-prefixed bang command (`execBangCmd`, `internal/tui/tui.go`) hardcoded
+`exec.CommandContext(ctx, "sh", "-c", cmd)`, the same Windows gap as P30.2 in a different call
+site. Added a `bangShellCommand` helper following the identical
+`sandbox.WindowsShellBinary()`/`runtime.GOOS`-branching convention. New
+`TestBangShellCommandPicksPlatformShell` and `TestBangShellCommandNotHardcodedSh`
+(`internal/tui/bangcmd_test.go`) cover the platform branch and guard against the specific
+regression of a bare `"sh"` on Windows. `go build ./...`, `go test ./internal/tui/...`, and
+`go vet ./internal/tui/...` all pass. All four Tier 1 items (P31.1, P31.2, P30.1-P30.3) are now
+shipped — see roadmap.md for the remaining Tier 2 items (P31.3 next).
+
+**Previously, same day:** shipped **P30.2** (Tier 1): `internal/hooks/exec.go` ran every
 configured `pre_tool_use`/`post_tool_use`/`session_start`/`stop`/`subagent_stop` hook command via
 a hardcoded `exec.CommandContext(ctx, "sh", "-c", s.Command)`, silently failing to launch on a
 native Windows host with no POSIX `sh` on PATH. Added a `shellCommand` helper mirroring
@@ -19,8 +30,7 @@ native Windows host with no POSIX `sh` on PATH. Added a `shellCommand` helper mi
 syntax that fails to parse under PowerShell's reserved `1>&2` operator — replaced with a
 GOOS-branching `vetoCommand` helper. New `TestShellCommandPlatformBranch` exercises the
 `shellCommand` helper directly (GOOS-independent assertion). `go build ./...`,
-`go test ./internal/hooks/...`, and `go vet ./internal/hooks/...` all pass. See roadmap.md for the
-remaining P30.3 open item.
+`go test ./internal/hooks/...`, and `go vet ./internal/hooks/...` all pass.
 
 **Previously, same day:** shipped **P30.1** (Tier 1): `internal/lsp/client.go`'s `readLoop`
 returned silently when the LSP server process died or its stdio pipe broke, never notifying any
