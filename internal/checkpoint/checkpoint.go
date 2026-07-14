@@ -263,6 +263,20 @@ func (s *Store) NewSnapshotter(checkpointID string) *Snapshotter {
 // Snapshotter of its own (P9).
 func (s *Snapshotter) CheckpointID() string { return s.checkpointID }
 
+// RestoreFiles rolls back every file captured under this snapshotter's
+// checkpoint to its pre-turn state (deleting files that did not exist before
+// the turn), delegating to Store.RestoreFiles. It returns the number of
+// files restored. Used to quarantine a bad write on an exhausted
+// output-guard FAIL (P27.16) — the same primitive the user-facing rewind
+// feature already uses. Safe to call on a nil receiver (returns 0, nil),
+// matching Capture's nil-safety so callers don't need a separate nil check.
+func (s *Snapshotter) RestoreFiles(ctx context.Context) (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	return s.store.RestoreFiles(ctx, s.checkpointID)
+}
+
 // Snapshotter captures the pre-modification content of files touched during a
 // single turn. It is safe for concurrent use (parallel tool calls) and captures
 // each path at most once, so the first capture wins — i.e. the pre-turn state.

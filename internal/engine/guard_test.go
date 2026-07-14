@@ -2,13 +2,20 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
+
+	_ "modernc.org/sqlite"
 )
 
 // scriptAdapter returns one text response per Stream call, in order.
@@ -531,5 +538,184 @@ func TestGuardExhaustedSurfaces(t *testing.T) {
 	}
 	if doneEvents != 1 {
 		t.Errorf("expected exactly 1 KindDone, got %d", doneEvents)
+	}
+}
+
+// newTestCheckpointStore builds a real, temp-file-backed SQLite checkpoint
+// store for the rollback-on-exhausted-FAIL tests below. internal/checkpoint's
+// own equivalent helper is unexported, so this is a minimal duplicate of it.
+func newTestCheckpointStore(t *testing.T) *checkpoint.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "cp.db"))
+	if err != nil {
+		t.Fatalf("open checkpoint db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	st, err := checkpoint.NewStore(db)
+	if err != nil {
+		t.Fatalf("checkpoint.NewStore: %v", err)
+	}
+	return st
+}
+
+// alwaysFailGuardTurns builds a scriptedAdapter script that: writes over an
+// existing workspace file via the real write_file tool, then gives two final
+// answers in a row that always fail the guard — enough to exhaust the
+// default (and explicit OutputGuardMaxRetries: 1) single-retry budget and
+// reach the terminal "surface anyway" branch.
+func alwaysFailGuardTurns() *scriptedAdapter {
+	return &scriptedAdapter{turns: [][]provider.Event{
+		// Turn 1: writes over the pre-existing file via the real write_file tool.
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
+				ID: "tu_1", Name: "write_file",
+				Input: json.RawMessage(`{"path":"report.md","content":"bad write"}`),
+			}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{IsEstimated: true}},
+		},
+		// Turn 2: a final answer that fails validation (first attempt).
+		{
+			{Type: provider.EventTextDelta, Text: "bad answer 1"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{IsEstimated: true}},
+		},
+		// Turn 3: the corrective retry also fails -> retries exhausted.
+		{
+			{Type: provider.EventTextDelta, Text: "bad answer 2"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{IsEstimated: true}},
+		},
+	}}
+}
+
+// terminalGuardFailEvent returns the non-retrying (terminal, retries-exhausted)
+// failed KindGuard event from evs, or nil.
+func terminalGuardFailEvent(evs []Event) *Event {
+	for i := range evs {
+		if evs[i].Kind == KindGuard && !evs[i].GuardPassed && !evs[i].GuardRetrying {
+			return &evs[i]
+		}
+	}
+	return nil
+}
+
+// TestGuardExhaustedRollsBackWrittenFile is the P27.16 (FIND-15) regression:
+// once the output guard's retries are exhausted and the failing answer is
+// surfaced anyway, any file the turn wrote must be quarantined — rolled back
+// to its pre-turn content via the checkpoint Snapshotter attached to ctx —
+// rather than left on disk exactly as the failing model wrote it.
+func TestGuardExhaustedRollsBackWrittenFile(t *testing.T) {
+	dir := t.TempDir()
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(dir, "report.md")
+	if err := os.WriteFile(target, []byte("original state"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := New(Options{
+		Adapter: alwaysFailGuardTurns(), Tools: reg, Model: "test",
+		OutputGuardMaxRetries: 1,
+		OutputGuard: func(context.Context, guard.Input) (bool, string, guard.Status) {
+			return false, "always bad", guard.StatusFailed
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st := newTestCheckpointStore(t)
+	cp, err := st.Create(context.Background(), "s1", 0, "write the report")
+	if err != nil {
+		t.Fatalf("checkpoint Create: %v", err)
+	}
+	snap := st.NewSnapshotter(cp.ID)
+	ctx := checkpoint.WithSnapshotter(context.Background(), snap)
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "write the report"}}})
+
+	var evs []Event
+	if err := eng.Run(ctx, conv, func(ev Event) { evs = append(evs, ev) }); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original state" {
+		t.Errorf("file content after exhausted guard FAIL = %q, want rolled back to %q", got, "original state")
+	}
+
+	final := terminalGuardFailEvent(evs)
+	if final == nil {
+		t.Fatal("expected a terminal (non-retrying) failed KindGuard event")
+	}
+	if final.GuardFilesRestored != 1 {
+		t.Errorf("GuardFilesRestored = %d, want 1", final.GuardFilesRestored)
+	}
+	if !strings.Contains(final.GuardReason, "rolled back 1 file") {
+		t.Errorf("GuardReason = %q, want it to mention the rollback", final.GuardReason)
+	}
+}
+
+// TestGuardExhaustedNoCheckpointStoreSkipsRollback covers the other half of
+// P27.16: when no checkpoint store is wired in (checkpoint.SnapshotterFrom
+// finds nothing on ctx — e.g. an embedded engine used outside the daemon, or
+// simply a test), the exhausted-FAIL path must not panic or error, and must
+// leave the retry-then-surface behavior exactly as before: the bad write
+// stays on disk and GuardFilesRestored is 0.
+func TestGuardExhaustedNoCheckpointStoreSkipsRollback(t *testing.T) {
+	dir := t.TempDir()
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(dir, "report.md")
+	if err := os.WriteFile(target, []byte("original state"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := New(Options{
+		Adapter: alwaysFailGuardTurns(), Tools: reg, Model: "test",
+		OutputGuardMaxRetries: 1,
+		OutputGuard: func(context.Context, guard.Input) (bool, string, guard.Status) {
+			return false, "always bad", guard.StatusFailed
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "write the report"}}})
+
+	// No checkpoint.WithSnapshotter attached to ctx: must not panic or error.
+	var evs []Event
+	if err := eng.Run(context.Background(), conv, func(ev Event) { evs = append(evs, ev) }); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bad write" {
+		t.Errorf("file content = %q, want the bad write left in place with no checkpoint store wired in", got)
+	}
+
+	final := terminalGuardFailEvent(evs)
+	if final == nil {
+		t.Fatal("expected a terminal (non-retrying) failed KindGuard event")
+	}
+	if final.GuardFilesRestored != 0 {
+		t.Errorf("GuardFilesRestored = %d, want 0 (no checkpoint store wired in)", final.GuardFilesRestored)
+	}
+	if strings.Contains(final.GuardReason, "rolled back") {
+		t.Errorf("GuardReason = %q, should not mention a rollback that didn't happen", final.GuardReason)
 	}
 }

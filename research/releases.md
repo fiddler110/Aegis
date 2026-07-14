@@ -8,6 +8,46 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-07-13 — **P27.16** (FIND-15, Tier 3, CVSS 3.6) shipped: quarantine-on-FAIL
+for the output guard, closing the gap where a guard verdict of FAIL that exhausted the corrective
+retry budget only ever led to the failing response being surfaced anyway — any file a `write_file`/
+`edit_file` call made that turn already landed on disk and stayed there exactly as the failing model
+left it. Aegis already had a full checkpoint/rewind mechanism (`internal/checkpoint`) built for the
+user-facing `/rewind` feature: `write_file`/`edit_file` call `checkpoint.SnapshotterFrom(ctx).
+Capture(absPath)` before every write, lazily recording each touched path's pre-turn content into the
+turn's checkpoint the first time it's touched, and `Store.RestoreFiles(ctx, checkpointID)` restores
+every captured path back to that pre-turn state (deleting files that did not exist before the turn).
+Rather than build a second, parallel mechanism, `internal/engine/engine.go`'s exhausted-retries FAIL
+branch (previously just `emit(Event{Kind: KindGuard, GuardPassed: false, ...})` and nothing else)
+now also calls the checkpoint machinery: a new `(*checkpoint.Snapshotter).RestoreFiles(ctx)` method
+(`internal/checkpoint/checkpoint.go`) delegates to the existing `Store.RestoreFiles` for that
+snapshotter's own checkpoint ID, so the engine doesn't need a new field or a direct `*Store`
+reference — it already receives the run's `Snapshotter` via `checkpoint.SnapshotterFrom(ctx)`, the
+same context value `internal/server/messages.go` already wires in via `checkpoint.WithSnapshotter`
+before every turn. `RestoreFiles` is nil-safe (mirrors `Capture`'s existing nil-safety), so a caller
+with no checkpoint store configured (`s.checkpoints == nil`, or an embedded engine used outside the
+daemon) is a no-op — rollback is skipped and today's retry-then-surface behavior is unchanged rather
+than erroring. The rollback is surfaced to callers two ways: a new `Engine.Event.GuardFilesRestored`
+int on the terminal `KindGuard` failure event, and the restored-file count appended in prose to that
+same event's `GuardReason` (e.g. "... — rolled back 2 file(s) written this turn"), which the TUI's
+existing `⚠ output guard: ...` warning line already renders verbatim with no new UI wiring. A plain
+`e.logger.Warn` line also records the rollback (or a restore failure) for daemon-log visibility. Of
+the finding's two suggested remediations — (a) quarantine/roll back on FAIL, or (b) a lighter
+pre-write guard pass before irreversible writes — (a) was chosen as the more surgical fit that reuses
+existing machinery end-to-end rather than adding a second validation pass; scope stayed tight,
+matching the finding's Tier 3 "Effort: M" sizing. New tests: `TestGuardExhaustedRollsBackWrittenFile`
+and `TestGuardExhaustedNoCheckpointStoreSkipsRollback` (`internal/engine/guard_test.go`, driving the
+engine against the real `write_file` tool and a real temp-file-backed checkpoint store) plus
+`TestSnapshotterRestoreFiles` and `TestNilSnapshotterRestoreFiles` (`internal/checkpoint/
+checkpoint_test.go`). `go build ./...`, `go vet ./...`, and the full `go test ./...` pass clean.
+
+*Branch note:* this worktree's `research/roadmap.md`/`research/releases.md` were based on an older
+commit that predates the rest of the 2026-07-13 STRIDE-A threat-model batch (P27.1-P27.15, P27.17,
+P27.18), which landed via a separate parallel line of work not reflected below — reconcile against
+that history when merging.
+
+---
+
 **Date:** 2026-06-29
 **Last updated:** 2026-07-12 — **P22.5, P22.6, P20.2, P20.3** shipped as a second user-selected
 batch of four Tier 4 parked items, same day as the first batch below. P25.9 and P6.1 were
