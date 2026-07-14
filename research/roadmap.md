@@ -1,6 +1,25 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-12 — a second batch of four Tier 4 parked items promoted and shipped on
+**Last updated:** 2026-07-13 — **P27.16** (FIND-15, Tier 3, CVSS 3.6, from a 2026-07-13 STRIDE-A
+threat-model pass) shipped: quarantine-on-FAIL for the output guard. Previously, a FAIL verdict
+that exhausted the guard's corrective retries only ever led to the failing response being surfaced
+anyway — any `write_file`/`edit_file` call the turn made already landed on disk and stayed there
+untouched. The engine's per-turn checkpoint `Snapshotter` (`internal/checkpoint`) already captures
+pre-write content for every path `write_file`/`edit_file` touch before the write happens — the same
+primitive `/rewind` uses — so the exhausted-retries branch in `internal/engine/engine.go`'s guard
+check now calls `checkpoint.SnapshotterFrom(ctx).RestoreFiles(ctx)` (new `Snapshotter` method
+delegating to the existing `Store.RestoreFiles`) to roll every file the turn wrote back to its
+pre-turn state before surfacing the failing answer, rather than leaving the bad write in place. A
+nil Snapshotter (no checkpoint store wired in) makes the call a no-op, so a caller without one keeps
+today's retry-then-surface behavior unchanged. The rollback is surfaced to the caller two ways: a
+new `Engine.Event.GuardFilesRestored` count on the terminal `KindGuard` failure event, and the
+restored-file count appended to that event's `GuardReason` text, which the TUI's existing output-
+guard warning line already renders verbatim — no new UI wiring needed. Full writeup in
+[releases.md](releases.md#latest-changes). A companion 2026-07-13 threat-model finding, **P27.17**
+(FIND-16, swarm sub-agent budget propagation), is being implemented in parallel in a separate line
+of work and is not covered by this update — see that item's own history for its status.
+
+Before that, 2026-07-12: a second batch of four Tier 4 parked items promoted and shipped on
 explicit user request: **P22.5** (`/side` ephemeral side conversation), **P22.6** (raw scrollback
 mode), **P20.2** (`aegis compare` blind model compare), and **P20.3** (hardware-aware model
 recommendation, `internal/hwinfo` + `aegis models --recommend`). **P25.9** and **P6.1** were
@@ -37,12 +56,17 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** none. P24.21/P13.3.2/P9.4/P13.4 and P22.5/P22.6/P20.2/P20.3 shipped 2026-07-12 —
-see [releases.md](releases.md#latest-changes). Tier 4 is the remaining parked set (3 items) — see
+**Open items:** none on this line of work. **P27.16** (FIND-15, quarantine-on-FAIL for the output
+guard) shipped 2026-07-13 — see [releases.md](releases.md#latest-changes). Note: this roadmap file
+does not yet reflect the rest of the 2026-07-13 STRIDE-A threat-model pass (P27.1-P27.15, P27.17,
+P27.18), which is landing via a separate parallel line of work — reconcile against that history at
+merge time. P24.21/P13.3.2/P9.4/P13.4 and P22.5/P22.6/P20.2/P20.3 shipped 2026-07-12 — see
+[releases.md](releases.md#latest-changes). Tier 4 is the remaining parked set (3 items) — see
 [Parked](#open-work--parked-tier-4).
 
-**Next session:** nothing queued. Next trigger: a new threat-model pass, a reported incident, a
-new feature evaluation, or a concrete pain point surfacing one of the Tier 4 parked items. Re-run
+**Next session:** nothing queued on this line of work beyond reconciling with the parallel P27
+batch above. Next trigger otherwise: a new threat-model pass, a reported incident, a new feature
+evaluation, or a concrete pain point surfacing one of the Tier 4 parked items. Re-run
 `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
 engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` (P26.1) is the standalone
 preflight companion for the same misconfiguration classes.
@@ -62,11 +86,23 @@ speculatively.
 **Tier 2:** empty. P26.2 (`sessionWorkdirs`/`sessionSkills` map leak on session delete) shipped
 2026-07-12 — see [releases.md](releases.md#latest-changes).
 
-**Tier 3:** empty. The last items shipped 2026-07-11 (P24.20; P15 web-UI batches A/B/C; P24.14) —
-see [releases.md](releases.md#latest-changes). Next trigger: a new threat-model pass, a reported
-incident, or a new feature evaluation.
+**Tier 3:** empty on this line of work — **P27.16** shipped 2026-07-13 (see
+[releases.md](releases.md#latest-changes)). Before that, the last items shipped 2026-07-11 (P24.20;
+P15 web-UI batches A/B/C; P24.14) — see [releases.md](releases.md#latest-changes).
 
 **Tier 4:** parked — P25.9, P13.3.3, P6.1. See [Parked](#open-work--parked-tier-4).
+
+---
+
+## Open Work — P27.16 (2026-07-13 threat-model finding FIND-15)
+
+### P27.16 — shipped 2026-07-13 (see [releases.md](releases.md#latest-changes))
+
+FIND-15 from the 2026-07-13 STRIDE-A threat-model pass: "the output guard runs after files are
+already written, so a FAIL verdict can only drive a retry, not undo a bad write." Remediation
+chosen: quarantine/roll back a written file on an exhausted-retries FAIL, reusing the existing
+checkpoint/rewind machinery rather than adding a new pre-write guard pass. See
+[releases.md](releases.md#latest-changes) for the full writeup.
 
 ---
 
