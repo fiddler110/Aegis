@@ -176,12 +176,17 @@ func (s *Server) resolveSessionWorkdir(raw string) (string, *workdirError) {
 	if err != nil {
 		return "", &workdirError{http.StatusBadRequest, "invalid workdir"}
 	}
+	// Check the allowlist (pure string comparison, no disk I/O) before
+	// os.Stat: statting first would let a remote client use this endpoint
+	// as a filesystem-existence oracle for paths outside the trust
+	// boundary (P31.2), since a 400 "does not exist" vs. 403 "not
+	// permitted" response reveals existence before the gate ever runs.
+	if !s.workdirAllowed(abs) {
+		return "", &workdirError{http.StatusForbidden, "workdir is not permitted for a remote-accessible daemon; add it to server.session_workdir_allowlist"}
+	}
 	info, err := os.Stat(abs)
 	if err != nil || !info.IsDir() {
 		return "", &workdirError{http.StatusBadRequest, "workdir does not exist or is not a directory"}
-	}
-	if !s.workdirAllowed(abs) {
-		return "", &workdirError{http.StatusForbidden, "workdir is not permitted for a remote-accessible daemon; add it to server.session_workdir_allowlist"}
 	}
 	return abs, nil
 }

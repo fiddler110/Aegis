@@ -8,7 +8,22 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — shipped **P31.1** (Tier 1, critical): nuclei's
+**Last updated:** 2026-07-14 — shipped **P31.2** (Tier 1, high): `internal/server/sessions.go`'s
+`resolveSessionWorkdir` (the P25.1 session-Workdir validator) called `os.Stat` on a client-supplied
+path *before* checking `s.workdirAllowed`, so a remote-accessible daemon let an
+authenticated-but-not-allowlisted client use `POST /sessions` as a filesystem-existence oracle — the
+400 ("workdir does not exist") vs. 403 ("not permitted") response distinguished existence from
+disallowal before the allowlist gate ever ran. Reordered so `workdirAllowed` (pure string/prefix
+comparison, no disk I/O) runs first and `os.Stat` only ever touches a path already inside the trust
+boundary; local (non-remote-accessible) daemons were unaffected either way since `workdirAllowed`
+short-circuits true for them. Tested via a new case appended to
+`TestCreateSessionWorkdirTrustBoundary` (`internal/server/workdir_test.go`): a nonexistent path
+outside the allowlist, with remote access enabled, must return 403 not 400; `go build ./...` and
+`go test ./internal/server/...` pass. Closes [CodeQL alert
+#4](https://github.com/fiddler110/Aegis/security/code-scanning/4). See roadmap.md for the
+remaining P30 open items (P30.1 next).
+
+**Previously, same day:** shipped **P31.1** (Tier 1, critical): nuclei's
 `security.tools.nuclei.templates_version` config value (settable via config file or the daemon's
 config-update API) reached both a `filepath.Join` (the per-version template cache/clone directory)
 and a `git clone --branch <version>` argument with no format validation, so a value containing
@@ -20,8 +35,7 @@ path-traversal (`../../../etc/passwd`, `..`, `v1.0.0/../../escape`), git-flag-in
 (`-oProxyCommand=evil`, `--upload-pack=evil`), and shell-metacharacter (`v1.0.0 && rm -rf /`)
 shaped values, alongside the existing pinned-version test; `go build ./...`, `go vet ./...`, and
 `go test ./internal/security/...` all pass. Closes [CodeQL alert
-#6](https://github.com/fiddler110/Aegis/security/code-scanning/6). See roadmap.md for the
-remaining P31/P30 open items (P31.2 next).
+#6](https://github.com/fiddler110/Aegis/security/code-scanning/6).
 
 **Previously, same day:** filed **P30.1-P30.8** (8 items) from a fresh parallel audit run
 after the P29 batch closed all prior open work: a code-gap scan of internal/ and cmd/ for
