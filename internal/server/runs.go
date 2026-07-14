@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -10,7 +11,10 @@ import (
 
 // runRegistry tracks in-flight message runs so concurrent, user-driven parallel
 // sessions are observable (via GET /runs, the TUI, and `aegis runs`). It is
-// purely informational; it does not gate execution.
+// purely informational for run listing; the one exception is cancel (P28.5),
+// which exists solely so a resumable run — one whose lifetime was
+// deliberately decoupled from its HTTP request context, see
+// api.PostMessageRequest.Resumable — can still be stopped on request.
 type runRegistry struct {
 	mu   sync.Mutex
 	runs map[string]*runState
@@ -22,6 +26,11 @@ type runState struct {
 	startedAt time.Time
 	tools     int
 	lastKind  string
+	// cancel stops this run out of band. Only set for resumable/background
+	// runs (P28.5) — a normal run is instead stopped by the client tearing
+	// down its HTTP request, which cancels the context the engine already
+	// runs on, so it needs no separate cancel func here.
+	cancel context.CancelFunc
 }
 
 func newRunRegistry() *runRegistry {
@@ -52,6 +61,33 @@ func (r *runRegistry) finish(runID string) {
 	r.mu.Lock()
 	delete(r.runs, runID)
 	r.mu.Unlock()
+}
+
+// setCancel attaches the out-of-band cancel func for a resumable run (P28.5).
+// A no-op if the run has already finished by the time the caller gets here.
+func (r *runRegistry) setCancel(runID string, cancel context.CancelFunc) {
+	r.mu.Lock()
+	if st := r.runs[runID]; st != nil {
+		st.cancel = cancel
+	}
+	r.mu.Unlock()
+}
+
+// stopSession cancels the active resumable run for a session, if any. Returns
+// false when no run is active for the session or the active run isn't
+// resumable (no cancel registered) — e.g. a plain TUI/CLI run, which is
+// stopped by the client disconnecting instead. Sessions serialize their own
+// runs to at most one at a time, so "the" run for a session is unambiguous.
+func (r *runRegistry) stopSession(sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, st := range r.runs {
+		if st.sessionID == sessionID && st.cancel != nil {
+			st.cancel()
+			return true
+		}
+	}
+	return false
 }
 
 // list returns active runs, newest first.

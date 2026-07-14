@@ -594,6 +594,16 @@ func (c *Client) Steer(ctx context.Context, sessionID, text string) error {
 	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/steer", api.SteerRequest{Text: text}, nil)
 }
 
+// StopRun cancels a resumable run (P28.5) — one sent with
+// PostMessageRequest.Resumable, whose lifetime was deliberately decoupled
+// from the HTTP request that started it, so closing that request alone
+// doesn't stop it. Returns an error if no resumable run is currently active
+// for the session (including a plain, non-resumable run — that kind is
+// stopped by cancelling its own request context instead).
+func (c *Client) StopRun(ctx context.Context, sessionID string) error {
+	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/stop", nil, nil)
+}
+
 // PostMessage streams engine events for a user turn. Events are delivered on
 // the returned channel, which is closed when the run finishes or ctx is done.
 func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.Event, error) {

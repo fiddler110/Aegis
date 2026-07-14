@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
@@ -129,6 +131,192 @@ func TestRunsEndpointReflectsActiveRun(t *testing.T) {
 	runs, _ = cl.ListRuns(ctx)
 	if len(runs) != 0 {
 		t.Errorf("after completion, ListRuns = %+v, want empty", runs)
+	}
+}
+
+// TestRunRegistryStopSession covers the P28.5 cancel path in isolation: a
+// run with no registered cancel (a plain, non-resumable run) can't be
+// stopped this way, and stopping removes the ability to double-stop.
+func TestRunRegistryStopSession(t *testing.T) {
+	r := newRunRegistry()
+	r.start("run-1", "sess-1", "t")
+
+	if r.stopSession("sess-1") {
+		t.Fatal("stopSession should report false before a cancel is registered")
+	}
+
+	cancelled := false
+	r.setCancel("run-1", func() { cancelled = true })
+
+	if !r.stopSession("sess-1") {
+		t.Fatal("stopSession should report true once a cancel is registered")
+	}
+	if !cancelled {
+		t.Fatal("stopSession did not invoke the registered cancel func")
+	}
+	if r.stopSession("no-such-session") {
+		t.Fatal("stopSession should report false for an unknown session")
+	}
+}
+
+// TestResumableRunSurvivesClientDisconnect is the core P28.5 behavior: a run
+// started with Resumable:true keeps executing after the client's HTTP
+// request is torn down (simulating a dropped connection), unlike a plain
+// run, and its events land in the buffered store so a reconnecting client
+// can catch up via GetBGEvents.
+func TestResumableRunSurvivesClientDisconnect(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+	}
+	adapter := &blockingAdapter{started: make(chan struct{}), release: make(chan struct{})}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, adapter, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	cl := client.New(ts.URL).WithToken("test-token")
+
+	bgCtx := context.Background()
+	meta, err := cl.CreateSession(bgCtx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A separate, cancellable context for the request itself — cancelling
+	// this (not bgCtx) is what simulates the client disconnecting, the same
+	// way an aborted browser fetch tears down its own request context
+	// without the daemon process going anywhere.
+	reqCtx, cancelReq := context.WithCancel(bgCtx)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		ch, err := cl.PostMessageReq(reqCtx, meta.ID, api.PostMessageRequest{Text: "go do work", Resumable: true})
+		if err != nil {
+			return
+		}
+		for range ch {
+		}
+	}()
+
+	<-adapter.started // the run is registered and mid-stream
+	cancelReq()       // simulate a dropped connection
+	<-drained         // the client-side stream read loop has exited
+
+	// The run must still be active server-side — a resumable run's context
+	// is deliberately not tied to the request context that just died.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		runs, err := cl.ListRuns(bgCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(runs) == 1 && runs[0].SessionID == meta.ID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run did not survive client disconnect: ListRuns = %+v", runs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(adapter.release) // let the still-running turn finish
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		runs, err := cl.ListRuns(bgCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(runs) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run never finished after release: ListRuns = %+v", runs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	events, err := cl.GetBGEvents(bgCtx, meta.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected the disconnected-but-still-running turn's events to be buffered")
+	}
+	sawDone := false
+	for _, e := range events {
+		if strings.Contains(e.Data, `"kind":"done"`) {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Errorf("buffered events did not include a done event: %+v", events)
+	}
+}
+
+// TestStopRunCancelsResumableRun verifies POST /sessions/{id}/stop actually
+// interrupts a resumable run's execution (not just removes it from
+// /runs) — needed because with a resumable run's context decoupled from its
+// HTTP request (P28.5), the client disconnecting no longer does this itself.
+func TestStopRunCancelsResumableRun(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+	}
+	adapter := &blockingAdapter{started: make(chan struct{}), release: make(chan struct{})}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, adapter, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	cl := client.New(ts.URL).WithToken("test-token")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		ch, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{Text: "go do work", Resumable: true})
+		if err != nil {
+			return
+		}
+		for range ch {
+		}
+	}()
+
+	<-adapter.started
+	if err := cl.StopRun(ctx, meta.ID); err != nil {
+		t.Fatalf("StopRun: %v", err)
+	}
+	<-drained // the stream closes once the cancelled run finishes up
+
+	runs, err := cl.ListRuns(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("run still active after StopRun: %+v", runs)
+	}
+
+	// Stopping a session with no active resumable run 404s rather than
+	// silently no-oping, so a caller can tell "nothing to stop" apart from
+	// a real failure.
+	if err := cl.StopRun(ctx, meta.ID); err == nil {
+		t.Error("StopRun on an already-finished run should error")
 	}
 }
 
