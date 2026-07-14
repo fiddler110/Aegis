@@ -148,6 +148,47 @@ func TestGitReadRejectsDisallowed(t *testing.T) {
 	}
 }
 
+// TestGitReadRejectsRemoteMutation guards against a sandbox-escape/network-
+// egress path: "remote add" (or set-url/rename/etc.) can point an attacker-
+// controlled URL into .git/config, and "remote show/update/prune" would then
+// contact it — a file:// URL can walk to any git repo the daemon process can
+// read, entirely outside the session's Workdir, via a tool declared CapRead.
+func TestGitReadRejectsRemoteMutation(t *testing.T) {
+	gitAvailable(t)
+	dir := initRepo(t)
+	tl := &gitTool{root: dir}
+
+	for _, args := range [][]string{
+		{"add", "evil", "file:///etc/passwd"},
+		{"set-url", "origin", "https://attacker.example/x"},
+		{"set-branches", "origin", "main"},
+		{"set-head", "origin", "main"},
+		{"rename", "origin", "upstream"},
+		{"remove", "origin"},
+		{"rm", "origin"},
+		{"update"},
+		{"prune"},
+	} {
+		res, _ := tl.Execute(context.Background(), gitInput(t, map[string]any{
+			"subcommand": "remote", "args": args,
+		}))
+		if !res.IsError {
+			t.Errorf("expected error for 'remote %v', got success: %q", args, res.Content)
+		}
+	}
+
+	// Plain listing forms must still work.
+	res, err := tl.Execute(context.Background(), gitInput(t, map[string]any{
+		"subcommand": "remote", "args": []string{"-v"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Errorf("'remote -v' should be allowed, got error: %q", res.Content)
+	}
+}
+
 func TestGitCommitSpecificPaths(t *testing.T) {
 	gitAvailable(t)
 	dir := initRepo(t)

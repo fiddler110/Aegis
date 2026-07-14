@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 8, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
+**Open items:** 6, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
 TODO/stub/skip/robustness markers, and a docs-vs-implementation drift scan of every docs/*.md file
 against current source) run after the P29 batch closed out all prior open work, plus the P31 batch
 (GitHub CodeQL code-scanning alerts pulled from the `fiddler110/Aegis` repo — 24 open alerts across
@@ -26,12 +26,20 @@ shipped mechanisms, no code change needed. All four Tier 1 items shipped 2026-07
 (nuclei `templates_version` path traversal / git-arg injection), **P31.2** (session-workdir
 existence-oracle gate ordering), **P30.1** (LSP client hang on transport death), and **P30.2** and
 **P30.3** (hooks and TUI bang command both hardcoded `sh -c` on Windows) — see
-[releases.md](releases.md#latest-changes).
+[releases.md](releases.md#latest-changes). **P31.3** (Web UI CSRF cookie `Secure` flag) and
+**P31.4** both shipped 2026-07-14 too — see [releases.md](releases.md#latest-changes). P31.4's
+plan was originally "dismiss two `go/command-injection` alerts as argv-exec/by-design"; re-
+verifying alert #7 against source surfaced a real, unrelated `git remote`-subcommand sandbox-
+escape/network-egress gap on the same code path (confirmed with a PoC), so the shipped version
+fixes that gap first and dismisses the alert with a justification that references the fix, rather
+than dismissing outright as planned.
 
-**Next session:** no Tier 1 work remains — pick up Tier 2 starting with P31.3 (Web UI CSRF cookie
-`Secure` flag), first in priority order below. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md)
-after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor`
-is the standalone preflight companion for the same misconfiguration classes.
+**Next session:** pick up Tier 2 starting with P31.5 (triage and suppress the nineteen
+`go/path-injection` alerts — re-verified against source this session, all confirmed safe, no code
+change needed, just the suppression bookkeeping), first in priority order below. Re-run
+`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
+companion for the same misconfiguration classes.
 
 ---
 
@@ -45,9 +53,9 @@ speculatively.
 
 **Tier 1:** none open. (P31.1, P31.2, P30.1, P30.2, and P30.3 shipped 2026-07-14.)
 
-**Tier 2:** P31.3, P31.4, P31.5, P30.4, P30.5, P30.6, P30.7, P30.8 — in priority order: real
-security hardening (P31.3) and alert-noise reduction (P31.4, P31.5) ahead of pure docs-drift
-cleanup (P30.4-P30.8).
+**Tier 2:** P31.5, P30.4, P30.5, P30.6, P30.7, P30.8 — in priority order: alert-noise
+reduction (P31.5) ahead of pure docs-drift cleanup (P30.4-P30.8). (P31.3 and P31.4 shipped
+2026-07-14.)
 
 **Tier 3:** none open.
 
@@ -56,36 +64,6 @@ cleanup (P30.4-P30.8).
 ---
 
 ## Open Work
-
-### P31.3 — Web UI CSRF cookie never sets `Secure`, even when TLS is enabled
-
-Priority: Tier 2 · Effort: S · [CodeQL alert #3](https://github.com/fiddler110/Aegis/security/code-scanning/3), `go/cookie-secure-not-set`, medium
-
-`internal/server/webui.go:79-86` (`handleWebUI`) sets the `HttpOnly`/`SameSite=Strict` double-submit
-CSRF cookie (FIND-01/P24.1) without `Secure`, unconditionally. The default loopback-only deployment
-this file's own doc comment describes doesn't need it, but `server.tls.enabled` (P24.18,
-`internal/server/tls_test.go`) is a supported config for remote-accessible daemons, and on that path
-the cookie should be marked `Secure` so it's never sent back over a downgraded plaintext connection.
-Fix: change the handler's unused `_ *http.Request` parameter to `r`, and set
-`Secure: r.TLS != nil` on the cookie.
-
-### P31.4 — Two `go/command-injection` alerts are argv-exec/by-design, not exploitable — dismiss with justification
-
-Priority: Tier 2 · Effort: S · [alert #7](https://github.com/fiddler110/Aegis/security/code-scanning/7) (`internal/tool/builtin/git.go:68`) and [alert #5](https://github.com/fiddler110/Aegis/security/code-scanning/5) (`internal/hooks/exec.go:95`), both `go/command-injection`, critical
-
-Both read against source: `git.go:68`'s `runGit` already runs `exec.CommandContext(ctx, "git",
-args...)` as an argument vector (never a shell string — the function's own comment says so), gated
-by `validateGitArgs`' `deniedGitArgPrefixes` blocklist (git.go:44-61) against option tokens that
-could write files or invoke external programs; CodeQL's `go/command-injection` query flags it purely
-because `args` is caller-influenced, without crediting the blocklist. `hooks/exec.go:95`'s `sh -c
-s.Command` is intentional — a hook's whole purpose is to run an operator-configured shell command
-(already tracked for its separate Windows-portability gap as P30.2); `s.Command` comes from trusted
-local config, not request/remote input. Action: dismiss both GitHub alerts with a written
-justification (CodeQL supports per-alert dismissal reasons: "used in tests" doesn't fit, but a
-custom note explaining the argv-vector/by-design-config reasoning does) rather than changing code.
-If `validateGitArgs`' blocklist approach is a lingering worry, consider hardening git.go toward an
-allowlist of safe read-only subcommands instead — but that's a separate, optional robustness
-improvement, not a fix for this alert.
 
 ### P31.5 — Nineteen `go/path-injection` alerts trace to already-validated session Workdir or directory enumeration — triage and suppress
 
@@ -111,7 +89,10 @@ the corresponding GitHub alert with the specific safe-shape justification above,
 runs stop resurfacing confirmed-safe findings as noise that could mask a real future alert. If a
 sanitizer-recognition false-positive persists after dismissal, a CodeQL query customization
 (recognizing `sanitize()` as a barrier) is the next step, not a code change to already-safe call
-sites.
+sites. Re-verified 2026-07-14 against current source for five of the eight files
+(`persona/load.go`, `skills/skills.go`, `memory/memory.go`, `memory/integrity.go`,
+`security/sbom.go`) as part of the P31.4 re-evaluation pass — both safe shapes held up, no
+vulnerability found. Only the suppression bookkeeping remains.
 
 ### P30.4 — Six docs/*.md files link to a `security.md` that no longer exists
 

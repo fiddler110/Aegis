@@ -144,6 +144,22 @@ func rejectMutatingReadArgs(sub string, args []string) string {
 				return "git tag: creating or deleting tags is not allowed via the git tool"
 			}
 		}
+	case "remote":
+		// "remote" is allowlisted for listing (bare, -v, show, get-url) but
+		// git also treats it as a config-mutation and network-fetch verb:
+		// "remote add/set-url" writes an arbitrary URL into .git/config, and
+		// "remote show/update/prune" then contacts that URL — a file:// URL
+		// can walk to any git repo readable by the daemon process (reachable
+		// afterwards via the allowed log/show subcommands), and any URL is a
+		// network egress path this CapRead tool has no business opening.
+		// Block every subverb that adds/rewrites a remote's target or that
+		// performs the network operation past a newly-added one.
+		if len(args) > 0 {
+			switch args[0] {
+			case "add", "set-url", "set-branches", "set-head", "rename", "remove", "rm", "update", "prune":
+				return "git remote: adding, rewriting, or fetching remotes is not allowed via the git tool; only listing (remote, remote -v, remote show <existing>, remote get-url) is permitted"
+			}
+		}
 	case "stash":
 		// Only "stash list" (and "stash show") are read-only.
 		if len(args) == 0 {
