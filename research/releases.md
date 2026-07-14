@@ -8,7 +8,25 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-13 — **P27.16** (FIND-15, Tier 3, CVSS 3.6) shipped: quarantine-on-FAIL
+**Last updated:** 2026-07-13 — **P27.19** (FIND-17, Tier 4, CVSS 5.9) shipped: documentation-only
+close-out of the P27 threat model's container-socket-trust finding. FIND-17 flagged that
+Docker/Podman socket access is root-equivalent on the host and asked for docs recommending
+"rootless Podman or a socket-proxy." The rootless-Podman half, along with the
+`--cap-drop=ALL`/`--security-opt=no-new-privileges` hardening and the `--network none` default
+FIND-17 also cites, was already shipped and already documented under **P24.10 (FIND-06)** — an
+earlier threat-model pass that found and fixed the same underlying issue — in the "Docker/Podman
+socket privilege equivalence" section of `docs/security_scan.md`. The one genuine gap between
+FIND-17's remediation text and the pre-existing docs was the socket-proxy option, which wasn't
+mentioned anywhere. Added a bullet to that section recommending a socket-proxy (e.g.
+`docker-socket-proxy`) restricted to the container-create/start/stop endpoints Aegis needs, as an
+alternative to rootless Podman for deployments stuck on a rootful Docker daemon. No code changes —
+Aegis doesn't ship or manage a socket-proxy itself, this is operator guidance only. Confirms the
+verification the finding itself asked for ("confirm the documented guidance recommends
+rootless/socket-proxy configurations and that default container flags include `--cap-drop=ALL` and
+`no-new-privileges`") is now fully true. Closes Tier 4's P27.19; **P27.20** (optional at-rest
+SQLite encryption) remains parked with no concrete trigger.
+
+Before that, same day (2026-07-13): **P27.16** (FIND-15, Tier 3, CVSS 3.6) shipped: quarantine-on-FAIL
 for the output guard, closing the gap where a guard verdict of FAIL that exhausted the corrective
 retry budget only ever led to the failing response being surfaced anyway — any file a `write_file`/
 `edit_file` call made that turn already landed on disk and stayed there exactly as the failing model
