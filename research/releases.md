@@ -8,7 +8,71 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — **P28.1** (Tier 1, real exploitable robustness gap) shipped: the TUI
+**Last updated:** 2026-07-14 — **P28.4** (Tier 2, compaction robustness) shipped: proactive
+per-turn context compaction now falls back to a deterministic, non-LLM shortening pass after the
+LLM summarizer fails twice in a row for the same run, instead of skipping compaction indefinitely.
+
+Live evaluation (`TestLiveWorkflow` against `qwythos:latest`, `deepseek-r1:8b`, `gpt-oss:20b`,
+2026-07-14, the same pass that filed the whole P28 batch) observed `proactive compaction failed:
+summarizer returned empty output` (`internal/compaction/compaction.go:212`) against both
+`qwythos:latest` and `gpt-oss:20b`. Before this fix, `internal/engine/engine.go`'s proactive
+per-turn compaction check (P2.7, ~85% context fill) just logged a `Warn` and skipped compaction for
+that turn entirely on any `Compactor.Compact` error — no retry, no fallback. Long local-model
+sessions run far more turns/tokens per task than cloud sessions (observed: 87k input / 2.4k output
+tokens over 13 tool calls for one bug fix with `gpt-oss:20b`), so a summarizer that unreliably
+returns empty output could repeatedly fail to shrink context every single turn, drifting toward the
+hard context-window ceiling with no safety valve — the model server would then start silently
+dropping the oldest tokens (including the system prompt) rather than Aegis ever compacting on its
+own terms.
+
+Investigated the existing compaction data model first (`internal/compaction/compaction.go`): a
+"turn" boundary for compaction is chosen by `Summarizer.boundary`, which finds the first assistant
+message at or after the `keepRecent` cutoff so the summarized prefix never splits a
+`tool_use`/`tool_result` pair; the LLM summary then replaces that whole prefix with a single
+synthetic `user` message ("Summary of earlier conversation...") spliced in ahead of the preserved
+suffix. There was no existing per-session or per-run failure-count tracking to piggyback on — the
+`compaction.Summarizer` is a single daemon-wide singleton (`s.compactor`, built once in
+`internal/server/server.go`) shared across every session, and `engine.Engine` itself is
+reconstructed fresh per HTTP request/turn (`s.newEngine` in `internal/server/messages.go`) — so
+neither was a natural home for cross-request state. Since `engine.Run`'s own tool-round loop
+(`for iter := 0; iter < e.maxIterations; iter++`, default cap 40) already spans every tool round of
+a single long local-model task — the exact shape of the observed failure (13 tool calls in one bug
+fix, all inside one `Run` call) — a run-scoped counter was sufficient to catch "twice in a row"
+without needing to thread new state through the session store: a new `compactionFailures` local
+counter in `Engine.Run`, reset to 0 on any successful compaction (LLM-summarized or
+deterministic-fallback) and incremented on each `Compact` error, mirroring the existing
+`guardRetries`/`ctxFullWarned` per-run locals already in that function.
+
+Fix, in two parts. (1) `internal/compaction/compaction.go` gets a new
+`(*Summarizer).FallbackCompact(msgs []provider.Message) (out []provider.Message, changed bool)` —
+deterministic, makes no adapter call, and so cannot itself return empty output. It reuses the exact
+same `boundary` selection as `Compact`/`ForceCompact` (protecting the `keepRecent` tail and tool-use
+pairing) but replaces the summarized prefix with a terse, programmatically generated note (message
+counts, tool-call count, and the distinct tool names used) instead of an AI-generated summary — a
+structurally valid replacement for the LLM summary, not just an arbitrary non-empty string. (2)
+`internal/engine/engine.go` gets a new optional `FallbackCompactor` interface
+(`FallbackCompact(msgs) (out, changed)`) that the proactive-compaction block in `Engine.Run`
+type-asserts for on `e.compactor` — so a `Compactor` that only implements `Compact` (e.g. a test
+double or a future non-LLM implementation) keeps today's warn-and-skip behavior unchanged. On the
+2nd consecutive `Compact` failure within a run, the engine calls `FallbackCompact` if the configured
+compactor supports it; on success it splices the deterministic result in exactly like a normal
+compaction, emits the existing `KindNotice` (now naming the fallback explicitly, e.g. "context ~87%
+full — summarizer unavailable, applied deterministic fallback compaction (42→6 messages)"), and
+resets the failure counter. `compaction.New`'s production `*Summarizer` now satisfies
+`FallbackCompactor` automatically, so the daemon's real compactor gets the fallback with no wiring
+changes in `internal/server`.
+
+New tests: `TestFallbackCompactShrinksWithoutLLM`, `TestFallbackCompactPreservesToolPair`,
+`TestFallbackCompactTooShortIsNoop` (`internal/compaction/compaction_test.go`, mirroring the
+existing `Compact`/`ForceCompact` coverage for the new deterministic path) and
+`TestProactiveCompactionFallsBackAfterTwoFailures` (`internal/engine/contextnotice_test.go`, a new
+`failingFallbackCompactor` test double that always fails `Compact` but implements
+`FallbackCompact` — asserts the fallback fires on exactly the 2nd consecutive failure, not the 1st,
+and that the resulting notice mentions the fallback). `go build ./...`, `go vet ./...`, and the full
+`go test ./...` pass clean. This was one of Tier 2's four items (P28.2, P28.4, P28.6, P28.7); three
+remain — see [roadmap.md](roadmap.md).
+
+Before that, same day (2026-07-14): **P28.1** (Tier 1, real exploitable robustness gap) shipped: the TUI
 now strips dangerous terminal escape sequences from untrusted tool output before it reaches the
 real terminal. This closed the P27 threat model's last open needs-verification question — whether
 the TUI fully neutralizes terminal escape sequences in untrusted tool output — which this same pass
