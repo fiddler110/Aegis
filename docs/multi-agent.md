@@ -110,7 +110,7 @@ workflow mode:
 {
   "mode": "debate",
   "claim": "Token X allows full account takeover.",
-  "max_rounds": 2,                 // optional, default 2
+  "max_rounds": 2,                 // optional, default 2, hard-capped at 10
   "domain": "security",            // optional: "security" (default) or "generic"
   "files": ["docs/auth-design.md"] // optional: files the roles should read for grounding
 }

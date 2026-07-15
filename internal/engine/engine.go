@@ -1229,7 +1229,16 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 		content, isErr = fmt.Sprintf("tool error: %v", err), true
 	}
 	if !isErr && t.Capability() == tool.CapWrite {
-		e.recordWrittenPaths(writtenPathsFromInput(tu.Input))
+		paths := writtenPathsFromInput(tu.Input)
+		if len(paths) == 0 {
+			// P32.6: writtenPathsFromInput only recognizes "path"/"file_path"/
+			// "edits[].path". A write-capability tool using a different input
+			// shape (an MCP tool, or a future builtin) silently gets no
+			// output-guard file validation and no quarantine-on-fail rollback —
+			// surface that gap instead of letting it degrade silently.
+			e.logger.Warn("write-capability tool call yielded no paths for output-guard coverage", "tool", tu.Name)
+		}
+		e.recordWrittenPaths(paths)
 	}
 	if !isErr && e.redactSecrets && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
 		// P24.12 / FIND-09: opt-in scrub of tool-read file content for secret

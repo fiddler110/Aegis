@@ -63,7 +63,26 @@ var ErrNotFound = errors.New("session not found")
 
 // Store persists sessions in SQLite.
 type Store struct {
-	db *sql.DB
+	db          *sql.DB
+	checkpoints CheckpointCleaner
+}
+
+// CheckpointCleaner deletes checkpoint snapshots for a session. Session
+// storage doesn't own checkpoint tables directly (see internal/checkpoint,
+// which shares this store's *sql.DB) but must fan out deletion to them so
+// Delete/Prune don't leave orphaned snapshots behind (P32.3) — previously
+// only the HTTP delete-session handler did this, so the TTL auto-pruner and
+// the /sessions/prune endpoint silently leaked checkpoint data forever.
+type CheckpointCleaner interface {
+	DeleteForSession(ctx context.Context, sessionID string) error
+}
+
+// SetCheckpointCleaner wires a checkpoint store's cleanup into this store's
+// Delete/Prune paths. Call once during daemon startup, after both stores are
+// constructed. Nil (the default, and every existing session.Store used in
+// tests that don't construct a checkpoint store) makes cleanup a no-op.
+func (s *Store) SetCheckpointCleaner(c CheckpointCleaner) {
+	s.checkpoints = c
 }
 
 // Open opens (and migrates) the session store at path.
@@ -563,8 +582,11 @@ func (s *Store) Unarchive(ctx context.Context, id string) error {
 	return err
 }
 
-// Prune deletes non-archived sessions whose updated_at is older than olderThan.
-// Returns the number of sessions deleted.
+// Prune deletes non-archived sessions whose updated_at is older than olderThan,
+// along with their bg_events rows and (via SetCheckpointCleaner) checkpoint
+// snapshots (P32.3 — this path previously bypassed checkpoint cleanup
+// entirely, since only the HTTP delete-session handler called it). Returns
+// the number of sessions deleted.
 func (s *Store) Prune(ctx context.Context, olderThan time.Duration) (int, error) {
 	threshold := time.Now().Add(-olderThan).UnixMilli()
 	const pred = `archived_at IS NULL AND updated_at < ?`
@@ -575,6 +597,27 @@ func (s *Store) Prune(ctx context.Context, olderThan time.Duration) (int, error)
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after Commit
 
+	var ids []string
+	if s.checkpoints != nil {
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM sessions WHERE `+pred, threshold)
+		if err != nil {
+			return 0, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		rows.Close()
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM session_messages WHERE session_id IN (SELECT id FROM sessions WHERE `+pred+`)`, threshold); err != nil {
 		return 0, err
@@ -583,12 +626,26 @@ func (s *Store) Prune(ctx context.Context, olderThan time.Duration) (int, error)
 		`DELETE FROM session_traces WHERE session_id IN (SELECT id FROM sessions WHERE `+pred+`)`, threshold); err != nil {
 		return 0, err
 	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM bg_events WHERE session_id IN (SELECT id FROM sessions WHERE `+pred+`)`, threshold); err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE `+pred, threshold)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
-	return int(n), tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if s.checkpoints != nil {
+		for _, id := range ids {
+			if err := s.checkpoints.DeleteForSession(ctx, id); err != nil {
+				slog.Default().Warn("prune session checkpoints", "session", id, "err", err)
+			}
+		}
+	}
+	return int(n), nil
 }
 
 // BGEvent is one buffered engine event for a background session.
@@ -717,7 +774,8 @@ func (s *Store) SetMode(ctx context.Context, id, mode string) error {
 	return err
 }
 
-// Delete removes a session and its message/trace rows.
+// Delete removes a session and its message/trace/bg_events rows, plus any
+// checkpoint snapshots registered via SetCheckpointCleaner (P32.3).
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -731,8 +789,19 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_traces WHERE session_id = ?`, id); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM bg_events WHERE session_id = ?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if s.checkpoints != nil {
+		if err := s.checkpoints.DeleteForSession(ctx, id); err != nil {
+			slog.Default().Warn("delete session checkpoints", "session", id, "err", err)
+		}
+	}
+	return nil
 }

@@ -159,6 +159,8 @@ aegis sessions prune
 
 Only non-archived sessions past the TTL are pruned. Archived sessions are always kept until explicitly deleted.
 
+Pruning (and explicit deletion) removes a session's checkpoint snapshots and buffered background-session events along with its messages and traces, so a long-running daemon's database doesn't grow unbounded even if `session_ttl_days` is set low.
+
 ---
 
 ## Exporting Sessions

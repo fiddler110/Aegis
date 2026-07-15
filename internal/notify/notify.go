@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"runtime"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // Status classifies a notification.
@@ -132,7 +134,7 @@ func desktopCommand(message, subtitle string) *exec.Cmd {
 		return exec.Command("notify-send", title, message)
 	case "windows":
 		ps := "New-BurntToastNotification -Text '" + desktopTitle + "','" + winEscape(message) + "'"
-		return exec.Command("powershell", "-NoProfile", "-Command", ps)
+		return exec.Command(sandbox.WindowsShellBinary(), "-NoProfile", "-Command", ps)
 	default:
 		return nil
 	}

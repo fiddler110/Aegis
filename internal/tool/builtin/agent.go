@@ -166,7 +166,7 @@ func (a *agentTool) InputSchema() json.RawMessage {
 			"proposer_persona": {"type": "string", "description": "Debate mode only: persona for the proposer role (default security-researcher, or general if domain is generic)."},
 			"critic_persona": {"type": "string", "description": "Debate mode only: persona for the critic role (default security-critic, or critic if domain is generic)."},
 			"arbiter_persona": {"type": "string", "description": "Debate mode only: persona for the arbiter role (default security-arbiter, or arbiter if domain is generic)."},
-			"max_rounds": {"type": "integer", "description": "Debate mode only: maximum critique/rebuttal rounds before arbitration (default 2)."}
+			"max_rounds": {"type": "integer", "description": "Debate mode only: maximum critique/rebuttal rounds before arbitration (default 2, hard-capped at 10)."}
 		},
 		"required": []
 	}`)
@@ -491,9 +491,16 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 		MaxTokens:       a.maxTokensPerRun,
 	}
 
+	// Mirrors the clamp debate.Run's withDefaults applies to Config.MaxRounds
+	// (P32.4) so this timeout can't be inflated by the same unclamped value —
+	// computed here since the timeout must be set before Run (and its
+	// internal clamp) ever runs.
 	debateMaxRounds := debateCfg.MaxRounds
 	if debateMaxRounds <= 0 {
 		debateMaxRounds = debate.DefaultMaxRounds
+	}
+	if debateMaxRounds > debate.MaxRoundsCeiling {
+		debateMaxRounds = debate.MaxRoundsCeiling
 	}
 	debateCtx, debateCancel := context.WithTimeout(ctx, maxAgentDuration*time.Duration(2*debateMaxRounds+2))
 	defer debateCancel()

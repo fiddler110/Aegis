@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/fiddler110/aegis/internal/trust"
 )
@@ -48,36 +49,127 @@ type Skill struct {
 	Dir         string // non-empty for a bundled (directory) skill; path to its companion files
 }
 
+// discoverCache memoizes Discover's result per distinct (workDir, dataDir,
+// enabledBuiltins) combination, short-circuited by a recursive size/mtime
+// signature over the scanned directories — the same change-detection pattern
+// persona.Refresh uses (internal/persona/load.go's dirSignature), extended to
+// walk recursively: a bundled skill's asset files (references/, scripts/)
+// live in subdirectories whose edits don't touch the top-level skill
+// directory entry's own mtime the way persona's flat *.md layout does.
+// Without this, BuildIndex/InjectIntoSystem re-walked and re-parsed every
+// skill file (including a full directory walk per bundled skill for its
+// asset manifest) on every session-start / system-prompt build (P32.7).
+//
+// Keyed per (workDir, dataDir, enabledBuiltins) rather than a single global
+// slot like persona's, since Discover is called directly with a session's own
+// workDir (P25.x) and different sessions can have different project roots.
+// The map is never evicted — bounded in practice by the number of distinct
+// project roots a daemon's sessions touch over its lifetime, the same
+// unenforced-but-low-risk bound other per-root caches in this codebase carry.
+var (
+	discoverMu    sync.RWMutex
+	discoverCache = map[string]discoverEntry{}
+)
+
+type discoverEntry struct {
+	sig    string
+	skills []Skill
+}
+
+// skillDirSpec is one directory Discover scans, with the filter/trust
+// treatment appendFromDir should apply to it.
+type skillDirSpec struct {
+	dir     string
+	filter  map[string]bool
+	trusted bool
+}
+
+// discoverSpecs returns the ordered list of directories Discover scans:
+// project-local, user-global, then (if any are enabled) embedded built-ins.
+func discoverSpecs(workDir, dataDir string, enabledBuiltins []string) []skillDirSpec {
+	specs := []skillDirSpec{
+		{dir: filepath.Join(workDir, ".aegis", "skills")},
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		specs = append(specs, skillDirSpec{dir: filepath.Join(home, ".aegis", "skills")})
+	}
+	if enabled := enabledSet(enabledBuiltins); len(enabled) > 0 && dataDir != "" {
+		specs = append(specs, skillDirSpec{dir: filepath.Join(dataDir, builtinSkillsDirName), filter: enabled, trusted: true})
+	}
+	return specs
+}
+
+// discoverCacheKey identifies a distinct Discover call shape for caching.
+func discoverCacheKey(workDir, dataDir string, enabledBuiltins []string) string {
+	return workDir + "\x00" + dataDir + "\x00" + strings.Join(enabledBuiltins, "\x00")
+}
+
+// skillsDirSignature builds a change-detection key from every file (at any
+// depth) under each of dirs: relative path, size, mtime, and whether it's a
+// directory. A missing dir contributes nothing (matches appendFromDir's
+// silent-skip behavior for a missing .aegis/skills folder).
+func skillsDirSignature(dirs []string) string {
+	var b strings.Builder
+	for _, dir := range dirs {
+		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				rel = path
+			}
+			fmt.Fprintf(&b, "%s/%s|%d|%d|%v;", dir, filepath.ToSlash(rel), info.Size(), info.ModTime().UnixNano(), d.IsDir())
+			return nil
+		})
+	}
+	return b.String()
+}
+
 // Discover loads all skills from the project and user directories, plus any
 // embedded built-in skill named in enabledBuiltins (dataDir locates the
 // per-user data directory built-ins are materialized into; see
 // MaterializeBuiltins). Any error reading a directory is silently skipped so
-// a missing .aegis/ folder doesn't break startup.
+// a missing .aegis/ folder doesn't break startup. Cheap to call repeatedly
+// (e.g. every session-start): a directory signature short-circuits the full
+// rescan when nothing changed (P32.7).
 func Discover(workDir, dataDir string, enabledBuiltins []string) []Skill {
-	seen := make(map[string]bool) // entry name → already loaded
-	var skills []Skill
+	specs := discoverSpecs(workDir, dataDir, enabledBuiltins)
+	dirs := make([]string, len(specs))
+	for i, sp := range specs {
+		dirs[i] = sp.dir
+	}
+	sig := skillsDirSignature(dirs)
+	key := discoverCacheKey(workDir, dataDir, enabledBuiltins)
+
+	discoverMu.RLock()
+	cached, ok := discoverCache[key]
+	discoverMu.RUnlock()
+	if ok && cached.sig == sig {
+		return append([]Skill(nil), cached.skills...)
+	}
 
 	// Project-local skills take precedence. Neither project nor user skill
 	// files are built into the binary, so their bodies are treated as
-	// untrusted (see appendFromDir's trusted param / FIND-05).
-	projectDir := filepath.Join(workDir, ".aegis", "skills")
-	skills = appendFromDir(skills, workDir, projectDir, seen, nil, false)
-
-	// User-global skills fill in anything not overridden by the project.
-	if home, err := os.UserHomeDir(); err == nil {
-		userDir := filepath.Join(home, ".aegis", "skills")
-		skills = appendFromDir(skills, workDir, userDir, seen, nil, false)
-	}
-
-	// Embedded built-ins fill in last, and only the ones explicitly enabled —
-	// they never override a same-named project/user skill. These ship in the
+	// untrusted (see appendFromDir's trusted param / FIND-05). Embedded
+	// built-ins fill in last, and only the ones explicitly enabled — they
+	// never override a same-named project/user skill; these ship in the
 	// binary, so they're trusted and not wrapped as untrusted content.
-	if enabled := enabledSet(enabledBuiltins); len(enabled) > 0 && dataDir != "" {
-		builtinDir := filepath.Join(dataDir, builtinSkillsDirName)
-		skills = appendFromDir(skills, workDir, builtinDir, seen, enabled, true)
+	seen := make(map[string]bool) // entry name → already loaded
+	var skills []Skill
+	for _, sp := range specs {
+		skills = appendFromDir(skills, workDir, sp.dir, seen, sp.filter, sp.trusted)
 	}
 
-	return skills
+	discoverMu.Lock()
+	discoverCache[key] = discoverEntry{sig: sig, skills: skills}
+	discoverMu.Unlock()
+
+	return append([]Skill(nil), skills...)
 }
 
 // enabledSet lowercases and dedupes a list of enabled builtin skill names for

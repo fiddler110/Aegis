@@ -8,7 +8,70 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-15 — shipped **P32.1** (Tier 1): plan mode's shell tool no longer grants
+**Last updated:** 2026-07-15 — shipped **P32.2-P32.7**, closing out both Tier 1 and Tier 2 of the
+2026-07-15 application review (P32.1 shipped earlier the same day; see below). **P32.2** (Tier 1):
+`ContextualGate.Check` (`internal/permission/contextual.go:105`) now calls
+`tool.EffectiveCapability(t, input)` instead of the static `t.Capability()`, matching the two call
+sites (`permission.Gate.Check`, `engine.serializeTool`) that already got this right — a future tool
+that narrows into/out of `CapWrite`/`CapNetwork` via `CapabilityFor` will now still be caught by the
+egress-then-write and network-allowlist rules instead of silently bypassing them. Added
+`TestNetworkAllowListUsesEffectiveCapability` (`internal/permission/contextual_test.go`), which fails
+against the pre-fix code. **P32.3** (Tier 1): session deletion no longer leaks checkpoint snapshots
+or `bg_events` rows. `session.Store` gained a `CheckpointCleaner` interface and
+`SetCheckpointCleaner` (`internal/session/session.go`), wired from `server.New` right after the
+checkpoint store is constructed; `Store.Delete` and `Store.Prune` now delete `bg_events` rows inside
+their existing transaction and fan out to the checkpoint cleaner afterward (`Prune` collects the
+about-to-be-pruned session IDs before its `DELETE`, then calls the cleaner per ID once the
+transaction commits) — previously only the HTTP `handleDeleteSession` handler did the checkpoint
+half, so the TTL auto-pruner and `/sessions/prune` silently left checkpoint snapshots (up to 16MiB
+each, uncapped count) and all `bg_events` rows behind forever, undermining the one feature
+(`cleanup.session_ttl_days`) specifically built to bound DB growth. `handleDeleteSession` was
+simplified to drop its now-redundant direct `checkpoints.DeleteForSession` call. Added
+`TestDeleteRemovesBGEventsAndCheckpoints` and `TestPruneRemovesBGEventsAndCheckpoints`
+(`internal/session/session_test.go`) using a `fakeCheckpointCleaner`. **P32.4** (Tier 1): debate
+`max_rounds` is now hard-capped regardless of caller input. Added `debate.MaxRoundsCeiling = 10`
+(`internal/debate/debate.go`), applied in `withDefaults` (the single choke point both the `agent`
+tool's debate mode and the `/debate` HTTP handler already funnel through via `debate.Run`) and
+mirrored in `executeDebate`'s own pre-`Run` context-timeout calculation
+(`internal/tool/builtin/agent.go`), which previously scaled `maxAgentDuration*(2*maxRounds+2)` off
+the same unclamped value. Previously nothing bounded `max_rounds` end-to-end — not the JSON schema,
+not `DebateRequest.MaxRounds`, not the timeout math — and `budgetExhausted` only helps when a
+`cost.Tracker` happens to be in context, so a model turn steered by prompt-injected content (a debate
+claim can be grounded in file content via `WithFiles`) could request an arbitrarily large round
+count, each round spawning 2 real sub-agents. The JSON schema description now documents the cap.
+Added `TestRunMaxRoundsHardCeiling` (`internal/debate/debate_test.go`), which fails against the
+pre-fix code by exhausting its scripted responses. The roadmap's "consider a concurrent-spawn-count
+cap alongside the existing depth cap" note for parallel `agent` tool calls was left open — a larger,
+separate change (aggregate per-turn spawn accounting) than this item's scoped fix. **P32.5** (Tier
+2): `internal/notify/notify.go`'s Windows toast-notification path and
+`internal/tui/clipboard_image.go`'s clipboard-image paste path now call
+`sandbox.WindowsShellBinary()` instead of hardcoding `"powershell"`, matching the convention
+`hooks/exec.go`, `tui/tui.go`, and `security/install.go` already followed — closes the last two call
+sites the P30 hardening sweep missed. **P32.6** (Tier 2): `engine.executeTool`
+(`internal/engine/engine.go`) now logs a warning (`tool`, the tool name) whenever a write-capability
+tool call's input yields zero paths from `writtenPathsFromInput` — previously a silent gap: an MCP
+tool or a future builtin write tool using field names other than `path`/`file_path`/`edits[].path`
+got no output-guard file validation and no quarantine-on-fail checkpoint rollback, with nothing
+marking that the guard's coverage had silently degraded to chat-text-only. Added
+`TestExecuteToolWarnsOnZeroPathWriteCall` (`internal/engine/engine_test.go`) with an
+`oddShapeWriteTool` fixture and a buffered `slog` handler. **P32.7** (Tier 2): `skills.Discover`
+(`internal/skills/skills.go`) is now memoized per `(workDir, dataDir, enabledBuiltins)` combination,
+short-circuited by a recursive size/mtime/is-dir signature (`skillsDirSignature`) over the scanned
+directories — the same change-detection pattern `persona.Refresh`'s `dirSignature` uses, extended to
+walk recursively (`filepath.WalkDir` rather than a single `os.ReadDir`) since a bundled skill's asset
+files live in subdirectories (`references/`, `scripts/`) whose edits don't touch the bundled skill's
+own top-level directory entry the way persona's flat `*.md` layout does. Previously `BuildIndex`/
+`InjectIntoSystem` re-walked and re-parsed every skill file — including a full asset-manifest
+directory walk per bundled skill — on every session-start/system-prompt build. The cache is a plain
+unbounded map (one entry per distinct project root a daemon's sessions touch), the same
+unenforced-but-low-risk bound other per-root caches in this codebase carry; not evicted, matching
+this item's Tier 2/no-dependency scope rather than adding a new retention policy. Added
+`TestDiscoverCacheDetectsFileEdits` and `TestDiscoverCacheDetectsNestedBundledAssetChanges`
+(`internal/skills/skills_test.go`) — the latter specifically exercises the recursive-vs-flat
+distinction from persona's pattern. Verified with `go build ./...`, `go vet ./...`, and
+`go test ./...` (full suite, all packages green) after each item.
+
+**Earlier, same day:** shipped **P32.1** (Tier 1): plan mode's shell tool no longer grants
 unconfined host-filesystem reads. `shellTool.CapabilityFor` (`internal/tool/builtin/shell.go`)
 downgrades a narrow allowlist of read-only commands (`cat`, `Get-Content`, `git status/log/diff`,
 …) from `CapExecute` to `CapRead`, which plan mode allows with no prompt — but unlike

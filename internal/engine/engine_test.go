@@ -1,9 +1,12 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/provider"
@@ -43,6 +46,56 @@ func (e *echoTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	_ = json.Unmarshal(input, &args)
 	return tool.Result{Content: "echo:" + args.Msg}, nil
+}
+
+// oddShapeWriteTool declares CapWrite but takes an input shape
+// writtenPathsFromInput doesn't recognize (no "path"/"file_path"/
+// "edits[].path"), simulating an MCP tool or a future builtin whose field
+// names differ from the ones the guard's path extraction knows about.
+type oddShapeWriteTool struct{}
+
+func (oddShapeWriteTool) Name() string                 { return "odd_write" }
+func (oddShapeWriteTool) Description() string          { return "" }
+func (oddShapeWriteTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (oddShapeWriteTool) Capability() tool.Capability  { return tool.CapWrite }
+func (oddShapeWriteTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{Content: "ok"}, nil
+}
+
+// TestExecuteToolWarnsOnZeroPathWriteCall covers P32.6: a write-capability
+// tool call that yields no extracted paths (writtenPathsFromInput only
+// recognizes a few field-name shapes) must log a warning instead of silently
+// degrading output-guard file coverage to nothing.
+func TestExecuteToolWarnsOnZeroPathWriteCall(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.Register(oddShapeWriteTool{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	eng, err := New(Options{Adapter: &scriptedAdapter{}, Tools: reg, Model: "test", Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		ID: "tu_1", Name: "odd_write", Input: json.RawMessage(`{"unexpected_field":"value.txt"}`),
+	})
+	if isErr {
+		t.Fatalf("expected the odd-shape write call to succeed")
+	}
+
+	if !strings.Contains(logBuf.String(), "write-capability tool call yielded no paths") {
+		t.Errorf("expected a warning log for zero extracted paths, got: %s", logBuf.String())
+	}
+	eng.writtenFilesMu.Lock()
+	n := len(eng.writtenFiles)
+	eng.writtenFilesMu.Unlock()
+	if n != 0 {
+		t.Errorf("expected no written-files entries recorded, got %d", n)
+	}
 }
 
 func TestRunToolRoundTrip(t *testing.T) {

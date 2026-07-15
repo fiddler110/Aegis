@@ -442,12 +442,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	taskMgr := task.NewManager(taskStore, logger)
 
-	// Checkpoint store shares the session database connection.
+	// Checkpoint store shares the session database connection. Wired into the
+	// session store's Delete/Prune so checkpoint snapshots are cleaned up on
+	// every deletion path, not just the HTTP delete-session handler (P32.3).
 	checkpointStore, err := checkpoint.NewStore(store.DB())
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
+	store.SetCheckpointCleaner(checkpointStore)
 
 	cwd, err := os.Getwd()
 	if err != nil {
