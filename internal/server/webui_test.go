@@ -259,6 +259,54 @@ func TestPageTokenSingleUseAndExpiry(t *testing.T) {
 	}
 }
 
+// TestWebUICSRFCookieSecureFlag covers P31.3: the CSRF cookie must carry
+// Secure when the request arrived over TLS, but not on the default
+// loopback-only plaintext deployment (Secure would make browsers silently
+// drop the cookie there).
+func TestWebUICSRFCookieSecureFlag(t *testing.T) {
+	srv := newTestWebUIServer(t)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	found := false
+	for _, c := range resp.Cookies() {
+		if c.Name == uiCSRFCookieName {
+			found = true
+			if c.Secure {
+				t.Error("expected Secure=false on the plain-HTTP cookie")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("plain-HTTP response missing the CSRF cookie")
+	}
+
+	tlsSrv := httptest.NewTLSServer(srv.Handler())
+	defer tlsSrv.Close()
+	tlsResp, err := tlsSrv.Client().Get(tlsSrv.URL + "/ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsResp.Body.Close()
+	found = false
+	for _, c := range tlsResp.Cookies() {
+		if c.Name == uiCSRFCookieName {
+			found = true
+			if !c.Secure {
+				t.Error("expected Secure=true on the TLS cookie")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("TLS response missing the CSRF cookie")
+	}
+}
+
 func TestWebUIAssetsServedWithLongCache(t *testing.T) {
 	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {
