@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // pasteClipboardImage reads an image from the OS clipboard and saves it to a
@@ -42,7 +44,7 @@ if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
 } else {
     Write-Output 'AEGIS_NOIMAGE'
 }`
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Sta", "-Command", script).Output()
+	out, err := exec.Command(sandbox.WindowsShellBinary(), "-NoProfile", "-NonInteractive", "-Sta", "-Command", script).Output()
 	if err != nil {
 		os.Remove(path)
 		return "", false, err

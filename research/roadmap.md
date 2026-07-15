@@ -11,27 +11,28 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 7 (P32.2-P32.8), plus 3 parked (P32.9-P32.11, Tier 4). A full objective
-application review on 2026-07-15 — four parallel passes covering (1) engine/tool/permission/sandbox,
-(2) persona/skills/swarm/debate/mcp/mcpserver/acp, (3) server/session/provider/guard/config/cron,
-and (4) tui/client/memory/cli — surfaced these (originally 8 open, P32.1-P32.8); see
+**Open items:** 1 (P32.8), plus 3 parked (P32.9-P32.11, Tier 4). A full objective application
+review on 2026-07-15 — four parallel passes covering (1) engine/tool/permission/sandbox, (2)
+persona/skills/swarm/debate/mcp/mcpserver/acp, (3) server/session/provider/guard/config/cron, and
+(4) tui/client/memory/cli — surfaced these (originally 8 open, P32.1-P32.8); see
 [Open Work](#open-work) and [Parked](#open-work--parked-tier-4) for the full list. **P32.1** shipped
-2026-07-15 — see [releases.md](releases.md#latest-changes). Two cross-cutting patterns came out of
-that review, noted here since they span multiple items: **(a)** tools that dynamically reclassify
-their own capability create seams where a gate written against the static/declared capability
-misses the reclassification — root cause of both P32.1 and P32.2; **(b)** several persistence
+2026-07-15; **P32.2-P32.7** (all of Tier 1 and Tier 2) shipped the same day — see
+[releases.md](releases.md#latest-changes). Two cross-cutting patterns came out of the review, noted
+here since they span multiple items: **(a)** tools that dynamically reclassify their own capability
+create seams where a gate written against the static/declared capability misses the
+reclassification — root cause of both P32.1 and P32.2, both now fixed; **(b)** several persistence
 layers (checkpoints, `bg_events`, memory) were each built without a shared "how does this get
-cleaned up" convention — root cause of P32.3 and P32.8, worth scoping as one retention pass rather
-than point fixes. The P30 batch (code-gap scan) and P31 batch (CodeQL alerts) both closed out
-2026-07-14 — see [releases.md](releases.md#latest-changes). The P27 threat model's
+cleaned up" convention — root cause of P32.3 (fixed) and P32.8 (still open, needs a retention
+design rather than a wiring fix). The P30 batch (code-gap scan) and P31 batch (CodeQL alerts) both
+closed out 2026-07-14 — see [releases.md](releases.md#latest-changes). The P27 threat model's
 needs-verification list remains fully closed.
 
-**Next session:** start with **P32.3** (Tier 1, checkpoint/bg_events cleanup — unbounded disk
-growth in a shipping feature), then batch **P32.2** and **P32.4** as one "dynamic capability /
-resource-bound consistency" pass since they share root cause (a) above. Tier 2 items (P32.5-P32.7)
-are cheap, no-dependency wins to fit in alongside. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md)
-after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor`
-is the standalone preflight companion for the same misconfiguration classes.
+**Next session:** only **P32.8** remains open, and it's Tier 3 (needs a retention-policy decision,
+not just a wiring fix) — check with the user before starting given the Tier 4 parking convention's
+"check with the user" norm extends naturally here once the cheap/no-dependency backlog is empty.
+Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
+companion for the same misconfiguration classes.
 
 ---
 
@@ -43,10 +44,11 @@ hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or i
 work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
 speculatively.
 
-**Tier 1:** P32.2, P32.3, P32.4. (P31.1, P31.2, P30.1, P30.2, and P30.3 shipped 2026-07-14; P32.1
+**Tier 1:** none open. (P31.1, P31.2, P30.1, P30.2, and P30.3 shipped 2026-07-14; P32.1-P32.4
 shipped 2026-07-15.)
 
-**Tier 2:** P32.5, P32.6, P32.7. (P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14.)
+**Tier 2:** none open. (P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped
+2026-07-15.)
 
 **Tier 3:** P32.8.
 
@@ -55,92 +57,6 @@ shipped 2026-07-15.)
 ---
 
 ## Open Work
-
-### P32.2 — `ContextualGate.Check` reads static capability instead of effective capability
-
-Priority: Tier 1 · Effort: S — no dependency, same root cause as P32.1
-
-`internal/permission/contextual.go:105` calls `t.Capability()` where the base `permission.Gate`
-(`permission.go:130`) and `engine.serializeTool` (`engine.go:1104`) both correctly call
-`tool.EffectiveCapability`. Currently harmless only because the sole `CapabilityOverrider`
-(shell) never downgrades into `CapWrite`/`CapNetwork` — the two capabilities `ContextualGate`
-gates (egress-then-write, network allowlist). Latent trap: the next tool that narrows into/out of
-write or network via `CapabilityFor` would silently bypass those rules. Fix: call
-`tool.EffectiveCapability(t, input)` for consistency with the two call sites that already got
-this right.
-
-### P32.3 — Session cleanup never removes checkpoint snapshots or `bg_events` rows
-
-Priority: Tier 1 · Effort: S — no dependency
-
-`internal/session/session.go`'s `Store.Delete` (:721-738) and TTL-based `Store.Prune` (:566-592)
-never call `checkpoints.DeleteForSession` — only the HTTP `handleDeleteSession` handler
-(`internal/server/sessions.go:286`) does, a separate code path. The daemon's TTL auto-pruner
-(`server.go:1109-1132`) and the `/sessions/prune` endpoint (`sessions.go:833-850`) both call
-`Store.Prune` directly, bypassing checkpoint cleanup entirely. Checkpoint snapshots (full pre-edit
-file contents) can be up to 16MiB each (`maxSnapshotBytes`, `checkpoint.go:29`) with no count cap,
-and `bg_events` rows (buffered SSE events for background sessions, `session.go:142,602-627`) are
-never deleted by any code path. The feature specifically built to bound DB growth
-(`cleanup.session_ttl_days`) silently leaves its largest data behind forever. Fix: wire
-`checkpoints.DeleteForSession` into `Store.Delete`/`Store.Prune` directly (not just the HTTP
-handler), and add `bg_events` cleanup to the same path; consider a `checkpoint.Store`
-prune/TTL backstop of its own.
-
-### P32.4 — Debate `max_rounds` and swarm spawn breadth are unclamped
-
-Priority: Tier 1 · Effort: S — no dependency
-
-The `agent` tool's debate mode has no maximum on `max_rounds` at any entry point — the JSON
-schema (`internal/tool/builtin/agent.go:169`), the HTTP `DebateRequest.MaxRounds`
-(`internal/server/debate.go:61`), and `executeDebate`'s own context timeout (`agent.go:493`,
-`maxAgentDuration*(2*maxRounds+2)`) all scale with the value rather than bounding it. Each round
-spawns 2 sub-agents via `swarm.Backend.Spawn` (real OS processes in subprocess mode). The only
-brake, `budgetExhausted` (`internal/debate/debate.go:220`), silently no-ops if `cost.Tracker`
-isn't in context (`agent.go:478`: `tracker, _ := ...`), and even when present is checked only once
-per round-start, so overshoot scales with round count. A model turn steered by prompt-injected
-file content (debate claims can load via `WithFiles`) could request an arbitrarily large round
-count. The same unclamped-breadth shape applies separately to parallel subprocess `agent` tool
-calls in one turn — no cap on concurrent spawn count at a given recursion depth (depth itself is
-capped at 3 via `maxSpawnDepth`, `agent.go:24`). Fix: clamp `max_rounds` to a small hard ceiling
-(e.g. 10) at the schema/handler boundary regardless of tracker presence, and consider a
-concurrent-spawn-count cap alongside the existing depth cap.
-
-### P32.5 — Two Windows shell-out sites missed the P30.2/P30.3 hardening sweep
-
-Priority: Tier 2 · Effort: S — no dependency
-
-`internal/notify/notify.go:135` and `internal/tui/clipboard_image.go:45` both still hardcode
-`exec.Command("powershell", ...)` instead of `sandbox.WindowsShellBinary()` (which prefers `pwsh`,
-fixing the Desktop/Core module-autoload gap documented at `internal/sandbox/sandbox.go:43-54`).
-`hooks/exec.go:190-195`, `tui/tui.go:604-609`, and `security/install.go:98-103` were all correctly
-updated in the P30 batch. Not currently exploitable — no attacker-controlled input reaches either
-site (toast notification text, clipboard paste script) — but it's the same class of gap that
-batch was explicitly sweeping for. Fix: swap both call sites to `sandbox.WindowsShellBinary()`.
-
-### P32.6 — Output guard silently drops file coverage for non-standard write-tool input shapes
-
-Priority: Tier 2 · Effort: S — no dependency
-
-`writtenPathsFromInput` (`internal/engine/engine.go:1261-1285`) only recognizes `path`,
-`file_path`, and `edits[].path`. Any MCP tool or future builtin write tool using a different field
-name gets no output-guard file validation and no quarantine-on-fail checkpoint rollback, with no
-log line marking the miss — the guard's core value (validating actual written content, not just
-the chat summary) silently degrades to chat-text-only. Fix: at minimum log a warning when a
-write-capability tool call has zero paths extracted, so the gap is visible instead of silent;
-consider a more general extraction (e.g. tool-declared path-field names) longer term.
-
-### P32.7 — `skills.Discover` re-walks and re-parses every skill file with no cache
-
-Priority: Tier 2 · Effort: S — no dependency
-
-`persona.Refresh` short-circuits via a `dirSignature` mtime/size fingerprint before doing a full
-rescan (`internal/persona/load.go:80-89`). `skills.Discover` has no equivalent: `BuildIndex`/
-`InjectIntoSystem` (`internal/skills/skills.go:327,361`) call `Discover` fresh on every
-session-start / system-prompt build, doing 1-3 `os.ReadDir` calls plus a full read+parse of every
-skill file, including a `filepath.WalkDir` of each bundled skill directory for its asset manifest
-(`withAssetManifest`, `skills.go:198`). For a project with several bundled skills this is a
-repeated full-tree walk per turn/session. Fix: apply the same mtime-signature short-circuit
-pattern already proven on the persona side.
 
 ### P32.8 — `memory.md` has no total-size cap or pruning path
 
@@ -151,9 +67,9 @@ but nothing bounds total file size or entry count. A long-running project/user m
 entries forever, growing system-prompt injection cost every session and slowing `LoadRelevant`'s
 per-entry TF-IDF scan linearly. No rotation, LRU-by-relevance trim, or periodic summarization
 exists. Larger than the Tier 1/2 items because a real fix needs a retention policy decision (hard
-cap + eviction order, or periodic summarization), not just a wiring fix — worth scoping together
-with P32.3's checkpoint/`bg_events` cleanup gap as one "persistence retention" pass, since both
-are instances of the same missing-lifecycle-policy pattern.
+cap + eviction order, or periodic summarization), not just a wiring fix — the same
+missing-lifecycle-policy pattern P32.3 (checkpoint/`bg_events` cleanup, shipped 2026-07-15) was an
+instance of, but unlike P32.3 this one can't be closed with a wiring fix alone.
 
 ---
 

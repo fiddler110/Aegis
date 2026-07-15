@@ -5,10 +5,22 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/trace"
 )
+
+// fakeCheckpointCleaner records DeleteForSession calls without touching a
+// real checkpoint.Store, for exercising the P32.3 Delete/Prune wiring.
+type fakeCheckpointCleaner struct {
+	deleted []string
+}
+
+func (f *fakeCheckpointCleaner) DeleteForSession(_ context.Context, sessionID string) error {
+	f.deleted = append(f.deleted, sessionID)
+	return nil
+}
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -455,6 +467,92 @@ func TestDeleteRemovesMessageAndTraceRows(t *testing.T) {
 	}
 	if msgCount != 0 || traceCount != 0 {
 		t.Errorf("Delete left orphan rows: messages=%d traces=%d", msgCount, traceCount)
+	}
+}
+
+// TestDeleteRemovesBGEventsAndCheckpoints covers P32.3: Delete must clean up
+// bg_events rows and fan out to a registered CheckpointCleaner, not just the
+// session_messages/session_traces rows TestDeleteRemovesMessageAndTraceRows
+// already covered — previously only the HTTP delete-session handler did the
+// checkpoint half of this, and nothing cleaned up bg_events at all.
+func TestDeleteRemovesBGEventsAndCheckpoints(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	cleaner := &fakeCheckpointCleaner{}
+	st.SetCheckpointCleaner(cleaner)
+
+	sess, err := st.Create(ctx, "del-bg", "sys", "build", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := st.AppendBGEvent(ctx, sess.ID, `{"kind":"text"}`); err != nil {
+		t.Fatalf("AppendBGEvent: %v", err)
+	}
+
+	if err := st.Delete(ctx, sess.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	var bgCount int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM bg_events WHERE session_id = ?`, sess.ID).Scan(&bgCount); err != nil {
+		t.Fatalf("count bg_events: %v", err)
+	}
+	if bgCount != 0 {
+		t.Errorf("Delete left %d orphan bg_events rows", bgCount)
+	}
+	if len(cleaner.deleted) != 1 || cleaner.deleted[0] != sess.ID {
+		t.Errorf("expected checkpoint cleaner called once with %q, got %v", sess.ID, cleaner.deleted)
+	}
+}
+
+// TestPruneRemovesBGEventsAndCheckpoints covers P32.3's other leak path: the
+// TTL auto-pruner and /sessions/prune both call Store.Prune directly, which
+// previously bypassed checkpoint (and bg_events) cleanup entirely since only
+// the HTTP delete-session handler called checkpoints.DeleteForSession.
+func TestPruneRemovesBGEventsAndCheckpoints(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	cleaner := &fakeCheckpointCleaner{}
+	st.SetCheckpointCleaner(cleaner)
+
+	old, err := st.Create(ctx, "old", "sys", "build", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := st.AppendBGEvent(ctx, old.ID, `{"kind":"text"}`); err != nil {
+		t.Fatalf("AppendBGEvent: %v", err)
+	}
+	// Backdate updated_at so Prune's TTL threshold catches it.
+	backdated := time.Now().Add(-48 * time.Hour).UnixMilli()
+	if _, err := st.db.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ?`, backdated, old.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	fresh, err := st.Create(ctx, "fresh", "sys", "build", "", "")
+	if err != nil {
+		t.Fatalf("Create fresh: %v", err)
+	}
+
+	n, err := st.Prune(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("Prune deleted %d sessions, want 1", n)
+	}
+
+	var bgCount int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM bg_events WHERE session_id = ?`, old.ID).Scan(&bgCount); err != nil {
+		t.Fatalf("count bg_events: %v", err)
+	}
+	if bgCount != 0 {
+		t.Errorf("Prune left %d orphan bg_events rows for pruned session", bgCount)
+	}
+	if len(cleaner.deleted) != 1 || cleaner.deleted[0] != old.ID {
+		t.Errorf("expected checkpoint cleaner called once with %q, got %v", old.ID, cleaner.deleted)
+	}
+	if _, err := st.Get(ctx, fresh.ID); err != nil {
+		t.Errorf("fresh session should survive Prune: %v", err)
 	}
 }
 

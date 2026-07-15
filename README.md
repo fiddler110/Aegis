@@ -111,10 +111,12 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 | [Session Management](docs/sessions.md) | Checkpoints, rewind, export, archiving |
 | [Providers & Models](docs/providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
 | [Memory & Knowledge](docs/memory-and-knowledge.md) | Project/user memory, skills, knowledge base |
+| [Skills](docs/skills.md) | Authoring guide: minimal/bundled skills, companion scripts, frontmatter, precedence, built-ins |
 | [Extensibility](docs/extensibility.md) | Lifecycle hooks, MCP servers, custom commands, agents, process plugins, bundles |
+| [MCP Trust Boundary](docs/mcp-trust-boundary.md) | What Aegis assumes about external MCP server output, provenance marking, opt-in injection scanning |
 | [Multi-Agent & Background Tasks](docs/multi-agent.md) | Swarm, parallel sessions, background tasks, cron scheduling |
 | [Multi-Agent Debate](docs/debate.md) | Adversarial claim review: domains, file-grounding, persona overrides, all four entry points |
-| [Security Features](docs/security.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual policies, audit trail |
+| [Security Features](docs/security_scan.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual policies, audit trail |
 
 ---
 

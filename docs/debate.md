@@ -22,9 +22,10 @@ threat fully mitigated," "does section 3 of this design doc contradict section 1
 | **Critic** | Tries to find one specific, concrete flaw — a factual error, an unsupported assumption, a missing case, an internal inconsistency. Must ground each challenge in cited evidence (`grep`/`read_file`/`web_fetch`/`security_scan` output, a `file:line`, a quoted passage) or explicitly `CONCEDE`. An uncited challenge is tagged `[unsubstantiated]` and discarded by the arbiter — it can't move the verdict |
 | **Arbiter** | Reads the full transcript and issues a final `VERDICT: UPHOLD \| REVISE \| REJECT` with a `CONFIDENCE: high \| medium \| low` |
 
-This runs for up to `max_rounds` (default 2) critique/rebuttal exchanges, then always produces a
-verdict — including when a round is skipped for budget reasons or a role call errors, since a
-partial transcript arbitrated as-is beats no verdict at all.
+This runs for up to `max_rounds` (default 2, hard-capped at 10 regardless of what a caller requests)
+critique/rebuttal exchanges, then always produces a verdict — including when a round is skipped for
+budget reasons or a role call errors, since a partial transcript arbitrated as-is beats no verdict
+at all.
 
 ---
 

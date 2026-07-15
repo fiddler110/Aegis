@@ -277,15 +277,12 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Store.Delete also cleans up checkpoint snapshots (P32.3) via the
+	// SetCheckpointCleaner wiring done in New — no separate call needed here.
 	if err := s.store.Delete(r.Context(), id); err != nil {
 		s.logger.Error("delete session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
-	}
-	if s.checkpoints != nil {
-		if err := s.checkpoints.DeleteForSession(r.Context(), id); err != nil {
-			s.logger.Warn("delete session checkpoints", "session", id, "err", err)
-		}
 	}
 	s.sessionTools.Delete(id)
 	s.sessionWorkdirs.Delete(id)

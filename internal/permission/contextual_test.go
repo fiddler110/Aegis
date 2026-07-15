@@ -113,6 +113,37 @@ func TestNetworkAllowList(t *testing.T) {
 	}
 }
 
+// TestNetworkAllowListUsesEffectiveCapability covers P32.2: Check must gate on
+// tool.EffectiveCapability, not the tool's static Capability(). A tool whose
+// static capability is CapExecute but that reclassifies to CapNetwork for
+// this specific call (the same CapabilityOverrider seam P25.4c added) must
+// still be gated by the network allowlist rule — before the fix,
+// ContextualGate.Check read t.Capability() directly, so this call's
+// `cap == tool.CapNetwork` comparison never matched and the allowlist was
+// silently bypassed.
+func TestNetworkAllowListUsesEffectiveCapability(t *testing.T) {
+	base := New(ModeBuild, AutoApprove{})
+	gate := NewContextualGate(base, ContextualOpts{
+		NetworkAllowList: []string{"example.com"},
+	})
+	ctx := context.Background()
+
+	netClassified := fakeOverrideTool{
+		fakeTool:    fakeTool{name: "shell", cap: tool.CapExecute},
+		overrideCap: tool.CapNetwork,
+	}
+
+	input := json.RawMessage(`{"url":"https://evil.com/steal"}`)
+	if ok, _ := gate.Check(ctx, netClassified, input); ok {
+		t.Error("evil.com should be blocked by allowlist even for a call reclassified to CapNetwork")
+	}
+
+	input = json.RawMessage(`{"url":"https://example.com/api"}`)
+	if ok, _ := gate.Check(ctx, netClassified, input); !ok {
+		t.Error("example.com should be allowed for a call reclassified to CapNetwork")
+	}
+}
+
 func TestNetworkAllowListDisabled(t *testing.T) {
 	base := New(ModeBuild, AutoApprove{})
 	gate := NewContextualGate(base, ContextualOpts{

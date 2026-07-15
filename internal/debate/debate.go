@@ -32,6 +32,15 @@ import (
 // spend well past what a single-pass equivalent task costs.
 const DefaultMaxRounds = 2
 
+// MaxRoundsCeiling hard-caps Config.MaxRounds regardless of caller input
+// (P32.4). Nothing upstream of withDefaults bounded it — the agent tool's
+// JSON schema, the HTTP DebateRequest field, and executeDebate's own context
+// timeout all scaled with whatever value arrived — so a model turn steered by
+// prompt-injected content (a debate claim can load via WithFiles) could
+// request an arbitrarily large round count, and budgetExhausted only helps
+// when a cost.Tracker happens to be in context. This applies unconditionally.
+const MaxRoundsCeiling = 10
+
 // Domain selects which default persona trio Config.withDefaults fills in when
 // a role persona isn't explicitly overridden. DomainSecurity is the zero
 // value so every existing caller that never set Domain keeps its original
@@ -115,6 +124,9 @@ func withDefaults(cfg Config) Config {
 	}
 	if cfg.MaxRounds <= 0 {
 		cfg.MaxRounds = DefaultMaxRounds
+	}
+	if cfg.MaxRounds > MaxRoundsCeiling {
+		cfg.MaxRounds = MaxRoundsCeiling
 	}
 	return cfg
 }

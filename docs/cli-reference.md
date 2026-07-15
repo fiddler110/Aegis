@@ -580,7 +580,7 @@ aegis debate "The plan's phased rollout correctly handles rollback" --domain gen
 | `--proposer` | Persona for the proposer role (default `security-researcher`, or `general` if `--domain generic`) |
 | `--critic` | Persona for the critic role (default `security-critic`, or `critic` if `--domain generic`) |
 | `--arbiter` | Persona for the arbiter role (default `security-arbiter`, or `arbiter` if `--domain generic`) |
-| `--max-rounds` | Maximum critique/rebuttal rounds before arbitration (default 2) |
+| `--max-rounds` | Maximum critique/rebuttal rounds before arbitration (default 2, hard-capped at 10) |
 | `--output-format` | `text` (default) or `json` (final transcript + verdict object) |
 
 ---

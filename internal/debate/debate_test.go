@@ -169,6 +169,30 @@ func TestRunMaxRoundsDefault(t *testing.T) {
 	}
 }
 
+// TestRunMaxRoundsHardCeiling covers P32.4: Config.MaxRounds must be clamped
+// to MaxRoundsCeiling regardless of how large a caller (an HTTP request, or a
+// model turn steered by prompt-injected content the claim was grounded in via
+// WithFiles) requests — nothing upstream of withDefaults bounded it before
+// this fix. Scripts exactly MaxRoundsCeiling non-conceding responses per role;
+// if the requested 9999 rounds weren't clamped, scriptedRun would run out of
+// responses and fail via its own t.Fatalf.
+func TestRunMaxRoundsHardCeiling(t *testing.T) {
+	byRole := map[string][]string{}
+	for i := 0; i < MaxRoundsCeiling; i++ {
+		byRole["critic"] = append(byRole["critic"], "Evidence: file.go:1 shows a gap.")
+		byRole["proposer"] = append(byRole["proposer"], "Addressed.")
+	}
+	byRole["arbiter"] = []string{"VERDICT: UPHOLD\nCONFIDENCE: low\nREASON: exhausted rounds."}
+
+	tr, err := Run(context.Background(), "Claim.", Config{MaxRounds: 9999}, scriptedRun(t, byRole))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(tr.Rounds) != MaxRoundsCeiling {
+		t.Fatalf("len(Rounds) = %d, want MaxRoundsCeiling=%d", len(tr.Rounds), MaxRoundsCeiling)
+	}
+}
+
 // TestRunBudgetExhaustedSkipsToArbitration proves P12.6: once the shared
 // tracker is within budgetHeadroomFraction of the cap, Run stops starting new
 // rounds and goes straight to arbitration on whatever transcript exists so

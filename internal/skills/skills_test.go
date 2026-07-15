@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeSkill(t *testing.T, dir, name, body string) {
@@ -48,6 +49,62 @@ func TestBuildIndexProgressiveDisclosure(t *testing.T) {
 	}
 	if !strings.Contains(idx, "eager inject") {
 		t.Errorf("legacy skill should be eager-injected:\n%s", idx)
+	}
+}
+
+// TestDiscoverCacheDetectsFileEdits covers P32.7's core correctness
+// requirement: the signature short-circuit must never serve stale content
+// after a skill file is edited, even though caching means Discover no longer
+// unconditionally re-reads every file.
+func TestDiscoverCacheDetectsFileEdits(t *testing.T) {
+	dir := t.TempDir()
+	sd := filepath.Join(dir, ".aegis", "skills")
+	writeSkill(t, sd, "deploy.md", "---\ndescription: Ship\n---\nfirst body\n")
+
+	got := Discover(dir, "", nil)
+	if len(got) != 1 || !strings.Contains(got[0].Content, "first body") {
+		t.Fatalf("initial discover = %+v, want content containing 'first body'", got)
+	}
+
+	writeSkill(t, sd, "deploy.md", "---\ndescription: Ship\n---\nsecond body, longer\n")
+	// Force a distinct mtime so the signature changes even if the edit above
+	// lands within the same filesystem timestamp tick as the first write.
+	bump := time.Now().Add(time.Second)
+	if err := os.Chtimes(filepath.Join(sd, "deploy.md"), bump, bump); err != nil {
+		t.Fatal(err)
+	}
+
+	got = Discover(dir, "", nil)
+	if len(got) != 1 || !strings.Contains(got[0].Content, "second body, longer") {
+		t.Fatalf("discover after edit = %+v, want updated content", got)
+	}
+}
+
+// TestDiscoverCacheDetectsNestedBundledAssetChanges covers the reason P32.7's
+// signature walks recursively rather than reusing persona's flat top-level
+// scan: a bundled skill's asset files live in subdirectories (references/,
+// scripts/), and adding one there doesn't necessarily touch the bundled
+// skill's own top-level directory entry.
+func TestDiscoverCacheDetectsNestedBundledAssetChanges(t *testing.T) {
+	dir := t.TempDir()
+	sd := filepath.Join(dir, ".aegis", "skills")
+	bundleDir := filepath.Join(sd, "html-report")
+	writeSkill(t, bundleDir, "SKILL.md", "---\ndescription: Report\n---\nbody\n")
+
+	got := Discover(dir, "", nil)
+	if len(got) != 1 {
+		t.Fatalf("discover = %+v, want 1 skill", got)
+	}
+	if strings.Contains(got[0].Content, "template.html") {
+		t.Fatalf("asset manifest mentions template.html before it exists:\n%s", got[0].Content)
+	}
+
+	refDir := filepath.Join(bundleDir, "references")
+	writeSkill(t, refDir, "template.html", "<html></html>")
+
+	got = Discover(dir, "", nil)
+	if len(got) != 1 || !strings.Contains(got[0].Content, "references/template.html") {
+		t.Fatalf("discover after adding nested asset = %+v, want manifest to list it", got)
 	}
 }
 
