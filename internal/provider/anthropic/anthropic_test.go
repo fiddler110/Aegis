@@ -137,6 +137,57 @@ func TestStreamParsing(t *testing.T) {
 	}
 }
 
+// TestStreamEmitsToolUseStartAtContentBlockStart is the P33.3 guard: a
+// tool_use content_block_start already carries the call's id and name, so the
+// call is announced there — while its input_json_delta arguments are still
+// streaming — rather than only at content_block_stop. The assembled
+// EventToolUse still follows unchanged (TestStreamParsing covers it), and a
+// text block must announce nothing.
+func TestStreamEmitsToolUseStartAtContentBlockStart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(sampleStream))
+	}))
+	defer srv.Close()
+
+	stream, err := New("test-key", WithBaseURL(srv.URL)).Stream(context.Background(), provider.Request{
+		Model:     "claude-test",
+		MaxTokens: 100,
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var starts []provider.ToolUseBlock
+	var sawTerminal bool
+	for ev := range stream {
+		switch ev.Type {
+		case provider.EventToolUseStart:
+			if sawTerminal {
+				t.Error("tool_use_start arrived after the assembled tool call — it must precede it")
+			}
+			starts = append(starts, *ev.ToolUse)
+		case provider.EventToolUse:
+			sawTerminal = true
+		}
+	}
+	if len(starts) != 1 {
+		t.Fatalf("got %d tool_use_start events, want exactly one (the stream's single tool_use block): %+v", len(starts), starts)
+	}
+	if starts[0].ID != "tu_99" || starts[0].Name != "search" {
+		t.Errorf("start = %+v, want id \"tu_99\" and name \"search\"", starts[0])
+	}
+	if len(starts[0].Input) != 0 {
+		t.Errorf("start carried input %q; arguments are still streaming at that point", starts[0].Input)
+	}
+	if !sawTerminal {
+		t.Error("the assembled EventToolUse must still follow the start event")
+	}
+}
+
 // thinkingStream is an SSE response containing a thinking block (with a
 // signature) followed by a text answer.
 const thinkingStream = `event: content_block_start
@@ -439,5 +490,23 @@ func TestMissingAPIKey(t *testing.T) {
 	_, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 1})
 	if err == nil {
 		t.Fatal("expected error for missing API key")
+	}
+}
+
+// TestStreamingClientHasNoWholeRequestTimeout is the P33.1 regression: the
+// adapter used to build its client with Timeout: 10*time.Minute, which bounds
+// the entire request including reading the streamed body, so a turn that
+// streamed for longer than that died mid-answer as a transport error.
+func TestStreamingClientHasNoWholeRequestTimeout(t *testing.T) {
+	a := New("k")
+	if a.client.Timeout != 0 {
+		t.Errorf("client.Timeout = %v, want 0 (it would cap streamed turn length)", a.client.Timeout)
+	}
+	tr, ok := a.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client.Transport = %T, want *http.Transport", a.client.Transport)
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want a bound on a server that never replies", tr.ResponseHeaderTimeout)
 	}
 }

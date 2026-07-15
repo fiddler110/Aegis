@@ -364,7 +364,7 @@ tui:
 
   # Keybinding remap (P13.3.5): override the key sequence(s) for a named
   # action. Action names are the lowercased internal/tui keyMap field names
-  # (send, queue, newline, thinking, complete, help, palette, cancel,
+  # (send, steer, newline, thinking, complete, help, palette, cancel,
   # interrupt, clear, editor, cyclemode, histup, histdown, teammates,
   # sessions, terminal, sidebartoggle, pasteimage, diagnose). Values are one
   # or more bubbles/key sequences (e.g. "ctrl+x", "alt+t", "f2"); the first

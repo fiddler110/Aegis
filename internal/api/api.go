@@ -148,8 +148,16 @@ type ImageInput struct {
 type EventKind string
 
 const (
-	KindText            EventKind = "text"
-	KindThinking        EventKind = "thinking"
+	KindText     EventKind = "text"
+	KindThinking EventKind = "thinking"
+	// KindToolCallStart announces a tool call the model has begun streaming —
+	// emitted as soon as the provider names the tool, while its arguments are
+	// still being generated, which on a local model is frequently the longest
+	// phase of a turn (P33.3). Tool is set; ToolInput is not, and ToolID only
+	// when the provider named the call and assigned its ID together. The
+	// KindToolCall for the same call still follows unchanged, so a client that
+	// doesn't know this kind behaves as it always has.
+	KindToolCallStart   EventKind = "tool_call_start"
 	KindToolCall        EventKind = "tool_call"
 	KindToolResult      EventKind = "tool_result"
 	KindTurnDone        EventKind = "turn_done"
@@ -157,16 +165,23 @@ const (
 	KindError           EventKind = "error"
 	KindApprovalRequest EventKind = "approval_request" // engine awaiting user approval
 	KindSteer           EventKind = "steer"            // mid-run steering instruction injected
-	KindGuard           EventKind = "guard"            // output validation warning
-	KindCostAlert       EventKind = "cost_alert"       // spend crossed the configured alert threshold (P9.5)
-	KindNotice          EventKind = "notice"           // engine advisory (context fill, compaction, step limit)
+	// KindSteerUnconsumed carries back a steer the run ended without ever
+	// injecting — the engine only drains the steer channel between tool
+	// rounds, so one sent while the model is writing its final answer (or
+	// during a text-only run) has nowhere to land (P33.2). Text is the
+	// original steer; a client that doesn't know this kind behaves as it
+	// always has, and a run with nothing left over never emits it.
+	KindSteerUnconsumed EventKind = "steer_unconsumed"
+	KindGuard           EventKind = "guard"      // output validation warning
+	KindCostAlert       EventKind = "cost_alert" // spend crossed the configured alert threshold (P9.5)
+	KindNotice          EventKind = "notice"     // engine advisory (context fill, compaction, step limit)
 )
 
 // Event is one server-sent event during a message run.
 type Event struct {
 	Kind      EventKind       `json:"kind"`
 	Text      string          `json:"text,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
+	Tool      string          `json:"tool,omitempty"` // KindToolCallStart / KindToolCall / KindToolResult
 	ToolInput json.RawMessage `json:"tool_input,omitempty"`
 	// ToolID is the provider tool_use ID, carried on both KindToolCall and
 	// its matching KindToolResult so a client can correlate the two exactly

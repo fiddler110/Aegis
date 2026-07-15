@@ -103,7 +103,7 @@ func newModelPicker(termW, termH int, catalog []modelcatalog.Model, current stri
 	}
 
 	palW := min(termW-6, 74)
-	palH := min(termH-8, max(len(items)*2+6, 12))
+	palH := dialogListH(termH, len(items), 12)
 
 	return newListDialog(dialogModelPicker, palW, palH, "Switch Model", true, items)
 }

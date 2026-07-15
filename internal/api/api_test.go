@@ -14,6 +14,7 @@ func TestEventKindWireValues(t *testing.T) {
 	cases := map[EventKind]string{
 		KindText:            "text",
 		KindThinking:        "thinking",
+		KindToolCallStart:   "tool_call_start",
 		KindToolCall:        "tool_call",
 		KindToolResult:      "tool_result",
 		KindTurnDone:        "turn_done",
@@ -21,6 +22,7 @@ func TestEventKindWireValues(t *testing.T) {
 		KindError:           "error",
 		KindApprovalRequest: "approval_request",
 		KindSteer:           "steer",
+		KindSteerUnconsumed: "steer_unconsumed",
 		KindGuard:           "guard",
 		KindCostAlert:       "cost_alert",
 		KindNotice:          "notice",

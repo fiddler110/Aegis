@@ -138,6 +138,13 @@ const (
 	EventThinkingDelta EventType = "thinking_delta"
 	// EventThinking carries one fully-assembled thinking block (with signature).
 	EventThinking EventType = "thinking"
+	// EventToolUseStart announces a tool call the moment the stream names it,
+	// while its arguments are still being generated — often the longest phase
+	// of an agentic turn on a local model (P33.3). ToolUse carries Name and,
+	// when the provider has assigned one by then, ID; Input is always empty.
+	// The fully-assembled EventToolUse for the same call still follows, so a
+	// consumer that ignores this event behaves exactly as before.
+	EventToolUseStart EventType = "tool_use_start"
 	// EventToolUse carries one fully-assembled tool-use block.
 	EventToolUse EventType = "tool_use"
 	// EventDone is the final event: the stream completed successfully.
@@ -150,7 +157,7 @@ const (
 type Event struct {
 	Type     EventType
 	Text     string         // set for EventTextDelta / EventThinkingDelta
-	ToolUse  *ToolUseBlock  // set for EventToolUse
+	ToolUse  *ToolUseBlock  // set for EventToolUseStart / EventToolUse
 	Thinking *ThinkingBlock // set for EventThinking
 	Stop     StopReason     // set for EventDone
 	Usage    *Usage         // set for EventDone (best effort)

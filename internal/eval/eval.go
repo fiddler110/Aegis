@@ -57,6 +57,7 @@ type GuardResult struct {
 type TurnResult struct {
 	FinalText   string
 	ToolCalls   []string // tool names invoked this turn, in call order
+	Steers      []string // steer texts the engine injected this turn, in order
 	GuardEvents []GuardResult
 	Err         error
 }
@@ -72,6 +73,15 @@ func (r *Result) AllToolCalls() []string {
 	var out []string
 	for _, tr := range r.Turns {
 		out = append(out, tr.ToolCalls...)
+	}
+	return out
+}
+
+// AllSteers flattens injected steer texts across every turn, in order.
+func (r *Result) AllSteers() []string {
+	var out []string
+	for _, tr := range r.Turns {
+		out = append(out, tr.Steers...)
 	}
 	return out
 }
@@ -115,6 +125,8 @@ func Run(ctx context.Context, s Scenario) (*Result, error) {
 				tr.FinalText += ev.Text
 			case engine.KindToolCall:
 				tr.ToolCalls = append(tr.ToolCalls, ev.ToolName)
+			case engine.KindSteer:
+				tr.Steers = append(tr.Steers, ev.Text)
 			case engine.KindGuard:
 				tr.GuardEvents = append(tr.GuardEvents, GuardResult{Passed: ev.GuardPassed, Reason: ev.GuardReason})
 			}
@@ -149,6 +161,32 @@ func ExpectToolNotCalled(name string) Check {
 			if tc == name {
 				return fmt.Errorf("expected tool %q not to be called, but it was", name)
 			}
+		}
+		return nil
+	}
+}
+
+// ExpectSteerInjected requires text to have been pulled off the steer channel
+// and injected into the conversation at least once across all turns.
+func ExpectSteerInjected(text string) Check {
+	return func(r *Result) error {
+		for _, st := range r.AllSteers() {
+			if st == text {
+				return nil
+			}
+		}
+		return fmt.Errorf("expected steer %q to be injected; injected steers were %v", text, r.AllSteers())
+	}
+}
+
+// ExpectNoSteerInjected requires the engine to never have injected a steer —
+// the P33.2 case, where a run that reaches no further tool round leaves
+// whatever was posted sitting on the channel for the daemon to hand back
+// rather than injecting (or dropping) it.
+func ExpectNoSteerInjected() Check {
+	return func(r *Result) error {
+		if steers := r.AllSteers(); len(steers) > 0 {
+			return fmt.Errorf("expected no steer to be injected, got %v", steers)
 		}
 		return nil
 	}

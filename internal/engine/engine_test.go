@@ -159,6 +159,64 @@ func TestRunToolRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRunForwardsToolCallStart is the P33.3 guard: an adapter that announces
+// a tool call while its arguments are still streaming
+// (provider.EventToolUseStart) must reach the consumer as KindToolCallStart —
+// ahead of the KindToolCall for the same call, which is unchanged and still
+// carries the input. An adapter that never announces (every scripted turn in
+// the tests above, and any older adapter) emits no such event at all.
+func TestRunForwardsToolCallStart(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventToolUseStart, ToolUse: &provider.ToolUseBlock{ID: "tu_1", Name: "echo"}},
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
+				ID: "tu_1", Name: "echo", Input: json.RawMessage(`{"msg":"hi"}`),
+			}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse},
+		},
+		{
+			{Type: provider.EventTextDelta, Text: "done"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn},
+		},
+	}}
+
+	reg := tool.NewRegistry()
+	if err := reg.Register(&echoTool{}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(Options{Adapter: adapter, Tools: reg, Model: "test", MaxTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var toolEvents []Event
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hello"}}})
+	err = eng.Run(context.Background(), conv, func(ev Event) {
+		switch ev.Kind {
+		case KindToolCallStart, KindToolCall:
+			toolEvents = append(toolEvents, ev)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(toolEvents) != 2 {
+		t.Fatalf("got %d tool-call events, want a start followed by the call: %+v", len(toolEvents), toolEvents)
+	}
+	start, call := toolEvents[0], toolEvents[1]
+	if start.Kind != KindToolCallStart || start.ToolName != "echo" || start.ToolID != "tu_1" {
+		t.Errorf("start event = %+v, want KindToolCallStart for echo/tu_1", start)
+	}
+	if len(start.ToolInput) != 0 {
+		t.Errorf("start event carried input %q; the arguments aren't assembled yet", start.ToolInput)
+	}
+	if call.Kind != KindToolCall || string(call.ToolInput) != `{"msg":"hi"}` {
+		t.Errorf("call event = %+v, want an unchanged KindToolCall carrying the input", call)
+	}
+}
+
 func TestRunEmitsTurnTraces(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
 		// Turn 1: assistant asks to call the echo tool.

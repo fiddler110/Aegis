@@ -207,6 +207,234 @@ func TestToolCard_StreamClosedResolvesStuckPendingCard(t *testing.T) {
 	}
 }
 
+// TestToolCard_StartShowsCardWhileArgumentsStream is the core P33.3
+// regression guard: the card must be on screen from KindToolCallStart —
+// while the model is still generating the call's arguments, frequently the
+// longest phase of a turn — rather than only for the moment between the
+// stream ending and the tool running.
+func TestToolCard_StartShowsCardWhileArgumentsStream(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("read a file", nil)
+	m.streaming = true
+	m.followBottom = true
+
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_1"})
+	m.refresh()
+	got := plainView(m)
+	if !strings.Contains(got, "read_file") {
+		t.Fatalf("expected the tool name on screen as soon as the model named it, got:\n%s", got)
+	}
+	if !strings.Contains(got, "preparing") {
+		t.Fatalf("expected the provisional card to show it is still being prepared, got:\n%s", got)
+	}
+	if len(m.pendingTools) != 1 {
+		t.Fatalf("expected the start event to track one pending card, got %d", len(m.pendingTools))
+	}
+	// The arguments aren't known yet, so nothing may claim the call ran or
+	// enter the tool-history strip — KindToolCall still owns both.
+	if strings.Contains(got, "running") {
+		t.Errorf("expected no running indicator before the call itself arrived, got:\n%s", got)
+	}
+	if len(m.tools) != 0 {
+		t.Errorf("expected the start event not to add a tool-history entry, got %v", m.tools)
+	}
+}
+
+// TestToolCard_StartReconcilesInPlaceWithoutDuplicating covers the handoff:
+// the KindToolCall that follows a KindToolCallStart must fill the arguments
+// into the card already on screen, not append a second one for the same call.
+func TestToolCard_StartReconcilesInPlaceWithoutDuplicating(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("read a file", nil)
+	m.streaming = true
+	m.followBottom = true
+
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_1"})
+	afterStart := m.transcript.Len()
+	card := m.pendingTools["tu_1"]
+	if card == nil {
+		t.Fatal("expected the start event to register a card under its tool_use ID")
+	}
+
+	toolInput, _ := json.Marshal(map[string]string{"path": "main.go"})
+	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: toolInput})
+	if got := m.transcript.Len(); got != afterStart {
+		t.Fatalf("expected the call to reuse the started card (same item count); after start=%d after call=%d", afterStart, got)
+	}
+	if len(m.pendingTools) != 1 || m.pendingTools["tu_1"] != card {
+		t.Fatalf("expected the same card still tracked under tu_1, got %v", m.pendingTools)
+	}
+	m.refresh()
+	got := plainView(m)
+	if strings.Contains(got, "preparing") {
+		t.Fatalf("expected the provisional state replaced once the arguments arrived, got:\n%s", got)
+	}
+	if !strings.Contains(got, "main.go") {
+		t.Fatalf("expected the call's arguments folded into the started card, got:\n%s", got)
+	}
+	if strings.Count(got, "read_file") != 1 {
+		t.Fatalf("expected exactly one card for the call, got:\n%s", got)
+	}
+
+	// The result must still resolve the same card in place.
+	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_1", ToolResult: "package main\n"})
+	if len(m.pendingTools) != 0 {
+		t.Fatalf("expected the reconciled card resolved by its result, got %d still pending", len(m.pendingTools))
+	}
+	if got := m.transcript.Len(); got != afterStart {
+		t.Fatalf("expected the result to update the same item in place; want %d items, got %d", afterStart, got)
+	}
+	m.refresh()
+	if final := plainView(m); !strings.Contains(final, "package main") {
+		t.Fatalf("expected the result rendered into the started card, got:\n%s", final)
+	}
+}
+
+// TestToolCard_StartWithLateToolIDReconcilesAndRekeys covers the OpenAI wire
+// shape where a tool call is named in an earlier delta than the one carrying
+// its ID: the start event has no ID to key the card by, so reconciliation
+// falls back to the oldest provisional card of the same name and re-keys it
+// to the real ID — otherwise the KindToolResult, which looks the card up by
+// that ID, would leave it stuck and append its own orphan block.
+func TestToolCard_StartWithLateToolIDReconcilesAndRekeys(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("read a file", nil)
+	m.streaming = true
+	m.followBottom = true
+
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file"})
+	afterStart := m.transcript.Len()
+
+	toolInput, _ := json.Marshal(map[string]string{"path": "main.go"})
+	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_late", ToolInput: toolInput})
+	if got := m.transcript.Len(); got != afterStart {
+		t.Fatalf("expected the ID-less started card reused; after start=%d after call=%d", afterStart, got)
+	}
+	if _, ok := m.pendingTools["tu_late"]; !ok {
+		t.Fatalf("expected the card re-keyed to the late-arriving tool_use ID, got %v", m.pendingTools)
+	}
+
+	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_late", ToolResult: "package main\n"})
+	if len(m.pendingTools) != 0 {
+		t.Fatalf("expected the re-keyed card resolved by its result, got %d still pending", len(m.pendingTools))
+	}
+	if got := m.transcript.Len(); got != afterStart {
+		t.Fatalf("expected no orphan block appended for the result; want %d items, got %d", afterStart, got)
+	}
+	m.refresh()
+	if got := plainView(m); !strings.Contains(got, "package main") || strings.Contains(got, "preparing") {
+		t.Fatalf("expected the result folded into the started card, got:\n%s", got)
+	}
+}
+
+// TestToolCard_ConcurrentStartsTrackedSeparately guards the dedupe rule: a
+// repeated tool_use ID must not stack a second card, but two ID-less starts
+// are two distinct calls (an adapter that names a call before it IDs it) and
+// must each get their own — deduping those by name would silently lose one.
+func TestToolCard_ConcurrentStartsTrackedSeparately(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("read two files", nil)
+	m.streaming = true
+	m.followBottom = true
+
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_a"})
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_a"})
+	if len(m.pendingTools) != 1 {
+		t.Fatalf("expected a repeated tool_use ID to be ignored, got %d cards", len(m.pendingTools))
+	}
+
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file"})
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file"})
+	if len(m.pendingTools) != 3 {
+		t.Fatalf("expected two ID-less starts to own separate cards, got %d total", len(m.pendingTools))
+	}
+}
+
+// TestToolCard_StartResolvedAsStuckOnCancel covers the orphan case unique to
+// P33.3: a run cancelled while the model is still writing a call's arguments
+// never produces the KindToolCall, let alone a result. The existing
+// resolveStuckToolCards safety nets must cover cards the start event created
+// too, rather than leaving one shimmering "preparing…" forever.
+func TestToolCard_StartResolvedAsStuckOnCancel(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("cancel me mid tool call", nil)
+	m.streaming = true
+	m.followBottom = true
+
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "shell", ToolID: "tu_cancelled"})
+	if len(m.pendingTools) != 1 {
+		t.Fatalf("expected one provisional card before cancellation, got %d", len(m.pendingTools))
+	}
+
+	m = driveUpdate(t, m, streamClosedMsg{})
+
+	if len(m.pendingTools) != 0 {
+		t.Fatalf("expected streamClosedMsg to resolve the provisional card, got %d still pending", len(m.pendingTools))
+	}
+	got := plainView(m)
+	if strings.Contains(got, "preparing") {
+		t.Fatalf("expected the preparing indicator gone after the stream closed, got:\n%s", got)
+	}
+	if !strings.Contains(got, "interrupted") || !strings.Contains(got, "shell") {
+		t.Fatalf("expected the provisional card to render an interrupted state naming the tool, got:\n%s", got)
+	}
+}
+
+// TestToolCard_StartResolvedAsStuckOnError is the KindError half of the
+// safety net above: a turn that fails while a call's arguments are streaming
+// must resolve the provisional card in place, appending only the error banner.
+func TestToolCard_StartResolvedAsStuckOnError(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("fail mid tool call", nil)
+	m.streaming = true
+	m.followBottom = true
+
+	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_err"})
+	beforeLen := m.transcript.Len()
+
+	m.applyEvent(api.Event{Kind: api.KindError, Error: "engine: context canceled"})
+
+	if len(m.pendingTools) != 0 {
+		t.Fatalf("expected the provisional card resolved after the error, got %d still pending", len(m.pendingTools))
+	}
+	if got := m.transcript.Len(); got != beforeLen+1 {
+		t.Fatalf("expected the card resolved in place (only the error banner appended); before=%d after=%d", beforeLen, got)
+	}
+	m.refresh()
+	got := plainView(m)
+	if strings.Contains(got, "preparing") {
+		t.Fatalf("expected the preparing indicator gone once the card was resolved as stuck, got:\n%s", got)
+	}
+	if !strings.Contains(got, "interrupted") {
+		t.Fatalf("expected the provisional card to render an interrupted state, got:\n%s", got)
+	}
+}
+
+// TestToolCard_NoStartEventStillRendersOneCard is the additive-only guard: a
+// producer that never emits KindToolCallStart (an older daemon, an adapter
+// whose provider doesn't announce tool calls early, a hand-built event) must
+// behave exactly as it did before P33.3.
+func TestToolCard_NoStartEventStillRendersOneCard(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("read a file", nil)
+	m.streaming = true
+	m.followBottom = true
+
+	toolInput, _ := json.Marshal(map[string]string{"path": "main.go"})
+	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: toolInput})
+	if len(m.pendingTools) != 1 {
+		t.Fatalf("expected one card for an unannounced call, got %d", len(m.pendingTools))
+	}
+	m.refresh()
+	got := plainView(m)
+	if !strings.Contains(got, "running") || strings.Contains(got, "preparing") {
+		t.Fatalf("expected the pre-P33.3 pending rendering, got:\n%s", got)
+	}
+	if strings.Count(got, "read_file") != 1 {
+		t.Fatalf("expected exactly one card, got:\n%s", got)
+	}
+}
+
 // TestToolCard_NoToolIDFallsBackToFIFO covers events with no ToolID (older
 // producers, or hand-built events like the ones integration_test.go already
 // uses) — resolution must fall back to the pre-P21.2 same-name FIFO match

@@ -78,6 +78,24 @@ func renderToolCardPending(th theme, call string, step int) string {
 	return call + "\n  " + shimmerText("⧗ running…", step, colTextMuted, colAccent)
 }
 
+// renderToolCardStart renders the provisional state of a card appended the
+// moment the model names a tool it is calling, while the call's arguments are
+// still streaming (P33.3). call here is just the name header — the real
+// renderToolCall block replaces it in place once the arguments finish — and
+// the shimmering status line is renderToolCardPending's, one word apart, so
+// the card the user is already watching only gains detail rather than being
+// swapped for a different-looking one.
+func renderToolCardStart(th theme, call string, step int) string {
+	return call + "\n  " + shimmerText("⧗ preparing…", step, colTextMuted, colAccent)
+}
+
+// renderToolCardStartCall renders the name-only call block of a card in the
+// provisional state above, matching renderToolCall's generic header so the
+// two line up when one replaces the other.
+func renderToolCardStartCall(th theme, name string) string {
+	return th.tool.Render("● " + name)
+}
+
 // renderToolCardDone renders the finished ("ok"/"err") state of a combined
 // tool-call card: the same call block (see renderToolCardPending) plus the
 // normal finished-result rendering underneath, so what used to be two

@@ -202,23 +202,47 @@ func thinkingPhrase(animStep int, humorMode bool, cat humorCategory) string {
 	return bank[idx]
 }
 
+// bytesPerTokenEstimate is the divisor used to turn model output bytes into a
+// token count while a run is in flight. Rough by construction — the point is a
+// live order-of-magnitude readout, which is why every number derived from it is
+// rendered with the "~" estimate marker.
+const bytesPerTokenEstimate = 4
+
+// streamStats is one snapshot of an in-flight run's throughput. estimated says
+// whether outputToks/tokPerSec came from the byte heuristic (model.streamStats)
+// or from counts the provider reported, so the formatter marks them honestly
+// without either side knowing the other's business.
+type streamStats struct {
+	elapsedSecs int
+	inputToks   int
+	outputToks  int
+	tokPerSec   float64
+	estimated   bool
+}
+
 // formatStreamHint builds the dim suffix shown next to the spinning indicator:
 //
-//	· 5s · ↑4.2k ↓~38
+//	· 12s · ↑4.2k · ↓~380 · ~14 tok/s
 //
-// elapsedSecs < 1 suppresses the time segment. inputToks 0 suppresses tokens.
-func formatStreamHint(elapsedSecs int, inputToks, liveTextBytes int) string {
+// elapsedSecs < 1 suppresses the time segment, inputToks 0 the prompt size, and
+// outputToks 0 both output segments — a zero here means "nothing generated yet",
+// not "zero tokens generated".
+func formatStreamHint(st streamStats) string {
+	tilde := ""
+	if st.estimated {
+		tilde = "~"
+	}
 	var s string
-	if elapsedSecs > 0 {
-		s += fmt.Sprintf(" · %ds", elapsedSecs)
+	if st.elapsedSecs > 0 {
+		s += fmt.Sprintf(" · %ds", st.elapsedSecs)
 	}
-	if inputToks > 0 {
-		s += " · ↑" + abbrevToks(inputToks)
+	if st.inputToks > 0 {
+		s += " · ↑" + abbrevToks(st.inputToks)
 	}
-	if liveTextBytes > 0 {
-		est := liveTextBytes / 4
-		if est > 0 {
-			s += " ↓~" + abbrevToks(est)
+	if st.outputToks > 0 {
+		s += " · ↓" + tilde + abbrevToks(st.outputToks)
+		if st.tokPerSec > 0 {
+			s += fmt.Sprintf(" · %s%.0f tok/s", tilde, st.tokPerSec)
 		}
 	}
 	return s

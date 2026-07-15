@@ -289,6 +289,7 @@ export interface Event {
   kind:
     | "text"
     | "thinking"
+    | "tool_call_start"
     | "tool_call"
     | "tool_result"
     | "turn_done"
@@ -296,6 +297,7 @@ export interface Event {
     | "error"
     | "approval_request"
     | "steer"
+    | "steer_unconsumed"
     | "guard"
     | "cost_alert"
     | "notice";

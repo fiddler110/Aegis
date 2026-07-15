@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/fiddler110/aegis/internal/api"
 )
@@ -150,18 +152,101 @@ func TestApprovalDialogFlow_NoPTY(t *testing.T) {
 	}
 }
 
+// TestApprovalOverlayLeavesTranscriptGeometryAlone is the P33.6 regression:
+// the approval prompt is composited over the chat, so the transcript keeps the
+// exact height it had before the engine asked. It used to be inserted between
+// transcript and input, shrinking the pane by the whole dialog — preview,
+// options and all — and pushing the conversation around mid-run.
+func TestApprovalOverlayLeavesTranscriptGeometryAlone(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.streaming = true
+
+	beforeH, beforeFixed := m.transcript.Height(), m.fixedH()
+	beforeChat := lipgloss.Height(m.renderChat())
+
+	m.applyEvent(api.Event{
+		Kind:           api.KindApprovalRequest,
+		Tool:           "write_file",
+		ToolInput:      []byte(`{"file_path":"a.go","content":"package a\n"}`),
+		ApprovalReason: "write capability requires approval",
+		ApprovalID:     "run-1",
+	})
+	m.applyViewportHeight()
+
+	if got := m.transcript.Height(); got != beforeH {
+		t.Errorf("transcript height moved with the approval open: %d -> %d", beforeH, got)
+	}
+	if got := m.fixedH(); got != beforeFixed {
+		t.Errorf("fixed vertical budget moved with the approval open: %d -> %d", beforeFixed, got)
+	}
+	if got := lipgloss.Height(m.renderChat()); got != beforeChat {
+		t.Errorf("chat frame height moved with the approval open: %d -> %d", beforeChat, got)
+	}
+
+	// The prompt reaches the screen only through the overlay compositor: it is
+	// absent from the chat frame itself, present in the composited view.
+	if chat := ansi.Strip(m.renderChat()); strings.Contains(chat, "Allow once") {
+		t.Error("expected the approval prompt out of the chat frame's vertical stack")
+	}
+	view := plainView(m)
+	if !strings.Contains(view, "Allow once") {
+		t.Errorf("expected the approval prompt composited over the chat, got:\n%s", view)
+	}
+	// Composited, not replacing: the frame behind it is still there.
+	if !strings.Contains(view, "Aegis") {
+		t.Errorf("expected the chat still visible behind the approval overlay, got:\n%s", view)
+	}
+	// Modality is unchanged (P25.4a): the composer stays blurred.
+	if m.ta.Focused() {
+		t.Error("expected the composer blurred while an approval is pending")
+	}
+	if !strings.Contains(view, "respond to the approval dialog") {
+		t.Errorf("expected the status-bar approval hint, got:\n%s", view)
+	}
+}
+
+// TestApprovalOverlayHeightIsStableAcrossOptionAndFeedbackModes checks the
+// other half of P33.6: entering deny-with-feedback swaps the option list for
+// the feedback line, which used to re-run applyViewportHeight and resize the
+// transcript underneath. Now nothing below the overlay moves.
+func TestApprovalOverlayHeightIsStableAcrossOptionAndFeedbackModes(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.streaming = true
+	m.applyEvent(api.Event{
+		Kind:       api.KindApprovalRequest,
+		Tool:       "shell",
+		ToolInput:  []byte(`{"command":"npm test"}`),
+		ApprovalID: "run-1",
+	})
+
+	before := m.transcript.Height()
+	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if !m.approval.feedbackMode {
+		t.Fatal("expected feedback mode after 'f'")
+	}
+	if got := m.transcript.Height(); got != before {
+		t.Errorf("transcript height moved entering feedback mode: %d -> %d", before, got)
+	}
+	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := m.transcript.Height(); got != before {
+		t.Errorf("transcript height moved leaving feedback mode: %d -> %d", before, got)
+	}
+}
+
 // TestApprovalDialogTakesKeyPriorityOverComposer verifies P25.4a: the
-// approval dialog consumes hotkeys even while the composer is mid-draft and
-// in "steer the model" mode — the state a live dialog opens on top of — and
+// approval dialog consumes hotkeys even while the composer is mid-draft and in
+// its streaming queue mode — the state a live dialog opens on top of — and
 // that the composer's focus/content is left untouched by the dialog's keys.
 func TestApprovalDialogTakesKeyPriorityOverComposer(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	m.streaming = true
-	m.setSteerMode(true)
+	m.setQueueMode(true)
 
 	// The composer has focus and a partial draft before the dialog opens —
-	// the exact "steer the model" state the live bug report described. Set
+	// the exact mid-run composer state the live bug report described. Set
 	// the draft directly (SetValue) rather than driving a keypress through
 	// Update, so the test doesn't depend on the completion popup's daemon
 	// client, which is unavailable in this unit test.

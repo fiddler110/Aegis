@@ -190,8 +190,8 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Steer channel: the TUI can POST /sessions/{id}/steer while the run is
 	// active to inject a course-correction message between tool rounds.
-	steerCh := make(chan string, 8)
-	s.pendingSteers.Store(id, steerCh)
+	steers := newSteerBox(8)
+	s.pendingSteers.Store(id, steers)
 	defer s.pendingSteers.Delete(id)
 
 	workdir := s.workdirFor(id)
@@ -210,7 +210,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// tool onto this session's own exposure state, not the daemon-wide
 	// registry every other session and persona shares.
 	sessionTools := s.sessionToolRegistry(id)
-	eng, err := s.newEngine(sess.Mode, runApprover, steerCh, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
+	eng, err := s.newEngine(sess.Mode, runApprover, steers.ch, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
@@ -372,6 +372,18 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	})
+
+	// The engine drains the steer channel only between tool rounds, so a steer
+	// posted while the model was writing its final answer — or during a
+	// text-only run — is still sitting in the box (P33.2). Close it first:
+	// that stops handleSteer accepting anything more, and the engine has
+	// stopped reading by now, so what comes back can neither be consumed twice
+	// nor grow behind us. The client decides what to do with it (the TUI
+	// requeues it as the next user turn); dropping it here is what made a
+	// typed message vanish without a trace.
+	for _, steer := range steers.close() {
+		send(api.Event{Kind: api.KindSteerUnconsumed, Text: steer})
+	}
 
 	// For non-interrupt aborts (max iterations, cost budget, loop detected) inject
 	// a note so the model knows on the next turn what happened and what remains.
@@ -613,9 +625,63 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// steerBox owns one run's steer channel and the closed flag that fences
+// handleSteer off once the run has finished draining. Without the fence a
+// steer accepted (204) between the end-of-run drain and pendingSteers.Delete
+// would sit in a channel nobody reads again — exactly the silent loss the
+// drain exists to prevent.
+type steerBox struct {
+	ch     chan string
+	mu     sync.Mutex
+	closed bool
+}
+
+func newSteerBox(n int) *steerBox { return &steerBox{ch: make(chan string, n)} }
+
+var (
+	errSteerClosed = errors.New("no active run for session")
+	errSteerFull   = errors.New("steer buffer full; try again momentarily")
+)
+
+// offer queues text for the run, or reports why it couldn't be queued.
+func (b *steerBox) offer(text string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return errSteerClosed
+	}
+	select {
+	case b.ch <- text:
+		return nil
+	default:
+		return errSteerFull
+	}
+}
+
+// close stops accepting steers and returns everything the engine never
+// consumed, oldest first. Call it only once the run's engine has stopped
+// reading; the drain itself needs no lock, since offer can no longer add to
+// the channel once closed is set.
+func (b *steerBox) close() []string {
+	b.mu.Lock()
+	b.closed = true
+	b.mu.Unlock()
+	var left []string
+	for {
+		select {
+		case text := <-b.ch:
+			left = append(left, text)
+		default:
+			return left
+		}
+	}
+}
+
 // handleSteer injects a mid-run instruction into an active session run. The
-// text is delivered to the engine between tool rounds via the steer channel;
-// if no run is active for the session the request returns 404.
+// text is delivered to the engine between tool rounds via the steer channel,
+// or handed back to the client as a KindSteerUnconsumed event if the run ends
+// without ever reaching another tool round; if no run is active for the
+// session the request returns 404.
 func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	id := r.PathValue("id")
@@ -630,15 +696,16 @@ func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
 	}
 	val, ok := s.pendingSteers.Load(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "no active run for session")
+		writeError(w, http.StatusNotFound, errSteerClosed.Error())
 		return
 	}
-	ch := val.(chan string)
-	select {
-	case ch <- req.Text:
+	switch err := val.(*steerBox).offer(req.Text); {
+	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, errSteerClosed):
+		writeError(w, http.StatusNotFound, err.Error())
 	default:
-		writeError(w, http.StatusTooManyRequests, "steer buffer full; try again momentarily")
+		writeError(w, http.StatusTooManyRequests, err.Error())
 	}
 }
 

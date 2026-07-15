@@ -53,6 +53,13 @@ func configureDialogList(l *list.Model, title string, pagination bool) {
 	l.SetShowHelp(false)
 }
 
+// dialogListH sizes a picker's list to n rows, bounded by the terminal height
+// and a per-picker floor. Shared so a picker opened empty (P33.7's loading
+// row) and the same picker once populated derive their height identically.
+func dialogListH(termH, n, minH int) int {
+	return min(termH-8, max(n*2+6, minH))
+}
+
 // dialogFrame wraps overlay content in the shared rounded primary border.
 func dialogFrame(content string) string {
 	return lipgloss.NewStyle().
@@ -80,6 +87,20 @@ const (
 	dialogBacktrackPicker
 )
 
+// noticeItem is a non-selectable placeholder row: the spinner shown while a
+// picker's fetch is in flight (P33.7), and the error or empty-result line when
+// that fetch lands with nothing to list.
+type noticeItem struct{ text string }
+
+func (n noticeItem) FilterValue() string { return "" }
+func (n noticeItem) Title() string       { return n.text }
+func (n noticeItem) Description() string { return "" }
+
+// noticeRow is a dialog's row set while it has nothing real to list.
+func noticeRow(text string) []list.Item {
+	return []list.Item{noticeItem{text: text}}
+}
+
 // dialogSelectedMsg is emitted when the user picks an item from any
 // listDialog; kind disambiguates which dialog it came from since only one is
 // ever open at a time.
@@ -101,6 +122,14 @@ type dialogCancelMsg struct{ kind dialogKind }
 type listDialog struct {
 	kind dialogKind
 	list list.Model
+	// loading marks a dialog opened ahead of its rows (P33.7), so the spinner
+	// row keeps animating until setItems or setNotice retires it.
+	loading bool
+	// fixedW holds the frame at the list's own width instead of letting it
+	// shrink-wrap the rows. Set for dialogs opened ahead of their data (P33.7):
+	// a shrink-wrapped frame is sized by its longest row, so the box would jump
+	// width under the user the moment the loading row gave way to real ones.
+	fixedW bool
 }
 
 // newListDialog builds a listDialog. w/h are the already-computed list
@@ -112,6 +141,41 @@ func newListDialog(kind dialogKind, w, h int, title string, pagination bool, ite
 	return listDialog{kind: kind, list: l}
 }
 
+// newLoadingDialog opens a picker before its rows exist: the dialog appears on
+// the keypress with a single spinner row, and setItems fills it in when the
+// fetch lands (P33.7). frame is the current m.sp frame; setLoadingFrame
+// advances it.
+func newLoadingDialog(kind dialogKind, w, h int, title, frame string) listDialog {
+	d := newListDialog(kind, w, h, title, true, noticeRow(frame+" loading…"))
+	d.loading, d.fixedW = true, true
+	return d
+}
+
+// setLoadingFrame redraws the spinner row for the current animation frame; a
+// no-op once the rows (or a notice) have replaced it.
+func (d *listDialog) setLoadingFrame(frame string) {
+	if d.loading {
+		d.list.SetItems(noticeRow(frame + " loading…"))
+	}
+}
+
+// setItems swaps a loading dialog's spinner row for the fetched rows, resizing
+// to their count so the frame settles into the shape it would have had if it
+// had opened with the data in hand.
+func (d *listDialog) setItems(items []list.Item, h int) tea.Cmd {
+	d.loading = false
+	d.list.SetHeight(h)
+	return d.list.SetItems(items)
+}
+
+// setNotice replaces the rows with one non-selectable line — a fetch error or
+// an empty result, reported inside the dialog the user is already looking at
+// rather than as a toast behind it (P33.7).
+func (d *listDialog) setNotice(text string) tea.Cmd {
+	d.loading = false
+	return d.list.SetItems(noticeRow(text))
+}
+
 func (d listDialog) Update(msg tea.Msg) (listDialog, tea.Cmd) {
 	if k, ok := msg.(tea.KeyMsg); ok {
 		switch k.String() {
@@ -120,6 +184,11 @@ func (d listDialog) Update(msg tea.Msg) (listDialog, tea.Cmd) {
 			return d, func() tea.Msg { return dialogCancelMsg{kind: kind} }
 		case "enter":
 			kind := d.kind
+			// A placeholder row isn't a choice: swallow enter rather than emit a
+			// selection every caller would then have to type-assert around.
+			if _, ok := d.list.SelectedItem().(noticeItem); ok {
+				return d, nil
+			}
 			if item := d.list.SelectedItem(); item != nil {
 				return d, func() tea.Msg { return dialogSelectedMsg{kind: kind, item: item} }
 			}
@@ -132,7 +201,11 @@ func (d listDialog) Update(msg tea.Msg) (listDialog, tea.Cmd) {
 }
 
 func (d listDialog) View() string {
-	return dialogFrame(d.list.View())
+	v := d.list.View()
+	if d.fixedW {
+		v = lipgloss.NewStyle().Width(d.list.Width()).Render(v)
+	}
+	return dialogFrame(v)
 }
 
 // renderOverlay composites fg centered over bg and fades bg to faint

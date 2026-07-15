@@ -29,19 +29,26 @@ func (b backtrackItem) Description() string {
 	return desc
 }
 
-// newBacktrackPicker builds the Esc-Esc backtrack dialog: previous user turns
-// newest-first (matching ListCheckpoints' own ordering and /rewind's no-arg
-// listing convention). Picking an entry forks the conversation up to just
-// before that turn and pre-fills the new session's input with its original
-// text so the user can edit it before resending (see forkAndSwitchCmd).
-func newBacktrackPicker(termW, termH int, items []backtrackItem) listDialog {
+// backtrackPickerH sizes the picker to n rows, the same way sessionPickerH
+// does: the loading frame and the populated one must agree.
+func backtrackPickerH(termH, n int) int { return dialogListH(termH, n, 10) }
+
+// newBacktrackPicker opens the Esc-Esc backtrack dialog on the second press,
+// before its two checkpoint/session round-trips have answered: it carries one
+// spinner row until backtrackPickerItems' rows land via setItems (P33.7).
+func newBacktrackPicker(termW, termH int, frame string) listDialog {
+	return newLoadingDialog(dialogBacktrackPicker, min(termW-6, 72), backtrackPickerH(termH, 0), "Backtrack: edit a previous message", frame)
+}
+
+// backtrackPickerItems renders previous user turns newest-first (matching
+// ListCheckpoints' own ordering and /rewind's no-arg listing convention).
+// Picking an entry forks the conversation up to just before that turn and
+// pre-fills the new session's input with its original text so the user can
+// edit it before resending (see forkAndSwitchCmd).
+func backtrackPickerItems(items []backtrackItem) []list.Item {
 	litems := make([]list.Item, len(items))
 	for i, it := range items {
 		litems[i] = it
 	}
-
-	palW := min(termW-6, 72)
-	palH := min(termH-8, max(len(items)*2+6, 10))
-
-	return newListDialog(dialogBacktrackPicker, palW, palH, "Backtrack: edit a previous message", true, litems)
+	return litems
 }

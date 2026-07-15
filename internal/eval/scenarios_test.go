@@ -181,6 +181,89 @@ func TestScenario_BudgetAbortsSecondTurn(t *testing.T) {
 	}
 }
 
+// TestScenario_SteerNeverConsumedOnTextOnlyRun is the P33.2 case: a steer
+// posted while the model is writing its final answer never reaches a tool
+// round, so the engine — which drains the channel only between rounds —
+// injects nothing and leaves the text on the channel. The engine is right to;
+// what made the message vanish was that nobody drained it afterwards, so this
+// pins the two halves of the contract the daemon's end-of-run drain relies on:
+// no injection, and the text still there to be handed back.
+func TestScenario_SteerNeverConsumedOnTextOnlyRun(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.Register(&echoTool{}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "here is the final answer"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 2}},
+		},
+	}}
+	steerCh := make(chan string, 1)
+	steerCh <- "actually, use the other file"
+
+	s := Scenario{
+		Name: "steer never consumed on a text-only run",
+		Options: engine.Options{
+			Adapter: adapter, Tools: reg, Model: "test",
+			SteerChan: steerCh,
+		},
+		Turns: []string{"answer without using tools"},
+	}
+	RunAndCheck(t, context.Background(), s,
+		ExpectNoError(),
+		ExpectNoSteerInjected(),
+		ExpectFinalTextContains("final answer"),
+	)
+	select {
+	case got := <-steerCh:
+		if got != "actually, use the other file" {
+			t.Errorf("steer left on the channel = %q, want the original text", got)
+		}
+	default:
+		t.Fatal("steer was neither injected nor left on the channel — it vanished (P33.2)")
+	}
+}
+
+// TestScenario_SteerConsumedBetweenToolRounds is the counterpart: given a tool
+// round to drain at, the same steer is injected and reported, so the daemon's
+// end-of-run drain finds nothing to hand back and the message is never
+// delivered twice.
+func TestScenario_SteerConsumedBetweenToolRounds(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.Register(&echoTool{}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_1", Name: "echo", Input: json.RawMessage(`{"msg":"hi"}`)}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse},
+		},
+		{
+			{Type: provider.EventTextDelta, Text: "steered"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn},
+		},
+	}}
+	steerCh := make(chan string, 1)
+	steerCh <- "actually, use the other file"
+
+	s := Scenario{
+		Name: "steer consumed between tool rounds",
+		Options: engine.Options{
+			Adapter: adapter, Tools: reg, Model: "test",
+			SteerChan: steerCh,
+		},
+		Turns: []string{"go"},
+	}
+	RunAndCheck(t, context.Background(), s,
+		ExpectNoError(),
+		ExpectSteerInjected("actually, use the other file"),
+	)
+	if len(steerCh) != 0 {
+		t.Errorf("steer channel still holds %d message(s) after injection", len(steerCh))
+	}
+}
+
 // TestScenario_MultiTurnContinuity sends two sequential user turns on the
 // same conversation and verifies the second turn's tool call still runs
 // correctly and its answer is distinct from the first — a regression guard

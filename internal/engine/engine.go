@@ -150,24 +150,31 @@ func isDenseScript(r rune) bool {
 type EventKind string
 
 const (
-	KindText       EventKind = "text"        // incremental assistant text
-	KindThinking   EventKind = "thinking"    // incremental extended-thinking text
-	KindToolCall   EventKind = "tool_call"   // a tool is about to run
-	KindToolResult EventKind = "tool_result" // a tool finished
-	KindTurnDone   EventKind = "turn_done"   // one model turn completed
-	KindTrace      EventKind = "trace"       // per-turn structured trace (server-internal)
-	KindDone       EventKind = "done"        // the run finished (final answer)
-	KindError      EventKind = "error"       // the run failed
-	KindSteer      EventKind = "steer"       // mid-run steering instruction injected
-	KindGuard      EventKind = "guard"       // output validation result (warning)
-	KindNotice     EventKind = "notice"      // advisory for the user (context fill, compaction)
+	KindText     EventKind = "text"     // incremental assistant text
+	KindThinking EventKind = "thinking" // incremental extended-thinking text
+	// KindToolCallStart announces a tool call the model has begun streaming,
+	// while its arguments are still being generated (P33.3). ToolName is set;
+	// ToolInput is not, and ToolID only when the provider named the call and
+	// assigned its ID together. The KindToolCall for the same call still
+	// follows unchanged, so a consumer that ignores this kind is unaffected —
+	// as is a provider adapter that never emits provider.EventToolUseStart.
+	KindToolCallStart EventKind = "tool_call_start"
+	KindToolCall      EventKind = "tool_call"   // a tool is about to run
+	KindToolResult    EventKind = "tool_result" // a tool finished
+	KindTurnDone      EventKind = "turn_done"   // one model turn completed
+	KindTrace         EventKind = "trace"       // per-turn structured trace (server-internal)
+	KindDone          EventKind = "done"        // the run finished (final answer)
+	KindError         EventKind = "error"       // the run failed
+	KindSteer         EventKind = "steer"       // mid-run steering instruction injected
+	KindGuard         EventKind = "guard"       // output validation result (warning)
+	KindNotice        EventKind = "notice"      // advisory for the user (context fill, compaction)
 )
 
 // Event is emitted to the consumer-provided sink as the run progresses.
 type Event struct {
 	Kind      EventKind
 	Text      string          // KindText
-	ToolName  string          // KindToolCall / KindToolResult
+	ToolName  string          // KindToolCallStart / KindToolCall / KindToolResult
 	ToolInput json.RawMessage // KindToolCall
 	// ToolID is the provider-assigned tool_use ID (provider.ToolUseBlock.ID),
 	// carried on both the KindToolCall and its matching KindToolResult so a
@@ -925,6 +932,10 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		case provider.EventThinking:
 			if ev.Thinking != nil {
 				thinking = append(thinking, *ev.Thinking)
+			}
+		case provider.EventToolUseStart:
+			if ev.ToolUse != nil {
+				emit(Event{Kind: KindToolCallStart, ToolName: ev.ToolUse.Name, ToolID: ev.ToolUse.ID})
 			}
 		case provider.EventToolUse:
 			if ev.ToolUse != nil {
