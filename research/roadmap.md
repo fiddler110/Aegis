@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 6, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
+**Open items:** 5, filed 2026-07-14 from two audits: the P30 batch (a code-gap scan for
 TODO/stub/skip/robustness markers, and a docs-vs-implementation drift scan of every docs/*.md file
 against current source) run after the P29 batch closed out all prior open work, plus the P31 batch
 (GitHub CodeQL code-scanning alerts pulled from the `fiddler110/Aegis` repo — 24 open alerts across
@@ -26,18 +26,19 @@ shipped mechanisms, no code change needed. All four Tier 1 items shipped 2026-07
 (nuclei `templates_version` path traversal / git-arg injection), **P31.2** (session-workdir
 existence-oracle gate ordering), **P30.1** (LSP client hang on transport death), and **P30.2** and
 **P30.3** (hooks and TUI bang command both hardcoded `sh -c` on Windows) — see
-[releases.md](releases.md#latest-changes). **P31.3** (Web UI CSRF cookie `Secure` flag) and
-**P31.4** both shipped 2026-07-14 too — see [releases.md](releases.md#latest-changes). P31.4's
-plan was originally "dismiss two `go/command-injection` alerts as argv-exec/by-design"; re-
-verifying alert #7 against source surfaced a real, unrelated `git remote`-subcommand sandbox-
-escape/network-egress gap on the same code path (confirmed with a PoC), so the shipped version
-fixes that gap first and dismisses the alert with a justification that references the fix, rather
-than dismissing outright as planned.
+[releases.md](releases.md#latest-changes). **P31.3** and **P31.4** both shipped 2026-07-14 too —
+see [releases.md](releases.md#latest-changes). P31.4's plan was originally "dismiss two
+`go/command-injection` alerts as argv-exec/by-design"; re-verifying alert #7 against source
+surfaced a real, unrelated `git remote`-subcommand sandbox-escape/network-egress gap on the same
+code path (confirmed with a PoC), so the shipped version fixes that gap first and dismisses the
+alert with a justification that references the fix, rather than dismissing outright as planned.
+**P31.5** (Tier 2) shipped 2026-07-14 too: added 8 file-scoped entries to
+`.aegis/security-baseline.yaml` covering all 19 confirmed-safe `go/path-injection` alerts, and
+dismissed the corresponding 19 GitHub alerts (`dismissed_reason: false positive`, per-alert
+justification comments) — see [releases.md](releases.md#latest-changes).
 
-**Next session:** pick up Tier 2 starting with P31.5 (triage and suppress the nineteen
-`go/path-injection` alerts — re-verified against source this session, all confirmed safe, no code
-change needed, just the suppression bookkeeping), first in priority order below. Re-run
-`TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+**Next session:** pick up the remaining Tier 2 docs-drift cleanup starting with P30.4, first in
+priority order below. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
 engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
 companion for the same misconfiguration classes.
 
@@ -53,9 +54,8 @@ speculatively.
 
 **Tier 1:** none open. (P31.1, P31.2, P30.1, P30.2, and P30.3 shipped 2026-07-14.)
 
-**Tier 2:** P31.5, P30.4, P30.5, P30.6, P30.7, P30.8 — in priority order: alert-noise
-reduction (P31.5) ahead of pure docs-drift cleanup (P30.4-P30.8). (P31.3 and P31.4 shipped
-2026-07-14.)
+**Tier 2:** P30.4, P30.5, P30.6, P30.7, P30.8 — pure docs-drift cleanup, in priority order.
+(P31.3, P31.4, and P31.5 shipped 2026-07-14.)
 
 **Tier 3:** none open.
 
@@ -64,35 +64,6 @@ reduction (P31.5) ahead of pure docs-drift cleanup (P30.4-P30.8). (P31.3 and P31
 ---
 
 ## Open Work
-
-### P31.5 — Nineteen `go/path-injection` alerts trace to already-validated session Workdir or directory enumeration — triage and suppress
-
-Priority: Tier 2 · Effort: M · [alerts #8-27 minus #4](https://github.com/fiddler110/Aegis/security/code-scanning) (19 of the 20 open `go/path-injection` alerts; #4 is P31.2), all high severity
-
-Read each flagged line against source (`internal/persona/load.go:152,216`;
-`internal/agentdef/agentdef.go:126,148`; `internal/skills/skills.go:108,131,149,182`;
-`internal/memory/memory.go:134,137,165,169`; `internal/memory/integrity.go:44,54`;
-`internal/security/sbom.go:45,48`; `internal/security/report_artifact.go:34,37`;
-`internal/security/baseline.go:41`). All follow one of two safe shapes CodeQL's taint tracking
-doesn't credit: (1) `os.ReadDir(dir)` enumerates a directory and re-joins `e.Name()` — a filename
-CodeQL taints back to `dir`, but the actual traversal-relevant string is filesystem-enumerated, not
-attacker-supplied; or (2) the path is `filepath.Join(root, fixedSuffix)` where `root` is a session
-Workdir/project root that already passed `resolveSessionWorkdir`'s existence-and-allowlist gate
-(P25.1, see P31.2) several calls upstream, and `fixedSuffix` is a hardcoded string
-(`.aegis/memory.md`, `.aegis/sbom.cdx.json`, `.aegis/security-baseline.yaml`, `.aegis/skills`) —
-`memory.go`'s `SaveSkill` additionally sanitizes its one real user-supplied segment (`name`) through
-`sanitize()` (memory.go:193-205, alphanumeric + `-`/`_` only) before the join CodeQL flags at
-memory.go:169. None of the 19 have an unvalidated attacker-controlled path segment reaching disk.
-Action: don't code-change these — add each to `.aegis/security-baseline.yaml` (the suppression
-format `internal/security/baseline.go` already reads, `rule_id` + `reason` + `expires`) or dismiss
-the corresponding GitHub alert with the specific safe-shape justification above, so future CodeQL
-runs stop resurfacing confirmed-safe findings as noise that could mask a real future alert. If a
-sanitizer-recognition false-positive persists after dismissal, a CodeQL query customization
-(recognizing `sanitize()` as a barrier) is the next step, not a code change to already-safe call
-sites. Re-verified 2026-07-14 against current source for five of the eight files
-(`persona/load.go`, `skills/skills.go`, `memory/memory.go`, `memory/integrity.go`,
-`security/sbom.go`) as part of the P31.4 re-evaluation pass — both safe shapes held up, no
-vulnerability found. Only the suppression bookkeeping remains.
 
 ### P30.4 — Six docs/*.md files link to a `security.md` that no longer exists
 

@@ -8,7 +8,31 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — shipped **P31.4** (Tier 2), with a scope correction from the
+**Last updated:** 2026-07-14 — shipped **P31.5** (Tier 2), closing out the P31 CodeQL batch: all
+19 non-P31.2 `go/path-injection` alerts (#8-27 minus #4) were re-verified against source in the
+P31.4 pass as one of two safe shapes (directory-enumeration re-join, or
+`filepath.Join(validated-root, fixed-or-sanitized-suffix)`), so this session was pure suppression
+bookkeeping, no code change. Added 8 entries to `.aegis/security-baseline.yaml` — one per file
+rather than per alert, since `internal/security/dedup.go`'s `normalizeLocation` strips any
+trailing `:<line>` before matching, so a file-scoped entry already suppresses every line CodeQL
+flagged in that file — each with a `reason` field naming the specific alert numbers and lines it
+covers and the applicable safe shape. Also dismissed all 19 corresponding GitHub alerts via
+`gh api -X PATCH repos/fiddler110/Aegis/code-scanning/alerts/{n}` with
+`dismissed_reason: "false positive"` and a per-alert justification comment; GitHub's 280-character
+cap on `dismissed_comment` forced a terser phrasing than the baseline file's fuller reasoning; a
+first pass at full-length comments 422'd on 18 of 19 (one alert's comment happened to fit), so
+comments were shortened to point back to `.aegis/security-baseline.yaml` for the complete
+justification rather than repeating it in full. Verified via `gh api ...code-scanning/alerts
+--paginate` that all 19 now read `dismissed`. All 20 `go/path-injection` alerts are now resolved:
+#1 and #13 read `fixed`, #8-12 and #14-27 read `dismissed` (this session), and #4 (P31.2's
+already-fixed gate-ordering bug) remains `open` on GitHub's side pending its own CodeQL rescan —
+out of scope here, since the code fix already shipped in P31.2. The three `go/command-injection`
+alerts (#5, #6, #7) and cookie-secure-not-set alert #3 are unaffected by this session; #3 and #5
+already read `fixed`/resolved from P31.3/earlier work, #6 and #7 remain open pending their own
+rescan or a future dismissal pass. No source files changed; no build/test run needed. See
+roadmap.md for the remaining Tier 2 docs-drift items (P30.4 next).
+
+**Previously, same day:** shipped **P31.4** (Tier 2), with a scope correction from the
 original plan. The roadmap's plan was "dismiss both `go/command-injection` alerts as
 argv-exec/by-design." Re-verifying alert #7 (`internal/tool/builtin/git.go:68`) against source
 confirmed the narrow CodeQL claim (never shell-interpreted — a false positive for classic command
