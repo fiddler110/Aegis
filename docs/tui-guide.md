@@ -46,7 +46,7 @@ The sidebar is **off by default**. Toggle it with `Ctrl+B` or `/sidebar`. When h
  in  64210     │
  out 512       │
 ─────────────────────────────────────────────────────────────────────────
- ◐ thinking…   2s              31% $0.01   build   ctrl+k · f1 · ctrl+e
+ ◐ generating… · 12s · ↑4.2k · ↓~380 · ~14 tok/s   31% $0.01   build
 ─────────────────────────────────────────────────────────────────────────
  │ Message Aegis…
 ```
@@ -76,7 +76,9 @@ Multi-line tool output is displayed in collapsible gutter blocks. File edits ren
 
 ### Status bar
 
-Shows the current run state (`◐ thinking…`, `◐ running…`, elapsed time) and the active permission mode. Keyboard hint shortcuts are shown on the right.
+Shows the current run state and the active permission mode; keyboard hint shortcuts are shown on the right.
+
+A streaming run reports its phase: `◐ waiting for first token` until the model's first output lands — reasoning, prose, or a tool name — then `◐ generating…`. Nothing on the stream separates a model load from prompt eval, so the wait is reported as one span rather than broken down. Alongside it, for the whole run: elapsed time, prompt size (`↑`), output so far (`↓`) and throughput (`tok/s`). While the model server reports no live token counts, the output figures are estimated from output size and marked `~`.
 
 ---
 
@@ -84,10 +86,11 @@ Shows the current run state (`◐ thinking…`, `◐ running…`, elapsed time) 
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Send message |
+| `Enter` | Send message. While streaming: queue the current draft as the next message instead of interrupting the run |
 | `Shift+Enter` | Insert newline in the input field (`Ctrl+J` fallback for terminals that can't send Shift+Enter) |
-| `Alt+Enter` | While streaming: queue the current draft as the next message instead of sending immediately |
-| `Esc` (×2) | Interrupt the streaming run — first press arms it, second press (quickly after) confirms and cancels; also discards any queued message |
+| `Alt+Enter` | While streaming: steer — inject the current draft into the running turn instead of queueing it |
+| `Esc` | Interrupt the streaming run immediately; also discards any queued message. With text typed in the input box, the first press clears the box and the second interrupts |
+| `Esc` `Esc` | With nothing running and the input box empty: open the backtrack picker to return to an earlier turn |
 | `Ctrl+C` | Cancel the current run, or quit if nothing is running |
 | `Ctrl+O` | Expand/collapse a collapsed thinking block |
 | `/` | Open slash-command completion popup |
@@ -147,7 +150,13 @@ Pasting or typing a bare image file path (PNG/JPEG/GIF/WebP, quoted or unquoted)
 
 ### Message queueing
 
-Pressing `Alt+Enter` while a run is streaming queues the current draft instead of sending it immediately. Queued messages show as a dimmed `⏳ queued ▸` block and are sent automatically, one per completed run, once the stream closes. An explicit interrupt (`Esc` ×2 or `Ctrl+C`) or a stream error discards the queue instead of auto-sending it — the assumption is that if you stopped the run, you don't want the next queued message firing on its own.
+Typing while a run is streaming and pressing `Enter` queues the draft rather than sending it immediately — the composer's border dims and its placeholder reads `Queue the next message…` to signal it. Queued messages show as a dimmed `⏳ queued ▸` block and are sent automatically, one per completed run, once the stream closes. An explicit interrupt (`Esc` or `Ctrl+C`) or a stream error discards the queue instead of auto-sending it — the assumption is that if you stopped the run, you don't want the next queued message firing on its own.
+
+### Steering a running turn
+
+`Alt+Enter` while a run is streaming *steers*: the draft is injected into the turn already in flight, and the model picks it up at the next tool round rather than after the run finishes. Queueing is on the reflex key (`Enter`) and steering on the deliberate one because steering changes a run that's already underway, while a queued message can still be discarded by interrupting.
+
+A steer is echoed as a dimmed `⇢ steer ▸` block the moment it's sent, which is replaced by a real user turn once the run injects it. A run can also end before ever reaching a tool round; the steer then never lands, and rather than vanishing it falls back into the queue to be sent as the next turn. The one exception is a steer left over from a run you explicitly interrupted — auto-sending there would go against the brakes, so it's surfaced as a dim `⇢ steer not delivered (interrupted)` note that keeps the text on screen for you to re-send.
 
 ---
 

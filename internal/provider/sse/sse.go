@@ -1,10 +1,11 @@
 // Package sse holds the small pieces of SSE-consumption plumbing that are
 // identical across provider adapters (internal/provider/anthropic,
-// internal/provider/openai): sizing the line scanner, the ctx-aware channel
-// send used while streaming events out, and turning a non-200 HTTP response
-// into the provider.APIError adapters return from Stream. It intentionally
-// does not know anything about either provider's wire format — that parsing
-// stays adapter-specific.
+// internal/provider/openai): the HTTP client both use for the streamed
+// request, sizing the line scanner, the ctx-aware channel send used while
+// streaming events out, and turning a non-200 HTTP response into the
+// provider.APIError adapters return from Stream. It intentionally does not
+// know anything about either provider's wire format — that parsing stays
+// adapter-specific.
 package sse
 
 import (
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 )
@@ -21,7 +23,26 @@ const (
 	initialBufSize = 64 * 1024
 	maxBufSize     = 4 * 1024 * 1024
 	maxErrBodySize = 64 * 1024
+
+	// responseHeaderTimeout bounds only the wait for the response headers, not
+	// the stream that follows. It is generous because a cold local backend
+	// (Ollama pulling a model into VRAM) can take minutes to reply at all.
+	responseHeaderTimeout = 5 * time.Minute
 )
+
+// NewStreamingClient returns the http.Client an adapter uses for its streamed
+// request. Client.Timeout stays zero on purpose: it bounds the whole request
+// *including* reading the response body, so any non-zero value silently caps
+// how long a turn may stream and kills a legitimately long agentic turn on a
+// slow local model as a transport error mid-answer. Bounding the overall run
+// is the caller's context's job; the transport still bounds a server that
+// accepts the connection and then never sends headers. Mirrors the daemon
+// client's split between its SSE and RPC clients (internal/client.New).
+func NewStreamingClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Timeout: 0, Transport: tr}
+}
 
 // NewScanner returns a bufio.Scanner over body, pre-sized the way both
 // adapters need it: a 64KiB initial buffer growing up to 4MiB so a single

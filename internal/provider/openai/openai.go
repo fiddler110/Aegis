@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/sse"
@@ -63,7 +62,7 @@ func WithReasoningEffort(effort string) Option {
 
 // New constructs an OpenAI adapter.
 func New(apiKey string, opts ...Option) *Adapter {
-	a := &Adapter{apiKey: apiKey, baseURL: defaultBaseURL, client: &http.Client{Timeout: 10 * time.Minute}}
+	a := &Adapter{apiKey: apiKey, baseURL: defaultBaseURL, client: sse.NewStreamingClient()}
 	for _, o := range opts {
 		o(a)
 	}
@@ -114,9 +113,9 @@ type wireTool struct {
 }
 
 type wireRequest struct {
-	Model     string        `json:"model"`
-	Messages  []wireMessage `json:"messages"`
-	Tools     []wireTool    `json:"tools,omitempty"`
+	Model    string        `json:"model"`
+	Messages []wireMessage `json:"messages"`
+	Tools    []wireTool    `json:"tools,omitempty"`
 	// MaxTokens and MaxCompletionTokens are mutually exclusive on the wire:
 	// real OpenAI o1/o3-class reasoning models reject max_tokens outright
 	// (a 400) and require max_completion_tokens instead, while every other
@@ -283,11 +282,55 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	return out, nil
 }
 
-// toolAccum accumulates a streamed tool call by index.
+// toolAccum accumulates a streamed tool call by index. announced records that
+// the call's EventToolUseStart has already been emitted, so a name repeated
+// across deltas can't announce the same call twice.
 type toolAccum struct {
-	id   string
-	name string
-	args strings.Builder
+	id        string
+	name      string
+	args      strings.Builder
+	announced bool
+}
+
+// errorMessage extracts the human-readable message from the "error" field of
+// a streamed chunk, which servers spell two ways: Ollama emits a bare string
+// ({"error":"model runner has unexpectedly stopped"}) mid-stream when a
+// worker OOMs or overflows its context, while OpenAI and vLLM emit an object
+// ({"error":{"message":"..."}}). An object carrying no message degrades to
+// its raw JSON rather than being lost. Anything else — an absent or null
+// field, a chunk whose "error" is neither string nor object — returns "" so
+// the caller drops it as benign noise instead of failing the turn.
+func errorMessage(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	if msg := strings.TrimSpace(obj.Message); msg != "" {
+		return msg
+	}
+	return trimmed
+}
+
+// streamErrorMessage is errorMessage for a chunk that failed to decode as a
+// completion chunk at all, pulling the error envelope out on its own.
+func streamErrorMessage(data string) string {
+	var env struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal([]byte(data), &env) != nil {
+		return ""
+	}
+	return errorMessage(env.Error)
 }
 
 func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event) {
@@ -333,9 +376,18 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
 			} `json:"usage"`
+			Error json.RawMessage `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			if msg := streamErrorMessage(data); msg != "" {
+				emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("openai: %s", msg)})
+				return
+			}
 			continue
+		}
+		if msg := errorMessage(chunk.Error); msg != "" {
+			emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("openai: %s", msg)})
+			return
 		}
 		if chunk.Usage != nil {
 			usage.InputTokens = chunk.Usage.PromptTokens
@@ -363,6 +415,14 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 				}
 				if tc.Function.Name != "" {
 					acc.name = tc.Function.Name
+				}
+				if acc.name != "" && !acc.announced {
+					acc.announced = true
+					if !emit(provider.Event{Type: provider.EventToolUseStart, ToolUse: &provider.ToolUseBlock{
+						ID: acc.id, Name: acc.name,
+					}}) {
+						return
+					}
 				}
 				acc.args.WriteString(tc.Function.Arguments)
 			}

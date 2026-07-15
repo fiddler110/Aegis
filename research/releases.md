@@ -8,7 +8,250 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-15 — shipped **P32.9-P32.11**, the three Tier 4 parked items from the
+**Last updated:** 2026-07-15 — shipped **P33.1-P33.8**, the whole of the P33 batch's Tier 1 and
+Tier 2 (both robustness fixes and all six UX items), leaving only the three Tier 3 items (P33.9
+native Ollama adapter, P33.10 keep-alive/pre-warm, P33.11 transient slash panels) open. The batch
+was implemented by parallel sub-agents grouped so no two concurrently edited the same file, in four
+rounds: (P33.1, P33.5) → P33.2 → P33.3 → (P33.4) → (P33.6, P33.7) → P33.8. Verified at the end
+with `go build ./...`, `go test ./...` (fully green), and `go test -race` over
+`internal/tui`, `internal/server`, `internal/engine`, `internal/eval`, `internal/api`.
+
+A cross-cutting result worth recording ahead of the per-item notes: **four of the eight items had
+materially inaccurate roadmap descriptions**, and in three cases implementing the item exactly as
+written would have shipped a non-fix or a visibly wrong UI. P33.1's stated root cause was wrong
+(the error envelope decoded *successfully*, so it was dropped one step earlier than the
+`json.Unmarshal` failure path the item blamed — fixing only the documented path would have fixed
+nothing); P33.4's phase-end condition missed the tool-call-first case and its tok/s data source
+(`liveText`) is reset every tool round; P33.7's picker inventory named two pickers that aren't
+remote-backed and one that doesn't exist, while omitting the persona picker; P33.3's proposed
+`Index` wire field proved unnecessary. The lesson for future batches: an assessment that reads code
+carefully enough to cite line numbers can still mis-state *mechanism*, and the line-number
+precision is not evidence the diagnosis is right. Each item below records its own correction.
+
+**P33.1** (Tier 1): the OpenAI and Anthropic adapters no longer kill long streams, and mid-stream
+Ollama errors no longer vanish. **(a)** Both adapters built `http.Client{Timeout: 10 * time.Minute}`
+(`openai.go:66`, `anthropic.go:77` — the item only predicted the OpenAI one; Anthropic had the
+identical bug). Go's `Client.Timeout` bounds the *entire* request including streamed-body reads, so
+any sufficiently long agentic turn on a slow local model died mid-stream as an unrecoverable
+transport error. Rather than duplicate the fix, `internal/provider/sse` (the P32.11 shared-plumbing
+package) gained `NewStreamingClient()` (`sse.go:38-52`): `Timeout: 0` over a clone of
+`http.DefaultTransport` (preserving proxy/TLS/pooling defaults) with `ResponseHeaderTimeout = 5m`;
+both adapters now call it. Interrupts already rode context cancellation
+(`http.NewRequestWithContext`), which is the correct seam. The 5-minute header timeout still bounds
+a server that accepts a connection and never replies, and critically stops at the headers so it
+cannot kill a long stream; a cold Ollama backend pulling a large model into VRAM can take minutes to
+send them. The item's optional idle-read watchdog was **deliberately not implemented**: Ollama sends
+headers immediately and then legitimately goes silent for minutes during prompt eval, so an
+idle-read timer would reintroduce exactly the false-positive kill this item exists to remove.
+**(b)** The item diagnosed mid-stream `{"error": ...}` envelopes as being lost to `consume()`'s
+silent `continue` on `json.Unmarshal` failure. That was wrong: Go ignores unknown fields, so the
+envelope decoded *successfully* into an empty chunk and was discarded earlier. The fix therefore
+covers both paths — the chunk struct gained `Error json.RawMessage`, and a non-empty message on
+successful decode emits `EventError` and returns; on decode failure, `streamErrorMessage(data)`
+re-decodes just the envelope and only errors if it yields a message, otherwise `continue`s as
+before. `errorMessage()` (`openai.go:293-317`) handles both spellings — Ollama's bare string
+(`{"error":"..."}`) and OpenAI/vLLM's object (`{"error":{"message":...}}`) — degrading an
+object-without-message to its raw JSON and returning `""` for absent/`null`/non-string-non-object,
+so benign noise stays skipped. Anthropic's mid-stream error handling was already correct
+(`anthropic.go:472-474`), making (b) genuinely OpenAI-only. Tests:
+`TestStreamingClientHasNoWholeRequestTimeout` (both adapters, asserts config rather than sleeping),
+`TestStreamOutlastsResponseHeaderTimeout` (fake SSE server dribbling chunks past a 50ms injected
+header timeout, proving the bound stops at headers), and a 7-case `TestMidStreamError` table
+covering both spellings, object-without-message, an undecodable chunk carrying an error, and three
+benign-noise cases asserting the stream still completes. The error tests were verified as genuine
+regressions against the pre-fix code.
+
+**P33.2** (Tier 1): steer messages can no longer be silently lost. The engine drained `steerCh` only
+between tool rounds, so a steer sent while the model was generating its final answer — or during a
+text-only run — was never injected, never echoed, and was dropped when the handler deleted
+`pendingSteers` on return. **No engine change was needed**: the between-rounds drain is correct;
+the bug was entirely that nobody drained afterwards. New wire event `api.KindSteerUnconsumed`
+(`"steer_unconsumed"`, `internal/api/api.go:159-166`), terminal, carrying the original text, emitted
+once per leftover steer before the stream closes — purely additive (a run with nothing left over
+never emits it; a client ignoring the kind behaves as today), added to the wire-value lock test and
+the web UI `Event` union (`types.ts:298`, types-only, no `dist/` rebuild). The drain race is fenced
+by replacing the raw `chan string` in `pendingSteers` with a `steerBox` (`messages.go:628-680`) —
+the channel plus a mutex-guarded `closed` flag; `handleSteer` goes through `offer()`, the end-of-run
+drain calls `close()` which sets the flag under the lock *then* drains. This yields no
+double-delivery (`eng.Run` has returned, so the drain is the only reader) and, more importantly, no
+lost message: without the fence a steer accepted with a `204` in the window between the drain and
+the deferred `pendingSteers.Delete` would land in a channel nobody reads again — a narrower
+instance of the very bug being fixed. A steer for a finished run now returns 404 rather than a lying
+204 (buffer-full is 429). Cancel-path split: the **server always emits** the event, since it cannot
+distinguish an Esc from a dropped connection (that is client state); the **TUI decides** — normal
+end requeues into `m.queued` per TQ8 semantics (auto-sending next), while after an explicit
+interrupt it renders a dim `⇢ steer not delivered (interrupted): <text>` note instead, because
+auto-sending a turn into a run the user just braked on is the same surprise TQ8's own
+`m.queued = nil` avoids. Either way the text stays on screen, so it is never *silently* lost. A
+daemon that never emits the event (older build, or an event the SSE ring buffer dropped) is handled
+too: leftover echoes are treated as unconsumed at `streamClosedMsg` rather than dangling forever.
+TUI side adds send-time local echo (dimmed `⇢ steer ▸ …`), `resolvePendingSteer`/`requeueSteer`, and
+an `interrupted` flag. `internal/eval` gained `TurnResult.Steers`, `Result.AllSteers`,
+`ExpectSteerInjected`, `ExpectNoSteerInjected`. Tests: `TestScenario_SteerNeverConsumedOnTextOnlyRun`
+(the done-when case: not injected *and* still on the channel, i.e. it didn't vanish) and
+`TestScenario_SteerConsumedBetweenToolRounds` (injected exactly once, channel empty → no double
+delivery); `internal/server/steer_test.go` (`TestSteerBoxFencesLateOffers` for ordering/full/
+post-close/idempotent-close, and an end-to-end `TestSteerUnconsumedHandedBackAtRunEnd` over the real
+HTTP/SSE seam); `internal/tui/steer_test.go` for echo-resolve, requeue-and-auto-send,
+interrupt-note, and the stream-close fallback. Golden transcripts byte-identical.
+
+**P33.3** (Tier 2): the pending tool card is now visible while the model is still generating the
+call's arguments — on a local model frequently the longest phase of an agentic turn, and previously
+covered only by the shimmer phrase, with the P21.2 card on screen for the milliseconds between
+stream end and execution start. New `provider.EventToolUseStart` (`provider.go:141`) reuses the
+existing `Event.ToolUse *ToolUseBlock` payload rather than widening the struct: `Name` always set,
+`ID` when the provider has assigned one that early, `Input` always empty; the terminal
+`EventToolUse` is unchanged. Emitted by OpenAI on the first delta carrying a name (`openai.go:424`,
+guarded by a new `toolAccum.announced` so a re-sent name can't announce twice) and by Anthropic at
+`content_block_start` for `type=="tool_use"` (`anthropic.go:412`). Engine forwards it as
+`KindToolCallStart` (`engine.go:155,936`); `toAPIEvent` maps kinds by string, so **no server change
+was required**. **The item's proposed `Index` field proved unnecessary** and was deliberately not
+added to the engine/api wire: the TUI reconciles with the two-tier rule `resolveToolCard` already
+had — exact ToolID match, then oldest still-provisional card with a matching name — and that FIFO
+tier turns out to be load-bearing rather than legacy, because the OpenAI wire format can name a call
+in an earlier delta than the one carrying its ID (so the start is often ID-less while the terminal
+event is not). Starts and calls are both emitted in stream order, so the i-th start of a name pairs
+with the i-th call; on reconcile the card is re-keyed in place (`rekeyPendingTool`, preserving
+`pendingToolOrder` position) so the later `KindToolResult` — which looks up by ID — still resolves
+it. Duplicate prevention: a start creates a card only if `ev.Tool != ""` and no card exists under a
+repeated *non-empty* ToolID (deduping by name would wrongly collapse two legitimate ID-less starts);
+`KindToolCall` appends only when reconciliation misses. The start deliberately does not touch
+`m.tools` or `pendingReadPaths` — `KindToolCall` still owns both, so nothing double-counts. Orphans
+are covered for free: provisional cards live in the same `pendingTools`/`pendingToolOrder`
+structures, so both existing `resolveStuckToolCards` nets (`KindError` and `streamClosedMsg`, the
+latter being P33.5's interrupt path) cover them unchanged, and `card.call` is set to the name header
+at start time so a stuck render still names the tool. Rendering via
+`renderToolCardStart`/`renderToolCardStartCall` (`toolview.go:81`) and a `toolCard.awaitingCall`
+flag; incremental argument display remains explicitly out of scope. Tests span adapter (both),
+engine forwarding, and six TUI cases including the late-ID rekey, the dedupe rules, stuck resolution
+on cancel *and* error, and an additive-only test proving a producer emitting no start event behaves
+exactly as pre-P33.3. **No golden regeneration was needed** — the eval harness's deterministic
+adapter never emits the new event and `eval.go` records only Text/ToolCall/Steer/Guard kinds.
+
+**P33.4** (Tier 2): the streaming status is phase-aware and token/tok-s feedback is continuous.
+Previously `m.status` was set once to `"thinking…"` at send and never changed, showing the identical
+shimmer for model-load, prompt-eval, and generation — on the target hardware (RX 7900 GRE 16GB) a
+10-60s wait, plus a cold reload if Ollama's 5m `keep_alive` lapsed. `formatStreamHint` (`flavor.go:
+205-247`) now takes a `streamStats` struct and renders ` · 12s · ↑4.2k · ↓~380 · ~14 tok/s`, with
+the `~` markers driven by `st.estimated` and zero segments dropped rather than printed as `0`. New
+`statusWaiting`/`statusGenerating`, `phaseStatus()`, `beginStream()`, `markModelOutput(n)`, and
+`streamStats()` (`tui.go:934-999`); the tail (`refresh()`), the sidebar section title
+(`WAITING`/`GENERATING`, so it cannot contradict the bar), and `renderInputArea` all read from them,
+and the hint now renders for the whole streaming duration rather than only in the no-live-text
+branch. `beginStream()` also zeroes `streamStart`, fixing a pre-existing one-frame glitch where the
+elapsed readout quoted the *previous* run's clock. `approval.go:246` resumes with `m.phaseStatus()`
+instead of a hardcoded `"thinking…"`. **Two corrections to the item's text, both made for
+truthfulness.** First, it says the phase ends at "the first `KindText`/`KindThinking` delta" — that
+misses the tool-call-first case, where P33.3's `preparing read_file…` card would sit on screen
+directly below a bar still insisting "waiting for first token". `markModelOutput` is therefore also
+called from `KindToolCallStart` *and* `KindToolCall` (the latter covering a daemon emitting no start
+event), with `n=0` since a tool name isn't measurable output bytes; the phase ends at *any* first
+model output. Second, it says to derive tok/s from "liveText byte growth" — not viable, because
+`flushLiveText` resets `liveText` at every tool round and at turn end, so the counter would drop to
+zero mid-run, defeating the item's own "continuously visible" goal; `outBytes` accumulates over the
+run instead and counts reasoning deltas as output (they are output tokens). Additionally, tok/s is
+measured from `firstTokenAt`, not `streamStart`: averaging a 60s cold-load into the rate would
+report a throughput the model never ran at. The heuristic (`bytesPerTokenEstimate = 4`) exists in
+exactly one place — `model.streamStats()` — which sets `estimated: true`; the formatter and both
+render sites are already estimate-agnostic, so P33.9 assigns real per-delta counts and clears the
+flag with no caller changes. Six tests in `phase_test.go`, including
+`TestStreamPhaseEndsAtProvisionalToolCard`, `TestStreamStatsRateExcludesTheWait`, and a
+`formatStreamHint` table pinning the reported-counts case that renders without tildes.
+
+**P33.5** (Tier 2): a single Esc interrupts while streaming, matching Claude Code (Aegis previously
+required Esc-Esc, pure friction given the first Esc did nothing else). The streaming Esc branch
+(`tui.go:1344-1371`) no longer arms `escPending`: an empty composer interrupts immediately
+(`m.cancel()` plus `m.queued = nil` for the TQ8 discard); a composer with text has the first Esc
+reset the textarea and return early with the run still streaming, so the next Esc hits the
+now-empty case and interrupts — preserving "clear input". The same-frame `alt+esc` decoder quirk is
+preserved and sharpened: with text, a coalesced double-tap falls through the clear into the cancel,
+meaning clear *and* interrupt rather than just clear. Case distinction is `m.streaming` plus
+`strings.TrimSpace(m.ta.Value()) != ""`, mirroring the emptiness test the idle branch already used.
+Esc-Esc while *idle* still opens the P22.3 backtrack picker, unchanged and still covered by the
+pre-existing `TestEscEsc_EmptyInputNotStreaming_OpensBacktrackPicker`. The now-unreachable
+`⚠ ESC again to stop` hint was dropped; `keymap.go:47` `Interrupt` help became
+`"interrupt run / clear input (×2 when idle: backtrack)"`, which the F1 overlay and `/help` pick up
+automatically via `helpEntries()`. `docs/tui-guide.md` gained a previously-undocumented `Esc Esc`
+idle-backtrack row. New `interrupt_esc_test.go` covers all three cases plus the alt+esc quirk.
+
+**P33.6** (Tier 2): the approval dialog composites over the chat instead of reflowing the frame —
+the single most jarring layout jump in the normal flow and the likely main contributor to the
+"disjointed" feel during permission-heavy runs. `render` (`tui.go:3503-3511`) now routes the
+approval through the existing P16.6 `renderOverlay` *before* the help/quit/dialog switch, so a
+dialog opened on top of a pending approval still wins and the approval stays visible (dimmed)
+behind it, as before. The approval branch was removed from `fixedH()` and `renderChat()`'s `parts`,
+and the `applyViewportHeight()` call at `KindApprovalRequest` deleted, along with the three in
+`handleApprovalKey`/`answerApproval` that existed only to re-make room for the inline dialog.
+`renderApprovalDialog` returns `dialogFrame(...)` content bounded by `approvalDialogW()` at
+`min(width-6, 74)`, matching the list pickers. Modality is untouched (same key interception, same
+`ta.Blur()`, same fall-through scrolling), so P25.4a's semantics carry over unchanged; `fixedH()` no
+longer renders the dialog just to measure it, making layout passes cheaper. Status line reworded to
+`⏸ respond to the approval dialog` since "above" is no longer accurate. Trade-off worth recording:
+the overlay is centred, so it now occludes the middle of the transcript where previously the
+(shorter) transcript was fully visible above it; the docs' claim that the transcript behind the
+dialog is still scrollable is now literally accurate. `approval_test.go` gained transcript/`fixedH`/
+chat-height stability assertions and overlay-vs-chat-frame placement.
+
+**P33.7** (Tier 2): the remote-backed pickers open instantly with a loading state instead of
+fetch-then-open, which previously produced zero visible reaction until the RPC returned. `dialog.go`
+gained `noticeItem`/`noticeRow` (a non-selectable placeholder), `listDialog.loading`/`fixedW`,
+`newLoadingDialog`, `setLoadingFrame`, `setItems`, `setNotice`, and a shared `dialogListH`;
+`Update`'s `enter` swallows a notice row. The session (Ctrl+Y) and backtrack (Esc-Esc) pickers split
+into `newXPicker(termW, termH, frame)` + `xPickerItems(...)` + `xPickerH(termH, n)`, opening
+immediately and returning `tea.Batch(fetch, m.sp.Tick)`. **The item's picker inventory was
+inaccurate** and is corrected here: `/session` never opened a picker at all (`cmdSession` prints
+text — only Ctrl+Y opens one), and `/timeline` (`m.timelineEntries`) and the model picker
+(`modelcatalog.Curated()`) are backed by *local* data, so there is no RPC to wait on and nothing to
+load. The genuinely remote-backed set is session, backtrack, and the **persona picker**
+(`/persona` → `client.ListPersonas`), which the item omits; the first two are done and persona is
+deferred to its own item (see roadmap P33.13) because it opens through the generic `slashResultMsg`
+path and would need a pre-dispatch hook in `handleSlashCommand` — a value receiver returning
+`tea.Cmd`, so it cannot mutate the model — which is a real refactor rather than this item's scoped
+S effort. Two non-obvious blockers had to be fixed: the dialog block returns early for *every*
+message, so the data handlers were unreachable and the spinner would have spun forever (it now falls
+through for `sessionsLoadedMsg`/`backtrackTargetsMsg`, `tui.go:1294-1303`); and the spinner tick is
+only re-queued while `m.streaming`, which neither picker path is, so the tick is claimed and
+re-queued in the dialog block while `loading`, dying naturally once data lands or the dialog closes.
+Dismiss-before-data is guarded by `awaitingPicker(kind)`, which requires the dialog to still be open
+*and* still be that kind — late data for a dismissed picker is dropped (errors still fall back to
+the old toast) and data for a picker replaced by another dialog cannot leak into it. Flicker is
+handled by `fixedW`: a dialog frame shrink-wraps its rows, so opening on a narrow "loading…" row
+would snap width the instant real rows arrived; these two pickers are held at their configured width
+(74/76) across loading → populated → notice, so only height changes. Beyond that, bubbletea's
+framerate-limited renderer coalesces a sub-frame-time fetch, so a fast daemon never flushes the
+loading frame at all. User-visible change worth noting: "no sessions to switch to" / "no checkpoints
+yet" are now in-dialog rows requiring Esc rather than a toast with nothing opening — intentional, to
+avoid an open-then-close flash. Ten new tests in `picker_loading_test.go`.
+
+**P33.8** (Tier 2): Enter and Alt+Enter swap during streaming — **Enter now queues, Alt+Enter
+steers** — chosen by the user from the item's option list. Aegis previously inverted Claude Code's
+default, putting the riskier action (mid-run injection, which per P33.2 could until today even
+vanish) on the reflex keypress, signalled only by a border colour and placeholder text. `tui.go:
+1631` (`enter`) appends to `m.queued` with TQ8 semantics and returns no command; `tui.go:1672`
+(`alt+enter`) appends to `m.pendingSteers` and returns `m.sendSteerCmd(text)`; idle behaviour is
+unchanged. P33.2's machinery survived the swap intact because its echo/requeue paths were wired to
+`m.pendingSteers`, not to a key — moving the append plus `sendSteerCmd` across carried `KindSteer`
+resolve, `KindSteerUnconsumed` requeue, the `interrupted`-note path, and the stream-close fallback
+unmodified, and all four pre-existing P33.2 tests pass with only the driving keypress swapped. The
+visual signal was **retired rather than relocated**: the amber (`colWarning`) border existed to warn
+"Enter injects into a live run", and since steering is no longer a mode the composer sits in but a
+one-shot deliberate keypress, that warning had nothing left to attach to. The streaming composer now
+uses `colTextMuted` (it recedes, because Enter holds rather than sends) with placeholder
+`Queue the next message… (alt+enter steers)`, naming the Enter action and documenting the opt-in;
+streaming itself is still signalled by P33.4's phase status bar. `setSteerMode` → `setQueueMode`.
+**Breaking config change:** `keymap.go`'s `Queue` field is renamed `Steer` (the `alt+enter` binding
+it holds now steers) and the `bindingsByName` key `"queue"` → `"steer"`, so any user config with
+`tui.keybindings.queue: [...]` now fails fast at startup with `unknown action(s): queue` —
+consistent with the existing fail-fast design, and the error names the typo, but it is user-visible
+and was not anticipated by the item's Effort-S description. Docs: `keymap.go` help text (feeding
+both F1 and `/help` through `helpEntries()`), `docs/tui-guide.md:89-91` shortcut table and its
+rewritten queueing section, a new "Steering a running turn" section documenting Alt+Enter, the
+`⇢ steer ▸` echo, requeue-on-unconsumed, and the interrupted-note exception (steering had been
+entirely undocumented before), and `docs/configuration.md:367`'s `tui.keybindings` action list. New
+`TestEnterWhileStreamingQueues` and `TestQueueModeSignalMatchesEnterAction`, the latter
+mutation-checked by forcing `colWarning` back in to confirm it isn't a silent pass.
+
+**Prior batch:** shipped **P32.9-P32.11**, the three Tier 4 parked items from the
 2026-07-15 application review, at the user's explicit request (they were parked precisely because
 they had no concrete trigger, per the roadmap's "check with the user before starting any of these"
 note — the user's ask to fix them directly is that trigger). Also shipped **P32.2-P32.8** the same

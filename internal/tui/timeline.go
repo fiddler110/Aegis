@@ -28,7 +28,7 @@ func newTimelinePicker(termW, termH int, entries []timelineEntry) listDialog {
 	}
 
 	palW := min(termW-6, 72)
-	palH := min(termH-8, max(len(entries)*2+6, 10))
+	palH := dialogListH(termH, len(entries), 10)
 
 	return newListDialog(dialogTimelinePicker, palW, palH, fmt.Sprintf("Timeline (%d turns)", len(entries)), true, items)
 }

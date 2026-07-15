@@ -12,7 +12,7 @@ import (
 // each binding carries its own help text, which the help overlay aggregates.
 type keyMap struct {
 	Send          key.Binding
-	Queue         key.Binding
+	Steer         key.Binding
 	Newline       key.Binding
 	Thinking      key.Binding
 	Complete      key.Binding
@@ -36,15 +36,15 @@ type keyMap struct {
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send / steer")),
-		Queue:         key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "queue next message (while streaming)")),
+		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send / queue next message (while streaming)")),
+		Steer:         key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "steer the running model (while streaming)")),
 		Newline:       key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("shift+enter", "insert newline (ctrl+j fallback)")),
 		Thinking:      key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand/collapse thinking")),
 		Complete:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "command completion")),
 		Help:          key.NewBinding(key.WithKeys("f1"), key.WithHelp("f1", "toggle help")),
 		Palette:       key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "command palette")),
 		Cancel:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel / quit")),
-		Interrupt:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt run (×2 to stop)")),
+		Interrupt:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt run / clear input (×2 when idle: backtrack)")),
 		Clear:         key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear transcript")),
 		Editor:        key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "open in $EDITOR")),
 		CycleMode:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "cycle mode")),
@@ -70,7 +70,7 @@ func defaultKeyMap() keyMap {
 func (km *keyMap) bindingsByName() map[string]*key.Binding {
 	return map[string]*key.Binding{
 		"send":          &km.Send,
-		"queue":         &km.Queue,
+		"steer":         &km.Steer,
 		"newline":       &km.Newline,
 		"thinking":      &km.Thinking,
 		"complete":      &km.Complete,
@@ -163,7 +163,7 @@ type keyHelpEntry struct{ Key, Desc string }
 func (km keyMap) helpEntries() []keyHelpEntry {
 	return []keyHelpEntry{
 		{km.Send.Help().Key, km.Send.Help().Desc},
-		{km.Queue.Help().Key, km.Queue.Help().Desc},
+		{km.Steer.Help().Key, km.Steer.Help().Desc},
 		{km.Newline.Help().Key, km.Newline.Help().Desc},
 		{km.Thinking.Help().Key, km.Thinking.Help().Desc},
 		{km.Interrupt.Help().Key, km.Interrupt.Help().Desc},

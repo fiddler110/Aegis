@@ -151,7 +151,6 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			a.feedbackMode = false
 			a.feedback = ""
-			m.applyViewportHeight()
 			return m, nil
 		case "backspace":
 			if r := []rune(a.feedback); len(r) > 0 {
@@ -179,7 +178,6 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if a.selected == apprDenyFeedback {
 			a.feedbackMode = true
-			m.applyViewportHeight()
 			return m, nil
 		}
 		return m.answerApproval(a.selected, "")
@@ -191,7 +189,6 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.answerApproval(apprDeny, "")
 	case "f", "F":
 		a.feedbackMode = true
-		m.applyViewportHeight()
 		return m, nil
 	}
 
@@ -243,11 +240,10 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 		steerText = fmt.Sprintf("The user denied the %s call. Feedback: %s", a.toolName, feedback)
 	}
 	m.approval = nil
-	m.status = "thinking…"
+	m.status = m.phaseStatus()
 	if !m.termFocused {
 		m.ta.Focus()
 	}
-	m.applyViewportHeight()
 
 	cl, sessionID := m.cfg.Client, m.cfg.SessionID
 	return m, func() tea.Msg {
@@ -265,15 +261,24 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 	}
 }
 
+// approvalDialogW is the content width of the approval overlay, bounded like
+// the list pickers' own frames (newSessionPicker et al.) so the dialog family
+// keeps one silhouette.
+func (m model) approvalDialogW() int {
+	return max(min(m.width-6, 74), 20)
+}
+
 // renderApprovalDialog renders the option-list approval prompt (TQ6),
 // replacing the old 3-line y/a/n banner: tool + reason header, a preview of
 // the pending change (the real diff for edits/writes), and an arrow-key
-// selectable option list with pattern-scoped "allow always".
+// selectable option list with pattern-scoped "allow always". P33.6 moved it
+// into the shared dialog frame — render() composites it over the chat via
+// renderOverlay rather than inserting it into the vertical stack, which used
+// to shrink the transcript by the dialog's whole height mid-run.
 func (m model) renderApprovalDialog() string {
 	a := m.approval
-	w := max(m.width-2, 20)
+	w := m.approvalDialogW()
 
-	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", w))
 	header := " " + lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚡ "+a.toolName) +
 		"  " + lipgloss.NewStyle().Foreground(colTextMuted).Render(
 		truncate(a.reason, max(w-len(a.toolName)-6, 12)))
@@ -285,7 +290,7 @@ func (m model) renderApprovalDialog() string {
 			lipgloss.NewStyle().Foreground(colFgBase).Render(a.feedback) +
 			lipgloss.NewStyle().Foreground(colAccent).Render("▎") +
 			lipgloss.NewStyle().Foreground(colTextMuted).Render("  enter send · esc back")
-		return sep + "\n" + header + "\n" + preview + prompt
+		return dialogFrame(header + "\n" + preview + prompt)
 	}
 
 	allowAlwaysLabel := "Allow always (once only — " + lipgloss.NewStyle().Foreground(colWarning).Render("no safe rule; write one by hand") + ")"
@@ -301,7 +306,7 @@ func (m model) renderApprovalDialog() string {
 	keys := [apprOptionCount]string{"y", "a", "n", "f"}
 
 	var b strings.Builder
-	b.WriteString(sep + "\n" + header + "\n" + preview)
+	b.WriteString(header + "\n" + preview)
 	for i := 0; i < apprOptionCount; i++ {
 		cursor := "   "
 		style := lipgloss.NewStyle().Foreground(colTextDim)
@@ -314,7 +319,7 @@ func (m model) renderApprovalDialog() string {
 			style.Render(truncate(labels[i], max(w-8, 16))) + key + "\n")
 	}
 	b.WriteString(" " + lipgloss.NewStyle().Foreground(colTextMuted).Render("↑/↓ select · enter confirm"))
-	return b.String()
+	return dialogFrame(b.String())
 }
 
 // ruleLabel renders the persistent rule an "allow always" choice would write.

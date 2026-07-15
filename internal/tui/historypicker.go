@@ -42,7 +42,7 @@ func newHistoryPicker(termW, termH int, history []string) listDialog {
 	}
 
 	palW := min(termW-6, 72)
-	palH := min(termH-8, max(len(history)*2+6, 10))
+	palH := dialogListH(termH, len(history), 10)
 
 	return newListDialog(dialogHistoryPicker, palW, palH, fmt.Sprintf("Input history (%d)", len(history)), true, items)
 }

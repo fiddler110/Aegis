@@ -23,7 +23,7 @@ func newPersonaPicker(termW, termH int, personas []api.PersonaInfo) listDialog {
 	}
 
 	palW := min(termW-6, 62)
-	palH := min(termH-8, max(len(personas)*2+6, 10))
+	palH := dialogListH(termH, len(personas), 10)
 
 	return newListDialog(dialogPersonaPicker, palW, palH, "Select Persona", false, items)
 }

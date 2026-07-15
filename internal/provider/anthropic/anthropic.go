@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/sse"
@@ -74,7 +73,7 @@ func New(apiKey string, opts ...Option) *Adapter {
 	a := &Adapter{
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
-		client:  &http.Client{Timeout: 10 * time.Minute},
+		client:  sse.NewStreamingClient(),
 		cache:   true,
 	}
 	for _, o := range opts {
@@ -409,6 +408,14 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 			typ:      ev.ContentBlock.Type,
 			toolID:   ev.ContentBlock.ID,
 			toolName: ev.ContentBlock.Name,
+		}
+		if ev.ContentBlock.Type == "tool_use" && ev.ContentBlock.Name != "" {
+			if !emit(provider.Event{Type: provider.EventToolUseStart, ToolUse: &provider.ToolUseBlock{
+				ID:   ev.ContentBlock.ID,
+				Name: ev.ContentBlock.Name,
+			}}) {
+				return false
+			}
 		}
 	case "content_block_delta":
 		bs := blocks[ev.Index]

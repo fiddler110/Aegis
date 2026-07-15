@@ -102,10 +102,14 @@ type toolEntry struct {
 // computed once and reused for both the pending state (redrawn every
 // animation tick — see renderToolCardPending) and the final combined
 // render, so neither pays for re-running a diff computation.
+// P33.3 adds one earlier state: a card appended at KindToolCallStart, whose
+// call block is only the tool's name until the KindToolCall carrying the
+// finished arguments reconciles it in place (awaitingCall).
 type toolCard struct {
-	blk  *transcriptItem
-	name string
-	call string
+	blk          *transcriptItem
+	name         string
+	call         string
+	awaitingCall bool
 }
 
 type model struct {
@@ -156,17 +160,25 @@ type model struct {
 	animStep    int       // frame counter for the streaming "working" shimmer
 	humorMode   bool      // when true, D&D phrases replace plain "thinking…"
 
+	// firstTokenAt is when the current run's first model output landed; zero
+	// while the run is still in its waiting phase (P33.4). outBytes accumulates
+	// the run's model output bytes — text and reasoning both — across the whole
+	// run rather than reading liveText, which flushLiveText resets at every tool
+	// round and at turn end.
+	firstTokenAt time.Time
+	outBytes     int
+
 	// followBottom tracks whether the viewport should auto-scroll to the newest
 	// content. It is true while the user is parked at the bottom and false once
 	// they scroll up, so streaming output never yanks them back down mid-read.
 	followBottom bool
 
 	// escPending is true after a first ESC press arms a double-tap action; a
-	// second ESC confirms it. Any non-ESC key clears this state. Two distinct
-	// actions share the flag, gated by m.streaming: while streaming, a second
-	// ESC cancels the run; while not streaming (and only once the input box
-	// is already empty, so a plain "clear the input" ESC doesn't arm it), a
-	// second ESC opens the P22.3 backtrack picker instead.
+	// second ESC confirms it. Any non-ESC key clears this state. Only the
+	// not-streaming path arms it, and only once the input box is already empty
+	// (so a plain "clear the input" ESC doesn't arm it): a second ESC there
+	// opens the P22.3 backtrack picker. While streaming, ESC interrupts on the
+	// first press (P33.5) and never arms.
 	escPending bool
 
 	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
@@ -174,10 +186,21 @@ type model struct {
 	histIdx    int
 	draftInput string
 
-	// queued holds messages typed with alt+enter during streaming (TQ8); they
+	// queued holds messages typed with enter during streaming (TQ8); they
 	// render as dimmed pending blocks and auto-send one at a time when the
 	// current stream closes. An explicit cancel discards the queue.
 	queued []string
+
+	// pendingSteers holds steers posted during the current run that the daemon
+	// hasn't reported back on yet (P33.2); they render as dimmed pending blocks
+	// until the matching KindSteer (injected) or KindSteerUnconsumed (never
+	// reached a tool round) event resolves them.
+	pendingSteers []string
+
+	// interrupted is true from an explicit cancel until the next stream starts.
+	// A steer the daemon hands back unconsumed after one is surfaced as a note
+	// rather than requeued, for the same reason an interrupt discards m.queued.
+	interrupted bool
 
 	// Lazily-built workspace file index for @file mention completion.
 	fileIndex      []string
@@ -639,6 +662,15 @@ func (m *model) recordChangedFile(path string) {
 	m.changedFiles = append(m.changedFiles, path)
 }
 
+// awaitingPicker reports whether kind's dialog — opened on the keypress with a
+// loading row (P33.7) — is still the one on screen, and so is still the right
+// place to put the fetch's result. It is false once the user dismissed it with
+// esc or moved on to another dialog: late data must fill in what's open, never
+// re-open or hijack what isn't.
+func (m model) awaitingPicker(kind dialogKind) bool {
+	return m.dialog != nil && m.dialog.kind == kind
+}
+
 func (m model) fetchSessions() tea.Cmd {
 	cl := m.cfg.Client
 	return func() tea.Msg {
@@ -884,17 +916,18 @@ func lastNLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// setSteerMode switches the textarea between normal input and steer mode.
-// In steer mode the placeholder and border colour signal that Enter will
-// inject a steering instruction into the running model turn rather than
-// start a new conversation turn.
-func (m *model) setSteerMode(on bool) {
+// setQueueMode switches the textarea between normal input and queue mode.
+// In queue mode the placeholder and border colour signal that Enter holds the
+// draft back as the next user turn instead of sending it now; injecting into
+// the running turn is alt+enter, which the placeholder names because it is the
+// deliberate action rather than the reflex one (P33.8).
+func (m *model) setQueueMode(on bool) {
 	styles := m.ta.Styles()
 	if on {
-		m.ta.Placeholder = "Steer the model…"
+		m.ta.Placeholder = "Queue the next message… (alt+enter steers)"
 		styles.Focused.Base = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colWarning)
+			BorderForeground(colTextMuted)
 		m.ta.Focus()
 	} else {
 		m.ta.Placeholder = "Message Aegis…"
@@ -908,6 +941,71 @@ func (m *model) setSteerMode(on bool) {
 func (m model) handleSlashCommand(parsed *commands.ParsedCommand) tea.Cmd {
 	slash := m.slash
 	return func() tea.Msg { return slashResultMsg(slash.Dispatch(parsed)) }
+}
+
+// The two phases of a streaming run the TUI can actually tell apart (P33.4).
+// Everything before the first model output — Ollama reloading a model whose
+// keep_alive lapsed, then prompt eval — is one indistinguishable wait from
+// here, and is reported as exactly that instead of being guessed at: no event
+// on the stream separates model load from prompt eval.
+const (
+	statusWaiting    = "waiting for first token"
+	statusGenerating = "generating…"
+)
+
+// phaseStatus is the status word for the run's current phase.
+func (m model) phaseStatus() string {
+	if m.firstTokenAt.IsZero() {
+		return statusWaiting
+	}
+	return statusGenerating
+}
+
+// beginStream marks the start of a run and resets the per-run phase state.
+// streamStart is zeroed too so the elapsed readout can't briefly quote the
+// previous run's clock in the frames before streamStartedMsg lands.
+func (m *model) beginStream() {
+	m.streaming = true
+	m.streamStart = time.Time{}
+	m.firstTokenAt = time.Time{}
+	m.outBytes = 0
+	m.status = statusWaiting
+}
+
+// markModelOutput ends the waiting phase and accumulates n output bytes. Any
+// evidence of model output counts, not just prose: a run whose first act is a
+// tool call reaches this through KindToolCallStart, so the phase line never
+// claims the run is still waiting while P33.3's provisional "preparing <tool>…"
+// card is on screen saying otherwise.
+func (m *model) markModelOutput(n int) {
+	if m.firstTokenAt.IsZero() {
+		m.firstTokenAt = time.Now()
+		m.status = statusGenerating
+	}
+	m.outBytes += n
+}
+
+// streamStats snapshots the in-flight run's throughput for the status line.
+// The output side is heuristic today — bytesPerTokenEstimate over the model's
+// own output bytes — and says so via estimated. P33.9's native Ollama adapter
+// reports real per-delta counts: assigning those to outputToks and clearing
+// estimated is the entire change, since nothing above this method knows where
+// the numbers came from.
+func (m model) streamStats() streamStats {
+	st := streamStats{inputToks: m.inputTokens, estimated: true}
+	if !m.streamStart.IsZero() {
+		st.elapsedSecs = int(time.Since(m.streamStart).Seconds())
+	}
+	st.outputToks = m.outBytes / bytesPerTokenEstimate
+	// Rate over the generation window only. The wait for the first token runs
+	// to a minute on a cold local model; averaging it in would report a
+	// throughput the model never ran at.
+	if !m.firstTokenAt.IsZero() && st.outputToks > 0 {
+		if secs := time.Since(m.firstTokenAt).Seconds(); secs >= 1 {
+			st.tokPerSec = float64(st.outputToks) / secs
+		}
+	}
+	return st
 }
 
 // sendUserMessage appends text as a user turn and starts the stream. Shared by
@@ -927,8 +1025,7 @@ func (m *model) sendUserMessage(text string) tea.Cmd {
 		displayText = fmt.Sprintf("(%d image%s attached)", len(images), suffix)
 	}
 	m.appendUser(displayText, m.renderImageThumbnails(images))
-	m.streaming = true
-	m.status = "thinking…"
+	m.beginStream()
 	m.followBottom = true // jump to the freshly sent message
 	// The callers reset the textarea just before this; with DynamicHeight
 	// that changes fixedH, so resync the pane height (which also re-pins).
@@ -974,6 +1071,31 @@ func (m model) sendSteerCmd(text string) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+// resolvePendingSteer drops the send-time echo of text once the daemon has
+// reported what became of it — injected (KindSteer) or handed back
+// (KindSteerUnconsumed).
+func (m *model) resolvePendingSteer(text string) {
+	for i, st := range m.pendingSteers {
+		if st == text {
+			m.pendingSteers = append(m.pendingSteers[:i], m.pendingSteers[i+1:]...)
+			return
+		}
+	}
+}
+
+// requeueSteer lands a steer the run never injected in the TQ8 queue, so it
+// auto-sends as the next user turn when the stream closes. After an explicit
+// interrupt it becomes a transcript note instead: sending into a run the user
+// just stopped is the surprise TQ8's own queue discard exists to avoid, and
+// the text stays on screen either way.
+func (m *model) requeueSteer(text string) {
+	if m.interrupted {
+		m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered (interrupted): "+oneLine(text)) + "\n\n")
+		return
+	}
+	m.queued = append(m.queued, text)
 }
 
 // maxEventsPerBatch caps how many events a single waitForEvent drain collapses
@@ -1084,6 +1206,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			return m, nil
 		}
+		// P33.7: keep the loading row's spinner turning. The tick is claimed
+		// here rather than left to the spinner.TickMsg case below, which this
+		// block returns ahead of, and re-queued only while a fetch is actually
+		// outstanding — once the rows land it stops on its own.
+		if _, ok := msg.(spinner.TickMsg); ok && m.dialog.loading {
+			var cmd tea.Cmd
+			m.sp, cmd = m.sp.Update(msg)
+			m.dialog.setLoadingFrame(m.sp.View())
+			return m, cmd
+		}
 		if c, ok := msg.(dialogCancelMsg); ok && c.kind == m.dialog.kind {
 			m.dialog = nil
 			m.ta.Focus()
@@ -1160,9 +1292,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		updated, cmd := m.dialog.Update(msg)
-		m.dialog = &updated
-		return m, cmd
+		// P33.7: the fetches that fill a picker opened on its loading row
+		// belong to their handlers in the main switch below — routing them into
+		// the list instead would leave the spinner up forever.
+		switch msg.(type) {
+		case sessionsLoadedMsg, backtrackTargetsMsg:
+		default:
+			updated, cmd := m.dialog.Update(msg)
+			m.dialog = &updated
+			return m, cmd
+		}
 	}
 
 	// Quit-confirmation overlay: shown instead of quitting outright when a
@@ -1342,25 +1481,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "alt+esc":
 			if m.streaming {
-				// A fast double-tap can land both ESC bytes in the same terminal
-				// read — likeliest exactly here, while streaming keeps the reader
-				// busy re-rendering. Ultraviolet's decoder then reports that as one
-				// "alt+esc" event instead of two separate "esc" ones, so treat it
-				// as an already-confirmed second press rather than requiring a
-				// third/fourth tap to get through.
-				if m.escPending || msg.String() == "alt+esc" {
-					// Second ESC: cancel the run. An explicit interrupt also
-					// discards any queued messages (TQ8) — auto-sending after
-					// the user hit the brakes would be a surprise.
-					if m.cancel != nil {
-						m.cancel()
+				// P33.5: a single ESC cancels the run. Text in the input box
+				// still gets cleared first, so there the interrupt is the next
+				// press — except when a fast double-tap lands both ESC bytes in
+				// the same terminal read, likeliest exactly here while streaming
+				// keeps the reader busy re-rendering. Ultraviolet's decoder
+				// reports that as one "alt+esc" event instead of two separate
+				// "esc" ones, so treat it as the clear plus the confirmed
+				// interrupt it was meant to be.
+				if strings.TrimSpace(m.ta.Value()) != "" {
+					m.ta.Reset()
+					if msg.String() != "alt+esc" {
+						m.escPending = false
+						return m, nil
 					}
-					m.escPending = false
-					m.queued = nil
-				} else {
-					// First ESC: arm the interrupt; status bar will show the warning.
-					m.escPending = true
 				}
+				// An explicit interrupt also discards any queued messages
+				// (TQ8) — auto-sending after the user hit the brakes would be
+				// a surprise.
+				if m.cancel != nil {
+					m.cancel()
+				}
+				m.escPending = false
+				m.queued = nil
+				m.interrupted = true
 				m.refresh()
 				return m, nil
 			}
@@ -1373,7 +1517,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.escPending || msg.String() == "alt+esc" {
 					m.escPending = false
 					m.refresh()
-					return m, m.fetchBacktrackTargets()
+					picker := newBacktrackPicker(m.width, m.height, m.sp.View())
+					m.dialog = &picker
+					return m, tea.Batch(m.fetchBacktrackTargets(), m.sp.Tick)
 				}
 				m.escPending = true
 				m.refresh()
@@ -1388,6 +1534,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancel() // interrupt the in-flight run; press again to quit
 				m.escPending = false
 				m.queued = nil // TQ8: explicit interrupt discards the queue
+				m.interrupted = true
 				return m, nil
 			}
 			if m.cancel != nil {
@@ -1408,7 +1555,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.fetchTeammates()
 		case "ctrl+y":
 			if !m.streaming {
-				return m, m.fetchSessions()
+				picker := newSessionPicker(m.width, m.height, m.sp.View())
+				m.dialog = &picker
+				return m, tea.Batch(m.fetchSessions(), m.sp.Tick)
 			}
 		case "ctrl+r":
 			// P22.4: reverse-search over sent-message history, like a shell's
@@ -1481,15 +1630,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.streaming {
-				// While the model is running, Enter injects a steering message
-				// between tool rounds rather than starting a new conversation turn.
+				// TQ8: while the model is running, Enter queues the draft as the
+				// next user turn; it auto-sends when the current run finishes.
 				text := strings.TrimSpace(m.ta.Value())
 				if text == "" {
 					return m, nil
 				}
 				m.ta.Reset()
 				m.escPending = false
-				return m, m.sendSteerCmd(text)
+				m.queued = append(m.queued, text)
+				m.followBottom = true
+				m.applyViewportHeight() // ta was just Reset; resync pane height
+				m.refresh()
+				return m, nil
 			}
 			text := strings.TrimSpace(m.ta.Value())
 			if text == "" {
@@ -1517,21 +1670,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.sendUserMessage(text)
 
 		case "alt+enter":
-			// TQ8: while streaming, alt+enter queues the draft as the next
-			// user turn instead of steering; it auto-sends when the current
-			// run finishes. When idle it behaves like a plain send.
+			// P33.8: while streaming, alt+enter injects the draft as a steering
+			// message between tool rounds instead of queueing it. When idle it
+			// behaves like a plain send.
 			text := strings.TrimSpace(m.ta.Value())
 			if text == "" {
 				return m, nil
 			}
 			m.ta.Reset()
 			if m.streaming {
-				m.queued = append(m.queued, text)
 				m.escPending = false
+				m.pendingSteers = append(m.pendingSteers, text)
 				m.followBottom = true
 				m.applyViewportHeight() // ta was just Reset; resync pane height
 				m.refresh()
-				return m, nil
+				return m, m.sendSteerCmd(text)
 			}
 			return m, m.sendUserMessage(text)
 		}
@@ -1541,7 +1694,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancel = msg.cancel
 		m.streamStart = time.Now()
 		m.escPending = false
-		m.setSteerMode(true)
+		m.interrupted = false
+		m.setQueueMode(true)
 		return m, tea.Batch(waitForEvent(m.events), m.sp.Tick)
 
 	case eventMsg:
@@ -1579,8 +1733,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancel = nil
 		m.status = "ready"
 		m.escPending = false
-		m.setSteerMode(false)
+		m.setQueueMode(false)
 		m.transcript.Append("\n")
+		// P33.2: a steer the daemon never reported a verdict on — an older
+		// daemon that doesn't emit KindSteerUnconsumed at all, or an event the
+		// SSE buffer dropped — is unconsumed by definition once the stream is
+		// gone, so treat it as such instead of leaving its echo dangling.
+		for _, st := range m.pendingSteers {
+			m.requeueSteer(st)
+		}
+		m.pendingSteers = nil
 		// TQ8: auto-send the next queued message, one per completed run. Don't
 		// notify here — another run is about to start immediately.
 		if len(m.queued) > 0 {
@@ -1594,13 +1756,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.streaming = false
 		m.escPending = false
-		m.setSteerMode(false)
+		m.setQueueMode(false)
 		m.transcript.Append(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")
 		// TQ8: don't auto-send into a failing session.
 		if len(m.queued) > 0 {
 			m.queued = nil
 			m.transcript.Append(m.th.statusDim.Render("⏳ queued messages discarded after error") + "\n\n")
 		}
+		for _, st := range m.pendingSteers {
+			m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered: "+oneLine(st)) + "\n\n")
+		}
+		m.pendingSteers = nil
 		m.status = "ready"
 		m.refresh()
 		return m, m.notifyCmd(notify.Event{Title: "Aegis", Body: "Error: " + truncate(msg.err.Error(), 100)})
@@ -1660,19 +1826,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.fetchStatusInfo(), statusTickCmd())
 
 	case sessionsLoadedMsg:
+		if !m.awaitingPicker(dialogSessionPicker) {
+			if msg.err != nil {
+				t, cmd := newToastCmd("sessions: "+msg.err.Error(), toastError)
+				m.activeToast = t
+				return m, cmd
+			}
+			return m, nil
+		}
 		if msg.err != nil {
-			t, cmd := newToastCmd("sessions: "+msg.err.Error(), toastError)
-			m.activeToast = t
-			return m, cmd
+			return m, m.dialog.setNotice("sessions: " + msg.err.Error())
 		}
 		if len(msg.items) == 0 {
-			t, cmd := newToastCmd("no sessions to switch to", toastInfo)
-			m.activeToast = t
-			return m, cmd
+			return m, m.dialog.setNotice("no sessions to switch to")
 		}
-		picker := newSessionPicker(m.width, m.height, msg.items, m.cfg.SessionID)
-		m.dialog = &picker
-		return m, nil
+		return m, m.dialog.setItems(sessionPickerItems(msg.items), sessionPickerH(m.height, len(msg.items)))
 
 	case sessionSwitchedMsg:
 		if msg.err != nil {
@@ -1685,19 +1853,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case backtrackTargetsMsg:
+		if !m.awaitingPicker(dialogBacktrackPicker) {
+			if msg.err != nil {
+				t, cmd := newToastCmd("backtrack: "+msg.err.Error(), toastError)
+				m.activeToast = t
+				return m, cmd
+			}
+			return m, nil
+		}
 		if msg.err != nil {
-			t, cmd := newToastCmd("backtrack: "+msg.err.Error(), toastError)
-			m.activeToast = t
-			return m, cmd
+			return m, m.dialog.setNotice("backtrack: " + msg.err.Error())
 		}
 		if len(msg.items) == 0 {
-			t, cmd := newToastCmd("no checkpoints yet — send a message first", toastInfo)
-			m.activeToast = t
-			return m, cmd
+			return m, m.dialog.setNotice("no checkpoints yet — send a message first")
 		}
-		picker := newBacktrackPicker(m.width, m.height, msg.items)
-		m.dialog = &picker
-		return m, nil
+		return m, m.dialog.setItems(backtrackPickerItems(msg.items), backtrackPickerH(m.height, len(msg.items)))
 
 	case forkedMsg:
 		if msg.err != nil {
@@ -1977,8 +2147,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Message != "" {
 			m.appendUser(msg.Message, nil)
-			m.streaming = true
-			m.status = "thinking…"
+			m.beginStream()
 			m.followBottom = true
 			m.refresh()
 			return m, tea.Batch(m.startStream(msg.Message, nil), m.sp.Tick)
@@ -2004,11 +2173,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyViewportHeight()
 			}
 			m.syncCompletion()
-			// Any non-ESC key while escPending clears the interrupt/backtrack
-			// arm state (the ESC case already returns early and manages
-			// escPending itself) — covers both the streaming double-tap-to-
-			// cancel arm and the not-streaming double-tap-to-backtrack arm
-			// (P22.3).
+			// Any non-ESC key while escPending clears the not-streaming
+			// double-tap-to-backtrack arm state (P22.3) — the ESC case already
+			// returns early and manages escPending itself.
 			if m.escPending {
 				m.escPending = false
 				m.refresh()
@@ -2113,10 +2280,6 @@ func (m *model) fixedH() int {
 	h := 1 + m.ta.Height() + 2 + 1
 	if m.completion.active {
 		h += completionBoxH
-	}
-	if m.approval != nil {
-		// The dialog height varies with its preview and option list (TQ6).
-		h += lipgloss.Height(m.renderApprovalDialog())
 	}
 	if len(m.todoItems) > 0 {
 		h += 1 // todo strip: one line
@@ -2290,18 +2453,28 @@ func (m *model) refresh() {
 		}
 		tail.WriteString(rendered)
 	} else if m.streaming {
-		secs := 0
-		if !m.streamStart.IsZero() {
-			secs = int(time.Since(m.streamStart).Seconds())
+		// P33.4: a flavor phrase describes what the model is doing, which is
+		// only knowable once it has started doing it. Before the first output
+		// the honest line is the wait itself and how long it has run.
+		phrase := statusWaiting
+		if !m.firstTokenAt.IsZero() {
+			cat := catThinking
+			if n := len(m.tools); n > 0 && m.tools[n-1].status == "pending" {
+				cat = categoryFor(m.tools[n-1].name)
+			}
+			phrase = thinkingPhrase(m.animStep, m.humorMode, cat)
 		}
-		cat := catThinking
-		if n := len(m.tools); n > 0 && m.tools[n-1].status == "pending" {
-			cat = categoryFor(m.tools[n-1].name)
-		}
-		phrase := thinkingPhrase(m.animStep, m.humorMode, cat)
-		hint := formatStreamHint(secs, m.inputTokens, 0) // no live-text bytes here; liveText is empty
+		hint := formatStreamHint(m.streamStats())
 		work := shimmerText("● "+phrase, m.animStep, colTextMuted, colAccent)
 		tail.WriteString(wrap(work+m.th.elapsedDim.Render(hint), w))
+	}
+
+	// P33.2: a steer is echoed the moment it's sent, so the typed text is
+	// visible while the daemon decides whether it lands mid-run or comes back
+	// unconsumed — the same dimmed pending treatment TQ8 gives queued messages.
+	for _, st := range m.pendingSteers {
+		line := m.th.statusDim.Render("⇢ steer ▸ " + truncate(oneLine(st), max(w-12, 16)))
+		tail.WriteString("\n" + wrap(line, w))
 	}
 
 	// TQ8: queued messages render as dimmed pending blocks below the live tail.
@@ -2792,14 +2965,42 @@ func (m *model) applyEvent(ev api.Event) {
 		if m.thinkText.Len() == 0 {
 			m.thinkStart = time.Now()
 		}
+		m.markModelOutput(len(ev.Text))
 		m.thinkText.WriteString(ev.Text)
 
 	case api.KindText:
 		m.flushThinking() // reasoning is done once the answer starts
 		// Buffer text in liveText; flushed through glamour at turn end.
+		m.markModelOutput(len(ev.Text))
 		m.liveText.WriteString(ev.Text)
 
+	case api.KindToolCallStart:
+		// P33.3: the model has named the tool but is still generating its
+		// arguments — frequently the longest phase of a turn on a local
+		// model, and one the shimmer phrase alone used to cover. The card
+		// goes up now and the KindToolCall below fills in the arguments in
+		// place. Only a repeat of a tool_use ID already on screen is dropped:
+		// two starts can legitimately share an empty ID (the OpenAI wire
+		// format can name a call in an earlier delta than it IDs it).
+		if ev.Tool == "" {
+			break
+		}
+		if c := m.pendingTools[ev.ToolID]; ev.ToolID != "" && c != nil {
+			break
+		}
+		m.markModelOutput(0)
+		m.flushThinking()
+		m.flushLiveText() // render any preceding prose before the tool line
+		key := m.toolCardKey(ev.ToolID)
+		call := "\n" + renderToolCardStartCall(m.th, ev.Tool)
+		if blk := m.transcript.AppendBlock(renderToolCardStart(m.th, call, m.animStep)); blk != nil {
+			m.trackPendingTool(key, &toolCard{blk: blk, name: ev.Tool, call: call, awaitingCall: true})
+		}
+
 	case api.KindToolCall:
+		// A daemon that emits no KindToolCallStart at all still leaves the
+		// waiting phase here rather than at the tool's result.
+		m.markModelOutput(0)
 		m.flushThinking()
 		m.flushLiveText() // render any preceding prose before the tool line
 		// P21.2: a tool call gets one addressable card, appended pending and
@@ -2809,18 +3010,13 @@ func (m *model) applyEvent(ev api.Event) {
 		// runs read/network tools concurrently) each own their own card; the
 		// synthetic fallback only matters for an event with no ToolID (older
 		// producers, or hand-built test events).
-		key := ev.ToolID
-		if key == "" {
-			m.pendingToolSeq++
-			key = fmt.Sprintf("#%d", m.pendingToolSeq)
-		}
 		call := "\n" + renderToolCall(m.th, ev.Tool, ev.ToolInput, m.transcript.Width())
-		if blk := m.transcript.AppendBlock(renderToolCardPending(m.th, call, m.animStep)); blk != nil {
-			if m.pendingTools == nil {
-				m.pendingTools = make(map[string]*toolCard)
+		key, reconciled := m.reconcileStartedToolCard(ev, call)
+		if !reconciled {
+			key = m.toolCardKey(ev.ToolID)
+			if blk := m.transcript.AppendBlock(renderToolCardPending(m.th, call, m.animStep)); blk != nil {
+				m.trackPendingTool(key, &toolCard{blk: blk, name: ev.Tool, call: call})
 			}
-			m.pendingTools[key] = &toolCard{blk: blk, name: ev.Tool, call: call}
-			m.pendingToolOrder = append(m.pendingToolOrder, key)
 		}
 		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
 		if len(m.tools) > maxToolHistory {
@@ -2956,19 +3152,24 @@ func (m *model) applyEvent(ev api.Event) {
 		// listening (P25.4a) — the approval dialog is the only visual and
 		// input focus target until it's answered.
 		m.ta.Blur()
-		m.applyViewportHeight() // dialog height varies with the preview (TQ6)
 		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + ev.Tool}
 
 	case api.KindSteer:
 		// A steering instruction was injected mid-run. Flush any partial model
 		// output, show the steer as a user message, then open a new assistant bar
 		// so the continuation renders under its own label.
+		m.resolvePendingSteer(ev.Text)
 		m.flushThinking()
 		m.flushLiveText()
 		sepW := max(m.transcript.Width()-2, 10)
 		m.transcript.Append(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
 		m.transcript.Append(barLabel("You", colUserFg) + "\n" + ev.Text + "\n\n")
 		m.transcript.Append(barLabel("Assistant", colAssistFg) + "\n")
+
+	case api.KindSteerUnconsumed:
+		// The run ended without the steer ever reaching a tool round (P33.2).
+		m.resolvePendingSteer(ev.Text)
+		m.requeueSteer(ev.Text)
 
 	case api.KindGuard:
 		m.flushThinking()
@@ -3062,6 +3263,90 @@ func (m *model) resolveToolCard(ev api.Event) (*toolCard, string) {
 	return nil, ""
 }
 
+// toolCardKey returns the pendingTools key for a tool event: its real
+// tool_use ID, or a synthesized one for an event that carries none (P21.2).
+func (m *model) toolCardKey(toolID string) string {
+	if toolID != "" {
+		return toolID
+	}
+	m.pendingToolSeq++
+	return fmt.Sprintf("#%d", m.pendingToolSeq)
+}
+
+// trackPendingTool registers a freshly-appended card under key.
+func (m *model) trackPendingTool(key string, c *toolCard) {
+	if m.pendingTools == nil {
+		m.pendingTools = make(map[string]*toolCard)
+	}
+	m.pendingTools[key] = c
+	m.pendingToolOrder = append(m.pendingToolOrder, key)
+}
+
+// reconcileStartedToolCard folds a KindToolCall's rendered arguments into the
+// provisional card its KindToolCallStart already put on screen (P33.3),
+// returning the key the card ends up registered under. reconciled is false
+// when there is no such card — a daemon that never emits KindToolCallStart,
+// an adapter whose provider doesn't announce tool calls early, or a start
+// event the SSE buffer dropped — and the caller appends a card as it always
+// has, so nothing here can produce a second card for one call.
+//
+// Identity mirrors resolveToolCard's: an exact tool_use-ID match first, then
+// the oldest still-provisional card of the same tool name. The fallback is
+// load-bearing rather than legacy-only — the OpenAI wire format may name a
+// tool call in an earlier delta than the one carrying its ID, so a start
+// event can be ID-less even when the call that follows it isn't. Both events
+// are emitted in stream order, so the i-th start of a name pairs with the
+// i-th call of it.
+func (m *model) reconcileStartedToolCard(ev api.Event, call string) (string, bool) {
+	card, key := m.startedToolCard(ev)
+	if card == nil {
+		return "", false
+	}
+	card.call = call
+	card.awaitingCall = false
+	m.transcript.SetItemRaw(card.blk, renderToolCardPending(m.th, card.call, m.animStep))
+	if ev.ToolID != "" && ev.ToolID != key {
+		m.rekeyPendingTool(key, ev.ToolID)
+		key = ev.ToolID
+	}
+	return key, true
+}
+
+// startedToolCard finds the still-provisional card belonging to ev and the
+// key it is registered under, or (nil, "").
+func (m *model) startedToolCard(ev api.Event) (*toolCard, string) {
+	if c := m.pendingTools[ev.ToolID]; ev.ToolID != "" && c != nil && c.awaitingCall {
+		return c, ev.ToolID
+	}
+	for _, k := range m.pendingToolOrder {
+		if c := m.pendingTools[k]; c != nil && c.awaitingCall && c.name == ev.Tool {
+			return c, k
+		}
+	}
+	return nil, ""
+}
+
+// rekeyPendingTool re-registers a pending card under newKey without
+// disturbing its position in pendingToolOrder. A card appended at
+// KindToolCallStart is keyed by whatever the start event carried — a
+// synthetic key when the provider hadn't assigned the tool_use ID that early
+// — while the KindToolResult that eventually arrives looks it up by the real
+// ID (P33.3).
+func (m *model) rekeyPendingTool(oldKey, newKey string) {
+	c := m.pendingTools[oldKey]
+	if c == nil {
+		return
+	}
+	delete(m.pendingTools, oldKey)
+	m.pendingTools[newKey] = c
+	for i, k := range m.pendingToolOrder {
+		if k == oldKey {
+			m.pendingToolOrder[i] = newKey
+			break
+		}
+	}
+}
+
 // removePendingTool drops key from both pendingTools and pendingToolOrder.
 // The order slice is small (bounded by maxParallelTools concurrent calls in
 // one round), so a linear scan to remove it is cheap.
@@ -3104,6 +3389,10 @@ func (m *model) resolveStuckToolCards() {
 // working instead of sitting static. A no-op when nothing is pending.
 func (m *model) updatePendingToolCards() {
 	for _, c := range m.pendingTools {
+		if c.awaitingCall {
+			m.transcript.SetItemRaw(c.blk, renderToolCardStart(m.th, c.call, m.animStep))
+			continue
+		}
 		m.transcript.SetItemRaw(c.blk, renderToolCardPending(m.th, c.call, m.animStep))
 	}
 }
@@ -3212,6 +3501,14 @@ func (m model) render() string {
 	}
 
 	base := m.renderChat()
+	if m.approval != nil {
+		// P33.6: the approval prompt used to sit between transcript and input,
+		// shrinking the pane by its own height every time the engine asked —
+		// the loudest layout jump in the normal flow. Compositing it leaves the
+		// transcript's geometry alone; modality is unchanged, since the
+		// composer was already blurred while one is pending (P25.4a).
+		base = renderOverlay(base, m.renderApprovalDialog(), m.width, m.height)
+	}
 	switch {
 	case m.helpOpen:
 		return renderOverlay(base, renderHelpBox(m.keys), m.width, m.height)
@@ -3224,9 +3521,9 @@ func (m model) render() string {
 }
 
 // renderChat renders the normal chat frame: title bar, transcript/sidebar/
-// terminal pane, completion popup, approval dialog, todo strip, and input
-// area. Split out of render() so overlay dialogs can composite over it
-// instead of replacing it (P16.6).
+// terminal pane, completion popup, todo strip, and input area. Split out of
+// render() so overlay dialogs can composite over it instead of replacing it
+// (P16.6).
 func (m model) renderChat() string {
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
@@ -3267,9 +3564,6 @@ func (m model) renderChat() string {
 		popupW := min(m.width-2, 72)
 		popup := lipgloss.NewStyle().PaddingLeft(1).Render(m.completion.view(popupW))
 		parts = append(parts, popup)
-	}
-	if m.approval != nil {
-		parts = append(parts, m.renderApprovalDialog())
 	}
 	if len(m.todoItems) > 0 {
 		parts = append(parts, m.renderTodoStrip())
@@ -3326,7 +3620,11 @@ func (m model) renderSidebar(h int) string {
 	add("")
 
 	if m.streaming && !m.streamStart.IsZero() {
-		section("GENERATING")
+		if m.firstTokenAt.IsZero() {
+			section("WAITING")
+		} else {
+			section("GENERATING")
+		}
 		secs := int(time.Since(m.streamStart).Seconds())
 		add(m.th.elapsedDim.Render(fmt.Sprintf("%ds elapsed", secs)))
 		add("")
@@ -3421,22 +3719,17 @@ func (m model) renderInputArea() string {
 		// P25.4a: the composer is blurred while the dialog is open (no
 		// blinking cursor down here) — spell out where input goes instead of
 		// leaving that to be inferred from the missing cursor alone.
-		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⏸ respond to the approval dialog above")
-	} else if m.streaming && m.escPending {
-		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to stop")
+		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⏸ respond to the approval dialog")
 	} else if !m.streaming && m.escPending {
 		// P22.3: armed by a first ESC press on an already-empty input box;
 		// a second press opens the backtrack picker.
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to backtrack")
 	} else if m.streaming {
-		secs := 0
-		if !m.streamStart.IsZero() {
-			secs = int(time.Since(m.streamStart).Seconds())
-		}
-		hint := ""
-		if secs > 0 {
-			hint = m.th.elapsedDim.Render(fmt.Sprintf(" %ds", secs))
-		}
+		// P33.4: the transcript tail loses its hint the moment live text starts
+		// flowing, so the status bar carries the token/throughput readout for
+		// the whole run — on a local model the rate is the vital sign, and it
+		// is worth least when it disappears at the first token.
+		hint := m.th.elapsedDim.Render(formatStreamHint(m.streamStats()))
 		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, colAccent) + hint
 	} else if m.activeToast != nil {
 		tag, fg, bg := toastTag(m.activeToast.level)

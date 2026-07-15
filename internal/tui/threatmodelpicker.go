@@ -38,7 +38,7 @@ func newThreatModelFrameworkPicker(termW, termH int) listDialog {
 	}
 
 	palW := min(termW-6, 74)
-	palH := min(termH-8, max(len(items)*2+6, 12))
+	palH := dialogListH(termH, len(items), 12)
 
 	return newListDialog(dialogThreatModelPicker, palW, palH, "Select Threat-Modeling Framework", false, items)
 }

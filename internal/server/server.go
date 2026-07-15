@@ -188,8 +188,9 @@ type Server struct {
 	// user has approved with "allow always" during the current daemon lifetime.
 	sessionPermCache sync.Map
 
-	// pendingSteers maps session ID → chan string for mid-run steering.
-	// The channel is written by handleSteer and drained by the engine between tool rounds.
+	// pendingSteers maps session ID → *steerBox for mid-run steering.
+	// The box is written by handleSteer and drained by the engine between tool
+	// rounds, then by handlePostMessage once the run ends.
 	pendingSteers sync.Map
 
 	// sessionSems serializes runs within a session. Each session maps to a
