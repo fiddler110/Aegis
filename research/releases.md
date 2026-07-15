@@ -8,7 +8,65 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-14 — shipped **P31.5** (Tier 2), closing out the P31 CodeQL batch: all
+**Last updated:** 2026-07-15 — shipped **P32.1** (Tier 1): plan mode's shell tool no longer grants
+unconfined host-filesystem reads. `shellTool.CapabilityFor` (`internal/tool/builtin/shell.go`)
+downgrades a narrow allowlist of read-only commands (`cat`, `Get-Content`, `git status/log/diff`,
+…) from `CapExecute` to `CapRead`, which plan mode allows with no prompt — but unlike
+`read_file`/`grep`/`glob`, this downgrade previously applied no path confinement at all, so
+`cat /etc/shadow` or `Get-Content C:\Users\<user>\.ssh\id_rsa` ran unconfined in plan mode,
+contradicting `docs/permissions.md`'s documented `Shell/Execute: Deny` guarantee. Fix:
+`readOnlyShellCommand` (`internal/tool/builtin/shell_readonly.go`) now takes the tool's root and
+runs every non-flag argument (for both the plain allowlist and git pathspecs after `--`) through
+`sandbox.ValidatePath` — the same root-confinement check `read_file`/`grep`/`glob` already use —
+before allowing the `CapRead` downgrade; a command with an absolute or `../`-traversal path
+argument now falls back to `CapExecute` and requires the normal execute approval instead of being
+silently auto-allowed. `CapabilityFor` carries no context, so this uses the tool's
+construction-time root rather than a session-scoped `Workdir` override — a known, accepted
+narrowing given the interface, not a new gap. Writing the Windows test case surfaced a second,
+adjacent bug: `sandbox.ValidatePath` (`internal/sandbox/pathvalidator.go`) treated a Windows
+driveless-rooted path (`/etc/shadow`, `\Windows\System32` — rooted at the current drive per actual
+Windows path resolution, but not `filepath.IsAbs` since it has no volume) as a plain relative path
+and folded it under root via `filepath.Join`, which validated it as safely confined even though the
+real OS would resolve it against the drive root instead — fixed by detecting this shape
+(`isWindowsRootedNoVolume`) and resolving it against `root`'s volume instead of joining, so
+`escapesRoot` catches it like any other absolute escape. This is a general `ValidatePath` fix, so
+it also closes the same gap for any other path-confined tool given a driveless-rooted path on
+Windows, not just shell. Added positive/negative table-driven cases to
+`shell_readonly_test.go` (OS-conditional for the Windows-drive-letter cases, since CI's Linux/macOS
+runners don't treat backslash paths as absolute) and `TestValidatePathWindowsRootedNoVolumeEscape`
+to `sandbox_test.go`. Verified with `go build ./...`, `go vet ./...`, and `go test ./...` (full
+suite, all packages green).
+
+**Previously, same day:** shipped **P30.4-P30.8** (Tier 2), closing out the Tier 2 docs-drift
+batch and leaving the roadmap with zero open items. **P30.4:** six `docs/*.md` files
+(`README.md`, `cli-reference.md`, `configuration.md`, `permissions.md`, `tools-reference.md`,
+`installation.md`) linked to `security.md`, which was renamed to `security_scan.md` in an earlier
+commit — repointed all six links (nine total link sites across those files, including two DAST/
+network-recon anchors and two YAML-comment references in configuration.md's `security:` block).
+**P30.5:** documented four fully-implemented but previously-undocumented CLI commands in
+cli-reference.md — `aegis doctor` (preflight self-diagnostic; added its own section with the full
+check list), `aegis trust` (P27.1 workspace-trust review/accept/revoke), `aegis cron list` (audit
+view over persisted cron jobs, flagging `auto_approve`), and `aegis config update` (added as a
+`### aegis config update` subsection under the existing `aegis config` heading). **P30.6:**
+documented two fully-implemented but previously-undocumented TUI slash commands in tui-guide.md —
+`/fork [n]` (Navigation & Sessions table) and `/notify <off|bell|desktop|both>` (Configuration &
+Setup table). **P30.7:** three smaller doc-drift fixes — added the missing `cron_history` tool
+entry to tools-reference.md's Scheduling section; added the missing `*(deferred)*` tag to
+`diagnostics` and `references` in the LSP tools list (all seven LSP tools are deferred per
+`internal/tool/builtin/builtin.go`'s `LSPTools(...)` call, confirmed against source before fixing);
+added `provider.zero_tool_nudge` to configuration.md's exhaustive `provider:` YAML reference block.
+**P30.8:** rewrote `internal/server/webui.go`'s `handleWebUI` doc comment, which still described the
+web UI as covering only "the core chat loop" and pointed at research/roadmap.md's P15 track as an
+open gap — P15 (persona/mode switching, cost/token display, checkpoints/rewind, security scanning,
+skills, memory management) shipped and closed out earlier; while fixing this, found and fixed the
+identical stale claim in docs/cli-reference.md's `aegis ui` section (same "current scope... not yet
+started" wording), since leaving one fixed and the other stale would have been inconsistent. No
+source-behavior changes — P30.8's `internal/server/webui.go` edit is a comment-only change, verified
+with `go build ./...`. Docs-only otherwise; no tests apply. See roadmap.md — the roadmap now has
+zero open items; next session should either pick a Tier 4 parked item only on a concrete trigger, or
+run a fresh audit pass to find the next batch.
+
+**Previously, same day:** shipped **P31.5** (Tier 2), closing out the P31 CodeQL batch: all
 19 non-P31.2 `go/path-injection` alerts (#8-27 minus #4) were re-verified against source in the
 P31.4 pass as one of two safe shapes (directory-enumeration re-join, or
 `filepath.Join(validated-root, fixed-or-sanitized-suffix)`), so this session was pure suppression

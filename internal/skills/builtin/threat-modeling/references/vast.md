@@ -51,9 +51,27 @@ ask → Operational Threat Model.
    makes that revisit cheap — the next run diffs against it instead of
    starting over, which is exactly the cadence VAST assumes.
 
+## CVSS / CWE / OWASP mapping
+
+VAST itself doesn't mandate a taxonomy, so `3-findings.md`'s mandatory
+CVSS/CWE/OWASP fields (`output-formats.md`) borrow whichever mapping fits
+the model type in play rather than being left empty: an **Application
+Threat Model** borrows the STRIDE mapping (CVSS 4.0 + CWE + OWASP Top
+10:2025 — the same as a STRIDE finding, since the enumeration method used is
+usually STRIDE categories per element anyway); a data-centric **Operational
+Threat Model** borrows the NIST 800-154 mapping (attack vector per data
+location, control/gap per vector). State which one was borrowed alongside
+the "Enumeration method used" line in `2-vast-analysis.md` — a reader needs
+to know which standard the mapping is drawing from, since VAST doesn't fix
+one itself.
+
 ## Skeleton
 
-The exact document structure — verbatim skeleton, fill-in table shapes,
-fixed value lists, and inline self-check comments — lives in
+The exact structure of this framework's own analysis file,
+`2-vast-analysis.md` — verbatim skeleton, fill-in table shapes, fixed value
+lists, and inline self-check comments — lives in
 `references/skeletons/skeleton-vast.md`. Read it before writing anything;
-do not improvise the structure from the process description above.
+do not improvise the structure from the process description above. The
+other six files in the run's output directory (architecture, DFD, findings,
+assessment, inventory) are framework-agnostic and covered by
+`references/output-formats.md` instead.

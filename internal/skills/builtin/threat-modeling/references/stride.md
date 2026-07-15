@@ -55,10 +55,22 @@ authorization failures still belong under E, not A.
 4. **Map a mitigation to every identified threat.** A threat with no
    mitigation is an open finding, not a paperwork gap — flag it as such.
 
+## Findings mapping
+
+STRIDE threats are concrete technical vulnerabilities, so CVSS 4.0, CWE, and
+OWASP Top 10:2025 apply directly to almost every finding derived from them —
+treat STRIDE findings in `3-findings.md` the same way `output-formats.md`'s
+per-framework applicability notes describe for NIST 800-154, with no
+`N/A` fallback expected except in genuinely unusual cases.
+
 ## Skeleton
 
-The exact document structure — verbatim skeleton, fill-in table shapes,
-fixed value lists, and inline self-check comments — lives in
+The exact structure of this framework's own analysis file,
+`2-stride-analysis.md` — verbatim skeleton, fill-in table shapes, fixed
+value lists, and inline self-check comments — lives in
 `references/skeletons/skeleton-stride.md`. Read it before writing
 anything; do not improvise the structure from the process description
-above.
+above. The other six files in the run's suite (`0-assessment.md`,
+`0.1-architecture.md`, `1.1-model.mmd`, `1-model.md`, `3-findings.md`,
+`inventory.yaml`) are framework-agnostic and covered by
+`references/output-formats.md` instead.

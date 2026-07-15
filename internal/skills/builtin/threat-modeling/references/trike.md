@@ -27,9 +27,13 @@ Define, explicitly:
 
 ### 2. Implementation model
 
-The data-flow diagram, same mechanics as STRIDE/LINDDUN: components, trust
-boundaries, data flows — but annotated against the permission matrix so each
-flow is traceable to the (actor, asset, action) cell it implements.
+This is the shared `1.1-model.mmd` / `1-model.md` DFD every framework in
+this skill produces (`output-formats.md`) — components, trust boundaries,
+data flows — but for Trike, each flow must also be traceable to the
+(actor, asset, action) cell of the Permission Matrix it implements. The
+Permission Matrix itself has no equivalent in the shared files; it lives
+in `2-trike-analysis.md`, Trike's own analysis file, alongside the Risk
+model below.
 
 ## Risk model — deriving threats from the permission matrix
 
@@ -56,10 +60,23 @@ write `accept` only when recording a decision a named human already made
 owner and reason attributed. A model-authored `accept` defeats the entire
 point of Trike's paper trail.
 
+**CVSS/CWE/OWASP in `3-findings.md`:** a Trike finding's Severity is derived
+from Probability × Impact, not assigned freestanding (the mapping table
+lives in `skeletons/skeleton-trike.md`). Still map CVSS/CWE/OWASP when the
+underlying denied-action-succeeding is a concrete technical weakness (a
+missing authorization check has a real CWE); write
+`CWE: N/A — access-control design gap, not a single CWE` when the threat is
+a broader permission-model issue — e.g. an entire actor class with no
+granular action-level restriction — than one weakness class captures. An
+`accept` decision surfaces in `3-findings.md`'s Threat Coverage Verification
+as `Mitigated (FIND-XX)` citing the owner and reason, never as a bare
+"Accepted Risk" status (`output-formats.md` forbids that status outright).
+
 ## Skeleton
 
-The exact document structure — verbatim skeleton, fill-in table shapes,
-fixed value lists, and inline self-check comments — lives in
+The exact structure of `2-trike-analysis.md` — verbatim skeleton, fill-in
+table shapes, fixed value lists, the Probability×Impact→Severity mapping,
+and inline self-check comments — lives in
 `references/skeletons/skeleton-trike.md`. Read it before writing
 anything; do not improvise the structure from the process description
 above.

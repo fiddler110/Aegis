@@ -2,12 +2,14 @@ package builtin
 
 import (
 	"encoding/json"
+	"runtime"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
 func TestReadOnlyShellCommand(t *testing.T) {
+	root := t.TempDir()
 	cases := []struct {
 		name    string
 		command string
@@ -26,6 +28,7 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"path-qualified binary", "/bin/cat file.txt", true},
 		{"windows exe suffix", "cat.exe file.txt", true},
 		{"leading/trailing whitespace", "  ls -la  ", true},
+		{"relative subdir path", "cat sub/dir/file.txt", true},
 
 		// Bypass attempts (must NOT classify as read-only).
 		{"redirection", "cat f > /etc/x", false},
@@ -40,6 +43,14 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"git paginate override", "git --paginate log", false},
 		{"git exec override", "git --exec=/bin/sh status", false},
 
+		// P32.1: absolute/traversal path arguments must not classify as
+		// read-only, even though the binary itself is on the allowlist —
+		// this is the plan-mode host-filesystem-read bypass.
+		{"absolute path outside root (unix)", "cat /etc/shadow", false},
+		{"parent traversal", "cat ../../../etc/passwd", false},
+		{"traversal with flag", "head -n 5 ../../etc/passwd", false},
+		{"git diff pathspec escape", "git diff HEAD -- ../../../etc/passwd", false},
+
 		// Negative cases: not on the allowlist at all.
 		{"empty command", "", false},
 		{"whitespace only", "   ", false},
@@ -52,7 +63,32 @@ func TestReadOnlyShellCommand(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := readOnlyShellCommand(c.command); got != c.want {
+			if got := readOnlyShellCommand(root, c.command); got != c.want {
+				t.Errorf("readOnlyShellCommand(%q) = %v, want %v", c.command, got, c.want)
+			}
+		})
+	}
+}
+
+// TestReadOnlyShellCommandWindowsPaths covers P32.1's windows-drive-letter
+// case, which filepath.IsAbs only recognizes as absolute on windows itself
+// (on unix/darwin a backslash string is just an opaque relative filename).
+func TestReadOnlyShellCommandWindowsPaths(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-drive-letter absolute paths only apply on windows")
+	}
+	root := t.TempDir()
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"absolute path outside root", `Get-Content C:\Users\x\.ssh\id_rsa`, false},
+		{"powershell absolute path", `Get-ChildItem C:\Windows\System32`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := readOnlyShellCommand(root, c.command); got != c.want {
 				t.Errorf("readOnlyShellCommand(%q) = %v, want %v", c.command, got, c.want)
 			}
 		})

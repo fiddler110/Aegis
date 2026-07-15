@@ -22,7 +22,7 @@ Welcome to the Aegis documentation. These guides cover every aspect of using, co
 | [MCP Trust Boundary](mcp-trust-boundary.md) | What Aegis assumes about external MCP server output, provenance marking, opt-in injection scanning |
 | [Multi-Agent & Background Tasks](multi-agent.md) | Swarm, sub-agents, parallel sessions, background tasks, cron scheduling |
 | [Multi-Agent Debate](debate.md) | Adversarial claim review: domains, file-grounding, persona overrides, all four entry points |
-| [Security Features](security.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual security policies |
+| [Security Features](security_scan.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual security policies |
 
 ## Quick Navigation
 

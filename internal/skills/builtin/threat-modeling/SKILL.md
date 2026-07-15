@@ -1,6 +1,6 @@
 ---
 name: threat-modeling
-description: Use when asked to threat model a system, application, feature, or data flow — identify assets, trust boundaries, threats, and mitigations using a structured framework (STRIDE, LINDDUN, PASTA, Trike, VAST, NIST 800-154) — or to update an existing threat model against the current code. Triggers on "threat model", "threat modeling", "STRIDE analysis", "privacy threat model", "risk-centric threat model", "update/refresh the threat model", "what changed since the last threat model", "what could go wrong with this design security-wise".
+description: Use when asked to threat model a system, application, feature, or data flow — identify assets, trust boundaries, threats, and mitigations using a structured framework (STRIDE, LINDDUN, PASTA, Trike, VAST, NIST 800-154) — or to update an existing threat model against the current code. Produces a suite of report files (architecture, DFD, framework analysis, findings with CVSS/CWE/OWASP, executive assessment) in a timestamped directory. Triggers on "threat model", "threat modeling", "STRIDE analysis", "privacy threat model", "risk-centric threat model", "update/refresh the threat model", "what changed since the last threat model", "what could go wrong with this design security-wise".
 ---
 
 # Threat Modeling Skill
@@ -10,8 +10,10 @@ produces a technically-complete document that answers a question nobody
 asked (a STRIDE pass on a system whose actual risk is regulatory PII
 exposure, or a PASTA business-impact exercise for a five-person team that
 just needed a per-endpoint threat/mitigation list). This skill's job is to
-get the framework choice right *before* any modeling starts, then keep the
-model grounded in the real system rather than an assumed one.
+get the framework choice right *before* any modeling starts, keep the model
+grounded in the real system rather than an assumed one, and deliver it as a
+suite of files a reader can navigate — not one document they have to
+scroll through to find the one finding that matters to them.
 
 ## 1. Pick the framework
 
@@ -44,18 +46,21 @@ Once chosen, read the matching reference file before doing anything else:
 `references/trike.md`, `references/vast.md`, or
 `references/nist-800-154.md`. Each one has the framework's process steps
 and points onward to its **skeleton** — the verbatim, fill-in-the-blanks
-document template for that framework, under `references/skeletons/`. §4
-below covers when to load the skeleton and how to use it; the point for
-now is: the skeleton, not this prose, is what fixes the actual document
-structure, so don't improvise one from the process description alone.
+template for its `2-<framework>-analysis.md` file, under
+`references/skeletons/`. §4 below covers when to load which reference and
+how the whole seven-file suite fits together; the point for now is: the
+skeletons, not this prose, fix the actual document structure, so don't
+improvise one from a process description alone.
 
 | Reference file | Read when | Contains |
 |---|---|---|
 | `references/stride.md` / `linddun.md` / `pasta.md` / `trike.md` / `vast.md` / `nist-800-154.md` | Framework chosen, before exploring the workspace | That framework's process/stages and category definitions |
+| `references/output-formats.md` | Before writing any of the five framework-agnostic files (`0-assessment.md`, `0.1-architecture.md`, `1.1-model.mmd`, `1-model.md`, `3-findings.md`) | Verbatim templates, mandatory fields (tier, CVSS 4.0, CWE, OWASP), the Threat Coverage Verification loop, and per-file post-write checks |
+| `references/diagram-conventions.md` | Before writing `1.1-model.mmd` or any diagram in `0.1-architecture.md` | Mermaid shapes, fixed color palette, DFD direction, pre-render checklist |
+| `references/skeletons/skeleton-<framework>.md` | **Before writing `2-<framework>-analysis.md` (§4.2), and again before filling each of its sections** | Verbatim document structure for the framework's own analysis file, fixed value lists, inline `<!-- ⛔ POST-*-CHECK -->` self-verification comments |
 | `references/companion-techniques.md` | After the framework pass, or if attacker realism/backlog framing was asked for | Technology sweep, Attack Trees, MITRE ATT&CK mapping, Evil User Stories |
-| `references/skeletons/skeleton-<framework>.md` | **Before writing the skeleton (§4.1), and again before filling each section (§4.2)** | Verbatim document structure, fixed value lists (prerequisite/severity/etc.), inline `<!-- ⛔ POST-*-CHECK -->` self-verification comments |
-| `references/skeletons/skeleton-inventory.md` | Writing the `.inventory.yaml` sidecar (§6) | Exact field names and structure for the sidecar |
-| `references/verification-and-updates.md` | Before finishing (§6) | Final self-check, sidecar rules, update workflow |
+| `references/skeletons/skeleton-inventory.md` | Writing `inventory.yaml` (§6) | Exact field names and structure for the sidecar |
+| `references/verification-and-updates.md` | Before finishing (§6) | Final self-check, sidecar rules, update workflow, sub-agent governance |
 
 ## 2. Explore the workspace before modeling
 
@@ -74,7 +79,8 @@ Never model an assumed architecture. Before applying any framework:
    doesn't exist; delete it rather than modeling an invented abstraction
    (`ConfigurationStore`, `DataLayer`) that no code implements. Name
    components after their anchors, not synonyms of them, so a re-run on the
-   same code produces the same names.
+   same code produces the same names, and so `inventory.yaml`'s ids stay
+   stable across runs.
 4. **Classify the deployment, and let it bound severity.** From the same
    evidence (listeners and bind addresses, ingress/proxy config, ports
    mappings, service manifests) classify the system: `internet-facing`,
@@ -82,8 +88,10 @@ Never model an assumed architecture. Before applying any framework:
    `local-desktop` (no listener at all). The classification is binding: a
    localhost-only daemon has no "unauthenticated remote attacker" threats —
    the floor prerequisite for every threat is local process access, and
-   severity must reflect that. State the classification in the document so
-   the reader can check the floor was applied.
+   severity must reflect that. Record it, with evidence, in
+   `0.1-architecture.md`'s Component Exposure Table — that table is the
+   single source of truth every later file's prerequisite/tier must respect
+   (`output-formats.md`).
 5. Only then apply the chosen framework's process against this real map —
    not a generic web-app shape.
 
@@ -91,12 +99,13 @@ Never model an assumed architecture. Before applying any framework:
 
 Never flag a security gap without confirming it exists; many platforms have
 secure defaults, and a confident finding about a gap that isn't there costs
-the whole document its credibility. Before writing any "missing X" threat:
+the whole suite its credibility. Before writing any "missing X" threat:
 
 - **Inventory the security infrastructure first.** Auth middleware, TLS
   termination, secret managers, permission gates, sandboxing, service-mesh
   mTLS, policy engines — if such a component exists, its protection is
-  likely active unless explicitly disabled.
+  likely active unless explicitly disabled. This inventory lands directly
+  in `0.1-architecture.md`'s Security Infrastructure Inventory table.
 - **Distinguish three configuration states:** *explicitly disabled*
   (`enabled: false` — flag it), *not configured* (check the platform's
   default before assuming insecure; Kubernetes RBAC and service-mesh mTLS
@@ -105,68 +114,96 @@ the whole document its credibility. Before writing any "missing X" threat:
 - **Cite evidence per threat.** Every threat entry names the file, config,
   or code path that makes it real — for a "missing security" claim, that
   means evidence the default is actually insecure, not just the absence of
-  a setting. A threat you cannot evidence goes in a "needs verification"
-  note, not the threat table.
+  a setting. A threat you cannot evidence goes in `0-assessment.md`'s
+  "Needs Verification" table, not the threat table.
 
-## 4. Apply the framework, writing the document as you go
+## 4. Build the seven-file suite, writing as you go
 
-Follow the loaded reference file's process, and its skeleton's structure,
-exactly. Do not stop after a partial pass — populate every category/stage/
-cell the framework defines, even ones with no findings ("none identified"
-is a valid, complete entry; a missing cell is not).
+Every run produces the same seven files, in the same directory, regardless
+of framework — the file list, naming, and directory convention are in
+`references/output-formats.md`; read it now if you haven't. Do not stop
+after a partial pass — populate every category/stage/cell the chosen
+framework defines, even ones with no findings ("none identified" is a valid,
+complete entry; a missing cell is not).
 
 **Write incrementally, never all-at-once at the end.** A threat model is a
-long task; holding the whole analysis in conversation until one final
-`write_file` means an interrupted run — context exhaustion on a local model,
-a step limit, a crash — loses everything. Instead:
+long task; holding the whole analysis in conversation until one final batch
+of writes means an interrupted run — context exhaustion on a local model, a
+step limit, a crash — loses everything. Instead:
 
-1. **Skeleton first.** Read `references/skeletons/skeleton-<framework>.md`
-   and copy its "Skeleton (initial, before any analysis)" block **verbatim**
-   via `write_file` — every heading in the order shown, each body replaced
-   with `<!-- PENDING -->` — at **`.aegis/security/threat-model/`** — the
-   same directory family the other persisted security reports use — named
-   `<framework>-<target>-<YYYY-MM-DD-HHMM>.md`. The `<target>` slug is
-   **mandatory, never omitted**: use the scoped feature/system name when the
-   model covers one (`webui`, `auth-service`), or the repo/workspace
-   directory name when it covers the whole project (`aegis`) — a reader
-   scanning the directory listing must be able to tell what each file
-   modeled without opening it. The `<YYYY-MM-DD-HHMM>` timestamp (local
-   time, 24h, dash-separated — e.g. `stride-aegis-2026-07-08-1432.md`) is
-   what keeps two same-day runs from colliding or overwriting each other; a
-   date alone is not enough since a full model plus an update can both land
-   on one day.
-2. **Fill section by section, copying the skeleton's table shape exactly.**
-   Work through the framework one component/stage at a time, and the
-   moment a section's analysis is complete, edit the document to replace
-   that section's `<!-- PENDING -->` marker with the filled content shown
-   under that same heading in the skeleton file — same columns, same
-   order, same fixed value lists (prerequisite, severity, deployment
-   classification, and whatever else that skeleton pins down); do not
-   rename a column or substitute a free-text value for a fixed one. Run
-   the skeleton's inline `<!-- ⛔ POST-*-CHECK -->` comments right after
-   writing each table — they travel with the copied content and are
-   invisible once rendered, but skipping them is how column drift and
-   missing cells happen. Do not batch several finished sections in memory
-   — the document on disk is the working state, and once a section is
-   written you no longer need to keep its details in the conversation
-   (this is what lets a long model survive context compaction).
-3. **Resume, don't restart.** If the target document already exists and
-   still contains `<!-- PENDING -->` markers, a previous run was
-   interrupted: re-read the document, keep every completed section, and
-   continue from the first pending one. Only the final §5 review round
-   re-examines completed sections.
+### 4.1 Skeleton stubs for all seven files
 
-Never delete or overwrite a *prior dated report* in that directory — an
-update is a new dated file, and the old one is the baseline it was diffed
-against (editing today's own in-progress file is of course the normal flow
-above).
+Create the directory
+`.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>/` and
+`write_file` a stub for **all seven files** before filling any of them:
+`0-assessment.md`, `0.1-architecture.md`, `1.1-model.mmd`, `1-model.md`,
+`2-<framework>-analysis.md`, `3-findings.md`, `inventory.yaml` — each with
+its top-level headings from `output-formats.md` (or
+`skeletons/skeleton-<framework>.md` for the framework-analysis file) and
+`<!-- PENDING -->` under every section.
+
+The `<target>` slug is **mandatory, never omitted**: use the scoped
+feature/system name when the model covers one (`webui`, `auth-service`), or
+the repo/workspace directory name when it covers the whole project
+(`aegis`) — a reader scanning `.aegis/security/threat-model/` must be able
+to tell what each directory modeled without opening it. The
+`<YYYY-MM-DD-HHMM>` timestamp (local time, 24h, dash-separated — e.g.
+`stride-aegis-2026-07-08-1432`) is what keeps two same-day runs from
+colliding; a date alone isn't enough since a full run plus an update can
+both land on one day.
+
+### 4.2 Fill in dependency order
+
+Files depend on each other — fill them in this order, replacing that file's
+`<!-- PENDING -->` markers with real content section by section as each
+section's analysis completes, per that file's template in
+`output-formats.md` (or the framework skeleton for step 3 below):
+
+1. **`0.1-architecture.md`** first — everything downstream cites its
+   component names, anchors, and Component Exposure Table.
+2. **`1.1-model.mmd` then `1-model.md`** — the diagram and its tables reuse
+   `0.1-architecture.md`'s exact component names (`diagram-conventions.md`
+   for the Mermaid conventions).
+3. **`2-<framework>-analysis.md`** — read
+   `references/skeletons/skeleton-<framework>.md` first, and copy its
+   structure exactly, same columns, same order, same fixed value lists
+   (prerequisite, tier, severity, deployment classification). Run the
+   skeleton's inline `<!-- ⛔ POST-*-CHECK -->` comments right after writing
+   each table — they travel with the copied content and are invisible once
+   rendered, but skipping them is how column drift and missing cells
+   happen.
+4. **`3-findings.md`** — every threat with a non-empty mitigation column in
+   step 3 becomes a finding here, with tier, CVSS 4.0, CWE, and OWASP per
+   `output-formats.md`'s mandatory-fields table (and its per-framework
+   applicability notes — not every framework's threats map to CVSS/CWE the
+   same way). Run the Threat Coverage Verification loop before moving on.
+5. **`0-assessment.md`** last — its counts and links depend on every file
+   above being complete.
+6. **`inventory.yaml`** — the sidecar, per
+   `references/skeletons/skeleton-inventory.md`.
+
+Do not batch several finished sections in memory — the files on disk are
+the working state, and once a section is written you no longer need to keep
+its details in the conversation (this is what lets a long run survive
+context compaction).
+
+**Resume, don't restart.** If the target directory already exists and any
+file still contains `<!-- PENDING -->` markers, a previous run was
+interrupted: re-read what's there, keep every completed section, and
+continue from the first pending one, in the dependency order above. Only
+the final §5 review round re-examines completed sections.
+
+Never delete or overwrite a *prior dated run directory* — an update is a new
+directory, and the old one is the baseline it was diffed against (editing
+today's own in-progress directory is, of course, the normal flow above).
 
 Three cross-framework rules while filling the template:
 
 - **Every threat states its prerequisite** (what access the attacker
   already needs: none / authenticated user / internal network / local
   process / host compromise), and no prerequisite may sit below the
-  deployment classification's floor from §2.
+  deployment classification's floor from §2, or the derived tier
+  (`output-formats.md`) will be wrong.
 - **Risk acceptance is not yours to make.** Never mark a threat "accepted
   risk" on your own authority — an unmitigated threat is an open finding
   with a proposed mitigation, and accepting it is the owning team's
@@ -183,55 +220,63 @@ on top of the chosen primary framework, not replacements for it.
 
 ## 5. Final review round — consistency, then debate (P12) when enabled
 
-After every section is filled (no `<!-- PENDING -->` markers remain),
-re-read the **complete document from disk** and review it as a whole —
-the sections were written one at a time, so this is where seams show:
+After every file's `<!-- PENDING -->` markers are gone, re-read the
+**complete suite from disk** and review it as a whole — the files were
+written one at a time, each depending on the last, so this is where seams
+show:
 
-- Component names and threat IDs are consistent across sections and match
-  the inventory sidecar; no section refers to a component another section
-  renamed or dropped.
-- Every threat's prerequisite still respects the deployment
-  classification's floor from §2, and severities are calibrated *against
-  each other*, not just individually plausible.
-- No two sections contradict each other about the same control or data
-  flow, and every threat still cites its evidence (§3).
+- Component names and threat IDs are consistent across all seven files; no
+  file refers to a component another file renamed or dropped.
+- Every threat's prerequisite still respects the deployment classification's
+  floor from §2, and its derived tier is consistent with its CVSS vector's
+  `AV`/`PR` values (a `Local Process` prerequisite cannot carry `AV:N`).
+- Every threat in `2-<framework>-analysis.md` appears exactly once in
+  `3-findings.md`'s Threat Coverage Verification table.
+- No two files contradict each other about the same control or data flow.
 
-Fix what fails by editing the document in place.
+Fix what fails by editing the files in place — the full checklist is
+`references/verification-and-updates.md`'s "Final self-check".
 
 Then, if your system prompt's "Debate mode (P12)" section marks threat
 modeling enabled, route the **contested entries** — high-severity threats
 and any whose severity or mitigation is genuinely arguable — through the
 `agent` tool's `mode:"debate"`, with `claim` set to the threat description,
 severity, and proposed mitigation. Patch the arbiter's verdict back into
-the document: adjust severity/mitigation per a REVISE verdict, drop the
-entry per a REJECT verdict, keep it as-is per UPHOLD. Skip clear-cut,
-uncontroversial entries. Debating at the end, over the assembled document,
-both keeps a long run from stalling mid-analysis and lets the debaters see
-each threat in the context of the whole model rather than in isolation.
+`2-<framework>-analysis.md` and `3-findings.md`: adjust severity/mitigation
+per a REVISE verdict, drop the entry per a REJECT verdict, keep it as-is per
+UPHOLD. Skip clear-cut, uncontroversial entries. Debating at the end, over
+the assembled suite, both keeps a long run from stalling mid-analysis and
+lets the debaters see each threat in the context of the whole model rather
+than in isolation.
 
 ## 6. Self-check, inventory, and updates
 
 Read `references/verification-and-updates.md` before finishing. It covers
-three things: the **final self-check** (coverage, prerequisite floors,
-anchors, evidence — run it and fix what fails before reporting), the
-**inventory sidecar** (a small YAML file written next to the document with
-stable component/threat IDs, so a future run can diff against this one),
-and the **update workflow** for when the ask is "update/refresh the threat
-model" or "what changed since last time" — verify each baseline threat
-against the current code and produce a standalone updated document with a
-changes-since section, rather than modeling from scratch or trusting the
-old document's claims.
+four things: **sub-agent governance** (if any exploration or verification
+was delegated to the `agent` tool, only the top-level run writes report
+files — a sub-agent is a narrow, read-only helper, never an independent
+producer of `0.1-architecture.md` or any other suite file), the **inventory
+sidecar** (`inventory.yaml`, with stable component/threat IDs so a future
+run can diff against this one), the **update workflow** for when the ask is
+"update/refresh the threat model" or "what changed since last time" (locate
+the baseline directory, verify each baseline threat against the current
+code, produce a standalone new directory with a Changes Since Baseline
+section, rather than modeling from scratch or trusting the old files'
+claims), and the **final self-check** (coverage, prerequisite/tier
+consistency, anchors, evidence, cross-file agreement — run it and fix what
+fails before reporting).
 
 ## 7. Report
 
-The document in `.aegis/security/threat-model/` (built incrementally per
+The directory in `.aegis/security/threat-model/` (built incrementally per
 §4) is the deliverable — a chat-only summary is not a complete threat
-model, since the whole point is a document mitigations can be tracked
-against. State which framework was used (and why, if inferred rather than
-requested) and the deployment classification at the top of the document.
-The task is done only when no `<!-- PENDING -->` marker remains, the §5
-review round has run over the assembled document, the self-check passes,
-and the inventory sidecar exists. If the run must stop early anyway (step
-limit, context pressure), say plainly which sections are complete on disk
-and that a follow-up "continue the threat model" run will resume from the
-pending markers.
+model, since the whole point is a navigable suite mitigations can be
+tracked against. State which framework was used (and why, if inferred
+rather than requested) and the deployment classification up front — both
+also belong in `0-assessment.md`'s Executive Summary. The task is done only
+when no `<!-- PENDING -->` marker remains in any of the seven files, the §5
+review round has run over the assembled suite, the final self-check passes,
+and `inventory.yaml` exists and agrees with the documents. If the run must
+stop early anyway (step limit, context pressure), say plainly which files
+are complete on disk and that a follow-up "continue the threat model" run
+will resume from the pending markers, in the dependency order from §4.2.

@@ -199,7 +199,7 @@ security:
 
 An empty list means unrestricted (the default).
 
-**Important scope note:** These policies apply to tool-capability network calls (`web_fetch`, `web_search`, MCP server connections). They do **not** restrict what the `shell` tool can do via `curl`, `wget`, etc. For enforced egress isolation, use the [container sandbox](security.md#sandboxed-execution) with `network: false`.
+**Important scope note:** These policies apply to tool-capability network calls (`web_fetch`, `web_search`, MCP server connections). They do **not** restrict what the `shell` tool can do via `curl`, `wget`, etc. For enforced egress isolation, use the [container sandbox](security_scan.md#sandboxed-execution) with `network: false`.
 
 ---
 

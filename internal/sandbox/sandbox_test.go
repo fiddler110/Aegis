@@ -58,6 +58,23 @@ func TestValidatePathEmpty(t *testing.T) {
 	}
 }
 
+func TestValidatePathWindowsRootedNoVolumeEscape(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("drive-relative rooted paths only apply on Windows")
+	}
+	root := t.TempDir()
+	// A driveless-rooted path ("/etc/shadow") is not filepath.IsAbs on
+	// Windows, but the OS resolves it against the current drive, not root —
+	// so it must be rejected as an escape (P32.1), not silently folded into
+	// a path under root the way a plain relative path would be.
+	if _, err := ValidatePath(root, "/etc/shadow"); err == nil {
+		t.Error("expected error for driveless-rooted path escape")
+	}
+	if _, err := ValidatePath(root, `\Windows\System32`); err == nil {
+		t.Error("expected error for driveless-rooted backslash path escape")
+	}
+}
+
 func TestValidatePathWindowsCaseInsensitive(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("case-insensitive root matching only applies on Windows")

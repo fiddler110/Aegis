@@ -118,6 +118,12 @@ provider:
   # 0 uses the built-in default (5).
   loop_threshold: 0
 
+  # Bounds the corrective-nudge retries fired when a turn that plainly reads
+  # as actionable produces zero tool calls (a model dumping its reasoning as
+  # prose instead of calling a tool). 0 uses the built-in default (1 retry);
+  # negative disables the nudge entirely.
+  zero_tool_nudge: 0
+
   # Extra HTTP headers on every request to the provider. Useful for gateway auth.
   headers:
     X-Gateway-Token: "your-token"
@@ -560,7 +566,7 @@ security:
 
   # Per-tool overrides, keyed by scanner name (semgrep, trivy, gitleaks).
   # image must be digest-pinned (image@sha256:...) — Aegis ships no built-in
-  # image pin; see docs/security.md for how to obtain and verify one.
+  # image pin; see docs/security_scan.md for how to obtain and verify one.
   tools: {}
     # trivy:
     #   method: auto
@@ -576,7 +582,7 @@ security:
   # whatever `wsl --set-default` currently points at. Empty (default) uses
   # WSL's own default-distro selection. Windows-only; a security-tooling
   # distro like Kali is recommended for red-team/recon work — see
-  # docs/security.md.
+  # docs/security_scan.md.
   wsl_distro: ""
 
   # Hard authorization gate for the dast_scan tool (P11.7), enforced inside
