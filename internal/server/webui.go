@@ -48,7 +48,7 @@ func mustSubFS(f embed.FS, dir string) fs.FS {
 // output (internal/server/webui/dist/) is embedded here — see that
 // directory and research/roadmap.md for the rest of the P15 breakdown
 // before extending this file ad hoc.
-func (s *Server) handleWebUI(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleWebUI(w http.ResponseWriter, r *http.Request) {
 	raw, err := fs.ReadFile(webUIAssets, "index.html")
 	if err != nil {
 		http.Error(w, "web UI not available", http.StatusInternalServerError)
@@ -76,12 +76,16 @@ func (s *Server) handleWebUI(w http.ResponseWriter, _ *http.Request) {
 	h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
 	// HttpOnly + SameSite=Strict double-submit CSRF cookie (FIND-01/P24.1):
 	// see uiCSRFCookieName's doc comment in auth.go for the full rationale.
+	// Secure is conditional on the request having arrived over TLS (P31.3) —
+	// the default loopback-only deployment is plaintext HTTP, where Secure
+	// would make the browser silently drop the cookie.
 	http.SetCookie(w, &http.Cookie{
 		Name:     uiCSRFCookieName,
 		Value:    csrf,
 		Path:     "/",
 		MaxAge:   int(pageTokenTTL.Seconds()),
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 	})
 	_, _ = w.Write([]byte(page))
