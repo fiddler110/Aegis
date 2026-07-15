@@ -307,6 +307,82 @@ func TestWebUICSRFCookieSecureFlag(t *testing.T) {
 	}
 }
 
+// TestWebUICSRFCookieSecureFlagTrustProxyHeaders covers P32.10: with
+// TrustProxyHeaders opted in, a plaintext request carrying
+// X-Forwarded-Proto: https (as a reverse proxy that terminates TLS itself
+// would forward) must still get Secure on the CSRF cookie. Without that
+// flag — the default — the same spoofed header on a direct plaintext
+// request must be ignored, since honoring it unconditionally would let any
+// caller that can reach the daemon directly fake a secure context.
+func TestWebUICSRFCookieSecureFlagTrustProxyHeaders(t *testing.T) {
+	newServer := func(trustProxyHeaders bool) *Server {
+		store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { store.Close() })
+		cfg := &config.Config{
+			Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+			Permission: config.PermissionConfig{Mode: "plan"},
+			Server:     config.ServerConfig{TrustProxyHeaders: trustProxyHeaders},
+		}
+		srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+		srv.authToken = "secret-token"
+		return srv
+	}
+
+	getWithForwardedProto := func(srv *Server) *http.Response {
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/ui", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Forwarded-Proto", "https")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	t.Run("trusted proxy header sets Secure", func(t *testing.T) {
+		srv := newServer(true)
+		resp := getWithForwardedProto(srv)
+		defer resp.Body.Close()
+		found := false
+		for _, c := range resp.Cookies() {
+			if c.Name == uiCSRFCookieName {
+				found = true
+				if !c.Secure {
+					t.Error("expected Secure=true when TrustProxyHeaders is set and X-Forwarded-Proto: https is present")
+				}
+			}
+		}
+		if !found {
+			t.Fatal("response missing the CSRF cookie")
+		}
+	})
+
+	t.Run("spoofed header ignored when TrustProxyHeaders is off", func(t *testing.T) {
+		srv := newServer(false)
+		resp := getWithForwardedProto(srv)
+		defer resp.Body.Close()
+		found := false
+		for _, c := range resp.Cookies() {
+			if c.Name == uiCSRFCookieName {
+				found = true
+				if c.Secure {
+					t.Error("expected Secure=false: TrustProxyHeaders is off, so a spoofed X-Forwarded-Proto must not set Secure")
+				}
+			}
+		}
+		if !found {
+			t.Fatal("response missing the CSRF cookie")
+		}
+	})
+}
+
 func TestWebUIAssetsServedWithLongCache(t *testing.T) {
 	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {

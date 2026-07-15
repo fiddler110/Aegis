@@ -507,6 +507,22 @@ type ServerConfig struct {
 	// filesystem oracle far beyond its own project.
 	SessionWorkdirAllowlist []string `koanf:"session_workdir_allowlist"`
 
+	// TrustProxyHeaders must be explicitly set to make the daemon honor
+	// X-Forwarded-Proto (and, for now, only that header — X-Forwarded-For and
+	// other forwarded headers are out of scope) from any client able to reach
+	// it (P32.10). This exists for operators who run the daemon behind a
+	// reverse proxy that terminates TLS itself and forwards plaintext to the
+	// loopback daemon: on that backend hop r.TLS is nil even though the
+	// browser used HTTPS, so without this flag the web UI's CSRF cookie would
+	// be minted without Secure. Only enable this when the daemon sits behind
+	// a reverse proxy the operator controls that strips or overwrites any
+	// client-supplied X-Forwarded-Proto before forwarding — otherwise a
+	// caller with direct network access to the daemon could spoof the header
+	// and the protection this flag is meant to restore becomes a lie. Off by
+	// default so the existing loopback-plaintext and built-in-TLS (see
+	// ServerTLSConfig below) deployment shapes are unaffected.
+	TrustProxyHeaders bool `koanf:"trust_proxy_headers"`
+
 	// TLS encrypts client<->daemon traffic (FIND-32/P24.18). On by default
 	// since P27.5/FIND-13: the loopback-only bind (AllowRemote above) already
 	// limits exposure to off-host attackers, but plaintext HTTP still leaves

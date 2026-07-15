@@ -1,0 +1,69 @@
+// Package sse holds the small pieces of SSE-consumption plumbing that are
+// identical across provider adapters (internal/provider/anthropic,
+// internal/provider/openai): sizing the line scanner, the ctx-aware channel
+// send used while streaming events out, and turning a non-200 HTTP response
+// into the provider.APIError adapters return from Stream. It intentionally
+// does not know anything about either provider's wire format — that parsing
+// stays adapter-specific.
+package sse
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/fiddler110/aegis/internal/provider"
+)
+
+const (
+	initialBufSize = 64 * 1024
+	maxBufSize     = 4 * 1024 * 1024
+	maxErrBodySize = 64 * 1024
+)
+
+// NewScanner returns a bufio.Scanner over body, pre-sized the way both
+// adapters need it: a 64KiB initial buffer growing up to 4MiB so a single
+// large SSE line (e.g. a big tool-call JSON payload) doesn't hit the
+// scanner's default 64KiB token limit.
+func NewScanner(body io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, initialBufSize), maxBufSize)
+	return scanner
+}
+
+// Emitter sends events to an adapter's output channel, aborting the send
+// (without blocking forever) if ctx is cancelled first.
+type Emitter struct {
+	ctx context.Context
+	out chan<- provider.Event
+}
+
+// NewEmitter constructs an Emitter bound to ctx and out. Its Emit method is
+// the shared body of the "emit" closure both adapters defined locally.
+func NewEmitter(ctx context.Context, out chan<- provider.Event) *Emitter {
+	return &Emitter{ctx: ctx, out: out}
+}
+
+// Emit sends ev on the output channel and reports whether it was delivered;
+// it returns false without sending if ctx is done first.
+func (e *Emitter) Emit(ev provider.Event) bool {
+	select {
+	case e.out <- ev:
+		return true
+	case <-e.ctx.Done():
+		return false
+	}
+}
+
+// HandleErrorResponse converts a non-200 HTTP response into the error an
+// adapter's Stream method returns (paired with a nil channel). It reads and
+// caps the response body, closes it, and wraps the result via
+// provider.NewHTTPError.
+func HandleErrorResponse(providerName string, resp *http.Response) error {
+	defer resp.Body.Close()
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodySize))
+	return provider.NewHTTPError(providerName, resp.StatusCode,
+		resp.Header.Get("Retry-After"), strings.TrimSpace(string(msg)))
+}

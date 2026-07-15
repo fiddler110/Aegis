@@ -7,6 +7,7 @@ package memory
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,6 +124,14 @@ func (s Sources) loadDirect() string {
 // its parent directory) if needed.
 const maxMemoryEntry = 4096
 
+// maxMemoryFileSize bounds a memory.md file's total size (P32.8). Without
+// this, a long-running project/user memory accumulates entries forever,
+// growing system-prompt injection cost every session (Load() injects the
+// whole file, unfiltered) and slowing LoadRelevant's per-entry TF-IDF scan
+// linearly. Append enforces it by dropping the oldest entries (FIFO) once
+// the file would grow past it — see pruneToCap.
+const maxMemoryFileSize = 64 * 1024
+
 func Append(path, entry string) error {
 	entry = strings.TrimSpace(entry)
 	if entry == "" {
@@ -147,12 +156,50 @@ func Append(path, entry string) error {
 	if closeErr != nil {
 		return closeErr
 	}
+	if err := pruneToCap(path); err != nil {
+		slog.Warn("memory: failed to prune file to size cap", "path", path, "error", err)
+	}
 	// P24.17 (FIND-30): refresh the integrity sidecar to match the file's
-	// full post-append content. This is Aegis's own write path, so the new
-	// baseline is trusted; a future load whose content diverges from this
-	// baseline without going through Append again gets flagged.
+	// full post-append (and, when pruneToCap trimmed it, post-prune) content.
+	// This is Aegis's own write path, so the new baseline is trusted; a
+	// future load whose content diverges from this baseline without going
+	// through Append again gets flagged.
 	updateSidecarAfterWrite(path)
 	return nil
+}
+
+// pruneToCap drops the oldest entries (FIFO — Append is pure append-only, so
+// line order is already chronological, oldest first) once path exceeds
+// maxMemoryFileSize, so the file stays a bounded, most-recent window instead
+// of growing forever (P32.8). No-op when the file is already under the cap.
+// The just-appended last line is never dropped, even in the pathological
+// case where it alone exceeds the cap (maxMemoryEntry is well under
+// maxMemoryFileSize, so that only happens if the cap itself is misconfigured
+// very small).
+//
+// This operates on whole lines, so it assumes the Append-written "- (date)
+// entry" format; a hand-edited memory.md using multi-line markdown
+// structures (headers, code blocks) can have a structure cut through the
+// middle when pruning triggers. That's an accepted tradeoff for keeping this
+// a plain size/FIFO policy rather than a markdown-aware one — see P32.8 in
+// roadmap.md.
+func pruneToCap(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(data) <= maxMemoryFileSize {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	size := len(data)
+	drop := 0
+	for size > maxMemoryFileSize && drop < len(lines)-1 {
+		size -= len(lines[drop]) + 1 // +1 for the line's trailing newline
+		drop++
+	}
+	kept := strings.Join(lines[drop:], "\n") + "\n"
+	return os.WriteFile(path, []byte(kept), 0o600)
 }
 
 // SaveSkill writes a named skill file under the project skills directory.

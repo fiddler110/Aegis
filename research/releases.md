@@ -8,8 +8,55 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-15 — shipped **P32.2-P32.7**, closing out both Tier 1 and Tier 2 of the
-2026-07-15 application review (P32.1 shipped earlier the same day; see below). **P32.2** (Tier 1):
+**Last updated:** 2026-07-15 — shipped **P32.9-P32.11**, the three Tier 4 parked items from the
+2026-07-15 application review, at the user's explicit request (they were parked precisely because
+they had no concrete trigger, per the roadmap's "check with the user before starting any of these"
+note — the user's ask to fix them directly is that trigger). Also shipped **P32.2-P32.8** the same
+day, closing out Tier 1, Tier 2, and the sole Tier 3 item (P32.1 shipped earlier the same day; see
+below).
+
+**P32.9** (Tier 4): the skills and persona frontmatter parsers no longer diverge.
+`skills.parseSkill` (`internal/skills/skills.go`) previously extracted `name`/`description` with a
+hand-rolled per-line `strings.Cut(line, ":")` loop — it worked only because skills frontmatter had
+exactly two scalar fields, and would have silently mis-parsed a quoted value containing a colon or
+any multi-line/structured value. It now unmarshals the frontmatter block as real YAML
+(`go.yaml.in/yaml/v3`, already a dependency via `internal/persona/load.go`) into a `yaml.Node`
+mapping and reads `name`/`description` off that, preserving the pre-existing case-insensitive key
+matching that a typed-struct decode (persona's approach) doesn't give for free. `skills.go`'s own
+`splitFrontmatter` — which, unlike persona's, handles a BOM prefix — was left as-is; only the
+field-extraction step changed. Malformed YAML falls back to the default name/empty description,
+matching the old parser's silent-skip behavior (`parseSkill`'s signature wasn't changed to return an
+error). Added `TestParseFrontmatterQuotedColon`, `TestParseFrontmatterMultilineValue`,
+`TestParseFrontmatterCaseInsensitiveKeys`, and `TestParseFrontmatterMalformedYAML`
+(`internal/skills/skills_test.go`) — the first two fail against the pre-fix line-parser. **P32.10**
+(Tier 4): the web UI's CSRF cookie can now carry `Secure` behind a reverse proxy that terminates TLS.
+`ServerConfig` (`internal/config/config.go`) gained `TrustProxyHeaders` (`trust_proxy_headers`,
+default `false`) — an explicit opt-in, since trusting `X-Forwarded-Proto` unconditionally would let
+any direct caller spoof HTTPS and get a cookie attribute meant to reflect the real transport.
+`handleWebUI`'s cookie (`internal/server/webui.go`) now sets `Secure: r.TLS != nil ||
+(s.cfg.Server.TrustProxyHeaders && r.Header.Get("X-Forwarded-Proto") == "https")` — the flag is only
+safe to enable when the daemon sits behind an operator-controlled proxy that strips/overwrites any
+client-supplied `X-Forwarded-Proto` before forwarding, which the new field's doc comment spells out.
+Added `TestWebUICSRFCookieSecureFlagTrustProxyHeaders` (`internal/server/webui_test.go`) with both
+the positive case (flag on + forwarded-proto header → `Secure`) and the regression guard (flag off,
+the default, + spoofed header on a plaintext request → `Secure` stays false). **P32.11** (Tier 4):
+the Anthropic and OpenAI provider adapters now share their SSE-consumption plumbing instead of each
+reimplementing it. New package `internal/provider/sse` (`sse.go`) holds `NewScanner` (the identical
+pre-sized `bufio.NewScanner` + 64KiB/4MiB `Buffer` call both adapters built independently),
+`NewEmitter`/`Emit` (the identical `select { case out <- ev: … case <-ctx.Done(): … }`
+channel-send-with-cancellation closure both adapters defined locally), and
+`HandleErrorResponse` (the identical non-200-response `LimitReader`+`ReadAll`+`NewHTTPError`+
+body-close handling both `Stream` methods repeated). `internal/provider/anthropic/anthropic.go` and
+`internal/provider/openai/openai.go` now call through these instead of duplicating the logic; the
+roadmap note's guess that retry/backoff might also be duplicated didn't hold up — neither adapter
+implements retry/backoff today, so none was added. Each adapter's per-adapter error-message prefix
+(`"anthropic: read stream: %w"` / `"openai: read stream: %w"`) was deliberately left inline rather
+than forced through a shared wrapper, since a one-line prefix parameter wouldn't have reduced real
+duplication. Pure internal refactor — `provider.Adapter` and all wire-format/event behavior are
+unchanged; both adapters' existing test suites (`anthropic_test.go`, `openai_test.go`, including
+ctx-cancellation-mid-stream and non-200 coverage) pass unmodified. Verified with `go build ./...` and
+`go test ./...` (full suite green) plus `go test -race ./internal/provider/...`.
+**P32.2** (Tier 1):
 `ContextualGate.Check` (`internal/permission/contextual.go:105`) now calls
 `tool.EffectiveCapability(t, input)` instead of the static `t.Capability()`, matching the two call
 sites (`permission.Gate.Check`, `engine.serializeTool`) that already got this right — a future tool
@@ -68,8 +115,25 @@ unenforced-but-low-risk bound other per-root caches in this codebase carry; not 
 this item's Tier 2/no-dependency scope rather than adding a new retention policy. Added
 `TestDiscoverCacheDetectsFileEdits` and `TestDiscoverCacheDetectsNestedBundledAssetChanges`
 (`internal/skills/skills_test.go`) — the latter specifically exercises the recursive-vs-flat
-distinction from persona's pattern. Verified with `go build ./...`, `go vet ./...`, and
-`go test ./...` (full suite, all packages green) after each item.
+distinction from persona's pattern. **P32.8** (Tier 3): `memory.md` now has a total-size cap.
+`Append` (`internal/memory/memory.go`) gained `maxMemoryFileSize` (64KB) and a `pruneToCap` step
+run after every write — once a file would grow past the cap, the oldest entries are dropped
+(FIFO; safe because `Append` is pure append-only, so file order is already chronological) until
+it's back under, then the integrity sidecar is refreshed against the pruned content. Previously
+only a single entry was bounded (`maxMemoryEntry` = 4096B); nothing bounded the file as a whole, so
+a long-running project/user memory grew forever, inflating `Load()`'s full-file system-prompt
+injection cost every session and slowing `LoadRelevant`'s per-entry TF-IDF scan linearly. Larger
+than a wiring fix because it needed a retention-policy decision first (hard-cap-with-FIFO-eviction
+vs. LRU-by-relevance vs. periodic summarization) — resolved by asking the user, who picked FIFO for
+its determinism and zero added state/model-call surface over the other two options. Pruning
+operates on whole lines, so a hand-edited file using multi-line markdown structures can have that
+structure cut mid-section if a prune triggers while it's over the cap — an accepted tradeoff of
+keeping this a plain size/FIFO policy rather than a markdown-aware one. Added
+`TestAppendPrunesOldestEntriesWhenOverCap` (`internal/memory/memory_test.go`), which fills well past
+the cap and asserts the oldest entry is gone, the newest survives, and the file stays under
+`maxMemoryFileSize`. `docs/memory-and-knowledge.md` documents the cap and its FIFO/markdown-cut
+tradeoff. Verified with `go build ./...`, `go vet ./...`, and `go test ./...` (full suite, all
+packages green) after each item.
 
 **Earlier, same day:** shipped **P32.1** (Tier 1): plan mode's shell tool no longer grants
 unconfined host-filesystem reads. `shellTool.CapabilityFor` (`internal/tool/builtin/shell.go`)

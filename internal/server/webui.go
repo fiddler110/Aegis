@@ -74,14 +74,19 @@ func (s *Server) handleWebUI(w http.ResponseWriter, r *http.Request) {
 	// see uiCSRFCookieName's doc comment in auth.go for the full rationale.
 	// Secure is conditional on the request having arrived over TLS (P31.3) —
 	// the default loopback-only deployment is plaintext HTTP, where Secure
-	// would make the browser silently drop the cookie.
+	// would make the browser silently drop the cookie. When
+	// Server.TrustProxyHeaders is set (P32.10), an X-Forwarded-Proto: https
+	// header also counts as TLS: that flag is only meant to be enabled behind
+	// an operator-controlled reverse proxy that terminates TLS itself and
+	// overwrites any client-supplied X-Forwarded-Proto, so the header is
+	// otherwise ignored to prevent a direct caller from spoofing Secure.
 	http.SetCookie(w, &http.Cookie{
 		Name:     uiCSRFCookieName,
 		Value:    csrf,
 		Path:     "/",
 		MaxAge:   int(pageTokenTTL.Seconds()),
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   r.TLS != nil || (s.cfg.Server.TrustProxyHeaders && r.Header.Get("X-Forwarded-Proto") == "https"),
 		SameSite: http.SameSiteStrictMode,
 	})
 	_, _ = w.Write([]byte(page))
