@@ -4,7 +4,6 @@
 package anthropic
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider/sse"
 )
 
 const (
@@ -293,10 +293,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		return nil, provider.NewTransportError(a.Name(), err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return nil, provider.NewHTTPError(a.Name(), resp.StatusCode,
-			resp.Header.Get("Retry-After"), strings.TrimSpace(string(msg)))
+		return nil, sse.HandleErrorResponse(a.Name(), resp)
 	}
 
 	out := make(chan provider.Event)
@@ -318,21 +315,13 @@ func (a *Adapter) consume(ctx context.Context, body io.ReadCloser, out chan<- pr
 	defer close(out)
 	defer body.Close()
 
-	emit := func(ev provider.Event) bool {
-		select {
-		case out <- ev:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
+	emit := sse.NewEmitter(ctx, out).Emit
 
 	blocks := map[int]*blockState{}
 	usage := &provider.Usage{}
 	stop := provider.StopOther
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner := sse.NewScanner(body)
 
 	var dataBuf strings.Builder
 	dispatch := func() bool {

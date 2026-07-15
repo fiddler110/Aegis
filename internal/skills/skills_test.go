@@ -31,6 +31,55 @@ func TestParseFrontmatter(t *testing.T) {
 	}
 }
 
+// TestParseFrontmatterQuotedColon locks in real-YAML parsing (P32.9): a
+// naive strings.Cut(line, ":") split on the first colon would truncate this
+// description at "Do", dropping everything from the embedded colon onward.
+func TestParseFrontmatterQuotedColon(t *testing.T) {
+	sk := parseSkill("file", "---\nname: deploy\ndescription: \"Do: this thing right\"\n---\nbody\n")
+	if sk.Description != "Do: this thing right" {
+		t.Errorf("description = %q, want %q", sk.Description, "Do: this thing right")
+	}
+}
+
+// TestParseFrontmatterMultilineValue locks in real-YAML parsing of a block
+// scalar, which the old per-line split couldn't represent at all (each
+// continuation line has no colon and was silently skipped).
+func TestParseFrontmatterMultilineValue(t *testing.T) {
+	sk := parseSkill("file", "---\ndescription: |\n  Line one\n  Line two\n---\nbody\n")
+	want := "Line one\nLine two"
+	if sk.Description != want {
+		t.Errorf("description = %q, want %q", sk.Description, want)
+	}
+}
+
+// TestParseFrontmatterCaseInsensitiveKeys preserves the old hand-rolled
+// parser's case-insensitive key matching.
+func TestParseFrontmatterCaseInsensitiveKeys(t *testing.T) {
+	sk := parseSkill("file", "---\nName: deploy\nDESCRIPTION: Ship the app\n---\nbody\n")
+	if sk.Name != "deploy" {
+		t.Errorf("name = %q, want deploy", sk.Name)
+	}
+	if sk.Description != "Ship the app" {
+		t.Errorf("description = %q, want %q", sk.Description, "Ship the app")
+	}
+}
+
+// TestParseFrontmatterMalformedYAML ensures a syntactically invalid
+// frontmatter block doesn't panic or propagate an error (parseSkill has no
+// error return); it falls back to the default name and no description.
+func TestParseFrontmatterMalformedYAML(t *testing.T) {
+	sk := parseSkill("file", "---\nname: [unterminated\n---\nbody\n")
+	if sk.Name != "file" {
+		t.Errorf("name = %q, want fallback %q", sk.Name, "file")
+	}
+	if sk.Description != "" {
+		t.Errorf("description = %q, want empty", sk.Description)
+	}
+	if !strings.Contains(sk.Content, "body") {
+		t.Errorf("body not preserved: %q", sk.Content)
+	}
+}
+
 func TestBuildIndexProgressiveDisclosure(t *testing.T) {
 	dir := t.TempDir()
 	sd := filepath.Join(dir, ".aegis", "skills")

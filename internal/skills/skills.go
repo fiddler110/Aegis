@@ -39,6 +39,7 @@ import (
 	"sync"
 
 	"github.com/fiddler110/aegis/internal/trust"
+	"go.yaml.in/yaml/v3"
 )
 
 // Skill represents a loaded skill definition.
@@ -333,6 +334,16 @@ func withAssetManifest(content, workDir, skillDir, manifestName string) string {
 // parseSkill extracts optional YAML frontmatter (name/description) and returns a
 // Skill with the frontmatter stripped from the body. defaultName is used when
 // the frontmatter carries no explicit name.
+//
+// Field extraction uses real YAML (go.yaml.in/yaml/v3), the same library
+// internal/persona/load.go's parsePersonaBytes uses, rather than a hand-rolled
+// per-line split — so quoted scalars with embedded colons and multi-line
+// block/folded values decode correctly. Keys are matched case-insensitively
+// (unlike persona's frontmatter, which only recognizes lowercase keys) to
+// preserve skills' pre-existing behavior. A malformed frontmatter block (not
+// a YAML mapping, or a YAML syntax error) is not fatal: parseSkill has no
+// error return, so it falls back to the default name and no description,
+// mirroring how a stray line was silently skipped by the old parser.
 func parseSkill(defaultName, raw string) Skill {
 	sk := Skill{Name: defaultName, Content: strings.TrimSpace(raw)}
 	body, front, ok := splitFrontmatter(raw)
@@ -340,13 +351,22 @@ func parseSkill(defaultName, raw string) Skill {
 		return sk
 	}
 	sk.Content = strings.TrimSpace(body)
-	for _, line := range strings.Split(front, "\n") {
-		key, val, found := strings.Cut(line, ":")
-		if !found {
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(front), &doc); err != nil || len(doc.Content) == 0 {
+		return sk
+	}
+	m := doc.Content[0]
+	if m.Kind != yaml.MappingNode {
+		return sk
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		key := strings.ToLower(strings.TrimSpace(m.Content[i].Value))
+		var val string
+		if err := m.Content[i+1].Decode(&val); err != nil {
 			continue
 		}
-		key = strings.TrimSpace(strings.ToLower(key))
-		val = strings.TrimSpace(strings.Trim(strings.TrimSpace(val), `"'`))
+		val = strings.TrimSpace(val)
 		switch key {
 		case "name":
 			if val != "" {

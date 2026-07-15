@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,41 @@ func TestLoadWrapsUntrustedProvenance(t *testing.T) {
 	}
 	if !strings.Contains(got, "prefers Go over Python") || !strings.Contains(got, "name is Scott") {
 		t.Errorf("expected original memory content to still be present verbatim, got %q", got)
+	}
+}
+
+// TestAppendPrunesOldestEntriesWhenOverCap verifies Append enforces
+// maxMemoryFileSize by dropping the oldest entries (FIFO) once the file
+// would grow past it, rather than letting memory.md grow unbounded (P32.8).
+func TestAppendPrunesOldestEntriesWhenOverCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.md")
+
+	// Fill well past the cap with distinguishable entries.
+	entrySize := 200
+	count := (maxMemoryFileSize / entrySize) + 20
+	for i := range count {
+		text := fmt.Sprintf("entry-%05d ", i) + strings.Repeat("x", entrySize)
+		if err := Append(path, text); err != nil {
+			t.Fatalf("Append(%d): %v", i, err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > maxMemoryFileSize {
+		t.Errorf("file size %d exceeds cap %d after pruning", len(data), maxMemoryFileSize)
+	}
+
+	got := string(data)
+	lastText := fmt.Sprintf("entry-%05d ", count-1)
+	if !strings.Contains(got, lastText) {
+		t.Errorf("most recent entry was pruned, expected it to survive: %q missing", lastText)
+	}
+	firstText := "entry-00000 "
+	if strings.Contains(got, firstText) {
+		t.Errorf("oldest entry should have been pruned (FIFO), still present")
 	}
 }
 
