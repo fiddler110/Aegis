@@ -415,6 +415,24 @@ Enable or disable a cron job without deleting it.
 
 ---
 
+### `cron_history`
+
+**Capability:** read
+
+List cron job fire-attempt audit history: job id, fired-at time, exit status (`ok`/`error`/
+`blocked`), and a truncated snippet of the run's combined output. Most recent first.
+
+```json
+{
+  "id": "cron-abc123",
+  "limit": 20
+}
+```
+
+`id` is optional (filters to one job); `limit` defaults to 20.
+
+---
+
 ## Web
 
 ### `web_fetch`
@@ -547,7 +565,7 @@ These tools require LSP servers configured in `lsp[]` (see [Configuration](confi
 
 ### `diagnostics`
 
-**Capability:** read
+**Capability:** read  *(deferred)*
 
 Get LSP diagnostics (errors and warnings) for a file.
 
@@ -563,7 +581,7 @@ Returns a list of diagnostics with severity, line/column, message, and source.
 
 ### `references`
 
-**Capability:** read
+**Capability:** read  *(deferred)*
 
 Find all references to a symbol at a given position using LSP.
 
@@ -756,7 +774,7 @@ Uses [Kroki](https://kroki.io) by default (configurable via `diagram.kroki_url`)
 
 **Capability:** execute
 
-Run available static/dependency/secrets scanners (opengrep, trivy, gitleaks, kubescape, hadolint, osv-scanner, grype, and opt-in engines) against a path — or a built container image, or generate an SBOM instead — and return a normalized findings report. See [Security Features](security.md) for the full scanner list and config.
+Run available static/dependency/secrets scanners (opengrep, trivy, gitleaks, kubescape, hadolint, osv-scanner, grype, and opt-in engines) against a path — or a built container image, or generate an SBOM instead — and return a normalized findings report. See [Security Features](security_scan.md) for the full scanner list and config.
 
 ```json
 {
@@ -800,7 +818,7 @@ Dynamic Application Security Testing via OWASP ZAP: crawls (and, in `active`/`ap
 }
 ```
 
-The target must be loopback/private (allowed by default) or explicitly declared in `security.dast.allowed_targets` — checked unconditionally, independent of permission mode. `active`/`api` modes additionally require `security.dast.allow_active: true`. Persists its report to `.aegis/security/dast.json`. See [Security Features](security.md#dynamic-application-security-testing-dast) for the full gating.
+The target must be loopback/private (allowed by default) or explicitly declared in `security.dast.allowed_targets` — checked unconditionally, independent of permission mode. `active`/`api` modes additionally require `security.dast.allow_active: true`. Persists its report to `.aegis/security/dast.json`. See [Security Features](security_scan.md#dynamic-application-security-testing-dast) for the full gating.
 
 ---
 
@@ -816,7 +834,7 @@ Network/host reconnaissance for attack-surface mapping: nmap discovers live host
 }
 ```
 
-Shares its target-authorization gate with `dast_scan` (loopback/private allowed by default, else must be declared in `security.dast.allowed_targets`), checked individually per target with a 256-target cap per call. `nuclei` additionally requires `security.tools.nuclei.templates_version` (a pinned `nuclei-templates` release tag). Host-binary only — no container fallback. `security.dast.allow_active: true` unlocks nmap's OS-detection/full-port-range/default-script mode and nuclei's full template set. Persists its report to `.aegis/security/network.json`. See [Security Features](security.md#network--host-reconnaissance-nmap--nuclei).
+Shares its target-authorization gate with `dast_scan` (loopback/private allowed by default, else must be declared in `security.dast.allowed_targets`), checked individually per target with a 256-target cap per call. `nuclei` additionally requires `security.tools.nuclei.templates_version` (a pinned `nuclei-templates` release tag). Host-binary only — no container fallback. `security.dast.allow_active: true` unlocks nmap's OS-detection/full-port-range/default-script mode and nuclei's full template set. Persists its report to `.aegis/security/network.json`. See [Security Features](security_scan.md#network--host-reconnaissance-nmap--nuclei).
 
 ---
 

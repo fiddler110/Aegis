@@ -39,10 +39,29 @@ data, anything where the risk that matters is a person being harmed by data
    pseudonymization, aggregation, differential privacy, minimization) and/or
    procedural (consent flow, retention policy, access review).
 
+## Findings: CWE and OWASP mapping
+
+When a LINDDUN threat becomes a finding in `3-findings.md`, CWE and OWASP
+don't map the way they do for STRIDE — many privacy harms aren't a
+technical "weakness" in the CWE sense at all (linkability created by an
+over-broad data model, for instance, is a design choice, not a defect
+class). Write `CWE: N/A — privacy design issue, not a code weakness` when
+that's genuinely true, and reserve a real CWE ID for the cases where the
+harm *is* a concrete weakness (e.g. `CWE-359: Exposure of Private
+Information` for an outright disclosure). For OWASP, map to the **OWASP
+Top 10 Privacy Risks** list (`P1`-`P10`, e.g. `P2:2021 – Insufficient Data
+Breach Response`) — not the web-application OWASP Top 10:2025, which is
+built for a different category of harm entirely. See
+`references/output-formats.md`'s per-framework applicability notes for the
+full mapping across all six frameworks.
+
 ## Skeleton
 
-The exact document structure — verbatim skeleton, fill-in table shapes,
-fixed value lists, and inline self-check comments — lives in
+The exact structure for this framework's file in the report suite —
+`2-linddun-analysis.md` — verbatim skeleton, fill-in table shapes, fixed
+value lists, and inline self-check comments, lives in
 `references/skeletons/skeleton-linddun.md`. Read it before writing
 anything; do not improvise the structure from the process description
-above.
+above. (The suite's other six files — architecture, DFD, findings,
+assessment, inventory — are framework-agnostic; their shape is in
+`references/output-formats.md`.)

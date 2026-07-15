@@ -21,7 +21,19 @@ func ValidatePath(root, path string) (string, error) {
 	}
 
 	abs := path
-	if !filepath.IsAbs(abs) {
+	switch {
+	case filepath.IsAbs(abs):
+		// already absolute, use as-is.
+	case isWindowsRootedNoVolume(abs):
+		// A path like "/etc/shadow" or "\etc\shadow" has no drive letter, so
+		// filepath.IsAbs reports false on Windows even though the OS treats
+		// it as rooted at the current drive, not as relative to root — join
+		// it against root's drive to match that real resolution instead of
+		// filepath.Join's (relative-path) semantics, which would otherwise
+		// fold the leading separator into a path that stays under root and
+		// wrongly validate as confined (P32.1).
+		abs = filepath.VolumeName(root) + abs
+	default:
 		abs = filepath.Join(root, abs)
 	}
 	abs = filepath.Clean(abs)
@@ -48,6 +60,18 @@ func ValidatePath(root, path string) (string, error) {
 	}
 
 	return full, nil
+}
+
+// isWindowsRootedNoVolume reports whether p is a Windows-style rooted path
+// (starts with a path separator) that carries no drive letter/UNC volume —
+// e.g. "/etc/shadow" or `\Windows\System32`. filepath.IsAbs returns false
+// for these on Windows (it requires a volume), but the OS itself resolves
+// them against the current drive, not against an arbitrary root directory.
+func isWindowsRootedNoVolume(p string) bool {
+	if runtime.GOOS != "windows" || p == "" {
+		return false
+	}
+	return (p[0] == '/' || p[0] == '\\') && filepath.VolumeName(p) == ""
 }
 
 // escapesRoot reports whether target lies outside root. On Windows the

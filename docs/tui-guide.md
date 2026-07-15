@@ -167,6 +167,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/rewind` | List checkpoints (newest first, with file counts) |
 | `/rewind <n> [code\|conversation\|both]` | Restore checkpoint n |
 | `/rollback [n]` | Restore checkpoint n and run `git reset --hard` |
+| `/fork [n]` | Branch the conversation into a brand-new session — as-is at its current end (no args), or truncated to checkpoint n, ready for a fresh/edited message; the source session is never modified |
 | `/compact` | Force context compaction now, ahead of a heavy stretch, instead of waiting for the automatic budget-driven trigger |
 | `/timeline` | Jump to a past turn in the conversation |
 | `/detach [on\|off]` | Run session in background (survives TUI close) |
@@ -188,6 +189,7 @@ Type `/` to open the command completion popup and browse available commands.
 |---------|-------------|
 | `/config` | Open the interactive configuration wizard (5-step) |
 | `/sandbox [use <target>]` | Show active sandbox backend and detected runtimes, or switch backend |
+| `/notify [off\|bell\|desktop\|both]` | Set the attention-system mode for stream-end/approval-pending/error while unfocused (bell, desktop OSC 9/777 notification, or both — the default); no args shows the current mode; session-only, set `tui.notifications` in config to persist |
 
 ### Memory & Knowledge
 

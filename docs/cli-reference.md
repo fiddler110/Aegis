@@ -189,7 +189,7 @@ aegis ui --no-open   # just print the URL
 
 The UI is a single self-contained page embedded in the binary. It lets you list/create sessions, view transcripts with collapsible thinking and tool sections, send messages with live SSE streaming, and approve tool calls inline. A status pill in the top bar shows what the agent is doing and how long it's been running (`Thinking… 12s`, `Running security_scan…`, `Waiting for your approval`) so a slow model turn never looks like a dead page; the Send button becomes a **Stop** button while a turn is in flight, cancelling it instead of just sitting there disabled.
 
-**Current scope:** today this covers the core chat loop — sessions, streaming, inline approvals — but not persona/mode switching, cost/token display, checkpoints/rewind, security scanning, skills, or memory management; those all live in the TUI (see [tui-guide.md](tui-guide.md)) and the CLI subcommands documented elsewhere on this page for now. Bringing the web UI to TUI-level depth (for users who'd rather not use a terminal at all) is tracked as `research/roadmap.md`'s P15 item — scoped, not yet started.
+**Scope:** the web UI has full TUI-parity scope (P15) — sessions, streaming, inline approvals, persona/mode switching, cost/token display, checkpoints/rewind, security scanning, skills, and memory management, all as panels on the same page. See [tui-guide.md](tui-guide.md) for the equivalent TUI controls, and the CLI subcommands documented elsewhere on this page for scriptable/headless use.
 
 ---
 
@@ -411,6 +411,46 @@ Useful for verifying config, checking which memory entries are loaded, confirmin
 
 ---
 
+## `aegis doctor`
+
+Preflight self-diagnostic: provider reachability and model availability, tool-calling smoke test (local Ollama-style providers only), configured-vs-actually-active sandbox backend, security scanner availability, output-guard/thinking-model pairing, session workdir allowlist posture, workspace-trust freeze state, and (if one is running) whether the daemon is reachable and in sync with the config on disk.
+
+```bash
+aegis doctor
+```
+
+Every check but the daemon-reachability one works standalone, with no daemon required — safe to run before `aegis serve`. Each row is `PASS`/`WARN`/`FAIL`; a `FAIL` row prints a `-> ` fix hint and makes the command exit non-zero, so it can gate scripts. A `WARN` never fails the command — it flags something worth a look (no sandbox isolation, an unpulled model, scanners enabled but unavailable) without blocking.
+
+```bash
+aegis doctor   # run before `aegis serve`, or any time something feels misconfigured
+```
+
+---
+
+## `aegis trust`
+
+Review and accept (or revoke) a project's `.aegis/config.yaml` security-relevant settings (P27.1). A cloned repository's project config is auto-merged with no confirmation by default, but security-relevant keys (`permission.*`, `sandbox.*`, `mcp.servers`, `notify.webhook`, `hooks`) stay frozen to their user/global values until the directory is explicitly trusted here — so checking out a repo can't silently widen its own permissions, add an attacker-controlled MCP server, or run lifecycle hooks.
+
+```bash
+aegis trust [--yes] [--revoke] [--status]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Skip the confirmation prompt (non-interactive/scripted use) |
+| `--revoke` | Remove trust for this directory instead of granting it |
+| `--status` | Show what's currently frozen without prompting or changing anything |
+
+```bash
+aegis trust --status   # see what the project config would change, no changes made
+aegis trust            # review the diff and accept it interactively
+aegis trust --revoke   # freeze this directory's project config again
+```
+
+`aegis doctor`'s "workspace trust" check surfaces the same frozen-settings state. Restart the daemon after trusting a directory to apply the newly-unfrozen settings.
+
+---
+
 ## `aegis scan`
 
 Run available security scanners against a path.
@@ -438,7 +478,7 @@ aegis scan --list                        # every valid --scanner name/category, 
 | `--list` | List every scanner name and category alias usable with `--scanner`, with live availability, then exit |
 | `--yes`, `-y` | Skip the interactive scanner-plan confirmation and run the auto-detected set immediately (for scripts/CI) |
 
-Full scanner reference, category aliases, and details on the container/WSL fallback and dedup/ASVS/baseline pipeline: [docs/security.md](security.md).
+Full scanner reference, category aliases, and details on the container/WSL fallback and dedup/ASVS/baseline pipeline: [docs/security_scan.md](security_scan.md).
 
 ### `aegis scan image`
 
@@ -599,6 +639,29 @@ Shows the planned changes and prompts for confirmation unless `--yes` is passed.
 
 ---
 
+## `aegis cron`
+
+Inspect persisted cron jobs (background scheduled tasks) — the operator-facing review view for jobs otherwise only visible to the model itself via the `cron_list` tool. In particular, surfaces which jobs carry `auto_approve`, since those bypass interactive approval entirely at fire time.
+
+### `aegis cron list`
+
+```bash
+aegis cron list [--auto-approve-only]
+```
+
+Lists every cron job: ID, enabled/disabled state, schedule, command, title, and an `[AUTO_APPROVE — fires unattended, bypassing interactive approval]` marker where applicable.
+
+| Flag | Description |
+|------|-------------|
+| `--auto-approve-only` | Show only jobs with `auto_approve` set |
+
+```bash
+aegis cron list
+aegis cron list --auto-approve-only   # audit what fires unattended
+```
+
+---
+
 ## `aegis worktree`
 
 Manage git worktrees for isolated parallel work.
@@ -667,6 +730,27 @@ Show the fully resolved configuration (after applying all layers).
 
 ```bash
 aegis config
+```
+
+### `aegis config update`
+
+Reconcile an existing config file with template content added since it was created (e.g. new security-scanner options), without discarding customizations. Existing keys, comments, and formatting are left untouched — only genuinely new content is spliced into a section you're already using (an active top-level key), and only if it's not already present. A timestamped backup of the original is written alongside it before any change.
+
+```bash
+aegis config update [--global] [--project] [--dry-run]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--global` | Only reconcile the global config (`~/.config/aegis/config.yaml`) |
+| `--project` | Only reconcile the project config (`.aegis/config.yaml`) |
+| `--dry-run` | Show what would change without writing |
+
+With no `--global`/`--project` flag, both are reconciled if they exist.
+
+```bash
+aegis config update --dry-run   # preview
+aegis config update             # apply, both global and project config
 ```
 
 ---

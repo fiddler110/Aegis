@@ -47,10 +47,41 @@ business X."
   correlate rather than duplicate the `security-audit` skill's output if
   both are in play for the same system.
 
+## Where each stage lands in the seven-file suite
+
+PASTA is the one framework whose native process has stages that overlap
+the suite's framework-agnostic files (SKILL.md §4, `output-formats.md`).
+Don't duplicate — split the work:
+
+- **Stages 2 and 3** (technical scope, application decomposition) are what
+  `0.1-architecture.md` and `1-model.md`/`1.1-model.mmd` already capture for
+  every framework — write the components, trust boundaries, DFD, and
+  Component Exposure Table there, not a second time in
+  `2-pasta-analysis.md`. `2-pasta-analysis.md` only needs a brief
+  cross-reference plus any PASTA-specific decomposition detail those files
+  don't ask for (e.g. an explicit use-case/actor list, if it clarifies
+  stage 4's threat enumeration).
+- **Stage 1** (business objectives) has no home in the framework-agnostic
+  files — it's PASTA's own distinguishing content — so it opens
+  `2-pasta-analysis.md` as this framework's preamble.
+- **Stages 4 through 7** (threat analysis, vulnerability analysis, attack
+  modeling, risk/impact) are the actual per-threat content of
+  `2-pasta-analysis.md`.
+
+**Findings and CVSS/CWE/OWASP:** stage 5's vulnerability analysis produces
+concrete technical weaknesses the same way STRIDE's per-element threats do
+— treat PASTA findings in `3-findings.md` like STRIDE findings for CVSS
+4.0/CWE/OWASP Top 10:2025 mapping purposes (`output-formats.md`'s
+mandatory-fields table), with stage 6's attack-path narrative folded into
+each finding's Description rather than left only in
+`2-pasta-analysis.md`. A threat's Tier in `3-findings.md` is derived from
+its prerequisite exactly as for every other framework; its Severity comes
+from stage 7's Risk rating.
+
 ## Skeleton
 
-The exact document structure — verbatim skeleton, fill-in table shapes,
-fixed value lists, and inline self-check comments — lives in
+The exact structure of `2-pasta-analysis.md` — verbatim skeleton, fill-in
+table shapes, fixed value lists, and inline self-check comments — lives in
 `references/skeletons/skeleton-pasta.md`. Read it before writing
 anything; do not improvise the structure from the process description
 above.

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/permission"
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // readOnlyShellArgv0 is the allowlist of binaries whose invocation classifies
@@ -39,11 +40,13 @@ var gitConfigOverrideFlags = []string{
 // tool.CapRead instead of tool.CapExecute (P25.4c): a narrow allowlist of
 // inspection commands, rejected outright if any shell chaining/redirection/
 // substitution metacharacter is present anywhere in the string — including
-// one nested inside quotes, which this scan does not parse. Being
+// one nested inside quotes, which this scan does not parse — or if any
+// argument resolves (via sandbox.ValidatePath, the same root-confinement
+// check read_file/grep/glob already use) outside root (P32.1). Being
 // conservative here is deliberate: a false negative just means the call
 // keeps requiring an execute approval like today; a false positive would
 // auto-approve something that mutates state or exfiltrates data.
-func readOnlyShellCommand(command string) bool {
+func readOnlyShellCommand(root, command string) bool {
 	command = strings.TrimSpace(command)
 	if command == "" || strings.ContainsAny(command, permission.ShellChainMetaChars) {
 		return false
@@ -54,15 +57,19 @@ func readOnlyShellCommand(command string) bool {
 	}
 	bin := strings.ToLower(baseBinaryName(fields[0]))
 	if bin == "git" {
-		return readOnlyGitCommand(fields[1:])
+		return readOnlyGitCommand(root, fields[1:])
 	}
-	return readOnlyShellArgv0[bin]
+	if !readOnlyShellArgv0[bin] {
+		return false
+	}
+	return shellArgsStayInRoot(root, fields[1:])
 }
 
 // readOnlyGitCommand reports whether a git invocation's arguments (fields
 // after "git") are a read-only status/log/diff call with no config-override
-// flag anywhere in the argument list.
-func readOnlyGitCommand(args []string) bool {
+// flag anywhere in the argument list and no path argument (e.g. a "--"
+// pathspec) that resolves outside root.
+func readOnlyGitCommand(root string, args []string) bool {
 	if len(args) == 0 || !readOnlyGitSubcommands[strings.ToLower(args[0])] {
 		return false
 	}
@@ -71,6 +78,26 @@ func readOnlyGitCommand(args []string) bool {
 			if a == f || strings.HasPrefix(a, f+"=") {
 				return false
 			}
+		}
+	}
+	return shellArgsStayInRoot(root, args[1:])
+}
+
+// shellArgsStayInRoot reports whether every non-flag argument in args
+// resolves (via sandbox.ValidatePath) within root. Flags (tokens starting
+// with "-") and the bare "--" separator are skipped since they are never
+// paths; every other token is validated the same way read_file/grep/glob
+// confine their path arguments, so an absolute path or a "../" traversal
+// disqualifies the whole command from the CapRead downgrade (it still runs,
+// just under the normal CapExecute approval flow instead of being silently
+// auto-allowed under plan mode's read gate).
+func shellArgsStayInRoot(root string, args []string) bool {
+	for _, a := range args {
+		if a == "--" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		if _, err := sandbox.ValidatePath(root, a); err != nil {
+			return false
 		}
 	}
 	return true

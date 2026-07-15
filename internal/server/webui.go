@@ -38,16 +38,12 @@ func mustSubFS(f embed.FS, dir string) fs.FS {
 // daemon binds to loopback only and the real token already lives on local
 // disk for any local client.
 //
-// Current scope covers the core chat loop only — session list, streaming
-// transcript, inline tool-call approvals — not persona/mode switching,
-// cost/token display, checkpoints/rewind, security scanning, skills, or
-// memory management, which today are TUI/CLI-only. That gap is the subject
-// of research/roadmap.md's P15 track. P15.1 (single-file vs. a small
-// bundled frontend) is resolved: this page is now built from
-// internal/server/webui/frontend (Vite + Preact + TypeScript) and its
-// output (internal/server/webui/dist/) is embedded here — see that
-// directory and research/roadmap.md for the rest of the P15 breakdown
-// before extending this file ad hoc.
+// The web UI has full TUI-parity scope (P15, shipped): session list,
+// streaming transcript, inline tool-call approvals, persona/mode switching,
+// cost/token display, checkpoints/rewind, security scanning, skills, and
+// memory management. This page is built from internal/server/webui/frontend
+// (Vite + Preact + TypeScript) and its output (internal/server/webui/dist/)
+// is embedded here — see that directory before extending this file ad hoc.
 func (s *Server) handleWebUI(w http.ResponseWriter, r *http.Request) {
 	raw, err := fs.ReadFile(webUIAssets, "index.html")
 	if err != nil {

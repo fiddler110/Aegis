@@ -31,17 +31,21 @@ func (t *shellTool) Name() string                { return "shell" }
 func (t *shellTool) Capability() tool.Capability { return tool.CapExecute }
 
 // CapabilityFor implements tool.CapabilityOverrider (P25.4c): a narrow
-// allowlist of read-only commands (ls, cat, git status/log/diff, …) is
-// gated as CapRead instead of the tool's usual CapExecute, so it no longer
-// needs a full execute approval in build mode and is allowed outright (not
-// silently denied) under the plan-mode read gate. The static Capability()
-// above is unchanged and still governs anything readOnlyShellCommand
-// doesn't recognize as safe.
+// allowlist of read-only commands (ls, cat, git status/log/diff, …) whose
+// arguments stay within root (P32.1) is gated as CapRead instead of the
+// tool's usual CapExecute, so it no longer needs a full execute approval in
+// build mode and is allowed outright (not silently denied) under the
+// plan-mode read gate. The static Capability() above is unchanged and still
+// governs anything readOnlyShellCommand doesn't recognize as safe — which
+// now includes any command reading outside the workspace root, so it falls
+// back to requiring the normal execute approval instead of being silently
+// auto-allowed. CapabilityOverrider carries no context, so this uses the
+// tool's construction-time root rather than a session-scoped override.
 func (t *shellTool) CapabilityFor(input json.RawMessage) tool.Capability {
 	var args struct {
 		Command string `json:"command"`
 	}
-	if json.Unmarshal(input, &args) == nil && readOnlyShellCommand(args.Command) {
+	if json.Unmarshal(input, &args) == nil && readOnlyShellCommand(t.root, args.Command) {
 		return tool.CapRead
 	}
 	return tool.CapExecute
