@@ -135,10 +135,18 @@ type model struct {
 	workDir    string
 	imageProto imageProtocol // inline image thumbnail capability (P16.9)
 
-	toolCompact         bool // when true, tool results are capped at toolMaxLinesCompact lines
-	tools               []toolEntry
-	inputTokens         int // uncached input tokens (last turn)
-	outputTokens        int
+	toolCompact  bool // when true, tool results are capped at toolMaxLinesCompact lines
+	tools        []toolEntry
+	inputTokens  int // uncached input tokens (last turn)
+	outputTokens int
+	// inputTokensKnown is false from beginStream() until KindTurnDone reports
+	// the current turn's usage. inputTokens itself keeps the previous turn's
+	// number across that gap (it feeds the idle sidebar/status readouts, which
+	// are fine showing a "last known" figure) but streamStats() must not pass
+	// it off as the in-flight turn's prompt size — P33.17: an absent number
+	// beats a wrong one, and the live hint has nowhere honest to source a
+	// mid-stream prompt size from until the model reports it.
+	inputTokensKnown    bool
 	cacheReadTokens     int  // prompt-cache hits (last turn)
 	cacheCreationTokens int  // prompt-cache writes (last turn)
 	tokensEstimated     bool // true when token counts are derived from heuristic
@@ -970,6 +978,10 @@ func (m *model) beginStream() {
 	m.firstTokenAt = time.Time{}
 	m.outBytes = 0
 	m.status = statusWaiting
+	// P33.17: the previous turn's inputTokens is now stale for this turn's
+	// prompt size — streamStats() must hide the ↑ segment rather than quote it
+	// until KindTurnDone reports this turn's real usage.
+	m.inputTokensKnown = false
 }
 
 // markModelOutput ends the waiting phase and accumulates n output bytes. Any
@@ -992,7 +1004,14 @@ func (m *model) markModelOutput(n int) {
 // estimated is the entire change, since nothing above this method knows where
 // the numbers came from.
 func (m model) streamStats() streamStats {
-	st := streamStats{inputToks: m.inputTokens, estimated: true}
+	st := streamStats{estimated: true}
+	// P33.17: inputTokens holds the previous turn's number until this turn's
+	// KindTurnDone lands — showing it mid-stream would misrepresent it as the
+	// current turn's prompt size, so the ↑ segment stays absent (inputToks
+	// zero) rather than quote a stale figure.
+	if m.inputTokensKnown {
+		st.inputToks = m.inputTokens
+	}
 	if !m.streamStart.IsZero() {
 		st.elapsedSecs = int(time.Since(m.streamStart).Seconds())
 	}
@@ -2005,6 +2024,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinkEntries = nil
 			m.tools = m.tools[:0]
 			m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
+			m.inputTokensKnown = false
 			m.cacheReadTokens, m.cacheCreationTokens = 0, 0
 			m.tokensEstimated = false
 			m.turnCount = 0
@@ -3130,6 +3150,7 @@ func (m *model) applyEvent(ev api.Event) {
 		m.flushLiveText() // render final prose through glamour
 		if ev.OutputTokens > 0 || ev.TokensEstimated {
 			m.inputTokens = ev.InputTokens
+			m.inputTokensKnown = true
 			m.outputTokens = ev.OutputTokens
 			m.cacheReadTokens = ev.CacheReadTokens
 			m.cacheCreationTokens = ev.CacheCreationTokens

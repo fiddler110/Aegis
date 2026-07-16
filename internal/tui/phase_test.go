@@ -19,7 +19,12 @@ func phaseModel(t *testing.T, sinceStart time.Duration) model {
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m.ta.SetValue("explain this repo")
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	// Simulates the current turn's prompt size already being known (as if
+	// KindTurnDone had reported it) so the phase/hint tests below have a
+	// number to assert on. TestStreamHintHidesStaleInputTokensAtNewTurn covers
+	// the opposite case: inputTokens set but inputTokensKnown still false.
 	m.inputTokens = 4200
+	m.inputTokensKnown = true
 	m.streamStart = time.Now().Add(-sinceStart)
 	m.refresh()
 	return m
@@ -136,6 +141,41 @@ func TestStreamStatsRateExcludesTheWait(t *testing.T) {
 	}
 	if got := int(st.tokPerSec + 0.5); got != 100 {
 		t.Errorf("tokPerSec = %v, want ~100 (1000 tokens over the 10s generation window, not the 60s run)", st.tokPerSec)
+	}
+}
+
+// TestStreamHintHidesStaleInputTokensAtNewTurn is the P33.17 regression: once
+// a turn's usage lands, m.inputTokens holds a real number — but it is *that
+// turn's* number. beginStream() must not let it leak into the next turn's
+// hint as if it were the new turn's prompt size until a fresh KindTurnDone
+// reports it. An absent ↑ segment during that dead zone beats a wrong one.
+func TestStreamHintHidesStaleInputTokensAtNewTurn(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// First turn completes with real usage.
+	m.beginStream()
+	m.applyEvent(api.Event{Kind: api.KindTurnDone, InputTokens: 4200, OutputTokens: 100})
+	if !m.inputTokensKnown || m.inputTokens != 4200 {
+		t.Fatalf("setup: expected first turn's usage recorded, got inputTokens=%d known=%v", m.inputTokens, m.inputTokensKnown)
+	}
+
+	// A second turn starts sending before any usage event for it has arrived.
+	m.beginStream()
+	m.streamStart = time.Now().Add(-5 * time.Second)
+	m.refresh()
+
+	if st := m.streamStats(); st.inputToks != 0 {
+		t.Errorf("streamStats().inputToks = %d, want 0 (previous turn's number must not leak into the new turn)", st.inputToks)
+	}
+	if got := plainView(m); strings.Contains(got, "↑4.2k") {
+		t.Errorf("stale prompt size from the previous turn is on screen for the new turn:\n%s", got)
+	}
+
+	// Once this turn's own usage lands, the number is trustworthy again.
+	m.applyEvent(api.Event{Kind: api.KindTurnDone, InputTokens: 5100, OutputTokens: 50})
+	if st := m.streamStats(); st.inputToks != 5100 {
+		t.Errorf("streamStats().inputToks = %d, want 5100 once this turn's own usage arrived", st.inputToks)
 	}
 }
 
