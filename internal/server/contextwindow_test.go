@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/ollamainfo"
@@ -113,5 +114,25 @@ func TestInitContextWindowNonOllamaIsFinal(t *testing.T) {
 	}
 	if !s.ctxWinFinal {
 		t.Error("non-Ollama providers should be final at startup")
+	}
+}
+
+// TestInitContextWindowNativeOllamaWithConfigSkipsProbe: the native Ollama
+// adapter (P33.9) pins options.num_ctx to the configured window on every
+// request, so a configured context_window is trusted outright — no /api/ps
+// or /api/show probe needed. Uses a bogus, unreachable base_url to prove no
+// network call happens: a probe attempt would time out and this test would
+// fail on the deadline instead of returning immediately.
+func TestInitContextWindowNativeOllamaWithConfigSkipsProbe(t *testing.T) {
+	s := ctxWinServer(32768, "ollama", "http://127.0.0.1:1")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	s.initContextWindow(ctx)
+	win, src := s.effectiveContextWindow()
+	if win != 32768 || src != "config" {
+		t.Errorf("got %d/%q, want 32768/config", win, src)
+	}
+	if !s.ctxWinFinal {
+		t.Error("a configured window on the native ollama adapter should be final immediately")
 	}
 }

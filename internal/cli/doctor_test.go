@@ -238,12 +238,13 @@ func TestDoctorToolCallCheckSkipsUnresolvedModel(t *testing.T) {
 }
 
 // sseServer starts an httptest server that answers any POST with the given
-// SSE-formatted body, mimicking an OpenAI-compatible /chat/completions
-// streaming response (the shape internal/provider/openai consumes).
+// newline-delimited-JSON body, mimicking Ollama's native /api/chat streaming
+// response (the shape internal/provider/ollama consumes; provider "ollama"
+// is native as of P33.9, not OpenAI-compat SSE).
 func sseServer(t *testing.T, body string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, body)
 	}))
@@ -257,12 +258,8 @@ func sseServer(t *testing.T, body string) *httptest.Server {
 // FAIL — this must stay non-fatal for offline/CI use) and name the doc
 // pointer in Fix.
 func TestDoctorToolCallCheckDetectsZeroToolCalls(t *testing.T) {
-	const body = `data: {"choices":[{"delta":{"content":"I would list the files by running ls."},"finish_reason":null}]}
-
-data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]
-
+	const body = `{"message":{"role":"assistant","content":"I would list the files by running ls."},"done":false}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}
 `
 	srv := sseServer(t, body)
 	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: srv.URL, Model: "deepseek-r1:8b"}}
@@ -284,12 +281,8 @@ data: [DONE]
 // TestDoctorToolCallCheckPassesOnToolCall confirms a model that does call
 // the smoke-test tool reports PASS with the observed call count.
 func TestDoctorToolCallCheckPassesOnToolCall(t *testing.T) {
-	const body = `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"list_files","arguments":"{\"path\":\".\"}"}}]},"finish_reason":null}]}
-
-data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
-
-data: [DONE]
-
+	const body = `{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_files","arguments":{"path":"."}}}]},"done":false}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":3}
 `
 	srv := sseServer(t, body)
 	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: srv.URL, Model: "gpt-oss:20b"}}

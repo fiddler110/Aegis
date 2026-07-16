@@ -146,6 +146,53 @@ func TestScenario_PlanModeBlocksWrite(t *testing.T) {
 	}
 }
 
+// TestScenario_EmptyAnswerNudgedExactlyOnce is the P34.1 regression, observed
+// live with gpt-oss:20b: a run whose tool round succeeds but whose next turn
+// ends with zero user-visible text must recover a real answer via a single
+// automatic nudge. The nudge is asserted to fire exactly once — an unbounded
+// version of this recovery would let a model that never emits text spin the
+// loop to the iteration cap, which is the failure this must not trade up to.
+func TestScenario_EmptyAnswerNudgedExactlyOnce(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.Register(&echoTool{}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_1", Name: "echo", Input: json.RawMessage(`{"msg":"hi"}`)}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		// Ends the turn having said nothing the user can see — the conclusion
+		// went to the thinking channel.
+		{
+			{Type: provider.EventThinkingDelta, Text: "The echo returned hi, so the answer is hi."},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 20, OutputTokens: 3}},
+		},
+		{
+			{Type: provider.EventTextDelta, Text: "The answer is hi."},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 25, OutputTokens: 4}},
+		},
+	}}
+
+	s := Scenario{
+		Name:   "empty answer nudged exactly once",
+		System: "sys",
+		Options: engine.Options{
+			Adapter: adapter, Tools: reg, Model: "test", MaxTokens: 100,
+		},
+		Turns: []string{"what did echo say?"},
+	}
+	RunAndCheck(t, context.Background(), s,
+		ExpectNoError(),
+		ExpectToolCalled("echo"),
+		ExpectFinalTextContains("The answer is hi."),
+		ExpectNoticeCountContaining("no text", 1),
+	)
+	if adapter.calls != 3 {
+		t.Errorf("model called %d times, want 3 (tool round, text-less turn, one nudge)", adapter.calls)
+	}
+}
+
 // TestScenario_BudgetAbortsSecondTurn verifies a session that blows its cost
 // budget on the first model turn never reaches the second — the harness
 // asserts both the error surfaced and that the would-be-forbidden turn never

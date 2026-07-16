@@ -16,10 +16,10 @@ import (
 
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
-	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/server"
+	"github.com/fiddler110/aegis/internal/toolcallprobe"
 	"github.com/spf13/cobra"
 )
 
@@ -209,10 +209,10 @@ func doctorProviderCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 }
 
 // doctorToolCallSmokePrompt is the obviously-actionable prompt sent to the
-// model for the P28.2 tool-calling smoke test: it names a concrete tool and
-// leaves no ambiguity that calling it (not describing it) is the expected
-// response.
-const doctorToolCallSmokePrompt = "Call the `list_files` tool now to list the files in the current directory. Do not describe what you would do — call the tool."
+// model for the P28.2 tool-calling smoke test. The probe itself lives in
+// internal/toolcallprobe so this check and the daemon's run-start gate (P34.2)
+// share one definition; this alias is kept for the tests that assert on it.
+const doctorToolCallSmokePrompt = toolcallprobe.SmokePrompt
 
 // doctorToolCallCheck (P28.2) does a cheap live round-trip smoke test against
 // the configured model: send a single obviously-actionable prompt with one
@@ -260,44 +260,11 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	req := provider.Request{
-		Model:  cfg.Provider.Model,
-		System: "You are a coding agent. When a task requires a tool, call it immediately instead of describing it in prose.",
-		Messages: []provider.Message{{
-			Role:    provider.RoleUser,
-			Content: []provider.Block{provider.TextBlock{Text: doctorToolCallSmokePrompt}},
-		}},
-		Tools: []provider.ToolSchema{{
-			Name:        "list_files",
-			Description: "List the files in a directory.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"directory to list"}},"required":["path"]}`),
-		}},
-		MaxTokens: 256,
-	}
-
-	events, err := adapter.Stream(rctx, req)
+	toolCalls, err := toolcallprobe.Run(rctx, adapter, cfg.Provider.Model)
 	if err != nil {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
 			Detail: fmt.Sprintf("tool-call smoke test could not run: %v", err),
-			Fix:    "best-effort check, not fatal — retry `aegis doctor` once the model server is responsive",
-		}
-	}
-
-	toolCalls := 0
-	var streamErr error
-	for ev := range events {
-		switch ev.Type {
-		case provider.EventToolUse:
-			toolCalls++
-		case provider.EventError:
-			streamErr = ev.Err
-		}
-	}
-	if streamErr != nil {
-		return doctorCheck{
-			Name: name, Severity: doctorWarn,
-			Detail: fmt.Sprintf("tool-call smoke test failed: %v", streamErr),
 			Fix:    "best-effort check, not fatal — retry `aegis doctor` once the model server is responsive",
 		}
 	}

@@ -126,6 +126,12 @@ type Usage struct {
 	CacheCreationTokens int  `json:"cache_creation_tokens,omitempty"`
 	CacheReadTokens     int  `json:"cache_read_tokens,omitempty"`
 	IsEstimated         bool `json:"is_estimated,omitempty"`
+	// LoadDurationMS is how long the provider spent loading the model into
+	// memory before inference began (Ollama's native `load_duration`,
+	// nanoseconds on the wire, converted to milliseconds here). Zero when not
+	// reported (every non-Ollama provider) or when the model was already
+	// warm. Lets a caller distinguish a slow cold load from generation time.
+	LoadDurationMS int64 `json:"load_duration_ms,omitempty"`
 }
 
 // EventType enumerates streaming events emitted by an adapter.

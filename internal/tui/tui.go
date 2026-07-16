@@ -1055,10 +1055,17 @@ func (m *model) markModelOutput(n int) {
 
 // streamStats snapshots the in-flight run's throughput for the status line.
 // The output side is heuristic today — bytesPerTokenEstimate over the model's
-// own output bytes — and says so via estimated. P33.9's native Ollama adapter
-// reports real per-delta counts: assigning those to outputToks and clearing
-// estimated is the entire change, since nothing above this method knows where
-// the numbers came from.
+// own output bytes — and says so via estimated. This stays a heuristic even
+// after P33.9's native Ollama adapter: verified against Ollama's actual wire
+// format, prompt_eval_count/eval_count arrive only on the final done:true
+// chunk, not per delta, so there is no real count to assign here mid-stream —
+// P33.9's real counts land post-turn instead (KindTurnDone / TurnTrace,
+// already IsEstimated=false for this adapter), which is what P33.17's
+// inputTokensKnown gate and the sidebar's "last known" panels already read.
+// An earlier draft of this comment claimed real per-delta counts would be
+// available here; that turned out to be the P33-batch pattern the roadmap's
+// own retrospective warns about (see roadmap.md) — verify before trusting a
+// diagnosis like that again.
 func (m model) streamStats() streamStats {
 	st := streamStats{estimated: true}
 	// P33.17: inputTokens holds the previous turn's number until this turn's

@@ -29,9 +29,17 @@ func (s *Server) initContextWindow(ctx context.Context) {
 	}
 
 	p := s.cfg.Provider
+	if p.Default == "ollama" && cfgWin > 0 {
+		// The native Ollama adapter (P33.9) pins options.num_ctx to cfgWin on
+		// every request, so the served window is exactly what's configured —
+		// no probing needed, unlike the OpenAI-compat path below.
+		s.ctxWinFinal = true
+		return
+	}
 	// Only probe when the target could plausibly be Ollama: the explicit
-	// "ollama" provider, or an "openai" provider re-pointed at a custom base
-	// URL (the documented way to run Aegis against a local server).
+	// "ollama" provider (with no configured window to pin), or an "openai"
+	// provider re-pointed at a custom base URL (the documented way to run
+	// Aegis against a local server via the OpenAI-compat endpoint).
 	if p.Default != "ollama" && (p.Default != "openai" || p.BaseURL == "") {
 		s.ctxWinFinal = true
 		return

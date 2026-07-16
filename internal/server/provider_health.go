@@ -8,6 +8,17 @@ import (
 	"github.com/fiddler110/aegis/internal/ollamainfo"
 )
 
+// isOllamaProvider reports whether the configured provider is a local
+// Ollama-style server: provider.default == "ollama", or a base_url pointing at
+// the default Ollama port. Same detection `aegis doctor` uses
+// (internal/cli/ollama.go's ollamaNativeBase), and the shared gate for every
+// check that is only meaningful — or only affordable — against a local model
+// server: reachability below, and the P34.2 tool-calling probe.
+func (s *Server) isOllamaProvider() bool {
+	p := s.cfg.Provider
+	return strings.EqualFold(p.Default, "ollama") || strings.Contains(p.BaseURL, ":11434")
+}
+
 // probeProviderReachability performs the cheap liveness check GET /status
 // (P28.7) surfaces to the TUI/web UI so "is the model actually reachable"
 // doesn't require spending a conversational turn on it — the exact pattern
@@ -28,8 +39,7 @@ import (
 // left unmeasured (0).
 func (s *Server) probeProviderReachability(ctx context.Context) (reachable bool, latencyMS int64) {
 	p := s.cfg.Provider
-	isOllama := strings.EqualFold(p.Default, "ollama") || strings.Contains(p.BaseURL, ":11434")
-	if isOllama {
+	if s.isOllamaProvider() {
 		base := ollamainfo.NativeBase(p.BaseURL)
 		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()

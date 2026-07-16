@@ -86,6 +86,44 @@ func TestLookupCVEKeywordSearch(t *testing.T) {
 	}
 }
 
+func TestLookupCVEProductVersionSearch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("virtualMatchString"); got != "cpe:2.3:*:*:apache_http_server:2.4.29:*:*:*:*:*:*:*" {
+			t.Errorf("virtualMatchString = %q, want the normalized CPE match string", got)
+		}
+		if got := r.URL.Query().Get("resultsPerPage"); got != "5" {
+			t.Errorf("resultsPerPage = %q, want default 5", got)
+		}
+		w.Write([]byte(`{"vulnerabilities": [
+			{"cve": {"id": "CVE-2017-15715", "descriptions": [{"lang":"en","value":"apache httpd issue"}]}}
+		]}`))
+	}))
+	defer srv.Close()
+
+	records, err := LookupCVE(context.Background(), CVEOptions{Product: "Apache HTTP Server", Version: "2.4.29", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("LookupCVE: %v", err)
+	}
+	if len(records) != 1 || records[0].ID != "CVE-2017-15715" {
+		t.Fatalf("got %+v, want one CVE-2017-15715 record", records)
+	}
+}
+
+func TestLookupCVERequiresBothProductAndVersion(t *testing.T) {
+	if _, err := LookupCVE(context.Background(), CVEOptions{Product: "apache_http_server"}); err == nil {
+		t.Error("expected an error when version is missing")
+	}
+	if _, err := LookupCVE(context.Background(), CVEOptions{Version: "2.4.29"}); err == nil {
+		t.Error("expected an error when product is missing")
+	}
+}
+
+func TestLookupCVERejectsProductVersionAlongsideKeyword(t *testing.T) {
+	if _, err := LookupCVE(context.Background(), CVEOptions{Keyword: "log4j", Product: "apache_http_server", Version: "2.4.29"}); err == nil {
+		t.Error("expected an error when both keyword and product/version are set")
+	}
+}
+
 func TestLookupCVERateLimitedReturnsClearError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")

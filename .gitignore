@@ -1,6 +1,7 @@
 # Build output
 /aegis
 /aegis.exe
+/aegis-eval.exe
 /dist/
 
 # Local test runs and scratch output

@@ -61,6 +61,15 @@ wide variance:
   prose instead. This is a known R1-distill failure mode: the model's reasoning gets dumped as the
   final answer instead of being followed by a structured tool call.
 
+A later pass (2026-07-16) added a fourth, and a different failure shape:
+
+- **`qwen2.5-coder:1.5b`** made **zero tool calls** despite an Ollama manifest that *claims* tool
+  support. It printed tool-call-shaped JSON (`{"name": "shell", "arguments": {...}}`) into its prose,
+  then **fabricated** the results — inventing a plausible directory listing rather than reporting that
+  it hadn't read anything. Worth calling out separately from the `deepseek-r1:8b` case above: manifest
+  metadata is not evidence a model can speak the protocol, and a model at this size may confabulate the
+  output of the tool it failed to call. Prefer a larger model for anything agentic.
+
 Takeaways:
 
 - Prefer models explicitly instruction-tuned for tool/function calling (`gpt-oss:20b`-class models,
@@ -73,6 +82,17 @@ Takeaways:
   sends a cheap, obviously-actionable smoke-test prompt to the configured local model and **warns**
   (never fails hard — safe for offline/CI use) if it comes back with zero tool calls. Run it after
   switching models to catch this before it costs you a real task.
+- You no longer have to remember to run it (P34.2). The daemon runs that same probe itself at run
+  start, for local Ollama-style providers only, and warns before the turn is spent if the model can't
+  call tools — once per model (the verdict is cached for the daemon's life) and once per session (a
+  tool-incapable model is still fine to converse with). A probe that can't reach a verdict — an
+  unreachable server, a timeout — stays silent rather than blaming the model. The probe is not extra
+  latency in practice: it runs against the model your turn is about to load anyway, so it shares that
+  cold load rather than adding one.
+- Independently, the engine watches for the `qwen2.5-coder:1.5b` signature above: if a turn's answer
+  contains tool-call-shaped JSON naming a real tool but made no actual tool call, it says so. This
+  costs nothing and needs no probe, so it also covers `aegis chat`, which runs its own in-process
+  engine and never touches the daemon's run path.
 - If a model diagnoses correctly but doesn't act on it (the `qwythos:latest` pattern above), a more
   directive follow-up prompt ("now call `edit_file` to apply the fix") often unsticks it — and as of
   P28.3, the engine does this automatically: when the first response to a plainly actionable request

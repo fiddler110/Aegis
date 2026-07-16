@@ -23,6 +23,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/net v0.57.0
+	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.53.0
 )
@@ -66,7 +67,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	modernc.org/libc v1.73.4 // indirect
