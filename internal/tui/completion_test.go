@@ -1,6 +1,15 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/fiddler110/aegis/internal/api"
+)
 
 // TestCommandDefsWellFormed is the P14.10 regression: every entry in the
 // single source-of-truth table has a name, a handler, and detailed help, and
@@ -162,5 +171,77 @@ func TestCompletionMoveWraps(t *testing.T) {
 	c.move(1)
 	if c.selected != 0 {
 		t.Errorf("move(1) wrap = %d, want 0", c.selected)
+	}
+}
+
+// TestCompletionPopupLeavesTranscriptGeometryAlone is the P33.18 regression:
+// the completion popup used to insert into the vertical layout and shrink
+// the transcript pane by its own height every time it opened — the same
+// reflow jump P33.6 fixed for the approval dialog. It now composites over
+// the finished layout (renderAnchoredOverlay) instead of resizing anything
+// underneath it.
+func TestCompletionPopupLeavesTranscriptGeometryAlone(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	// syncCompletion() -> commandEntries() -> slash.Customs(); pre-seed the
+	// customs cache so this client-less test model never calls the nil
+	// daemon client (same pre-existing crash risk integration_test.go and
+	// follow_intent_test.go sidestep).
+	m.slash.customs = []api.CommandInfo{}
+
+	beforeH, beforeFixed := m.transcript.Height(), m.fixedH()
+	beforeChat := lipgloss.Height(m.renderChat())
+
+	m.ta.SetValue("/")
+	m.syncCompletion()
+	if !m.completion.active {
+		t.Fatal("expected the completion popup to be active after typing '/'")
+	}
+
+	if got := m.transcript.Height(); got != beforeH {
+		t.Errorf("transcript height moved with the completion popup open: %d -> %d", beforeH, got)
+	}
+	if got := m.fixedH(); got != beforeFixed {
+		t.Errorf("fixed vertical budget moved with the completion popup open: %d -> %d", beforeFixed, got)
+	}
+	if got := lipgloss.Height(m.renderChat()); got != beforeChat {
+		t.Errorf("renderChat height moved with the completion popup open: %d -> %d", beforeChat, got)
+	}
+
+	full := ansi.Strip(m.render())
+	if !strings.Contains(full, "/help") {
+		t.Errorf("expected a completion row (e.g. /help) in the composited view, got: %q", full)
+	}
+	if !strings.Contains(full, "AEGIS") {
+		t.Errorf("expected chat content still visible behind the popup, got: %q", full)
+	}
+}
+
+// TestCompletionPopupAnchorsAboveComposer checks the popup's composited
+// position (P33.18): it sits directly above the composer/todo strip, not
+// centered like the modal overlays (renderOverlay).
+func TestCompletionPopupAnchorsAboveComposer(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.slash.customs = []api.CommandInfo{}
+	m.ta.SetValue("/")
+	m.syncCompletion()
+
+	_, x, y := m.renderCompletionPopup()
+	if x != 0 {
+		t.Errorf("expected the popup left-anchored at x=0, got x=%d", x)
+	}
+	inputAreaH := m.ta.Height() + 2 + 1
+	wantY := m.height - inputAreaH - completionBoxH
+	if len(m.todoItems) > 0 {
+		wantY -= 1
+	}
+	if y != wantY {
+		t.Errorf("popup anchor y = %d, want %d (bottom-anchored above the composer)", y, wantY)
+	}
+	// The popup must not be centered like a modal overlay: a 40-row terminal
+	// centers around y=~17, well above the composer.
+	if y < m.height/2 {
+		t.Errorf("expected popup anchored in the lower half of the screen, got y=%d height=%d", y, m.height)
 	}
 }
