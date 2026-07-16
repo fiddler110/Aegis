@@ -40,16 +40,40 @@ var SmokeTool = provider.ToolSchema{
 	InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"directory to list"}},"required":["path"]}`),
 }
 
-// Run sends the smoke test to model via adapter and reports how many
-// structured tool calls came back.
+// SmokeMaxTokens caps the probe generously, for the same reason ProbeTimeout
+// does: the cap is a bound, not a target — the stream ends the moment the tool
+// call lands — so a terse model pays nothing for headroom, while a tight cap
+// truncates a verbose one mid-reasoning and buys a false accusation.
+//
+// It was measured, not guessed. At the original 256 the probe was a coin flip
+// on a reasoning model: `qwen3:14b` needed 124-825 completion tokens across
+// five runs of this exact prompt (most of it thinking preamble before the
+// call), so 256 truncated the majority of them and reported a model that calls
+// tools reliably as one that cannot. Truncation past even this cap is still
+// handled — see Result.Truncated — but it should be rare enough not to matter.
+const SmokeMaxTokens = 2048
+
+// Result is what one probe run observed.
+type Result struct {
+	// ToolCalls is how many structured tool calls the model emitted.
+	ToolCalls int
+	// Truncated reports that the model hit the token cap before it finished.
+	// A truncated run that made no tool call is not evidence of anything: the
+	// call may simply have been the next token the model was going to emit.
+	// Callers must treat ToolCalls == 0 && Truncated as "no verdict", never as
+	// failure.
+	Truncated bool
+}
+
+// Run sends the smoke test to model via adapter and reports what came back.
 //
 // A non-nil error means the probe could not reach a verdict (transport
 // failure, mid-stream provider error, cancelled context) — it never means the
 // model failed. Callers must treat that case as "unknown" and stay silent
 // rather than accusing a model of not supporting tool calls when the truth is
-// the server was unreachable. toolCalls == 0 with a nil error is the only
-// negative verdict this probe can justify.
-func Run(ctx context.Context, adapter provider.Adapter, model string) (toolCalls int, err error) {
+// the server was unreachable. A zero ToolCalls with a nil error is the only
+// negative verdict this probe can justify, and only when !Truncated.
+func Run(ctx context.Context, adapter provider.Adapter, model string) (Result, error) {
 	events, err := adapter.Stream(ctx, provider.Request{
 		Model:  model,
 		System: SmokeSystem,
@@ -58,26 +82,31 @@ func Run(ctx context.Context, adapter provider.Adapter, model string) (toolCalls
 			Content: []provider.Block{provider.TextBlock{Text: SmokePrompt}},
 		}},
 		Tools:     []provider.ToolSchema{SmokeTool},
-		MaxTokens: 256,
+		MaxTokens: SmokeMaxTokens,
 	})
 	if err != nil {
-		return 0, err
+		return Result{}, err
 	}
 	// The stream must be drained even after an error event so the adapter's
 	// goroutine can finish rather than block on an unread channel.
+	var res Result
+	var stop provider.StopReason
 	var streamErr error
 	for ev := range events {
 		switch ev.Type {
 		case provider.EventToolUse:
-			toolCalls++
+			res.ToolCalls++
+		case provider.EventDone:
+			stop = ev.Stop
 		case provider.EventError:
 			streamErr = ev.Err
 		}
 	}
 	if streamErr != nil {
-		return 0, streamErr
+		return Result{}, streamErr
 	}
-	return toolCalls, nil
+	res.Truncated = stop == provider.StopMaxTokens
+	return res, nil
 }
 
 // Verdict is what the probe learned about one model.
@@ -148,12 +177,19 @@ func (g *Gate) Verdict(ctx context.Context, adapter provider.Adapter, model stri
 		}
 		pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
 		defer cancel()
-		calls, err := Run(pctx, adapter, model)
+		res, err := Run(pctx, adapter, model)
 		if err != nil {
 			return Unknown, err
 		}
+		if res.ToolCalls == 0 && res.Truncated {
+			// The model ran out of tokens before it finished, so silence here
+			// is the cap's doing, not the model's. Unknown, and deliberately
+			// not cached: a verdict this run couldn't justify must not be the
+			// one every later session in this process inherits.
+			return Unknown, nil
+		}
 		v := OK
-		if calls == 0 {
+		if res.ToolCalls == 0 {
 			v = Unsupported
 		}
 		g.store(model, v)

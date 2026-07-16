@@ -260,7 +260,7 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	toolCalls, err := toolcallprobe.Run(rctx, adapter, cfg.Provider.Model)
+	res, err := toolcallprobe.Run(rctx, adapter, cfg.Provider.Model)
 	if err != nil {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
@@ -268,7 +268,14 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 			Fix:    "best-effort check, not fatal — retry `aegis doctor` once the model server is responsive",
 		}
 	}
-	if toolCalls == 0 {
+	if res.ToolCalls == 0 && res.Truncated {
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: fmt.Sprintf("model %q hit the smoke test's %d-token cap before answering — no verdict", cfg.Provider.Model, toolcallprobe.SmokeMaxTokens),
+			Fix:    "not a failure: the model ran out of tokens mid-answer, so the check proves nothing either way — common with reasoning models that think at length before acting",
+		}
+	}
+	if res.ToolCalls == 0 {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
 			Detail: fmt.Sprintf("model %q answered an obviously-actionable smoke-test prompt with zero tool calls", cfg.Provider.Model),
@@ -277,7 +284,7 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	}
 	return doctorCheck{
 		Name: name, Severity: doctorPass,
-		Detail: fmt.Sprintf("model %q made %d tool call(s) on the smoke-test prompt", cfg.Provider.Model, toolCalls),
+		Detail: fmt.Sprintf("model %q made %d tool call(s) on the smoke-test prompt", cfg.Provider.Model, res.ToolCalls),
 	}
 }
 
