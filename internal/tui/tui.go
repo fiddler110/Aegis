@@ -951,6 +951,26 @@ func (m model) handleSlashCommand(parsed *commands.ParsedCommand) tea.Cmd {
 	return func() tea.Msg { return slashResultMsg(slash.Dispatch(parsed)) }
 }
 
+// dispatchSlash wraps handleSlashCommand, additionally opening the persona
+// picker's loading dialog synchronously (P33.13, finishing P33.7) for a bare
+// "/persona" — the one slash command whose dispatch is known, before its RPC
+// (ListPersonas) even starts, to open a dialog once slashResultMsg lands.
+// handleSlashCommand alone can't do this: its value receiver only returns a
+// tea.Cmd, with no way to mutate the model ahead of that command actually
+// running. Callers that submit a slash command from an addressable model (a
+// pointer receiver, or Update's own local value — always addressable) use
+// this instead of handleSlashCommand directly. /persona <name> (switching
+// directly, no picker) and every other command pass through unchanged.
+func (m *model) dispatchSlash(parsed *commands.ParsedCommand) tea.Cmd {
+	cmd := m.handleSlashCommand(parsed)
+	if parsed.Name != "persona" || len(parsed.Args) != 0 {
+		return cmd
+	}
+	picker := newPersonaPicker(m.width, m.height, m.sp.View())
+	m.dialog = &picker
+	return tea.Batch(cmd, m.sp.Tick)
+}
+
 // The two phases of a streaming run the TUI can actually tell apart (P33.4).
 // Everything before the first model output — Ollama reloading a model whose
 // keep_alive lapsed, then prompt eval — is one indistinguishable wait from
@@ -1259,7 +1279,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				parsed := &commands.ParsedCommand{Name: item.name, Raw: "/" + item.name}
-				return m, m.handleSlashCommand(parsed)
+				return m, m.dispatchSlash(parsed)
 			case dialogPersonaPicker:
 				item := sel.item.(personaItem)
 				parsed := &commands.ParsedCommand{Name: "persona", Args: []string{item.name}, Raw: "/persona " + item.name}
@@ -1316,6 +1336,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the list instead would leave the spinner up forever.
 		switch msg.(type) {
 		case sessionsLoadedMsg, backtrackTargetsMsg:
+		case slashResultMsg:
+			// P33.13: the persona picker opens ahead of its data through the
+			// same generic slashResultMsg every other slash command uses, so
+			// (unlike sessionsLoadedMsg/backtrackTargetsMsg, each dedicated to
+			// one picker) it can only fall through here while the dialog on
+			// screen is actually the persona picker awaiting it — anything
+			// else stays swallowed by the dialog below, same as always.
+			if m.dialog.kind != dialogPersonaPicker {
+				updated, cmd := m.dialog.Update(msg)
+				m.dialog = &updated
+				return m, cmd
+			}
 		default:
 			updated, cmd := m.dialog.Update(msg)
 			m.dialog = &updated
@@ -1680,7 +1712,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ta.Reset()
 				m.histIdx = -1
 				m.draftInput = ""
-				return m, m.handleSlashCommand(parsed)
+				return m, m.dispatchSlash(parsed)
 			}
 			m.ta.Reset()
 			return m, m.sendUserMessage(text)
@@ -1946,9 +1978,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cfg.Model = *msg.Model
 		}
 		if msg.Personas != nil {
-			picker := newPersonaPicker(m.width, m.height, msg.Personas)
-			m.dialog = &picker
+			// P33.13: the picker already opened (in its loading state) the
+			// moment "/persona" was dispatched — populate it in place rather
+			// than opening a second one. Not awaiting means the user dismissed
+			// it (or moved on to another dialog) before this landed: drop it,
+			// same as the session/backtrack pickers' late-data handling.
+			if m.awaitingPicker(dialogPersonaPicker) {
+				return m, m.dialog.setItems(personaPickerItems(msg.Personas), personaPickerH(m.height, len(msg.Personas)))
+			}
 			return m, nil
+		}
+		if m.awaitingPicker(dialogPersonaPicker) {
+			// The bare "/persona" dispatch that opened the loading dialog
+			// came back with nothing to list (msg.Output alone) or failed
+			// (msg.IsError) — report it inside the dialog the user is already
+			// looking at instead of as a transcript line below.
+			return m, m.dialog.setNotice(msg.Output)
 		}
 		if msg.Models != nil {
 			picker := newModelPicker(m.width, m.height, msg.Models, m.cfg.Model)
@@ -2421,7 +2466,7 @@ func (m *model) acceptCompletion(run bool) tea.Cmd {
 		m.draftInput = ""
 		m.applyViewportHeight()
 		m.refresh()
-		return m.handleSlashCommand(&commands.ParsedCommand{Name: e.name, Raw: "/" + e.name})
+		return m.dispatchSlash(&commands.ParsedCommand{Name: e.name, Raw: "/" + e.name})
 	}
 	if commandsNeedingArgs[e.name] {
 		m.ta.SetValue("/" + e.name + " ")
