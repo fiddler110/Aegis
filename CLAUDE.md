@@ -58,6 +58,18 @@ AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcros
 ollama pull llama3.2
 go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v
 
+# Live-probe tier: checks the tool-calling smoke probe (internal/toolcallprobe,
+# shared by `aegis doctor` and the daemon's P34.2 warning) against a real
+# model. It exists because the probe's correctness is a claim about real model
+# behavior that no unit test can hold — the P34.2 false positive (a reasoning
+# model thinking past the token cap, reported as "can't call tools") lived
+# through a fully green suite. Run it when changing SmokeMaxTokens, the smoke
+# prompt, or the verdict rules. Same on-demand, no-scheduled-CI policy as the
+# tiers below. Override the default model/endpoint with
+# AEGIS_LIVE_PROBE_MODEL / AEGIS_LIVE_PROBE_URL.
+ollama pull qwen3:14b
+go test -tags live_probe ./internal/toolcallprobe/... -run TestLiveProbeReachesAVerdict -v
+
 # Live-workflow eval tier (P25.7): drives a real daemon over the same HTTP
 # API + SSE seam the TUI/web UI use — not a scripted adapter — against a
 # real local model, running a seeded-bug fix/verify task and asserting

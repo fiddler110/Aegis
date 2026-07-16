@@ -517,3 +517,59 @@ func TestTranslateToolResults(t *testing.T) {
 		t.Errorf("tool message wrong: %+v", out[3])
 	}
 }
+
+// TestStreamMapsFinishReasonToStopReason covers the gap behind P34.2's
+// false positive: the adapter only ever mapped "tool_calls", so `stop`
+// defaulted to StopEndTurn and a response cut off at the token cap arrived
+// indistinguishable from a model that chose to stop. The tool-calling probe
+// read that as "made no tool call" and accused a capable model of not
+// supporting tool calls.
+func TestStreamMapsFinishReasonToStopReason(t *testing.T) {
+	const toolCallDelta = `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"list_files","arguments":"{}"}}]}}]}
+
+`
+	for _, tc := range []struct {
+		name string
+		body string
+		want provider.StopReason
+	}{
+		{
+			name: "length means truncated",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"thinking\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+			want: provider.StopMaxTokens,
+		},
+		{
+			name: "stop means end of turn",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+			want: provider.StopEndTurn,
+		},
+		{
+			name: "tool_calls wins",
+			body: toolCallDelta + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+			want: provider.StopToolUse,
+		},
+		{
+			// A cap reached after the call already landed truncated nothing
+			// the caller was waiting for — parity with the Ollama adapter.
+			name: "a tool call already seen outranks a later length",
+			body: toolCallDelta + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+			want: provider.StopToolUse,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var done *provider.Event
+			for _, ev := range streamEvents(t, tc.body) {
+				if ev.Type == provider.EventDone {
+					e := ev
+					done = &e
+				}
+			}
+			if done == nil {
+				t.Fatal("no EventDone emitted")
+			}
+			if done.Stop != tc.want {
+				t.Errorf("Stop = %q, want %q", done.Stop, tc.want)
+			}
+		})
+	}
+}

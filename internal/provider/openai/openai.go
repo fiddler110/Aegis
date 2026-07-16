@@ -426,8 +426,19 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 				}
 				acc.args.WriteString(tc.Function.Arguments)
 			}
-			if ch.FinishReason == "tool_calls" {
+			switch ch.FinishReason {
+			case "tool_calls":
 				stop = provider.StopToolUse
+			case "length":
+				// Without this the caller cannot tell a model that chose to
+				// stop from one cut off mid-answer: stop defaults to
+				// StopEndTurn, so a truncated response reported as a clean end
+				// of turn. Guarded on StopToolUse for parity with the native
+				// Ollama adapter — a cap reached after the tool call already
+				// landed truncated nothing the caller was waiting for.
+				if stop != provider.StopToolUse {
+					stop = provider.StopMaxTokens
+				}
 			}
 		}
 	}
