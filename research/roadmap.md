@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-15
+**Last updated:** 2026-07-16
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,9 +11,17 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 15 — three surviving P33 items (**P33.9-P33.11**, all Tier 3), seven new items
-(**P33.13-P33.19**) opened 2026-07-15 from findings surfaced while implementing the P33 batch, and
-five parked (**P25.9, P33.12, P33.20-P33.22**).
+**Open items:** 10 — five Tier 3 items (**P33.9, P33.10, P33.11, P33.16, P33.19**) and five parked
+(**P25.9, P33.12, P33.20-P33.22**). Tier 1 and Tier 2 are both fully clear.
+
+**P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16** — the whole of the Tier 2 batch,
+implemented by five parallel sub-agents, each in its own isolated git worktree (`isolation:
+"worktree"`), then merged into `main` one at a time. All five auto-merged with zero conflicts
+despite four of the five touching `internal/tui/tui.go`, because worktree isolation kept the
+concurrent edits from ever colliding on disk — conflict avoidance came from git's merge at
+integration time rather than from hand-grouping items by file the way the P33.1-P33.8 batch did.
+Full `go build ./...` / `go vet ./...` / `go test ./...` green after every merge. See
+[releases.md](releases.md#latest-changes) for the full writeup.
 
 **P33.1-P33.8 shipped 2026-07-15** — the whole of the batch's Tier 1 and Tier 2, implemented by
 parallel sub-agents grouped so no two concurrently edited the same file. See
@@ -43,47 +51,50 @@ output, not just text; `outBytes` not `liveText`; tok/s measured from first toke
 otherwise a 60s cold-load is averaged into a throughput the model never ran at). Where an item says
 "show X", the implementer owns the question of whether X is substantiable.
 
-**Next session:** the Tier 2 items are all small and independent — P33.14 (repo-wide `gofmt` + a CI
-gate) is the cheapest and removes a recurring papercut; P33.15 (steer error surfacing) is the most
-user-visible. P33.13 (persona picker) finishes the job P33.7 started. Of Tier 3, **P33.9 (native
-Ollama adapter) is the keystone**: it unblocks P33.10, upgrades P33.4's phase display from
-inference to fact, replaces the estimated token heuristic behind the single `streamStats()` seam
-P33.4 left for exactly that purpose, and is a prerequisite for P33.19. Re-run `TestLiveWorkflow`
-(recipe in CLAUDE.md) after any change touching the engine/server/sandbox/guard/swarm/cron/debate
-seams; `aegis doctor` is the standalone preflight companion for the same misconfiguration classes.
+**Next session:** with Tier 2 clear, **P33.9 (native Ollama adapter) is next** — it's the keystone
+of the remaining batch: unblocks P33.10, upgrades P33.4's phase display from inference to fact,
+replaces the estimated token heuristic behind the single `streamStats()` seam P33.4 left for
+exactly that purpose, and is a prerequisite for P33.19. It's also the largest remaining item (Effort:
+L), so budget accordingly rather than pairing it with something else in the same session. P33.16
+needs a decision before implementation and is best sequenced after P33.9 gives it a real error
+taxonomy to decide against. P33.11 should read P33.20 first — starting it is P33.20's stated
+activation trigger. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
+engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
+companion for the same misconfiguration classes.
 
 ---
 
-## Priority Order
+## Tiering Criteria
 
-Tiering criteria: **Tier 1** = real, currently-exploitable security/robustness gaps, small effort,
-no dependency. **Tier 2** = cheap, no-dependency wins — user-facing polish or small self-contained
-hardening. **Tier 3** = real value but larger or sequence-dependent (blocks or is blocked by other
-work). **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build
-speculatively.
-
-**Tier 1:** none open. (P33.1 and P33.2 shipped 2026-07-15; P31.1, P31.2, P30.1-P30.3 shipped
-2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
-
-**Tier 2:** P33.13 (persona picker instant-open), P33.14 (repo-wide gofmt + CI gate), P33.15 (steer
-error surfacing), P33.17 (stale input-token count), P33.18 (completion popup steals viewport
-height). (P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14;
-P32.5-P32.7 shipped 2026-07-15.)
-
-**Tier 3:** P33.9 (native Ollama adapter), P33.10 (keep-alive/pre-warm — partially blocked by
-P33.9), P33.11 (transient slash panels), P33.16 (mid-stream error retryability — needs a decision),
-P33.19 (post-tool-round wait phase — blocked by P33.9). (P32.8 shipped 2026-07-15.)
-
-**Tier 4:** parked — P25.9, P33.12, P33.20, P33.21, P33.22. See [Parked](#open-work--parked-tier-4).
-(P32.9-P32.11 shipped 2026-07-15.)
+**Tier 1** = real, currently-exploitable security/robustness gaps, small effort, no dependency.  
+**Tier 2** = cheap, no-dependency wins — user-facing polish or small self-contained hardening.  
+**Tier 3** = real value but larger or sequence-dependent (blocks or is blocked by other work).  
+**Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build speculatively.
 
 ---
 
-## Open Work
+## Open Work — Tier 1
+
+**Status:** None open. (P33.1 and P33.2 shipped 2026-07-15; P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
+
+---
+
+## Open Work — Tier 2
+
+**Status:** None open. (P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8
+shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
+
+---
+
+## Open Work — Tier 3
+
+Five items: P33.9, P33.10, P33.11, P33.16, P33.19. Medium-effort with real value; some are
+sequence-dependent. P33.9 is the keystone unblocking P33.10 and P33.19.
+(P32.8 shipped 2026-07-15.)
 
 ### P33.9 — Native Ollama provider adapter
 
-Priority: Tier 3 · Effort: L
+Effort: L
 
 **The keystone of the remaining batch** — it unblocks P33.10 and P33.19, and upgrades P33.4's
 shipped phase display from inference to fact.
@@ -121,7 +132,7 @@ CLAUDE.md).
 
 ### P33.10 — Ollama keep-alive management and pre-warm
 
-Priority: Tier 3 · Effort: M — partially blocked by P33.9
+Effort: M — partially blocked by P33.9
 
 Ollama unloads models after its default 5-minute `keep_alive`; the next message then pays a full
 cold reload (tens of seconds on 16GB VRAM). P33.4 shipped a phase split that makes this wait
@@ -137,7 +148,7 @@ and other workloads; make persistence an explicit user choice.
 
 ### P33.11 — Transient panels for informational slash commands
 
-Priority: Tier 3 · Effort: M
+Effort: M
 
 `/status`, `/models`, `/help`, `/config`, `/memory` and friends print static blocks into the
 transcript (`internal/tui/slash.go`), so after a session of housekeeping the conversation is
@@ -157,69 +168,9 @@ read P33.20 first**: the dialog block currently swallows every message while a d
 which is unreachable today only because pickers require `!streaming`. Transient panels shown
 *during* a run would make it reachable, so P33.20 likely stops being parked the moment this starts.
 
-### P33.13 — Persona picker opens instantly (finishes P33.7)
-
-Priority: Tier 2 · Effort: M
-
-P33.7 shipped instant-open loading states for the session (Ctrl+Y) and backtrack (Esc-Esc) pickers
-and corrected the record on the rest: `/session` never opened a picker (`cmdSession` prints text),
-and `/timeline` and the model picker are backed by local data with no RPC to wait on. The **persona
-picker** (`/persona` → `client.ListPersonas`) is the one genuinely remote-backed picker still doing
-fetch-then-open, and the original item never mentioned it.
-
-It was deferred rather than rushed because it is not the same shape as the other two: it opens
-through the generic `slashResultMsg` path, so opening early needs a pre-dispatch hook in
-`handleSlashCommand` — currently a value receiver returning `tea.Cmd`, so it cannot mutate the
-model. That refactor is the item. Reuse P33.7's machinery verbatim once the hook exists
-(`newLoadingDialog`, `fixedW` to prevent the width snap, `awaitingPicker(kind)` for
-dismiss-before-data, and the dialog-block fall-through that data messages need in order to be
-reachable at all — see `tui.go:1294-1303`). Note the persona list is also hot-reloaded server-side
-(`persona.Refresh`), so it is the picker most likely to be genuinely slow.
-
-Done when: `/persona` opens instantly with a loading row, populates in place, and handles
-dismiss-before-data and fetch error the same way the session picker does; tests mirror
-`picker_loading_test.go`.
-
-### P33.14 — Repo-wide `gofmt` cleanup and a CI gate
-
-Priority: Tier 2 · Effort: S
-
-`gofmt -l ./internal ./cmd` currently reports three files unformatted at HEAD:
-`internal/checkpoint/checkpoint.go`, `internal/server/auth.go`, `internal/tool/builtin/
-knowledge_test.go`. All three are pre-existing and unrelated to any recent item — they were noticed
-independently by two different P33 agents, each of which correctly left them alone to keep its diff
-clean, which is exactly how drift like this survives.
-
-The formatting fix is trivial. **The item is really the CI gate**: nothing currently fails when
-unformatted code lands, so this will silently recur. Add a `gofmt -l` check (failing on non-empty
-output) to the existing CI workflow, and consider `go vet ./...` alongside it if not already gated.
-Do the gate in the same change as the cleanup, or the cleanup is pointless.
-
-### P33.15 — Steer error surfacing in the TUI
-
-Priority: Tier 2 · Effort: S
-
-Three related loose ends left by P33.2, grouped because they all live in the same TUI steer/error
-path:
-
-1. **429 vs 404 are conflated.** P33.2 made the server distinguish "steer buffer full" (429,
-   retryable) from "run already finished" (404, not) — a distinction that did not exist before, and
-   which was the whole point of the `steerBox` fence. The TUI treats both as a generic `errMsg`, so
-   the user sees the same opaque failure for "try again" and "the run's over".
-2. **A failed steer POST visually tears down a live run.** `errMsg` sets `m.streaming = false` even
-   when the failure is a *steer POST* on a still-live stream. Pre-existing and not touched by
-   P33.2, but it means a transient steer failure makes a run that is in fact still going look
-   finished. Scope the teardown to failures that actually end the stream.
-3. **The denial-feedback steer renders as a user turn.** `internal/tui/approval.go:236-262` posts
-   `"The user denied the %s call. Feedback: …"` on the same steer channel. It is normally consumed
-   (a denial happens mid-tool-round) so this is latent, but it now inherits P33.2's safety net —
-   and if it ever comes back unconsumed, the TUI will requeue that system-phrased text as the
-   user's next message. Either tag steers with an origin so the requeue path can render/skip
-   system-originated ones, or exclude them from requeue entirely.
-
 ### P33.16 — Should mid-stream provider errors be retryable?
 
-Priority: Tier 3 · Effort: S — needs a decision before implementing
+Effort: S — needs a decision before implementing
 
 P33.1 made mid-stream Ollama errors (`{"error": ...}` envelopes: model OOM, context overflow,
 worker crash) surface as `provider.EventError` instead of vanishing into a truncated answer. It
@@ -235,40 +186,9 @@ blanket choice — which means it needs the error taxonomy that P33.9's native a
 better access to. Decide the policy before writing code; sequence after P33.9 if per-class
 classification wins.
 
-### P33.17 — The `↑` input-token count is last turn's number
-
-Priority: Tier 2 · Effort: S
-
-`m.inputTokens` — the `↑4.2k` segment in the streaming hint — holds the *previous* turn's prompt
-size while the current turn streams. Pre-existing and inherited from the old hint, but P33.4 made
-it considerably more prominent by keeping the hint visible for the entire streaming duration
-instead of only in the no-live-text branch. It is a subtly stale number now shown continuously,
-which is worse than one shown briefly.
-
-Fix options, cheapest first: zero/hide the segment until the current turn's real prompt size is
-known; or estimate it at send time from the assembled request. Note P33.9 would deliver the real
-number (`prompt_eval_count`) — but only for Ollama sessions, so this still wants a
-provider-agnostic answer. Keep it truthful: an absent number beats a wrong one.
-
-### P33.18 — Completion popup steals viewport height
-
-Priority: Tier 2 · Effort: S
-
-The last known layout-reflow jump in the normal flow. P33.6 moved the approval dialog to the
-`renderOverlay` compositor so transcript geometry stays stable during permission-heavy runs; the
-completion popup still inserts into the vertical layout and shrinks the transcript the same way the
-approval dialog used to. It was explicitly out of scope for P33.6 and noted there as the follow-up
-candidate.
-
-P33.6's diff is the template — remove the branch from `fixedH()` and `renderChat()`'s `parts`, drop
-the `applyViewportHeight()` calls that exist only to make room, and composite instead. One real
-difference to think through: the completion popup is anchored to the composer and non-modal (the
-user is still typing into the box behind it), where the approval dialog is centred and modal, so
-`renderOverlay`'s centring and background-dimming are not directly reusable. Placement is the work.
-
 ### P33.19 — Name the post-tool-round wait
 
-Priority: Tier 3 · Effort: S — blocked by P33.9
+Effort: S — blocked by P33.9
 
 P33.4 shipped a **per-run** phase split: "waiting for first token · Ns" until the first model
 output, then generating. That is correct as specified, but it means after a tool result the bar
@@ -284,15 +204,16 @@ currently measure; that is why this is blocked rather than merely sequenced.
 
 ---
 
-## Open Work — Parked (Tier 4)
+## Open Work — Tier 4
 
-Low urgency, no trigger, or explicitly parked pending demand. Do not build speculatively —
-revisit only if a concrete trigger (user demand, reported pain, incident) appears, and check
-with the user before starting any of these.
+Five items parked — P25.9, P33.12, P33.20, P33.21, P33.22. Low urgency, no trigger, or
+explicitly parked pending demand. Do not build speculatively — revisit only if a concrete trigger
+appears, and check with the user before starting any of these.
+(P32.9-P32.11 shipped 2026-07-15.)
 
 ### P33.20 — The dialog block swallows every message while a dialog is open
 
-Priority: Tier 4 · Effort: S — parked, latent (but see trigger)
+Effort: S — parked, latent (but see trigger)
 
 `Update`'s dialog branch returns early for *every* message while a dialog is open — including
 stream events. This is unreachable today because the pickers that open dialogs all require
@@ -307,7 +228,7 @@ Treat P33.11 as this item's activation, and read this before starting that.
 
 ### P33.21 — Editor/background surfaces ignore `KindToolCallStart`
 
-Priority: Tier 4 · Effort: S — parked, no concrete trigger
+Effort: S — parked, no concrete trigger
 
 P33.3 added `provider.EventToolUseStart` → `KindToolCallStart` and wired it through the engine, the
 api wire, and the TUI. `internal/acp/agent.go` and `internal/cli/bg.go` ignore the new kind and
@@ -323,7 +244,7 @@ Cosmetic side effect noted here so it isn't rediscovered as a bug: `runRegistry.
 
 ### P33.22 — Rename `escPending` to reflect its single purpose
 
-Priority: Tier 4 · Effort: S — parked, cosmetic
+Effort: S — parked, cosmetic
 
 After P33.5, `escPending` is written by exactly one path (arming the idle backtrack picker) but is
 still cleared defensively in several send/stream-start handlers (`tui.go:1491,1530,1543,1581,1596`).
@@ -333,7 +254,7 @@ next substantive edit of that region rather than spending a commit on it.
 
 ### P33.12 — Composite the wizard and security-config forms as overlays
 
-Priority: Tier 4 · Effort: M — parked, no concrete trigger
+Effort: M — parked, no concrete trigger
 
 The first-run wizard and the security-config editor are the last two surfaces that replace the
 frame outright instead of compositing over the live chat (`render()`). The code comments defend
@@ -347,7 +268,7 @@ if the inconsistency is noticed in real use.
 
 ### P25.9 — Per-session scoping of `lsp.Manager`
 
-Priority: Tier 4 · Effort: L — parked, no concrete trigger
+Effort: L — parked, no concrete trigger
 
 The P25.1 deliberately-deferred gap list originally named six daemon-wide singletons; five
 shipped (see [releases.md](releases.md#latest-changes)): `knowledge.Store`, `longmem.Store`, the

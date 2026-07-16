@@ -8,6 +8,99 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-07-16 — shipped **P33.13, P33.14, P33.15, P33.17, P33.18**, clearing the
+Tier 2 batch left open by the P33.1-P33.8 shipment below. Implemented by five parallel sub-agents,
+each given its own isolated git worktree via `Agent(isolation: "worktree")` rather than hand-grouped
+by file the way the P33.1-P33.8 batch was — a deliberate change in method, since four of the five
+items touch `internal/tui/tui.go`. All five branches merged into `main` sequentially afterward with
+**zero conflicts** (`git merge --no-ff`, auto-merged even where two branches both touched `tui.go`),
+verified with a full `go build ./...` / `go vet ./...` / `go test ./...` pass after every merge.
+
+**P33.14** (Tier 2): `gofmt -l ./internal ./cmd` cleaned on the three pre-existing unformatted files
+(`internal/checkpoint/checkpoint.go`, `internal/server/auth.go`,
+`internal/tool/builtin/knowledge_test.go`), and a `Gofmt check` step was added to
+`.github/workflows/ci.yml`'s `build-and-test` job (gated to the `ubuntu-latest` leg, same pattern as
+the existing frontend-drift-check step, placed before `Vet`) so unformatted code now fails CI
+instead of silently landing again. The workflow's `push`/`pull_request` triggers remain intentionally
+disabled (`workflow_dispatch`-only); that's a separate, out-of-scope decision.
+
+**P33.17** (Tier 2): the `↑` input-token count in the TUI's streaming hint no longer shows the
+*previous* turn's prompt size while a new turn is streaming. Root cause: `m.inputTokens` is only
+refreshed by the `KindTurnDone` handler (`internal/tui/tui.go`), which fires at/near turn end, so for
+the whole wait-plus-generation window of a new turn the UI displayed stale data as current. Fix:
+added `inputTokensKnown bool`, cleared by `beginStream()` on every new turn (and on `/clear`/session
+switch) and set `true` only when `KindTurnDone` assigns the real count; `streamStats()` now leaves
+`st.inputToks` at `0` while unknown, and the existing `inputToks > 0` gate in `formatStreamHint`
+means the segment simply doesn't render rather than showing a wrong number. Deliberately
+provider-agnostic (does not wait on P33.9's real Ollama token counts) and deliberately left the
+sidebar CONTEXT bar / cost panel / `renderStats()` alone — those intentionally show a persistent
+last-known figure when idle and aren't gated by `m.streaming` the way `streamStats()`'s two call
+sites are. New test `TestStreamHintHidesStaleInputTokensAtNewTurn`
+(`internal/tui/phase_test.go`) drives a real `KindTurnDone` then a second `beginStream()` and asserts
+the `↑` segment is absent until that turn's own usage event lands.
+
+**P33.18** (Tier 2): the inline `@file`/command completion popup no longer shrinks the transcript
+viewport when it opens — the last known layout-reflow jump in the normal flow, following the same
+compositor pattern P33.6 used for the approval dialog. `fixedH()` no longer reserves
+`completionBoxH` and `renderChat()` no longer inserts the popup into its vertical `parts`; the
+`applyViewportHeight()` calls that existed only to reclaim space for it (esc-close, ctrl+r, ctrl+k,
+`syncCompletion()`) were removed. Unlike the approval dialog, the popup is **non-modal and
+composer-anchored** — the user is still typing behind it — so P33.6's `renderOverlay` (centered,
+dims everything outside the frame) wasn't reusable as-is. Added a sibling,
+`renderAnchoredOverlay(bg, fg string, x, y, width, height int) string` (`internal/tui/dialog.go`),
+which positions a layer at an explicit `(x,y)` with no centering and no dimming; a new
+`renderCompletionPopup()` computes a bottom-anchored position just above the composer/todo strip,
+matching the popup's old visual location. Tests:
+`TestCompletionPopupLeavesTranscriptGeometryAlone` (mirrors the P33.6 regression test — transcript
+height, `fixedH()`, and `renderChat()` height are unchanged while the popup is open) and
+`TestCompletionPopupAnchorsAboveComposer` (`internal/tui/completion_test.go`).
+
+**P33.13** (Tier 2, finishes P33.7): `/persona` now opens instantly with a loading state instead of
+fetch-then-open, the one genuinely remote-backed picker P33.7 left behind. Root cause: it dispatches
+through the generic `slashResultMsg` path via `handleSlashCommand`, a **value-receiver** method that
+can only return a `tea.Cmd` and so cannot mutate the model to open a dialog before the RPC runs.
+Added `func (m *model) dispatchSlash(parsed *commands.ParsedCommand) tea.Cmd`
+(`internal/tui/tui.go`), a pointer-receiver wrapper that opens the persona picker's loading dialog
+synchronously for a bare `/persona` before still returning the async dispatch command; rewired the
+three call sites that can trigger it (text-submit, command-palette selection, Tab/Enter completion).
+`internal/tui/personapicker.go` now opens via `newPersonaPicker` in the loading state (mirroring
+`newSessionPicker`/`newBacktrackPicker`, with `fixedW` to prevent width-snap). Since `/persona`
+shares the generic `slashResultMsg` type with every other slash command (unlike the dedicated
+`sessionsLoadedMsg`/`backtrackTargetsMsg` used by P33.7's two pickers), the dialog-block
+fall-through switch now lets `slashResultMsg` through specifically when the open dialog is the
+persona picker, leaving every other dialog's message-swallowing behavior unchanged. Seven new tests
+in `internal/tui/picker_loading_test.go` mirror the session/backtrack template: instant-open,
+populate-in-place, frame-width stability, fetch-error notice, empty-result notice,
+dismiss-before-data, and no-hijack-of-another-dialog.
+
+**P33.15** (Tier 2): three related fixes to the TUI's steer/error path, left over from P33.2.
+**(1)** 429 (steer buffer full, retryable) and 404 (run already finished, not retryable) no longer
+collapse into the same opaque error. `internal/client/client.go`'s `decodeError` now returns a typed
+`client.StatusError{Code int; Msg string}` instead of a bare `fmt.Errorf` (same message text,
+purely additive) so callers can `errors.As` to recover the HTTP status without string-parsing.
+**(2)** A failed steer POST no longer visually tears down a live run. Previously any error reaching
+`internal/tui/tui.go`'s `case errMsg:` set `m.streaming = false` unconditionally, so a transient
+steer-POST failure on a still-live stream made the whole run look finished. A new `steerFailedMsg`
+type, returned by `sendSteerCmd` and by `approval.go`'s denial-feedback send instead of `errMsg`,
+resolves only its one failed entry out of `pendingSteers` and leaves `m.streaming`, `m.queued`, and
+every other in-flight steer untouched; it branches on the recovered `StatusError` code (404 →
+requeue via the same path `KindSteerUnconsumed` uses, not shown as an error; 429 → dim "server busy
+— try again"; other → generic "steer not delivered"). `errMsg`'s original full-teardown behavior is
+unchanged for errors that actually end the stream. **(3)** The approval-denial-feedback steer
+(`"The user denied the %s call. Feedback: …"`, `internal/tui/approval.go`) is now origin-tagged
+rather than indistinguishable from a user-typed steer: `pendingSteers []string` became
+`pendingSteers []pendingSteerEntry{text, origin steerOrigin}` (`steerOriginUser` /
+`steerOriginDenialFeedback`), threaded through `resolvePendingSteer`/`requeueSteer`. If a
+denial-feedback steer ever comes back unconsumed via `KindSteerUnconsumed`, it now renders a
+"feedback not delivered" note instead of being pushed into `m.queued` and sent to the model as if
+the user had typed that system-phrased sentence. Tests added/extended across
+`internal/client/client_test.go`, `internal/server/steer_test.go` (a new
+`TestSteerFullReturns429RetryableStatusError` floods the size-8 steer buffer over a real HTTP round
+trip), and `internal/tui/steer_test.go` (five new cases: 404/429/generic steer failures, other
+pending steers left alone, an already-resolved race, denial-feedback non-requeue).
+
+---
+
 **Last updated:** 2026-07-15 — shipped **P33.1-P33.8**, the whole of the P33 batch's Tier 1 and
 Tier 2 (both robustness fixes and all six UX items), leaving only the three Tier 3 items (P33.9
 native Ollama adapter, P33.10 keep-alive/pre-warm, P33.11 transient slash panels) open. The batch
