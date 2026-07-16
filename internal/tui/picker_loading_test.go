@@ -329,3 +329,182 @@ func TestBacktrackPickerDismissedBeforeDataArrives(t *testing.T) {
 		t.Fatal("late backtrack data re-opened a dismissed picker")
 	}
 }
+
+// openPersonaPicker types "/persona" and presses Enter on an idle model,
+// returning the resulting model — the P33.13 path where the picker opens on
+// dispatch, ahead of ListPersonas answering, rather than the fetch-then-open
+// P33.7 left behind because opening early needed a pre-dispatch hook the
+// generic slash-command path didn't have (see dispatchSlash in tui.go).
+func openPersonaPicker(t *testing.T, m model) model {
+	t.Helper()
+	m.ta.SetValue("/persona")
+	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.dialog == nil {
+		t.Fatal("expected \"/persona\" to open the picker immediately")
+	}
+	return m
+}
+
+// TestPersonaPickerOpensBeforeDataLands is the P33.13 regression: submitting
+// "/persona" used to sit with no visible reaction until ListPersonas
+// returned. The dialog must be on screen with a loading row the moment the
+// command is dispatched, and fill in when the data lands.
+func TestPersonaPickerOpensBeforeDataLands(t *testing.T) {
+	m := openPersonaPicker(t, idleModel(t))
+
+	if !m.dialog.loading {
+		t.Error("expected the picker to open in its loading state")
+	}
+	if m.dialog.kind != dialogPersonaPicker {
+		t.Errorf("expected a persona picker, got kind %v", m.dialog.kind)
+	}
+	view := plainView(m)
+	if !strings.Contains(view, "loading…") {
+		t.Errorf("expected a loading row on screen, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Select Persona") {
+		t.Errorf("expected the picker's title on screen, got:\n%s", view)
+	}
+
+	// The dispatch lands: the spinner row is replaced by the real rows in
+	// place, via the same slashResultMsg every other slash command uses.
+	m = driveUpdate(t, m, slashResultMsg{Personas: []api.PersonaInfo{
+		{Name: "general", Description: "General-purpose"},
+		{Name: "security", Description: "Security review"},
+	}})
+	if m.dialog == nil {
+		t.Fatal("expected the picker to still be open once its data landed")
+	}
+	if m.dialog.loading {
+		t.Error("expected the loading state to clear once the data landed")
+	}
+	if n := len(m.dialog.list.Items()); n != 2 {
+		t.Fatalf("expected 2 persona rows, got %d", n)
+	}
+	if _, ok := m.dialog.list.Items()[0].(personaItem); !ok {
+		t.Errorf("expected personaItem rows, got %#v", m.dialog.list.Items()[0])
+	}
+	view = plainView(m)
+	if strings.Contains(view, "loading…") {
+		t.Errorf("expected the loading row gone, got:\n%s", view)
+	}
+	if !strings.Contains(view, "general") || !strings.Contains(view, "security") {
+		t.Errorf("expected the fetched personas listed, got:\n%s", view)
+	}
+}
+
+// TestPersonaPickerFrameWidthSurvivesPopulation guards the same flicker as
+// TestSessionPickerFrameWidthSurvivesPopulation: a dialog frame shrink-wraps
+// its rows, so a picker that opened on a narrow "loading…" row would snap to
+// a different width the instant real rows (or a notice) arrived.
+func TestPersonaPickerFrameWidthSurvivesPopulation(t *testing.T) {
+	m := openPersonaPicker(t, idleModel(t))
+	loadingW := lipgloss.Width(m.dialog.View())
+
+	items := []api.PersonaInfo{
+		{Name: "general", Description: "s"},
+		{Name: "security", Description: "a much, much longer persona description than the first"},
+	}
+	m = driveUpdate(t, m, slashResultMsg{Personas: items})
+
+	if got := lipgloss.Width(m.dialog.View()); got != loadingW {
+		t.Errorf("picker frame width jumped when the data landed: %d -> %d", loadingW, got)
+	}
+	if got, want := m.dialog.list.Height(), personaPickerH(40, len(items)); got != want {
+		t.Errorf("populated picker height = %d, want the item-count height %d", got, want)
+	}
+
+	// A notice is the same frame too — an error must not resize the box either.
+	m2 := openPersonaPicker(t, idleModel(t))
+	m2 = driveUpdate(t, m2, slashResultMsg{Output: "Failed to list personas: x", IsError: true})
+	if got := lipgloss.Width(m2.dialog.View()); got != loadingW {
+		t.Errorf("picker frame width jumped on the error notice: %d -> %d", loadingW, got)
+	}
+}
+
+// TestPersonaPickerFetchErrorShowsInDialog: an error reaches the user where
+// they are looking — inside the dialog they just opened — instead of as a
+// transcript line behind it (P33.13).
+func TestPersonaPickerFetchErrorShowsInDialog(t *testing.T) {
+	m := openPersonaPicker(t, idleModel(t))
+	m = driveUpdate(t, m, slashResultMsg{Output: "Failed to list personas: daemon unreachable", IsError: true})
+
+	if m.dialog == nil {
+		t.Fatal("expected the dialog to stay open to carry the error")
+	}
+	if m.dialog.loading {
+		t.Error("expected the loading state to clear on error")
+	}
+	view := plainView(m)
+	if !strings.Contains(view, "daemon unreachable") {
+		t.Errorf("expected the fetch error in the dialog, got:\n%s", view)
+	}
+
+	// The error row is not a choice: enter must not emit a selection the
+	// caller would type-assert into a personaItem.
+	_, cmd := m.dialog.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("expected enter on a notice row to be swallowed, got msg %#v", cmd())
+	}
+}
+
+// TestPersonaPickerEmptyResultShowsInDialog covers cmdPersona's "no personas
+// configured" outcome — reported inside the dialog rather than the
+// transcript, same as the fetch-error case above.
+func TestPersonaPickerEmptyResultShowsInDialog(t *testing.T) {
+	m := openPersonaPicker(t, idleModel(t))
+	m = driveUpdate(t, m, slashResultMsg{Output: "No personas available."})
+
+	if m.dialog == nil {
+		t.Fatal("expected the dialog to stay open to carry the empty-result notice")
+	}
+	if view := plainView(m); !strings.Contains(view, "No personas available.") {
+		t.Errorf("expected the empty-result notice in the dialog, got:\n%s", view)
+	}
+}
+
+// TestPersonaPickerDismissedBeforeDataArrives is the race opening early
+// introduces, same as the session/backtrack pickers: esc closes the loading
+// dialog, then the dispatch lands. Late data (success or error) must not
+// re-open the picker.
+func TestPersonaPickerDismissedBeforeDataArrives(t *testing.T) {
+	m := openPersonaPicker(t, idleModel(t))
+
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(model)
+	if cmd == nil {
+		t.Fatal("expected esc to emit a cancel cmd")
+	}
+	m = driveUpdate(t, m, cmd())
+	if m.dialog != nil {
+		t.Fatal("expected esc to close the loading picker")
+	}
+
+	m = driveUpdate(t, m, slashResultMsg{Personas: []api.PersonaInfo{{Name: "general"}}})
+	if m.dialog != nil {
+		t.Fatal("late persona data re-opened a dismissed picker")
+	}
+
+	m = driveUpdate(t, m, slashResultMsg{Output: "Failed to list personas: boom", IsError: true})
+	if m.dialog != nil {
+		t.Fatal("late persona error re-opened a dismissed picker")
+	}
+}
+
+// TestPersonaPickerDataDoesNotHijackAnotherDialog: the user dismissed the
+// persona picker and opened something else (the palette) before the dispatch
+// landed. The result belongs to a dialog that is no longer there and must be
+// dropped, not poured into whatever took its place.
+func TestPersonaPickerDataDoesNotHijackAnotherDialog(t *testing.T) {
+	m := openPersonaPicker(t, idleModel(t))
+	pal := newPalette(m.width, m.height, allCommandEntries(nil))
+	m.dialog = &pal
+
+	m = driveUpdate(t, m, slashResultMsg{Personas: []api.PersonaInfo{{Name: "general"}}})
+	if m.dialog == nil || m.dialog.kind != dialogPalette {
+		t.Fatal("expected the palette to still own the screen")
+	}
+	if view := plainView(m); strings.Contains(view, "general") {
+		t.Errorf("persona rows leaked into the palette, got:\n%s", view)
+	}
+}
