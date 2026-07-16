@@ -11,9 +11,22 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 10 — one Tier 2 item (**P34.3**), four Tier 3 items
-(**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 is
-fully clear.
+**Open items:** 9 — four Tier 3 items
+(**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 and
+Tier 2 are both fully clear.
+
+**P34.3 shipped 2026-07-16** — persona activation preloads the deferred tools a persona declares.
+Live A/B against `qwen3:14b`, the model that produced the original observation. See
+[releases.md](releases.md#latest-changes).
+
+**The live A/B found the item's own diagnosis understated the bug, which is the P34.2 verification
+lesson repeating.** The item says the model "tried `security_scan` twice before being told to call
+`tool_search`" — an inefficiency. The recorded baseline (fix stashed, same model/prompt/mode) is
+worse: qwen3:14b reasons *correctly and by name* ("I should start by calling the recon_scan function
+with the target 127.0.0.1"), then emits **zero tool calls and zero text** — the turn dead-ends into
+P34.1's empty-answer nudge and an empty reply. A persona promising a tool the schema list doesn't
+carry doesn't just misroute the model; it can strand it entirely. Worth remembering as a shape: the
+observation a roadmap item is filed from is one sample of the failure, not its bound.
 
 **P34.2 shipped 2026-07-16 — both levers**, live-verified against the `qwen2.5-coder:1.5b` model that
 produced the original observation and against a capable 24b model for false positives. See
@@ -91,7 +104,7 @@ output, not just text; `outBytes` not `liveText`; tok/s measured from first toke
 otherwise a 60s cold-load is averaged into a throughput the model never ran at). Where an item says
 "show X", the implementer owns the question of whether X is substantiable.
 
-**Next session:** **P34.3** is the cheapest next win and the last open Tier 2 item. **P33.10** now has
+**Next session:** **P33.10** is the best next win — Tier 2 is now clear. **P33.10** has
 a head start from P34.2: `internal/toolcallprobe` established that a probe at run start is nearly free
 because it shares the load the turn was going to pay, which is the same insight pre-warm turns on, and
 `toolcallprobe.Gate` is a working model of the per-model caching P33.10 needs. With P33.9 shipped, **P33.10
@@ -128,34 +141,10 @@ preflight companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-One item: P34.3 — found by a live 2026-07-16 manual red-team-persona
-workflow test (`recon_scan` + `security_advise` cve_lookup against a home-lab host), small and
-dependency-free. (P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16 — see
-[releases.md](releases.md#latest-changes); P33.13, P33.14, P33.15, P33.17, P33.18 shipped
-2026-07-16; P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14;
-P32.5-P32.7 shipped 2026-07-15.)
-
-### P34.3 — Personas that declare a deferred tool should tell the model to load it first
-
-Effort: S
-
-Observed live (2026-07-16, manual `red-team`-persona workflow test): `recon_scan` is registered
-as a **deferred** tool (`internal/tool/builtin/builtin.go`'s `networkAndScanTools`, loaded via
-`Registry.RegisterDeferred`) — invisible to the model until it calls `tool_search`/`skill`,
-independent of anything a persona declares. `internal/persona/builtin/red-team.md` lists
-`recon_scan`/`dast_scan` in its advisory `Tools:` frontmatter and names them in prose ("run
-recon_scan"), but never instructs the model to load them first. Without an explicit hint in the
-prompt, `qwen3:14b` tried `security_scan` (the wrong tool — that one's for source code, not
-network targets) twice before being told to call `tool_search`.
-
-Two independent fixes, either is enough on its own: **(1)** add a line to `red-team.md` (and any
-other built-in persona whose `Tools:` list includes a deferred tool — check `dast_scan` too)
-telling the model to call `tool_search` for its scan tools before attempting to use them.
-**(2)** Have persona activation itself pre-load (`Registry.Load`) any deferred tool a persona's
-`Tools:` list names, so the model never needs the extra `tool_search` round-trip for a persona
-built around those tools. (2) is the more general fix and removes a whole class of "model tried
-the wrong tool first" failures for every deferred-tool persona, not just red-team; (1) is
-cheaper and can ship first.
+**Status:** None open. (P34.3 shipped 2026-07-16 — see [releases.md](releases.md#latest-changes);
+P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16;
+P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped 2026-07-15;
+P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
 
 ---
 

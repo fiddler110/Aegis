@@ -8,7 +8,66 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-16 — shipped **P34.2, both levers**: warn when the selected model can't
+**Last updated:** 2026-07-16 — shipped **P34.3**: persona activation now preloads the deferred tools
+a persona declares, so a persona built around a deferred tool never has to discover its own working
+set via `tool_search`.
+
+The item offered two fixes; this ships **(2)**, the general one. A persona's `Tools:` frontmatter is
+the author's explicit statement of its working set, so `preloadPersonaTools`
+(`internal/server/engine_build.go`, next to `buildGate` — the other consumer of `p.Tools`) exposes
+any tool in that list which is *currently deferred and unloaded*, onto the session's own registry
+clone. Fix (1) — prose telling the model to `tool_search` first — is then unnecessary: with the
+schema present, there is nothing to search for.
+
+**The change is deliberately narrow, because `Tools:` is advisory and must stay that way (P7.5).**
+Preload only ever moves a registered, currently-deferred tool from "advertised by name" to
+"offered" — exactly what the model's own `tool_search` call would have done a turn later. It cannot
+register a tool the registry lacks, cannot re-expose one something else deliberately un-exposed
+(`SetExposed(name, false)` survives it), and changes nothing about what the permission gate allows.
+The real boundary — mode, rules, contextual gates, `PersonaToolGate` — is untouched: the live A/B
+below shows plan mode still blocking the preloaded `recon_scan` on execute capability, which is the
+point. It runs on the **session clone**, never `s.tools`; a test pins the P9 invariant that a
+red-team session can't widen the tools offered to every other session.
+
+**A second, required half: the deferred-tools advertisement was reading the wrong registry.**
+`effectiveSystem` built its `<deferred_tools>` block from the daemon-wide `s.tools` while
+`tool_search` has always loaded onto the session clone (P9) — so the prompt would have kept telling
+the model to `tool_search` for a schema already in front of it, re-inviting the exact round-trip
+this item removes. Now sourced from `toolRegistryFor(sessionID)`, which falls back to `s.tools` only
+when no session is in scope. This was a latent P9 gap in its own right: before P34.3 nothing
+preloaded, but a session's *own* `tool_search` call already produced the same contradiction on the
+next turn.
+
+**Live A/B against `qwen3:14b`** — the model that produced the original observation — same prompt,
+same `red-team` persona, plan mode, fix stashed vs. applied. Driven over the real daemon's HTTP/SSE
+seam, not `aegis chat` (which builds its own in-process engine and would have proved nothing about
+this path — the P34.2 lesson, applied rather than relearned):
+
+- **Without the fix:** the model reasons *correctly and by name* — "I should start by calling the
+  recon_scan function with the target 127.0.0.1" — then emits **zero tool calls and zero text**. The
+  turn dead-ends into P34.1's empty-answer nudge, then an empty reply.
+- **With the fix:** `recon_scan` is the **first** tool call, `{"targets":["127.0.0.1"]}`, correct on
+  the first attempt. No `security_scan`, no `tool_search` detour. Plan mode then blocks it on
+  execute capability, as designed — no scan ran.
+
+**This revised the item's own diagnosis.** P34.3 was filed as an inefficiency ("tried `security_scan`
+twice before being told to call `tool_search`"); the recorded baseline is worse than that. A persona
+that promises a tool the schema list doesn't carry doesn't just misroute the model — it can strand
+it in a turn that produces nothing at all. The filed observation was one sample of the failure, not
+its bound.
+
+**Cost, measured rather than asserted** (the P34.2 "measure before deferring" lesson): 18 of 22
+built-in personas declare at least one deferred tool, red-team the most at six
+(`render_diagram`, `latex_build`, `latex_new_document`, `dast_scan`, `recon_scan`,
+`security_advise`) ≈ 8.9KB of description+schema, ~2.2k tokens; most personas sit at two or three,
+≈700-2000 bytes. That is a real re-inflation of exactly what deferral (P4.6) exists to avoid, and it
+is still the right trade: it buys back a turn the model otherwise spends on a `tool_search`
+round-trip — or, as the baseline shows, wastes entirely — for tools the persona was built to use.
+Preload stays scoped to the declared list; a deferred tool a persona never names stays deferred.
+
+---
+
+**Previously:** shipped **P34.2, both levers**: warn when the selected model can't
 actually make tool calls. Lever (2) names it after the fact at zero cost; lever (1) probes the model
 and warns *before* the turn is spent.
 

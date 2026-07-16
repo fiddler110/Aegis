@@ -210,6 +210,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// tool onto this session's own exposure state, not the daemon-wide
 	// registry every other session and persona shares.
 	sessionTools := s.sessionToolRegistry(id)
+	// A persona that declares a deferred tool means it (P34.3): expose those
+	// up front, onto this session's clone only, so the model never has to
+	// discover its own working set via tool_search.
+	if loaded := preloadPersonaTools(sessionTools, p); len(loaded) > 0 {
+		s.logger.Debug("preloaded persona's deferred tools", "persona", p.Name, "tools", loaded)
+	}
 	eng, err := s.newEngine(sess.Mode, runApprover, steers.ch, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
