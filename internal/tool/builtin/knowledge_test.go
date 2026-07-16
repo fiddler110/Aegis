@@ -110,4 +110,3 @@ func TestProjectKnowledgeToolNilProviderUsesFixedStore(t *testing.T) {
 		t.Errorf("expected the fixed store's result, got: %s", res.Content)
 	}
 }
-

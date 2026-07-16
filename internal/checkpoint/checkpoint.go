@@ -35,8 +35,8 @@ var ErrNotFound = errors.New("checkpoint not found")
 type Checkpoint struct {
 	ID        string    `json:"id"`
 	SessionID string    `json:"session_id"`
-	Seq       int       `json:"seq"`    // message count to truncate the conversation to on rewind
-	Label     string    `json:"label"`  // typically the user's prompt text, truncated
+	Seq       int       `json:"seq"`               // message count to truncate the conversation to on rewind
+	Label     string    `json:"label"`             // typically the user's prompt text, truncated
 	GitSHA    string    `json:"git_sha,omitempty"` // HEAD commit at checkpoint time (P3.4)
 	FileCount int       `json:"file_count"`
 	CreatedAt time.Time `json:"created_at"`
