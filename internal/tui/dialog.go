@@ -227,6 +227,24 @@ func renderOverlay(bg, fg string, width, height int) string {
 	return canvas.Render()
 }
 
+// renderAnchoredOverlay composites fg over bg at a caller-chosen (x,y)
+// instead of centering, and does not dim the rest of the frame (P33.18). It
+// backs non-modal overlays anchored to a fixed point on screen — the
+// completion popup sits just above the composer while the user keeps typing
+// behind it, so unlike renderOverlay's centered/dimmed modal treatment,
+// nothing here should visually recede.
+func renderAnchoredOverlay(bg, fg string, x, y, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return fg
+	}
+	y = max(0, y)
+
+	root := lipgloss.NewLayer(bg, lipgloss.NewLayer(fg).X(x).Y(y).Z(1))
+	canvas := lipgloss.NewCanvas(width, height)
+	canvas.Compose(lipgloss.NewCompositor(root))
+	return canvas.Render()
+}
+
 // dimOutside marks every cell of canvas outside the (x,y,w,h) rectangle as
 // faint, in place.
 func dimOutside(canvas *lipgloss.Canvas, x, y, w, h int) {
