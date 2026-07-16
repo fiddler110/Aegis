@@ -15,6 +15,22 @@ keep it when adding items.
 (**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 is
 fully clear.
 
+**Two threat-model findings closed 2026-07-16 — both had shipped for only half their surface.**
+**FIND-14**'s fair-share budget floor existed on the subprocess backend only, so every *in-process*
+teammate still checked one shared tracker against the daemon's full cap and one expensive sibling
+could starve the rest; the floor now travels on the context (`WithBudgetOverride`) since an
+in-process teammate has no `WorkerSpec` to carry it. **FIND-17**'s TUI sanitization covered the
+model's answer text but not its *thinking* text, which renders through lipgloss rather than
+`mdRender` — so an embedded OSC/ANSI sequence still reached the terminal, on live turns and on
+replayed history alike. See [releases.md](releases.md#latest-changes).
+
+**Both are the same shape, and it's a new one for this roadmap: a fix scoped to one code path reads
+as done in the changelog.** These weren't wrong diagnoses (the P33/P34 pattern) — they were correct
+fixes with an unexamined blast radius, closed without asking which *other* paths the finding covered.
+The other backend and the other render channel were never named, so nothing flagged them as open.
+Worth asking of any finding marked closed: which surfaces does it actually name, and which does it
+merely happen to cover?
+
 **P34.2's live warning was firing on a capable model, found and fixed 2026-07-16** while
 live-verifying P34.3 — the daemon warned that `qwen3:14b` "likely can't use tools" in the same run
 where it made real tool calls. Two defects stacked: the probe's 256-token cap truncated the model
