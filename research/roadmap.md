@@ -11,9 +11,24 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 9 — four Tier 3 items
-(**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 and
-Tier 2 are both fully clear.
+**Open items:** 10 — one Tier 2 item (**P34.5**), four Tier 3 items
+(**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 is
+fully clear.
+
+**P34.2's live warning was firing on a capable model, found and fixed 2026-07-16** while
+live-verifying P34.3 — the daemon warned that `qwen3:14b` "likely can't use tools" in the same run
+where it made real tool calls. Two defects stacked: the probe's 256-token cap truncated the model
+mid-reasoning (it needs 124-825 completion tokens on that prompt — 3 of 5 runs cut off), and the
+**OpenAI adapter never mapped `finish_reason: "length"`**, so truncation arrived as a clean
+`StopEndTurn` and was indistinguishable from a model that chose not to call. Fixed at both levels:
+truncation is now a non-verdict (`Unknown`, uncached) rather than an accusation, and the cap is
+2048. See [releases.md](releases.md#latest-changes).
+
+**That is the third consecutive item whose defect was invisible to a green suite**, and the first
+where the *fix itself* shipped the bug — P34.2's own "measure before deferring" lesson was applied
+to the probe's cost and not to its token budget. `internal/toolcallprobe` had no tests at all; it
+now has them, plus a `live_probe` tier, because the scripted tests can only assert what the code
+does with a given stream, never whether the cap fits how a reasoning model actually thinks.
 
 **P34.3 shipped 2026-07-16** — persona activation preloads the deferred tools a persona declares.
 Live A/B against `qwen3:14b`, the model that produced the original observation. See
@@ -141,10 +156,38 @@ preflight companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-**Status:** None open. (P34.3 shipped 2026-07-16 — see [releases.md](releases.md#latest-changes);
+One item: P34.5 — found 2026-07-16 while fixing the P34.2 false positive, small and
+dependency-free. (P34.3 shipped 2026-07-16 — see [releases.md](releases.md#latest-changes);
 P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16;
 P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped 2026-07-15;
 P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
+
+### P34.5 — Nothing tells an existing user their Ollama config is on the legacy compat path
+
+Effort: S
+
+Found 2026-07-16 on the maintainer's own machine, which is the point: a config written before
+P33.9 says `provider.default: openai` with `base_url: http://localhost:11434/v1`, and **nothing
+ever says that is now the worse of two paths**. P33.9 shipped the native adapter and
+`providerfactory.buildOne` only wires `ollama.WithNumCtx`/`WithKeepAlive` and the real
+load/token telemetry on the `ollama` branch — a config on the `openai` branch silently gets none
+of it, forever, with no warning and no migration.
+
+The cost is not theoretical. The compat path cannot send `num_ctx`, so Ollama served every request
+at its 4096 default while the configured model supports 40960 — a red-team session was at
+"context ~142% full" on turn one, and P33.9's cold-load notice never fires because the compat
+path can't see `load_duration`. Switching `default: ollama` + `context_window: 32768` fixed all of
+it (verified: `/api/ps` reports `ctx=32768`, and the same session went from overflowing to ~18%
+of the window).
+
+The detection is trivial and unambiguous: `default: openai` **and** a `base_url` that is neither
+empty nor an OpenAI endpoint — an `:11434` host, or any `/v1` base that isn't `api.openai.com` —
+is an Ollama server being driven through the wrong adapter. `aegis doctor` is the natural home
+(it already has a provider check), and startup deserves a one-line warning too, since the point
+is that users never think to look. Suggest the exact three-line config change rather than
+describing it. Note the one real behavior difference so the fix isn't a silent downgrade: the
+`ollama` branch defaults `think: false` while the compat path leaves the model's own default
+alone, so a qwen3-style reasoning model stops thinking unless `think: true` is set explicitly.
 
 ---
 
