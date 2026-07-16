@@ -8,9 +8,69 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-16 — shipped **P34.3** (personas preload the deferred tools they declare)
-and a **P34.2 follow-up fix**: the tool-calling probe was accusing a capable model of not supporting
-tool calls.
+**Last updated:** 2026-07-16 — closed two threat-model findings that had each shipped for only half
+their surface: **FIND-14**'s swarm budget floor (subprocess backend only) and **FIND-17**'s TUI
+output sanitization (answer text only). Earlier the same day: **P34.3** (personas preload the
+deferred tools they declare) and a **P34.2 follow-up fix** (the tool-calling probe was accusing a
+capable model of not supporting tool calls).
+
+---
+
+### FIND-14 (second half) — in-process swarm teammates get a guaranteed budget share
+
+P24.15 shipped FIND-14's fair-share floor for the **subprocess backend only**: `Spawn` computes each
+worker's remaining allowance via `remainingBudget`/`remainingTokens` and carries it down in the
+`WorkerSpec`. The in-process backend had no budget handling at all, so `subAgentRunner` ran every
+teammate against the *shared* tracker checked at the daemon's **full configured cap**. Every sibling
+therefore checked the same live aggregate, and one expensive teammate could push that total past the
+cap and leave every other teammate's next per-turn check with nothing — exactly the DoS shape
+(STRIDE-A, CVSS 3.6) the finding describes, still open on the backend that runs by default when the
+executable path can't be resolved.
+
+**An in-process teammate has no spec to carry its share, so it travels on the context instead.**
+`InProcessBackend.Spawn` computes the same floor and attaches it via a new `WithBudgetOverride`
+(`internal/swarm/types.go`); `subAgentRunner` honors it by running the teammate against a *fresh
+local* tracker capped at that share, then folding the actual spend back into the shared ledger via
+`AddWorkerCost`. That mirrors what `SubprocessBackend` already does with a worker's self-reported
+spend, so a sibling spawned afterward still sees the updated total — the shared D1 ceiling survives,
+but no teammate's live spend can starve another's floor out from under it.
+
+No override is attached when there are no configured caps (`NewInProcessBackend` now takes
+`cost.budget_usd`/`cost.max_tokens_per_run`; a caller with no cap has nothing to guarantee a share
+of) or when the context carries no shared ledger to compute a share from — a detached spawn. Both
+keep the existing shared-ledger behavior.
+
+**Worth noting as a shape:** the finding was marked closed with half its surface untouched. A fix
+scoped to one backend reads as done in the changelog, and the gap only surfaces by asking which
+*other* code paths the same finding covers.
+
+Tests: new `internal/swarm/inprocess_budget_test.go` — `TestInProcessSpawnAttachesBudgetOverride`,
+`TestInProcessSpawnNoOverrideWithoutCaps`, `TestInProcessSpawnNoOverrideWithoutTracker`.
+`go build ./...`, `go test ./internal/swarm/...` clean.
+
+---
+
+### FIND-17 (second half) — thinking text is sanitized before it reaches the terminal
+
+P24.20 (FIND-17) sanitized the model's **answer** text in `mdRender`, but **thinking text never
+passes through it**. Both display paths — the streaming dim tail in `refresh()` and the settled block
+in `appendThinkingBlock` — render raw model reasoning through lipgloss, not glamour, so an ANSI/OSC
+sequence embedded in adversarial model output (e.g. reproduced verbatim via a prompt-injection
+vector) reached the terminal intact: OSC 52 clipboard writes, OSC 0/2 title-bar spoofing, cursor
+repositioning, alternate-screen switches. The mitigation was real; it just didn't cover the second
+channel the same untrusted text renders through.
+
+Fix: apply the existing `stripControlSeqs` at both points. `appendThinkingBlock` is the single choke
+point for settled blocks, covering `flushThinking` (live turns) and `loadHistory` (replayed history)
+alike — a stored transcript replays the same untrusted bytes.
+
+**Sanitize at render rather than at ingest**, deliberately: an escape sequence split across two
+stream chunks would defeat a per-chunk pass at the `WriteString` boundary, which stays safe but
+litters the leftover parameter bytes into the transcript. The assembled buffer has no such seam, and
+it matches how `mdRender` already treats the answer text.
+
+Tests: new `internal/tui/sanitize_thinking_test.go` — `TestStreamingThinkingIsSanitized`,
+`TestSettledThinkingBlockIsSanitized`. `go build ./...`, `go test ./internal/tui/...` clean.
 
 ---
 
