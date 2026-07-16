@@ -35,7 +35,7 @@ func (f *fakeBackend) Spawn(ctx context.Context, cfg swarm.SpawnConfig) (*swarm.
 			return "", &stubErr{f.errStr}
 		}
 		return f.output, nil
-	}, swarm.NewRegistry(), swarm.MailboxRoot(f.root))
+	}, swarm.NewRegistry(), swarm.MailboxRoot(f.root), 0, 0)
 	return b.Spawn(ctx, cfg)
 }
 func (f *fakeBackend) Shutdown(context.Context)                  {}
@@ -322,7 +322,7 @@ func (g *gatingBackend) Spawn(ctx context.Context, cfg swarm.SpawnConfig) (*swar
 	b := swarm.NewInProcessBackend(func(context.Context, swarm.SpawnConfig) (string, error) {
 		g.enter()
 		return "ok", nil
-	}, swarm.NewRegistry(), swarm.MailboxRoot(g.root))
+	}, swarm.NewRegistry(), swarm.MailboxRoot(g.root), 0, 0)
 	return b.Spawn(ctx, cfg)
 }
 func (g *gatingBackend) Shutdown(context.Context)                  {}
