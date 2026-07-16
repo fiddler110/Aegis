@@ -274,6 +274,19 @@ func (s *Server) sessionToolRegistry(id string) *tool.Registry {
 	return v.(*tool.Registry)
 }
 
+// toolRegistryFor returns the session-scoped registry clone for sessionID, or
+// the daemon-wide registry when no session is in scope (""). The deferred-tool
+// advertisement has to read the session's own clone: tool_search loads onto
+// the clone (P9), and persona activation now preloads onto it too (P34.3), so
+// sourcing the advertisement from s.tools would keep telling the model to
+// tool_search for tools whose schemas it can already see.
+func (s *Server) toolRegistryFor(sessionID string) *tool.Registry {
+	if sessionID == "" {
+		return s.tools
+	}
+	return s.sessionToolRegistry(sessionID)
+}
+
 // workdirFor returns the working directory session id was created with
 // (P25.1), or the daemon's default workspace when id is unset, unknown, or
 // was created without an explicit Workdir. Cheap in-memory lookup — see

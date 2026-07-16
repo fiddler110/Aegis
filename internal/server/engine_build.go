@@ -178,6 +178,48 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 	return gate, engineHooks
 }
 
+// preloadPersonaTools exposes any deferred tool named in a persona's advisory
+// Tools list, so a persona built around a deferred tool doesn't need a
+// tool_search round-trip to discover what it was configured to use (P34.3).
+// Observed live: red-team names recon_scan in both its Tools list and its
+// prose, but recon_scan is deferred, so qwen3:14b reached for security_scan —
+// the source-code scanner, wrong for a network target — twice before being
+// told to call tool_search.
+//
+// Only currently-deferred, not-yet-loaded tools are touched, so this stays
+// well inside the advisory contract (P7.5): it cannot register a tool the
+// registry lacks, cannot re-expose one something else deliberately hid, and
+// changes nothing about what the permission gate allows — it only moves a
+// tool's schema from "advertised by name" to "offered", exactly what the
+// model's own tool_search call would have done a turn later.
+//
+// reg must be the session-scoped clone (P9): preloading onto the daemon-wide
+// registry would leak one persona's working set into every other session.
+// Returns the names newly exposed.
+func preloadPersonaTools(reg *tool.Registry, p persona.Persona) []string {
+	if reg == nil || len(p.Tools) == 0 {
+		return nil
+	}
+	deferred := make(map[string]bool)
+	for _, d := range reg.Deferred() {
+		deferred[d.Name] = true
+	}
+	var want []string
+	for _, name := range p.Tools {
+		if deferred[name] {
+			want = append(want, name)
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	var loaded []string
+	for _, t := range reg.Load(want...) {
+		loaded = append(loaded, t.Name())
+	}
+	return loaded
+}
+
 // newEngine builds an engine for one turn. modelOverride, when non-empty, is
 // a per-session model pin (P14.7 /model) that takes precedence over the
 // persona's own Model and the global provider.model — same precedence a

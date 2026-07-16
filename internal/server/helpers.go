@@ -61,7 +61,7 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 	if repoMap != "" && !(s.cfg.Provider.LocalPromptProfile() && len(repoMap) > localRepoMapMaxBytes) {
 		parts = append(parts, repoMap)
 	}
-	if dt := deferredToolsBlock(s.tools); dt != "" {
+	if dt := deferredToolsBlock(s.toolRegistryFor(sessionID)); dt != "" {
 		parts = append(parts, dt)
 	}
 	if db := debateIntegrationBlock(s.cfg.Security.Debate); db != "" {
