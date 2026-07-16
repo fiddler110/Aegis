@@ -2581,7 +2581,12 @@ func (m *model) refresh() {
 	var tail strings.Builder
 
 	// Streaming extended-thinking is shown dim above the answer until it flushes.
+	// Like the answer text in mdRender, this is the model's own generated text
+	// and is sanitized before it reaches the terminal (P24.20, FIND-17) — the
+	// dim styling here is lipgloss, not glamour, so nothing else on this path
+	// would strip an embedded control sequence.
 	if think := m.thinkText.String(); think != "" {
+		think = stripControlSeqs(think)
 		tail.WriteString(wrap(m.th.thinking.Render("✻ thinking")+"\n"+m.th.thinkingDim.Render(think)+"\n", w))
 	}
 
@@ -2705,7 +2710,15 @@ func (m *model) flushThinking() {
 // appendThinkingBlock adds one collapsible thinking block to the transcript,
 // honouring the current expand/collapse state. secs 0 (e.g. replayed history,
 // where the duration is unknown) omits the "for Ns" suffix.
+//
+// raw is the model's own generated reasoning — from a live stream via
+// flushThinking, or from replayed history via loadHistory — so it is
+// sanitized here for the same reason mdRender sanitizes the answer text
+// (P24.20, FIND-17). This is the single choke point for settled thinking
+// blocks, and it renders through lipgloss rather than glamour, so without
+// this an embedded ANSI/OSC sequence would reach the terminal intact.
 func (m *model) appendThinkingBlock(raw string, secs int) {
+	raw = stripControlSeqs(raw)
 	header := "✻ thought"
 	if secs > 0 {
 		header += fmt.Sprintf(" for %ds", secs)
