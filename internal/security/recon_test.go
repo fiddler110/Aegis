@@ -141,6 +141,8 @@ func TestResolveNucleiTemplatesRejectsUnsafeVersion(t *testing.T) {
 	for _, version := range []string{
 		"../../../etc/passwd",
 		"..",
+		".",
+		"...",
 		"v1.0.0/../../escape",
 		"-oProxyCommand=evil",
 		"--upload-pack=evil",

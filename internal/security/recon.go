@@ -404,6 +404,15 @@ func resolveNucleiTemplates(ctx context.Context, opts Options) (string, error) {
 	if strings.HasPrefix(version, "-") || !nucleiTemplatesVersionPattern.MatchString(version) {
 		return "", fmt.Errorf("security.tools.nuclei.templates_version %q is not a valid release tag — only letters, digits, '.', '_', '-' are allowed, and it must not start with '-'", version)
 	}
+	// A pure-dot value ("." / ".." / "...") satisfies the character class above
+	// — '.' is a legitimate tag character — but names a relative path segment
+	// rather than a tag, and filepath.Join resolves it against the cache dir
+	// instead of nesting under it (".." lands in its parent, which is then
+	// handed to nuclei as its template set). The pattern already excludes both
+	// separators, so this is the only traversal shape that can reach the Join.
+	if strings.Trim(version, ".") == "" {
+		return "", fmt.Errorf("security.tools.nuclei.templates_version %q is not a valid release tag — it is a relative path segment, not a version", version)
+	}
 	dir := filepath.Join(nucleiTemplatesBaseDir(), version)
 	if info, err := os.Stat(dir); err == nil && info.IsDir() {
 		return dir, nil
