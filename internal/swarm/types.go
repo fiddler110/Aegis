@@ -174,3 +174,43 @@ func WithCostTracker(ctx context.Context, tracker any) context.Context {
 func CostTrackerFromContext(ctx context.Context) any {
 	return ctx.Value(costTrackerKey{})
 }
+
+type budgetOverrideKey struct{}
+
+// budgetOverride is one spawn's own guaranteed share of a shared swarm budget.
+type budgetOverride struct {
+	usd    float64
+	tokens int
+}
+
+// WithBudgetOverride returns a context carrying a per-agent budget override:
+// usd/tokens are this spawn's own guaranteed ceiling, computed from the shared
+// budget with a floor (remainingBudget/remainingTokens) rather than the
+// daemon's full configured cap.
+//
+// Without it, every in-process teammate sharing one WithCostTracker ledger
+// checks the same live aggregate total against the same full cap, so a single
+// runaway sibling can push that total past the cap and leave every other
+// teammate's next per-turn check with nothing (FIND-14). SubprocessBackend
+// already avoids this by computing each worker's remaining allowance into its
+// WorkerSpec; an in-process teammate has no spec to carry it, so it travels on
+// the context instead.
+//
+// A RunFunc finding an override attached (via BudgetOverrideFromContext) should
+// run the spawn against its own local tracker capped at that share, then fold
+// the actual spend back into the shared tracker once it finishes — mirroring
+// how SubprocessBackend folds a worker's self-reported spend back via
+// AddWorkerCost. Zero for either field means that dimension is uncapped, the
+// same convention engine.Options.BudgetUSD/MaxTokensPerRun already use.
+func WithBudgetOverride(ctx context.Context, usd float64, tokens int) context.Context {
+	return context.WithValue(ctx, budgetOverrideKey{}, budgetOverride{usd: usd, tokens: tokens})
+}
+
+// BudgetOverrideFromContext returns the per-agent budget override carried by
+// ctx, and whether one was attached at all.
+func BudgetOverrideFromContext(ctx context.Context) (usd float64, tokens int, ok bool) {
+	if b, isOK := ctx.Value(budgetOverrideKey{}).(budgetOverride); isOK {
+		return b.usd, b.tokens, true
+	}
+	return 0, 0, false
+}

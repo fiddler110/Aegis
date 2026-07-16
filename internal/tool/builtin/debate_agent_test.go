@@ -33,7 +33,7 @@ func (b *roleScriptedBackend) Spawn(ctx context.Context, cfg swarm.SpawnConfig) 
 			return "(no scripted response for this role)", nil
 		}
 		return resp, nil
-	}, swarm.NewRegistry(), swarm.MailboxRoot(b.root))
+	}, swarm.NewRegistry(), swarm.MailboxRoot(b.root), 0, 0)
 	return backend.Spawn(ctx, cfg)
 }
 func (b *roleScriptedBackend) Shutdown(context.Context)                  {}

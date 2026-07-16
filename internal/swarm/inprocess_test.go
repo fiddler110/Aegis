@@ -14,7 +14,7 @@ func TestInProcessSpawnReturnsResult(t *testing.T) {
 	run := func(ctx context.Context, cfg SpawnConfig) (string, error) {
 		return "handled: " + cfg.Prompt, nil
 	}
-	b := NewInProcessBackend(run, reg, root)
+	b := NewInProcessBackend(run, reg, root, 0, 0)
 
 	h, err := b.Spawn(context.Background(), SpawnConfig{Name: "w", Prompt: "do it"})
 	if err != nil {
@@ -45,7 +45,7 @@ func TestInProcessSpawnReturnsResult(t *testing.T) {
 func TestInProcessOnStopFires(t *testing.T) {
 	reg := NewRegistry()
 	run := func(context.Context, SpawnConfig) (string, error) { return "out", nil }
-	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()))
+	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()), 0, 0)
 
 	stopped := make(chan Result, 1)
 	b.OnStop(func(_ Identity, res Result) { stopped <- res })
@@ -69,7 +69,7 @@ func TestInProcessSpawnPropagatesDepth(t *testing.T) {
 	run := func(ctx context.Context, cfg SpawnConfig) (string, error) {
 		return fmt.Sprintf("depth=%d", DepthFromContext(ctx)), nil
 	}
-	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()))
+	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()), 0, 0)
 
 	h, _ := b.Spawn(context.Background(), SpawnConfig{Name: "w", Depth: 2})
 	res, _ := h.Wait(context.Background())
@@ -83,7 +83,7 @@ func TestInProcessSpawnFailure(t *testing.T) {
 	run := func(ctx context.Context, cfg SpawnConfig) (string, error) {
 		return "", errors.New("boom")
 	}
-	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()))
+	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()), 0, 0)
 
 	h, _ := b.Spawn(context.Background(), SpawnConfig{Name: "w"})
 	res, _ := h.Wait(context.Background())
@@ -103,7 +103,7 @@ func TestInProcessShutdownWaits(t *testing.T) {
 		<-released
 		return "ok", nil
 	}
-	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()))
+	b := NewInProcessBackend(run, reg, MailboxRoot(t.TempDir()), 0, 0)
 	if _, err := b.Spawn(context.Background(), SpawnConfig{Name: "w"}); err != nil {
 		t.Fatal(err)
 	}

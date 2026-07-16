@@ -914,17 +914,26 @@ func (s *Server) buildSwarmBackend(mailboxRoot string) swarm.Backend {
 		}
 		s.logger.Warn("cannot resolve executable path; falling back to in-process swarm backend")
 	}
-	return swarm.NewInProcessBackend(s.subAgentRunner(), s.swarmReg, mailboxRoot)
+	return swarm.NewInProcessBackend(s.subAgentRunner(), s.swarmReg, mailboxRoot, s.cfg.Cost.BudgetUSD, s.cfg.Cost.MaxTokensPerRun)
 }
 
 // subAgentRunner returns a swarm.RunFunc that executes a teammate by building a
 // sub-engine over the daemon's shared adapter and tools. The child runs with its
-// own (clamped) permission mode. Its cost tracker is the same shared ledger the
-// top-level session run attached to ctx (D1): every sub-agent in a fan-out
-// tree, at any depth, draws against one BudgetUSD ceiling instead of each spawn
-// getting a fresh allowance — a background/detached spawn whose context was
-// severed from the request falls back to a fresh tracker since there's no
-// ledger left to share.
+// own (clamped) permission mode. Its cost tracker is normally the same shared
+// ledger the top-level session run attached to ctx (D1): every sub-agent in a
+// fan-out tree, at any depth, draws against one BudgetUSD ceiling instead of
+// each spawn getting a fresh allowance — a background/detached spawn whose
+// context was severed from the request falls back to a fresh tracker since
+// there's no ledger left to share.
+//
+// FIND-14: when InProcessBackend.Spawn has attached a per-agent budget override
+// (this teammate's own guaranteed floor share of the shared pool), the teammate
+// runs against a fresh local tracker capped at that share instead of checking
+// the shared tracker against the daemon's full cap — otherwise every teammate
+// checks the same live aggregate, so one expensive sibling can push it past the
+// cap and starve the rest. The local tracker's actual spend folds back into the
+// shared ledger when the teammate finishes (mirroring SubprocessBackend's
+// AddWorkerCost), so a sibling spawned afterward still sees the updated total.
 func (s *Server) subAgentRunner() swarm.RunFunc {
 	return func(ctx context.Context, cfg swarm.SpawnConfig) (string, error) {
 		if s.adapter == nil {
@@ -934,8 +943,17 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		if model == "" {
 			model = s.cfg.Provider.Model
 		}
-		tracker, _ := swarm.CostTrackerFromContext(ctx).(*cost.Tracker)
-		if tracker == nil {
+		sharedTracker, _ := swarm.CostTrackerFromContext(ctx).(*cost.Tracker)
+
+		tracker := sharedTracker
+		budgetUSD := s.cfg.Cost.BudgetUSD
+		maxTokensPerRun := s.cfg.Cost.MaxTokensPerRun
+		var foldBack *cost.Tracker
+		if usd, toks, ok := swarm.BudgetOverrideFromContext(ctx); ok {
+			foldBack = cost.NewTracker()
+			tracker = foldBack
+			budgetUSD, maxTokensPerRun = usd, toks
+		} else if tracker == nil {
 			tracker = cost.NewTracker()
 		}
 		// Sub-agents get the same gate stack a top-level run does (contextual
@@ -952,8 +970,8 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			Compactor:       s.compactor,
 			Hooks:           engineHooks,
 			Cost:            tracker,
-			BudgetUSD:       s.cfg.Cost.BudgetUSD,
-			MaxTokensPerRun: s.cfg.Cost.MaxTokensPerRun,
+			BudgetUSD:       budgetUSD,
+			MaxTokensPerRun: maxTokensPerRun,
 			Model:           model,
 			MaxTokens:       s.cfg.Provider.MaxTokens,
 			Logger:          s.logger,
@@ -981,6 +999,12 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 				sb.WriteString(ev.Text)
 			}
 		})
+		// Fold this teammate's actual spend back into the shared ledger, so a
+		// sibling spawned afterwards computes its own share against a total
+		// that includes this one (FIND-14).
+		if foldBack != nil && sharedTracker != nil {
+			sharedTracker.AddWorkerCost(foldBack.TotalUSD(), foldBack.TotalTokens())
+		}
 		return strings.TrimSpace(sb.String()), runErr
 	}
 }
