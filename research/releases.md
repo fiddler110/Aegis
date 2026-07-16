@@ -8,9 +8,63 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-16 — shipped **P34.3**: persona activation now preloads the deferred tools
-a persona declares, so a persona built around a deferred tool never has to discover its own working
-set via `tool_search`.
+**Last updated:** 2026-07-16 — shipped **P34.3** (personas preload the deferred tools they declare)
+and a **P34.2 follow-up fix**: the tool-calling probe was accusing a capable model of not supporting
+tool calls.
+
+---
+
+### P34.2 follow-up — a truncated probe is not a verdict
+
+Found while live-verifying P34.3, in the same run: the daemon warned that `qwen3:14b` "made no tool
+call on a trivial tool-calling probe — it likely can't use tools", and then that model made real
+tool calls. The warning P34.2 shipped to stop a model lying to the user was itself lying about the
+model. **Two independent defects stacked.**
+
+**The probe's token cap was too tight for a reasoning model.** At `MaxTokens: 256` the model spends
+its budget on thinking preamble and gets cut off before the call. Measured against the real model
+rather than guessed: `qwen3:14b` needs **124-825 completion tokens** across five runs of this exact
+prompt, so 256 truncated **3 of 5** — a coin flip that reported a model which calls tools reliably
+as one that cannot, then cached that verdict for the daemon's entire process lifetime. The cap is a
+bound, not a target (the stream ends the moment the call lands), so headroom is free for a terse
+model: raised to 2048, the same reasoning `ProbeTimeout` already documents for its own generosity.
+
+**The OpenAI adapter silently swallowed the truncation signal.** It mapped only `finish_reason:
+"tool_calls"`; `"length"` fell through to the `stop := StopEndTurn` default, so a response cut off
+mid-answer was indistinguishable from a model that chose to stop. The native Ollama adapter has
+always mapped it (`DoneReason == "length"` → `StopMaxTokens`), so this was a gap between two
+adapters that are supposed to be one seam — and it is wider than the probe: *any* caller reading
+`Stop` was being told a truncated answer ended cleanly. Fixed with the same tool-call-wins
+precedence the Ollama adapter uses.
+
+With the signal available, zero tool calls **plus** truncation is now `Unknown` — never
+`Unsupported` — and deliberately not cached: a verdict the run couldn't justify must not be the one
+every later session in the process inherits. `aegis doctor` made the same accusation and got the
+same fix.
+
+**The two fixes are complementary, and the live run shows why both are worth having.** At the old
+256 the truncation guard alone already keeps the Gate silent (truncation reaches no verdict rather
+than a false one), while the raised cap is what makes a real verdict near-certain: **0/5 truncated
+at 2048, 3/5 at 256**, same model, same prompt.
+
+`internal/toolcallprobe` had **no tests at all**; it now has them, including a **`live_probe`
+tier** against a real model (documented in CLAUDE.md alongside `live_eval`/`live_workflow`). That
+tier is the whole point — the false positive lived through a fully green suite, because scripted
+tests can only assert what the code does with a given stream, never whether the cap fits the way a
+reasoning model actually thinks.
+
+**The lesson is sharper than the bug.** P34.2's own release note says *"a cost objection stated in
+the abstract survived three drafts of this roadmap; one measurement dissolved it. Measure before
+deferring."* That lesson was applied to the probe's cost and not to its token budget — 256 was never
+measured against a thinking model. The fix shipped the same class of defect the item was written to
+warn about.
+
+---
+
+### P34.3 — personas preload the deferred tools they declare
+
+Persona activation now preloads the deferred tools a persona declares, so a persona built around a
+deferred tool never has to discover its own working set via `tool_search`.
 
 The item offered two fixes; this ships **(2)**, the general one. A persona's `Tools:` frontmatter is
 the author's explicit statement of its working set, so `preloadPersonaTools`
@@ -49,6 +103,10 @@ this path — the P34.2 lesson, applied rather than relearned):
 - **With the fix:** `recon_scan` is the **first** tool call, `{"targets":["127.0.0.1"]}`, correct on
   the first attempt. No `security_scan`, no `tool_search` detour. Plan mode then blocks it on
   execute capability, as designed — no scan ran.
+
+Re-verified afterwards through the **native Ollama adapter** (the A/B above ran over the
+OpenAI-compat path), where the same session is clean end to end: `recon_scan` first, correct target,
+and zero notices — no probe false positive, no context overflow, no empty answer.
 
 **This revised the item's own diagnosis.** P34.3 was filed as an inefficiency ("tried `security_scan`
 twice before being told to call `tool_search`"); the recorded baseline is worse than that. A persona
