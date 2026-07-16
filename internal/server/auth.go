@@ -224,6 +224,7 @@ const pageTokenTTL = 60 * time.Second
 //     and cannot frame this page to scrape its DOM (X-Frame-Options: DENY),
 //     so it cannot obtain the matching nonce embedded in the HTML to send
 //     back as the header.
+//
 // A raw local process with direct HTTP access (not going through a browser)
 // is unaffected by either fact and can still complete the whole flow itself
 // — that residual risk is the same class as reading daemon.token directly

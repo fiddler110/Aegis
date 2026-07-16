@@ -63,6 +63,19 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # gofmt output is OS-independent, so one leg is enough (mirrors the
+      # frontend drift check above). Fails the build if any file under
+      # internal/ or cmd/ isn't gofmt-formatted.
+      - name: Gofmt check
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          UNFORMATTED="$(gofmt -l ./internal ./cmd)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
       - name: Vet
         run: go vet ./...
 
