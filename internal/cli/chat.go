@@ -149,6 +149,12 @@ func newChatCmd() *cobra.Command {
 			var answer strings.Builder
 			toolCalls := 0
 			runErr := eng.Run(ctx, conv, func(ev engine.Event) {
+				// Counted for every format: both json and stream-json report
+				// this in their trailer, so counting it per-branch left
+				// stream-json's summary permanently reading zero.
+				if ev.Kind == engine.KindToolCall {
+					toolCalls++
+				}
 				switch format {
 				case outputStreamJSON:
 					emitStreamEvent(out, ev)
@@ -156,13 +162,16 @@ func newChatCmd() *cobra.Command {
 					if ev.Kind == engine.KindText {
 						answer.WriteString(ev.Text)
 					}
-					if ev.Kind == engine.KindToolCall {
-						toolCalls++
-					}
 				default: // text
 					switch ev.Kind {
 					case engine.KindText:
 						fmt.Fprint(out, ev.Text)
+					case engine.KindNotice:
+						// Advisories (empty answer, cold load, a model that
+						// can't call tools) were dropped entirely here, so the
+						// default output format was the one surface that never
+						// showed them.
+						fmt.Fprintf(out, "\n[notice: %s]\n", ev.Text)
 					case engine.KindToolCall:
 						fmt.Fprintf(out, "\n[tool: %s %s]\n", ev.ToolName, string(ev.ToolInput))
 					case engine.KindToolResult:
@@ -261,7 +270,10 @@ type streamEvent struct {
 func emitStreamEvent(w io.Writer, ev engine.Event) {
 	se := streamEvent{Type: string(ev.Kind)}
 	switch ev.Kind {
-	case engine.KindText, engine.KindThinking:
+	case engine.KindText, engine.KindThinking, engine.KindNotice:
+		// A notice carries its whole payload in Text — omitting it here shipped
+		// bare `{"type":"notice"}` lines that told a stream-json consumer
+		// nothing at all.
 		se.Text = ev.Text
 	case engine.KindToolCall:
 		se.Tool, se.ToolInput = ev.ToolName, ev.ToolInput

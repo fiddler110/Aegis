@@ -420,8 +420,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 
 	guardRetries := 0
 	zeroToolNudges := 0
+	// emptyAnswerNudges bounds the P34.1 nudge to one attempt per run.
+	emptyAnswerNudges := 0
 	toolRoundsCompleted := 0
 	ctxFullWarned := false // one context-nearly-full notice per run, not one per turn
+	// toolCallAsTextWarned bounds the P34.2 notice to one per run: the check
+	// sits on a path a guard retry can re-enter.
+	toolCallAsTextWarned := false
 	// compactionFailures counts consecutive proactive-compaction failures
 	// within this run (P28.4). Reset to 0 on any successful compaction
 	// (LLM-summarized or deterministic-fallback); never carries across runs,
@@ -616,6 +621,37 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				}})
 				continue
 			}
+			// P34.1: the model ended its turn without error but produced no
+			// user-visible text at all, so the user is about to receive an
+			// empty reply (observed live with gpt-oss:20b, which emits its
+			// conclusion into the thinking channel and stops). Ask once for a
+			// plain-text answer. Bounded to a single attempt so a model that
+			// simply won't speak can't spin the loop; if the nudge also comes
+			// back empty, say so rather than returning silence.
+			if assistantText(assistant) == "" {
+				if emptyAnswerNudges == 0 {
+					emptyAnswerNudges++
+					emit(Event{Kind: KindNotice, Text: "model ended its turn with no text — asking it for a plain-text answer"})
+					conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+						provider.TextBlock{Text: emptyAnswerNudgeText},
+					}})
+					continue
+				}
+				emit(Event{Kind: KindNotice, Text: "model produced no text even after being asked for a plain-text answer — the reply is empty"})
+			}
+			// P34.2: the model wrote a tool call into its prose instead of
+			// emitting one, and no tool call has succeeded all run — the
+			// qwen2.5-coder:1.5b signature, where a model whose Ollama manifest
+			// claims tool support simply cannot speak the protocol, then
+			// fabricates the results it never fetched. Name it once; never
+			// block, since a prose-only session with such a model is still
+			// legitimate and the user may not care.
+			if !toolCallAsTextWarned && !suppressTools && toolRoundsCompleted == 0 {
+				if names := e.exposedToolNames(); len(names) > 0 && looksLikeToolCallJSON(assistantText(assistant), names) {
+					toolCallAsTextWarned = true
+					emit(Event{Kind: KindNotice, Text: "model emitted a tool call as text — it may not support tool calling; run `aegis doctor` to check this model"})
+				}
+			}
 			if e.outputGuard != nil {
 				maxRetries := e.outputGuardMax
 				if maxRetries <= 0 {
@@ -679,7 +715,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				retractGuardCorrectives(conv)
 			}
 			if zeroToolNudges > 0 {
-				retractZeroToolNudges(conv)
+				retractNudges(conv, zeroToolNudgePrefix)
+			}
+			if emptyAnswerNudges > 0 {
+				retractNudges(conv, emptyAnswerNudgePrefix)
 			}
 			doneEv := Event{Kind: KindDone}
 			if runUsageSeen {
@@ -808,19 +847,28 @@ const zeroToolNudgeText = zeroToolNudgePrefix + ", but this task plainly reads a
 	" appropriate tool now to actually do it, then give a final answer once the action is" +
 	" complete. Do not just explain what you would do — do it.]"
 
-// retractZeroToolNudges removes P28.3 nudge scaffolding — each nudge prompt
-// and the text-only assistant answer it was reacting to — from the
-// conversation once the run has settled, mirroring retractGuardCorrectives:
-// the scaffolding must stay in place *during* the retry (the model reconsiders
-// against it) but has no business surviving into the durable transcript or a
-// future turn's context.
-func retractZeroToolNudges(conv *Conversation) {
+// emptyAnswerNudgePrefix opens the P34.1 corrective-nudge prompt and, like
+// zeroToolNudgePrefix above, doubles as the marker its retraction keys on.
+const emptyAnswerNudgePrefix = "[Your previous response contained no text"
+
+const emptyAnswerNudgeText = emptyAnswerNudgePrefix + " at all — the user saw an empty reply." +
+	" Reply now with your final answer as plain text. Put the answer itself in your visible" +
+	" response, not in your reasoning.]"
+
+// retractNudges removes corrective-nudge scaffolding — each nudge prompt
+// opening with prefix, and the tool-call-less assistant answer it was reacting
+// to — from the conversation once the run has settled, mirroring
+// retractGuardCorrectives: the scaffolding must stay in place *during* the
+// retry (the model reconsiders against it) but has no business surviving into
+// the durable transcript or a future turn's context. Used for both the P28.3
+// zero-tool nudge and the P34.1 empty-answer nudge.
+func retractNudges(conv *Conversation, prefix string) {
 	kept := make([]provider.Message, 0, len(conv.Messages))
 	removed := false
 	for _, m := range conv.Messages {
-		if isZeroToolNudge(m) {
+		if isNudge(m, prefix) {
 			if n := len(kept); n > 0 && kept[n-1].Role == provider.RoleAssistant && !hasToolUse(kept[n-1]) {
-				kept = kept[:n-1] // the text-only answer this nudge was reacting to
+				kept = kept[:n-1] // the answer this nudge was reacting to
 			}
 			removed = true
 			continue
@@ -833,12 +881,12 @@ func retractZeroToolNudges(conv *Conversation) {
 	}
 }
 
-func isZeroToolNudge(m provider.Message) bool {
+func isNudge(m provider.Message, prefix string) bool {
 	if m.Role != provider.RoleUser || len(m.Content) != 1 {
 		return false
 	}
 	tb, ok := m.Content[0].(provider.TextBlock)
-	return ok && strings.HasPrefix(tb.Text, zeroToolNudgePrefix)
+	return ok && strings.HasPrefix(tb.Text, prefix)
 }
 
 // leadingPolitenessRe strips a leading politeness/indirection wrapper so the
@@ -872,6 +920,82 @@ func looksActionable(userText string) bool {
 	return actionVerbRe.MatchString(text)
 }
 
+// toolCallProbe is the shape a model prints when it means to make a tool call
+// but cannot emit one: a name plus an argument object. Both spellings of the
+// argument key seen in the wild are accepted, and the value is left raw
+// because OpenAI-style output encodes it as a JSON *string* rather than an
+// object.
+type toolCallProbe struct {
+	Name       string          `json:"name"`
+	Arguments  json.RawMessage `json:"arguments"`
+	Parameters json.RawMessage `json:"parameters"`
+}
+
+// maxToolCallJSONCandidates bounds the brace scan below so that a long answer
+// full of code (every `{` is a candidate start) can't turn this into a
+// quadratic scan of the whole text.
+const maxToolCallJSONCandidates = 64
+
+// looksLikeToolCallJSON reports whether text contains a JSON object shaped
+// like a structured tool call naming one of the tools actually offered to the
+// model (P34.2) — the qwen2.5-coder:1.5b signature, where a model whose
+// manifest claims tool support prints `{"name": "shell", "arguments": {...}}`
+// into its prose instead of emitting a tool call.
+//
+// Requiring a *known* tool name, rather than any name/arguments pair, is what
+// keeps this off ordinary JSON in an answer: the model has to have named
+// something it was actually handed. Since the caller only warns, a false
+// positive costs a wrong notice, so the check is allowed to be approximate —
+// but it is deliberately anchored on the observed shape rather than widened to
+// every tool-call dialect, because a notice that fires on prose the user can
+// see is *not* a tool call would be worse than silence.
+func looksLikeToolCallJSON(text string, names map[string]struct{}) bool {
+	// Cheap pre-check: no argument key, no candidate — this exits on
+	// essentially every normal answer without scanning anything.
+	if !strings.Contains(text, `"arguments"`) && !strings.Contains(text, `"parameters"`) {
+		return false
+	}
+	tried := 0
+	for i, r := range text {
+		if r != '{' {
+			continue
+		}
+		if tried++; tried > maxToolCallJSONCandidates {
+			return false
+		}
+		// Decode rather than brace-match: the decoder stops at the first
+		// complete value and ignores the trailing text around it, which is
+		// exactly the "JSON embedded in prose" case, and it gets string
+		// escaping right for free.
+		var probe toolCallProbe
+		if err := json.NewDecoder(strings.NewReader(text[i:])).Decode(&probe); err != nil {
+			continue // brace opened something that isn't JSON (prose, code)
+		}
+		if probe.Arguments == nil && probe.Parameters == nil {
+			continue // e.g. the wrapper object around a nested tool call
+		}
+		if _, ok := names[probe.Name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// exposedToolNames returns the set of tool names the model was actually
+// offered this run — the same Schemas() the request carried, so the check
+// above can't be fooled by a name the model never saw.
+func (e *Engine) exposedToolNames() map[string]struct{} {
+	if e.tools == nil {
+		return nil
+	}
+	schemas := e.tools.Schemas()
+	names := make(map[string]struct{}, len(schemas))
+	for _, s := range schemas {
+		names[s.Name] = struct{}{}
+	}
+	return names
+}
+
 // lastUserText returns the text content of the most recent user message in
 // msgs that carries a text block — the triggering request for the current
 // turn — skipping any trailing tool-result-only messages.
@@ -892,6 +1016,12 @@ func lastUserText(msgs []provider.Message) string {
 	}
 	return ""
 }
+
+// coldLoadNoticeThresholdMS is the load_duration below which a KindNotice
+// cold-load callout would just be noise from an already-warm model's own
+// bookkeeping overhead (Ollama reports a small nonzero load_duration even
+// when nothing was actually loaded).
+const coldLoadNoticeThresholdMS = 1000
 
 // turn performs a single model call, accumulating the assistant message and any
 // tool-use blocks from the stream.
@@ -956,6 +1086,15 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		usage.InputTokens = conv.estimatedTokens()
 		usage.OutputTokens = estimateTokens(string(text))
 		usage.IsEstimated = true
+	}
+
+	// The native Ollama adapter (P33.9) reports how long this call spent
+	// loading the model into memory before inference began. Below the
+	// threshold that's just the server's own bookkeeping overhead on an
+	// already-warm model; above it, it's the tens-of-seconds cold-load wait
+	// P33.4's phase split made visible but couldn't yet name.
+	if usage != nil && usage.LoadDurationMS >= coldLoadNoticeThresholdMS {
+		emit(Event{Kind: KindNotice, Text: fmt.Sprintf("model cold-loaded (%.1fs)", float64(usage.LoadDurationMS)/1000)})
 	}
 
 	// The conversation must record exactly what the model produced, in order:

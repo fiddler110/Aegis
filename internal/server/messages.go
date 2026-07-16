@@ -343,6 +343,15 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		conv.Persisted = len(conv.Messages)
 	}
+	// P34.2 lever (1): warn before the turn is spent when this model can't
+	// actually emit tool calls. Probed once per model and cached, against the
+	// resolved model — after the persona pin, the per-session override, and
+	// routing have had their say. The engine's own lever (2) still covers what
+	// this can't reach (a model whose probe was inconclusive), one turn later.
+	if warn := s.toolCallingWarning(runCtx, id, s.resolveModel(p, sess.Model)); warn != "" {
+		send(api.Event{Kind: api.KindNotice, Text: warn})
+	}
+
 	runErr := eng.Run(runCtx, conv, func(ev engine.Event) {
 		// Trace events are server-internal observability records — collect them
 		// for persistence but never forward them to the SSE client.

@@ -45,8 +45,8 @@ func TestBuild_LocalToCloudFallbackSkippedWithoutOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if a.Name() != "openai" { // ollama uses the OpenAI-compatible adapter
-		t.Fatalf("got name %q, want openai (ollama adapter)", a.Name())
+	if a.Name() != "ollama" { // ollama uses its native /api/chat adapter (P33.9)
+		t.Fatalf("got name %q, want ollama", a.Name())
 	}
 	if !strings.Contains(buf.String(), "skipping cloud fallback") {
 		t.Fatalf("expected a warning about the skipped cloud fallback, got log: %s", buf.String())

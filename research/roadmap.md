@@ -11,8 +11,48 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 10 — five Tier 3 items (**P33.9, P33.10, P33.11, P33.16, P33.19**) and five parked
-(**P25.9, P33.12, P33.20-P33.22**). Tier 1 and Tier 2 are both fully clear.
+**Open items:** 10 — one Tier 2 item (**P34.3**), four Tier 3 items
+(**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 is
+fully clear.
+
+**P34.2 shipped 2026-07-16 — both levers**, live-verified against the `qwen2.5-coder:1.5b` model that
+produced the original observation and against a capable 24b model for false positives. See
+[releases.md](releases.md#latest-changes).
+
+**The lesson worth carrying forward is about verification, not the item.** Every stage of this item
+was green before it was right, and only live runs said otherwise — four separate times:
+**(1)** the unit tests passed and the TUI rendered correctly, yet the first live `aegis chat
+--output-format stream-json` run exposed two pre-existing bugs the tests could not see (notices
+serialized without their text, and a trailer reporting `"tool_calls":0` unconditionally). **(2)** A
+third instance of that same defect class — notices dropped entirely in chat's *default* text format —
+was then found only by going looking for it. **(3)** Lever (1) was wired, built, and unit-green, and
+still did nothing on the surface it was tested on: `aegis chat` builds its own in-process engine and
+never touches the daemon's run path, which no test asserted. **(4)** Driving a real daemon showed the
+warning was correct but *nagging* — it repeated on every turn, including `what is 2+2?` — which no
+test would have called a failure. The rule this suggests for future items: a green suite says the code
+does what the test says, never that the feature reached a user. Drive the real binary before shipping.
+
+**The item's own cost framing was wrong, and worth remembering as a shape:** it deferred lever (1) on
+"probe cost", which on inspection didn't exist — the probe only ever runs against local Ollama, and
+at run start it shares a cold load the turn was about to pay anyway. A cost objection stated in the
+abstract survived three drafts of this roadmap; one measurement dissolved it. Measure before deferring.
+
+**P34.1 shipped 2026-07-16** — the empty-answer nudge. See
+[releases.md](releases.md#latest-changes). Its stated mechanism was marked unverified; it was
+re-derived with a failing test before any fix was written, and **the diagnosis held** (the
+`len(toolUses) == 0` branch emits `KindDone` without ever checking that text was produced, and
+the output guard's `if final != ""` means an empty answer skips validation entirely rather than
+tripping it). That's the first item in two batches whose written mechanism survived verification —
+the cheap failing-test proof is what established that, and is worth keeping as the default.
+
+**P34.2 added 2026-07-16** from a live 3-model eval pass (`gpt-oss:20b`, `qwen3:14b`,
+`qwen2.5-coder:1.5b` — 3 use cases each via `aegis chat` through the P33.9 native adapter):
+nothing warns when a configured model can't actually emit structured tool calls.
+
+**P33.9 shipped 2026-07-16** — the native Ollama provider adapter, Tier 3's keystone. See
+[releases.md](releases.md#latest-changes) for the full writeup. P33.10 and P33.19 are now
+unblocked; P33.16 has the real error taxonomy it was waiting on to decide its retry-classification
+question.
 
 **P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16** — the whole of the Tier 2 batch,
 implemented by five parallel sub-agents, each in its own isolated git worktree (`isolation:
@@ -51,16 +91,23 @@ output, not just text; `outBytes` not `liveText`; tok/s measured from first toke
 otherwise a 60s cold-load is averaged into a throughput the model never ran at). Where an item says
 "show X", the implementer owns the question of whether X is substantiable.
 
-**Next session:** with Tier 2 clear, **P33.9 (native Ollama adapter) is next** — it's the keystone
-of the remaining batch: unblocks P33.10, upgrades P33.4's phase display from inference to fact,
-replaces the estimated token heuristic behind the single `streamStats()` seam P33.4 left for
-exactly that purpose, and is a prerequisite for P33.19. It's also the largest remaining item (Effort:
-L), so budget accordingly rather than pairing it with something else in the same session. P33.16
-needs a decision before implementation and is best sequenced after P33.9 gives it a real error
-taxonomy to decide against. P33.11 should read P33.20 first — starting it is P33.20's stated
-activation trigger. Re-run `TestLiveWorkflow` (recipe in CLAUDE.md) after any change touching the
-engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is the standalone preflight
-companion for the same misconfiguration classes.
+**Next session:** **P34.3** is the cheapest next win and the last open Tier 2 item. **P33.10** now has
+a head start from P34.2: `internal/toolcallprobe` established that a probe at run start is nearly free
+because it shares the load the turn was going to pay, which is the same insight pre-warm turns on, and
+`toolcallprobe.Gate` is a working model of the per-model caching P33.10 needs. With P33.9 shipped, **P33.10
+(keep-alive management/pre-warm)** and **P33.19
+(name the post-tool-round wait)** are both unblocked and can now use real `load_duration`/
+`prompt_eval_count` data instead of guessing. **P33.16** (mid-stream error retry classification)
+also has what it was waiting on: a real per-class error taxonomy from the native adapter's error
+path, distinct from the OpenAI-compat one. Decide P33.16's policy before writing code. P33.11
+should read P33.20 first — starting it is P33.20's stated activation trigger. P33.9's native adapter
+has since been validated against a live Ollama server (0.30.10, `gpt-oss:20b` and `qwen3:14b`) — see
+[releases.md](releases.md#latest-changes): the adapter itself held up across 10 runs (real usage
+every time, correct tool-call translation), and the handful of failures were model-side reliability
+variance (malformed tool-call output, a bad edit), not adapter defects. Re-run `TestLiveWorkflow`
+after any change touching the engine/server/sandbox/guard/swarm/cron/debate seams; `aegis doctor` is
+the standalone
+preflight companion for the same misconfiguration classes.
 
 ---
 
@@ -81,70 +128,60 @@ companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-**Status:** None open. (P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8
-shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
+One item: P34.3 — found by a live 2026-07-16 manual red-team-persona
+workflow test (`recon_scan` + `security_advise` cve_lookup against a home-lab host), small and
+dependency-free. (P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16 — see
+[releases.md](releases.md#latest-changes); P33.13, P33.14, P33.15, P33.17, P33.18 shipped
+2026-07-16; P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14;
+P32.5-P32.7 shipped 2026-07-15.)
+
+### P34.3 — Personas that declare a deferred tool should tell the model to load it first
+
+Effort: S
+
+Observed live (2026-07-16, manual `red-team`-persona workflow test): `recon_scan` is registered
+as a **deferred** tool (`internal/tool/builtin/builtin.go`'s `networkAndScanTools`, loaded via
+`Registry.RegisterDeferred`) — invisible to the model until it calls `tool_search`/`skill`,
+independent of anything a persona declares. `internal/persona/builtin/red-team.md` lists
+`recon_scan`/`dast_scan` in its advisory `Tools:` frontmatter and names them in prose ("run
+recon_scan"), but never instructs the model to load them first. Without an explicit hint in the
+prompt, `qwen3:14b` tried `security_scan` (the wrong tool — that one's for source code, not
+network targets) twice before being told to call `tool_search`.
+
+Two independent fixes, either is enough on its own: **(1)** add a line to `red-team.md` (and any
+other built-in persona whose `Tools:` list includes a deferred tool — check `dast_scan` too)
+telling the model to call `tool_search` for its scan tools before attempting to use them.
+**(2)** Have persona activation itself pre-load (`Registry.Load`) any deferred tool a persona's
+`Tools:` list names, so the model never needs the extra `tool_search` round-trip for a persona
+built around those tools. (2) is the more general fix and removes a whole class of "model tried
+the wrong tool first" failures for every deferred-tool persona, not just red-team; (1) is
+cheaper and can ship first.
 
 ---
 
 ## Open Work — Tier 3
 
-Five items: P33.9, P33.10, P33.11, P33.16, P33.19. Medium-effort with real value; some are
-sequence-dependent. P33.9 is the keystone unblocking P33.10 and P33.19.
-(P32.8 shipped 2026-07-15.)
-
-### P33.9 — Native Ollama provider adapter
-
-Effort: L
-
-**The keystone of the remaining batch** — it unblocks P33.10 and P33.19, and upgrades P33.4's
-shipped phase display from inference to fact.
-
-The OpenAI-compat endpoint structurally blocks four things the harness currently works around:
-**(1)** per-request `num_ctx` — today Aegis can only *detect and warn* about the serving context
-(`internal/server/contextwindow.go`, `internal/ollamainfo`) instead of setting it; **(2)**
-`keep_alive` control on chat requests (see P33.10); **(3)** real token usage — local runs mark
-usage `IsEstimated` via the byte heuristic (`internal/engine/engine.go`), so token caps, the
-context bar, and compaction thresholds all run on estimates; **(4)** load/prompt-eval telemetry.
-Ollama's native `/api/chat` returns `prompt_eval_count`, `eval_count`, `eval_duration`, and
-`load_duration` with every response — real tokens, real tok/s, and the ability to surface "model
-cold-loaded (8.2s)" as a dim `KindNotice`.
-
-Plan: new `internal/provider/ollama` implementing the existing `provider.Adapter` seam (one
-`Stream` method — the whole point of the abstraction); reuse `internal/provider/sse` helpers
-(including P33.1's `NewStreamingClient`) and the retry/failover decorators from
-`providerfactory.Build`; config selects it (e.g. provider `ollama` with the existing base-URL
-plumbing); the openai adapter remains for genuinely OpenAI-compatible gateways. `ollamainfo`'s
-three-source context-window detection collapses to "ask the request we just made" for sessions on
-this adapter. Run the `live_workflow` eval tier against it before switching any default (recipe in
-CLAUDE.md).
-
-**Seams P33.1-P33.8 deliberately left for this item** (all shipped, all waiting):
-- `model.streamStats()` (`internal/tui/tui.go`) is the *only* place the 4-bytes-per-token heuristic
-  exists, and it sets `estimated: true`. The formatter and both render sites are already
-  estimate-agnostic (there is a test pinning the no-tilde reported-counts render). Assign real
-  per-delta counts and clear the flag — no caller changes needed.
-- `provider.EventToolUseStart` (P33.3) needs an emission point in the new adapter to keep
-  provisional tool cards working; a producer that never emits it degrades gracefully, so this is
-  not a blocker, but it is a visible regression against the openai path if skipped.
-- P33.1's mid-stream error-envelope handling (`errorMessage()`, both the bare-string and object
-  spellings) is OpenAI-adapter-local. The native adapter needs its own equivalent; Ollama's native
-  API uses the bare-string spelling.
+Four items: P33.10, P33.11, P33.16, P33.19. Medium-effort with real value; some are
+sequence-dependent. (P32.8 shipped 2026-07-15; P33.9, the keystone unblocking P33.10 and P33.19,
+shipped 2026-07-16 — see [releases.md](releases.md#latest-changes).)
 
 ### P33.10 — Ollama keep-alive management and pre-warm
 
-Effort: M — partially blocked by P33.9
+Effort: M — unblocked by P33.9
 
 Ollama unloads models after its default 5-minute `keep_alive`; the next message then pays a full
 cold reload (tens of seconds on 16GB VRAM). P33.4 shipped a phase split that makes this wait
-*visible* ("waiting for first token · Ns") but cannot yet *name* it as a cold load — that needs
-P33.9's `load_duration`. Two levers: **(1)** a config knob (e.g. `provider.ollama.keep_alive`)
-passed on chat requests — requires the native adapter (P33.9); the OpenAI-compat endpoint ignores
-it. **(2)** Independent of P33.9: a native-API warm ping (in-repo precedent:
-`internal/cli/ollama.go:17-29` already POSTs `keep_alive: 0` to force-unload — the inverse
-operation) triggered when the TUI regains focus (`tea.FocusMsg` is already tracked) or on first
-keystroke of a new message, gated on `/api/ps` (via `ollamainfo`) reporting the model unloaded.
-Never default `keep_alive: -1` (pin-forever) — the machine profile this targets has 16GB system RAM
-and other workloads; make persistence an explicit user choice.
+*visible* ("waiting for first token · Ns"); P33.9 shipped the ability to *name* it as a cold load
+(`Usage.LoadDurationMS`, surfaced as a `KindNotice` when ≥1s) — that half is done. What's left is
+the pre-warm half. Two levers: **(1)** a config knob (e.g. `provider.ollama.keep_alive`) passed on
+chat requests — the native adapter already accepts this (`ollama.WithKeepAlive`, unwired), it just
+needs a `ProviderConfig` field and `providerfactory.buildOne` to pass it through. **(2)** Independent
+lever: a native-API warm ping (in-repo precedent: `internal/cli/ollama.go:17-29` already POSTs
+`keep_alive: 0` to force-unload — the inverse operation) triggered when the TUI regains focus
+(`tea.FocusMsg` is already tracked) or on first keystroke of a new message, gated on `/api/ps` (via
+`ollamainfo`) reporting the model unloaded. Never default `keep_alive: -1` (pin-forever) — the
+machine profile this targets has 16GB system RAM and other workloads; make persistence an explicit
+user choice.
 
 ### P33.11 — Transient panels for informational slash commands
 
@@ -182,13 +219,16 @@ Whether that is right is a genuine behavior decision, deliberately left above P3
 classes differ: a worker crash is plausibly retryable; a context overflow will fail identically on
 every retry and retrying wastes a full prompt-eval on a slow local model, which is precisely the
 cost this batch has been trying to reduce. Likely answer is per-class classification rather than a
-blanket choice — which means it needs the error taxonomy that P33.9's native adapter would give
-better access to. Decide the policy before writing code; sequence after P33.9 if per-class
-classification wins.
+blanket choice. P33.9 shipped its own `errorMessage()` in `internal/provider/ollama/ollama.go`,
+structurally identical to the OpenAI-compat one (same bare-`fmt.Errorf`, not-retryable-by-default
+behavior) — it doesn't yet classify by error text, so the taxonomy work below is still open, just
+now with a second call site (`internal/provider/openai/errorMessage` and
+`internal/provider/ollama/errorMessage`) that any per-class classification needs to reach. Decide
+the policy before writing code.
 
 ### P33.19 — Name the post-tool-round wait
 
-Effort: S — blocked by P33.9
+Effort: S — unblocked by P33.9
 
 P33.4 shipped a **per-run** phase split: "waiting for first token · Ns" until the first model
 output, then generating. That is correct as specified, but it means after a tool result the bar
@@ -198,9 +238,12 @@ to expose, just not on the first round.
 A per-model-call phase would catch every round, but "waiting for first token" is the wrong words
 for it: it is neither the first token nor, while the tool is still executing, a model wait at all.
 Distinguishing "tool is running" from "tool finished, model is re-evaluating a now-larger prompt"
-truthfully requires knowing when the model actually started work — which is P33.9's
-`prompt_eval_count`/`load_duration` territory. Do not guess at wording for a state the TUI cannot
-currently measure; that is why this is blocked rather than merely sequenced.
+truthfully requires knowing when the model actually started work. P33.9 shipped exactly that signal
+for the native adapter (`provider.Usage.LoadDurationMS`, populated from Ollama's `load_duration`/
+`prompt_eval_count` on every `EventDone`) — it currently reaches the TUI only as a post-turn
+`KindNotice`, one-shot per call, not a live per-round phase word. The remaining work is turning that
+into the live phase label this item wants; do not guess at wording for a state the TUI can now
+measure but doesn't yet render mid-round.
 
 ---
 

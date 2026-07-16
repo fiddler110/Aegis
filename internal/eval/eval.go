@@ -58,6 +58,7 @@ type TurnResult struct {
 	FinalText   string
 	ToolCalls   []string // tool names invoked this turn, in call order
 	Steers      []string // steer texts the engine injected this turn, in order
+	Notices     []string // KindNotice texts emitted this turn, in order
 	GuardEvents []GuardResult
 	Err         error
 }
@@ -82,6 +83,15 @@ func (r *Result) AllSteers() []string {
 	var out []string
 	for _, tr := range r.Turns {
 		out = append(out, tr.Steers...)
+	}
+	return out
+}
+
+// AllNotices flattens KindNotice texts across every turn, in order.
+func (r *Result) AllNotices() []string {
+	var out []string
+	for _, tr := range r.Turns {
+		out = append(out, tr.Notices...)
 	}
 	return out
 }
@@ -127,6 +137,8 @@ func Run(ctx context.Context, s Scenario) (*Result, error) {
 				tr.ToolCalls = append(tr.ToolCalls, ev.ToolName)
 			case engine.KindSteer:
 				tr.Steers = append(tr.Steers, ev.Text)
+			case engine.KindNotice:
+				tr.Notices = append(tr.Notices, ev.Text)
 			case engine.KindGuard:
 				tr.GuardEvents = append(tr.GuardEvents, GuardResult{Passed: ev.GuardPassed, Reason: ev.GuardReason})
 			}
@@ -187,6 +199,25 @@ func ExpectNoSteerInjected() Check {
 	return func(r *Result) error {
 		if steers := r.AllSteers(); len(steers) > 0 {
 			return fmt.Errorf("expected no steer to be injected, got %v", steers)
+		}
+		return nil
+	}
+}
+
+// ExpectNoticeCountContaining requires exactly want notices containing substr
+// across the whole scenario. The count matters as much as the presence for
+// self-correcting behavior that must stay bounded — a nudge that fires twice
+// is as much a regression as one that never fires (P34.1).
+func ExpectNoticeCountContaining(substr string, want int) Check {
+	return func(r *Result) error {
+		var got int
+		for _, n := range r.AllNotices() {
+			if strings.Contains(n, substr) {
+				got++
+			}
+		}
+		if got != want {
+			return fmt.Errorf("expected %d notice(s) containing %q, got %d: %v", want, substr, got, r.AllNotices())
 		}
 		return nil
 	}

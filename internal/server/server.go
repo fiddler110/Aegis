@@ -50,6 +50,7 @@ import (
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
+	"github.com/fiddler110/aegis/internal/toolcallprobe"
 	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
@@ -72,21 +73,27 @@ type Server struct {
 	cronCancel  context.CancelFunc
 	checkpoints *checkpoint.Store
 	fileTracker *filetracker.Tracker
-	knowledge   *knowledge.Store // project knowledge base (P3.3); nil when unavailable
-	longMem     *longmem.Store   // long-term entity memory (P3.1); nil when unavailable
-	embedder    embed.Embedder   // shared semantic-recall embedder (P5.8); nil = BM25-only
-	runs        *runRegistry
-	sandbox     sandbox.Backend
-	lspMgr      *lsp.Manager
-	audit       *hooks.Audit
-	execHook    *hooks.Exec      // user-configured lifecycle hooks (P4.4); nil when none
-	notifier    *notify.Notifier // background-session notifications (P5.4); nil when disabled
-	cmdReg      *commands.Registry
-	permRules   []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
-	permMu      sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
-	repoMap     string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
-	repoMapMu   sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
-	personaDirs []string          // directories rescanned by refreshPersonas for hot reload
+	toolCalling *toolcallprobe.Gate // P34.2: per-model tool-calling verdict cache
+	// toolCallWarned records the (session, model) pairs already warned about a
+	// tool-incapable model, so the notice informs once rather than nagging every
+	// turn. Written only when a model actually fails the probe.
+	toolCallWarned   map[string]struct{}
+	toolCallWarnedMu sync.Mutex
+	knowledge        *knowledge.Store // project knowledge base (P3.3); nil when unavailable
+	longMem          *longmem.Store   // long-term entity memory (P3.1); nil when unavailable
+	embedder         embed.Embedder   // shared semantic-recall embedder (P5.8); nil = BM25-only
+	runs             *runRegistry
+	sandbox          sandbox.Backend
+	lspMgr           *lsp.Manager
+	audit            *hooks.Audit
+	execHook         *hooks.Exec      // user-configured lifecycle hooks (P4.4); nil when none
+	notifier         *notify.Notifier // background-session notifications (P5.4); nil when disabled
+	cmdReg           *commands.Registry
+	permRules        []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
+	permMu           sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
+	repoMap          string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
+	repoMapMu        sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
+	personaDirs      []string          // directories rescanned by refreshPersonas for hot reload
 
 	// knowledgeStores/repoMaps cache a per-session-Workdir instance of each
 	// daemon-wide singleton (P25.9): s.knowledge/s.repoMap above remain the
@@ -968,7 +975,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 // newWithDeps assembles a Server from explicit dependencies. It is the seam
 // used by tests to inject a mock adapter and an in-memory store.
 func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, adapter provider.Adapter, tools *tool.Registry) *Server {
-	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry()}
+	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry(), toolCalling: toolcallprobe.NewGate()}
 	if cfg.Server.MaxConcurrentRuns > 0 {
 		s.runSem = make(chan struct{}, cfg.Server.MaxConcurrentRuns)
 	}

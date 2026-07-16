@@ -11,6 +11,7 @@ import (
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/anthropic"
+	"github.com/fiddler110/aegis/internal/provider/ollama"
 	"github.com/fiddler110/aegis/internal/provider/openai"
 )
 
@@ -25,7 +26,7 @@ func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
 		logger = slog.Default()
 	}
 
-	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, logger)
+	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +47,7 @@ func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
 			continue
 		}
 		apiKey := config.ProviderAPIKey(fb.Provider)
-		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, logger)
+		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, logger)
 		if err != nil {
 			logger.Warn("provider fallback: skipping misconfigured fallback", "provider", fb.Provider, "err", err)
 			continue
@@ -141,7 +142,7 @@ func validateBaseURL(name, apiKey, baseURL string, logger *slog.Logger) error {
 // the primary and every fallback target so their construction rules
 // (base URL defaults, thinking/reasoning options, key requirements) stay
 // identical.
-func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens int, logger *slog.Logger) (provider.Adapter, error) {
+func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, logger *slog.Logger) (provider.Adapter, error) {
 	if err := validateBaseURL(name, apiKey, baseURL, logger); err != nil {
 		return nil, err
 	}
@@ -166,21 +167,25 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 		return anthropic.New(apiKey, opts...), nil
 
 	case "ollama":
-		// Ollama uses an OpenAI-compatible API. Default to localhost:11434 when
-		// no base URL is configured. Thinking is disabled by default to prevent
-		// reasoning preambles in non-thinking tasks.
-		if baseURL == "" {
-			baseURL = "http://localhost:11434/v1"
-		}
+		// Native /api/chat (P33.9), not the OpenAI-compat endpoint: it needs
+		// no API key, and unlocks per-request num_ctx, keep_alive, and real
+		// token/load telemetry the compat path can't offer. A lingering "/v1"
+		// suffix from an older config is stripped by ollama.WithBaseURL.
+		// Thinking is disabled by default to prevent reasoning preambles in
+		// non-thinking tasks.
 		falseVal := false
 		if think == nil {
 			think = &falseVal // suppress Ollama thinking unless explicitly enabled
 		}
-		return openai.New(apiKey,
-			openai.WithBaseURL(baseURL),
-			openai.WithHeaders(headers),
-			openai.WithThink(think),
-		), nil
+		opts := []ollama.Option{
+			ollama.WithBaseURL(baseURL),
+			ollama.WithHeaders(headers),
+			ollama.WithThink(think),
+		}
+		if contextWindow > 0 {
+			opts = append(opts, ollama.WithNumCtx(contextWindow))
+		}
+		return ollama.New(opts...), nil
 
 	case "openai":
 		// Require an API key only when using the real OpenAI endpoint. Local

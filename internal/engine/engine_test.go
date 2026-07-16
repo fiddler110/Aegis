@@ -159,6 +159,74 @@ func TestRunToolRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRunEmitsColdLoadNotice covers P33.9: when a provider (the native
+// Ollama adapter) reports a load_duration at or above the cold-load
+// threshold, the engine surfaces it as a dim KindNotice so a long
+// first-token wait gets named instead of looking like generic generation
+// time. A load_duration below the threshold (an already-warm model's own
+// bookkeeping overhead) must not produce a notice.
+func TestRunEmitsColdLoadNotice(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "hi"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{
+				InputTokens: 10, OutputTokens: 5, LoadDurationMS: 8200,
+			}},
+		},
+	}}
+	eng, err := New(Options{Adapter: adapter, Model: "test", MaxTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var notices []string
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hello"}}})
+	err = eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindNotice {
+			notices = append(notices, ev.Text)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "cold-loaded") || !strings.Contains(notices[0], "8.2s") {
+		t.Errorf("expected one cold-load notice mentioning 8.2s, got %v", notices)
+	}
+}
+
+// TestRunSkipsColdLoadNoticeBelowThreshold: a small load_duration (already-
+// warm model) must not be reported as a cold load.
+func TestRunSkipsColdLoadNoticeBelowThreshold(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "hi"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{
+				InputTokens: 10, OutputTokens: 5, LoadDurationMS: 50,
+			}},
+		},
+	}}
+	eng, err := New(Options{Adapter: adapter, Model: "test", MaxTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var notices []string
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hello"}}})
+	err = eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindNotice {
+			notices = append(notices, ev.Text)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(notices) != 0 {
+		t.Errorf("expected no cold-load notice below threshold, got %v", notices)
+	}
+}
+
 // TestRunForwardsToolCallStart is the P33.3 guard: an adapter that announces
 // a tool call while its arguments are still streaming
 // (provider.EventToolUseStart) must reach the consumer as KindToolCallStart —

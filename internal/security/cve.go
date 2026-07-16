@@ -36,12 +36,25 @@ const nvdAPIKeyEnv = "NVD_API_KEY"
 // CVEOptions is one cve_lookup call's parameters.
 type CVEOptions struct {
 	// CVEID looks up one specific CVE (e.g. "CVE-2021-44228"). Mutually
-	// exclusive with Keyword.
+	// exclusive with Keyword and Product/Version.
 	CVEID string
-	// Keyword runs NVD's free-text keyword search. Mutually exclusive with
-	// CVEID.
+	// Keyword runs NVD's free-text keyword search against CVE titles/
+	// descriptions. Mutually exclusive with CVEID and Product/Version. This
+	// matches on prose, not on the affected product, so it's prone to
+	// false-positive matches against an unrelated product that happens to
+	// share vocabulary with the real one (see Product/Version below for the
+	// precise alternative).
 	Keyword string
-	// Limit bounds keyword-search results (default/max enforced internally).
+	// Product and Version (both required together) run a CPE-based NVD
+	// lookup (P34.4) instead of free text: they're folded into an NVD
+	// "virtualMatchString" (cpe:2.3:*:*:<product>:<version>:*:*:*:*:*:*:*,
+	// vendor left wildcarded since callers — e.g. an nmap service/version
+	// banner — usually don't know it) so NVD matches against the actual
+	// affected-product field of each CVE record rather than free-text
+	// keyword search. Mutually exclusive with CVEID and Keyword.
+	Product string
+	Version string
+	// Limit bounds keyword/CPE-search results (default/max enforced internally).
 	Limit int
 
 	// BaseURL overrides nvdDefaultBaseURL (tests only).
@@ -77,11 +90,26 @@ const (
 // decides whether to back off and retry, matching this tool's "guarded,
 // human/model stays in the loop" design.
 func LookupCVE(ctx context.Context, opts CVEOptions) ([]CVERecord, error) {
-	if strings.TrimSpace(opts.CVEID) == "" && strings.TrimSpace(opts.Keyword) == "" {
-		return nil, fmt.Errorf("cve_lookup requires either cve_id or keyword")
+	cveID := strings.TrimSpace(opts.CVEID)
+	keyword := strings.TrimSpace(opts.Keyword)
+	product := strings.TrimSpace(opts.Product)
+	version := strings.TrimSpace(opts.Version)
+	hasCPE := product != "" || version != ""
+
+	modes := 0
+	for _, set := range []bool{cveID != "", keyword != "", hasCPE} {
+		if set {
+			modes++
+		}
 	}
-	if strings.TrimSpace(opts.CVEID) != "" && strings.TrimSpace(opts.Keyword) != "" {
-		return nil, fmt.Errorf("cve_lookup takes cve_id or keyword, not both")
+	if modes == 0 {
+		return nil, fmt.Errorf("cve_lookup requires one of cve_id, keyword, or product+version")
+	}
+	if modes > 1 {
+		return nil, fmt.Errorf("cve_lookup takes exactly one of cve_id, keyword, or product+version")
+	}
+	if hasCPE && (product == "" || version == "") {
+		return nil, fmt.Errorf("cve_lookup's product+version match requires both fields, got product=%q version=%q", product, version)
 	}
 
 	base := opts.BaseURL
@@ -97,10 +125,14 @@ func LookupCVE(ctx context.Context, opts CVEOptions) ([]CVERecord, error) {
 	}
 
 	q := url.Values{}
-	if opts.CVEID != "" {
-		q.Set("cveId", strings.ToUpper(strings.TrimSpace(opts.CVEID)))
-	} else {
-		q.Set("keywordSearch", opts.Keyword)
+	switch {
+	case cveID != "":
+		q.Set("cveId", strings.ToUpper(cveID))
+	case hasCPE:
+		q.Set("virtualMatchString", cpeVirtualMatchString(product, version))
+		q.Set("resultsPerPage", strconv.Itoa(limit))
+	default:
+		q.Set("keywordSearch", keyword)
 		q.Set("resultsPerPage", strconv.Itoa(limit))
 	}
 	endpoint := base + "?" + q.Encode()
@@ -154,6 +186,20 @@ func LookupCVE(ctx context.Context, opts CVEOptions) ([]CVERecord, error) {
 		out = append(out, v.CVE.toRecord())
 	}
 	return out, nil
+}
+
+// cpeVirtualMatchString builds an NVD "virtualMatchString" from a product and
+// version, wildcarding every other CPE 2.3 component (part, vendor, update,
+// edition, language, sw_edition, target_sw, target_hw, other). Vendor is left
+// wildcarded because the common caller (an nmap service/version banner, e.g.
+// "Apache httpd 2.4.29") doesn't know it; NVD's virtualMatchString matching
+// still resolves it against the product+version pair. Per CPE 2.3 naming
+// convention, spaces become underscores and the string is lowercased.
+func cpeVirtualMatchString(product, version string) string {
+	norm := func(s string) string {
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), " ", "_"))
+	}
+	return fmt.Sprintf("cpe:2.3:*:*:%s:%s:*:*:*:*:*:*:*", norm(product), norm(version))
 }
 
 // FormatCVEResults renders CVE lookup results as short human-readable text,

@@ -8,6 +8,241 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-07-16 — shipped **P34.2, both levers**: warn when the selected model can't
+actually make tool calls. Lever (2) names it after the fact at zero cost; lever (1) probes the model
+and warns *before* the turn is spent.
+
+The item's observation was reproduced live before anything was written (`qwen2.5-coder:1.5b` pulled
+for exactly this, `aegis chat --mode plan` through the P33.9 native adapter): the model made **zero**
+tool calls, printed a tool-call-shaped JSON object into its prose, then fabricated a directory
+listing — inventing `.go` files named after Aegis's own tools (`tool_search.go`, `web_fetch.go`,
+`write_file.go`). Nothing in the run said why.
+
+`engine.Run`'s `len(toolUses) == 0` branch now emits a one-per-run `KindNotice` ("model emitted a
+tool call as text — it may not support tool calling; run `aegis doctor` to check this model") when
+the final text contains tool-call-shaped JSON naming a tool the model was actually offered. Warn
+only, never blocking — a prose-only session with such a model is still legitimate. The detector
+(`looksLikeToolCallJSON`) decodes candidate `{`-anchored substrings rather than brace-matching (the
+decoder stops at the first complete value and handles string escaping for free), gated behind a
+cheap `"arguments"`/`"parameters"` substring pre-check and a 64-candidate cap so a code-heavy answer
+can't make it quadratic.
+
+**Two deviations from the item as written, both deliberate.** (a) The item says fire when *the turn*
+made zero structured tool calls; this keys on `toolRoundsCompleted == 0` — the whole *run* — because
+a model that already made a real tool call has proven it speaks the protocol, so JSON in its final
+answer is quotation, not incapacity. (b) The name must match a tool actually in `Schemas()`; any
+name/arguments pair would fire on ordinary JSON in an answer. Both narrow the check toward silence,
+consistent with the P33 lesson that a notice which fires on prose the user can see is not a tool
+call would be worse than none.
+
+**Two real bugs found by live-verifying rather than trusting the tests** — both in
+`internal/cli/chat.go`, both pre-existing, both invisible to the unit tests and to the TUI:
+**(1)** `emitStreamEvent` never copied `Text` for `KindNotice`, so every engine advisory (this one,
+P34.1's empty-answer notice, P33.9's cold-load notice, context-fill, compaction) reached
+`--output-format stream-json` as a content-free `{"type":"notice"}`. The first live run surfaced
+exactly that, which is how it was caught. **(2)** `toolCalls++` sat inside the `outputJSON` branch of
+the event switch, so the stream-json trailer reported `"tool_calls":0` unconditionally — wrong in
+precisely the surface this item exists to make legible. Both fixed; `TestEmitStreamEvent` extended to
+cover the notice payload.
+
+Live-verified end to end on both sides after the fix. `qwen2.5-coder:1.5b`: the P28.3 zero-tool nudge
+fires first, fails to help, then the new notice names the actual cause. `supergoatscriptguy/
+mythos-sec:24b` (capable, same prompt, 2 runs): real `ls`/`read_file` tool calls, no false positive,
+and `tool_calls: 2` now correctly reported. One run also surfaced P33.9's cold-load notice
+("model cold-loaded (28.2s)") — incidental confirmation that path works live. New tests:
+`TestToolCallAsTextNotice`, `TestToolCallAsTextNoticeSkippedAfterRealToolCall`,
+`TestLooksLikeToolCallJSON` (`internal/engine/toolcallastext_test.go`).
+
+### Lever (1) — probe the model, warn before the turn is spent
+
+**The item deferred this on "probe cost", and that cost turned out not to exist.** The probe only ever
+runs against local Ollama-style providers (the same `isOllamaProvider` gate `aegis doctor` and the
+P28.7 reachability check use), so it never touches a paid API. And run at *run start*, it shares the
+cold load the turn was about to pay anyway — Ollama keeps the model resident, so the probe's real
+marginal cost is its own inference on an already-loading model, not the ~28s load. The abstract
+objection had survived three roadmap drafts; one measurement dissolved it.
+
+`internal/toolcallprobe` is a new package holding the single definition of the smoke test (prompt,
+system prompt, tool schema, `Run`). `doctorToolCallCheck` was refactored onto it — its five existing
+tests pass unchanged against the shared code — so the daemon's gate and doctor's diagnostic row can't
+drift into two different verdicts for the same model. `toolcallprobe.Gate` adds the caching layer:
+one verdict per model, `singleflight`-collapsed so concurrent sessions starting on a cold model share
+one probe rather than queueing a load each.
+
+**Three rules the implementation holds that the item didn't state.** (a) *An inconclusive probe never
+blames the model* — a transport error, a mid-stream provider error, or a timeout yields `Unknown`, is
+never cached, and says nothing; telling a user their model can't call tools when the truth is the
+server was down would be worse than silence. (b) *The verdict cache is never persisted*, though "once
+per model, not per daemon" is tempting: an Ollama tag is mutable, so `ollama pull` can replace what
+`qwen3:14b` means without the name changing, and a verdict on disk could outlive the model it
+describes. (c) *Warn once per session per model, not per run* — see the live findings below.
+
+**Placement deviates from the item deliberately.** It names three model-selection sites (daemon start,
+`PATCH /sessions/{id}`, the TUI `/models` picker); this hooks run start instead, which is the one
+choke point downstream of all three and the only place the model is known *after* the persona pin, the
+per-session `/model` override, and P30's routing have resolved. It is also the only one where the
+probe is free, since it's the moment the model gets loaded regardless.
+
+**Four things only live runs caught, each after the code was already green:**
+**(1)** Lever (1) was fully wired, built, and unit-green — and did nothing when tested through
+`aegis chat`, because `chat` builds its own in-process engine and never touches the daemon's run
+path. No test asserted otherwise. This is left as-is by decision, and documented: lever (1)'s cache
+can only amortize in a long-lived process, so probing in a one-shot CLI would double the model calls
+of every scripted `aegis chat` and never repay it — and lever (2) already covers that surface at zero
+cost, verified live. **(2)** Verified against a real daemon over the HTTP+SSE seam (the
+`TestLiveWorkflow` approach, since `chat` was the wrong surface): the warning fires before the run on
+`qwen2.5-coder:1.5b`, naming the model. **(3)** A second run on the same daemon warned from cache in
+0.9s with no re-probe. **(4)** That same run exposed the nagging problem — `what is 2+2?` drew the
+full paragraph, and in a TUI it would have repeated on every message of the session. Hence rule (c):
+a tool-incapable model is still perfectly good company for conversation. Re-warning on a model switch
+is kept, since that's new information.
+
+Also fixed here, found while writing the concurrency test: `Gate.Verdict`'s cache fast-path sat
+outside the singleflight, so a caller could miss the cache, wait for the slot, and probe a second time
+after another goroutine had already stored the verdict — a duplicated model load, the exact cost the
+cache exists to prevent. Now re-checked inside the flight.
+
+New tests (`internal/server/toolcalling_test.go`): `TestToolCallingWarningFlagsModelWithNoToolCalls`,
+`TestToolCallingWarningSilentForCapableModel`, `TestToolCallingWarningNeverBlamesAnOutage`,
+`TestToolCallingWarningProbesOncePerModel`, `TestToolCallingWarningWarnsOncePerSession`,
+`TestToolCallingWarningCollapsesConcurrentProbes`, `TestToolCallingWarningSkipsNonLocalProvider`,
+`TestToolCallingWarningSkipsUnresolvedModel` — green under `-race -count=5`.
+`docs/providers.md`'s "Tool-calling reliability for local models" section documents both warnings and
+adds `qwen2.5-coder:1.5b` to the model table, calling out its distinct failure shape: unlike
+`deepseek-r1:8b`, which simply answers in prose, it *fabricated* the output of the tool it never
+called.
+
+---
+
+**Last updated:** 2026-07-16 — shipped **P34.4**: CPE-based product+version matching for
+`security_advise`'s `cve_lookup` action. Found the same day via a manual `red-team`-persona
+workflow test (`recon_scan` against a home-lab host, then `cve_lookup` on what it found):
+`cve_lookup` only supported a CVE ID or NVD's free-text `keywordSearch`, which matches on CVE
+prose rather than the affected-product field — a nuclei finding titled "SMB Anonymous Access
+Detection" returned CVE-2016-9463 (a Nextcloud/ownCloud auth-bypass CVE) and CVE-2024-5262 (a
+ProjectDiscovery Interactsh SMB issue), neither plausibly related to the actual scanned host.
+
+Added `CVEOptions.Product`/`Version` (`internal/security/cve.go`), folded into NVD's
+`virtualMatchString` query parameter as `cpe:2.3:*:*:<product>:<version>:*:*:*:*:*:*:*` —
+vendor and every other CPE 2.3 component wildcarded, since the common caller (an nmap
+service/version banner) doesn't know the vendor field. `LookupCVE` now validates exactly one of
+cve_id/keyword/product+version is set. `security_advise`'s `cve_lookup` action
+(`internal/tool/builtin/advise.go`) exposes `product`/`version` as sibling input fields to
+`keyword`, with its description telling the model to prefer CPE matching whenever a scanner
+captured a versioned banner and fall back to keyword search only when it didn't. Live-verified
+against the real NVD API: `product="openssh" version="7.4"` returned only
+OpenSSH-specific CVEs (CVE-2017-15906, CVE-2018-15473, CVE-2018-15919, CVE-2018-20685,
+CVE-2019-6109), all pre-7.6 as expected — no off-target matches, unlike the keyword-search
+baseline. New tests: `TestLookupCVEProductVersionSearch`,
+`TestLookupCVERequiresBothProductAndVersion`,
+`TestLookupCVERejectsProductVersionAlongsideKeyword` (`internal/security/cve_test.go`);
+existing `TestAdviseToolCVELookupWiring` and the rest of the `cve_test.go`/`advise_test.go`
+suites still pass unchanged. Keyword search stays as the fallback path (some findings, e.g.
+misconfig-class nuclei templates, have no version to match against) — this was additive, not a
+replacement.
+
+**P34.1 shipped 2026-07-16** — detect and recover a run that ends with no
+user-visible text. Observed live in the 2026-07-16 3-model eval pass (`gpt-oss:20b`, 1 run in 4):
+tool calls executed, the run ended without error, and the final turn carried **zero** visible text —
+`aegis chat --output-format json` returned an empty `answer`, and the TUI showed tool activity
+followed by nothing.
+
+The roadmap flagged its mechanism as **unverified**, so per the P33 batch's own lesson it was
+re-derived with a failing test before any fix was written — and this time the written diagnosis
+held. Confirmed: `engine.Run`'s `len(toolUses) == 0` branch emits `KindDone` on `StopEndTurn`
+without ever checking whether text was produced, and the output guard is no backstop because it is
+itself gated on `if final := assistantText(assistant); final != ""` — an empty answer skips
+validation rather than failing it. That is the whole bug: silence is the one output nothing in the
+pipeline inspects.
+
+The fix, in that same branch and deliberately model-agnostic (the cause is gpt-oss routing its
+conclusion to the thinking channel, but the recovery doesn't depend on that): when a turn ends with
+`assistantText(assistant) == ""`, append one user-role nudge asking for the final answer as plain
+text and loop. It is bounded to a **single** attempt per run via `emptyAnswerNudges` — an unbounded
+version would trade an empty reply for a model that never speaks spinning to the iteration cap,
+which is a strictly worse failure. If the nudge also comes back empty, a `KindNotice` names the
+condition so the empty reply is explained rather than silent. Placement is after the P28.3 zero-tool
+nudge, which keeps precedence on its own (disjoint) failure mode: P28.3 fires only when
+`toolRoundsCompleted == 0` and the request `looksActionable`, whereas P34.1's live case is a
+*successful* tool round followed by silence. Scaffolding is retracted from the durable transcript on
+settle, reusing P28.3's established pattern — `retractZeroToolNudges`/`isZeroToolNudge` were
+generalized into `retractNudges(conv, prefix)`/`isNudge(m, prefix)` (single existing caller) rather
+than duplicated per nudge type.
+
+The eval harness gained `KindNotice` capture to support the required scenario: `TurnResult.Notices`,
+`Result.AllNotices()`, and an `ExpectNoticeCountContaining(substr, want)` check — a *count*, not a
+presence check, because for bounded self-correcting behavior a nudge firing twice is as much a
+regression as one never firing. `goldenTranscript` is a separate projection from `Result`, so the
+new field left `tool_round_trip.golden.json` untouched (exactly the decoupling that type's comment
+was written to provide). New tests: `internal/eval`'s `TestScenario_EmptyAnswerNudgedExactlyOnce`
+plus three engine tests covering recovery, the bounded-once-then-notify stubborn case, and the
+no-false-positive path when text is present. All three failed against unmodified code first.
+`go build ./...` / `go vet ./...` / `go test ./...` / `go test -race` green.
+
+Verified live against a real Ollama server (`qwen3:14b`), since the change's main risk is a *false
+positive* nudging healthy runs: a plain prompt returned `turns: 1` and a real answer, and a
+tool-using prompt returned `turns: 2` / `tool_calls: 1` and a correct answer — a spurious nudge
+would have shown one extra turn in either. The originating model (`gpt-oss:20b`) is not currently
+pulled locally, so the text-less path itself is covered by the deterministic tiers rather than
+re-observed live.
+
+---
+
+**Last updated:** 2026-07-16 — shipped **P33.9**, the Tier 3 keystone: a native Ollama
+`provider.Adapter` (`internal/provider/ollama`) speaking `/api/chat` directly instead of Ollama's
+OpenAI-compatible `/v1/chat/completions` endpoint, unlocking the four things that endpoint
+structurally blocked. **(1)** Per-request `options.num_ctx`: `providerfactory.buildOne`'s `"ollama"`
+case now passes `cfg.Provider.ContextWindow` straight through via `ollama.WithNumCtx`, and
+`internal/server/contextwindow.go`'s `initContextWindow` short-circuits to `ctxWinFinal = true`
+immediately when both a configured window and the native adapter are in play — the served window is
+now exactly what's configured, no `/api/ps`/`/api/show` probe needed (that probe path is unchanged
+for the `provider: openai` + Ollama-base_url shape, which still can't set num_ctx). **(2)**
+`keep_alive`: exposed as `ollama.WithKeepAlive`, not yet driven by config — that's P33.10. **(3)**
+Real token usage: `prompt_eval_count`/`eval_count` land directly in `provider.Usage`, so
+`engine.go`'s byte-count estimate fallback (`IsEstimated`) never triggers for this adapter — real
+counts flow automatically since it only estimates when both fields are zero. **(4)** Load telemetry:
+a new `Usage.LoadDurationMS` field (nanosecond `load_duration` converted to ms) surfaces as a dim
+`KindNotice` ("model cold-loaded (8.2s)") from `engine.go`'s `turn()` whenever it's ≥1s — below that
+threshold is just an already-warm model's own bookkeeping overhead. Other adapter-shape notes: tool
+calls arrive as complete objects on Ollama's native stream (no incremental-argument accumulation
+like the OpenAI-compat path), so `EventToolUseStart` and the fully-assembled `EventToolUse` fire
+back to back per call; call IDs are synthesized (`tu_N`, native tool calls carry none) and tool
+*results* are correlated back to the model by name (`tool_name` field) rather than an ID, since
+native has no `tool_call_id` — `translate()` builds an ID→name map from the conversation's own
+`ToolUseBlock`s to bridge that. Mid-stream errors use the bare-string `{"error":"..."}` spelling
+(the object spelling is tolerated defensively). The `openai` adapter/provider value is completely
+unchanged — the documented `provider: openai` + `base_url: http://localhost:11434/v1` pattern
+(`internal/cli/init.go`'s template) keeps working exactly as before; only the `provider: ollama`
+value's construction switched adapters. New package tests
+(`internal/provider/ollama/ollama_test.go`): message/tool-result/image translation, full stream
+parsing (text, tool call, usage, load duration), mid-stream error, `/v1`-suffix stripping, and
+`options` field population. `internal/cli/doctor_test.go`'s live-smoke-test mocks were updated from
+OpenAI-compat SSE framing to native NDJSON to match (they exercise `provider: ollama` through the
+real `providerfactory.Build`). New engine tests
+(`TestRunEmitsColdLoadNotice`/`TestRunSkipsColdLoadNoticeBelowThreshold`) and a context-window test
+(`TestInitContextWindowNativeOllamaWithConfigSkipsProbe`, using an unreachable `base_url` to prove no
+network probe fires). Unblocks P33.10 (keep-alive pre-warm) and P33.19 (naming the post-tool-round
+wait via `prompt_eval_count`/`load_duration`); P33.16 can now decide its retry-classification
+question against a real error taxonomy. `go build ./...` / `go vet ./...` / `go test ./...` green.
+
+`live_workflow` eval tier since run against a real local Ollama server (0.30.10), both `gpt-oss:20b`
+(this repo's own configured default) and `qwen3:14b`: 10 total daemon runs across both models,
+every one reporting real (`estimated=false`) token usage end to end, with `glob`/`read_file`/
+`edit_file`/`shell`/`grep`/`ls` all translating and executing correctly through the new adapter.
+`FixSeededBug`/`GuardNoMetaLeak` each passed cleanly at least once per model. The runs that failed
+did so for reasons orthogonal to the adapter: **(1)** `gpt-oss:20b` intermittently emitted malformed
+tool-call output (garbled/corrupted argument text, and once its own reasoning prose in place of
+JSON) that Ollama's own server-side harmony-format tool-call parser rejected with an HTTP 500 —
+`doctorToolCallCheck`'s doc comment (`internal/cli/doctor.go`) already documents `gpt-oss:20b`
+tool-calling reliability as a known live-eval variance, predating this item; the adapter correctly
+surfaced Ollama's error as an `APIError`/engine error rather than hanging or corrupting state.
+**(2)** `qwen3:14b` once wrote a syntactically invalid edit (merged a dict-key-style fragment into
+an arithmetic line) — a model-competence miss, not a wire-format problem; every tool call around it
+parsed and executed correctly. No failure in either case involved malformed requests from the
+adapter, misrouted responses, or incorrect usage/error translation.
+
+---
+
 **Last updated:** 2026-07-16 — shipped **P33.13, P33.14, P33.15, P33.17, P33.18**, clearing the
 Tier 2 batch left open by the P33.1-P33.8 shipment below. Implemented by five parallel sub-agents,
 each given its own isolated git worktree via `Agent(isolation: "worktree")` rather than hand-grouped
