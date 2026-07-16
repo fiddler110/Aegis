@@ -1461,7 +1461,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "esc":
 				m.completion = completionState{}
-				m.applyViewportHeight()
 				m.refresh()
 				return m, nil
 			case "tab":
@@ -1570,7 +1569,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 				m.completion = completionState{}
-				m.applyViewportHeight()
 				picker := newHistoryPicker(m.width, m.height, m.history)
 				m.dialog = &picker
 				return m, nil
@@ -1582,7 +1580,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+k":
 			if !m.streaming {
 				m.completion = completionState{}
-				m.applyViewportHeight()
 				pal := newPalette(m.width, m.height, m.commandEntries())
 				m.dialog = &pal
 				return m, nil
@@ -2212,8 +2209,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// from the bottom, resumed by scrolling back to it (both handled above, at
 	// the scroll inputs themselves) or by sending/queueing a message. It is
 	// deliberately NOT re-derived from geometry here on every message: any
-	// layout perturbation (completion popup, approval dialog, textarea growth)
-	// briefly makes AtBottom() read false, and a blanket re-derivation would
+	// layout perturbation (approval dialog, textarea growth) briefly makes
+	// AtBottom() read false, and a blanket re-derivation would
 	// turn that into a permanently dead auto-follow with no user scroll having
 	// happened.
 	return m, tea.Batch(cmds...)
@@ -2236,8 +2233,9 @@ func (m model) cycleModeCmd() tea.Cmd {
 // --- layout ---
 
 // layout recalculates pane dimensions after a terminal resize.
-// Height budget: title(1) + content(vpH) + textarea+border(ta.Height()+2) + belowBar(1)
-// plus the completion popup box (completionBoxH) when the popup is active.
+// Height budget: title(1) + content(vpH) + textarea+border(ta.Height()+2) + belowBar(1).
+// The completion popup (P33.18) is composited over this layout rather than
+// reserving space in it — see render()'s anchored-overlay compositing.
 func (m *model) layout() {
 	vpW := m.width - 1 // -1 for PaddingLeft on the main panel
 	if m.rawScrollback {
@@ -2275,12 +2273,11 @@ func (m *model) layout() {
 }
 
 // fixedH is the non-viewport vertical budget: title + textarea(+border) +
-// belowBar, plus the completion popup and optional strips.
+// belowBar, plus optional strips. The completion popup (P33.18) is
+// composited over the finished layout instead of reserved here — see
+// renderCompletionPopup and render()'s anchored-overlay compositing.
 func (m *model) fixedH() int {
 	h := 1 + m.ta.Height() + 2 + 1
-	if m.completion.active {
-		h += completionBoxH
-	}
 	if len(m.todoItems) > 0 {
 		h += 1 // todo strip: one line
 	}
@@ -2303,8 +2300,7 @@ func (m *model) applyViewportHeight() {
 	}
 	// P21.7: a height change moves the bottom edge out from under the pinned
 	// offset. While following, re-pin immediately so a pane shrink (approval
-	// dialog, completion popup, textarea wrap) never leaves the newest content
-	// below the fold.
+	// dialog, textarea wrap) never leaves the newest content below the fold.
 	if m.followBottom {
 		m.transcript.GotoBottom()
 	}
@@ -2322,7 +2318,9 @@ func (m *model) commandEntries() []cmdEntry {
 }
 
 // syncCompletion recomputes the inline completion popup from the textarea
-// value, resizing the viewport when the popup opens or closes.
+// value. The popup composites over the finished layout (P33.18) rather than
+// resizing the viewport, so opening/closing it no longer perturbs the
+// transcript pane.
 func (m *model) syncCompletion() {
 	prev := m.completion.active
 	val := m.ta.Value()
@@ -2343,7 +2341,6 @@ func (m *model) syncCompletion() {
 	}
 	m.completion = computeCompletion(val, m.commandEntries(), files)
 	if m.completion.active != prev {
-		m.applyViewportHeight()
 		m.refresh()
 	}
 }
@@ -3501,6 +3498,17 @@ func (m model) render() string {
 	}
 
 	base := m.renderChat()
+	if m.completion.active {
+		// P33.18: the completion popup used to insert into the vertical layout
+		// and shrink the transcript pane by its own height, the same reflow
+		// jump P33.6 fixed for the approval dialog. Unlike that dialog it is
+		// non-modal and anchored (the user is still typing behind it, not
+		// looking at a centered form), so it composites via
+		// renderAnchoredOverlay — no centering, no dimming — positioned just
+		// above the composer instead of the screen center.
+		popup, x, y := m.renderCompletionPopup()
+		base = renderAnchoredOverlay(base, popup, x, y, m.width, m.height)
+	}
 	if m.approval != nil {
 		// P33.6: the approval prompt used to sit between transcript and input,
 		// shrinking the pane by its own height every time the engine asked —
@@ -3521,9 +3529,9 @@ func (m model) render() string {
 }
 
 // renderChat renders the normal chat frame: title bar, transcript/sidebar/
-// terminal pane, completion popup, todo strip, and input area. Split out of
-// render() so overlay dialogs can composite over it instead of replacing it
-// (P16.6).
+// terminal pane, todo strip, and input area. Split out of render() so overlay
+// dialogs — and, since P33.18, the completion popup — composite over it
+// instead of being laid out inline.
 func (m model) renderChat() string {
 	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
@@ -3560,17 +3568,31 @@ func (m model) renderChat() string {
 	}
 
 	parts := []string{titleBar, content}
-	if m.completion.active {
-		popupW := min(m.width-2, 72)
-		popup := lipgloss.NewStyle().PaddingLeft(1).Render(m.completion.view(popupW))
-		parts = append(parts, popup)
-	}
 	if len(m.todoItems) > 0 {
 		parts = append(parts, m.renderTodoStrip())
 	}
 	parts = append(parts, inputArea)
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// renderCompletionPopup renders the inline completion popup and the (x, y)
+// screen position render() should composite it at (P33.18): left-aligned,
+// bottom-anchored just above the composer — above the todo strip too, when
+// one is showing, matching the popup's old position in the vertical layout
+// before it moved to compositing. Only meaningful when m.completion.active;
+// callers must check that first.
+func (m model) renderCompletionPopup() (popup string, x, y int) {
+	popupW := min(m.width-2, 72)
+	popup = lipgloss.NewStyle().PaddingLeft(1).Render(m.completion.view(popupW))
+
+	inputAreaH := m.ta.Height() + 2 + 1 // border(2) + belowBar(1), mirrors fixedH()
+	todoH := 0
+	if len(m.todoItems) > 0 {
+		todoH = 1
+	}
+	y = m.height - inputAreaH - todoH - lipgloss.Height(popup)
+	return popup, 0, y
 }
 
 func (m model) renderTitleBar() string {
