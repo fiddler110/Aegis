@@ -244,6 +244,13 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 	if !m.termFocused {
 		m.ta.Focus()
 	}
+	if steerText != "" {
+		// Tagged steerOriginDenialFeedback (P33.15 #3): this is system-phrased
+		// text, not something the user typed, so if it ever comes back as
+		// KindSteerUnconsumed it must not be requeued as the next user turn
+		// the way a plain steer would be — see requeueSteer.
+		m.pendingSteers = append(m.pendingSteers, pendingSteerEntry{text: steerText, origin: steerOriginDenialFeedback})
+	}
 
 	cl, sessionID := m.cfg.Client, m.cfg.SessionID
 	return m, func() tea.Msg {
@@ -253,9 +260,14 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 			return errMsg{err: fmt.Errorf("approval: %w", err)}
 		}
 		if steerText != "" {
-			// Best-effort: the steer channel is buffered and consumed between
-			// tool rounds; if the run ends first the feedback is simply lost.
-			_ = cl.Steer(ctx, sessionID, steerText)
+			// The steer channel is buffered and consumed between tool
+			// rounds; a failure here (e.g. the run ended first, or the
+			// buffer's full) doesn't mean the approval itself failed, so it
+			// reports back as steerFailedMsg rather than errMsg — same
+			// reasoning as sendSteerCmd (P33.15 #2).
+			if err := cl.Steer(ctx, sessionID, steerText); err != nil {
+				return steerFailedMsg{text: steerText, origin: steerOriginDenialFeedback, err: fmt.Errorf("steer: %w", err)}
+			}
 		}
 		return nil
 	}
