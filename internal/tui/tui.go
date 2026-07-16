@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/color"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,8 +204,11 @@ type model struct {
 	// pendingSteers holds steers posted during the current run that the daemon
 	// hasn't reported back on yet (P33.2); they render as dimmed pending blocks
 	// until the matching KindSteer (injected) or KindSteerUnconsumed (never
-	// reached a tool round) event resolves them.
-	pendingSteers []string
+	// reached a tool round) event resolves them. Each entry carries an origin
+	// (P33.15 #3) so an unconsumed system-authored steer (denial feedback,
+	// approval.go) can be told apart from a user-typed one when it comes back
+	// unconsumed — only the latter is safe to requeue as the next user turn.
+	pendingSteers []pendingSteerEntry
 
 	// interrupted is true from an explicit cancel until the next stream starts.
 	// A steer the daemon hands back unconsumed after one is surfaced as a note
@@ -405,6 +410,37 @@ type batchEventMsg struct {
 
 type streamClosedMsg struct{}
 type errMsg struct{ err error }
+
+// steerFailedMsg reports a failed steer POST (P33.15 #2). Unlike errMsg —
+// which represents an error that ends (or prevents the start of) the main
+// stream — a steer POST failing doesn't mean the run itself died: the SSE
+// stream this steer was meant to interrupt may well still be live. Routing
+// it through its own message type instead of errMsg lets the two be handled
+// differently: errMsg tears the whole run's UI state down, steerFailedMsg
+// only resolves the one steer attempt that failed.
+type steerFailedMsg struct {
+	text   string
+	origin steerOrigin
+	err    error
+}
+
+// steerOrigin tags a pendingSteers entry with who authored the steer text,
+// so the KindSteerUnconsumed requeue path (P33.15 #3) can tell a user-typed
+// steer — safe to requeue as the next user turn — from a system-authored one
+// (currently just approval.go's denial-feedback steer) that would be
+// misattributed to the user if sent the same way.
+type steerOrigin int
+
+const (
+	steerOriginUser steerOrigin = iota
+	steerOriginDenialFeedback
+)
+
+// pendingSteerEntry is one entry in model.pendingSteers.
+type pendingSteerEntry struct {
+	text   string
+	origin steerOrigin
+}
 
 // bangMsg carries the result of a ! shell command (P2.2).
 type bangMsg struct {
@@ -1099,29 +1135,38 @@ func (m *model) diagnoseLastFailureCmd() tea.Cmd {
 }
 
 // sendSteerCmd posts a steering instruction to the daemon. The instruction is
-// injected into the conversation between tool rounds by the engine.
-func (m model) sendSteerCmd(text string) tea.Cmd {
+// injected into the conversation between tool rounds by the engine. A
+// failure reports back as steerFailedMsg rather than errMsg (P33.15 #2) —
+// the stream this steer targets may still be live, so a failed POST here
+// must not read as "the run died."
+func (m model) sendSteerCmd(text string, origin steerOrigin) tea.Cmd {
 	cl, id := m.cfg.Client, m.cfg.SessionID
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := cl.Steer(ctx, id, text); err != nil {
-			return errMsg{err: fmt.Errorf("steer: %w", err)}
+			return steerFailedMsg{text: text, origin: origin, err: fmt.Errorf("steer: %w", err)}
 		}
 		return nil
 	}
 }
 
 // resolvePendingSteer drops the send-time echo of text once the daemon has
-// reported what became of it — injected (KindSteer) or handed back
-// (KindSteerUnconsumed).
-func (m *model) resolvePendingSteer(text string) {
+// reported what became of it — injected (KindSteer), handed back
+// (KindSteerUnconsumed), or the POST that sent it failed (steerFailedMsg).
+// Returns the entry's origin and whether one was actually found, so a caller
+// racing another resolution path (e.g. steerFailedMsg arriving after the
+// stream already closed and swept pendingSteers itself) can tell it has
+// nothing left to do.
+func (m *model) resolvePendingSteer(text string) (steerOrigin, bool) {
 	for i, st := range m.pendingSteers {
-		if st == text {
+		if st.text == text {
+			origin := st.origin
 			m.pendingSteers = append(m.pendingSteers[:i], m.pendingSteers[i+1:]...)
-			return
+			return origin, true
 		}
 	}
+	return steerOriginUser, false
 }
 
 // requeueSteer lands a steer the run never injected in the TQ8 queue, so it
@@ -1129,7 +1174,18 @@ func (m *model) resolvePendingSteer(text string) {
 // interrupt it becomes a transcript note instead: sending into a run the user
 // just stopped is the surprise TQ8's own queue discard exists to avoid, and
 // the text stays on screen either way.
-func (m *model) requeueSteer(text string) {
+//
+// A system-authored steer (steerOriginDenialFeedback) is never requeued as a
+// user turn regardless of interrupt state (P33.15 #3): it's system-phrased
+// text ("The user denied the X call. Feedback: ...") the model was meant to
+// receive as steering context, not a message the user typed, so sending it
+// as the next turn would misattribute it. It only gets a note that it wasn't
+// delivered.
+func (m *model) requeueSteer(text string, origin steerOrigin) {
+	if origin == steerOriginDenialFeedback {
+		m.transcript.Append(m.th.statusDim.Render("⇢ feedback not delivered: "+oneLine(text)) + "\n\n")
+		return
+	}
 	if m.interrupted {
 		m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered (interrupted): "+oneLine(text)) + "\n\n")
 		return
@@ -1728,11 +1784,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ta.Reset()
 			if m.streaming {
 				m.escPending = false
-				m.pendingSteers = append(m.pendingSteers, text)
+				m.pendingSteers = append(m.pendingSteers, pendingSteerEntry{text: text, origin: steerOriginUser})
 				m.followBottom = true
 				m.applyViewportHeight() // ta was just Reset; resync pane height
 				m.refresh()
-				return m, m.sendSteerCmd(text)
+				return m, m.sendSteerCmd(text, steerOriginUser)
 			}
 			return m, m.sendUserMessage(text)
 		}
@@ -1788,7 +1844,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// SSE buffer dropped — is unconsumed by definition once the stream is
 		// gone, so treat it as such instead of leaving its echo dangling.
 		for _, st := range m.pendingSteers {
-			m.requeueSteer(st)
+			m.requeueSteer(st.text, st.origin)
 		}
 		m.pendingSteers = nil
 		// TQ8: auto-send the next queued message, one per completed run. Don't
@@ -1812,12 +1868,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript.Append(m.th.statusDim.Render("⏳ queued messages discarded after error") + "\n\n")
 		}
 		for _, st := range m.pendingSteers {
-			m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered: "+oneLine(st)) + "\n\n")
+			m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered: "+oneLine(st.text)) + "\n\n")
 		}
 		m.pendingSteers = nil
 		m.status = "ready"
 		m.refresh()
 		return m, m.notifyCmd(notify.Event{Title: "Aegis", Body: "Error: " + truncate(msg.err.Error(), 100)})
+
+	case steerFailedMsg:
+		// P33.15 #2: a steer POST failing does NOT mean the stream it was
+		// meant to interrupt died — unlike errMsg above, this must not touch
+		// m.streaming, m.queued, or any other in-flight m.pendingSteers.
+		if _, found := m.resolvePendingSteer(msg.text); !found {
+			// Already resolved by the main stream itself — a KindSteer/
+			// KindSteerUnconsumed event, or the streamClosedMsg safety net —
+			// arrived before this async POST response did. Nothing left to do.
+			return m, nil
+		}
+		var statusErr *client.StatusError
+		switch {
+		case errors.As(msg.err, &statusErr) && statusErr.Code == http.StatusNotFound:
+			// errSteerClosed: the run had already ended before the steer
+			// reached the daemon. Not a failure — the run legitimately
+			// finished — so this isn't shown as an error at all; hand the
+			// text to the same requeue path KindSteerUnconsumed uses so a
+			// user-typed steer still isn't silently lost (P33.15 #1).
+			m.requeueSteer(msg.text, msg.origin)
+		case errors.As(msg.err, &statusErr) && statusErr.Code == http.StatusTooManyRequests:
+			// errSteerFull: the run is still live, this is just retryable.
+			m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered (server busy — try again): "+oneLine(msg.text)) + "\n\n")
+		default:
+			m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered: "+oneLine(msg.text)) + "\n\n")
+		}
+		m.refresh()
+		return m, nil
 
 	case bangMsg: // P2.2: shell command result
 		header := m.th.tool.Render("! " + msg.cmd)
@@ -2535,7 +2619,7 @@ func (m *model) refresh() {
 	// visible while the daemon decides whether it lands mid-run or comes back
 	// unconsumed — the same dimmed pending treatment TQ8 gives queued messages.
 	for _, st := range m.pendingSteers {
-		line := m.th.statusDim.Render("⇢ steer ▸ " + truncate(oneLine(st), max(w-12, 16)))
+		line := m.th.statusDim.Render("⇢ steer ▸ " + truncate(oneLine(st.text), max(w-12, 16)))
 		tail.WriteString("\n" + wrap(line, w))
 	}
 
@@ -3231,8 +3315,11 @@ func (m *model) applyEvent(ev api.Event) {
 
 	case api.KindSteerUnconsumed:
 		// The run ended without the steer ever reaching a tool round (P33.2).
-		m.resolvePendingSteer(ev.Text)
-		m.requeueSteer(ev.Text)
+		// requeueSteer uses the resolved origin to keep a system-authored
+		// steer (denial feedback) from being sent as the next user turn
+		// (P33.15 #3).
+		origin, _ := m.resolvePendingSteer(ev.Text)
+		m.requeueSteer(ev.Text, origin)
 
 	case api.KindGuard:
 		m.flushThinking()

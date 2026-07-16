@@ -695,10 +695,30 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	return nil
 }
 
+// StatusError is returned by request methods (via decodeError) when the
+// daemon responds with a non-2xx HTTP status. It carries the numeric status
+// code so callers that need to branch on it — e.g. distinguishing a steer
+// POST's 404 ("no active run for session", not retryable) from its 429
+// ("steer buffer full", retryable, see internal/server/messages.go
+// handleSteer) — can recover it via errors.As instead of parsing the error
+// string. Error() keeps the exact "daemon error (%d): %s" text callers that
+// only use .Error() have always seen, so this is purely additive.
+type StatusError struct {
+	Code int
+	Msg  string // daemon-provided message from api.ErrorResponse.Error; may be empty
+}
+
+func (e *StatusError) Error() string {
+	if e.Msg != "" {
+		return fmt.Sprintf("daemon error (%d): %s", e.Code, e.Msg)
+	}
+	return fmt.Sprintf("daemon error: %d", e.Code)
+}
+
 func decodeError(resp *http.Response) error {
 	var e api.ErrorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&e); err == nil && e.Error != "" {
-		return fmt.Errorf("daemon error (%d): %s", resp.StatusCode, e.Error)
+		return &StatusError{Code: resp.StatusCode, Msg: e.Error}
 	}
-	return fmt.Errorf("daemon error: %d", resp.StatusCode)
+	return &StatusError{Code: resp.StatusCode}
 }

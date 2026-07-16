@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -182,6 +183,55 @@ func TestDoDecodesErrorResponse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "session not found") || !strings.Contains(err.Error(), "404") {
 		t.Errorf("err = %v, want it to mention the status and message", err)
+	}
+}
+
+// TestDoErrorIsTypedStatusError verifies decodeError's result carries the
+// HTTP status code as a typed *StatusError recoverable via errors.As, not
+// just embedded in the error string — the P33.15 fix that lets callers (the
+// TUI's steer path) distinguish a 404 ("run already ended", not retryable)
+// from a 429 ("steer buffer full", retryable) without parsing text. Error()
+// text must stay exactly what it was before this existed (TestDoDecodesErrorResponse).
+func TestDoErrorIsTypedStatusError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(api.ErrorResponse{Error: "steer buffer full"})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	err := c.Steer(context.Background(), "s1", "hi")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("err = %v (%T), want it to unwrap to a *StatusError", err, err)
+	}
+	if statusErr.Code != http.StatusTooManyRequests {
+		t.Errorf("statusErr.Code = %d, want %d", statusErr.Code, http.StatusTooManyRequests)
+	}
+	if !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "steer buffer full") {
+		t.Errorf("err.Error() = %q, want unchanged daemon-error text", err.Error())
+	}
+}
+
+// TestDoErrorWithoutBodyStillTypes covers the no-JSON-body fallback branch of
+// decodeError — it must still produce a *StatusError, not a plain error.
+func TestDoErrorWithoutBodyStillTypes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	err := c.Steer(context.Background(), "s1", "hi")
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("err = %v (%T), want it to unwrap to a *StatusError", err, err)
+	}
+	if statusErr.Code != http.StatusNotFound {
+		t.Errorf("statusErr.Code = %d, want 404", statusErr.Code)
 	}
 }
 
