@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/security"
 )
 
@@ -33,6 +36,18 @@ func runDoctor(t *testing.T, args ...string) (string, error) {
 // FAIL rows and a nil error (main.go maps that to exit 0). The sandbox row
 // itself is expected to be a WARN, not a PASS, since P27.14/FIND-04: local
 // gives no isolation and doctor now says so rather than passing silently.
+//
+// Unlike TestDoctorNamesPodmanMisconfig this needs no selectSandbox seam
+// (P34.7): the "local" default takes SelectSandbox's `case "", "local"`,
+// which constructs the local backend without probing for a runtime. Every
+// other row is deterministic here too — the provider/tool-calling rows reach
+// the host only behind ollamaNativeBase, a pure-config predicate that is ""
+// for this cloud config, and disableAllScanners keeps the scanners row from
+// calling security.Resolve. The daemon row is the one that still reads the
+// host (it probes cfg.Server.Addr, so a maintainer running `aegis serve`
+// gets PASS instead of WARN, plus possible extra rows), but it cannot flip
+// either assertion below: it emits only PASS/WARN and never FAIL by design,
+// and the "no isolation" WARN comes from the sandbox row regardless.
 func TestDoctorCleanSetupExitsZero(t *testing.T) {
 	redirectConfigDir(t)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test-fake")
@@ -50,28 +65,132 @@ func TestDoctorCleanSetupExitsZero(t *testing.T) {
 	}
 }
 
+// fakeContainerBackend stands in for the *sandbox.ContainerBackend
+// SelectSandbox returns once a container runtime is present. doctorSandboxCheck
+// only ever reads Name() (and Close()s it), so the exec methods are never
+// called.
+type fakeContainerBackend struct{ name string }
+
+func (f fakeContainerBackend) Name() string { return f.name }
+func (f fakeContainerBackend) Exec(context.Context, string, sandbox.ExecOpts) (string, error) {
+	return "", nil
+}
+func (f fakeContainerBackend) ExecStreaming(context.Context, string, sandbox.ExecOpts, func(string)) error {
+	return nil
+}
+func (f fakeContainerBackend) Close() error { return nil }
+
+// withSelectSandbox injects a deterministic sandbox-selection result for the
+// duration of one test, the same shape as internal/security's
+// withDetectRuntime.
+func withSelectSandbox(t *testing.T, fn func(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (sandbox.Backend, bool, string, error)) {
+	t.Helper()
+	orig := selectSandbox
+	selectSandbox = fn
+	t.Cleanup(func() { selectSandbox = orig })
+}
+
+// doctorRow returns the rendered report line for the named check plus its
+// "-> fix" continuation line, so an assertion can be scoped to one row
+// instead of matching anywhere in the report.
+func doctorRow(t *testing.T, out, name string) string {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[1] != name {
+			continue
+		}
+		if i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "->") {
+			return line + "\n" + lines[i+1]
+		}
+		return line
+	}
+	t.Fatalf("no %q row in doctor output:\n%s", name, out)
+	return ""
+}
+
 // TestDoctorNamesPodmanMisconfig reproduces P25.2's live-eval misconfig
-// (sandbox.backend: podman with no podman runtime present) and checks
-// doctor names both the problem and the correcting config key, per P26.1's
+// (sandbox.backend: podman with no podman runtime present) and checks doctor
+// names both the problem and the correcting config key, per P26.1's
 // acceptance criteria.
+//
+// Both branches are asserted through the selectSandbox seam rather than
+// whatever the host happens to have installed (P34.7). Before the seam this
+// test reached the real runtime probe, so it only passed on machines without
+// podman — i.e. precisely when it was not exercising the misconfig it claims
+// to cover, and starting a podman machine turned it red. The seam also lets
+// the runtime-present branch be asserted at all, which no host-dependent
+// version could do in the same run.
 func TestDoctorNamesPodmanMisconfig(t *testing.T) {
-	redirectConfigDir(t)
-	t.Setenv("ANTHROPIC_API_KEY", "sk-test-fake")
-	disableAllScanners(t)
-
-	if err := config.PatchGlobalSandbox(config.SandboxPatch{Backend: "podman"}); err != nil {
-		t.Fatalf("patch sandbox: %v", err)
+	cases := []struct {
+		name         string
+		sb           sandbox.Backend
+		fallback     bool
+		reason       string
+		wantSeverity string
+		wantContains []string
+	}{
+		{
+			// No podman on the host: SelectSandbox falls back to the real
+			// local backend and reports why, exactly as it does when
+			// NewContainerBackend returns ErrNoContainerRuntime.
+			name:     "runtime absent",
+			sb:       sandbox.NewLocalBackendWithEnv(nil),
+			fallback: true,
+			reason: fmt.Sprintf("configured sandbox backend %q unavailable (%v) — running unsandboxed on the host",
+				"container", sandbox.ErrNoContainerRuntime),
+			wantSeverity: "WARN",
+			// The problem and the correcting config key, per P26.1.
+			wantContains: []string{"is not active", "sandbox.backend"},
+		},
+		{
+			// Podman present: the configured backend is the active one, so
+			// there is no misconfig left to name.
+			name:         "runtime present",
+			sb:           fakeContainerBackend{name: "container:podman"},
+			fallback:     false,
+			wantSeverity: "PASS",
+			wantContains: []string{`configured "container", active "container:podman"`},
+		},
 	}
 
-	out, err := runDoctor(t)
-	if err != nil {
-		t.Fatalf("doctor: %v\noutput:\n%s", err, out)
-	}
-	if !strings.Contains(out, "WARN") || !strings.Contains(out, "sandbox") {
-		t.Errorf("expected a sandbox WARN row, got:\n%s", out)
-	}
-	if !strings.Contains(out, "sandbox.backend") {
-		t.Errorf("expected the correcting config key sandbox.backend to be named, got:\n%s", out)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			redirectConfigDir(t)
+			t.Setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+			disableAllScanners(t)
+
+			if err := config.PatchGlobalSandbox(config.SandboxPatch{Backend: "podman"}); err != nil {
+				t.Fatalf("patch sandbox: %v", err)
+			}
+
+			withSelectSandbox(t, func(cfg config.SandboxConfig, _ string, _ *slog.Logger) (sandbox.Backend, bool, string, error) {
+				// config.Normalize rewrites the runtime name typed into
+				// backend ("podman") into the backend/runtime pair
+				// SelectSandbox actually switches on — assert that still
+				// happens, since it is what makes this a live misconfig
+				// rather than an unknown-backend error.
+				if cfg.Backend != "container" || cfg.Runtime != "podman" {
+					t.Errorf(`sandbox.backend "podman" normalized to backend=%q runtime=%q, want "container"/"podman"`, cfg.Backend, cfg.Runtime)
+				}
+				return tc.sb, tc.fallback, tc.reason, nil
+			})
+
+			out, err := runDoctor(t)
+			if err != nil {
+				t.Fatalf("doctor: %v\noutput:\n%s", err, out)
+			}
+			row := doctorRow(t, out, "sandbox")
+			if !strings.HasPrefix(row, tc.wantSeverity) {
+				t.Errorf("sandbox row: want %s, got:\n%s", tc.wantSeverity, row)
+			}
+			for _, want := range tc.wantContains {
+				if !strings.Contains(row, want) {
+					t.Errorf("sandbox row missing %q, got:\n%s", want, row)
+				}
+			}
+		})
 	}
 }
 
