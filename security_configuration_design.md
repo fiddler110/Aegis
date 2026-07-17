@@ -11,9 +11,8 @@ The system supports both global and project-level configurations, with the inter
 ## Configuration Architecture
 
 ### Security Scanner Components
-Aegis includes 13 built-in security scanners:
-- opengrep (default SAST engine)
-- semgrep (opt-in alternative)  
+Aegis includes 12 built-in security scanners:
+- opengrep (SAST engine)
 - gosec/bandit/brakeman/njsscan (language-specific engines)
 - trivy, gitleaks, kubescape, hadolint, osv-scanner, grype, dockle
 

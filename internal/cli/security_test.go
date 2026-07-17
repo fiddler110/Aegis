@@ -32,7 +32,7 @@ func TestSecurityStatusListsBuiltinScanners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("security status: %v", err)
 	}
-	for _, name := range []string{"semgrep", "trivy", "gitleaks"} {
+	for _, name := range []string{"opengrep", "trivy", "gitleaks"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("status output missing %q: %s", name, out)
 		}

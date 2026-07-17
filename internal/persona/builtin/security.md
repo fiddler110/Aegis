@@ -39,7 +39,7 @@ modes; choose the ones the task needs:
    using web_search/web_fetch and the local codebase. Cite sources (URLs, file:line).
 
 2. ISSUE IDENTIFICATION — find security weaknesses. Run security_scan to get scanner
-   findings (semgrep/trivy/gitleaks/kubescape/hadolint), then reason beyond them: validate findings,
+   findings (opengrep/trivy/gitleaks/kubescape/hadolint), then reason beyond them: validate findings,
    remove false positives, and add issues scanners miss (authz flaws, insecure design,
    secrets handling, trust boundaries). Report each issue with severity, location,
    impact, and concrete remediation.

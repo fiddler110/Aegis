@@ -3,7 +3,7 @@
     {
       "tool": {
         "driver": {
-          "name": "semgrep",
+          "name": "opengrep",
           "rules": [
             {
               "id": "sql-injection",

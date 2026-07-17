@@ -64,7 +64,7 @@ func TestBaselineApplySuppressesMatchingActiveEntry(t *testing.T) {
 	}}
 	findings := []Finding{
 		{Tool: "osv-scanner", RuleID: "CVE-2024-1111", Location: "left-pad@1.0.0 (package-lock.json)"},
-		{Tool: "semgrep", RuleID: "other-rule", Location: "app.go:1"},
+		{Tool: "opengrep", RuleID: "other-rule", Location: "app.go:1"},
 	}
 	kept, suppressed, expired, invalid := b.Apply(findings, time.Now())
 	if len(kept) != 1 || kept[0].RuleID != "other-rule" {
@@ -134,8 +134,8 @@ func TestBaselineApplyLocationScoping(t *testing.T) {
 		{RuleID: "rule-x", Location: "vendor/", Reason: "vendored code, not ours", Expires: "2099-01-01"},
 	}}
 	findings := []Finding{
-		{Tool: "semgrep", RuleID: "rule-x", Location: "vendor/lib/foo.go:10"},
-		{Tool: "semgrep", RuleID: "rule-x", Location: "internal/app.go:10"},
+		{Tool: "opengrep", RuleID: "rule-x", Location: "vendor/lib/foo.go:10"},
+		{Tool: "opengrep", RuleID: "rule-x", Location: "internal/app.go:10"},
 	}
 	kept, suppressed, _, _ := b.Apply(findings, time.Now())
 	if len(suppressed) != 1 || suppressed[0].Location != "vendor/lib/foo.go:10" {
@@ -147,7 +147,7 @@ func TestBaselineApplyLocationScoping(t *testing.T) {
 }
 
 func TestBaselineApplyNoEntriesKeepsEverything(t *testing.T) {
-	findings := []Finding{{Tool: "semgrep", RuleID: "r", Location: "a.go:1"}}
+	findings := []Finding{{Tool: "opengrep", RuleID: "r", Location: "a.go:1"}}
 	var b *Baseline
 	kept, suppressed, expired, invalid := b.Apply(findings, time.Now())
 	if len(kept) != 1 || len(suppressed) != 0 || len(expired) != 0 || len(invalid) != 0 {

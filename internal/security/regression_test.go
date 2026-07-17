@@ -66,7 +66,7 @@ suppressions:
 `)
 
 	scanners := []Scanner{
-		sarifFixture("semgrep", "semgrep_sast.sarif.json", "semgrep"),
+		sarifFixture("opengrep", "opengrep_sast.sarif.json", "opengrep"),
 		sarifFixture("trivy-vuln", "trivy_vuln.sarif.json", "trivy"),
 		sarifFixture("trivy-misconfig", "trivy_misconfig.sarif.json", "trivy"),
 		fixtureScanner{name: "gitleaks", file: "gitleaks.json", parse: parseGitleaks},

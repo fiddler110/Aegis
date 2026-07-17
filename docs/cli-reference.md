@@ -459,7 +459,7 @@ Run available security scanners against a path.
 aegis scan [path] [flags]
 ```
 
-Default path is the current directory. Runs every enabled scanner (**opengrep**, **trivy**, **gitleaks**, **kubescape**, **hadolint**, **osv-scanner**, **grype**, whichever are installed or container-fallback-able) and produces a normalized findings report with severity, location, rule ID, and remediation hint, persisted to `.aegis/security/scan.json`. **semgrep** and the language-targeted engines (**gosec**/**bandit**/**brakeman**/**njsscan**) are opt-in — a plain scan auto-detects the project's language (`go.mod`/`*.go`, `requirements.txt`/`*.py`, `Gemfile`/`*.rb`, `package.json`/`*.js`, and more) and auto-enables the matching one for this run only, without touching config, so a Rust or Java repo never triggers bandit. **hadolint**/**kubescape** are likewise skipped, with a reason, when the path has no Dockerfile/Kubernetes manifest.
+Default path is the current directory. Runs every enabled scanner (**opengrep**, **trivy**, **gitleaks**, **kubescape**, **hadolint**, **osv-scanner**, **grype**, whichever are installed or container-fallback-able) and produces a normalized findings report with severity, location, rule ID, and remediation hint, persisted to `.aegis/security/scan.json`. The language-targeted engines (**gosec**/**bandit**/**brakeman**/**njsscan**) are opt-in — a plain scan auto-detects the project's language (`go.mod`/`*.go`, `requirements.txt`/`*.py`, `Gemfile`/`*.rb`, `package.json`/`*.js`, and more) and auto-enables the matching one for this run only, without touching config, so a Rust or Java repo never triggers bandit. **hadolint**/**kubescape** are likewise skipped, with a reason, when the path has no Dockerfile/Kubernetes manifest.
 
 At a real terminal, a plain `aegis scan` (no `--scanner`, no `--yes`) previews that auto-detected plan and asks for confirmation before running anything; `--yes` (or a non-interactive stdin, e.g. CI) skips the prompt and runs immediately.
 
@@ -516,7 +516,7 @@ Runs nmap + nuclei against a bare host/IP/CIDR list (attack-surface mapping), pe
 
 ## `aegis security`
 
-Manage security scanner availability (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, trufflehog, kubescape, hadolint, grype, dockle, osv-scanner, syft) — the tools behind `aegis scan`/the `security_scan` tool.
+Manage security scanner availability (opengrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, trufflehog, kubescape, hadolint, grype, dockle, osv-scanner, syft) — the tools behind `aegis scan`/the `security_scan` tool.
 
 ### `aegis security status`
 
@@ -540,7 +540,7 @@ Guided, approval-gated host install for one scanner — prints the exact command
 aegis security build-image [--profile core|full] [--runtime docker|podman] [--image TAG] [--no-cache] [--global]
 ```
 
-Builds one local image carrying every bundled scanner, then records its image ID in config so container-method scanning needs a single image instead of a digest-pinned image per tool. `--profile core` builds only the statically-linked scanners; the default `full` adds the Python (semgrep/bandit/njsscan), Ruby (brakeman) and network (nmap/nuclei) scanners (~1.8GB).
+Builds one local image carrying every bundled scanner, then records its image ID in config so container-method scanning needs a single image instead of a digest-pinned image per tool. `--profile core` builds only the statically-linked scanners; the default `full` adds the Python (bandit/njsscan), Ruby (brakeman) and network (nmap/nuclei) scanners (~1.8GB).
 
 The recorded image ID is re-verified before every container run — an image rebuilt or retagged behind Aegis's back fails closed rather than running silently. Run `aegis security update-db` afterwards to populate the vulnerability databases. See [security_scan.md](security_scan.md#the-multiscanner-image-one-image-instead-of-sixteen).
 

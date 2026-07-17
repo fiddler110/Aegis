@@ -6,17 +6,15 @@ import (
 )
 
 // TestScannerDefaultEnabledSplit is the P11.3 regression: opengrep is the
-// new default SAST engine, semgrep and the four language-targeted engines
-// are opt-in, and every scanner that predates this feature stays
-// default-enabled (a flipped zero-value here would silently disable most of
-// the existing scan surface).
+// SAST engine, the four language-targeted engines are opt-in, and every
+// scanner that predates this feature stays default-enabled (a flipped
+// zero-value here would silently disable most of the existing scan surface).
 func TestScannerDefaultEnabledSplit(t *testing.T) {
 	cases := []struct {
 		name string
 		want bool
 	}{
 		{"opengrep", true},
-		{"semgrep", false},
 		{"gosec", false},
 		{"bandit", false},
 		{"brakeman", false},
@@ -48,7 +46,7 @@ func TestDefaultScannersIncludesSASTDepth(t *testing.T) {
 	for _, sc := range DefaultScanners() {
 		names[sc.Name()] = true
 	}
-	for _, want := range []string{"opengrep", "semgrep", "gosec", "bandit", "brakeman", "njsscan"} {
+	for _, want := range []string{"opengrep", "gosec", "bandit", "brakeman", "njsscan"} {
 		if !names[want] {
 			t.Errorf("DefaultScanners() missing %q: %v", want, names)
 		}
@@ -57,7 +55,7 @@ func TestDefaultScannersIncludesSASTDepth(t *testing.T) {
 
 // TestSASTScanArgsPinsPacksNeverAuto is the P11.3 reproducibility/supply-
 // chain requirement: rule packs must be pinned explicitly, never resolved
-// via semgrep/opengrep's own "auto" registry lookup.
+// via opengrep's own "auto" registry lookup.
 func TestSASTScanArgsPinsPacksNeverAuto(t *testing.T) {
 	args := sastScanArgs()
 	joined := strings.Join(args, " ")

@@ -9,7 +9,7 @@ container runtime, or network access in CI.
 
 | File | Format | Representative of | Source |
 |---|---|---|---|
-| `semgrep_sast.sarif.json` | SARIF | semgrep/opengrep SAST | hand-authored, matches semgrep's documented `--sarif` output shape (rule `properties.tags`/`security-severity`) |
+| `opengrep_sast.sarif.json` | SARIF | opengrep SAST | hand-authored, matches opengrep's documented `--sarif` output shape (rule `properties.tags`/`security-severity`) |
 | `trivy_vuln.sarif.json` | SARIF | trivy `fs` dependency CVE | hand-authored, matches trivy's `--format sarif` shape (bare severity tag) |
 | `trivy_misconfig.sarif.json` | SARIF | trivy IaC misconfig | hand-authored, non-CVE rule ID (`AVD-...`) to exercise the misconfig/CVE ASVS split |
 | `grype_sca.sarif.json` | SARIF | grype directory/SBOM scan | hand-authored, `security-severity` CVSS-score form |

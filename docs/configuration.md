@@ -564,14 +564,14 @@ security:
   # "host" (never fall back to a container) | "container" (always prefer it).
   default_method: auto
 
-  # Per-tool overrides, keyed by scanner name (semgrep, trivy, gitleaks).
+  # Per-tool overrides, keyed by scanner name (opengrep, trivy, gitleaks).
   # image must be digest-pinned (image@sha256:...) — Aegis ships no built-in
   # image pin; see docs/security_scan.md for how to obtain and verify one.
   tools: {}
     # trivy:
     #   method: auto
     #   image: "aquasec/trivy@sha256:<digest-you-verified>"
-    # semgrep:
+    # opengrep:
     #   enabled: true
     #   method: host
     # gitleaks:

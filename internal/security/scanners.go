@@ -36,14 +36,12 @@ func firstLine(s string) string {
 	return strings.TrimSpace(before)
 }
 
-// --- opengrep / semgrep (P11.3: pluggable SAST, opengrep default) ---
+// --- opengrep (P11.3: the SAST engine) ---
 //
-// Both engines are rule-syntax compatible and emit SARIF, so they share one
-// arg builder and one pinned pack list. Packs are pinned explicitly — never
-// "auto" — for reproducibility and supply-chain hygiene: `--config auto`
-// needs network egress, nudges toward a platform login, and resolves
-// whatever the registry currently serves for that pack name rather than a
-// fixed rule set.
+// Packs are pinned explicitly — never "auto" — for reproducibility and
+// supply-chain hygiene: `--config auto` needs network egress, nudges toward a
+// platform login, and resolves whatever the registry currently serves for that
+// pack name rather than a fixed rule set.
 var sastRulePacks = []string{"p/owasp-top-ten", "p/security-audit"}
 
 func sastScanArgs() []string {
@@ -78,27 +76,6 @@ func (opengrepScanner) Scan(ctx context.Context, dir string, method Method, rt s
 	return ParseSARIF(out, "opengrep")
 }
 
-type semgrepScanner struct{}
-
-func (semgrepScanner) Name() string { return "semgrep" }
-func (semgrepScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
-	return Resolve(ctx, "semgrep", opts)
-}
-func (semgrepScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
-	var out []byte
-	var err error
-	args := sastScanArgs()
-	if method == MethodContainer {
-		out, err = runScannerImage(ctx, rt, image, dir, opts, "semgrep", append(sastScanArgsFor(opts, image), "/src")...)
-	} else {
-		out, err = runJSON(ctx, dir, "semgrep", append(args, ".")...)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return ParseSARIF(out, "semgrep")
-}
-
 // --- trivy ---
 
 type trivyScanner struct{}
@@ -113,7 +90,25 @@ func (trivyScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.
 // misconfig (IaC across Terraform/CloudFormation/Kubernetes/Helm/Dockerfile/
 // ARM) — rather than relying on whatever trivy's own version-dependent
 // default scanner set happens to be.
-var trivyScanArgs = []string{"--scanners", "vuln,secret,misconfig"}
+//
+// --include-dev-deps exists for the same reason the scanner list is explicit:
+// trivy's default silently narrows the scan. It skips npm/yarn/gradle *dev*
+// dependencies, which on this repo's own frontend lockfile means cataloging
+// 1 of 140 packages (139 devDependencies + preact) — see P34.10.
+//
+// The usual argument for the default (dev deps don't ship, so their CVEs
+// matter less) doesn't survive contact with the rest of the pipeline:
+// osv-scanner already includes dev deps, so those findings reach the report
+// regardless. Leaving trivy's default alone therefore buys no quiet — it only
+// makes the two SCA scanners disagree about what the scan even covers, and
+// costs the corroboration that dedup (P11.8) is built to merge. Measured on a
+// lockfile with known-vulnerable dev deps (lodash 4.17.15, minimist 1.2.0):
+// trivy reports 0 by default and 9 with this flag — including a CRITICAL
+// (CVE-2021-44906) that osv-scanner was already reporting alone.
+//
+// Note this is npm/yarn/gradle-only upstream; it's a no-op for every other
+// ecosystem trivy catalogs.
+var trivyScanArgs = []string{"--scanners", "vuln,secret,misconfig", "--include-dev-deps"}
 
 func (trivyScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	var out []byte
@@ -433,7 +428,7 @@ func findK8sManifests(dir string) ([]string, error) {
 }
 
 // kubescape's --output flag writes a file rather than stdout (unlike
-// semgrep/trivy, whose SARIF flag writes directly to stdout), so this
+// opengrep/trivy, whose SARIF flag writes directly to stdout), so this
 // mirrors gitleaks' report-file pattern: a real temp file on the host,
 // /dev/stdout inside the container (every scanner container is Linux).
 func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
@@ -673,7 +668,7 @@ func scanSBOMWithGrype(ctx context.Context, sbom []byte) ([]Finding, error) {
 // --- gosec, bandit, brakeman (P11.3: opt-in language-targeted SAST) ---
 //
 // All three document their SARIF formatter paired with an explicit output
-// path in their own docs/examples (unlike semgrep/opengrep/njsscan, which
+// path in their own docs/examples (unlike opengrep/njsscan, which
 // write SARIF straight to stdout), so these use the same "write to a real
 // temp file on the host, /dev/stdout inside the container" pattern gitleaks
 // and kubescape already established — every scanner container is Linux, so
@@ -800,8 +795,8 @@ func runHostToTempSARIF(ctx context.Context, dir, toolName string, buildArgs fun
 //
 // Unlike gosec/bandit/brakeman above, njsscan's own docs show --sarif
 // writing straight to stdout by default (an --output flag is only needed to
-// also persist a copy to a file), so this follows the semgrep/opengrep/
-// trivy stdout-SARIF pattern instead.
+// also persist a copy to a file), so this follows the opengrep/trivy
+// stdout-SARIF pattern instead.
 
 type njsscanScanner struct{}
 

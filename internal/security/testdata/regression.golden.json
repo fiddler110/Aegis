@@ -1,7 +1,7 @@
 {
   "findings": [
     {
-      "tool": "semgrep",
+      "tool": "opengrep",
       "rule_id": "sql-injection",
       "severity": "HIGH",
       "title": "User input flows into a raw SQL query",
@@ -52,7 +52,7 @@
     }
   ],
   "ran": [
-    "semgrep",
+    "opengrep",
     "trivy-vuln",
     "trivy-misconfig",
     "gitleaks",
@@ -64,8 +64,8 @@
   "ran_via": {
     "gitleaks": "host",
     "grype": "host",
+    "opengrep": "host",
     "osv-scanner": "host",
-    "semgrep": "host",
     "trivy-misconfig": "host",
     "trivy-vuln": "host",
     "trufflehog": "host",

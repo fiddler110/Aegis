@@ -42,7 +42,7 @@ const securityScannerAdditionBlock = `  # ── Per-scanner config for ` + "`ae
   #                             # opengrep/kubescape (P14.x) instead of the WSL default —
   #                             # recommended for red-team/recon work (see docs/security.md)
   # tools:                      # keyed by scanner name (aegis scan --list)
-  #   semgrep:    { enabled: true, method: host }
+  #   opengrep:   { enabled: true, method: host }
   #   trivy:      { enabled: true, image: "trivy@sha256:..." }
   #   gitleaks:   { enabled: true }
   #   trufflehog: { enabled: true, verify: false }   # live credential check, host-only

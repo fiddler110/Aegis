@@ -162,3 +162,28 @@ func TestBrakemanRelevantGatesOnRailsApp(t *testing.T) {
 		t.Error("Relevant() = false, want true for config/environment.rb + config/application.rb")
 	}
 }
+
+// TestTrivyScanArgsIncludeDevDeps pins P34.10's scope decision. trivy's
+// default skips npm/yarn/gradle dev dependencies, which on this repo's own
+// frontend lockfile means cataloging 1 of 140 packages. The decision is not
+// "more findings is better" — it's that osv-scanner already includes dev
+// deps, so without this flag the two SCA scanners disagree about what the
+// scan covers and trivy contributes nothing to the ecosystem osv is already
+// reporting on alone.
+func TestTrivyScanArgsIncludeDevDeps(t *testing.T) {
+	var hasDevDeps, hasScanners bool
+	for _, a := range trivyScanArgs {
+		switch a {
+		case "--include-dev-deps":
+			hasDevDeps = true
+		case "vuln,secret,misconfig":
+			hasScanners = true
+		}
+	}
+	if !hasDevDeps {
+		t.Error("trivyScanArgs must pass --include-dev-deps: without it trivy silently skips npm dev dependencies that osv-scanner does scan (P34.10)")
+	}
+	if !hasScanners {
+		t.Error("trivyScanArgs lost its explicit scanner list (P11.6)")
+	}
+}

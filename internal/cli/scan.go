@@ -46,7 +46,7 @@ func newScanCmd() *cobra.Command {
 		Short: "Run available security scanners and print normalized findings",
 		Long: "Runs every enabled scanner (opengrep, trivy, gitleaks, kubescape, hadolint, osv-scanner, grype) over the " +
 			"given path (default: current directory) and prints a unified findings report, persisted to " +
-			".aegis/security/scan.json under it. semgrep and the language-targeted engines (gosec/bandit/brakeman/" +
+			".aegis/security/scan.json under it. The language-targeted engines (gosec/bandit/brakeman/" +
 			"njsscan) are opt-in — enable via security.tools.<name>.enabled: true or `aegis security config` — but " +
 			"a plain scan with no --scanner filter auto-detects the project's language (go.mod/*.go, " +
 			"requirements.txt/*.py, Gemfile/*.rb, package.json/*.js, and more for display only) and auto-enables " +

@@ -81,7 +81,7 @@ func TestParseSARIFEmptyRuns(t *testing.T) {
 
 func TestParseSARIFExtractsCWEFromRuleTags(t *testing.T) {
 	data := []byte(`{"runs":[{
-		"tool":{"driver":{"name":"semgrep","rules":[
+		"tool":{"driver":{"name":"opengrep","rules":[
 			{"id":"sql-injection","properties":{"tags":["security","CWE-89: SQL Injection"]}}
 		]}},
 		"results":[
@@ -89,7 +89,7 @@ func TestParseSARIFExtractsCWEFromRuleTags(t *testing.T) {
 			 "locations":[{"physicalLocation":{"artifactLocation":{"uri":"db.go"}}}]}
 		]
 	}]}`)
-	findings, err := ParseSARIF(data, "semgrep")
+	findings, err := ParseSARIF(data, "opengrep")
 	if err != nil {
 		t.Fatal(err)
 	}

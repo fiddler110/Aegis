@@ -15,7 +15,7 @@
 #             dockle needs the container engine socket (internal/security/images.go).
 #
 # PROFILE=core  static scanner binaries only (no Python/Ruby/network tools).
-# PROFILE=full  everything: adds semgrep/bandit/njsscan (Python), brakeman
+# PROFILE=full  everything: adds bandit/njsscan (Python), brakeman
 #               (Ruby), nmap + nuclei (network).
 ARG PROFILE=full
 
@@ -47,7 +47,7 @@ COPY fetch.sh /usr/local/bin/fetch.sh
 RUN chmod +x /usr/local/bin/fetch.sh && /usr/local/bin/fetch.sh
 
 # ─────────────────────────────────────────────────────────────────────────────
-# py — semgrep / bandit / njsscan in a self-contained venv (full profile only)
+# py — bandit / njsscan in a self-contained venv (full profile only)
 # ─────────────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS py
 
@@ -55,22 +55,20 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends python3 python3-venv python3-pip gcc python3-dev \
 	&& rm -rf /var/lib/apt/lists/*
 
-ARG SEMGREP_VERSION=1.170.0
 ARG BANDIT_VERSION=1.9.4
 ARG NJSSCAN_VERSION=0.4.3
 
-# One venv per tool, not one shared venv: njsscan pins an exact semgrep
-# (0.4.3 wants semgrep==1.86.0), which is unsatisfiable alongside a current
-# standalone semgrep — pip fails the whole install with ResolutionImpossible.
-# This is the same isolation `pipx install` gives, which is what each tool's
-# ScannerDescriptor.Install already recommends. njsscan keeps its own pinned
-# semgrep inside its venv; the `semgrep` scanner uses the standalone one.
+# One venv per tool, not one shared venv: njsscan pins an exact, long-stale
+# version of its own analysis engine (0.4.3 wants semgrep==1.86.0), so sharing
+# a venv risks pip resolving the whole install into ResolutionImpossible as
+# soon as another tool wants a different version. This is the same isolation
+# `pipx install` gives, which is what each tool's ScannerDescriptor.Install
+# already recommends.
 #
 # Pinned exactly, for the same reason the binaries above are. --no-cache-dir
 # keeps the layer from carrying pip's download cache into the copy.
 RUN set -eux; \
 	for spec in \
-	"semgrep:semgrep==${SEMGREP_VERSION}" \
 	"bandit:bandit[sarif]==${BANDIT_VERSION}" \
 	"njsscan:njsscan==${NJSSCAN_VERSION}" \
 	; do \
@@ -152,7 +150,7 @@ RUN set -eux; \
 	chmod -R a+rX /opt/semgrep-rules
 
 # A scan mounts the workspace read-write at /src but tools must not need to
-# write outside it; /tmp as HOME covers semgrep/opengrep's dotfile writes.
+# write outside it; /tmp as HOME covers opengrep's dotfile writes.
 WORKDIR /src
 
 # No ENTRYPOINT, deliberately. Every other scanner image entrypoints its own
@@ -183,7 +181,7 @@ COPY --from=fetch /out/nuclei /usr/local/bin/nuclei
 # Each tool lives in its own venv (see the py stage), so put the entrypoints on
 # PATH by name rather than adding a shared venv's bin/ — there isn't one.
 RUN set -eux; \
-	for name in semgrep bandit njsscan; do \
+	for name in bandit njsscan; do \
 	ln -sf "/opt/venv/${name}/bin/${name}" "/usr/local/bin/${name}"; \
 	"/usr/local/bin/${name}" --version >/dev/null 2>&1 || { echo "${name} is not runnable" >&2; exit 1; }; \
 	done

@@ -10,9 +10,9 @@ import (
 	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
-func TestParseSemgrepSARIF(t *testing.T) {
+func TestParseOpengrepSARIF(t *testing.T) {
 	data := []byte(`{"runs":[{
-		"tool":{"driver":{"name":"semgrep","rules":[
+		"tool":{"driver":{"name":"opengrep","rules":[
 			{"id":"go.lang.security.audit.sqli","shortDescription":{"text":"possible SQL injection"}},
 			{"id":"generic.secrets.key","shortDescription":{"text":"hardcoded key"}}
 		]}},
@@ -23,7 +23,7 @@ func TestParseSemgrepSARIF(t *testing.T) {
 			 "locations":[{"physicalLocation":{"artifactLocation":{"uri":"cfg.go"},"region":{"startLine":7}}}]}
 		]
 	}]}`)
-	findings, err := ParseSARIF(data, "semgrep")
+	findings, err := ParseSARIF(data, "opengrep")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,8 +39,8 @@ func TestParseSemgrepSARIF(t *testing.T) {
 	if findings[1].Severity != SevMedium {
 		t.Errorf("warning level should map to MEDIUM, got %s", findings[1].Severity)
 	}
-	if findings[0].Tool != "semgrep" {
-		t.Errorf("tool = %q, want semgrep", findings[0].Tool)
+	if findings[0].Tool != "opengrep" {
+		t.Errorf("tool = %q, want opengrep", findings[0].Tool)
 	}
 }
 

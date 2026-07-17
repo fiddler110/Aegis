@@ -10,8 +10,8 @@ func TestNormalizeRuleIDExtractsCVE(t *testing.T) {
 }
 
 func TestNormalizeRuleIDFallsBackToLowercase(t *testing.T) {
-	got := normalizeRuleID("  Semgrep.Rule.ID  ")
-	if got != "semgrep.rule.id" {
+	got := normalizeRuleID("  Opengrep.Rule.ID  ")
+	if got != "opengrep.rule.id" {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -57,8 +57,8 @@ func TestDedupFindingsMergesAcrossTools(t *testing.T) {
 
 func TestDedupFindingsPreservesDistinctFindings(t *testing.T) {
 	findings := []Finding{
-		{Tool: "semgrep", RuleID: "rule-a", Severity: SevMedium, Location: "a.go:1"},
-		{Tool: "semgrep", RuleID: "rule-b", Severity: SevMedium, Location: "b.go:1"},
+		{Tool: "opengrep", RuleID: "rule-a", Severity: SevMedium, Location: "a.go:1"},
+		{Tool: "opengrep", RuleID: "rule-b", Severity: SevMedium, Location: "b.go:1"},
 	}
 	out := DedupFindings(findings)
 	if len(out) != 2 {

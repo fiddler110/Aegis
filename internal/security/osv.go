@@ -12,7 +12,7 @@ import (
 // equivalent — confirmed against the upstream google/osv-scanner source
 // (pkg/models): the `experimental_analysis` map lives only on the native
 // JSON report's per-package `groups`, so osv-scanner gets its own parser
-// here instead of routing through ParseSARIF like semgrep/trivy do.
+// here instead of routing through ParseSARIF like opengrep/trivy do.
 //
 // Struct shapes below are a minimal read of that JSON schema — only the
 // fields Aegis surfaces as a Finding.

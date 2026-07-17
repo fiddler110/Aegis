@@ -5,11 +5,20 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
 )
+
+// hostGOOS is a seam over runtime.GOOS so a test can exercise a
+// platform-specific resolution rule (ScannerDescriptor.HostBroken) on any
+// machine. Resolve can't read runtime.GOOS directly anyway — its `runtime`
+// named return shadows the package inside the function body — but the real
+// reason this is a var is P34.7's lesson: a test that asserts what the host
+// happens to be is testing the host, not the rule.
+var hostGOOS = runtime.GOOS
 
 // Method identifies how a scanner ran (or would run).
 type Method string
@@ -48,10 +57,9 @@ type ScannerDescriptor struct {
 	// DefaultEnabled is the Enabled value Resolve assumes when an operator
 	// hasn't configured security.tools.<name> at all (P11.3). True for every
 	// tool that predates this field (preserves prior default-scan-everything
-	// behavior); false for opt-in-only tools — semgrep (opengrep is now the
-	// default SAST engine, semgrep is selectable via config) and the
-	// language-targeted SAST engines (gosec/bandit/brakeman/njsscan), which
-	// only make sense for a project in that specific language.
+	// behavior); false for opt-in-only tools — the language-targeted SAST
+	// engines (gosec/bandit/brakeman/njsscan), which only make sense for a
+	// project in that specific language.
 	DefaultEnabled bool
 	// WSLCapable marks scanners whose Scan implementation has a MethodWSL
 	// execution branch: tools with no native Windows build at all (opengrep,
@@ -64,6 +72,24 @@ type ScannerDescriptor struct {
 	// purpose-built for security tooling (Kali) is the recommended WSL
 	// target — see security.wsl_distro in docs/security.md.
 	WSLCapable bool
+	// HostBroken maps a GOOS to the reason this scanner's *host* binary
+	// cannot produce a usable result there, even when it's installed and on
+	// PATH. Distinct from "not installed" (an operator can fix that) and from
+	// RelevanceChecker (about the workspace, not the platform): this is the
+	// binary being present and non-functional, which Resolve otherwise has no
+	// way to see — lookPath only proves a file exists.
+	//
+	// Resolve treats a HostBroken platform as "no host binary": under "auto"
+	// it falls through to the container (which is Linux, so it's unaffected),
+	// and under an explicit method: host it reports this reason rather than
+	// running the binary. Deliberately not a blanket skip of the tool — the
+	// container method runs these tools fine on the same machine, so refusing
+	// the tool outright would under-report a scan Aegis can actually do.
+	//
+	// Keyed by GOOS rather than probing the tool because the breakage is a
+	// hardcoded platform branch in the tool itself (see njsscan), not a
+	// missing dependency a probe could detect.
+	HostBroken map[string]string
 }
 
 // descriptors is keyed by scanner name so provisioning/config code (P11.10,
@@ -73,24 +99,12 @@ var descriptors = map[string]ScannerDescriptor{
 		Name:           "opengrep",
 		Binary:         "opengrep",
 		Category:       "SAST",
-		Summary:        "Static analysis — scans source code for security bugs and anti-patterns using pattern-based rules across 30+ languages. Community-governed semgrep fork: no login/telemetry, openly-licensed rules. Default SAST engine (P11.3); semgrep remains selectable.",
+		Summary:        "Static analysis — scans source code for security bugs and anti-patterns using pattern-based rules across 30+ languages. Community-governed semgrep fork: no login/telemetry, openly-licensed rules. The SAST engine (P11.3).",
 		DefaultEnabled: true,
 		WSLCapable:     true, // no native Windows build; runs under WSL there (P14.x)
 		Install: map[string]string{
 			"darwin": "curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash",
 			"linux":  "curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash",
-		},
-	},
-	"semgrep": {
-		Name:           "semgrep",
-		Binary:         "semgrep",
-		Category:       "SAST",
-		Summary:        "Static analysis — scans source code for security bugs and anti-patterns using pattern-based rules across 30+ languages. Selectable alternative to the default opengrep engine (P11.3); semgrep's registry has faster rule-update velocity for brand-new CVE patterns, at the cost of needing network/platform login for `--config auto` (Aegis pins explicit packs instead).",
-		DefaultEnabled: false,
-		Install: map[string]string{
-			"darwin":  "brew install semgrep",
-			"linux":   "pipx install semgrep",
-			"windows": "pipx install semgrep",
 		},
 	},
 	"gosec": {
@@ -133,12 +147,28 @@ var descriptors = map[string]ScannerDescriptor{
 		Name:           "njsscan",
 		Binary:         "njsscan",
 		Category:       "SAST (Node.js)",
-		Summary:        "Node.js-specific static analysis: semantic-aware scanning for insecure code patterns in JavaScript/TypeScript server code. Opt-in — enable for Node.js projects (P11.3).",
+		Summary:        "Node.js-specific static analysis: semantic-aware scanning for insecure code patterns in JavaScript/TypeScript server code. Opt-in — enable for Node.js projects (P11.3). No usable Windows host build (see HostBroken); the container method runs it there.",
 		DefaultEnabled: false,
+		// njsscan's engine (libsast) hardcodes `if platform.system() ==
+		// 'Windows': return None` in invoke_semgrep, then calls .get() on that
+		// None in SemanticGrep.format_output — so every run on a Windows host
+		// dies with an AttributeError traceback, identically with and without
+		// JS files present, on every project (P34.9).
+		//
+		// This is *not* njsscan's underlying engine being unsupported on
+		// Windows — it runs there fine: libsast never asks whether the engine
+		// is available, so gating on that would let njsscan through to the
+		// same crash. The condition here is the one libsast itself branches
+		// on, which is why this is keyed by GOOS.
+		HostBroken: map[string]string{
+			"windows": "njsscan has no working Windows host build: its libsast engine stubs out its own analysis call on Windows and then crashes on the stub (AttributeError), on every project regardless of language",
+		},
+		// No "windows" entry, deliberately: pipx would install a binary that
+		// can only ever produce the traceback above. `aegis security install
+		// njsscan` on Windows says so and points at the container instead.
 		Install: map[string]string{
-			"darwin":  "pipx install njsscan",
-			"linux":   "pipx install njsscan",
-			"windows": "pipx install njsscan",
+			"darwin": "pipx install njsscan",
+			"linux":  "pipx install njsscan",
 		},
 	},
 	"trivy": {
@@ -399,7 +429,7 @@ func (o Options) policyFor(name string, defaultEnabled bool) ToolPolicy {
 // A tool's Enabled resolves from (in order): an explicit
 // security.tools.<name>.enabled in config, else the tool's own
 // ScannerDescriptor.DefaultEnabled (P11.3) — not a blanket true — so
-// configuring e.g. security.tools.semgrep.method without an explicit
+// configuring e.g. security.tools.bandit.method without an explicit
 // enabled: true doesn't silently opt a default-off tool back in.
 func OptionsFromConfig(cfg config.SecurityConfig) Options {
 	tools := make(map[string]ToolPolicy, len(cfg.Tools))
@@ -466,7 +496,18 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		image = d.DefaultImage
 	}
 	wantMethod := strings.ToLower(strings.TrimSpace(policy.Method))
-	hostAvailable := lookPath(d.Binary)
+	// A HostBroken platform means the host binary can't produce a usable
+	// result even if it's sitting on PATH, so it doesn't count as available
+	// (P34.9). hostUnavailable is the phrase every "can't run it natively"
+	// message below opens with: "not installed" is the wrong story to tell
+	// about a binary that is installed and simply cannot work here, and it
+	// would also mislead AvailabilityNote, which keys on that exact phrase.
+	hostBroken := d.HostBroken[hostGOOS]
+	hostAvailable := lookPath(d.Binary) && hostBroken == ""
+	hostUnavailable := d.Binary + " not installed"
+	if hostBroken != "" {
+		hostUnavailable = hostBroken
+	}
 
 	// imageUsable validates a resolved image for execution: nothing for a
 	// multiscanner image until a runtime is known (its check needs one), the
@@ -489,6 +530,9 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 	case "host":
 		if hostAvailable {
 			return MethodHost, "", "", ""
+		}
+		if hostBroken != "" {
+			return MethodNone, "", "", hostBroken + " (security.tools." + name + ".method is \"host\") — set security.tools." + name + ".method: container (or remove the method pin to let it fall back automatically) to run " + name + " in the Linux scanner image instead"
 		}
 		return MethodNone, "", "", d.Binary + " not installed on PATH (security.tools." + name + ".method is \"host\", no container fallback)"
 	case "container":
@@ -555,13 +599,20 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		}
 		if image == "" {
 			if opts.Multiscanner.Enabled && opts.Multiscanner.Image != "" && !opts.Multiscanner.Tools[name] {
-				return MethodNone, "", "", d.Binary + " not installed, and " + noContainerImageReason(name, opts)
+				return MethodNone, "", "", hostUnavailable + ", and " + noContainerImageReason(name, opts)
 			}
-			msg := d.Binary + " not installed and no container image configured — set security.tools." + name + ".image (digest-pinned) to enable container fallback, run `aegis security build-image` for the shared multiscanner image, or `aegis security install " + name + "` for a guided host install"
-			if d.WSLCapable {
+			msg := hostUnavailable + " and no container image configured — set security.tools." + name + ".image (digest-pinned) to enable container fallback, run `aegis security build-image` for the shared multiscanner image, or `aegis security install " + name + "` for a guided host install"
+			if hostBroken != "" {
+				// No "guided host install" suffix here: installing the binary
+				// is precisely what doesn't help on this platform.
+				msg = hostUnavailable + ", and no container image is configured to run it instead — run `aegis security build-image` for the shared multiscanner image, or set security.tools." + name + ".image (digest-pinned)"
+			} else if d.WSLCapable {
 				msg = d.Binary + " not installed (no native Windows build) and not found inside WSL either — run `aegis security install " + name + "` for a guided install, or `aegis security build-image` for the shared multiscanner image"
 			}
 			return MethodNone, "", "", msg
+		}
+		if hostBroken != "" {
+			return MethodNone, "", "", hostUnavailable + ", and no container runtime is available (docker/podman) to run it instead — start one (on Windows with Podman: `podman machine start`)"
 		}
 		return MethodNone, "", "", d.Binary + " not installed and no container runtime available (docker/podman) — run `aegis security install " + name + "` for guided setup"
 	}

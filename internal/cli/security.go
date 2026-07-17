@@ -24,7 +24,7 @@ import (
 func newSecurityCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "security",
-		Short: "Manage security scanner availability (opengrep, semgrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, trufflehog, kubescape, hadolint, grype, dockle, osv-scanner, syft)",
+		Short: "Manage security scanner availability (opengrep, gosec, bandit, brakeman, njsscan, trivy, gitleaks, trufflehog, kubescape, hadolint, grype, dockle, osv-scanner, syft)",
 		Long: "Inspects and provisions the scanners behind `aegis scan`/the security_scan tool. " +
 			"`status` reports whether each tool will run via its host binary, a configured " +
 			"container image, or not at all (with the exact reason). `install` walks through " +
@@ -64,7 +64,7 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			"the built image's ID into config. That ID is re-verified before every container run: " +
 			"if the image is rebuilt or retagged behind Aegis's back, scans fail with a specific " +
 			"reason rather than silently running something else.\n\n" +
-			"Profiles: `full` (default) adds the Python (semgrep/bandit/njsscan), Ruby (brakeman) " +
+			"Profiles: `full` (default) adds the Python (bandit/njsscan), Ruby (brakeman) " +
 			"and network (nmap/nuclei) scanners on top of `core`'s static binaries. Expect roughly " +
 			"3-4GB for full, and a long first build — vulnerability databases are baked in so scans " +
 			"keep working with networking disabled.",

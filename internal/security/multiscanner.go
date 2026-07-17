@@ -26,7 +26,7 @@ import (
 const (
 	// MultiscannerProfileCore carries only the statically-linked scanners.
 	MultiscannerProfileCore = "core"
-	// MultiscannerProfileFull adds the Python (semgrep/bandit/njsscan), Ruby
+	// MultiscannerProfileFull adds the Python (bandit/njsscan), Ruby
 	// (brakeman), and network (nmap/nuclei) scanners.
 	MultiscannerProfileFull = "full"
 
@@ -178,7 +178,7 @@ var multiscannerCoreTools = []string{
 // multiscannerFullOnlyTools need an interpreter or a network stack, so they
 // only exist in the full profile.
 var multiscannerFullOnlyTools = []string{
-	"semgrep", "bandit", "brakeman", "njsscan", "nmap", "nuclei",
+	"bandit", "brakeman", "njsscan", "nmap", "nuclei",
 }
 
 // multiscannerExcludedTools are scanners the shared image deliberately does

@@ -18,7 +18,7 @@ func TestExtractCWEFromTextRecognizesCommonForms(t *testing.T) {
 }
 
 func TestASVSForKnownCWEMapsToChapter(t *testing.T) {
-	f := Finding{Tool: "semgrep", CWE: "89"}
+	f := Finding{Tool: "opengrep", CWE: "89"}
 	got := asvsFor(f)
 	if got != "V5.3 Output Encoding and Injection Prevention" {
 		t.Fatalf("got %q", got)
@@ -26,7 +26,7 @@ func TestASVSForKnownCWEMapsToChapter(t *testing.T) {
 }
 
 func TestASVSUnmappedCWELeftEmpty(t *testing.T) {
-	f := Finding{Tool: "semgrep", CWE: "999999"}
+	f := Finding{Tool: "opengrep", CWE: "999999"}
 	if got := asvsFor(f); got != "" {
 		t.Fatalf("expected no mapping for an unrecognized CWE, got %q", got)
 	}
@@ -61,7 +61,7 @@ func TestASVSUnmappedForSCATools(t *testing.T) {
 
 func TestAssignASVSSkipsAlreadySetValues(t *testing.T) {
 	findings := []Finding{
-		{Tool: "semgrep", CWE: "79", ASVS: "custom-override"},
+		{Tool: "opengrep", CWE: "79", ASVS: "custom-override"},
 		{Tool: "gitleaks"},
 	}
 	assignASVS(findings)

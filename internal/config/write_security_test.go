@@ -223,7 +223,7 @@ func TestPatchGlobalSecurityPreservesNucleiTemplatesVersion(t *testing.T) {
 func TestBuildSecurityBlockEnabledFalseIsExplicit(t *testing.T) {
 	disabled := false
 	block := buildSecurityBlock(SecurityPatch{
-		Tools: map[string]SecurityToolConfig{"semgrep": {Enabled: &disabled}},
+		Tools: map[string]SecurityToolConfig{"opengrep": {Enabled: &disabled}},
 	})
 	if !strings.Contains(block, "enabled: false") {
 		t.Errorf("expected an explicit enabled: false, got:\n%s", block)
