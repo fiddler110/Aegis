@@ -2,11 +2,67 @@ package security
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// osv-scanner's exit codes, as measured against 2.4.0 — the version pinned in
+// the multiscanner Containerfile — on both the host and container paths
+// (P34.12):
+//
+//	0/1  package sources found (1 = vulnerabilities among them), JSON on stdout
+//	127  a real failure: unresolvable path, unknown flag
+//	128  "No package sources found", zero bytes on stdout
+//
+// 128 is the one that needs interpreting. It is overwhelmingly an accurate
+// refusal — "this tree declares no dependencies" — which runJSON (which
+// tolerates a non-zero exit only when output was produced) otherwise turns
+// into an `osv-scanner: error: exit status 128` row on any C/C++, shell or
+// docs repo. That's P34.6's shape: a correct answer rendered as a broken tool.
+//
+// But 128 covers a second case the "no dependencies here" reading gets wrong:
+// osv-scanner also reports it when candidate manifests *were* found and every
+// one of them failed to parse, logging "Error during extraction:" per file
+// first. Mapping that to zero findings would silently drop SCA coverage on a
+// repo whose lockfile is corrupt — the precise failure mode a manifest-name
+// allowlist was rejected for risking. So the marker is what separates them.
+const (
+	osvNoPackageSourcesExit = 128
+	osvExtractionErrMarker  = "Error during extraction:"
+)
+
+// interpretOSVError maps an osv-scanner run that produced no stdout onto
+// either a benign "nothing to scan" (nil — report zero findings) or an error
+// worth surfacing. Any exit code other than 128 is passed through untouched:
+// 127 means osv-scanner genuinely failed, and a container runtime's own
+// failures land on 125/126/127 rather than 128.
+func interpretOSVError(err error) error {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != osvNoPackageSourcesExit {
+		return err
+	}
+	if detail := osvExtractionFailures(string(ee.Stderr)); detail != "" {
+		return fmt.Errorf("found no parsable dependency manifest — %s", detail)
+	}
+	return nil
+}
+
+// osvExtractionFailures pulls osv-scanner's per-file extraction errors out of
+// stderr, so a corrupt lockfile is reported as the parse failure it is rather
+// than as a bare exit code.
+func osvExtractionFailures(stderr string) string {
+	var out []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, osvExtractionErrMarker) {
+			out = append(out, strings.TrimSpace(strings.TrimPrefix(line, osvExtractionErrMarker)))
+		}
+	}
+	return strings.Join(out, "; ")
+}
 
 // osv-scanner's --call-analysis reachability verdict (P11.12) has no SARIF
 // equivalent — confirmed against the upstream google/osv-scanner source

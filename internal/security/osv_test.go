@@ -1,9 +1,149 @@
 package security
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// The two stderr fixtures below are verbatim captures from osv-scanner 2.4.0
+// (the multiscanner's pinned version), taken on both the host and container
+// paths — the two runs that exit 128 with empty stdout and mean opposite
+// things (P34.12).
+const (
+	// A tree that declares no dependencies at all: an accurate refusal.
+	osvNoSourcesStderr = `Scanning dir .
+Starting filesystem walk for root: C:\
+End status: 1 dirs visited, 5 inodes visited, 0 Extract calls, 415.2µs elapsed, 415.2µs wall time
+No package sources found, --help for usage information.
+`
+	// A tree whose only lockfile is corrupt: SCA coverage genuinely lost.
+	// Same exit code, same empty stdout, same closing line — the extraction
+	// error is the sole thing distinguishing it.
+	osvExtractionErrStderr = `Scanning dir ./bad
+Starting filesystem walk for root: C:\
+End status: 1 dirs visited, 2 inodes visited, 1 Extract calls, 0s elapsed, 0s wall time
+Error during extraction: (extracting as javascript/packagelockjson) bad/package-lock.json: could not extract: invalid character 'o' in literal null (expecting 'u')
+No package sources found, --help for usage information.
+`
+)
+
+// osvExitError builds a real *exec.ExitError carrying code and stderr by
+// re-running this test binary as a helper process — the same shape runJSON's
+// cmd.Output() hands osvScanner.Scan, including a populated ee.Stderr.
+//
+// Deliberately not `sh -c "exit 128"`: a test that skips when the host lacks a
+// shell is testing the host, not the rule (P34.7).
+func osvExitError(t *testing.T, code int, stderr string) error {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestOSVHelperProcess")
+	cmd.Env = append(os.Environ(),
+		"AEGIS_OSV_HELPER=1",
+		"AEGIS_OSV_HELPER_CODE="+strconv.Itoa(code),
+		"AEGIS_OSV_HELPER_STDERR="+stderr,
+	)
+	_, err := cmd.Output()
+	if err == nil {
+		t.Fatalf("helper process exited 0, want %d", code)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("got %T (%v), want *exec.ExitError", err, err)
+	}
+	return err
+}
+
+// TestOSVHelperProcess is not a real test: it's the child end of osvExitError,
+// inert unless the parent sets AEGIS_OSV_HELPER.
+func TestOSVHelperProcess(t *testing.T) {
+	if os.Getenv("AEGIS_OSV_HELPER") != "1" {
+		return
+	}
+	fmt.Fprint(os.Stderr, os.Getenv("AEGIS_OSV_HELPER_STDERR"))
+	code, _ := strconv.Atoi(os.Getenv("AEGIS_OSV_HELPER_CODE"))
+	os.Exit(code)
+}
+
+// TestInterpretOSVErrorNoPackageSources is P34.12's headline case: a tree with
+// no dependency manifest must report zero findings, not an error row.
+func TestInterpretOSVErrorNoPackageSources(t *testing.T) {
+	err := osvExitError(t, osvNoPackageSourcesExit, osvNoSourcesStderr)
+	if got := interpretOSVError(err); got != nil {
+		t.Errorf("interpretOSVError() = %v, want nil (no dependencies is not a failure)", got)
+	}
+}
+
+// TestInterpretOSVErrorWrappedNoPackageSources covers the container path,
+// where runContainerCLI wraps the *exec.ExitError in a fmt.Errorf("%w"). The
+// 128 verdict has to survive the wrapping, since the container runtime returns
+// the container's exit code and osv-scanner behaves identically there
+// (measured, not assumed).
+func TestInterpretOSVErrorWrappedNoPackageSources(t *testing.T) {
+	err := osvExitError(t, osvNoPackageSourcesExit, osvNoSourcesStderr)
+	wrapped := fmt.Errorf("podman run aegis-multiscanner:v1: %w\n%s", err, osvNoSourcesStderr)
+	if got := interpretOSVError(wrapped); got != nil {
+		t.Errorf("interpretOSVError(wrapped) = %v, want nil", got)
+	}
+}
+
+// TestInterpretOSVErrorExtractionFailure is the case the "128 means zero
+// findings" reading gets wrong: osv-scanner found a manifest and failed to
+// parse it. Reporting zero findings here would silently drop SCA coverage on a
+// repo that has dependencies, so this must stay an error — and name the file.
+func TestInterpretOSVErrorExtractionFailure(t *testing.T) {
+	err := osvExitError(t, osvNoPackageSourcesExit, osvExtractionErrStderr)
+	got := interpretOSVError(err)
+	if got == nil {
+		t.Fatal("interpretOSVError() = nil, want an error: a corrupt lockfile is not an empty tree")
+	}
+	if !strings.Contains(got.Error(), "package-lock.json") {
+		t.Errorf("error %q should name the manifest that failed to parse", got)
+	}
+	if strings.Contains(got.Error(), "exit status") {
+		t.Errorf("error %q should explain the parse failure, not restate the exit code", got)
+	}
+}
+
+// TestInterpretOSVErrorPassesThroughRealFailures pins the other half of the
+// contract: 127 is osv-scanner genuinely failing (bad path, unknown flag), and
+// a container runtime's own errors land on 125/126/127 too. None of those may
+// be swallowed into a clean scan.
+func TestInterpretOSVErrorPassesThroughRealFailures(t *testing.T) {
+	for _, code := range []int{1, 125, 126, 127} {
+		err := osvExitError(t, code, "failed to resolve path\n")
+		got := interpretOSVError(err)
+		if !errors.Is(got, err) {
+			t.Errorf("exit %d: interpretOSVError() = %v, want the original error passed through", code, got)
+		}
+	}
+}
+
+// TestInterpretOSVErrorPassesThroughNonExitErrors: a context cancellation or a
+// missing binary is not an exit code at all and must not be read as one.
+func TestInterpretOSVErrorPassesThroughNonExitErrors(t *testing.T) {
+	err := errors.New("exec: \"osv-scanner\": executable file not found in $PATH")
+	if got := interpretOSVError(err); !errors.Is(got, err) {
+		t.Errorf("interpretOSVError() = %v, want the original error", got)
+	}
+}
+
+func TestOSVExtractionFailures(t *testing.T) {
+	if got := osvExtractionFailures(osvNoSourcesStderr); got != "" {
+		t.Errorf("got %q, want empty for a clean no-sources run", got)
+	}
+	got := osvExtractionFailures(osvExtractionErrStderr)
+	if !strings.Contains(got, "bad/package-lock.json") || strings.Contains(got, osvExtractionErrMarker) {
+		t.Errorf("got %q, want the detail with the marker stripped", got)
+	}
+	multi := "Error during extraction: a.json: bad\nError during extraction: b.json: worse\n"
+	if got := osvExtractionFailures(multi); got != "a.json: bad; b.json: worse" {
+		t.Errorf("got %q, want both failures joined", got)
+	}
+}
 
 // osvFixture is a realistic 3-package osv-scanner --format json report:
 // one Go package with a called (reachable) vuln, one Go package with an

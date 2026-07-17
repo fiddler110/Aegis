@@ -42,7 +42,10 @@ func dialClient() (*client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	cl := client.NewFromConfig(cfg)
+	cl, err := client.NewFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach daemon at %s: %w (start it with: aegis serve)", cfg.Server.Addr, err)
+	}
 	if err := cl.Health(context.Background()); err != nil {
 		return nil, fmt.Errorf("cannot reach daemon at %s: %w (start it with: aegis serve)", cfg.Server.Addr, err)
 	}

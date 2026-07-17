@@ -585,7 +585,11 @@ func (osvScanner) Scan(ctx context.Context, dir string, method Method, rt sandbo
 		out, err = runJSON(ctx, dir, "osv-scanner", append(args, ".")...)
 	}
 	if err != nil {
-		return nil, err
+		// Both runners surface an error only when stdout was empty, so
+		// reaching here already means the "exit non-zero with output" case
+		// osv-scanner uses for findings is ruled out. What's left is a
+		// tree with nothing to scan, or a real failure (P34.12).
+		return nil, interpretOSVError(err)
 	}
 	return parseOSVScanner(out, root)
 }
