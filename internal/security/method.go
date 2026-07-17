@@ -370,6 +370,12 @@ type Options struct {
 	Tools map[string]ToolPolicy // keyed by scanner name; a missing entry uses DefaultMethod
 	// DefaultMethod applies to any tool with no entry in Tools; "" means "auto".
 	DefaultMethod string
+	// Multiscanner is the single locally-built image carrying every bundled
+	// scanner. When enabled, it supplies the container-method image for any
+	// tool it covers that has no explicit security.tools.<name>.image — see
+	// multiscanner.go. Zero value = disabled, leaving resolution exactly as it
+	// was before the shared image existed.
+	Multiscanner MultiscannerPolicy
 	// WSLDistro names a specific registered WSL distro (e.g. "kali-linux") to
 	// target for every WSLCapable scanner (P14.x), instead of whatever `wsl
 	// --set-default` currently points at. Empty uses WSL's own default-distro
@@ -408,7 +414,12 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 		}
 		tools[name] = ToolPolicy{Enabled: enabled, EnabledExplicit: explicit, Method: tc.Method, Image: tc.Image, TemplatesVersion: tc.TemplatesVersion, Verify: tc.Verify}
 	}
-	return Options{Tools: tools, DefaultMethod: cfg.DefaultMethod, WSLDistro: cfg.WSLDistro}
+	return Options{
+		Tools:         tools,
+		DefaultMethod: cfg.DefaultMethod,
+		WSLDistro:     cfg.WSLDistro,
+		Multiscanner:  MultiscannerPolicyFromConfig(cfg.Multiscanner),
+	}
 }
 
 // detectRuntime is a seam over sandbox.DetectBest so tests can inject a
@@ -440,12 +451,39 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		return MethodNone, "", "", "opt-in tool, not enabled by default — set security.tools." + name + ".enabled: true (or `aegis security config`) to turn it on"
 	}
 
+	// Image precedence: an explicit per-tool image always wins, then the
+	// shared multiscanner image (if enabled and it carries this tool), then
+	// the descriptor default — which is empty for every built-in scanner, by
+	// design. viaMultiscanner selects which validation the image gets below:
+	// a digest-pin regex for a registry reference, or a real image-ID
+	// comparison for the locally-built one (see verifyMultiscannerImage).
 	image = policy.Image
+	viaMultiscanner := false
+	if image == "" && opts.Multiscanner.Covers(name) {
+		image, viaMultiscanner = opts.Multiscanner.Image, true
+	}
 	if image == "" {
 		image = d.DefaultImage
 	}
 	wantMethod := strings.ToLower(strings.TrimSpace(policy.Method))
 	hostAvailable := lookPath(d.Binary)
+
+	// imageUsable validates a resolved image for execution: nothing for a
+	// multiscanner image until a runtime is known (its check needs one), the
+	// digest-pin rule otherwise.
+	imageUsable := func() string {
+		if viaMultiscanner {
+			return ""
+		}
+		return digestPinReason(name, image)
+	}
+
+	// The shared image only exists in the storage of the runtime that built
+	// it, so probe that one rather than whatever DetectBest would prefer.
+	var runtimePriority []sandbox.ContainerRuntime
+	if viaMultiscanner {
+		runtimePriority = opts.Multiscanner.RuntimePriority()
+	}
 
 	switch wantMethod {
 	case "host":
@@ -455,14 +493,25 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		return MethodNone, "", "", d.Binary + " not installed on PATH (security.tools." + name + ".method is \"host\", no container fallback)"
 	case "container":
 		if image == "" {
-			return MethodNone, "", "", "no container image configured for " + name + "; set security.tools." + name + ".image (digest-pinned) — see docs/security.md"
+			return MethodNone, "", "", noContainerImageReason(name, opts)
 		}
-		if reason := digestPinReason(name, image); reason != "" {
+		if reason := imageUsable(); reason != "" {
 			return MethodNone, "", "", reason
 		}
-		rt, ok := detectRuntime(ctx, nil)
+		rt, ok := detectRuntime(ctx, runtimePriority)
 		if !ok {
+			if viaMultiscanner {
+				return MethodNone, "", "", "the multiscanner image was built with " + string(opts.Multiscanner.Runtime) + ", which isn't available now — start it (on Windows with Podman: `podman machine start`), or re-run `aegis security build-image` to rebuild with an available runtime"
+			}
 			return MethodNone, "", "", "security.tools." + name + ".method is \"container\" but no container runtime is available (docker/podman) — run `aegis security install " + name + "` for guided setup"
+		}
+		if viaMultiscanner {
+			if reason := verifyMultiscannerImage(ctx, rt, opts.Multiscanner); reason != "" {
+				return MethodNone, "", "", reason
+			}
+			if reason := verifyMultiscannerCache(ctx, rt, name, opts.Multiscanner); reason != "" {
+				return MethodNone, "", "", reason
+			}
 		}
 		return MethodContainer, rt, image, ""
 	case "wsl":
@@ -477,26 +526,62 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		if hostAvailable {
 			return MethodHost, "", "", ""
 		}
+		// multiscannerReason is held rather than returned immediately: under
+		// "auto" a broken shared image shouldn't preempt a working WSL path.
+		// If nothing else runs the tool either, it's the most actionable
+		// reason to report, so it wins over the generic no-image message.
+		multiscannerReason := ""
 		if image != "" {
-			if reason := digestPinReason(name, image); reason != "" {
+			if reason := imageUsable(); reason != "" {
 				return MethodNone, "", "", reason
 			}
-			if rt, ok := detectRuntime(ctx, nil); ok {
-				return MethodContainer, rt, image, ""
+			if rt, ok := detectRuntime(ctx, runtimePriority); ok {
+				if viaMultiscanner {
+					multiscannerReason = verifyMultiscannerImage(ctx, rt, opts.Multiscanner)
+					if multiscannerReason == "" {
+						multiscannerReason = verifyMultiscannerCache(ctx, rt, name, opts.Multiscanner)
+					}
+				}
+				if multiscannerReason == "" {
+					return MethodContainer, rt, image, ""
+				}
 			}
 		}
 		if d.WSLCapable && wslBinaryAvailable(ctx, d.Binary, opts.WSLDistro) {
 			return MethodWSL, "", "", ""
 		}
+		if multiscannerReason != "" {
+			return MethodNone, "", "", multiscannerReason
+		}
 		if image == "" {
-			msg := d.Binary + " not installed and no container image configured — set security.tools." + name + ".image (digest-pinned) to enable container fallback, or run `aegis security install " + name + "` for a guided host install"
+			if opts.Multiscanner.Enabled && opts.Multiscanner.Image != "" && !opts.Multiscanner.Tools[name] {
+				return MethodNone, "", "", d.Binary + " not installed, and " + noContainerImageReason(name, opts)
+			}
+			msg := d.Binary + " not installed and no container image configured — set security.tools." + name + ".image (digest-pinned) to enable container fallback, run `aegis security build-image` for the shared multiscanner image, or `aegis security install " + name + "` for a guided host install"
 			if d.WSLCapable {
-				msg = d.Binary + " not installed (no native Windows build) and not found inside WSL either — run `aegis security install " + name + "` for a guided install, or set security.tools." + name + ".image (digest-pinned) for a container fallback"
+				msg = d.Binary + " not installed (no native Windows build) and not found inside WSL either — run `aegis security install " + name + "` for a guided install, or `aegis security build-image` for the shared multiscanner image"
 			}
 			return MethodNone, "", "", msg
 		}
 		return MethodNone, "", "", d.Binary + " not installed and no container runtime available (docker/podman) — run `aegis security install " + name + "` for guided setup"
 	}
+}
+
+// noContainerImageReason explains why a tool has no usable container image.
+//
+// The multiscanner case is called out separately because the generic advice
+// ("run `aegis security build-image`") is actively misleading to someone who
+// already did: a core-profile image genuinely doesn't carry bandit, and
+// telling them to run the command they just ran sends them in a circle. The
+// actionable fact is that the profile they built excludes this tool.
+func noContainerImageReason(name string, opts Options) string {
+	if opts.Multiscanner.Enabled && opts.Multiscanner.Image != "" && !opts.Multiscanner.Tools[name] {
+		if why, excluded := multiscannerExcludedTools[name]; excluded {
+			return "the multiscanner image deliberately doesn't carry " + name + ": " + why
+		}
+		return "the multiscanner image (" + opts.Multiscanner.Image + ") doesn't carry " + name + " — rebuild it with `aegis security build-image --profile full` to include it, or set security.tools." + name + ".image (digest-pinned) to give it an image of its own"
+	}
+	return "no container image configured for " + name + "; set security.tools." + name + ".image (digest-pinned), or run `aegis security build-image` to build the shared multiscanner image — see docs/security_scan.md"
 }
 
 // digestPinRe matches a container reference's trailing "@sha256:<hex>"
@@ -518,6 +603,48 @@ func digestPinReason(name, image string) string {
 	return "security.tools." + name + ".image (" + image + ") is not digest-pinned (need image@sha256:<hex>, not a floating tag) — see docs/security.md's docker pull + docker inspect pin recipe"
 }
 
+// runScannerImage runs one scanner out of image against dir.
+//
+// It exists because a per-tool scanner image and the shared multiscanner image
+// are invoked differently. Every official scanner image ENTRYPOINTs its own
+// tool, so Aegis passes bare arguments ("fs", "--format", "sarif", ...). An
+// image carrying sixteen tools obviously can't entrypoint one of them, so it
+// sets no entrypoint and the binary name becomes the first argument instead.
+// Callers pass both and this picks, so no call site has to know which image it
+// got from Resolve.
+func runScannerImage(ctx context.Context, rt sandbox.ContainerRuntime, image, dir string, opts Options, binary string, args ...string) ([]byte, error) {
+	if !opts.usesMultiscanner(image) {
+		return runContainerImage(ctx, rt, image, dir, args...)
+	}
+	// The multiscanner ships no databases, so the cache volume has to come
+	// along or DB-backed scanners have nothing to match against. Still
+	// --network none: update-db is the only run allowed to fetch.
+	args = append([]string{binary}, args...)
+	cliArgs := containerRunArgs(rt, image, dir, args...)
+	cliArgs = withCacheVolume(cliArgs, image)
+	return runContainerCLI(ctx, rt, image, cliArgs)
+}
+
+// withCacheVolume inserts the scanner cache mount just before the image
+// reference, which is where a run's flags have to stop and its command begins.
+func withCacheVolume(cliArgs []string, image string) []string {
+	for i, a := range cliArgs {
+		if a == image {
+			out := make([]string, 0, len(cliArgs)+2)
+			out = append(out, cliArgs[:i]...)
+			out = append(out, "-v", MultiscannerCacheVolume+":"+multiscannerCacheMount)
+			return append(out, cliArgs[i:]...)
+		}
+	}
+	return cliArgs
+}
+
+// usesMultiscanner reports whether image is the shared multiscanner image, as
+// opposed to a per-tool image an operator pinned for this scanner.
+func (o Options) usesMultiscanner(image string) bool {
+	return o.Multiscanner.Enabled && image != "" && image == o.Multiscanner.Image
+}
+
 // runContainerImage runs image (ideally digest-pinned) against dir
 // bind-mounted at /src, passing args directly to the image's entrypoint — no
 // shell involved, matching how virtually every security scanner's official
@@ -526,7 +653,13 @@ func digestPinReason(name, image string) string {
 // separately). Hardening flags mirror sandbox.ContainerBackend's OCI args
 // (P4.7/P7 posture): no capabilities, no privilege escalation.
 func runContainerImage(ctx context.Context, rt sandbox.ContainerRuntime, image, dir string, args ...string) ([]byte, error) {
-	cliArgs := containerRunArgs(rt, image, dir, args...)
+	return runContainerCLI(ctx, rt, image, containerRunArgs(rt, image, dir, args...))
+}
+
+// runContainerCLI executes an already-built runtime command line, split out so
+// a caller that needs to adjust the flags (see runScannerImage's cache mount)
+// doesn't have to duplicate the exit-code handling.
+func runContainerCLI(ctx context.Context, rt sandbox.ContainerRuntime, image string, cliArgs []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, string(rt), cliArgs...)
 	out, err := cmd.Output()
 	// Scanners commonly exit non-zero when they find issues; tolerate that as

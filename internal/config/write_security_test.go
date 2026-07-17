@@ -19,6 +19,67 @@ func chdirTemp(t *testing.T) {
 	t.Cleanup(func() { os.Chdir(oldWd) })
 }
 
+// TestPatchSecurityRoundTripsCarriedFields is a regression test for fields
+// being dropped by a write that didn't mean to touch them. patchSecurity
+// rewrites the whole security: block, so any field absent from SecurityPatch
+// is deleted from the operator's config as a side effect — which is what
+// happened to security.wsl_distro and security.debate: a `/security-config`
+// save or `aegis harden` run silently removed them.
+func TestPatchSecurityRoundTripsCarriedFields(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	want := SecurityPatch{
+		DefaultMethod: "auto",
+		WSLDistro:     "kali-linux",
+		Debate:        DebateIntegrationConfig{ThreatModel: true, Triage: true},
+		Multiscanner: MultiscannerConfig{
+			Enabled:     true,
+			Image:       "localhost/aegis-multiscanner:v1",
+			ImageID:     "sha256:abc123",
+			Concurrency: 4,
+			Tools:       []string{"trivy", "gitleaks"},
+		},
+	}
+	if err := PatchGlobalSecurity(want); err != nil {
+		t.Fatalf("PatchGlobalSecurity: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg.Security.WSLDistro != "kali-linux" {
+		t.Errorf("wsl_distro = %q, want kali-linux (dropped by the write)", cfg.Security.WSLDistro)
+	}
+	if !cfg.Security.Debate.ThreatModel || !cfg.Security.Debate.Triage {
+		t.Errorf("debate = %+v, want both true (dropped by the write)", cfg.Security.Debate)
+	}
+	ms := cfg.Security.Multiscanner
+	if !ms.Enabled || ms.Image != want.Multiscanner.Image || ms.ImageID != want.Multiscanner.ImageID {
+		t.Errorf("multiscanner = %+v, want %+v", ms, want.Multiscanner)
+	}
+	if ms.Concurrency != 4 {
+		t.Errorf("multiscanner.concurrency = %d, want 4", ms.Concurrency)
+	}
+	if strings.Join(ms.Tools, ",") != "trivy,gitleaks" {
+		t.Errorf("multiscanner.tools = %v, want [trivy gitleaks]", ms.Tools)
+	}
+}
+
+// TestPatchSecurityOmitsUnbuiltMultiscanner keeps a never-built multiscanner
+// out of the file entirely, rather than writing a block that claims an enabled
+// image with nothing behind it.
+func TestPatchSecurityOmitsUnbuiltMultiscanner(t *testing.T) {
+	block := buildSecurityBlock(SecurityPatch{DefaultMethod: "auto"})
+	if strings.Contains(block, "multiscanner:") {
+		t.Errorf("empty multiscanner should not be written, got:\n%s", block)
+	}
+	if strings.Contains(block, "wsl_distro:") || strings.Contains(block, "debate:") {
+		t.Errorf("empty wsl_distro/debate should not be written, got:\n%s", block)
+	}
+}
+
 func TestPatchGlobalSecurityCreatesBlock(t *testing.T) {
 	redirectConfigDir(t)
 

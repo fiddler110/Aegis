@@ -66,7 +66,7 @@ func (opengrepScanner) Scan(ctx context.Context, dir string, method Method, rt s
 	args := sastScanArgs()
 	switch method {
 	case MethodContainer:
-		out, err = runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
+		out, err = runScannerImage(ctx, rt, image, dir, opts, "opengrep", append(sastScanArgsFor(opts, image), "/src")...)
 	case MethodWSL:
 		out, err = sandbox.RunWSLCommand(ctx, dir, opts.WSLDistro, "opengrep", append(args, ".")...)
 	default:
@@ -84,12 +84,12 @@ func (semgrepScanner) Name() string { return "semgrep" }
 func (semgrepScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "semgrep", opts)
 }
-func (semgrepScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (semgrepScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	var out []byte
 	var err error
 	args := sastScanArgs()
 	if method == MethodContainer {
-		out, err = runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
+		out, err = runScannerImage(ctx, rt, image, dir, opts, "semgrep", append(sastScanArgsFor(opts, image), "/src")...)
 	} else {
 		out, err = runJSON(ctx, dir, "semgrep", append(args, ".")...)
 	}
@@ -115,12 +115,12 @@ func (trivyScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.
 // default scanner set happens to be.
 var trivyScanArgs = []string{"--scanners", "vuln,secret,misconfig"}
 
-func (trivyScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (trivyScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	var out []byte
 	var err error
 	args := append([]string{"fs", "--format", "sarif", "--quiet"}, trivyScanArgs...)
 	if method == MethodContainer {
-		out, err = runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
+		out, err = runScannerImage(ctx, rt, image, dir, opts, "trivy", append(args, "/src")...)
 	} else {
 		out, err = runJSON(ctx, dir, "trivy", append(args, ".")...)
 	}
@@ -138,13 +138,13 @@ func (gitleaksScanner) Name() string { return "gitleaks" }
 func (gitleaksScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "gitleaks", opts)
 }
-func (gitleaksScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (gitleaksScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
 		// /dev/stdout avoids needing a second bind mount for the report file:
 		// every scanner container is a Linux image (Docker Desktop/Podman run
 		// Linux containers even on a Windows/macOS host), so /dev/stdout
 		// always exists there regardless of host OS.
-		out, err := runContainerImage(ctx, rt, image, dir, "detect", "--source", "/src", "--no-git",
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "gitleaks", "detect", "--source", "/src", "--no-git",
 			"--report-format", "json", "--report-path", "/dev/stdout", "--exit-code", "0")
 		if err != nil {
 			return nil, err
@@ -285,7 +285,7 @@ func (trufflehogScanner) Scan(ctx context.Context, dir string, method Method, rt
 	}
 
 	if method == MethodContainer {
-		out, err := runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "trufflehog", append(args, "/src")...)
 		if err != nil {
 			return nil, err
 		}
@@ -438,7 +438,7 @@ func findK8sManifests(dir string) ([]string, error) {
 // /dev/stdout inside the container (every scanner container is Linux).
 func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		out, err := runContainerImage(ctx, rt, image, dir, "scan", "--format", "sarif", "--output", "/dev/stdout", "/src")
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "kubescape", "scan", "--format", "sarif", "--output", "/dev/stdout", "/src")
 		if err != nil {
 			return nil, err
 		}
@@ -524,7 +524,7 @@ func findDockerfiles(dir string) ([]string, error) {
 	return out, nil
 }
 
-func (hadolintScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (hadolintScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	files, err := findDockerfiles(dir)
 	if err != nil {
 		return nil, err
@@ -534,7 +534,7 @@ func (hadolintScanner) Scan(ctx context.Context, dir string, method Method, rt s
 		var data []byte
 		var err error
 		if method == MethodContainer {
-			data, err = runContainerImage(ctx, rt, image, dir, "--format", "sarif", "/src/"+f)
+			data, err = runScannerImage(ctx, rt, image, dir, opts, "hadolint", "--format", "sarif", "/src/"+f)
 		} else {
 			data, err = runJSON(ctx, dir, "hadolint", "--format", "sarif", f)
 		}
@@ -568,12 +568,18 @@ func (osvScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.Co
 // experimental) rather than an error, so it's always safe to pass.
 var osvScanArgs = []string{"--format", "json", "--call-analysis=all", "--recursive"}
 
-func (osvScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (osvScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	var out []byte
 	var err error
 	args := append([]string{}, osvScanArgs...)
 	if method == MethodContainer {
-		out, err = runContainerImage(ctx, rt, image, dir, append(args, "/src")...)
+		// Without this the scan dies trying to reach api.osv.dev, since every
+		// scanner container runs with --network none. Only the multiscanner
+		// image is known to carry the offline database.
+		if opts.usesMultiscanner(image) {
+			args = append(args, multiscannerOfflineFlag)
+		}
+		out, err = runScannerImage(ctx, rt, image, dir, opts, "osv-scanner", append(args, "/src")...)
 	} else {
 		out, err = runJSON(ctx, dir, "osv-scanner", append(args, ".")...)
 	}
@@ -617,7 +623,7 @@ func (grypeDirScanner) Resolve(ctx context.Context, opts Options) (Method, sandb
 // becomes common.
 func (grypeDirScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		out, err := runContainerImage(ctx, rt, image, dir, "dir:/src", "-o", "sarif")
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "grype", "dir:/src", "-o", "sarif")
 		if err != nil {
 			return nil, err
 		}
@@ -673,9 +679,9 @@ func (gosecScanner) Name() string { return "gosec" }
 func (gosecScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "gosec", opts)
 }
-func (gosecScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (gosecScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		out, err := runContainerImage(ctx, rt, image, dir, "-fmt=sarif", "-out=/dev/stdout", "./...")
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "gosec", "-fmt=sarif", "-out=/dev/stdout", "./...")
 		if err != nil {
 			return nil, err
 		}
@@ -692,9 +698,9 @@ func (banditScanner) Name() string { return "bandit" }
 func (banditScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "bandit", opts)
 }
-func (banditScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (banditScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		out, err := runContainerImage(ctx, rt, image, dir, "-r", "/src", "-f", "sarif", "-o", "/dev/stdout")
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "bandit", "-r", "/src", "-f", "sarif", "-o", "/dev/stdout")
 		if err != nil {
 			return nil, err
 		}
@@ -711,9 +717,9 @@ func (brakemanScanner) Name() string { return "brakeman" }
 func (brakemanScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "brakeman", opts)
 }
-func (brakemanScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (brakemanScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		out, err := runContainerImage(ctx, rt, image, dir, "/src", "-f", "sarif", "-o", "/dev/stdout")
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "brakeman", "/src", "-f", "sarif", "-o", "/dev/stdout")
 		if err != nil {
 			return nil, err
 		}
@@ -767,11 +773,11 @@ func (njsscanScanner) Name() string { return "njsscan" }
 func (njsscanScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "njsscan", opts)
 }
-func (njsscanScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, _ Options) ([]Finding, error) {
+func (njsscanScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	var out []byte
 	var err error
 	if method == MethodContainer {
-		out, err = runContainerImage(ctx, rt, image, dir, "--sarif", "/src")
+		out, err = runScannerImage(ctx, rt, image, dir, opts, "njsscan", "--sarif", "/src")
 	} else {
 		out, err = runJSON(ctx, dir, "njsscan", "--sarif", ".")
 	}

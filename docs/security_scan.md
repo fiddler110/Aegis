@@ -545,6 +545,127 @@ to `MethodNone` with a reason pointing back at this section's `docker pull`/`doc
 recipe, rather than silently running an image that can be repointed at any time by whoever
 controls the registry.
 
+### The multiscanner image: one image instead of sixteen
+
+Pinning an image per tool is accurate but tedious, and the section above is why the
+container path resolves to "unavailable" out of the box for everything. The alternative is
+to build **one local image carrying every scanner**:
+
+```bash
+aegis security build-image                   # full profile, auto-detected runtime
+aegis security build-image --profile core    # static binaries only, much smaller
+```
+
+That builds a Containerfile embedded in the binary (source:
+`internal/security/multiscanner/`), reads back the resulting image ID, and writes the
+config block for you. Then populate the vulnerability databases once:
+
+```bash
+aegis security update-db                  # fills the cache volume
+aegis security update-db --skip-java-db   # skips trivy's ~1.4GB Java DB
+```
+
+```yaml
+security:
+  multiscanner:
+    enabled: true
+    image: "localhost/aegis-multiscanner:v1"
+    image_id: "sha256:..."      # written by build-image; re-verified before every run
+    runtime: podman             # the image only exists in this runtime's storage
+    concurrency: 3              # how many scanners run at once
+    tools: [...]                # what the built profile actually carries
+```
+
+Resolution precedence is: an explicit `security.tools.<name>.image` wins, then the
+multiscanner image (for tools it carries), then nothing. Host binaries still win under
+`method: auto`, so building the image doesn't take a scan away from a tool you already
+have installed — set `security.default_method: container` if you want the image used
+even when a host binary exists.
+
+**Profiles.** `core` carries the statically-linked scanners (trivy, gitleaks, trufflehog,
+syft, grype, osv-scanner, kubescape, hadolint, opengrep). `full` (the default) adds the
+Python engines (semgrep, bandit, njsscan), Ruby (brakeman), and the network scanners
+(nmap, nuclei).
+
+**Size.** The full image is ~1.8GB. The vulnerability databases are deliberately *not* in
+it — baked in they were ~3.7GB of a 5.8GB image. They live in a podman/docker volume
+(`aegis-scanner-cache`) instead, which is also what makes runtime fetching viable at all:
+scanner containers run with `--rm`, so without a persistent cache every scan would
+re-download trivy's ~1.2GB database from scratch.
+
+**Not included, deliberately.** Each exclusion has a reason, recorded in
+`multiscannerExcludedTools` (`internal/security/multiscanner.go`) so `aegis scan` can
+explain itself rather than suggesting a rebuild that wouldn't help:
+
+- **zap** — a large Java app with a different mount contract; keeps its own image.
+- **dockle** and the image scanners (`trivy image`, `grype <ref>`) — need the container
+  engine socket, or are host-only by design.
+- **grype** — excluded by decision, not by constraint: trivy + osv-scanner are the SCA
+  coverage, and grype's database was the largest single cache item. Worth knowing if you
+  revisit it: on this repo grype reported 47 findings where trivy reported 3 and
+  osv-scanner 1, so this does trade real dependency-CVE coverage. It's still a registered
+  scanner — install it on the host and `method: host` runs it.
+- **gosec** — excluded for a subtler reason. It's a compile-assisted analyzer that
+  resolves packages via `go list`, needing a Go toolchain and module downloads, which
+  `--network none` can't provide. It doesn't fail when it can't; it reports **zero
+  findings and exits clean**. Measured on this repo: host 244 findings, container 0. A
+  silent all-clear is the worst failure mode for a security tool, so gosec runs on the
+  host (`aegis security install gosec`) or not at all.
+
+#### Why an image ID rather than a digest pin
+
+A locally-built image has no registry digest — `RepoDigests` stays empty until an image is
+pushed or pulled — so the `image@sha256:...` reference every other scanner image must
+carry cannot exist for one. Rather than waive that rule, the multiscanner path replaces it
+with a stronger check: the image's real ID is read back via `image inspect` and compared
+against `image_id` before the first container run of a scan. Rebuild or retag the image
+behind Aegis's back and scans fail closed:
+
+```
+multiscanner image localhost/aegis-multiscanner:v1 no longer matches the ID recorded in
+config (have a1b2c3d4e5f6, expected 1111222233 44) — it was rebuilt or retagged; re-run
+`aegis security build-image` to re-pin it
+```
+
+That verifies the actual image content, which is what the digest rule was reaching for; a
+regex over a reference string never inspects the image at all.
+
+#### One networked run, and only one
+
+Databases have to be fetched from somewhere. The split is:
+
+| | network | workspace mounted |
+|---|---|---|
+| `aegis security update-db` | **yes** | no |
+| every scan | no (`--network none`) | yes |
+
+`update-db` runs the image's `aegis-update-db` script with networking on and *no* source
+mounted, writing trivy's and osv-scanner's databases into the cache volume. Scans mount
+that volume read-write but keep `--network none`, so the workspace is never mounted into a
+container that can reach the network. Re-run `update-db` whenever you want fresher data —
+the databases are only as current as its last run.
+
+Two things stay baked into the image, because they're small and pinning them is the point:
+the SAST rule packs (~1.9MB) and the nuclei template set. Both would otherwise be fetched
+at scan time — a "pinned" registry pack like `p/owasp-top-ten` is still an HTTP fetch from
+semgrep.dev, which is exactly why opengrep failed against a network-less container before
+they were baked.
+
+Every scanner version in the image is pinned by an `ARG` and its download checked against
+the checksum its project publishes. That catches corruption and wrong asset names, not a
+compromised upstream — the checksum ships from the same release as the artifact. The
+image-ID pin is what actually binds Aegis to a specific image. See
+`internal/security/multiscanner/README.md` for how to bump a scanner version.
+
+#### Parallelism
+
+Each container-method scanner is a container, so scans run several at once —
+`security.multiscanner.concurrency` (default 3) bounds how many. Set it to `1` for
+strictly sequential runs. The report is identical at any concurrency: results are folded
+in plan order rather than completion order, so `Scanners run:` never reorders. Live
+progress events do interleave now, so a scanner's "start" is no longer immediately
+followed by its own "done".
+
 ### WSL fallback for tools with no native Windows build (or an unreliable one)
 
 Four built-in scanners are `WSLCapable` — Aegis can run them inside the **Windows Subsystem for

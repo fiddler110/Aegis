@@ -577,6 +577,37 @@ security:
     # gitleaks:
     #   install: prompt   # prompt (default) | always | never
 
+  # One locally-built image carrying every bundled scanner, so container-method
+  # scanning needs one image instead of a digest-pinned image per tool. Written
+  # by `aegis security build-image` — you don't normally hand-edit this block.
+  # Run `aegis security update-db` afterwards to populate the vulnerability
+  # databases, which live in a container volume rather than in the image.
+  #
+  # image_id is a real image ID, not a registry digest: a locally-built image
+  # has no digest (RepoDigests is empty until a push/pull), so instead of the
+  # pin rule above, Aegis reads the image's actual ID back via `image inspect`
+  # and compares it before every container run. Rebuilt or retagged behind
+  # Aegis's back = scans fail closed with a specific reason.
+  multiscanner:
+    enabled: false
+    # image: "localhost/aegis-multiscanner:v1"
+    # image_id: "sha256:..."   # recorded at build time; re-verified before use
+    #
+    # The runtime that built the image. Recorded because a locally-built image
+    # exists only in the storage of the engine that built it — auto-detection
+    # could pick a different one (on Windows it prefers wslc) and report a
+    # perfectly good podman-built image as missing.
+    # runtime: podman
+    #
+    # How many scanners run at once (each container-method scanner is one
+    # container). Applies to host-method runs too. Default 3; set 1 for
+    # strictly sequential runs. The report is identical at any value.
+    # concurrency: 3
+    #
+    # Which scanners the built image carries; written from the profile that
+    # was actually built. Empty assumes the full profile.
+    # tools: []
+
   # Names a specific registered WSL distro (e.g. "kali-linux") to target for
   # every WSL-capable scanner (nmap, nuclei, opengrep, kubescape), instead of
   # whatever `wsl --set-default` currently points at. Empty (default) uses

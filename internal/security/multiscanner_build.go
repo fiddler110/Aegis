@@ -1,0 +1,219 @@
+package security
+
+import (
+	"context"
+	"embed"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
+)
+
+// multiscannerFS carries the image definition inside the binary, so `aegis
+// security build-image` works from an installed binary with no checkout —
+// the same reason internal/skills embeds its built-in skills.
+//
+// Every file the Containerfile COPYs must be listed here: the build context is
+// materialized from this FS, so a script that exists on disk but not in this
+// pattern fails the build with a "no such file" that points at the context
+// rather than at the missing embed.
+//
+//go:embed multiscanner/Containerfile multiscanner/fetch.sh multiscanner/update-db.sh
+var multiscannerFS embed.FS
+
+// MultiscannerBuildOptions configures one image build.
+type MultiscannerBuildOptions struct {
+	// Runtime forces a container runtime; empty auto-detects via DetectBest.
+	Runtime sandbox.ContainerRuntime
+	// Profile is MultiscannerProfileCore or MultiscannerProfileFull.
+	Profile string
+	// Image is the tag to apply; empty uses MultiscannerDefaultImage.
+	Image string
+	// NoCache passes --no-cache, forcing every layer to rebuild. The way to
+	// refresh the baked vulnerability databases, which are otherwise cached.
+	NoCache bool
+}
+
+// MultiscannerBuildResult is what a successful build recorded — everything
+// `aegis security build-image` needs to write the config block.
+type MultiscannerBuildResult struct {
+	Runtime sandbox.ContainerRuntime
+	Image   string
+	ImageID string
+	Profile string
+	Tools   []string
+}
+
+// UpdateMultiscannerDB refreshes the scanner databases in the cache volume by
+// running the image's aegis-update-db script.
+//
+// This is the only container run in the whole security package that gets
+// network access, and the only one with no workspace mounted — those two facts
+// are the design. Databases aren't baked into the image (they were ~3.7GB of
+// 5.8GB), so they have to be fetched at some point; doing it here keeps every
+// *scan* on --network none with the workspace mounted, instead of handing
+// outbound network to a container that can read the user's source.
+//
+// skipJavaDB drops trivy's ~1.4GB Java database for callers who never scan JVM
+// code.
+func UpdateMultiscannerDB(ctx context.Context, p MultiscannerPolicy, skipJavaDB bool, out io.Writer) error {
+	if !p.Enabled || p.Image == "" {
+		return fmt.Errorf("no multiscanner image configured — run `aegis security build-image` first")
+	}
+	rt, ok := detectRuntime(ctx, p.RuntimePriority())
+	if !ok {
+		if p.Runtime != "" {
+			return fmt.Errorf("the multiscanner image was built with %s, which isn't available now — start it (on Windows with Podman: `podman machine start`)", p.Runtime)
+		}
+		return fmt.Errorf("no container runtime available (docker/podman)")
+	}
+	if reason := verifyMultiscannerImage(ctx, rt, p); reason != "" {
+		return fmt.Errorf("%s", reason)
+	}
+
+	args := []string{
+		"run", "--rm",
+		// Network ON, deliberately and uniquely — fetching the databases is
+		// the entire job. Kept safe by what's absent: no workspace mount, so
+		// there is no source for a networked container to reach.
+		"--network", "bridge",
+		"--cap-drop=ALL", "--security-opt=no-new-privileges",
+		"-v", MultiscannerCacheVolume + ":" + multiscannerCacheMount,
+	}
+	if skipJavaDB {
+		args = append(args, "-e", "AEGIS_SKIP_JAVA_DB=true")
+	}
+	args = append(args, p.Image, "aegis-update-db")
+
+	cmd := exec.CommandContext(ctx, string(rt), args...)
+	if out != nil {
+		cmd.Stdout = out
+		cmd.Stderr = out
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s: database update failed: %w", rt, err)
+	}
+	return nil
+}
+
+// normalizeProfile validates and canonicalizes a --profile value.
+func normalizeProfile(p string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(p)) {
+	case "", MultiscannerProfileFull:
+		return MultiscannerProfileFull, nil
+	case MultiscannerProfileCore:
+		return MultiscannerProfileCore, nil
+	default:
+		return "", fmt.Errorf("unknown profile %q (want %s)", p, strings.Join(MultiscannerProfiles(), " or "))
+	}
+}
+
+// MaterializeMultiscannerContext writes the embedded build context (the
+// Containerfile and its fetch script) into dir.
+func MaterializeMultiscannerContext(dir string) error {
+	entries, err := fs.ReadDir(multiscannerFS, "multiscanner")
+	if err != nil {
+		return fmt.Errorf("read embedded build context: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := multiscannerFS.ReadFile("multiscanner/" + e.Name())
+		if err != nil {
+			return fmt.Errorf("read embedded %s: %w", e.Name(), err)
+		}
+		// 0o755 on fetch.sh is belt-and-braces: the Containerfile chmods it
+		// after COPY anyway, because a mode set on a Windows host doesn't
+		// survive into the build context reliably.
+		mode := os.FileMode(0o644)
+		if strings.HasSuffix(e.Name(), ".sh") {
+			mode = 0o755
+		}
+		if err := os.WriteFile(filepath.Join(dir, e.Name()), data, mode); err != nil {
+			return fmt.Errorf("write %s: %w", e.Name(), err)
+		}
+	}
+	return nil
+}
+
+// BuildMultiscanner builds the shared scanner image and returns its identity,
+// streaming the runtime's build output to out (which may be nil).
+//
+// The returned ImageID is the point of the whole exercise: it's what `aegis
+// security build-image` records into config and what Resolve re-verifies
+// before every container run. See MultiscannerConfig for why an image ID
+// rather than the digest-pinned reference every other scanner image needs.
+func BuildMultiscanner(ctx context.Context, opts MultiscannerBuildOptions, out io.Writer) (MultiscannerBuildResult, error) {
+	var res MultiscannerBuildResult
+
+	profile, err := normalizeProfile(opts.Profile)
+	if err != nil {
+		return res, err
+	}
+	image := strings.TrimSpace(opts.Image)
+	if image == "" {
+		image = MultiscannerDefaultImage
+	}
+
+	rt := opts.Runtime
+	if rt == "" {
+		detected, ok := detectRuntime(ctx, nil)
+		if !ok {
+			return res, fmt.Errorf("no container runtime available (looked for docker/podman) — install one, then re-run; on Windows with Podman, `podman machine start` must also have been run")
+		}
+		rt = detected
+	}
+
+	dir, err := os.MkdirTemp("", "aegis-multiscanner-*")
+	if err != nil {
+		return res, fmt.Errorf("create build context: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := MaterializeMultiscannerContext(dir); err != nil {
+		return res, err
+	}
+
+	args := []string{"build", "--build-arg", "PROFILE=" + profile, "-t", image, "-f", filepath.Join(dir, "Containerfile")}
+	if opts.NoCache {
+		args = append(args, "--no-cache")
+	}
+	args = append(args, dir)
+
+	cmd := exec.CommandContext(ctx, string(rt), args...)
+	if out != nil {
+		cmd.Stdout = out
+		cmd.Stderr = out
+	}
+	if err := cmd.Run(); err != nil {
+		return res, fmt.Errorf("%s build failed: %w", rt, err)
+	}
+
+	id, err := inspectImageID(ctx, rt, image)
+	if err != nil {
+		return res, fmt.Errorf("build reported success but the image can't be inspected: %w", err)
+	}
+	id = strings.TrimSpace(id)
+	if normalizeImageID(id) == "" {
+		return res, fmt.Errorf("%s returned an empty image ID for %s", rt, image)
+	}
+	// Store the canonical "sha256:<hex>" form regardless of which dialect the
+	// runtime reported (podman omits the prefix, docker includes it);
+	// normalizeImageID makes the comparison itself format-agnostic either way.
+	if !strings.HasPrefix(id, "sha256:") {
+		id = "sha256:" + id
+	}
+
+	return MultiscannerBuildResult{
+		Runtime: rt,
+		Image:   image,
+		ImageID: id,
+		Profile: profile,
+		Tools:   MultiscannerTools(profile),
+	}, nil
+}

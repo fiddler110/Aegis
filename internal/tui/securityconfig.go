@@ -61,6 +61,9 @@ type securityConfigModel struct {
 	egressThenWrite  bool
 	networkAllowList []string
 	dast             config.DASTConfig
+	wslDistro        string
+	debate           config.DebateIntegrationConfig
+	multiscanner     config.MultiscannerConfig
 
 	defaultMethod string
 	tools         map[string]config.SecurityToolConfig // working copy, mutated as the user edits
@@ -111,6 +114,9 @@ func newSecurityConfigModel(width, height int, th theme, global bool) *securityC
 		egressThenWrite:  sec.EgressThenWrite,
 		networkAllowList: sec.NetworkAllowList,
 		dast:             sec.DAST,
+		wslDistro:        sec.WSLDistro,
+		debate:           sec.Debate,
+		multiscanner:     sec.Multiscanner,
 		defaultMethod:    strOrDefault(sec.DefaultMethod, "auto"),
 		tools:            tools,
 		statuses:         map[string]string{},
@@ -512,6 +518,9 @@ func (m *securityConfigModel) saveCmd() tea.Cmd {
 		DefaultMethod:    m.defaultMethod,
 		Tools:            m.tools,
 		DAST:             m.dast,
+		WSLDistro:        m.wslDistro,
+		Debate:           m.debate,
+		Multiscanner:     m.multiscanner,
 	}
 	write := config.PatchProjectSecurity
 	if m.global {

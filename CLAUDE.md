@@ -19,6 +19,40 @@ aegis --first-init
 export OPENAI_API_KEY="ollama"   # or ANTHROPIC_API_KEY for cloud
 ```
 
+The multiscanner container image (`internal/security/multiscanner/Containerfile`
++ `fetch.sh`) bundles every filesystem scanner into one locally-built image, so
+container-method scanning needs one image instead of a digest-pinned image per
+tool. It's embedded via `go:embed` and built by `aegis security build-image`,
+which records the resulting image ID into config; that ID is re-verified via
+`image inspect` before every container run (a locally-built image has no
+registry digest to pin — see `internal/security/multiscanner.go`). `go build`
+needs no container runtime; only `build-image` does.
+
+```bash
+aegis security build-image --profile core    # static scanners only
+aegis security build-image                   # full: + Python/Ruby/network, ~1.8GB
+aegis security update-db                     # fill the DB cache volume (needs network)
+```
+
+Vulnerability databases are **not** in the image — they live in a container
+volume (`aegis-scanner-cache`), populated by `aegis security update-db`. That's
+both a size decision (baked in they were ~3.7GB of a 5.8GB image) and a
+necessity: scanner containers run `--rm`, so without a persistent cache every
+scan would re-download trivy's ~1.2GB DB. `update-db` is the **only** container
+run given network access, and it mounts no workspace; scans keep
+`--network none` and read the volume.
+
+Two traps when changing this:
+- The Containerfile and its scripts are `go:embed`-ed — **rebuild the binary**
+  or `build-image` silently uses the old copy. Every file the Containerfile
+  COPYs must be in the embed pattern (a test enforces this).
+- Anything a scanner fetches on first use must be baked in **and** the tool
+  told to use the local copy. Opengrep's "pinned" rule packs are still an HTTP
+  fetch; osv-scanner calls api.osv.dev per run. `gosec` is excluded outright —
+  it needs a Go toolchain and module resolution, and reports zero findings
+  rather than failing without them (host 244 vs container 0 on this repo). See
+  `multiscannerExcludedTools`.
+
 The embedded web UI (`aegis ui`, served at `/ui`) is built from
 `internal/server/webui/frontend` (Vite + Preact + TypeScript); its output
 (`internal/server/webui/dist/`) is committed to git and embedded via

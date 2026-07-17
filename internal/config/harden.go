@@ -59,6 +59,9 @@ func ComputeHardenPlan(cfg *Config) HardenPlan {
 		DefaultMethod:    cfg.Security.DefaultMethod,
 		Tools:            cfg.Security.Tools,
 		DAST:             cfg.Security.DAST,
+		WSLDistro:        cfg.Security.WSLDistro,
+		Debate:           cfg.Security.Debate,
+		Multiscanner:     cfg.Security.Multiscanner,
 	}
 	securityChanged := !cfg.Security.EgressThenWrite
 

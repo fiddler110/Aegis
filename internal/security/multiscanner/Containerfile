@@ -1,0 +1,224 @@
+# Aegis multiscanner image.
+#
+# One image carrying every filesystem security scanner Aegis knows how to
+# drive, so an operator provisions once instead of installing 16 tools (or
+# configuring 16 separate container images) before `aegis scan` is whole.
+#
+# Built locally by `aegis security build-image`, which records the resulting
+# image ID into config and re-verifies it before every container run — that
+# pin, not a registry digest, is what binds Aegis to this exact image.
+#
+# Deliberately NOT here:
+#   zap     - large Java app with its own mount contract (/zap/wrk:rw); keeps
+#             its own official image (see internal/security/dast.go).
+#   image scanners (trivy image / grype / dockle) - host-only by design;
+#             dockle needs the container engine socket (internal/security/images.go).
+#
+# PROFILE=core  static scanner binaries only (no Python/Ruby/network tools).
+# PROFILE=full  everything: adds semgrep/bandit/njsscan (Python), brakeman
+#               (Ruby), nmap + nuclei (network).
+ARG PROFILE=full
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fetch — pinned, checksum-verified static binaries
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS fetch
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates curl tar unzip \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Bump a version and its sibling checksum together; see fetch.sh. Nothing
+# resolves "latest" — a floating scanner version is the same class of problem
+# as a floating image tag.
+ARG TRIVY_VERSION=0.72.0
+ARG GITLEAKS_VERSION=8.30.1
+ARG TRUFFLEHOG_VERSION=3.95.9
+ARG SYFT_VERSION=1.48.0
+ARG OSV_SCANNER_VERSION=2.4.0
+ARG KUBESCAPE_VERSION=4.0.10
+ARG HADOLINT_VERSION=2.14.0
+ARG OPENGREP_VERSION=1.25.0
+# opengrep publishes sigstore signatures, not checksums — digest pinned here.
+ARG OPENGREP_SHA256=9ac4aebb47ba3f7b0d8fc641ac8749cb6c2f253f616131a67d9631e00d4bea33
+ARG NUCLEI_VERSION=3.11.0
+
+COPY fetch.sh /usr/local/bin/fetch.sh
+RUN chmod +x /usr/local/bin/fetch.sh && /usr/local/bin/fetch.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# py — semgrep / bandit / njsscan in a self-contained venv (full profile only)
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS py
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends python3 python3-venv python3-pip gcc python3-dev \
+	&& rm -rf /var/lib/apt/lists/*
+
+ARG SEMGREP_VERSION=1.170.0
+ARG BANDIT_VERSION=1.9.4
+ARG NJSSCAN_VERSION=0.4.3
+
+# One venv per tool, not one shared venv: njsscan pins an exact semgrep
+# (0.4.3 wants semgrep==1.86.0), which is unsatisfiable alongside a current
+# standalone semgrep — pip fails the whole install with ResolutionImpossible.
+# This is the same isolation `pipx install` gives, which is what each tool's
+# ScannerDescriptor.Install already recommends. njsscan keeps its own pinned
+# semgrep inside its venv; the `semgrep` scanner uses the standalone one.
+#
+# Pinned exactly, for the same reason the binaries above are. --no-cache-dir
+# keeps the layer from carrying pip's download cache into the copy.
+RUN set -eux; \
+	for spec in \
+	"semgrep:semgrep==${SEMGREP_VERSION}" \
+	"bandit:bandit[sarif]==${BANDIT_VERSION}" \
+	"njsscan:njsscan==${NJSSCAN_VERSION}" \
+	; do \
+	name="${spec%%:*}"; req="${spec#*:}"; \
+	python3 -m venv "/opt/venv/${name}"; \
+	"/opt/venv/${name}/bin/pip" install --no-cache-dir --upgrade pip; \
+	"/opt/venv/${name}/bin/pip" install --no-cache-dir "${req}"; \
+	test -x "/opt/venv/${name}/bin/${name}" || { echo "${name} entrypoint missing after install" >&2; exit 1; }; \
+	done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# core — static scanners + baked vulnerability databases
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS profile-core
+
+# curl/unzip are runtime dependencies of aegis-update-db (it fetches and
+# verifies the OSV archives). git is needed by scanners that inspect repository
+# history.
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates curl git unzip \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Two scanners are deliberately absent:
+#
+#   gosec  needs a Go toolchain and module resolution (network) to load
+#          packages, and reports zero findings rather than failing when it
+#          can't — which --network none guarantees. Measured on the Aegis repo:
+#          host 244 findings, container 0.
+#   grype  removed by decision; trivy + osv-scanner cover SCA here.
+#
+# See multiscannerExcludedTools in ../multiscanner.go.
+COPY --from=fetch /out/trivy /out/gitleaks /out/trufflehog /out/syft \
+	/out/osv-scanner /out/kubescape \
+	/out/hadolint /out/opengrep /usr/local/bin/
+
+# Vulnerability databases are NOT baked into the image — they were ~3.7GB of a
+# 5.8GB image. They live in a cache volume mounted at /cache instead, populated
+# by `aegis security update-db` (the only thing that gets network access) and
+# read by scans, which still run with --network none.
+#
+# These env vars are what make that split work. The cache paths point into the
+# volume, and the TRIVY_SKIP_*_UPDATE flags stop scans from attempting a fetch
+# they cannot perform — without them a scan against an empty cache would hang
+# on DNS and fail confusingly rather than reporting a clear "run update-db".
+# aegis-update-db flips the skips off for its own run.
+#
+# XDG_CACHE_HOME redirects osv-scanner (and opengrep) into the volume too:
+# both cache under $XDG_CACHE_HOME/$HOME, and osv-scanner's DB is the other
+# thing update-db populates.
+ENV HOME=/opt/aegis-home \
+	AEGIS_CACHE_DIR=/cache \
+	XDG_CACHE_HOME=/cache \
+	TRIVY_CACHE_DIR=/cache/trivy \
+	TRIVY_SKIP_DB_UPDATE=true \
+	TRIVY_SKIP_JAVA_DB_UPDATE=true \
+	TRIVY_SKIP_CHECK_UPDATE=true
+
+# /cache is a mountpoint at runtime; create it (and a writable HOME) so the
+# image is still usable if someone runs it without the volume.
+RUN mkdir -p "$HOME" /cache && chmod 777 "$HOME" /cache
+
+COPY update-db.sh /usr/local/bin/aegis-update-db
+RUN chmod +x /usr/local/bin/aegis-update-db
+
+# Bake the SAST rule packs. "Pinned" registry packs (p/owasp-top-ten) are still
+# fetched from semgrep.dev at scan time — pinning the name doesn't make them
+# local — so a network-less container can't use them by reference. The scanner
+# points --config at these files instead when running from this image (see
+# multiscannerRulePackPath in ../multiscanner.go).
+ARG SAST_RULES_BASE=https://semgrep.dev/c/p
+RUN set -eux; \
+	mkdir -p /opt/semgrep-rules; \
+	for pack in owasp-top-ten security-audit; do \
+	curl -fsSL --retry 3 "${SAST_RULES_BASE}/${pack}" -o "/opt/semgrep-rules/${pack}.yaml"; \
+	# A registry error page would download happily and then fail at scan time
+	# as an empty rule set; require it to actually look like rules.
+	grep -q "rules:" "/opt/semgrep-rules/${pack}.yaml" || { echo "${pack}.yaml has no rules: key" >&2; exit 1; }; \
+	done; \
+	chmod -R a+rX /opt/semgrep-rules
+
+# A scan mounts the workspace read-write at /src but tools must not need to
+# write outside it; /tmp as HOME covers semgrep/opengrep's dotfile writes.
+WORKDIR /src
+
+# No ENTRYPOINT, deliberately. Every other scanner image entrypoints its own
+# tool, so Aegis passes bare args; a shared image can't do that. Aegis prepends
+# the binary name instead (see runScannerImage in internal/security/method.go).
+ENTRYPOINT []
+CMD ["/bin/sh", "-c", "echo 'aegis multiscanner: invoke a scanner by name, e.g. trivy fs /src' >&2; exit 64"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# full — core + Python + Ruby + network scanners
+# ─────────────────────────────────────────────────────────────────────────────
+FROM profile-core AS profile-full
+
+# brakeman is capped at 7.1.1, not "latest": debian:bookworm ships Ruby 3.1.2,
+# and brakeman 7.1.2+ requires Ruby >= 3.2.0 (it fails the install outright).
+# Raising this needs a base image with a newer Ruby, not just a version bump.
+ARG BRAKEMAN_VERSION=7.1.1
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends python3 ruby ruby-dev build-essential nmap \
+	&& gem install --no-document brakeman -v "${BRAKEMAN_VERSION}" \
+	&& apt-get purge -y --auto-remove ruby-dev build-essential \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& brakeman --version
+
+COPY --from=py /opt/venv /opt/venv
+COPY --from=fetch /out/nuclei /usr/local/bin/nuclei
+
+# Each tool lives in its own venv (see the py stage), so put the entrypoints on
+# PATH by name rather than adding a shared venv's bin/ — there isn't one.
+RUN set -eux; \
+	for name in semgrep bandit njsscan; do \
+	ln -sf "/opt/venv/${name}/bin/${name}" "/usr/local/bin/${name}"; \
+	"/usr/local/bin/${name}" --version >/dev/null 2>&1 || { echo "${name} is not runnable" >&2; exit 1; }; \
+	done
+
+ARG NUCLEI_TEMPLATES_VERSION=v10.4.6
+ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates
+# Templates are executable network-probe logic, so they're pinned to a release
+# tag and baked in rather than pulled at scan time — the same posture the
+# nuclei scanner already enforces via security.tools.nuclei.templates_version.
+#
+# Fetched as the tagged source tarball rather than via `nuclei
+# -update-templates`, which always resolves to the latest release and would
+# quietly ignore the pin above.
+# curl/ca-certificates come from profile-core and are deliberately NOT purged
+# here: --auto-remove would strip them back out of the base stage, and
+# ca-certificates going missing would break TLS for anything that needs it.
+RUN set -eux; \
+	mkdir -p "${NUCLEI_TEMPLATES_DIR}"; \
+	curl -fsSL --retry 3 \
+	"https://github.com/projectdiscovery/nuclei-templates/archive/refs/tags/${NUCLEI_TEMPLATES_VERSION}.tar.gz" \
+	-o /tmp/templates.tar.gz; \
+	tar -xzf /tmp/templates.tar.gz -C "${NUCLEI_TEMPLATES_DIR}" --strip-components=1; \
+	rm -f /tmp/templates.tar.gz; \
+	chmod -R a+rX "${NUCLEI_TEMPLATES_DIR}"; \
+	test -d "${NUCLEI_TEMPLATES_DIR}/http" || { echo "nuclei templates ${NUCLEI_TEMPLATES_VERSION} look wrong: no http/ dir" >&2; exit 1; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# final — selected by --build-arg PROFILE=core|full
+# ─────────────────────────────────────────────────────────────────────────────
+FROM profile-${PROFILE} AS final
+
+ARG PROFILE
+ARG AEGIS_MULTISCANNER_VERSION=v1
+LABEL org.opencontainers.image.title="aegis-multiscanner" \
+	org.opencontainers.image.description="Aegis bundled security scanners" \
+	org.opencontainers.image.source="https://github.com/fiddler110/aegis" \
+	io.aegis.multiscanner.profile="${PROFILE}" \
+	io.aegis.multiscanner.version="${AEGIS_MULTISCANNER_VERSION}"

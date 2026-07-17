@@ -665,6 +665,12 @@ type SecurityConfig struct {
 	// container) — the default.
 	DefaultMethod string `koanf:"default_method"`
 
+	// Multiscanner configures the single locally-built image that carries
+	// every bundled scanner, so an operator provisions once instead of
+	// installing each tool (or configuring a container image per tool).
+	// Written by `aegis security build-image`; see MultiscannerConfig.
+	Multiscanner MultiscannerConfig `koanf:"multiscanner"`
+
 	// WSLDistro names a specific registered WSL distro (e.g. "kali-linux") to
 	// target for every WSLCapable scanner (nmap, nuclei, opengrep, kubescape;
 	// P14.x), instead of whatever `wsl --set-default` currently points at.
@@ -685,6 +691,55 @@ type SecurityConfig struct {
 	// debate multiplies model calls per item, so it's a deliberate opt-in,
 	// never a silent behavior change to the existing single-pass workflows.
 	Debate DebateIntegrationConfig `koanf:"debate"`
+}
+
+// MultiscannerConfig points at the locally-built image that bundles every
+// scanner Aegis can drive against a directory. It exists because the
+// alternative — ScannerDescriptor.DefaultImage — is deliberately empty for
+// every tool (a scanner image is supply-chain attack surface, so Aegis never
+// ships an unverified default), which left the container path resolving to
+// MethodNone out of the box unless an operator pinned 16 separate images.
+//
+// The pin here is an image *ID*, not a registry digest, and that difference is
+// the point. A locally-built image has no registry digest at all — RepoDigests
+// stays empty until a push or pull — so the `image@sha256:...` reference the
+// per-tool Image field requires cannot exist for one. Rather than weaken that
+// rule, this path replaces it with a stronger check: `<runtime> image inspect`
+// is asked for the image's real ID before the first container run of a scan
+// and compared against ImageID. An image rebuilt or retagged behind Aegis's
+// back fails closed with a specific reason, instead of a regex on a reference
+// string vouching for content it never looked at.
+type MultiscannerConfig struct {
+	// Enabled turns the shared image on as the container-method image for
+	// every bundled scanner. False (the default) leaves resolution exactly as
+	// it was: per-tool images only.
+	Enabled bool `koanf:"enabled"`
+	// Image is the local reference `aegis security build-image` tagged, e.g.
+	// "localhost/aegis-multiscanner:v1". Never pulled — it must already exist
+	// in the runtime's local storage, and its ID must match ImageID.
+	Image string `koanf:"image"`
+	// Runtime is the container runtime that built the image ("podman",
+	// "docker", ...), recorded because a locally-built image exists only in
+	// the storage of the runtime that built it. Without it, resolution would
+	// fall back to auto-detection and could pick a different runtime than the
+	// build did — on Windows, DetectBest prefers wslc, so a podman-built image
+	// would be reported missing even though it exists. Empty falls back to
+	// auto-detection (the pre-multiscanner behavior).
+	Runtime string `koanf:"runtime"`
+	// ImageID is the full "sha256:..." ID of the image as built, recorded by
+	// `aegis security build-image` and re-verified before use. Empty means
+	// "never built" — resolution reports that rather than running whatever
+	// currently answers to Image.
+	ImageID string `koanf:"image_id"`
+	// Concurrency bounds how many scanners run at once during a scan. Each
+	// container-method scanner is one container, so this is how many run in
+	// parallel. 0 means the built-in default (multiscannerDefaultConcurrency);
+	// 1 restores strictly sequential execution.
+	Concurrency int `koanf:"concurrency"`
+	// Tools optionally restricts which scanners resolve to the shared image.
+	// Empty (the default) means every scanner the image is known to carry.
+	// A per-tool security.tools.<name>.image always wins over this.
+	Tools []string `koanf:"tools"`
 }
 
 // DebateIntegrationConfig toggles routing specific existing security

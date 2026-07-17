@@ -120,6 +120,14 @@ func SelectScanners(all []Scanner, opts Options, selectors []string) ([]Scanner,
 		p := tools[name]
 		p.Enabled = true
 		p.EnabledExplicit = true
+		// Selecting a tool must not change *how* it runs. Without this, a tool
+		// with no security.tools.<name> entry gains one here with an empty
+		// Method, and policyFor then returns that instead of falling back to
+		// DefaultMethod — so `aegis scan --scanner semgrep` under
+		// security.default_method: container silently ran on the host.
+		if p.Method == "" {
+			p.Method = opts.DefaultMethod
+		}
 		tools[name] = p
 	}
 	opts.Tools = tools
