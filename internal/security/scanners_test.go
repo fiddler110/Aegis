@@ -114,3 +114,51 @@ func TestKubescapeRelevantGatesOnManifestPresence(t *testing.T) {
 		t.Error("Relevant() = false, want true once a manifest exists")
 	}
 }
+
+// TestBrakemanRelevantGatesOnRailsApp mirrors the hadolint/kubescape cases
+// for brakeman (P34.6). The stakes are higher here: without the gate brakeman
+// doesn't report zero findings on a non-Rails repo, it exits 4 and the scan
+// reports an error that looks like a broken tool.
+func TestBrakemanRelevantGatesOnRailsApp(t *testing.T) {
+	write := func(dir, rel string) {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("# ruby\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dir := t.TempDir()
+	if ok, reason := (brakemanScanner{}).Relevant(dir); ok || reason == "" {
+		t.Errorf("Relevant() = %v, %q, want false with a reason for an empty dir", ok, reason)
+	}
+
+	// A Ruby project that isn't a Rails app: brakeman refuses these too.
+	write(dir, "Rakefile")
+	write(dir, "lib/thing.rb")
+	if ok, reason := (brakemanScanner{}).Relevant(dir); ok || reason == "" {
+		t.Errorf("Relevant() = %v, %q, want false for a non-Rails Ruby project", ok, reason)
+	}
+
+	// config/environment.rb alone isn't enough — brakeman wants a
+	// config/application.rb or a Rakefile alongside it.
+	bare := t.TempDir()
+	write(bare, "config/environment.rb")
+	if ok, reason := (brakemanScanner{}).Relevant(bare); ok || reason == "" {
+		t.Errorf("Relevant() = %v, %q, want false for config/environment.rb with no application.rb or Rakefile", ok, reason)
+	}
+
+	write(dir, "config/environment.rb") // dir already has a Rakefile
+	if ok, _ := (brakemanScanner{}).Relevant(dir); !ok {
+		t.Error("Relevant() = false, want true for config/environment.rb + Rakefile")
+	}
+
+	rails3 := t.TempDir()
+	write(rails3, "config/environment.rb")
+	write(rails3, "config/application.rb")
+	if ok, _ := (brakemanScanner{}).Relevant(rails3); !ok {
+		t.Error("Relevant() = false, want true for config/environment.rb + config/application.rb")
+	}
+}
