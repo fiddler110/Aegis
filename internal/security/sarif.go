@@ -8,7 +8,7 @@ import (
 )
 
 // SARIF (Static Analysis Results Interchange Format) is the shared output
-// format for semgrep, trivy, grype, checkov, hadolint, and ZAP (P11.2). One
+// format for opengrep, trivy, grype, checkov, hadolint, and ZAP (P11.2). One
 // ingester here maps any tool's SARIF report onto Finding, so adding a new
 // SARIF-emitting scanner needs no bespoke parser — only tools that don't
 // speak SARIF (e.g. gitleaks) keep a hand-written one.

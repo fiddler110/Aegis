@@ -11,9 +11,38 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 12 — two Tier 2 items (**P34.9, P34.10**), four Tier 3 items
-(**P33.10, P33.11, P33.16, P33.19**), and six parked (**P25.9, P33.12, P33.20-P33.22, P34.11**).
-Tier 1 is fully clear.
+**Open items:** 11 — one Tier 2 item (**P34.12**), four Tier 3 items (**P33.10, P33.11, P33.16,
+P33.19**), and six parked (**P25.9, P33.12, P33.20-P33.22, P34.11**). Tier 1 is fully clear.
+
+**P34.9 and P34.10 shipped 2026-07-17**, clearing Tier 2 apart from **P34.12**, which this batch
+filed on its way out — osv-scanner reports `error: exit status 128` on any tree with no dependency
+lockfile, which is the P34.6 "accurate refusal that reads as a broken tool" shape a third time.
+Filed with a verified mechanism (reproduced with Aegis's exact args, before and after `git init`,
+on both an absent and an empty lockfile) rather than a plausible one — the first guess, that 128
+meant a git failure, was wrong. See
+[releases.md](releases.md#latest-changes). **P34.9 makes it four consecutive items whose diagnosis
+was wrong, and it's the sharpest case yet: the fix the item specified was the one that could not
+work.** The item blamed njsscan's Windows traceback on semgrep being unsupported there and offered
+"gate on semgrep's own availability" as a candidate. Semgrep runs fine on Windows; njsscan's engine
+(libsast) just hardcodes `if platform.system() == 'Windows': return None` and then crashes on its
+own stub — it never asks whether semgrep is there, so that gate would have passed and reproduced
+the identical crash. The mechanism took one `grep` of the installed package to find.
+
+**What's new here is a second cost of a wrong diagnosis, beyond the fix failing: the false
+mechanism implicated an innocent component.** "Semgrep isn't supported on Windows" is a claim about
+a tool Aegis ships its own scanner for — acting on it would have gated a working semgrep too. A
+wrong mechanism doesn't just fail to fix its own item; it invites collateral changes to whatever
+it names. The [P34.5-P34.8 lesson](#status) said re-verify a handed-down mechanism before building
+on it; P34.9 adds that the re-verification is cheapest at the boundary the mechanism names
+(here: run semgrep once), and that this is worth doing *even when the fix seems obvious*.
+
+**P34.10 is the counter-example worth keeping in view: its numbers were exactly right** (1 of 140
+packages, and zero cost today because those packages have no CVEs). Not every item has decayed —
+which is the point of re-verifying rather than assuming either way. Its *trade*, though, inverted
+under measurement: the "dev-dep CVEs are lower severity, so trivy's default spares the user noise"
+argument dissolves once you notice osv-scanner already includes dev deps, so the findings arrive
+regardless. The default bought no quiet, only scanner disagreement about scope. **When an item
+frames something as a judgement call, check whether the rest of the system has already made it.**
 
 **P34.5-P34.8 shipped 2026-07-17** — the whole of the Tier 2 batch, four parallel sub-agents in
 isolated worktrees, merged one at a time. See [releases.md](releases.md#latest-changes).
@@ -155,10 +184,9 @@ output, not just text; `outBytes` not `liveText`; tok/s measured from first toke
 otherwise a 60s cold-load is averaged into a throughput the model never ran at). Where an item says
 "show X", the implementer owns the question of whether X is substantiable.
 
-**Next session:** **P33.10** is the best next win — the P34.5-P34.8 batch cleared Tier 2 of
-everything except the two items it filed on the way out (**P34.9**, **P34.10**), both small,
-both scanner-scope questions rather than defects. **P33.10** has
-a head start from P34.2: `internal/toolcallprobe` established that a probe at run start is nearly free
+**Next session:** **P33.10** is the best next win — with P34.9 and P34.10 shipped, the only Tier 2
+item left is **P34.12**, which is small and self-contained enough to pick up alongside rather than
+instead of it. **P33.10** has a head start from P34.2: `internal/toolcallprobe` established that a probe at run start is nearly free
 because it shares the load the turn was going to pay, which is the same insight pre-warm turns on, and
 `toolcallprobe.Gate` is a working model of the per-model caching P33.10 needs. With P33.9 shipped, **P33.10
 (keep-alive management/pre-warm)** and **P33.19
@@ -194,67 +222,51 @@ preflight companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-Two items, both found 2026-07-17 while shipping the P34.5-P34.8 batch and both about scanner
-coverage being quietly narrower than the numbers imply. Dependency-free. (P34.5, P34.6, P34.7
-and P34.8 shipped 2026-07-17 — see [releases.md](releases.md#latest-changes);
-P34.3 shipped 2026-07-16; P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16;
-P34.4 shipped 2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16;
-P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7
-shipped 2026-07-15.)
+One item, filed 2026-07-17 by the P34.9/P34.10 batch on its way out — the same way that batch's
+own two items were filed, and the same family as both (a scanner whose accurate refusal reaches
+the report as a broken tool). Dependency-free. (P34.9 and P34.10 shipped 2026-07-17 — see
+[releases.md](releases.md#latest-changes); P34.5-P34.8 shipped 2026-07-17; P34.3 shipped
+2026-07-16; P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped
+2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped
+2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
 
-### P34.9 — Host-method njsscan errors on every project on Windows, whatever the language
-
-Effort: S
-
-Found 2026-07-17 while answering P34.6's follow-on question (does any other language-targeted
-scanner error rather than skip on the wrong language?). The answer for njsscan was "no, it exits
-0 with empty SARIF" **in the container** — but on the Windows host it crashes with a libsast
-`AttributeError` traceback, and it does so **identically with and without JS files present**. So
-this is not a relevance-gate gap (P34.6's fix would not help): it's njsscan-on-Windows being
-broken outright, because semgrep isn't supported there. Every host-method scan on Windows that
-enables njsscan reports an error row for it, on every project.
-
-Deliberately left out of P34.6's scope, which was about relevance gating. The interesting
-question here is what the right answer *is*, and it isn't obvious: a host-platform gate that
-skips njsscan on Windows would report a clean "skipped" for a tool the user might reasonably
-expect to run, which is its own kind of lie — the container method runs it fine on the same
-machine. So the choice is between skipping with a reason that names the platform, erroring with
-a message that says "use `method: container` on Windows" instead of surfacing a raw Python
-traceback, or gating on semgrep's own availability rather than on `runtime.GOOS`. Prefer whichever
-of those the evidence supports; the traceback is the only part that is unambiguously wrong.
-
-Worth checking whether any other Python-based scanner in the registry (bandit is the obvious one)
-has the same host-Windows dependency on semgrep. Bandit was verified clean on both host and
-container during P34.6, so the answer there is probably no — but the check is cheap and the same
-shape of surprise is what produced this item.
-
-### P34.10 — trivy sees 1 of 140 npm packages, because it skips dev dependencies by default
+### P34.12 — osv-scanner reports "error: exit status 128" on any tree with no dependency lockfile
 
 Effort: S
 
-Found 2026-07-17 by P34.8's measurement work, and separable from it: P34.8 fixed the dedup bug
-it uncovered, and deliberately did not make this configuration call.
+Found 2026-07-17 while live-verifying P34.9 — a scratch JS project (package.json + app.js, no
+lockfile) produced `osv-scanner: error: exit status 128` in an otherwise clean scan report.
 
-`trivy fs` skips npm **dev** dependencies by default. This repo's `package-lock.json` is 139
-devDependencies plus preact, so trivy catalogs **1 of 140** packages — osv-scanner scans all 140.
-Today this costs exactly nothing: those 140 packages currently have **zero** known
-vulnerabilities, and osv-scanner covers them regardless. That is why this is Tier 2 and not Tier
-1 — there is no missed finding to point at, only a missing capability that would matter the day a
-devDependency has a CVE.
+**The mechanism is verified, not inferred** (osv-scanner 2.4.0, the version pinned in the
+multiscanner Containerfile and the one on this host — so this isn't version skew):
 
-The decision is `--include-dev-deps`, and it is a real trade rather than an obvious yes: dev
-dependencies don't ship, so a CVE in one is a genuinely lower-severity thing than a CVE in a
-runtime dep, and turning this on will raise finding counts on npm projects for vulnerabilities
-that a user may reasonably not care about. The counter-argument is that a build-time dependency
-still executes on a developer's machine and in CI, which is a real attack surface, and that
-Aegis's own frontend toolchain is exactly that shape. Note the asymmetry that makes this worth
-deciding rather than defaulting: **osv-scanner already includes dev deps**, so the two SCA
-scanners currently disagree about what the scan scope even is — whatever the answer, the two
-should agree, and the answer should be written down where a user can find it.
+- With Aegis's exact args (`--format json --call-analysis=all --recursive .`), osv-scanner exits
+  **128** and writes **zero bytes to stdout**, with `No package sources found, --help for usage
+  information.` on stderr. 128 is osv-scanner's documented "no package sources" code.
+- It does this both for a tree with no lockfile at all *and* for a lockfile whose `packages` has
+  only the root entry. Add one real package and it's exit 0 with JSON on stdout.
+- It is **not** git-related, which is the obvious wrong guess (128 is also git's error code):
+  reproduced identically before and after `git init`.
+- `runJSON` tolerates a non-zero exit "as long as output was produced". stdout is empty here, so
+  the tolerance doesn't apply and the exit code becomes an error row.
 
-The safest first step is measurement, which is cheap: run trivy with and without
-`--include-dev-deps` against a tree whose devDependencies *do* have known CVEs and see what the
-delta actually looks like before choosing a default.
+So this is the **P34.6 shape exactly**: brakeman's "Please supply the path to a Rails application"
+was an accurate refusal that read as a broken tool, and this is the same — "there are no
+dependencies here to scan" is correct, useful, and currently rendered as a failure. It hits any
+tree with no dependency manifest: a C/C++ repo, a shell/docs repo, a bare scratch directory.
+
+The decision is where to put it, and unlike P34.6 the obvious answer is probably wrong.
+A `RelevanceChecker` mirrors brakeman's fix but would have to enumerate every manifest type
+osv-scanner supports across every ecosystem it covers — a list that will drift out of date
+silently, and the failure mode of drift is a **skipped SCA scan on a repo that had dependencies
+all along**, which is worse than the error row it replaces. Prefer teaching the osv-scanner Scan
+branch that exit 128 with empty stdout means zero findings, since that's osv-scanner's own
+documented contract and needs no list. Worth checking whether the container path agrees (same
+binary and version, so it should — but that's the assumption, not a measurement).
+
+Worth a look while there: the same "accurate refusal, error-shaped" question for the other
+scanners' documented exit codes. P34.6 checked the *language*-targeted tools; nothing has swept
+the SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I broke".
 
 ---
 

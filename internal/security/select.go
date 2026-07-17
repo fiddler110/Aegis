@@ -16,7 +16,7 @@ import (
 // matching — "SCA / IaC / secrets" isn't a clean keyword to type or match).
 var categoryAliases = map[string][]string{
 	"secrets":   {"gitleaks", "trufflehog"},
-	"sast":      {"opengrep", "semgrep", "gosec", "bandit", "brakeman", "njsscan"},
+	"sast":      {"opengrep", "gosec", "bandit", "brakeman", "njsscan"},
 	"sca":       {"osv-scanner", "grype"},
 	"deps":      {"osv-scanner", "grype"},
 	"iac":       {"kubescape", "hadolint"},
@@ -123,7 +123,7 @@ func SelectScanners(all []Scanner, opts Options, selectors []string) ([]Scanner,
 		// Selecting a tool must not change *how* it runs. Without this, a tool
 		// with no security.tools.<name> entry gains one here with an empty
 		// Method, and policyFor then returns that instead of falling back to
-		// DefaultMethod — so `aegis scan --scanner semgrep` under
+		// DefaultMethod — so `aegis scan --scanner opengrep` under
 		// security.default_method: container silently ran on the host.
 		if p.Method == "" {
 			p.Method = opts.DefaultMethod

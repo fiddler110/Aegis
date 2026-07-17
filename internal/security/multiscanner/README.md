@@ -41,7 +41,7 @@ at all.
 | | `core` | `full` (default) |
 |---|---|---|
 | Static binaries (trivy, gitleaks, trufflehog, syft, osv-scanner, kubescape, hadolint, opengrep) | ✅ | ✅ |
-| Python: semgrep, bandit, njsscan | | ✅ |
+| Python: bandit, njsscan | | ✅ |
 | Ruby: brakeman | | ✅ |
 | Network: nmap, nuclei | | ✅ |
 | Measured size | ~1.1GB | ~1.8GB |

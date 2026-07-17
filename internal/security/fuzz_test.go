@@ -3,7 +3,7 @@ package security
 import "testing"
 
 // These fuzz targets cover the untrusted-input parsers this package feeds
-// scanner output through: SARIF (shared by semgrep/trivy/grype/checkov/
+// scanner output through: SARIF (shared by opengrep/trivy/grype/checkov/
 // hadolint/ZAP), and the hand-written JSON/JSON-Lines/XML ingesters for
 // tools that don't speak SARIF. All are pure functions over a byte slice
 // with no side effects, so a fuzz failure here means a parser panics on

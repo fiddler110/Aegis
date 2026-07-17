@@ -11,7 +11,7 @@ import (
 
 // withTestDescriptor registers a scanner descriptor under a name guaranteed
 // not to collide with a real scanner, restoring the map afterward. Using a
-// synthetic name (never "semgrep"/"trivy"/"gitleaks") keeps these tests
+// synthetic name (never "opengrep"/"trivy"/"gitleaks") keeps these tests
 // deterministic regardless of what happens to be installed on the machine
 // running them.
 func withTestDescriptor(t *testing.T, d ScannerDescriptor) {
@@ -35,11 +35,21 @@ func withWSLBinaryAvailable(t *testing.T, fn func(ctx context.Context, bin, dist
 	t.Cleanup(func() { wslBinaryAvailable = orig })
 }
 
+// withHostGOOS pins the OS the platform-specific resolution rules see, so the
+// HostBroken tests below assert the rule on every machine instead of only on
+// the one platform that happens to trigger it (P34.7's lesson).
+func withHostGOOS(t *testing.T, goos string) {
+	t.Helper()
+	orig := hostGOOS
+	hostGOOS = goos
+	t.Cleanup(func() { hostGOOS = orig })
+}
+
 // TestResolveOptInToolDisabledByDefault is the P11.3 regression: a tool
 // descriptor with DefaultEnabled: false must resolve to MethodNone with a
 // distinct "opt-in" reason (not "disabled by configuration") when the
-// operator hasn't configured it at all — e.g. semgrep and the language-
-// targeted SAST engines, which are opt-in now that opengrep is the default.
+// operator hasn't configured it at all — e.g. the language-targeted SAST
+// engines, which are opt-in alongside the default opengrep.
 func TestResolveOptInToolDisabledByDefault(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-optin", Binary: "go", DefaultEnabled: false})
 
@@ -346,6 +356,128 @@ func TestDescriptorsSortedByName(t *testing.T) {
 	for i := 1; i < len(all); i++ {
 		if all[i].Name < all[i-1].Name {
 			t.Errorf("Descriptors() not sorted: %q before %q", all[i-1].Name, all[i].Name)
+		}
+	}
+}
+
+// --- P34.9: HostBroken (a host binary that's present but cannot work here) ---
+
+// TestResolveHostBrokenFallsBackToContainer is P34.9's core regression: on a
+// platform where the host binary is installed but structurally broken,
+// "auto" must route to the container rather than running it. Binary: "go" is
+// deliberate — it's guaranteed on PATH while these tests run, so this proves
+// the HostBroken rule beats a real lookPath hit rather than passing because
+// no binary was found.
+func TestResolveHostBrokenFallsBackToContainer(t *testing.T) {
+	withHostGOOS(t, "windows")
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:       "test-hostbroken",
+		Binary:     "go",
+		HostBroken: map[string]string{"windows": "test-hostbroken has no working Windows host build"},
+	})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return sandbox.RuntimeDocker, true
+	})
+	opts := Options{Tools: map[string]ToolPolicy{"test-hostbroken": {Enabled: true, Image: "example/image@sha256:deadbeef"}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-hostbroken", opts)
+	if method != MethodContainer {
+		t.Fatalf("method = %v, reason = %q, want MethodContainer (host binary present but broken on this platform)", method, reason)
+	}
+}
+
+// TestResolveHostBrokenOnlyAppliesToNamedPlatform guards the obvious
+// over-reach: the rule must not disable the host binary everywhere.
+func TestResolveHostBrokenOnlyAppliesToNamedPlatform(t *testing.T) {
+	withHostGOOS(t, "linux")
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:       "test-hostbroken-elsewhere",
+		Binary:     "go",
+		HostBroken: map[string]string{"windows": "no working Windows host build"},
+	})
+	opts := Options{Tools: map[string]ToolPolicy{"test-hostbroken-elsewhere": {Enabled: true}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-hostbroken-elsewhere", opts)
+	if method != MethodHost {
+		t.Fatalf("method = %v, reason = %q, want MethodHost (HostBroken names windows, not linux)", method, reason)
+	}
+}
+
+// TestResolveHostBrokenRefusesExplicitHostMethod proves an operator who
+// pinned method: host gets the real reason and the way out, rather than
+// either a traceback (the pre-P34.9 behavior) or a silent downgrade to a
+// method they explicitly didn't ask for.
+func TestResolveHostBrokenRefusesExplicitHostMethod(t *testing.T) {
+	withHostGOOS(t, "windows")
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:       "test-hostbroken-pinned",
+		Binary:     "go",
+		HostBroken: map[string]string{"windows": "no working Windows host build: its engine crashes on the stub"},
+	})
+	opts := Options{Tools: map[string]ToolPolicy{"test-hostbroken-pinned": {Enabled: true, Method: "host"}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-hostbroken-pinned", opts)
+	if method != MethodNone {
+		t.Fatalf("method = %v, want MethodNone (method: host pinned on a platform where host can't work)", method)
+	}
+	if !strings.Contains(reason, "no working Windows host build") {
+		t.Errorf("reason = %q, want the descriptor's own explanation", reason)
+	}
+	if !strings.Contains(reason, "container") {
+		t.Errorf("reason = %q, want the container method named as the way out", reason)
+	}
+	// The binary *is* installed; saying otherwise sends the operator to
+	// reinstall it, and would also trip AvailabilityNote's "not installed"
+	// heuristic into offering an install that cannot help.
+	if strings.Contains(reason, "not installed") {
+		t.Errorf("reason = %q, must not claim the binary is not installed", reason)
+	}
+}
+
+// TestResolveHostBrokenWithNoContainerFallbackExplainsItself covers the
+// dead-end: no image, nothing runnable. The reason must still be about the
+// platform, not a bogus "not installed".
+func TestResolveHostBrokenWithNoContainerFallbackExplainsItself(t *testing.T) {
+	withHostGOOS(t, "windows")
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:       "test-hostbroken-noimage",
+		Binary:     "go",
+		HostBroken: map[string]string{"windows": "no working Windows host build"},
+	})
+	opts := Options{Tools: map[string]ToolPolicy{"test-hostbroken-noimage": {Enabled: true}}}
+
+	method, _, _, reason := Resolve(context.Background(), "test-hostbroken-noimage", opts)
+	if method != MethodNone {
+		t.Fatalf("method = %v, want MethodNone (no image, host unusable)", method)
+	}
+	if !strings.Contains(reason, "no working Windows host build") {
+		t.Errorf("reason = %q, want the platform explanation", reason)
+	}
+	if strings.Contains(reason, "not installed") {
+		t.Errorf("reason = %q, must not claim the binary is not installed", reason)
+	}
+}
+
+// TestNjsscanDeclaresWindowsHostBroken pins the real descriptor: njsscan on a
+// Windows host dies in libsast's own engine stub (P34.9), and it must never be
+// routed there. Asserted on the descriptor rather than by running njsscan, so
+// it holds on CI machines without it installed.
+func TestNjsscanDeclaresWindowsHostBroken(t *testing.T) {
+	d, ok := DescriptorFor("njsscan")
+	if !ok {
+		t.Fatal("njsscan descriptor missing")
+	}
+	if d.HostBroken["windows"] == "" {
+		t.Error("njsscan must declare HostBroken[windows]: its libsast engine stubs out its own analysis call on Windows and crashes on the stub")
+	}
+	// A guided `pipx install njsscan` on Windows installs exactly the binary
+	// HostBroken then refuses to run.
+	if _, has := d.Install["windows"]; has {
+		t.Error("njsscan must not offer a Windows host install: the installed binary can only produce a traceback")
+	}
+	for _, osName := range []string{"darwin", "linux"} {
+		if d.Install[osName] == "" {
+			t.Errorf("njsscan lost its %s install command", osName)
 		}
 	}
 }

@@ -83,7 +83,7 @@ var toolASVS = map[string]string{
 
 // asvsFor derives a best-effort ASVS label for f: CWE-based mapping first
 // (works for any SARIF-sourced finding across every SAST/DAST tool that
-// tags CWE — semgrep/opengrep/gosec/bandit/brakeman/njsscan/ZAP), then a
+// tags CWE — opengrep/gosec/bandit/brakeman/njsscan/ZAP), then a
 // tool-name fallback, then trivy's own misconfig-vs-CVE split (trivy shares
 // one tool name across both SCA and IaC findings, distinguished here by
 // whether its rule ID is a bare CVE). Returns "" when nothing matches —

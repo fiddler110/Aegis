@@ -95,7 +95,7 @@ $ConfigPath    = Join-Path $env:APPDATA "aegis\config.yaml"
 # Mirrors internal/security/method.go's descriptor list — every scanner that
 # has a guided host install (zap is container-only and has none, so it's
 # handled by container config, not this list).
-$SecurityTools = @("opengrep","semgrep","gosec","bandit","brakeman","njsscan","trivy","gitleaks","kubescape","hadolint","grype","dockle","osv-scanner","syft","nmap","nuclei")
+$SecurityTools = @("opengrep","gosec","bandit","brakeman","njsscan","trivy","gitleaks","kubescape","hadolint","grype","dockle","osv-scanner","syft","nmap","nuclei")
 
 # ─── Show plan ─────────────────────────────────────────────────────────────────
 Write-Host ""

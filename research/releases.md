@@ -8,11 +8,90 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-17 — **P34.5-P34.8**, the whole of the Tier 2 batch: the legacy
-Ollama-compat warning, brakeman's relevance gate, the doctor sandbox test seam, and the
-trivy-vs-grype investigation, which turned out to be a dedup bug. Four parallel sub-agents in
-isolated worktrees, merged one at a time. Earlier: **FIND-14** and **FIND-17**'s second halves,
-**P34.3**, and a **P34.2 follow-up fix**.
+**Last updated:** 2026-07-17 — **P34.9** and **P34.10**, clearing Tier 2: njsscan's Windows
+traceback (a libsast bug, not the semgrep gap the item diagnosed) and trivy's silent npm
+dev-dependency skip. Earlier the same day: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P34.9, P34.10 — the last two Tier 2 items: scanner scope that was quietly narrower than reported
+
+Both items were filed by the P34.5-P34.8 batch on its way out, and both were about a scanner
+covering less than the report implied. `go build ./...`, `go vet ./...`, `go test ./...` green,
+and both fixes driven through the real `aegis scan` binary rather than only the suite.
+
+**P34.9's symptom was real and its diagnosis was wrong — the fourth consecutive item to fit that
+shape, and the first where the *specified* fix was the one that would have failed.** The item said
+njsscan crashes on Windows "because semgrep isn't supported there", and offered gating on semgrep's
+availability as a candidate fix. Semgrep 1.168.0 runs fine on this Windows host (verified: it
+scanned a JS file, exit 0, real results — and Aegis's own semgrep scanner uses it there). The real
+mechanism is in njsscan's engine: `libsast/core_sgrep/helpers.py` opens `invoke_semgrep` with
+`if platform.system() == 'Windows': return None`, an unconditional early return that never asks
+whether semgrep exists, and `SemanticGrep.format_output` then calls `.get()` on that `None` →
+`AttributeError`. So the item's preferred gate would have found semgrep present, allowed the run,
+and reproduced the identical traceback. Believing the diagnosis had a second cost available: it
+implicates semgrep-on-Windows generally, which would have wrongly gated Aegis's working semgrep
+scanner too.
+
+The fix gates the **host method**, not the tool. New `ScannerDescriptor.HostBroken` (GOOS → reason)
+marks a host binary that is present but cannot work on a platform — distinct from "not installed"
+(fixable) and from `RelevanceChecker` (about the workspace, not the platform), and invisible to
+`lookPath`, which only proves a file exists. `Resolve` treats a HostBroken platform as "no host
+binary", so the default `auto` falls through to the container — which is Linux and unaffected. This
+answers the item's own objection that a blanket skip would be "its own kind of lie... the container
+method runs it fine on the same machine": nothing is skipped, it's rerouted. Only an explicit
+`method: host` fails, reporting the reason and the way out instead of a traceback. Keyed by GOOS
+rather than probed because the breakage *is* a hardcoded platform branch in the tool.
+
+Verified end-to-end on the item's own scenario: a plain `aegis scan .` on a JS project, where
+language auto-detection enables njsscan (so `EnabledExplicit` is false and the operator never asked
+for it), now reports `njsscan (container)` with 2 real findings where it previously produced a
+Python traceback as an error row. njsscan's Windows `Install` entry is gone too — `pipx install
+njsscan` there installs precisely the binary HostBroken then refuses to run.
+
+**That last removal exposed a latent bug of the "which surfaces does it name vs merely happen to
+cover" shape** (the FIND-14/FIND-17 pattern, recorded in [roadmap.md](roadmap.md#status)):
+`InstallCommand`'s Windows→WSL install fallback was never gated on `WSLCapable`, but `Resolve` only
+ever offers `MethodWSL` to a WSLCapable tool. Every tool lacking a Windows install entry happened to
+be WSLCapable, so the gap was unreachable rather than absent — njsscan would have been the first
+tool to fall through it, into a WSL install no scan could reach. Now gated, in `InstallCommand` and
+`NoGuidedInstallReason` both. The existing `TestInstallCommandWSLFallback` fixture claimed to model
+"opengrep/kubescape's actual shape" while omitting the `WSLCapable` both real descriptors set; it
+passed only because the code didn't check the field, and now matches the shape it names.
+
+The item's cheap follow-on question — does bandit share the Windows dependency? — was checked:
+no. Bandit writes valid SARIF and exits 0 on a Windows host, mixed-language tree included.
+
+**P34.10's numbers were exactly right**, including its claim that the gap currently costs nothing:
+trivy's `fs` mode skips npm dev dependencies by default, so this repo's frontend lockfile catalogs
+**1 of 140** packages (139 devDependencies + preact), and all 140 have zero known vulnerabilities
+today. `trivyScanArgs` now passes `--include-dev-deps`.
+
+**The measurement the item asked for is what decided it, and it inverted the trade the item
+described.** The case for trivy's default is that dev deps don't ship, so their CVEs are lower
+severity — but osv-scanner already includes dev deps unconditionally, so those findings reach the
+report either way. The default bought no quiet; it only made the two SCA scanners disagree about
+scan scope and left an ecosystem covered by one of them alone. Measured against a lockfile with
+known-vulnerable dev deps (lodash 4.17.15, minimist 1.2.0): trivy reports **0** by default and
+**9** with the flag, including a CRITICAL (CVE-2021-44906) that osv-scanner was already reporting
+by itself. Driven through the real binary, the two scanners' findings **dedup** — 4 raw findings
+became 2 reported, tagged `[also flagged by: Trivy]` — so the flag buys corroboration on the
+exact path P34.8 had just fixed, at no cost in report volume. The scope decision is documented in
+[docs/security_scan.md](../docs/security_scan.md) under "SCA scope", per the item's request that
+the two scanners agree and that the answer be written where a user can find it.
+
+Both fixes are pinned by host-independent tests. The `HostBroken` rule is asserted through a new
+`hostGOOS` seam (P34.7's lesson — a test that asserts what the host happens to be is testing the
+host, not the rule), with `Binary: "go"` fixtures so the rule is proven to beat a real `lookPath`
+hit rather than passing because no binary was found.
+
+**Filed from this batch's own findings: P34.12** — osv-scanner exits 128 with empty stdout on any
+tree with no dependency lockfile, which `runJSON` (which tolerates a non-zero exit only when output
+was produced) turns into `osv-scanner: error: exit status 128`. Found by driving the real binary
+for P34.9, on a scratch JS project that happened to have no lockfile. It's P34.6's shape a third
+time — an accurate refusal rendered as a broken tool — and it's filed with the mechanism verified
+rather than assumed, including the wrong guess it rules out: 128 is git's error code too, but this
+reproduces identically before and after `git init`.
 
 ---
 

@@ -76,7 +76,7 @@ aegis scan --scanner secrets             # category alias: gitleaks + trufflehog
 aegis scan --scanner gitleaks --scanner trufflehog   # equivalent to --scanner secrets
 ```
 
-Recognized category aliases: `secrets` (gitleaks, trufflehog), `sast` (opengrep, semgrep, gosec,
+Recognized category aliases: `secrets` (gitleaks, trufflehog), `sast` (opengrep, gosec,
 bandit, brakeman, njsscan), `sca`/`deps` (osv-scanner, grype), `iac` (kubescape, hadolint),
 `misconfig` (kubescape, hadolint, trivy). An unrecognized name/category is rejected with the full
 valid list rather than silently running everything or erroring opaquely.
@@ -95,7 +95,7 @@ trufflehog   Secrets                 opt-in   trufflehog not installed and no co
 
 Category aliases (--scanner <alias> runs every scanner in the group):
   secrets    -> gitleaks, trufflehog
-  sast       -> bandit, brakeman, gosec, njsscan, opengrep, semgrep
+  sast       -> bandit, brakeman, gosec, njsscan, opengrep
   ...
 ```
 
@@ -192,12 +192,11 @@ model's history, not just its latest state.
 
 | Scanner | What it finds | Host binary | Enabled by default? |
 |---------|--------------|---------|---|
-| **opengrep** | SAST: code patterns, injection, auth issues, insecure APIs — default engine | `opengrep` | Yes |
-| **Semgrep** | Same as opengrep; selectable alternative engine | `semgrep` | No — opt-in |
+| **opengrep** | SAST: code patterns, injection, auth issues, insecure APIs | `opengrep` | Yes |
 | **gosec** | Go-specific SAST (crypto misuse, SQL injection, hardcoded creds) | `gosec` | No — opt-in |
 | **Bandit** | Python-specific SAST | `bandit` | No — opt-in |
 | **Brakeman** | Ruby on Rails-specific SAST | `brakeman` | No — opt-in |
-| **njsscan** | Node.js-specific SAST | `njsscan` | No — opt-in |
+| **njsscan** | Node.js-specific SAST (no working Windows host build — see below) | `njsscan` | No — opt-in |
 | **Trivy** | Vulnerabilities in dependencies (Go, npm, pip, etc.), IaC misconfig (Terraform/CloudFormation/K8s/Helm/Dockerfile/ARM), secrets | `trivy` | Yes |
 | **Gitleaks** | Secrets and credentials accidentally committed | `gitleaks` | Yes |
 | **trufflehog** | Secrets and credentials, with optional live verification against the real provider API — see below | `trufflehog` | No — opt-in |
@@ -214,15 +213,35 @@ scanning the directory directly (`grype dir:<path>`) so a missing/broken syft in
 blackholes the SCA control. Use `aegis scan sbom` to generate the SBOM standalone, without
 running grype at all.
 
-### SAST: opengrep by default, semgrep and language-specific engines opt-in
+### SCA scope: dev dependencies are scanned
+
+The three SCA scanners (trivy, osv-scanner, grype) all scan **development dependencies**, not
+just runtime ones. That's worth stating because it isn't trivy's own default: `trivy fs` skips
+npm/yarn/gradle dev dependencies unless `--include-dev-deps` is passed, which Aegis passes.
+
+The reasoning is scanner *agreement* rather than maximal findings. osv-scanner includes dev
+dependencies with no way to turn that off, so leaving trivy's default alone doesn't spare
+anyone the findings — it only means the two scanners disagree about what the scan covers, and
+that the ecosystem where they'd otherwise corroborate each other (and dedup, see below) is
+covered by one of them alone. On this repo's frontend lockfile, trivy's default catalogs 1 of
+140 packages (139 of them are devDependencies); on a lockfile with known-vulnerable dev
+dependencies, that default reports 0 findings where osv-scanner reports 8 — including a
+CRITICAL.
+
+A dev-dependency CVE is genuinely lower-severity than a runtime one — it doesn't ship to
+production. It is not *no* severity: build and test tooling executes on developer machines and
+in CI, with repo and often credential access. Judge these findings by that standard rather
+than filtering them out sight-unseen; `--severity`-style triage belongs in the report, not in
+a scanner's collection scope, because a scanner that never catalogs a package cannot tell you
+anything about it later.
+
+### SAST: opengrep, plus language-specific engines opt-in
 
 **opengrep** (a community-governed semgrep fork — no login/telemetry, openly-licensed rules)
-is the default SAST engine. **Semgrep** is a selectable alternative: same rule syntax, but
-`--config auto` needs network egress and nudges toward a platform login, and its registry's
-rule-update velocity for brand-new CVE patterns is faster than opengrep's — so keep it
-available for teams that want that trade-off. Both run with **explicitly pinned rule packs**
-(`p/owasp-top-ten`, `p/security-audit`) rather than `auto`, for reproducibility and
-supply-chain hygiene.
+is the SAST engine. It runs with **explicitly pinned rule packs** (`p/owasp-top-ten`,
+`p/security-audit`) rather than `auto`, for reproducibility and supply-chain hygiene:
+`--config auto` needs network egress, nudges toward a platform login, and resolves whatever
+the registry currently serves for that pack name rather than a fixed rule set.
 
 Four opt-in, language-targeted engines cover what the multi-language core misses:
 **gosec** (Go), **bandit** (Python), **brakeman** (Ruby on Rails), **njsscan** (Node.js).
@@ -232,11 +251,19 @@ They're listed in `aegis security status` like every other scanner but resolve t
 ```yaml
 security:
   tools:
-    semgrep:
-      enabled: true    # use semgrep instead of / alongside opengrep
     gosec:
       enabled: true    # this is a Go project
 ```
+
+**njsscan on Windows has no usable host build.** Its engine (libsast) stubs out its own
+analysis call on Windows and then crashes on the stub, so the host binary fails with a Python
+`AttributeError` on every project, with or without JavaScript in it. This is a property of
+njsscan itself, not of the underlying engine, which runs on Windows fine — libsast never asks
+whether it's available. Aegis therefore never routes njsscan to the host on Windows: a normal
+`method: auto` (the default) resolves it to the **container**, which runs it correctly on the
+same machine. Only an explicit `security.tools.njsscan.method: host` fails, and it reports
+that reason rather than a traceback. `aegis security install njsscan` on Windows says the
+same thing instead of installing a binary that cannot work.
 
 Or interactively: `/security-config` (TUI) or `aegis security config`. The TUI wizard also
 installs a tool for you — pick it from the list, choose "Install now (guided)," and confirm the
@@ -294,7 +321,7 @@ ever calls the vulnerable *function*. osv-scanner runs with `--call-analysis=all
 does call-graph analysis to tell the difference: for Go it's on by default and is
 govulncheck under the hood (the same analysis `go vet`-adjacent tooling uses); Rust and
 Java JAR analysis are experimental upstream. No other scanner Aegis integrates (trivy,
-grype, semgrep) has an open-source equivalent as of this writing, so their findings carry
+grype, opengrep) has an open-source equivalent as of this writing, so their findings carry
 no reachability signal — this is deliberately not guessed or inferred from anywhere else.
 
 Each finding's `reachability` is one of:
@@ -502,7 +529,7 @@ security:
     trivy:
       method: auto
       image: "aquasec/trivy@sha256:<digest-you-verified>"
-    semgrep:
+    opengrep:
       enabled: true
       method: host             # never fall back to a container for this one
     gitleaks:
@@ -584,7 +611,7 @@ even when a host binary exists.
 
 **Profiles.** `core` carries the statically-linked scanners (trivy, gitleaks, trufflehog,
 syft, grype, osv-scanner, kubescape, hadolint, opengrep). `full` (the default) adds the
-Python engines (semgrep, bandit, njsscan), Ruby (brakeman), and the network scanners
+Python engines (bandit, njsscan), Ruby (brakeman), and the network scanners
 (nmap, nuclei).
 
 **Size.** The full image is ~1.8GB. The vulnerability databases are deliberately *not* in
@@ -734,7 +761,7 @@ Severity: HIGH
 Location: internal/server/server.go:142
 Rule:     CWE-307 (Brute Force)
 Message:  Missing rate limiting on authentication endpoint
-Source:   semgrep
+Source:   opengrep
 
 Severity: MEDIUM
 Location: go.sum
@@ -760,7 +787,7 @@ returned (P11.8):
   the highest-severity copy and tagging it `[also flagged by: <tools>]` so
   nothing is silently hidden, just not repeated three times.
 - **ASVS mapping** — findings with a recognizable CWE (from SARIF rule tags
-  — semgrep/opengrep/gosec/bandit/brakeman/njsscan/ZAP all tag one when they
+  — opengrep/gosec/bandit/brakeman/njsscan/ZAP all tag one when they
   know it) get a best-effort OWASP ASVS 4.0.3 chapter label (e.g. `asvs: V5.3
   Output Encoding and Injection Prevention`), plus a small tool-based
   fallback for gitleaks/kubescape/hadolint/trivy-misconfig. Left blank when

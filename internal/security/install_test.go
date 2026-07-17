@@ -9,11 +9,11 @@ import (
 )
 
 func TestInstallCommandKnownTool(t *testing.T) {
-	// semgrep ships an install command for every supported OS (unlike
+	// bandit ships an install command for every supported OS (unlike
 	// opengrep, whose curl|bash installer has no Windows equivalent).
-	cmd, ok := InstallCommand("semgrep")
+	cmd, ok := InstallCommand("bandit")
 	if !ok || strings.TrimSpace(cmd) == "" {
-		t.Fatalf("InstallCommand(semgrep) = (%q, %v), want a non-empty command", cmd, ok)
+		t.Fatalf("InstallCommand(bandit) = (%q, %v), want a non-empty command", cmd, ok)
 	}
 }
 
@@ -159,6 +159,10 @@ func TestInstallCommandWSLFallback(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{
 		Name:   "test-wsl-install",
 		Binary: "test-wsl-install",
+		// WSLCapable is part of "opengrep/kubescape's actual shape" this
+		// fixture names — both real descriptors set it, and P34.9 made
+		// InstallCommand actually require it before offering a WSL install.
+		WSLCapable: true,
 		Install: map[string]string{
 			"linux": "curl -fsSL https://example.com/install.sh | bash",
 		},
@@ -316,5 +320,74 @@ func TestRunGuidedInstallPassesCommandIntactThroughShell(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "part1") || !strings.Contains(out, "part2") {
 		t.Errorf("output = %q, want both chained command parts to have run", out)
+	}
+}
+
+// --- P34.9: install guidance for a platform with no working host build ---
+
+// TestInstallCommandNonWSLCapableNeverFallsBackToWSL is P34.9's install-side
+// guard. Resolve only ever offers MethodWSL for a WSLCapable tool, so
+// offering a WSL install for anything else guides the operator into
+// installing a binary no scan can reach. Before njsscan dropped its Windows
+// install entry, every tool without one happened to be WSLCapable, so this
+// gap was unreachable rather than absent.
+func TestInstallCommandNonWSLCapableNeverFallsBackToWSL(t *testing.T) {
+	withHostGOOS(t, "windows")
+	withWSLDistroAvailable(t, func(context.Context, string) bool { return true })
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:       "test-nowsl-install",
+		Binary:     "test-nowsl-install",
+		WSLCapable: false,
+		Install:    map[string]string{"linux": "pipx install test-nowsl-install"},
+	})
+
+	if cmd, ok := InstallCommand("test-nowsl-install"); ok {
+		t.Errorf("InstallCommand = %q, want no command: the tool has no WSL execution path, so installing it into WSL is unusable", cmd)
+	}
+}
+
+// TestInstallCommandWSLCapableStillFallsBack is the other half: the guard
+// above must not break the opengrep/kubescape case it sits next to.
+func TestInstallCommandWSLCapableStillFallsBack(t *testing.T) {
+	withHostGOOS(t, "windows")
+	withWSLDistroAvailable(t, func(context.Context, string) bool { return true })
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:       "test-wsl-capable",
+		Binary:     "test-wsl-capable",
+		WSLCapable: true,
+		Install:    map[string]string{"linux": "curl -fsSL https://example.com/install.sh | bash"},
+	})
+
+	cmd, ok := InstallCommand("test-wsl-capable")
+	if !ok {
+		t.Fatal("InstallCommand returned nothing for a WSLCapable tool with a Linux install and a distro present")
+	}
+	if !strings.Contains(cmd, "wsl") {
+		t.Errorf("InstallCommand = %q, want a WSL-wrapped invocation", cmd)
+	}
+}
+
+// TestNoGuidedInstallReasonHostBrokenNamesTheRealFix proves the operator who
+// asks to install njsscan on Windows is told why no install helps and what
+// does — rather than being sent to the tool's docs to install the binary
+// that produces the traceback.
+func TestNoGuidedInstallReasonHostBrokenNamesTheRealFix(t *testing.T) {
+	withHostGOOS(t, "windows")
+	withTestDescriptor(t, ScannerDescriptor{
+		Name:       "test-hostbroken-install",
+		Binary:     "test-hostbroken-install",
+		HostBroken: map[string]string{"windows": "no working Windows host build: its engine crashes on the stub"},
+		Install:    map[string]string{"linux": "pipx install test-hostbroken-install"},
+	})
+
+	reason := NoGuidedInstallReason("test-hostbroken-install")
+	if !strings.Contains(reason, "no working Windows host build") {
+		t.Errorf("reason = %q, want the descriptor's own explanation", reason)
+	}
+	if !strings.Contains(reason, "build-image") {
+		t.Errorf("reason = %q, want the container image named as the actual fix", reason)
+	}
+	if strings.Contains(reason, "wsl") || strings.Contains(reason, "WSL") {
+		t.Errorf("reason = %q, must not suggest WSL for a tool with no WSL execution path", reason)
 	}
 }

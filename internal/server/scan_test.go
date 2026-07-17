@@ -27,7 +27,7 @@ import (
 //
 // PATH is cleared for the duration of the test so exec.LookPath can't find
 // any scanner binaries: every test in this file assumes scanners resolve to
-// "skipped", and on a dev box that actually has trivy/grype/semgrep/etc.
+// "skipped", and on a dev box that actually has trivy/grype/opengrep/etc.
 // installed a real scan would run instead and blow the client's 30s timeout
 // (same hermeticity trick as withEmptyPath in internal/security).
 func newScanTestServer(t *testing.T) (cl *client.Client, baseURL, token, workspace string) {

@@ -174,7 +174,7 @@ func TestResolveExplicitToolImageBeatsMultiscanner(t *testing.T) {
 
 // TestResolveMultiscannerNotCoveringTool proves the shared image is only used
 // for tools it actually carries — a core-profile build must not be handed
-// semgrep and asked to run it.
+// bandit and asked to run it.
 func TestResolveMultiscannerNotCoveringTool(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-ms", Binary: "definitely-not-a-real-binary", DefaultEnabled: true})
 	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
@@ -484,10 +484,10 @@ func TestMultiscannerToolsByProfile(t *testing.T) {
 		}
 		return false
 	}
-	if has(core, "semgrep") || has(core, "brakeman") || has(core, "nmap") {
+	if has(core, "bandit") || has(core, "brakeman") || has(core, "nmap") {
 		t.Errorf("core profile must not claim interpreter/network tools: %v", core)
 	}
-	if !has(full, "semgrep") || !has(full, "brakeman") || !has(full, "nmap") {
+	if !has(full, "bandit") || !has(full, "brakeman") || !has(full, "nmap") {
 		t.Errorf("full profile is missing an expected tool: %v", full)
 	}
 	// No profile may claim an excluded tool. gosec is the one that matters
@@ -531,7 +531,7 @@ func TestMultiscannerPolicyFromConfig(t *testing.T) {
 	if !p.Covers("trivy") || !p.Covers("gitleaks") {
 		t.Error("policy should cover its configured tools")
 	}
-	if p.Covers("semgrep") {
+	if p.Covers("bandit") {
 		t.Error("policy should not cover a tool absent from its list")
 	}
 	if p.EffectiveConcurrency() != 5 {
@@ -561,7 +561,7 @@ func TestMultiscannerPolicyFromConfig(t *testing.T) {
 // rather than just the happy path.
 func concurrencyFixtures() []Scanner {
 	return []Scanner{
-		sarifFixture("semgrep", "semgrep_sast.sarif.json", "semgrep"),
+		sarifFixture("opengrep", "opengrep_sast.sarif.json", "opengrep"),
 		sarifFixture("trivy-vuln", "trivy_vuln.sarif.json", "trivy"),
 		sarifFixture("trivy-misconfig", "trivy_misconfig.sarif.json", "trivy"),
 		fixtureScanner{name: "gitleaks", file: "gitleaks.json", parse: parseGitleaks},
@@ -683,35 +683,35 @@ func TestSASTScanArgsForMultiscannerUsesBakedRules(t *testing.T) {
 }
 
 // TestSelectScannersKeepsDefaultMethod is a regression test for selection
-// silently changing execution method. `aegis scan --scanner semgrep` under
-// security.default_method: container ran semgrep on the host, because
+// silently changing execution method. `aegis scan --scanner opengrep` under
+// security.default_method: container ran opengrep on the host, because
 // SelectScanners created a tools entry with an empty Method and policyFor
 // returns an existing entry verbatim rather than falling back to
 // DefaultMethod. Picking *which* scanners run must not change *how* they run.
 func TestSelectScannersKeepsDefaultMethod(t *testing.T) {
-	all := []Scanner{semgrepScanner{}, trivyScanner{}}
+	all := []Scanner{opengrepScanner{}, trivyScanner{}}
 	opts := Options{DefaultMethod: "container"}
 
-	_, got, err := SelectScanners(all, opts, []string{"semgrep"})
+	_, got, err := SelectScanners(all, opts, []string{"opengrep"})
 	if err != nil {
 		t.Fatalf("SelectScanners: %v", err)
 	}
-	if m := got.Tools["semgrep"].Method; m != "container" {
-		t.Errorf("selected semgrep Method = %q, want the inherited \"container\"", m)
+	if m := got.Tools["opengrep"].Method; m != "container" {
+		t.Errorf("selected opengrep Method = %q, want the inherited \"container\"", m)
 	}
 
 	// An explicit per-tool method still wins — this fills a gap, never
 	// overrides an operator's choice.
 	opts2 := Options{
 		DefaultMethod: "container",
-		Tools:         map[string]ToolPolicy{"semgrep": {Method: "host"}},
+		Tools:         map[string]ToolPolicy{"opengrep": {Method: "host"}},
 	}
-	_, got2, err := SelectScanners(all, opts2, []string{"semgrep"})
+	_, got2, err := SelectScanners(all, opts2, []string{"opengrep"})
 	if err != nil {
 		t.Fatalf("SelectScanners: %v", err)
 	}
-	if m := got2.Tools["semgrep"].Method; m != "host" {
-		t.Errorf("selected semgrep Method = %q, want the explicit \"host\" preserved", m)
+	if m := got2.Tools["opengrep"].Method; m != "host" {
+		t.Errorf("selected opengrep Method = %q, want the explicit \"host\" preserved", m)
 	}
 }
 

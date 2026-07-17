@@ -16,7 +16,7 @@ func TestLoadRelevantScoresHigherForMatching(t *testing.T) {
 		"- The database uses PostgreSQL for persistence\n"+
 			"- The frontend is built with React and TypeScript\n"+
 			"- CI runs on GitHub Actions\n"+
-			"- Security scans use Semgrep for static analysis\n",
+			"- Security scans use Opengrep for static analysis\n",
 	), 0o644)
 
 	src := Sources{ProjectRoot: root, DataDir: dataDir}

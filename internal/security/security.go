@@ -130,7 +130,7 @@ type Finding struct {
 
 // Scanner is one external analysis tool.
 type Scanner interface {
-	// Name is the scanner identifier (e.g. "semgrep").
+	// Name is the scanner identifier (e.g. "opengrep").
 	Name() string
 	// Resolve reports how this scanner would run right now under opts:
 	// MethodHost (its binary is on PATH and policy allows it), MethodContainer
@@ -162,8 +162,8 @@ type RelevanceChecker interface {
 }
 
 // DefaultScanners returns the built-in filesystem scanners. opengrep is the
-// default SAST engine (P11.3); semgrep and the four language-targeted
-// engines (gosec/bandit/brakeman/njsscan) are included too but resolve to
+// SAST engine (P11.3); the four language-targeted engines
+// (gosec/bandit/brakeman/njsscan) are included too but resolve to
 // MethodNone ("opt-in tool, not enabled by default") unless explicitly
 // enabled via security.tools.<name>.enabled — listed here rather than
 // omitted so `aegis security status`/`/security-config` can always discover
@@ -171,7 +171,6 @@ type RelevanceChecker interface {
 func DefaultScanners() []Scanner {
 	return []Scanner{
 		opengrepScanner{},
-		semgrepScanner{},
 		gosecScanner{},
 		banditScanner{},
 		brakemanScanner{},

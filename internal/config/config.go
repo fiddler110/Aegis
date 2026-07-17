@@ -656,7 +656,7 @@ type SecurityConfig struct {
 	// Tools configures per-scanner behavior for `aegis scan`/the security_scan
 	// tool (P11.11): whether it's enabled, how it runs (host binary vs
 	// container image), and its digest-pinned image override. Keyed by
-	// scanner name (semgrep, trivy, gitleaks, ...); a name with no entry uses
+	// scanner name (opengrep, trivy, gitleaks, ...); a name with no entry uses
 	// DefaultMethod and runs enabled with no image override.
 	Tools map[string]SecurityToolConfig `koanf:"tools"`
 	// DefaultMethod is the resolver method for any scanner with no entry in
