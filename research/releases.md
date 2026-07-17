@@ -8,9 +8,51 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-17 — **P34.9** and **P34.10**, clearing Tier 2: njsscan's Windows
-traceback (a libsast bug, not the semgrep gap the item diagnosed) and trivy's silent npm
-dev-dependency skip. Earlier the same day: **P34.5-P34.8**, the previous Tier 2 batch.
+**Last updated:** 2026-07-17 — **P34.12**, the last Tier 2 item: osv-scanner's exit-128 "no package
+sources" refusal, which turned out to need two-way disambiguation rather than the one-way mapping
+its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearing the rest of Tier
+2 — njsscan's Windows traceback (a libsast bug, not the semgrep gap the item diagnosed) and
+trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P34.12 — osv-scanner's exit-128 refusal needed two-way disambiguation, not a one-way mapping
+
+Filed by the P34.9/P34.10 batch on its way out (see below), P34.12 fit the now-familiar P34.6
+shape — brakeman's "Please supply the path to a Rails application", trivy's silent dev-dep skip,
+now osv-scanner's `error: exit status 128` on any tree with no dependency manifest, all a scanner's
+accurate refusal reaching the report as a broken tool. The item's own filing had already reproduced
+the mechanism against the pinned osv-scanner 2.4.0 with Aegis's exact args, ruled out the tempting
+wrong guess (128 is git's code too, but the exit reproduces identically before and after `git
+init`), and proposed the fix: teach `osv-scanner`'s `Scan` branch that exit 128 with empty stdout
+means zero findings.
+
+**That fix was half right, and the half that was wrong is the interesting part.** Re-verifying
+against the same osv-scanner binary turned up a second producer of the identical exit 128 with
+empty stdout: a tree whose only candidate manifest exists but fails to parse (a corrupt
+`package-lock.json`) hits the same code path, logging `Error during extraction: ...` per failed
+file before the same closing `No package sources found` line. Collapsing exit 128 straight to "zero
+findings" would have silently converted that case — a repo with real dependencies whose lockfile is
+broken — into a clean SCA scan, which is a worse outcome than the error row it replaces and exactly
+the failure mode the item's own filing flagged as the risk of a `RelevanceChecker` manifest
+allowlist (drift causing a skipped scan on a repo that had dependencies all along). The manifest
+allowlist was rejected for that risk; a bare exit-code mapping would have reintroduced it by a
+different door.
+
+The fix (`internal/security/osv.go`) keys on osv-scanner's own stderr, not a guess: 128 with no
+`Error during extraction:` line is the benign case (nil error, zero findings); 128 with one or more
+of those lines is surfaced as an error naming the file(s) that failed to parse. `interpretOSVError`
+sits between both runners (`runJSON` host path, `runScannerImage`/`runContainerCLI` container path)
+and the existing `parseOSVScanner`, using `errors.As` so it also unwraps the container path's
+`fmt.Errorf("%w", ...)` wrapping. The container path's agreement with the host was measured, not
+assumed (the item's own stated gap): built and ran the multiscanner image directly against both a
+lockfile-less tree and a corrupt-lockfile tree, matching exit 128 in both cases. Also measured:
+`--recursive` on a JS project with only a `package.json` and no lockfile at all, and one whose
+lockfile's `packages` object has only the root entry — both hit exit 128 the same way. Pinned with
+table-driven tests exercising a real `*exec.ExitError` (built via a helper-process re-exec, not a
+`sh -c "exit N"` shell dependency — P34.7's lesson that a test asserting what the host happens to
+have is testing the host) across both the bare and container-wrapped shapes, plus the pass-through
+cases (127 and other real failures, and non-`*exec.ExitError` errors like a missing binary).
 
 ---
 
