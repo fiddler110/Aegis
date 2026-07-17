@@ -288,6 +288,16 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	}
 }
 
+// selectSandbox is a seam over server.SelectSandbox so tests can inject a
+// deterministic sandbox-selection result without needing a real docker/podman
+// install, mirroring internal/security's detectRuntime seam over
+// sandbox.DetectBest. Without it the whole selection path
+// (server.SelectSandbox -> sandbox.NewContainerBackend -> the real runtime
+// probe) reaches the host, so a test asserting the runtime-absent branch
+// really asserts "does this machine have podman?" — it passes precisely when
+// it isn't exercising the misconfig it covers (P34.7).
+var selectSandbox = server.SelectSandbox
+
 // doctorSandboxCheck runs the same SelectSandbox the daemon uses at startup
 // (and the subprocess swarm worker reconstructs, internal/cli/worker.go) so
 // the configured-vs-actually-active sandbox backend gap P25.2 fixed for the
@@ -299,7 +309,7 @@ func doctorSandboxCheck(cfg *config.Config) doctorCheck {
 		cwd = "."
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sb, fallback, reason, err := server.SelectSandbox(cfg.Sandbox, cwd, logger)
+	sb, fallback, reason, err := selectSandbox(cfg.Sandbox, cwd, logger)
 	if err != nil {
 		return doctorCheck{
 			Name: name, Severity: doctorFail,
