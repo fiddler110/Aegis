@@ -3,6 +3,7 @@ package security
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -62,8 +63,14 @@ type osvEvent struct {
 // osvGroup mirrors google/osv-scanner's GroupInfo: IDs alias the same
 // underlying vulnerability across databases, and ExperimentalAnalysis
 // carries the --call-analysis verdict per ID when the ecosystem supports it.
+//
+// Aliases is the superset of IDs: osv-scanner routinely reports a group whose
+// IDs are Go-vulndb/GHSA identifiers only and files the CVE under Aliases
+// instead (P34.8), so it's Aliases — not IDs — that reliably carries the one
+// identifier other scanners key on.
 type osvGroup struct {
 	IDs                  []string                   `json:"ids"`
+	Aliases              []string                   `json:"aliases"`
 	MaxSeverity          string                     `json:"max_severity"`
 	ExperimentalAnalysis map[string]osvAnalysisInfo `json:"experimental_analysis"`
 }
@@ -73,9 +80,67 @@ type osvAnalysisInfo struct {
 	Unimportant bool `json:"unimportant"`
 }
 
+// osvRuleID renders a group's identifiers with any CVE alias guaranteed to be
+// among them.
+//
+// Dedup keys SCA findings on an embedded CVE (normalizeRuleID), which only
+// works if the CVE is actually in the rendered rule ID. osv-scanner's group
+// IDs frequently aren't: a vulnerability trivy reports as "CVE-2021-3121"
+// arrives here as ids ["GO-2021-0053", "GHSA-c3h9-896r-86jm"] with the CVE
+// only under aliases, so the two copies of one finding never merged (P34.8).
+// Only CVE aliases are appended — normalizeRuleID looks for nothing else, and
+// osv-scanner's alias sets also carry distro-specific IDs (BIT-*, etc.) that
+// would be noise in a rule ID a user reads.
+func osvRuleID(g osvGroup) string {
+	ids := append([]string{}, g.IDs...)
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[strings.ToUpper(id)] = true
+	}
+	for _, alias := range g.Aliases {
+		if !cveRe.MatchString(alias) {
+			continue
+		}
+		if key := strings.ToUpper(alias); !seen[key] {
+			seen[key] = true
+			ids = append(ids, alias)
+		}
+	}
+	return strings.Join(ids, ", ")
+}
+
+// osvRelativeSource re-renders osv-scanner's source path relative to the scan
+// root, the way every SARIF-based scanner already reports locations.
+//
+// osv-scanner resolves its target to an absolute host path (host method) or
+// to the container mount point (/src, container method), while trivy/grype
+// emit a path relative to the scanned tree. normalizeLocation can't reconcile
+// the two — it has no idea what the root was — so "CVE-x at go.mod" and
+// "CVE-x at /abs/path/go.mod" keyed differently and no osv-scanner finding
+// ever merged with anything (P34.8). Root is trimmed here, at the one place
+// that knows it.
+func osvRelativeSource(root, path string) string {
+	if root == "" || path == "" {
+		return path
+	}
+	r := strings.TrimSuffix(filepath.ToSlash(root), "/")
+	p := filepath.ToSlash(path)
+	if r == "" || len(p) <= len(r) {
+		return p
+	}
+	// EqualFold: a Windows host root ("D:\dev\repo") and osv-scanner's
+	// rendering of it ("D:/dev/repo") can differ in case.
+	if strings.EqualFold(p[:len(r)], r) && p[len(r)] == '/' {
+		return p[len(r)+1:]
+	}
+	return p
+}
+
 // parseOSVScanner maps osv-scanner's native JSON report onto Finding, one
-// per (package, alias-group) pair.
-func parseOSVScanner(data []byte) ([]Finding, error) {
+// per (package, alias-group) pair. Root is the directory osv-scanner was
+// pointed at, trimmed from each finding's location (see osvRelativeSource);
+// pass "" to leave osv-scanner's own paths untouched.
+func parseOSVScanner(data []byte, root string) ([]Finding, error) {
 	data = []byte(strings.TrimSpace(string(data)))
 	if len(data) == 0 {
 		return nil, nil
@@ -95,7 +160,7 @@ func parseOSVScanner(data []byte) ([]Finding, error) {
 				if len(g.IDs) == 0 {
 					continue
 				}
-				ruleID := strings.Join(g.IDs, ", ")
+				ruleID := osvRuleID(g)
 				title := ruleID
 				remediation := ""
 				if v, ok := vulnByID[g.IDs[0]]; ok {
@@ -107,7 +172,7 @@ func parseOSVScanner(data []byte) ([]Finding, error) {
 					RuleID:       ruleID,
 					Severity:     osvSeverity(g.MaxSeverity),
 					Title:        title,
-					Location:     fmt.Sprintf("%s@%s (%s)", pkg.Package.Name, pkg.Package.Version, firstNonEmpty(res.Source.Path, pkg.Package.Ecosystem)),
+					Location:     fmt.Sprintf("%s@%s (%s)", pkg.Package.Name, pkg.Package.Version, firstNonEmpty(osvRelativeSource(root, res.Source.Path), pkg.Package.Ecosystem)),
 					Remediation:  remediation,
 					Reachability: groupReachability(g.IDs, g.ExperimentalAnalysis),
 				})

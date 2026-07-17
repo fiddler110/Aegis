@@ -52,7 +52,7 @@ func FuzzParseOSVScanner(f *testing.F) {
 	f.Add([]byte(`{}`))
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = parseOSVScanner(data)
+		_, _ = parseOSVScanner(data, "")
 	})
 }
 

@@ -10,8 +10,11 @@ import (
 )
 
 // cveRe extracts a CVE identifier embedded anywhere in a rule ID string —
-// osv-scanner joins alias IDs as "CVE-2023-1234, GHSA-xxxx-yyyy-zzzz", and
-// this lets that match trivy/grype's bare "CVE-2023-1234" RuleID.
+// osv-scanner findings carry alias IDs joined as "GO-2021-0053, CVE-2023-1234"
+// (see osvRuleID), and this lets that match trivy/grype's bare "CVE-2023-1234"
+// RuleID. The CVE is the only identifier the tools reliably share: the same
+// vulnerability is otherwise a GO-*/GHSA-* ID to osv-scanner and a CVE to
+// trivy, so a rule ID without one merges with nothing (P34.8).
 var cveRe = regexp.MustCompile(`(?i)CVE-\d{4}-\d+`)
 
 // normalizeRuleID reduces a Finding's RuleID to a dedup-comparable form: the

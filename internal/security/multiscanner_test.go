@@ -566,7 +566,7 @@ func concurrencyFixtures() []Scanner {
 		sarifFixture("trivy-misconfig", "trivy_misconfig.sarif.json", "trivy"),
 		fixtureScanner{name: "gitleaks", file: "gitleaks.json", parse: parseGitleaks},
 		fixtureScanner{name: "trufflehog", file: "trufflehog.jsonl", parse: func(b []byte) ([]Finding, error) { return parseTrufflehog(b, true) }},
-		fixtureScanner{name: "osv-scanner", file: "osv_scanner.json", parse: parseOSVScanner},
+		fixtureScanner{name: "osv-scanner", file: "osv_scanner.json", parse: osvFixtureParse},
 		sarifFixture("grype", "grype_sca.sarif.json", "grype"),
 		sarifFixture("zap", "zap_dast.sarif.json", "zap"),
 		fixtureScanner{name: "broken", file: "does_not_exist.json", parse: parseGitleaks},
