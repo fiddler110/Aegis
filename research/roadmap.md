@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 10 — one Tier 2 item (**P34.5**), four Tier 3 items
+**Open items:** 11 — two Tier 2 items (**P34.5, P34.6**), four Tier 3 items
 (**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 is
 fully clear.
 
@@ -172,8 +172,9 @@ preflight companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-One item: P34.5 — found 2026-07-16 while fixing the P34.2 false positive, small and
-dependency-free. (P34.3 shipped 2026-07-16 — see [releases.md](releases.md#latest-changes);
+Two items: P34.5 — found 2026-07-16 while fixing the P34.2 false positive — and P34.6, found
+2026-07-16 while live-verifying the multiscanner image. Both small and dependency-free.
+(P34.3 shipped 2026-07-16 — see [releases.md](releases.md#latest-changes);
 P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16;
 P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped 2026-07-15;
 P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
@@ -204,6 +205,36 @@ is that users never think to look. Suggest the exact three-line config change ra
 describing it. Note the one real behavior difference so the fix isn't a silent downgrade: the
 `ollama` branch defaults `think: false` while the compat path leaves the model's own default
 alone, so a qwen3-style reasoning model stops thinking unless `think: true` is set explicitly.
+
+### P34.6 — brakeman reports "error" on every non-Rails project instead of skipping
+
+Effort: S
+
+Found 2026-07-16 while live-verifying the multiscanner image. `brakeman` against this repo
+exits 4 with empty stdout and `Please supply the path to a Rails application (looking in
+/src).` — which is brakeman working correctly. Aegis has no relevance gate for it, so
+`runContainerCLI` sees a non-zero exit with no output and the scan reports
+`brakeman: error: exit status 4`. Not a container artifact: a host-installed brakeman does
+the same thing, and has since the scanner was added. It only surfaces now because the
+multiscanner's `full` profile makes brakeman trivial to turn on.
+
+The fix is a `RelevanceChecker` on `brakemanScanner` (`internal/security/scanners.go`),
+exactly as `hadolintScanner` and `kubescapeScanner` already have — brakeman's own check is
+`config/environment.rb` plus a `config/application.rb`/`Rakefile`, so mirroring "is there a
+Rails app here" is cheap and unambiguous. It then reports `no Rails application found in
+workspace`, the same shape as `no Dockerfile found in workspace`, instead of an error that
+looks like a broken tool.
+
+Worth keeping the existing semantics while doing it: `PlanScanners` only consults a
+`RelevanceChecker` when `!EnabledExplicit`, so an operator who explicitly sets
+`security.tools.brakeman.enabled: true` still gets the run (and brakeman's real error) —
+explicit config beating auto-detection is the intended behavior, not a gap to close here.
+
+The category is worth a second look beyond brakeman: this is a scanner whose "not
+applicable" answer is indistinguishable from "failed", and it was invisible until something
+made the tool easy to enable. `njsscan`, `bandit` and `gosec` are the other language-targeted
+engines with no relevance gate — check whether any of them also errors rather than skipping
+on a project in the wrong language.
 
 ---
 
