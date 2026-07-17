@@ -11,16 +11,18 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 11 — one Tier 2 item (**P34.12**), four Tier 3 items (**P33.10, P33.11, P33.16,
-P33.19**), and six parked (**P25.9, P33.12, P33.20-P33.22, P34.11**). Tier 1 is fully clear.
+**Open items:** 10 — four Tier 3 items (**P33.10, P33.11, P33.16,
+P33.19**), and six parked (**P25.9, P33.12, P33.20-P33.22, P34.11**). Tier 1 and Tier 2 are both
+fully clear.
 
-**P34.9 and P34.10 shipped 2026-07-17**, clearing Tier 2 apart from **P34.12**, which this batch
-filed on its way out — osv-scanner reports `error: exit status 128` on any tree with no dependency
-lockfile, which is the P34.6 "accurate refusal that reads as a broken tool" shape a third time.
-Filed with a verified mechanism (reproduced with Aegis's exact args, before and after `git init`,
-on both an absent and an empty lockfile) rather than a plausible one — the first guess, that 128
-meant a git failure, was wrong. See
-[releases.md](releases.md#latest-changes). **P34.9 makes it four consecutive items whose diagnosis
+**P34.9, P34.10, and P34.12 shipped 2026-07-17**, clearing Tier 2. P34.12 — osv-scanner reporting
+`error: exit status 128` on any tree with no dependency lockfile — was itself the P34.6 "accurate
+refusal that reads as a broken tool" shape a third time, but the fix its own filing proposed turned
+out to be half right: exit 128 is *also* what osv-scanner returns when it found a manifest and
+failed to parse it, which a bare "128 means zero findings" mapping would have silently read as a
+clean scan. `interpretOSVError` (`internal/security/osv.go`) now checks stderr for osv-scanner's own
+`Error during extraction:` marker to tell the two cases apart, surfacing the second as an error that
+names the file. See [releases.md](releases.md#latest-changes). **P34.9 makes it four consecutive items whose diagnosis
 was wrong, and it's the sharpest case yet: the fix the item specified was the one that could not
 work.** The item blamed njsscan's Windows traceback on semgrep being unsupported there and offered
 "gate on semgrep's own availability" as a candidate. Semgrep runs fine on Windows; njsscan's engine
@@ -222,49 +224,13 @@ preflight companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-One item, filed 2026-07-17 by the P34.9/P34.10 batch on its way out — the same way that batch's
-own two items were filed, and the same family as both (a scanner whose accurate refusal reaches
-the report as a broken tool). Dependency-free. (P34.9 and P34.10 shipped 2026-07-17 — see
-[releases.md](releases.md#latest-changes); P34.5-P34.8 shipped 2026-07-17; P34.3 shipped
+**Status:** None open. (P34.12 shipped 2026-07-17 — see [releases.md](releases.md#latest-changes);
+P34.9 and P34.10 shipped 2026-07-17; P34.5-P34.8 shipped 2026-07-17; P34.3 shipped
 2026-07-16; P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped
 2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped
 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
 
-### P34.12 — osv-scanner reports "error: exit status 128" on any tree with no dependency lockfile
-
-Effort: S
-
-Found 2026-07-17 while live-verifying P34.9 — a scratch JS project (package.json + app.js, no
-lockfile) produced `osv-scanner: error: exit status 128` in an otherwise clean scan report.
-
-**The mechanism is verified, not inferred** (osv-scanner 2.4.0, the version pinned in the
-multiscanner Containerfile and the one on this host — so this isn't version skew):
-
-- With Aegis's exact args (`--format json --call-analysis=all --recursive .`), osv-scanner exits
-  **128** and writes **zero bytes to stdout**, with `No package sources found, --help for usage
-  information.` on stderr. 128 is osv-scanner's documented "no package sources" code.
-- It does this both for a tree with no lockfile at all *and* for a lockfile whose `packages` has
-  only the root entry. Add one real package and it's exit 0 with JSON on stdout.
-- It is **not** git-related, which is the obvious wrong guess (128 is also git's error code):
-  reproduced identically before and after `git init`.
-- `runJSON` tolerates a non-zero exit "as long as output was produced". stdout is empty here, so
-  the tolerance doesn't apply and the exit code becomes an error row.
-
-So this is the **P34.6 shape exactly**: brakeman's "Please supply the path to a Rails application"
-was an accurate refusal that read as a broken tool, and this is the same — "there are no
-dependencies here to scan" is correct, useful, and currently rendered as a failure. It hits any
-tree with no dependency manifest: a C/C++ repo, a shell/docs repo, a bare scratch directory.
-
-The decision is where to put it, and unlike P34.6 the obvious answer is probably wrong.
-A `RelevanceChecker` mirrors brakeman's fix but would have to enumerate every manifest type
-osv-scanner supports across every ecosystem it covers — a list that will drift out of date
-silently, and the failure mode of drift is a **skipped SCA scan on a repo that had dependencies
-all along**, which is worse than the error row it replaces. Prefer teaching the osv-scanner Scan
-branch that exit 128 with empty stdout means zero findings, since that's osv-scanner's own
-documented contract and needs no list. Worth checking whether the container path agrees (same
-binary and version, so it should — but that's the assumption, not a measurement).
-
-Worth a look while there: the same "accurate refusal, error-shaped" question for the other
+Worth a look for a future item: the same "accurate refusal, error-shaped" question for the other
 scanners' documented exit codes. P34.6 checked the *language*-targeted tools; nothing has swept
 the SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I broke".
 
