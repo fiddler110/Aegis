@@ -235,8 +235,8 @@ func newSecurityUpdateDBCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update-db",
 		Short: "Download/refresh the multiscanner's vulnerability databases",
-		Long: "Populates the scanner cache volume (" + security.MultiscannerCacheVolume + ") with the trivy and " +
-			"osv-scanner vulnerability databases. Run this once after `aegis security build-image`, and " +
+		Long: "Populates the scanner cache volume (" + security.MultiscannerCacheVolume + ") with the trivy, " +
+			"grype, and osv-scanner vulnerability databases. Run this once after `aegis security build-image`, and " +
 			"again whenever you want fresher data — the databases are only as current as the last run.\n\n" +
 			"This is the only Aegis container run that is given network access, and it mounts no workspace. " +
 			"Scans themselves still run with --network none and read the databases from the volume.",

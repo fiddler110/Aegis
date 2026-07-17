@@ -11,8 +11,14 @@
 # Deliberately NOT here:
 #   zap     - large Java app with its own mount contract (/zap/wrk:rw); keeps
 #             its own official image (see internal/security/dast.go).
-#   image scanners (trivy image / grype / dockle) - host-only by design;
-#             dockle needs the container engine socket (internal/security/images.go).
+#   dockle  - inspects a built image through the local container engine socket,
+#             so it can't run from inside a --network none scanner container
+#             (internal/security/images.go).
+#
+# Note on grype: the grype *binary* is carried here for source SCA (grype
+# dir:/src, internal/security/scanners.go). Scanning a built container *image*
+# by reference (grype <ref>) remains host-only — that needs registry egress the
+# scanner container denies (see imageContainerFallbackUnsupported).
 #
 # PROFILE=core  static scanner binaries only (no Python/Ruby/network tools).
 # PROFILE=full  everything: adds bandit/njsscan (Python), brakeman
@@ -36,6 +42,7 @@ ARG GITLEAKS_VERSION=8.30.1
 ARG TRUFFLEHOG_VERSION=3.95.9
 ARG SYFT_VERSION=1.48.0
 ARG OSV_SCANNER_VERSION=2.4.0
+ARG GRYPE_VERSION=0.116.0
 ARG KUBESCAPE_VERSION=4.0.10
 ARG HADOLINT_VERSION=2.14.0
 ARG OPENGREP_VERSION=1.25.0
@@ -91,17 +98,16 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates curl git unzip \
 	&& rm -rf /var/lib/apt/lists/*
 
-# Two scanners are deliberately absent:
+# One scanner is deliberately absent:
 #
 #   gosec  needs a Go toolchain and module resolution (network) to load
 #          packages, and reports zero findings rather than failing when it
 #          can't — which --network none guarantees. Measured on the Aegis repo:
 #          host 244 findings, container 0.
-#   grype  removed by decision; trivy + osv-scanner cover SCA here.
 #
 # See multiscannerExcludedTools in ../multiscanner.go.
 COPY --from=fetch /out/trivy /out/gitleaks /out/trufflehog /out/syft \
-	/out/osv-scanner /out/kubescape \
+	/out/osv-scanner /out/grype /out/kubescape \
 	/out/hadolint /out/opengrep /usr/local/bin/
 
 # Vulnerability databases are NOT baked into the image — they were ~3.7GB of a
@@ -118,13 +124,26 @@ COPY --from=fetch /out/trivy /out/gitleaks /out/trufflehog /out/syft \
 # XDG_CACHE_HOME redirects osv-scanner (and opengrep) into the volume too:
 # both cache under $XDG_CACHE_HOME/$HOME, and osv-scanner's DB is the other
 # thing update-db populates.
+#
+# GRYPE_DB_CACHE_DIR points grype's vulnerability DB at the same volume; the DB
+# lives at $GRYPE_DB_CACHE_DIR/<schema>/vulnerability.db (schema == grype's
+# ModelVersion, 6 for the pinned GRYPE_VERSION). GRYPE_DB_AUTO_UPDATE=false and
+# GRYPE_DB_REQUIRE_UPDATE_CHECK=false keep scans from reaching the network for a
+# DB refresh; GRYPE_DB_VALIDATE_AGE=false stops grype refusing an air-gapped DB
+# that has aged past its 120h staleness window (update-db can't run on every
+# scan, so a cached DB is expected to be "old"). aegis-update-db flips
+# GRYPE_DB_AUTO_UPDATE on for its own run.
 ENV HOME=/opt/aegis-home \
 	AEGIS_CACHE_DIR=/cache \
 	XDG_CACHE_HOME=/cache \
 	TRIVY_CACHE_DIR=/cache/trivy \
 	TRIVY_SKIP_DB_UPDATE=true \
 	TRIVY_SKIP_JAVA_DB_UPDATE=true \
-	TRIVY_SKIP_CHECK_UPDATE=true
+	TRIVY_SKIP_CHECK_UPDATE=true \
+	GRYPE_DB_CACHE_DIR=/cache/grype/db \
+	GRYPE_DB_AUTO_UPDATE=false \
+	GRYPE_DB_REQUIRE_UPDATE_CHECK=false \
+	GRYPE_DB_VALIDATE_AGE=false
 
 # /cache is a mountpoint at runtime; create it (and a writable HOME) so the
 # image is still usable if someone runs it without the volume.

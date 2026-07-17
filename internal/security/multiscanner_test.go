@@ -115,8 +115,10 @@ func TestCacheCheckOnlyAppliesToDBTools(t *testing.T) {
 			t.Errorf("%s needs no DB but was gated on the cache: %q", name, reason)
 		}
 	}
-	if reason := verifyMultiscannerCache(context.Background(), sandbox.RuntimePodman, "trivy", p); reason == "" {
-		t.Error("trivy needs a DB and should have been gated on the empty cache")
+	for _, name := range []string{"trivy", "grype", "osv-scanner"} {
+		if reason := verifyMultiscannerCache(context.Background(), sandbox.RuntimePodman, name, p); reason == "" {
+			t.Errorf("%s needs a DB and should have been gated on the empty cache", name)
+		}
 	}
 }
 
@@ -502,6 +504,36 @@ func TestMultiscannerToolsByProfile(t *testing.T) {
 	}
 	if _, ok := multiscannerExcludedTools["gosec"]; !ok {
 		t.Error("gosec must stay excluded: it silently reports 0 findings in a --network none container")
+	}
+	// grype is carried by the image (core profile) for source SCA — it was
+	// reinstated once the DB moved to the cache volume like trivy's/osv's.
+	if !has(core, "grype") {
+		t.Errorf("grype should be in the core profile: %v", core)
+	}
+	if _, ok := multiscannerExcludedTools["grype"]; ok {
+		t.Error("grype must not be listed as excluded: it is carried by the image")
+	}
+}
+
+// TestSCAExcludeArgsCoverBuildArtifacts guards P34.11: the source-SCA dir:
+// scans (grype and the syft SBOM they're fed from) must exclude compiled build
+// output, or grype reports the developer's local binaries as project CVEs.
+func TestSCAExcludeArgsCoverBuildArtifacts(t *testing.T) {
+	args := scaExcludeArgs()
+	if len(args) != len(scaBuildArtifactExcludes)*2 {
+		t.Fatalf("scaExcludeArgs = %v, want %d --exclude pairs", args, len(scaBuildArtifactExcludes))
+	}
+	sawExe := false
+	for i := 0; i < len(args); i += 2 {
+		if args[i] != "--exclude" {
+			t.Errorf("arg %d = %q, want --exclude", i, args[i])
+		}
+		if args[i+1] == "./**/*.exe" {
+			sawExe = true
+		}
+	}
+	if !sawExe {
+		t.Error("exclude patterns must cover ./**/*.exe (the measured P34.8 noise was Windows .exe build output)")
 	}
 }
 

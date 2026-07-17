@@ -20,11 +20,20 @@ func GenerateSBOM(ctx context.Context, dir string, opts Options) ([]byte, Method
 	if method == MethodNone {
 		return nil, MethodNone, errors.New(reason)
 	}
+	// The same build-artifact exclusion grype's dir: scan uses (P34.11): syft is
+	// what catalogs a compiled binary's embedded module list, so excluding those
+	// here keeps the persisted SBOM — and the grype run fed from it — scoped to
+	// declared dependencies rather than local build output. See
+	// scaBuildArtifactExcludes.
 	if method == MethodContainer {
-		out, err := runContainerImage(ctx, rt, image, dir, "dir:/src", "-o", SBOMFormat)
+		args := append([]string{"dir:/src"}, scaExcludeArgs()...)
+		args = append(args, "-o", SBOMFormat)
+		out, err := runContainerImage(ctx, rt, image, dir, args...)
 		return out, method, err
 	}
-	out, err := runJSON(ctx, dir, "syft", "dir:.", "-o", SBOMFormat)
+	args := append([]string{"dir:."}, scaExcludeArgs()...)
+	args = append(args, "-o", SBOMFormat)
+	out, err := runJSON(ctx, dir, "syft", args...)
 	return out, method, err
 }
 

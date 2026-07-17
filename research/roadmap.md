@@ -11,8 +11,10 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 5 — all parked (**P25.9, P33.12, P33.21, P33.22, P34.11**). Tier 1, Tier 2, and
-Tier 3 are all fully clear.
+**Open items:** 4 — all parked (**P25.9, P33.12, P33.21, P33.22**). Tier 1, Tier 2, and
+Tier 3 are all fully clear. (**P34.11 shipped 2026-07-17** — grype was reinstated into the
+multiscanner image for tool centralization, which was P34.11's activation trigger, so its
+build-artifact-exclusion fix landed alongside it. See releases.md.)
 
 **The whole Tier 3 batch — P33.10, P33.11, P33.16, P33.19 — shipped 2026-07-17**, four parallel
 sub-agents in isolated worktrees, applied to `main` one at a time with a green `go build`/`go vet`/
@@ -266,36 +268,11 @@ P33.19, shipped 2026-07-16.)
 
 ## Open Work — Tier 4
 
-Five items parked — P25.9, P33.12, P33.21, P33.22, P34.11. Low urgency, no trigger, or
+Four items parked — P25.9, P33.12, P33.21, P33.22. Low urgency, no trigger, or
 explicitly parked pending demand. Do not build speculatively — revisit only if a concrete trigger
 appears, and check with the user before starting any of these.
 (P33.20 shipped 2026-07-17 alongside P33.11 — its message-allowlist fix was implemented as part of
 that work; P32.9-P32.11 shipped 2026-07-15.)
-
-### P34.11 — If grype is ever reinstated, `dir:` mode must exclude build artifacts
-
-Effort: S — parked; activation trigger is any move to re-add grype to the multiscanner
-
-Parked because it is conditional on a decision that currently points the other way. P34.8
-measured grype at 55 findings against this repo where trivy found 0 vulns, and classified them:
-**48 of 55 were gitignored compiled `.exe` build artifacts** (`testrun/aegis.exe`,
-`aegis-eval.exe`), almost all `stdlib` CVEs from the go1.25.0 toolchain baked into the binary,
-plus 2 from a vendored `tsc.exe` inside `node_modules`. `grype dir:` finds these because `syft`
-catalogs **574** Go components by reading binaries, against go.mod's 67.
-
-That is a property of one developer's local build output, not of the project's dependencies —
-which is **evidence for grype's current exclusion** (`multiscannerExcludedTools`,
-`internal/security/multiscanner.go`), not against it. P34.8's item had anticipated the opposite:
-that grype's extras might be real unique coverage and therefore an argument to reinstate it. They
-aren't.
-
-So this item only activates if someone moves to re-add grype for some *other* reason. If that
-happens, the finding to carry forward is that `dir:` mode needs to exclude build outputs
-(honoring `.gitignore`, or an explicit exclude list) — otherwise grype reports a scan of the
-developer's `go build` output as though it were a scan of the project, and the resulting finding
-count is both alarming and almost entirely noise. Note this also makes grype's numbers
-machine-dependent: a clean worktree with no compiled binaries gave **1** finding, the same tree
-with build artifacts gave 55.
 
 ### P33.21 — Editor/background surfaces ignore `KindToolCallStart`
 

@@ -55,6 +55,9 @@ That's not only a size decision — it's what makes runtime fetching viable at
 all. Scanner containers run with `--rm`, so without a persistent cache every
 scan would re-download trivy's ~1.2GB database from scratch.
 
+This is a single named volume shared by every scan in every project — one
+cache, machine-wide, not one per repo.
+
 | | network | workspace mounted |
 |---|---|---|
 | `aegis security update-db` (runs `update-db.sh`) | **yes** | no |
@@ -84,14 +87,10 @@ resolver can explain itself rather than suggesting a rebuild that won't help.
   that — it reports zero findings and exits clean. Measured on the Aegis repo:
   host 244 findings, container 0. Shipping it here would ship a silent
   all-clear, so it runs on the host or not at all.
-- **grype** — excluded by decision, not by a technical constraint: it worked
-  fine in the image, but trivy + osv-scanner were kept as the SCA coverage and
-  grype's DB was the largest single cache item. If you revisit this: on the
-  Aegis repo grype found 47 where trivy found 3 and osv-scanner 1, so it does
-  trade real dependency-CVE coverage. It remains a registered scanner, so a
-  host-installed grype still runs via `method: host`.
 - **Image scanners** (`trivy image`, `grype <ref>`) — host-only by design;
-  `runImageCmd` ignores the resolved method entirely.
+  `runImageCmd` ignores the resolved method entirely. Note this is the *image*
+  scanning use of grype; the grype binary is carried here for source SCA
+  (`grype dir:/src`), whose DB now lives in the cache volume like trivy's.
 
 ## The rule this image keeps learning
 
@@ -111,10 +110,11 @@ cannot tell you this — every one of those three passed a fully green suite.
 
 Scans run with `--network none` (see `containerRunArgs` in `../method.go`), so
 anything a tool would normally fetch on first use has to already be present.
-The build downloads the trivy and grype databases and sets
-`TRIVY_SKIP_DB_UPDATE` / `GRYPE_DB_AUTO_UPDATE=false` so the tools use what's
-baked in rather than failing against a network-less container. Nuclei templates
-are fetched as a pinned release tarball for the same reason.
+`aegis security update-db` downloads the trivy, grype, and osv-scanner
+databases into the cache volume, and the image sets `TRIVY_SKIP_DB_UPDATE` /
+`GRYPE_DB_AUTO_UPDATE=false` so scans use what's cached rather than failing
+against a network-less container. Nuclei templates are fetched as a pinned
+release tarball at build time for the same reason.
 
 The trade is staleness: databases are only as fresh as the last build. Refresh
 with `aegis security build-image --no-cache`.
