@@ -172,6 +172,12 @@ Use "aegis <command> --help" for details on any command below.`,
 				Notifications:  cfg.TUI.Notifications,
 				ImageRendering: cfg.TUI.ImageRendering,
 				Keybindings:    cfg.TUI.Keybindings,
+				// P33.10 pre-warm: "" off Ollama, disabling the warm ping. Only
+				// the native adapter can be pre-warmed, but the ping is a raw
+				// /api/generate call that works against any Ollama base — so this
+				// is populated whenever the config points at Ollama at all
+				// (ollamaNativeBase also matches an :11434 openai-compat base_url).
+				OllamaBaseURL: ollamaNativeBase(cfg),
 			})
 			unloadOllamaModel(cfg)
 			return runErr

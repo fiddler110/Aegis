@@ -119,40 +119,115 @@ func Detect(ctx context.Context, nativeBase, model string) (Result, bool) {
 	return res, true
 }
 
-// psContext returns the context_length /api/ps reports for model when it is
-// currently loaded, or 0. Older Ollama versions omit the field; model-name
-// matching tolerates a missing ":latest" tag on either side.
-func psContext(ctx context.Context, nativeBase, model string) int {
+// psModel is one entry from /api/ps's loaded-model list.
+type psModel struct {
+	Name          string `json:"name"`
+	Model         string `json:"model"`
+	ContextLength int    `json:"context_length"`
+}
+
+// psModels fetches the currently-loaded models from /api/ps. ok is false when
+// the request fails or the server does not respond 200 (older versions, or a
+// non-Ollama base) — distinct from a successful empty list (nothing loaded).
+func psModels(ctx context.Context, nativeBase string) (models []psModel, ok bool) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nativeBase+"/api/ps", nil)
 	if err != nil {
-		return 0
+		return nil, false
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0
+		return nil, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0
+		return nil, false
 	}
 	var out struct {
-		Models []struct {
-			Name          string `json:"name"`
-			Model         string `json:"model"`
-			ContextLength int    `json:"context_length"`
-		} `json:"models"`
+		Models []psModel `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, false
+	}
+	return out.Models, true
+}
+
+// psContext returns the context_length /api/ps reports for model when it is
+// currently loaded, or 0. Older Ollama versions omit the field; model-name
+// matching tolerates a missing ":latest" tag on either side.
+func psContext(ctx context.Context, nativeBase, model string) int {
+	models, ok := psModels(ctx, nativeBase)
+	if !ok {
 		return 0
 	}
-	for _, m := range out.Models {
+	for _, m := range models {
 		if sameModel(m.Name, model) || sameModel(m.Model, model) {
 			return m.ContextLength
 		}
 	}
 	return 0
+}
+
+// IsLoaded reports whether model is currently resident in Ollama's memory per
+// /api/ps. It keys on the model's presence in the loaded list, not on the
+// context_length field (which older versions omit), so it stays correct as a
+// pure "loaded / not loaded" gate. Returns false when nativeBase is
+// unreachable or reports no such model — the safe default for a pre-warm
+// decision, since warming an already-loaded model is a cheap no-op anyway.
+func IsLoaded(ctx context.Context, nativeBase, model string) bool {
+	models, ok := psModels(ctx, nativeBase)
+	if !ok {
+		return false
+	}
+	for _, m := range models {
+		if sameModel(m.Name, model) || sameModel(m.Model, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// Warm asks Ollama to load model into memory without generating anything, by
+// POSTing an empty-prompt /api/generate request (the inverse of the
+// keep_alive:0 unload in internal/cli/ollama.go). keep_alive is deliberately
+// omitted so the model loads for Ollama's own default duration rather than
+// being pinned — pre-warm removes the next cold load, it does not change the
+// residency policy. Best-effort: a non-nil error means the warm-up did not
+// happen, which is never fatal (the next real request simply pays the load).
+func Warm(ctx context.Context, nativeBase, model string) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]any{"model": model})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nativeBase+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama warm-up: %s", resp.Status)
+	}
+	return nil
+}
+
+// WarmIfUnloaded loads model into memory only when /api/ps reports it is not
+// already resident (P33.10 lever 2). It returns true when a warm-up was
+// actually issued. The /api/ps gate is the item's explicit requirement — never
+// pay a redundant load request for an already-loaded model.
+func WarmIfUnloaded(ctx context.Context, nativeBase, model string) bool {
+	if nativeBase == "" || model == "" {
+		return false
+	}
+	if IsLoaded(ctx, nativeBase, model) {
+		return false
+	}
+	_ = Warm(ctx, nativeBase, model)
+	return true
 }
 
 // showInfo queries POST /api/show for a modelfile-pinned num_ctx and the

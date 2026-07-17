@@ -59,6 +59,21 @@ type SlashResult struct {
 	// framework is picked.
 	ThreatModelTarget *string
 
+	// Transient marks output that should render in a dismissable overlay panel
+	// (P33.11) instead of being appended to the transcript — set by the
+	// dispatcher from the command's commandDef.transient flag, so a session of
+	// informational housekeeping (/status, /help, /memory …) doesn't leave
+	// stale blocks behind. Only ever consulted when the result carries plain
+	// Output (no Message/picker/sentinel), so a transient command that still
+	// needs to open a picker or send a message is unaffected.
+	Transient bool
+
+	// TransientTitle is the chip shown at the top of the transient panel — the
+	// command name (e.g. "/status"), stamped by the dispatcher alongside
+	// Transient so the panel can label itself without the TUI threading the
+	// parsed command name into the result message.
+	TransientTitle string
+
 	// SwitchToSession is non-empty after a successful /fork (P22.3): the TUI
 	// must load this session id as the active one, the same "fetch and
 	// replace the live view" path Ctrl+Y's session picker and ReloadSession
@@ -103,7 +118,19 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model, workDir strin
 	d.builtins = make(map[string]func(args []string) SlashResult, len(defs)+1)
 	for _, c := range defs {
 		c := c
-		d.builtins[c.name] = func(args []string) SlashResult { return c.handler(d, args) }
+		d.builtins[c.name] = func(args []string) SlashResult {
+			r := c.handler(d, args)
+			// Stamp the transient flag from the single-source table (P33.11) so
+			// the TUI routes this command's plain output into a dismissable
+			// panel rather than the transcript. A command that opens a picker or
+			// sends a message carries those fields regardless; the TUI only
+			// honors Transient on plain Output.
+			if c.transient {
+				r.Transient = true
+				r.TransientTitle = "/" + c.name
+			}
+			return r
+		}
 	}
 	d.builtins["quit"] = d.cmdQuit // bare alias for "exit"; deliberately unlisted
 	return d

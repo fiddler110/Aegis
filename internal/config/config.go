@@ -398,6 +398,14 @@ type ProviderConfig struct {
 	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
 	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
 	ContextWindow   int               `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
+	// KeepAlive controls how long Ollama keeps the model resident after a
+	// request, via the native adapter's keep_alive field (P33.10). Only the
+	// native "ollama" adapter honors it; the OpenAI-compat path cannot send it.
+	// "" (default) omits the field, leaving Ollama's own 5m default in effect.
+	// Accepts a Go duration ("30m") or an integer number of seconds; "-1" pins
+	// the model in memory forever. Never defaulted to "-1" — persistence is an
+	// explicit opt-in because the target profile has limited system RAM.
+	KeepAlive string `koanf:"keep_alive"`
 	// TaskRouting opts a session's user-facing turns into per-turn model
 	// routing (P9.4): a local heuristic classifies each turn as "simple" or
 	// "complex" and simple turns run on SmallModel instead of Model. Off by

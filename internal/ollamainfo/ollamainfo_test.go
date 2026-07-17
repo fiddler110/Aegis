@@ -167,6 +167,88 @@ func TestSameModel(t *testing.T) {
 	}
 }
 
+// TestIsLoaded keys purely on the model's presence in /api/ps, independent of
+// whether the server reports a context_length (older versions omit it).
+func TestIsLoaded(t *testing.T) {
+	loaded := fakeOllama{
+		ps: map[string]any{"models": []map[string]any{
+			{"name": "llama3.2:latest", "model": "llama3.2:latest"}, // no context_length
+		}},
+	}.server(t)
+	if !IsLoaded(context.Background(), loaded.URL, "llama3.2") {
+		t.Error("IsLoaded should be true for a model present in /api/ps even with no context_length")
+	}
+	if IsLoaded(context.Background(), loaded.URL, "mistral") {
+		t.Error("IsLoaded should be false for a model not in /api/ps")
+	}
+
+	empty := fakeOllama{}.server(t) // /api/ps returns an empty models list
+	if IsLoaded(context.Background(), empty.URL, "llama3.2") {
+		t.Error("IsLoaded should be false when nothing is loaded")
+	}
+}
+
+// TestWarmIfUnloadedGate: an already-loaded model must not be warmed; an
+// unloaded one triggers exactly one /api/generate warm request.
+func TestWarmIfUnloadedGate(t *testing.T) {
+	var warmCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"version": "0.12.0"})
+	})
+	// Nothing loaded.
+	mux.HandleFunc("GET /api/ps", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+	})
+	mux.HandleFunc("POST /api/generate", func(w http.ResponseWriter, _ *http.Request) {
+		warmCalls++
+		json.NewEncoder(w).Encode(map[string]any{"done": true})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if !WarmIfUnloaded(context.Background(), ts.URL, "llama3.2") {
+		t.Fatal("WarmIfUnloaded should report a warm-up for an unloaded model")
+	}
+	if warmCalls != 1 {
+		t.Fatalf("expected exactly 1 warm request, got %d", warmCalls)
+	}
+
+	// Empty base or model: no request at all.
+	if WarmIfUnloaded(context.Background(), "", "llama3.2") {
+		t.Error("WarmIfUnloaded with empty base should be a no-op")
+	}
+	if WarmIfUnloaded(context.Background(), ts.URL, "") {
+		t.Error("WarmIfUnloaded with empty model should be a no-op")
+	}
+}
+
+// TestWarmIfUnloadedSkipsLoaded: a resident model is never re-warmed.
+func TestWarmIfUnloadedSkipsLoaded(t *testing.T) {
+	var warmCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"version": "0.12.0"})
+	})
+	mux.HandleFunc("GET /api/ps", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"models": []map[string]any{
+			{"name": "llama3.2:latest", "model": "llama3.2:latest"},
+		}})
+	})
+	mux.HandleFunc("POST /api/generate", func(w http.ResponseWriter, _ *http.Request) {
+		warmCalls++
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	if WarmIfUnloaded(context.Background(), ts.URL, "llama3.2") {
+		t.Error("WarmIfUnloaded should not warm an already-loaded model")
+	}
+	if warmCalls != 0 {
+		t.Fatalf("expected no warm request for a loaded model, got %d", warmCalls)
+	}
+}
+
 func TestParseNumCtx(t *testing.T) {
 	if got := parseNumCtx("temperature 0.7\nnum_ctx 8192\n"); got != 8192 {
 		t.Errorf("parseNumCtx = %d, want 8192", got)

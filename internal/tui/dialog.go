@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
+
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -243,6 +246,96 @@ func renderAnchoredOverlay(bg, fg string, x, y, width, height int) string {
 	canvas := lipgloss.NewCanvas(width, height)
 	canvas.Compose(lipgloss.NewCompositor(root))
 	return canvas.Render()
+}
+
+// transientPanel is a dismissable, scrollable text overlay for purely
+// informational slash-command output (/status, /help, /memory, … — P33.11).
+// Unlike the listDialog family it renders free-form text rather than a
+// filterable list, and it never enters the transcript, so housekeeping
+// commands don't leave stale blocks behind. Tall output (/help) scrolls a
+// fixed-height window with the arrow/page keys; esc, enter, or q closes it.
+// It composites over the live chat via renderOverlay, the same treatment the
+// pickers and approval dialog use.
+type transientPanel struct {
+	title string
+	body  string // the raw, unwrapped output text
+	isErr bool   // tint the title chip when the command reported an error
+
+	lines  []string // body wrapped to width, one entry per rendered row
+	offset int      // index of the first visible line
+	width  int      // content width the lines were wrapped to
+	height int      // number of body rows visible at once (the scroll window)
+}
+
+// newTransientPanel builds a panel sized to the terminal. termW/termH are the
+// full frame dimensions; the panel takes a bounded fraction so it reads as an
+// overlay rather than a full-screen takeover.
+func newTransientPanel(title, body string, isErr bool, termW, termH int) transientPanel {
+	p := transientPanel{title: title, body: body, isErr: isErr}
+	p.resize(termW, termH)
+	return p
+}
+
+// resize re-wraps the body for the current terminal size and clamps the scroll
+// offset so a shrink doesn't leave it scrolled past the end.
+func (p *transientPanel) resize(termW, termH int) {
+	// Leave room for the rounded frame, its padding, and the surrounding dim
+	// margin; floor/ceil so a tiny or huge terminal still renders sanely.
+	p.width = min(max(termW-8, 24), 100)
+	p.height = max(termH-10, 3)
+	p.lines = strings.Split(wrap(p.body, p.width), "\n")
+	p.offset = min(p.offset, p.maxOffset())
+}
+
+// maxOffset is the largest first-visible-line index that still fills the
+// window; 0 when the whole body fits.
+func (p *transientPanel) maxOffset() int { return max(0, len(p.lines)-p.height) }
+
+// scroll moves the viewport by delta lines, bounded to the content.
+func (p *transientPanel) scroll(delta int) {
+	p.offset = max(0, min(p.offset+delta, p.maxOffset()))
+}
+
+// scrollable reports whether the body is taller than the window, i.e. whether
+// the scroll keys and position indicator are meaningful.
+func (p *transientPanel) scrollable() bool { return len(p.lines) > p.height }
+
+func (p transientPanel) View() string {
+	titleBg := colBrandBg
+	if p.isErr {
+		titleBg = colError
+	}
+	titleChip := lipgloss.NewStyle().
+		Background(titleBg).
+		Foreground(colBrandFg).
+		Bold(true).
+		Padding(0, 1).
+		Render(p.title)
+
+	end := min(p.offset+p.height, len(p.lines))
+	visible := append([]string(nil), p.lines[p.offset:end]...)
+	// Hold the box at a fixed height while scrolling so the frame doesn't jump
+	// as a short final page scrolls into view; a body that fits is left at its
+	// natural height (no padding) so /memory doesn't render as a tall box of
+	// blank lines.
+	if p.scrollable() {
+		for len(visible) < p.height {
+			visible = append(visible, "")
+		}
+	}
+	bodyStyle := lipgloss.NewStyle().Foreground(colFgBase)
+	if p.isErr {
+		bodyStyle = bodyStyle.Foreground(colError)
+	}
+	body := bodyStyle.Width(p.width).Render(strings.Join(visible, "\n"))
+
+	hint := "esc to close"
+	if p.scrollable() {
+		hint = fmt.Sprintf("%d–%d of %d · ↑/↓ pgup/pgdn scroll · esc close", p.offset+1, end, len(p.lines))
+	}
+	footer := lipgloss.NewStyle().Foreground(colTextMuted).Render(hint)
+
+	return dialogFrame(titleChip + "\n\n" + body + "\n\n" + footer)
 }
 
 // dimOutside marks every cell of canvas outside the (x,y,w,h) rectangle as

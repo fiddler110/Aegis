@@ -3,8 +3,10 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/provider"
@@ -169,7 +171,7 @@ func TestStreamSendsOptions(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(WithBaseURL(srv.URL), WithNumCtx(8192))
+	a := New(WithBaseURL(srv.URL), WithNumCtx(8192), WithKeepAlive("30m"))
 	stream, err := a.Stream(context.Background(), provider.Request{
 		Model:     "llama3.2",
 		MaxTokens: 512,
@@ -191,5 +193,35 @@ func TestStreamSendsOptions(t *testing.T) {
 	}
 	if gotBody.Options.NumPredict != 512 {
 		t.Errorf("num_predict = %d, want 512", gotBody.Options.NumPredict)
+	}
+	if gotBody.KeepAlive != "30m" {
+		t.Errorf("keep_alive = %q, want %q", gotBody.KeepAlive, "30m")
+	}
+}
+
+// TestStreamOmitsKeepAliveByDefault is the P33.10 guard: with no WithKeepAlive
+// option the field is omitted entirely (never "-1"/pin-forever), so Ollama's
+// own 5m default stays in effect.
+func TestStreamOmitsKeepAliveByDefault(t *testing.T) {
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	a := New(WithBaseURL(srv.URL))
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+	if strings.Contains(string(rawBody), "keep_alive") {
+		t.Errorf("keep_alive must be omitted when unset, got body: %s", rawBody)
 	}
 }
