@@ -56,23 +56,31 @@ func newMCPServeCmd() *cobra.Command {
 			}
 			defer closer.Close()
 
-			cl := client.NewFromConfig(cfg)
+			// A missing TLS cert here just means no daemon has ever started at
+			// this data dir yet — treat it the same as "no daemon reachable".
+			cl, clErr := client.NewFromConfig(cfg)
+			reachable := false
+			if clErr == nil {
+				healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+				reachable = cl.Health(healthCtx) == nil
+				healthCancel()
+			}
 
 			// Reuse a running daemon if present; otherwise start one embedded in
 			// this process and stop it when the client disconnects.
-			healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
-			healthErr := cl.Health(healthCtx)
-			healthCancel()
-			if healthErr != nil {
+			if !reachable {
 				stopDaemon, startErr := startEmbeddedDaemon(cfg)
 				if startErr != nil {
 					return fmt.Errorf("start daemon: %w", startErr)
 				}
 				defer stopDaemon()
+				cl, clErr = client.NewFromConfig(cfg)
+				if clErr != nil {
+					return fmt.Errorf("daemon started but client could not be configured: %w", clErr)
+				}
 				if !waitForDaemon(cl, 10*time.Second) {
 					return fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
 				}
-				cl = client.NewFromConfig(cfg)
 			}
 			// cl (the final value, after any reassignment above) lives for
 			// the whole MCP session — srv.Serve blocks until the calling

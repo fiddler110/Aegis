@@ -498,7 +498,14 @@ func doctorWorkdirCheck(cfg *config.Config) doctorCheck {
 // relative to a config edit and needs a restart to pick it up.
 func doctorDaemonChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	const name = "daemon"
-	cl := client.NewFromConfig(cfg)
+	cl, clErr := client.NewFromConfig(cfg)
+	if clErr != nil {
+		return []doctorCheck{{
+			Name: name, Severity: doctorWarn,
+			Detail: fmt.Sprintf("client config: %v", clErr),
+			Fix:    "start the daemon at least once with `aegis serve` (or `aegis`) so it can generate its TLS certificate",
+		}}
+	}
 	// cl is local to this check and never escapes — scrub its token once the
 	// checks below are done (FIND-33/P24.21).
 	defer cl.Zero()

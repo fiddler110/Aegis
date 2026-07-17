@@ -74,14 +74,20 @@ Use "aegis <command> --help" for details on any command below.`,
 			if err != nil {
 				return err
 			}
-			cl := client.NewFromConfig(cfg)
+			// A missing TLS cert here just means no daemon has ever started at
+			// this data dir yet (server.New generates it) — treat it the same
+			// as "no daemon reachable" below, not as fatal.
+			cl, clErr := client.NewFromConfig(cfg)
 
 			// Check whether a daemon is already running.
-			healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
-			healthErr := cl.Health(healthCtx)
-			healthCancel()
+			reachable := false
+			if clErr == nil {
+				healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+				reachable = cl.Health(healthCtx) == nil
+				healthCancel()
+			}
 
-			if healthErr != nil {
+			if !reachable {
 				// No daemon reachable — start one embedded in this process.
 				// The returned cancel shuts it down when the TUI exits.
 				stopDaemon, startErr := startEmbeddedDaemon(cfg)
@@ -90,12 +96,20 @@ Use "aegis <command> --help" for details on any command below.`,
 				}
 				defer stopDaemon()
 
+				// Rebuild the client before polling, not after: startEmbeddedDaemon
+				// has now written daemon.token and (with server.tls.enabled)
+				// generated daemon.crt, neither of which existed when cl was built
+				// above on a first run. From here on a load failure is a real bug
+				// (the daemon we just started guarantees both files exist), so it
+				// is fatal rather than folded into "keep waiting".
+				cl, clErr = client.NewFromConfig(cfg)
+				if clErr != nil {
+					return fmt.Errorf("daemon started but client could not be configured: %w", clErr)
+				}
+
 				if !waitForDaemon(cl, 10*time.Second) {
 					return fmt.Errorf("daemon at %s did not become ready within 10 s", cfg.Server.Addr)
 				}
-				// The embedded daemon wrote a fresh token to disk; re-read it
-				// so subsequent authenticated requests use the correct value.
-				cl = client.NewFromConfig(cfg)
 			}
 
 			warnSandboxFallback(cl)
@@ -241,22 +255,32 @@ Use "aegis <command> --help" for details on any command below.`,
 // client (a one-shot command can defer Zero immediately; a longer-lived
 // consumer needs to wait until its own natural completion point).
 func ensureDaemon(ctx context.Context, cfg *config.Config) (*client.Client, func(), error) {
-	cl := client.NewFromConfig(cfg)
-	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	healthErr := cl.Health(hctx)
-	cancel()
-	if healthErr == nil {
-		return cl, func() {}, nil
+	// A missing TLS cert here just means no daemon has ever started at this
+	// data dir yet — treat it the same as "no daemon reachable" below.
+	cl, clErr := client.NewFromConfig(cfg)
+	if clErr == nil {
+		hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		healthErr := cl.Health(hctx)
+		cancel()
+		if healthErr == nil {
+			return cl, func() {}, nil
+		}
 	}
 	stop, err := startEmbeddedDaemon(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("start daemon: %w", err)
 	}
+	// From here on a load failure is fatal: the daemon we just started
+	// guarantees both the token and (if TLS is enabled) the cert exist.
+	cl, clErr = client.NewFromConfig(cfg)
+	if clErr != nil {
+		stop()
+		return nil, nil, fmt.Errorf("daemon started but client could not be configured: %w", clErr)
+	}
 	if !waitForDaemon(cl, 10*time.Second) {
 		stop()
 		return nil, nil, fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
 	}
-	cl = client.NewFromConfig(cfg)
 	return cl, stop, nil
 }
 

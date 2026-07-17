@@ -26,23 +26,35 @@ func newUICmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cl := client.NewFromConfig(cfg)
+			// A missing TLS cert here just means no daemon has ever started at
+			// this data dir yet — treat it the same as "no daemon reachable".
+			cl, clErr := client.NewFromConfig(cfg)
 			// This command only uses cl to check/report daemon health before
 			// handing off to the browser (or, for an embedded daemon, to
 			// block until Ctrl+C); it is never reused after RunE returns, so
-			// scrub it on the way out (FIND-33/P24.21).
-			defer cl.Zero()
-
-			healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
-			healthErr := cl.Health(healthCtx)
-			healthCancel()
+			// scrub whichever client ends up used on the way out (FIND-33/
+			// P24.21). A closure, not a plain `defer cl.Zero()`, so it picks
+			// up the rebuilt client from the no-daemon-yet branch below
+			// rather than the pre-daemon-start one this defer was registered
+			// against.
+			defer func() {
+				if cl != nil {
+					cl.Zero()
+				}
+			}()
+			reachable := false
+			if clErr == nil {
+				healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+				reachable = cl.Health(healthCtx) == nil
+				healthCancel()
+			}
 
 			url := webUIURL(cfg.Server.Addr, cfg.Server.TLS.Enabled)
 			if cfg.Server.TLS.Enabled {
 				fmt.Fprintln(cmd.OutOrStdout(), "TLS is enabled: your browser will warn about the daemon's self-signed certificate — this is expected (see docs/configuration.md).")
 			}
 
-			if healthErr == nil {
+			if reachable {
 				// A daemon is already running; just point the browser at it.
 				warnSandboxFallback(cl)
 				fmt.Fprintf(cmd.OutOrStdout(), "Web UI: %s\n", url)
@@ -58,6 +70,10 @@ func newUICmd() *cobra.Command {
 				return fmt.Errorf("start daemon: %w", startErr)
 			}
 			defer stopDaemon()
+			cl, clErr = client.NewFromConfig(cfg)
+			if clErr != nil {
+				return fmt.Errorf("daemon started but client could not be configured: %w", clErr)
+			}
 			if !waitForDaemon(cl, 10*time.Second) {
 				return fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
 			}

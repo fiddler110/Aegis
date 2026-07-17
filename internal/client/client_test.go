@@ -2,18 +2,89 @@ package client
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/config"
 )
+
+// TestNewFromConfigTLSDependsOnCertOnDisk pins down the ordering hazard behind
+// the first-run "client sent an HTTP request to an HTTPS server" handshake
+// failure: with server.tls.enabled true, NewFromConfig only produces an https://
+// client once the daemon's cert exists on disk. Before that, it errors rather
+// than silently falling back to plaintext against what may be a TLS listener.
+//
+// This is why internal/cli's auto-start paths treat that error, when raised
+// by a client built *before* a daemon is known to exist, the same as an
+// unreachable daemon — and only rebuild the client (fatally, if it still
+// errors) after startEmbeddedDaemon returns and server.New has generated the
+// cert.
+func TestNewFromConfigTLSDependsOnCertOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir: dir,
+		Server: config.ServerConfig{
+			Addr: "127.0.0.1:4127",
+			TLS:  config.ServerTLSConfig{Enabled: true},
+		},
+	}
+
+	// Before the daemon exists there is no cert to pin: NewFromConfig must
+	// error loudly rather than silently falling back to plaintext against
+	// what may be a TLS listener.
+	if _, err := NewFromConfig(cfg); err == nil {
+		t.Error("NewFromConfig before cert exists: expected an error, got nil")
+	}
+
+	// Once the daemon has written a valid cert, the same config yields a
+	// pinned https:// client.
+	writeTestCert(t, cfg.TLSCertPath())
+	c, err := NewFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("NewFromConfig after cert exists: %v", err)
+	}
+	if c.base != "https://127.0.0.1:4127" {
+		t.Errorf("base after cert exists = %q, want https://127.0.0.1:4127", c.base)
+	}
+}
+
+// writeTestCert writes a minimal self-signed certificate to path, standing in
+// for the daemon.crt that server.New generates on first start.
+func writeTestCert(t *testing.T, path string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(path, pemBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // TestNewNormalizesAddr verifies New adds a scheme when missing and strips a
 // trailing slash, since callers pass raw host:port from config/flags.

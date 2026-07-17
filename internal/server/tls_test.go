@@ -71,7 +71,10 @@ func TestListenAndServeTLSRoundTrip(t *testing.T) {
 	}()
 
 	// A client pinned to the daemon's own certificate must succeed.
-	pinned := client.New(addr).WithTLS(cfg.TLSCertPath())
+	pinned, err := client.New(addr).WithTLS(cfg.TLSCertPath())
+	if err != nil {
+		t.Fatalf("WithTLS: %v", err)
+	}
 	if err := waitForHealthy(pinned, 3*time.Second); err != nil {
 		t.Fatalf("pinned client never became healthy: %v", err)
 	}

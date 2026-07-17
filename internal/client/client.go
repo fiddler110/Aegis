@@ -99,18 +99,22 @@ func (c *Client) WithTokenFile(path string) *Client {
 // certificate (wrong file, stale after regeneration, a MITM) fails closed
 // with a TLS handshake error rather than silently connecting.
 //
-// If certPath cannot be read or does not contain a valid PEM certificate, c
-// is returned unchanged (mirroring WithTokenFile's fail-open-to-previous-
-// state behavior). Callers that want "enable TLS only if configured" should
-// use NewFromConfig rather than calling this directly.
-func (c *Client) WithTLS(certPath string) *Client {
+// If certPath cannot be read or does not contain a valid PEM certificate,
+// WithTLS returns an error instead of falling back to c unchanged: silently
+// downgrading a caller that asked to pin TLS into one that speaks plaintext
+// is itself a security-relevant failure mode, and previously turned into a
+// cryptic "client sent an HTTP request to an HTTPS server" handshake error
+// from the daemon's logs rather than a clear one from the client. Callers
+// that want "enable TLS only if configured" should use NewFromConfig rather
+// than calling this directly.
+func (c *Client) WithTLS(certPath string) (*Client, error) {
 	pemBytes, err := os.ReadFile(certPath)
 	if err != nil {
-		return c
+		return nil, fmt.Errorf("read tls cert %s: %w", certPath, err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemBytes) {
-		return c
+		return nil, fmt.Errorf("tls cert %s: no valid PEM certificate found", certPath)
 	}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
 	c2 := *c
@@ -119,7 +123,7 @@ func (c *Client) WithTLS(certPath string) *Client {
 	if after, ok := strings.CutPrefix(c2.base, "http://"); ok {
 		c2.base = "https://" + after
 	}
-	return &c2
+	return &c2, nil
 }
 
 // NewFromConfig builds a Client wired up the way every CLI command needs it:
@@ -128,12 +132,25 @@ func (c *Client) WithTLS(certPath string) *Client {
 // (FIND-32/P24.18). Centralizing this here means the scheme/token/TLS wiring
 // changes in one place as transport options evolve, instead of at every
 // `client.New(cfg.Server.Addr)...` call site in internal/cli.
-func NewFromConfig(cfg *config.Config) *Client {
+//
+// Returns an error when TLS is enabled but the certificate cannot be loaded,
+// rather than silently handing back a plaintext client aimed at what may be
+// a TLS listener. Callers that construct a client *before* a daemon is known
+// to exist (the "is one already running?" probe in internal/cli's auto-start
+// paths) should treat that error the same as an unreachable daemon — a
+// missing cert is expected until server.New has run once and generated it —
+// and only treat it as fatal for a client built after they themselves
+// started (or confirmed) the daemon.
+func NewFromConfig(cfg *config.Config) (*Client, error) {
 	c := New(cfg.Server.Addr)
 	if cfg.Server.TLS.Enabled {
-		c = c.WithTLS(cfg.TLSCertPath())
+		pinned, err := c.WithTLS(cfg.TLSCertPath())
+		if err != nil {
+			return nil, fmt.Errorf("server.tls.enabled is true but the daemon certificate could not be loaded: %w", err)
+		}
+		c = pinned
 	}
-	return c.WithTokenFile(cfg.AuthTokenPath())
+	return c.WithTokenFile(cfg.AuthTokenPath()), nil
 }
 
 func (c *Client) setAuth(req *http.Request) {
