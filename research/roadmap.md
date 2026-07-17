@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 11 — two Tier 2 items (**P34.5, P34.6**), four Tier 3 items
+**Open items:** 13 — four Tier 2 items (**P34.5, P34.6, P34.7, P34.8**), four Tier 3 items
 (**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 is
 fully clear.
 
@@ -172,9 +172,11 @@ preflight companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-Two items: P34.5 — found 2026-07-16 while fixing the P34.2 false positive — and P34.6, found
-2026-07-16 while live-verifying the multiscanner image. Both small and dependency-free.
-(P34.3 shipped 2026-07-16 — see [releases.md](releases.md#latest-changes);
+Four items: P34.5 — found 2026-07-16 while fixing the P34.2 false positive — plus P34.6, P34.7
+and P34.8, all found 2026-07-16 while live-verifying the multiscanner image. All
+dependency-free; P34.8 is the one with an unbounded tail, and the only one that touches how much
+coverage a scan actually has. (P34.3 shipped 2026-07-16 — see
+[releases.md](releases.md#latest-changes);
 P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16;
 P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped 2026-07-15;
 P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
@@ -235,6 +237,65 @@ applicable" answer is indistinguishable from "failed", and it was invisible unti
 made the tool easy to enable. `njsscan`, `bandit` and `gosec` are the other language-targeted
 engines with no relevance gate — check whether any of them also errors rather than skipping
 on a project in the wrong language.
+
+### P34.7 — `TestDoctorNamesPodmanMisconfig` only passes on machines without podman
+
+Effort: S
+
+Found 2026-07-16 while live-verifying the multiscanner image, by starting the podman machine
+the work needed. `TestDoctorNamesPodmanMisconfig` (`internal/cli/doctor_test.go:57`) patches
+`sandbox.backend: podman` and asserts doctor emits a `WARN` naming `sandbox.backend` — its
+premise, stated in its own comment, is "with no podman runtime present". With podman actually
+running, doctor correctly reports `PASS sandbox — configured "container", active
+"container:podman"`, and the test fails. Confirmed as pre-existing rather than a regression by
+stashing the branch and re-running against a clean tree with the machine up: identical failure.
+
+The test reaches the real host. `doctorSandboxCheck` → `server.SelectSandbox` →
+`sandbox.NewContainerBackend` → `sandbox.DetectBest`, and nothing in that chain is injectable
+from `internal/cli`, so the assertion is really about whether the machine running `go test` has
+podman installed. That is a CI/maintainer-machine tripwire: the suite silently changes meaning
+based on the developer's toolchain, and the greener answer is the wrong one — the test passes
+precisely when it isn't exercising the misconfig it claims to cover.
+
+`internal/security` already solved this shape: `detectRuntime` (`method.go:417`) is a package
+var wrapping `sandbox.DetectBest` purely so tests can inject a deterministic result. The same
+seam on the sandbox-selection path would let this test assert both branches (runtime absent →
+WARN naming the key; runtime present → PASS) instead of one branch by accident of environment.
+Worth checking whether `TestDoctorNoFailRowsInCleanSetup` and the other doctor rows have the
+same host dependency.
+
+### P34.8 — Why does trivy report 3 findings where grype reported 47 on the same tree?
+
+Effort: M
+
+Found 2026-07-16 while live-verifying the multiscanner image, and sharpened by the decision to
+drop grype from it. One run, one repo, one moment: **grype 47 findings, trivy 3, osv-scanner 1**
+(alongside opengrep's 26, deduping to 64 total). Those three are supposed to overlap heavily —
+dedup merged only 13 of 77 raw findings — and they are all pointed at the same `go.mod` (67
+packages) and `package-lock.json` (140 packages).
+
+This was noted-and-parked when grype was in the image and the discrepancy was cushioned. It
+isn't cushioned now: **trivy and osv-scanner are the only SCA coverage the multiscanner
+carries**, so if trivy is under-reporting on this tree, container-mode scans are quietly
+shipping less dependency-CVE coverage than the numbers imply. That is the bad direction for a
+security tool to be wrong in — a small findings count reads as good news.
+
+Not filed as Tier 1 because nothing is confirmed broken: the gap may be entirely legitimate.
+`grype dir:` catalogs installed packages and binaries (including, plausibly, the committed
+`internal/server/webui/dist/` bundle), while `trivy fs --scanners vuln,secret,misconfig` is
+lockfile-driven; different inputs can honestly produce different counts. But osv-scanner finding
+**1** across 140 npm packages where grype found 47 is the detail that doesn't sit right, and
+"they scan different things" is a hypothesis, not an answer.
+
+First step is cheap even though the fix isn't bounded: run all three against this repo with a
+host-installed grype, diff the finding sets by (rule/CVE, location), and classify grype's extra
+47 — genuinely-unique CVEs, artifacts of scanning `dist/`, or duplicates that dedup should have
+merged and didn't. Each answer points somewhere different: a trivy configuration gap, a
+scan-scope difference worth documenting, or a `normalizeLocation` bug in `dedup.go`. If grype's
+extra findings turn out to be real and unique, that is also the evidence for revisiting its
+exclusion (`multiscannerExcludedTools`, `internal/security/multiscanner.go`) — it was dropped by
+decision, not by any technical constraint, and it remains a registered scanner runnable via
+`method: host`.
 
 ---
 
