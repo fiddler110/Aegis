@@ -571,7 +571,12 @@ var osvScanArgs = []string{"--format", "json", "--call-analysis=all", "--recursi
 func (osvScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	var out []byte
 	var err error
+	// root is what osv-scanner resolves its target to and therefore what its
+	// report paths are prefixed with — the mount point inside a container, the
+	// scanned directory on the host. parseOSVScanner trims it so locations
+	// come out repo-relative like every SARIF scanner's (P34.8).
 	args := append([]string{}, osvScanArgs...)
+	root := dir
 	if method == MethodContainer {
 		// Without this the scan dies trying to reach api.osv.dev, since every
 		// scanner container runs with --network none. Only the multiscanner
@@ -579,6 +584,7 @@ func (osvScanner) Scan(ctx context.Context, dir string, method Method, rt sandbo
 		if opts.usesMultiscanner(image) {
 			args = append(args, multiscannerOfflineFlag)
 		}
+		root = "/src"
 		out, err = runScannerImage(ctx, rt, image, dir, opts, "osv-scanner", append(args, "/src")...)
 	} else {
 		out, err = runJSON(ctx, dir, "osv-scanner", append(args, ".")...)
@@ -586,7 +592,7 @@ func (osvScanner) Scan(ctx context.Context, dir string, method Method, rt sandbo
 	if err != nil {
 		return nil, err
 	}
-	return parseOSVScanner(out)
+	return parseOSVScanner(out, root)
 }
 
 // --- grype, directory/SBOM mode (P11.4) ---
