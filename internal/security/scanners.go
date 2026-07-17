@@ -717,6 +717,36 @@ func (brakemanScanner) Name() string { return "brakeman" }
 func (brakemanScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
 	return Resolve(ctx, "brakeman", opts)
 }
+
+// Relevant implements RelevanceChecker: brakeman only scans Rails
+// applications, and unlike gosec/bandit/njsscan (which report zero findings
+// on a project in the wrong language) it exits 4 with "Please supply the path
+// to a Rails application" — an accurate refusal that reaches the report as
+// "brakeman: error: exit status 4" and reads as a broken tool. Gating on the
+// same thing brakeman itself checks turns that into an honest skip reason.
+func (brakemanScanner) Relevant(dir string) (bool, string) {
+	if !isRailsApp(dir) {
+		return false, "no Rails application found in workspace"
+	}
+	return true, ""
+}
+
+// isRailsApp mirrors brakeman's own project check: a config/environment.rb,
+// plus either config/application.rb (Rails 3+) or a Rakefile. Only the scan
+// root is checked, deliberately — that's the path brakeman is handed, so a
+// Rails app nested in a subdirectory is one brakeman would refuse too.
+func isRailsApp(dir string) bool {
+	if !isFile(filepath.Join(dir, "config", "environment.rb")) {
+		return false
+	}
+	return isFile(filepath.Join(dir, "config", "application.rb")) || isFile(filepath.Join(dir, "Rakefile"))
+}
+
+func isFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
 func (brakemanScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
 		out, err := runScannerImage(ctx, rt, image, dir, opts, "brakeman", "/src", "-f", "sarif", "-o", "/dev/stdout")
