@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -290,29 +291,82 @@ func PlanScanners(ctx context.Context, dir string, scanners []Scanner, opts Opti
 
 // RunWithProgress is RunWithOptions with an optional callback invoked before
 // and after each scanner runs. progress may be nil (equivalent to
-// RunWithOptions); scanners still run strictly sequentially, so events arrive
-// in a deterministic, non-overlapping order.
+// RunWithOptions).
+//
+// Scanners run concurrently, up to opts.scanConcurrency() at a time — each one
+// is a subprocess (and, on the container path, a whole container), so a
+// sequential run left most of the machine idle waiting on the slowest tool.
+//
+// The Report is byte-for-byte identical to a sequential run at any
+// concurrency, by construction rather than by luck: results land in a slice
+// indexed by plan position and are folded into the Report afterwards in plan
+// order, so Ran/RanVia never depend on which scanner happened to finish first.
+// Findings then go through the same DedupFindings/assignASVS/applyBaseline/
+// sortFindings pipeline as before.
+//
+// progress callbacks are serialized, so a caller needs no lock of its own —
+// but unlike the pre-concurrency contract, events from different scanners now
+// interleave: a PhaseStart is no longer guaranteed to be followed by its own
+// PhaseDone. Callers keying live status by ScanEvent.Scanner (aegis scan, the
+// /scan picker) are unaffected. Skipped scanners are reported up front, before
+// any execution begins.
 func RunWithProgress(ctx context.Context, dir string, scanners []Scanner, opts Options, progress func(ScanEvent)) Report {
 	rep := newReport()
-	for _, entry := range PlanScanners(ctx, dir, scanners, opts) {
-		sc := entry.Scanner
+	plan := PlanScanners(ctx, dir, scanners, opts)
+
+	var emitMu sync.Mutex
+	emit := func(ev ScanEvent) {
+		if progress == nil {
+			return
+		}
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		progress(ev)
+	}
+
+	type scanResult struct {
+		findings []Finding
+		err      error
+	}
+	results := make([]scanResult, len(plan))
+
+	sem := make(chan struct{}, opts.scanConcurrency())
+	var wg sync.WaitGroup
+	for i, entry := range plan {
 		if entry.Skipped {
-			rep.Skipped[sc.Name()] = entry.Reason
-			if progress != nil {
-				progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseSkipped, Reason: entry.Reason})
-			}
+			emit(ScanEvent{Scanner: entry.Scanner.Name(), Phase: PhaseSkipped, Reason: entry.Reason})
 			continue
 		}
-		if progress != nil {
-			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseStart, Method: entry.Method})
-		}
-		start := time.Now()
-		findings, err := sc.Scan(ctx, dir, entry.Method, entry.Runtime, entry.Image, opts)
-		rep.record(sc.Name(), entry.Method, findings, err)
-		if progress != nil {
-			progress(ScanEvent{Scanner: sc.Name(), Phase: PhaseDone, Method: entry.Method, Findings: len(findings), Err: err, Elapsed: time.Since(start)})
-		}
+		wg.Add(1)
+		go func(i int, entry ScanPlanEntry) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[i] = scanResult{err: ctx.Err()}
+				return
+			}
+			sc := entry.Scanner
+			emit(ScanEvent{Scanner: sc.Name(), Phase: PhaseStart, Method: entry.Method})
+			start := time.Now()
+			findings, err := sc.Scan(ctx, dir, entry.Method, entry.Runtime, entry.Image, opts)
+			results[i] = scanResult{findings: findings, err: err}
+			emit(ScanEvent{Scanner: sc.Name(), Phase: PhaseDone, Method: entry.Method, Findings: len(findings), Err: err, Elapsed: time.Since(start)})
+		}(i, entry)
 	}
+	wg.Wait()
+
+	// Fold results in plan order — the step that makes concurrency invisible
+	// to the Report.
+	for i, entry := range plan {
+		if entry.Skipped {
+			rep.Skipped[entry.Scanner.Name()] = entry.Reason
+			continue
+		}
+		rep.record(entry.Scanner.Name(), entry.Method, results[i].findings, results[i].err)
+	}
+
 	// Dedup and ASVS-tag before baseline matching, so a suppression entry
 	// matches the same (rule/CVE, location) key a reader would see reported
 	// once, not once per tool that happened to flag it (P11.8).

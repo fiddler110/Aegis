@@ -260,6 +260,9 @@ func (s *Server) handlePatchConfigSecurity(w http.ResponseWriter, r *http.Reques
 		DefaultMethod:    cfg.Security.DefaultMethod,
 		Tools:            cfg.Security.Tools,
 		DAST:             cfg.Security.DAST,
+		WSLDistro:        cfg.Security.WSLDistro,
+		Debate:           cfg.Security.Debate,
+		Multiscanner:     cfg.Security.Multiscanner,
 	}
 	if req.EgressThenWrite != nil {
 		patch.EgressThenWrite = *req.EgressThenWrite

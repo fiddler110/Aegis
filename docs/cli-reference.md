@@ -534,6 +534,26 @@ aegis security install <tool> [--yes]
 
 Guided, approval-gated host install for one scanner — prints the exact command and asks for confirmation before running it (`--yes` skips the prompt for scripted use).
 
+### `aegis security build-image`
+
+```bash
+aegis security build-image [--profile core|full] [--runtime docker|podman] [--image TAG] [--no-cache] [--global]
+```
+
+Builds one local image carrying every bundled scanner, then records its image ID in config so container-method scanning needs a single image instead of a digest-pinned image per tool. `--profile core` builds only the statically-linked scanners; the default `full` adds the Python (semgrep/bandit/njsscan), Ruby (brakeman) and network (nmap/nuclei) scanners (~1.8GB).
+
+The recorded image ID is re-verified before every container run — an image rebuilt or retagged behind Aegis's back fails closed rather than running silently. Run `aegis security update-db` afterwards to populate the vulnerability databases. See [security_scan.md](security_scan.md#the-multiscanner-image-one-image-instead-of-sixteen).
+
+### `aegis security update-db`
+
+```bash
+aegis security update-db [--skip-java-db]
+```
+
+Downloads/refreshes the trivy and osv-scanner vulnerability databases into the `aegis-scanner-cache` volume. Run it once after `build-image`, then whenever you want fresher data — the databases are only as current as the last run. `--skip-java-db` drops trivy's ~1.4GB Java database.
+
+This is the only Aegis container run given network access, and it mounts no workspace; scans still run with `--network none` and read the databases from the volume.
+
 ### `aegis security config`
 
 ```bash

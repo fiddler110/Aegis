@@ -230,6 +230,15 @@ type SecurityPatch struct {
 	DefaultMethod    string
 	Tools            map[string]SecurityToolConfig
 	DAST             DASTConfig
+	// WSLDistro, Debate and Multiscanner are carried through for exactly the
+	// reason named above: patchSecurity rewrites the whole block, so a field
+	// absent here is a field deleted from the operator's config. They were
+	// missing while the type was, which meant any write (`/security-config`,
+	// `aegis harden`, PATCH /config/security) silently dropped an operator's
+	// security.wsl_distro and security.debate settings as a side effect.
+	WSLDistro    string
+	Debate       DebateIntegrationConfig
+	Multiscanner MultiscannerConfig
 }
 
 // PatchProjectSecurity replaces the security: block in the project-level
@@ -320,6 +329,38 @@ func buildSecurityBlock(p SecurityPatch) string {
 		}
 	}
 	fmt.Fprintf(&b, "    allow_active: %t\n", p.DAST.AllowActive)
+
+	if p.WSLDistro != "" {
+		fmt.Fprintf(&b, "  wsl_distro: %s\n", p.WSLDistro)
+	}
+	if p.Debate.ThreatModel || p.Debate.Triage {
+		b.WriteString("  debate:\n")
+		fmt.Fprintf(&b, "    threat_model: %t\n", p.Debate.ThreatModel)
+		fmt.Fprintf(&b, "    triage: %t\n", p.Debate.Triage)
+	}
+	// Only written once an image has actually been built. An empty block would
+	// otherwise claim an enabled multiscanner with no image, which resolves to
+	// a MethodNone reason on every scan.
+	if ms := p.Multiscanner; ms.Image != "" || ms.ImageID != "" {
+		b.WriteString("  multiscanner:\n")
+		fmt.Fprintf(&b, "    enabled: %t\n", ms.Enabled)
+		fmt.Fprintf(&b, "    image: %q\n", ms.Image)
+		fmt.Fprintf(&b, "    image_id: %q\n", ms.ImageID)
+		if ms.Runtime != "" {
+			fmt.Fprintf(&b, "    runtime: %s\n", ms.Runtime)
+		}
+		if ms.Concurrency > 0 {
+			fmt.Fprintf(&b, "    concurrency: %d\n", ms.Concurrency)
+		}
+		if len(ms.Tools) == 0 {
+			b.WriteString("    tools: []\n")
+		} else {
+			b.WriteString("    tools:\n")
+			for _, t := range ms.Tools {
+				fmt.Fprintf(&b, "      - %s\n", t)
+			}
+		}
+	}
 
 	return b.String()
 }
