@@ -51,8 +51,9 @@ func newScanCmd() *cobra.Command {
 			"a plain scan with no --scanner filter auto-detects the project's language (go.mod/*.go, " +
 			"requirements.txt/*.py, Gemfile/*.rb, package.json/*.js, and more for display only) and auto-enables " +
 			"the matching one for this run, without needing config, unless you've explicitly enabled/disabled it " +
-			"yourself; hadolint/kubescape are likewise skipped automatically when the workspace has no Dockerfile " +
-			"or Kubernetes manifest for them to analyze. At a real terminal, a plain `aegis scan` (no --scanner, " +
+			"yourself; hadolint/kubescape/brakeman are likewise skipped automatically when the workspace has no " +
+			"Dockerfile, Kubernetes manifest, or Rails application for them to analyze. At a real terminal, a " +
+			"plain `aegis scan` (no --scanner, " +
 			"no --yes) previews this auto-detected plan and asks for confirmation before running anything — pass " +
 			"--yes, or run non-interactively (CI/scripts), to skip the prompt and run the plan immediately. Pass " +
 			"--scanner one or more times to run only specific scanners or categories instead (e.g. --scanner " +
