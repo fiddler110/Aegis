@@ -31,6 +31,21 @@ else
 	TRIVY_SKIP_JAVA_DB_UPDATE=false trivy image --download-java-db-only
 fi
 
+echo "==> grype vulnerability DB"
+# The image sets GRYPE_DB_AUTO_UPDATE=false so scans never fetch; this run is
+# the exception, so it's flipped on. `grype db update` hydrates
+# $GRYPE_DB_CACHE_DIR/<schema>/vulnerability.db (the file verifyMultiscannerCache
+# checks for). VALIDATE_AGE stays off so the download isn't rejected as stale.
+GRYPE_DB_AUTO_UPDATE=true grype db update
+# An empty/partial DB would still scan clean and report nothing (grype doesn't
+# fail on a thin DB), so assert the vulnerability.db grype just wrote is
+# substantial. Globbed rather than hardcoding the schema subdirectory (6 today).
+grype_db=$(ls -1 "${GRYPE_DB_CACHE_DIR:-/cache/grype/db}"/*/vulnerability.db 2>/dev/null | head -n1 || true)
+if [ -z "$grype_db" ] || [ "$(stat -c%s "$grype_db")" -lt 10000000 ]; then
+	echo "grype vulnerability DB is missing or implausibly small — refusing to treat this as a successful update" >&2
+	exit 1
+fi
+
 echo "==> osv-scanner offline databases"
 # Fetched directly rather than via `osv-scanner --download-offline-databases`,
 # which only pulls the ecosystems a probe project happens to reference and

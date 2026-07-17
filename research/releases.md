@@ -8,11 +8,56 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-17 — **P34.12**, the last Tier 2 item: osv-scanner's exit-128 "no package
+**Last updated:** 2026-07-17 — **P34.11**: grype reinstated into the multiscanner image for tool
+centralization, which was P34.11's own activation trigger, so the parked build-artifact-exclusion
+fix shipped with it. Earlier: **P34.12**, the last Tier 2 item: osv-scanner's exit-128 "no package
 sources" refusal, which turned out to need two-way disambiguation rather than the one-way mapping
 its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearing the rest of Tier
 2 — njsscan's Windows traceback (a libsast bug, not the semgrep gap the item diagnosed) and
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P34.11 — grype reinstated into the multiscanner image, with `dir:` build-artifact exclusion
+
+The parked item was conditional: it would activate only if grype were re-added to the shared image
+"for some *other* reason." Tool centralization was that reason — grype had stayed a registered
+scanner that only ran via a host install, the one SCA tool not covered by the one-build-and-go
+image. Reinstating it carried the exact fix P34.11 reserved.
+
+**The image side.** grype is a static binary, so it joins the **core** profile beside trivy and
+osv-scanner: pinned + checksum-verified in `fetch.sh` (v0.116.0), COPYed into `profile-core`, and
+removed from `multiscannerExcludedTools`. Its vulnerability DB — the ~1.8GB item that was the
+original reason for exclusion — lives in the `aegis-scanner-cache` volume exactly like trivy's and
+osv's, not baked into the image: `update-db.sh` runs `grype db update`, and the image sets
+`GRYPE_DB_AUTO_UPDATE=false` / `GRYPE_DB_VALIDATE_AGE=false` so scans read the cached DB under
+`--network none` rather than reaching for a refresh. grype is a third instance of the osv-scanner
+empty-cache failure shape (a missing DB yields "0 vulnerabilities," not an error), so it joins
+`multiscannerDBTools` and is gated on `/cache/grype/db/6/vulnerability.db` before it runs — the `6`
+tracks grype's DB `ModelVersion` and must move with any grype bump that changes the schema major.
+Image scanning by reference (`grype <ref>`) stays host-only; only source SCA (`grype dir:/src`)
+runs in the image.
+
+**The exclusion (the actual P34.11 fix).** P34.8 measured grype at 55 findings on this repo where
+trivy found 0 vulns, and classified them: 48 of 55 were gitignored compiled `.exe` build artifacts,
+almost all `stdlib` CVEs the go1.25.0 toolchain baked into the binaries — because `syft` catalogs a
+compiled executable's embedded module list (574 Go components against go.mod's 67). The fix is a
+shared `--exclude` glob list (`scaBuildArtifactExcludes`) of compiled-binary extensions, applied to
+**both** grype `dir:` paths (container + host fallback) **and** the syft SBOM generation the primary
+path is fed from — so the persisted SBOM is clean at the source too. Manifests (`go.mod`,
+`package-lock.json`) are not binaries, so real dependency coverage (the goldmark `GO-2026-5320`
+finding from go.mod) is untouched while the machine-dependent binary-catalog noise disappears. The
+honest limitation, noted in code: an extensionless Unix `go build` output can't be matched by a
+portable glob; the measured noise here was Windows `.exe` cross-build output, and build dirs are
+conventionally gitignored for the extensionless case.
+
+**Verified.** `go build ./...` and `go test ./internal/security/... ./internal/server/...
+./internal/cli/...` green; new assertions lock in grype's presence in core, its removal from the
+excluded set, its DB-cache gating, and that the exclude args cover `./**/*.exe`. Not verified in
+this environment: the actual image build and a live grype scan (needs a container runtime and the
+~1.8GB DB download) — the DB marker path and the `grype db update` layout were confirmed against
+grype v0.116.0's source (`ModelVersion = 6`, `VulnerabilityDBFileName = "vulnerability.db"`,
+`DBDirectoryPath = DBRootDir/<ModelVersion>`) rather than by running it.
 
 ---
 
@@ -256,7 +301,8 @@ against go.mod's 67. 2 more come from a vendored `tsc.exe` in `node_modules`. On
 dependency finding (`GO-2026-5320`, goldmark v1.7.13, once per nested worktree). The item's
 `dist/` hypothesis was wrong — the mechanism is binary cataloging — and the conclusion runs
 opposite to what the item anticipated: this is **evidence for keeping grype excluded**, not
-against. Parked as [P34.11](roadmap.md#p3411--if-grype-is-ever-reinstated-dir-mode-must-exclude-build-artifacts).
+against. Parked at the time as P34.11 — later shipped when grype was reinstated for tool
+centralization, carrying the build-artifact exclusion (see P34.11 above).
 
 **The osv-scanner=1 anomaly wasn't one.** The item's "1 across 140 npm packages" conflated two
 ecosystems: the "1" was goldmark, from `go.mod`. osv-scanner *did* scan all 140 npm packages and

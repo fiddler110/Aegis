@@ -603,6 +603,44 @@ func (osvScanner) Scan(ctx context.Context, dir string, method Method, rt sandbo
 // Report aggregations (RunWithOptions vs ScanImage) so the shared name never
 // collides.
 
+// scaBuildArtifactExcludes are the glob patterns grype and syft skip in dir:
+// mode so a source SCA scan reports the project's *declared* dependencies, not
+// the developer's local build output (P34.11).
+//
+// Both tools catalog dependencies partly by reading compiled binaries: syft
+// inventories a Go executable's embedded module list, which is why a checkout
+// carrying `go build` output cataloged 574 Go components against go.mod's 67 —
+// and why grype then reported ~50 mostly-stdlib CVEs baked into those binaries
+// by the toolchain, none of them a fact about the project's dependencies
+// (P34.8). Excluding compiled artifacts collapses that back to the
+// manifest-derived set: go.mod / package-lock.json etc. are not binaries, so
+// real SCA coverage (the goldmark finding from go.mod) is untouched, while the
+// machine-dependent binary-catalog noise disappears.
+//
+// Anchored with ./**/ so they match at any depth relative to the scan root, the
+// form both tools' doublestar matcher expects. This catches binaries by
+// extension; an extensionless Unix `go build` output can't be matched by a
+// portable glob, but the measured noise on this repo was Windows .exe
+// cross-build output, and build dirs are conventionally gitignored for the
+// extensionless case.
+var scaBuildArtifactExcludes = []string{
+	"./**/*.exe",
+	"./**/*.dll",
+	"./**/*.so",
+	"./**/*.dylib",
+	"./**/*.test",
+}
+
+// scaExcludeArgs expands scaBuildArtifactExcludes into repeated --exclude
+// flags, the form grype and syft both accept in dir: mode.
+func scaExcludeArgs() []string {
+	args := make([]string, 0, len(scaBuildArtifactExcludes)*2)
+	for _, p := range scaBuildArtifactExcludes {
+		args = append(args, "--exclude", p)
+	}
+	return args
+}
+
 type grypeDirScanner struct{}
 
 func (grypeDirScanner) Name() string { return "grype" }
@@ -628,7 +666,9 @@ func (grypeDirScanner) Resolve(ctx context.Context, opts Options) (Method, sandb
 // becomes common.
 func (grypeDirScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		out, err := runScannerImage(ctx, rt, image, dir, opts, "grype", "dir:/src", "-o", "sarif")
+		args := append([]string{"dir:/src"}, scaExcludeArgs()...)
+		args = append(args, "-o", "sarif")
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "grype", args...)
 		if err != nil {
 			return nil, err
 		}
@@ -642,7 +682,9 @@ func (grypeDirScanner) Scan(ctx context.Context, dir string, method Method, rt s
 		}
 	}
 
-	out, err := runImageCmd(ctx, "grype", "dir:"+dir, "-o", "sarif")
+	args := append([]string{"dir:" + dir}, scaExcludeArgs()...)
+	args = append(args, "-o", "sarif")
+	out, err := runImageCmd(ctx, "grype", args...)
 	if err != nil {
 		return nil, err
 	}

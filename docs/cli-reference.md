@@ -550,7 +550,7 @@ The recorded image ID is re-verified before every container run — an image reb
 aegis security update-db [--skip-java-db]
 ```
 
-Downloads/refreshes the trivy and osv-scanner vulnerability databases into the `aegis-scanner-cache` volume. Run it once after `build-image`, then whenever you want fresher data — the databases are only as current as the last run. `--skip-java-db` drops trivy's ~1.4GB Java database.
+Downloads/refreshes the trivy, grype, and osv-scanner vulnerability databases into the `aegis-scanner-cache` volume. Run it once after `build-image`, then whenever you want fresher data — the databases are only as current as the last run. `--skip-java-db` drops trivy's ~1.4GB Java database.
 
 This is the only Aegis container run given network access, and it mounts no workspace; scans still run with `--network none` and read the databases from the volume.
 

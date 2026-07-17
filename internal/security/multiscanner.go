@@ -101,9 +101,18 @@ const (
 //     that never looked at a database.
 //
 // So the cache is verified up front rather than trusting each tool to complain.
+//
+// grype is a third instance of the osv-scanner failure shape: on an empty cache
+// it does not fail, it reports zero findings (GRYPE_DB_AUTO_UPDATE=false + a
+// missing DB = "0 vulnerabilities" from a scanner that never had a database).
+// The "6" in its marker is grype's DB ModelVersion (grype writes
+// $GRYPE_DB_CACHE_DIR/<ModelVersion>/vulnerability.db); it must move in step
+// with GRYPE_VERSION in the Containerfile whenever a grype bump changes the DB
+// schema major.
 var multiscannerDBTools = map[string]string{
 	"trivy":       "/cache/trivy/db/trivy.db",
 	"osv-scanner": "/cache/osv-scanner/npm/all.zip",
+	"grype":       "/cache/grype/db/6/vulnerability.db",
 }
 
 // verifyMultiscannerCache reports a MethodNone reason when name needs a
@@ -172,7 +181,7 @@ func sastScanArgsFor(opts Options, image string) []string {
 // the Containerfile installs them.
 var multiscannerCoreTools = []string{
 	"trivy", "gitleaks", "trufflehog", "syft",
-	"osv-scanner", "kubescape", "hadolint", "opengrep",
+	"osv-scanner", "grype", "kubescape", "hadolint", "opengrep",
 }
 
 // multiscannerFullOnlyTools need an interpreter or a network stack, so they
@@ -188,14 +197,6 @@ var multiscannerFullOnlyTools = []string{
 var multiscannerExcludedTools = map[string]string{
 	"zap":    "zap is a large Java app with its own mount contract (/zap/wrk) and automation-framework invocation; it keeps its own official image",
 	"dockle": "dockle inspects an image through the local container engine, so it needs the engine socket and can't run from inside a scanner container",
-	// grype is excluded by decision rather than by a technical constraint: it
-	// works fine in the image, but trivy and osv-scanner were kept as the SCA
-	// coverage and grype's database was the single largest cache item (~1.8GB).
-	// Worth knowing if you revisit this: on the Aegis repo grype reported 47
-	// findings where trivy reported 3 and osv-scanner 1, so this trades real
-	// dependency-CVE coverage for a smaller cache. It stays a registered
-	// scanner, so `method: host` still runs a host-installed grype.
-	"grype": "grype is not carried by the multiscanner image by decision (its DB was the largest single item in the cache) — install it on the host (`aegis security install grype`) and it will run via method: host, or set security.tools.grype.image to give it its own image",
 	// gosec is the subtle one, and the reason it's excluded is worth stating
 	// precisely: it is a compile-assisted analyzer. It resolves packages via
 	// `go list`, which needs a Go toolchain and the module cache — i.e. the

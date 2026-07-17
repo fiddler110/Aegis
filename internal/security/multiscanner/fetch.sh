@@ -15,7 +15,7 @@
 set -eu
 
 : "${TRIVY_VERSION:?}" "${GITLEAKS_VERSION:?}" "${TRUFFLEHOG_VERSION:?}"
-: "${SYFT_VERSION:?}" "${OSV_SCANNER_VERSION:?}"
+: "${SYFT_VERSION:?}" "${OSV_SCANNER_VERSION:?}" "${GRYPE_VERSION:?}"
 : "${KUBESCAPE_VERSION:?}" "${HADOLINT_VERSION:?}"
 : "${OPENGREP_VERSION:?}" "${OPENGREP_SHA256:?}" "${NUCLEI_VERSION:?}"
 
@@ -99,6 +99,15 @@ get_osv_scanner() {
 	install -m 0755 osv-scanner_linux_amd64 "$OUT/osv-scanner"
 }
 
+get_grype() {
+	base="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}"
+	dl "${base}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+	dl "${base}/grype_${GRYPE_VERSION}_checksums.txt"
+	verify "grype_${GRYPE_VERSION}_checksums.txt" "grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+	tar -xzf "grype_${GRYPE_VERSION}_linux_amd64.tar.gz" grype
+	install -m 0755 grype "$OUT/grype"
+}
+
 get_kubescape() {
 	base="https://github.com/kubescape/kubescape/releases/download/v${KUBESCAPE_VERSION}"
 	dl "${base}/kubescape_${KUBESCAPE_VERSION}_linux_amd64"
@@ -148,6 +157,7 @@ fetch gitleaks get_gitleaks
 fetch trufflehog get_trufflehog
 fetch syft get_syft
 fetch osv-scanner get_osv_scanner
+fetch grype get_grype
 fetch kubescape get_kubescape
 fetch hadolint get_hadolint
 fetch opengrep get_opengrep

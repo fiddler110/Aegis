@@ -620,18 +620,19 @@ it — baked in they were ~3.7GB of a 5.8GB image. They live in a podman/docker 
 scanner containers run with `--rm`, so without a persistent cache every scan would
 re-download trivy's ~1.2GB database from scratch.
 
+That volume is a single named volume shared by every scan in every project — nothing is
+duplicated per-project, so you don't accumulate GBs per repo. Inspect or reclaim it with
+`podman system df -v` / `podman volume inspect aegis-scanner-cache`.
+
 **Not included, deliberately.** Each exclusion has a reason, recorded in
 `multiscannerExcludedTools` (`internal/security/multiscanner.go`) so `aegis scan` can
 explain itself rather than suggesting a rebuild that wouldn't help:
 
 - **zap** — a large Java app with a different mount contract; keeps its own image.
 - **dockle** and the image scanners (`trivy image`, `grype <ref>`) — need the container
-  engine socket, or are host-only by design.
-- **grype** — excluded by decision, not by constraint: trivy + osv-scanner are the SCA
-  coverage, and grype's database was the largest single cache item. Worth knowing if you
-  revisit it: on this repo grype reported 47 findings where trivy reported 3 and
-  osv-scanner 1, so this does trade real dependency-CVE coverage. It's still a registered
-  scanner — install it on the host and `method: host` runs it.
+  engine socket, or are host-only by design. (The grype *binary* is carried for source
+  SCA — `grype dir:/src` — with its DB in the cache volume; only scanning a built image
+  by reference stays host-only.)
 - **gosec** — excluded for a subtler reason. It's a compile-assisted analyzer that
   resolves packages via `go list`, needing a Go toolchain and module downloads, which
   `--network none` can't provide. It doesn't fail when it can't; it reports **zero
