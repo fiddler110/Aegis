@@ -36,6 +36,11 @@ func sarifFixture(name, file, tool string) fixtureScanner {
 	return fixtureScanner{name: name, file: file, parse: func(b []byte) ([]Finding, error) { return ParseSARIF(b, tool) }}
 }
 
+// osvFixtureParse replays a recorded osv-scanner report the way a real scan
+// parses it. The fixtures record paths relative to the scanned tree already,
+// so the scan root is empty — osvRelativeSource has nothing to trim.
+func osvFixtureParse(b []byte) ([]Finding, error) { return parseOSVScanner(b, "") }
+
 // TestScanRegressionAcrossRecordedOutputs is the P11.9 regression proof: it
 // drives the full aggregation pipeline (parse -> dedup -> ASVS -> baseline
 // -> sort, exactly what RunWithOptions does for a live scan) over recorded
@@ -66,7 +71,7 @@ suppressions:
 		sarifFixture("trivy-misconfig", "trivy_misconfig.sarif.json", "trivy"),
 		fixtureScanner{name: "gitleaks", file: "gitleaks.json", parse: parseGitleaks},
 		fixtureScanner{name: "trufflehog", file: "trufflehog.jsonl", parse: func(b []byte) ([]Finding, error) { return parseTrufflehog(b, true) }},
-		fixtureScanner{name: "osv-scanner", file: "osv_scanner.json", parse: parseOSVScanner},
+		fixtureScanner{name: "osv-scanner", file: "osv_scanner.json", parse: osvFixtureParse},
 		sarifFixture("grype", "grype_sca.sarif.json", "grype"),
 		sarifFixture("zap", "zap_dast.sarif.json", "zap"),
 	}

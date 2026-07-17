@@ -55,7 +55,7 @@ const osvFixture = `{
 }`
 
 func TestParseOSVScannerReachability(t *testing.T) {
-	findings, err := parseOSVScanner([]byte(osvFixture))
+	findings, err := parseOSVScanner([]byte(osvFixture), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,9 +94,114 @@ func TestParseOSVScannerReachability(t *testing.T) {
 }
 
 func TestParseOSVScannerEmpty(t *testing.T) {
-	findings, err := parseOSVScanner([]byte("  \n"))
+	findings, err := parseOSVScanner([]byte("  \n"), "")
 	if err != nil || findings != nil {
 		t.Errorf("empty osv-scanner output should yield no findings, got %v %v", findings, err)
+	}
+}
+
+// osvRealShapeFixture is the shape osv-scanner actually emits, which the
+// older fixtures above do not: the scan target resolved to an absolute path,
+// and a group whose ids carry no CVE at all — the CVE that every other
+// scanner keys on is filed under the group's aliases, next to distro IDs that
+// are noise. Recorded from osv-scanner 2.4.0 (P34.8).
+const osvRealShapeFixture = `{
+  "results": [
+    {
+      "source": {"path": "/scan/root/go.mod"},
+      "packages": [
+        {
+          "package": {"name": "github.com/gogo/protobuf", "version": "1.3.1", "ecosystem": "Go"},
+          "vulnerabilities": [
+            {"id": "GO-2021-0053", "summary": "panic in ParseUvarint",
+             "aliases": ["BIT-protobuf-2021-3121", "CVE-2021-3121", "GHSA-c3h9-896r-86jm"],
+             "affected": [{"ranges": [{"events": [{"introduced": "0"}, {"fixed": "1.3.2"}]}]}]}
+          ],
+          "groups": [
+            {"ids": ["GO-2021-0053", "GHSA-c3h9-896r-86jm"],
+             "aliases": ["BIT-protobuf-2021-3121", "CVE-2021-3121", "GHSA-c3h9-896r-86jm", "GO-2021-0053"],
+             "max_severity": "8.6"}
+          ]
+        }
+      ]
+    }
+  ]
+}`
+
+// TestOSVFindingDedupsAgainstSARIFCopy is the P34.8 regression proof, and it
+// asserts the invariant that actually matters rather than either half of the
+// mechanism: one vulnerability, reported by osv-scanner and by a SARIF
+// scanner over the same file, must collapse to a single finding.
+//
+// It failed both ways before the fix — osv-scanner rendered the location as
+// an absolute path where trivy rendered it relative, and rendered a rule ID
+// with no CVE in it — so on a tree where the two tools genuinely overlapped,
+// dedup merged nothing at all and every shared CVE was reported twice under
+// two different names.
+func TestOSVFindingDedupsAgainstSARIFCopy(t *testing.T) {
+	osvFindings, err := parseOSVScanner([]byte(osvRealShapeFixture), "/scan/root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(osvFindings) != 1 {
+		t.Fatalf("expected 1 osv-scanner finding, got %d", len(osvFindings))
+	}
+
+	// The same vulnerability as trivy reports it: bare CVE, path relative to
+	// the scanned tree, ":line" suffix.
+	trivyCopy := Finding{
+		Tool:     "trivy",
+		RuleID:   "CVE-2021-3121",
+		Location: "go.mod:1",
+		Severity: SevHigh,
+	}
+
+	merged := DedupFindings(append([]Finding{trivyCopy}, osvFindings...))
+	if len(merged) != 1 {
+		t.Fatalf("one CVE seen by two scanners must dedup to 1 finding, got %d:\n  trivy: %s\n  osv:   %s (rule %q)",
+			len(merged), dedupKey(trivyCopy, 0), dedupKey(osvFindings[0], 1), osvFindings[0].RuleID)
+	}
+	if got := merged[0].SeenBy; len(got) != 1 {
+		t.Errorf("merged finding should record the other scanner on SeenBy, got %v", got)
+	}
+}
+
+func TestOSVRuleIDSurfacesCVEAlias(t *testing.T) {
+	got := osvRuleID(osvGroup{
+		IDs:     []string{"GO-2021-0053", "GHSA-c3h9-896r-86jm"},
+		Aliases: []string{"BIT-protobuf-2021-3121", "CVE-2021-3121", "GHSA-c3h9-896r-86jm", "GO-2021-0053"},
+	})
+	// The CVE is appended (dedup keys on it); the group's own IDs keep their
+	// order and lead; non-CVE aliases and duplicates stay out.
+	want := "GO-2021-0053, GHSA-c3h9-896r-86jm, CVE-2021-3121"
+	if got != want {
+		t.Errorf("osvRuleID = %q, want %q", got, want)
+	}
+	if normalizeRuleID(got) != "CVE-2021-3121" {
+		t.Errorf("rule ID %q must normalize to the CVE for dedup, got %q", got, normalizeRuleID(got))
+	}
+}
+
+func TestOSVRelativeSource(t *testing.T) {
+	cases := []struct{ name, root, path, want string }{
+		{"container mount point", "/src", "/src/go.mod", "go.mod"},
+		{"host absolute root", "/home/u/repo", "/home/u/repo/sub/go.mod", "sub/go.mod"},
+		{"windows root, mixed separators", `D:\dev\repo`, "D:/dev/repo/go.mod", "go.mod"},
+		{"trailing slash on root", "/src/", "/src/go.mod", "go.mod"},
+		{"no root known", "", "/src/go.mod", "/src/go.mod"},
+		// A path outside the scan root is left alone rather than mangled: it
+		// really is a different file, and must not dedup against one inside.
+		{"unrelated path", "/src", "/other/go.mod", "/other/go.mod"},
+		// Guards against a prefix match that isn't a directory boundary.
+		{"sibling with shared prefix", "/src", "/srcfoo/go.mod", "/srcfoo/go.mod"},
+		{"path equal to root", "/src", "/src", "/src"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := osvRelativeSource(c.root, c.path); got != c.want {
+				t.Errorf("osvRelativeSource(%q, %q) = %q, want %q", c.root, c.path, got, c.want)
+			}
+		})
 	}
 }
 
