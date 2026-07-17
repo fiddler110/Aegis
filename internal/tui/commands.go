@@ -27,6 +27,19 @@ type commandDef struct {
 	// picker.
 	needsArgs bool
 
+	// transient marks a purely informational command whose Output is rendered
+	// in a dismissable overlay panel (P33.11) instead of appended to the
+	// transcript, so a session of housekeeping (/status, /help, /memory …)
+	// doesn't litter the conversation with stale blocks. Only set it for
+	// read-only commands with no action variant: a command that also writes
+	// config or toggles session state (e.g. /sandbox, /skills, /guard) must
+	// keep its confirmation in the transcript, and since the flag is per
+	// command — not per invocation — such dual-purpose commands stay
+	// non-transient. The dispatcher stamps SlashResult.Transient from this flag
+	// (NewSlashDispatcher), keeping the decision in this single-source table
+	// rather than at scattered call sites.
+	transient bool
+
 	handler func(*SlashDispatcher, []string) SlashResult
 }
 
@@ -42,7 +55,7 @@ type commandDef struct {
 func commandDefs() []commandDef {
 	return []commandDef{
 		{
-			name: "help", argHint: "[cmd]", needsArgs: true,
+			name: "help", argHint: "[cmd]", needsArgs: true, transient: true,
 			shortDesc:    "Show this help or detail for a command",
 			detailedHelp: "/help [command]\n  Show available commands, or detailed help for a specific command.\n  No args: also lists keyboard shortcuts, including keybind-only features that have no slash-command equivalent (e.g. ctrl+x terminal pane, ctrl+t sub-agent list, ctrl+y session switcher, ctrl+r input-history search).",
 			handler:      (*SlashDispatcher).cmdHelp,
@@ -84,7 +97,7 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdConfig,
 		},
 		{
-			name:         "memory",
+			name: "memory", transient: true,
 			shortDesc:    "Show saved memories",
 			detailedHelp: "/memory\n  Display saved project and user memory entries.",
 			handler:      (*SlashDispatcher).cmdMemory,
@@ -110,7 +123,7 @@ func commandDefs() []commandDef {
 			handler: (*SlashDispatcher).cmdSkills,
 		},
 		{
-			name:         "commands",
+			name: "commands", transient: true,
 			shortDesc:    "List custom commands",
 			detailedHelp: "/commands\n  List custom user-defined commands from .aegis/commands/.",
 			handler:      (*SlashDispatcher).cmdCommands,
@@ -128,7 +141,7 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdModel,
 		},
 		{
-			name:         "status",
+			name: "status", transient: true,
 			shortDesc:    "Show daemon health, sandbox backend, and cost caps/spend",
 			detailedHelp: "/status\n  Show daemon reachability, provider/model, active sandbox backend and any fallback reason, this session's cumulative spend against its caps, and cross-session today's spend against the daily caps.",
 			handler:      (*SlashDispatcher).cmdStatus,
@@ -194,7 +207,7 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdResearch,
 		},
 		{
-			name: "session", argHint: "[list]", needsArgs: true,
+			name: "session", argHint: "[list]", needsArgs: true, transient: true,
 			shortDesc:    "Show session info or list sessions",
 			detailedHelp: "/session [list]\n  No args: show current session info.\n  list: show all sessions.",
 			handler:      (*SlashDispatcher).cmdSession,
@@ -254,13 +267,13 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdBundle,
 		},
 		{
-			name:         "runs",
+			name: "runs", transient: true,
 			shortDesc:    "List message runs currently in flight across all sessions",
 			detailedHelp: "/runs\n  List message runs currently in flight across all sessions (session id, elapsed time, tool-call count, last event kind, title) — same data as `aegis runs`.",
 			handler:      (*SlashDispatcher).cmdRuns,
 		},
 		{
-			name: "bg", argHint: "[list|events [session-id]]",
+			name: "bg", argHint: "[list|events [session-id]]", transient: true,
 			shortDesc:    "List background (detached) sessions, or print one's buffered events",
 			detailedHelp: "/bg [list|events [session-id]]\n  No args or 'list': list sessions currently running in background (detached) mode.\n  'events [session-id]': print buffered engine events from a background session (defaults to the current session) — same data as `aegis bg events`.",
 			handler:      (*SlashDispatcher).cmdBG,

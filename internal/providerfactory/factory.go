@@ -26,7 +26,7 @@ func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
 		logger = slog.Default()
 	}
 
-	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, logger)
+	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
 			continue
 		}
 		apiKey := config.ProviderAPIKey(fb.Provider)
-		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, logger)
+		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, logger)
 		if err != nil {
 			logger.Warn("provider fallback: skipping misconfigured fallback", "provider", fb.Provider, "err", err)
 			continue
@@ -142,7 +142,7 @@ func validateBaseURL(name, apiKey, baseURL string, logger *slog.Logger) error {
 // the primary and every fallback target so their construction rules
 // (base URL defaults, thinking/reasoning options, key requirements) stay
 // identical.
-func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, logger *slog.Logger) (provider.Adapter, error) {
+func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, logger *slog.Logger) (provider.Adapter, error) {
 	if err := validateBaseURL(name, apiKey, baseURL, logger); err != nil {
 		return nil, err
 	}
@@ -184,6 +184,12 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 		}
 		if contextWindow > 0 {
 			opts = append(opts, ollama.WithNumCtx(contextWindow))
+		}
+		// keep_alive is opt-in: "" omits the field so Ollama's own 5m default
+		// stays in effect. A user who sets "-1" to pin the model forever gets
+		// exactly that — but it is never the default (P33.10).
+		if keepAlive != "" {
+			opts = append(opts, ollama.WithKeepAlive(keepAlive))
 		}
 		return ollama.New(opts...), nil
 

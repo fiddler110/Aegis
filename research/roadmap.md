@@ -11,9 +11,29 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 10 — four Tier 3 items (**P33.10, P33.11, P33.16,
-P33.19**), and six parked (**P25.9, P33.12, P33.20-P33.22, P34.11**). Tier 1 and Tier 2 are both
-fully clear.
+**Open items:** 5 — all parked (**P25.9, P33.12, P33.21, P33.22, P34.11**). Tier 1, Tier 2, and
+Tier 3 are all fully clear.
+
+**The whole Tier 3 batch — P33.10, P33.11, P33.16, P33.19 — shipped 2026-07-17**, four parallel
+sub-agents in isolated worktrees, applied to `main` one at a time with a green `go build`/`go vet`/
+`go test ./...` (61 packages) after each. **P33.20 shipped with it**: P33.11's agent implemented the
+message-allowlist hardening the parked item specified, so it leaves Tier 4 closed rather than merely
+triggered. Two of the four items had a decayed claim, both caught by verifying against the real code
+before building — continuing the batch's now-standard pattern. **P33.10 is the counter-example: every
+one of its claims held.** **P33.11** refined its own scope on contact — `/models` and `/config` were
+described as printing static transcript blocks but are already overlays (model picker / wizard), so
+the `transient` flag was scoped to the genuinely text-only commands (`help, memory, status, commands,
+runs, session, bg`), and dual-purpose commands stay in-transcript so their action confirmations
+survive. It also found P33.20's premise doesn't hold under a correct design — transient panels can't
+actually be open during streaming (slash dispatch is `!streaming`-gated and the panel is modal), so
+the allowlist is defensive future-proofing of a real latent bug (it already bit P33.7) rather than a
+load-bearing fix. **P33.16** surfaced the sharpest scoping correction: classifying mid-stream errors
+does *not* by itself cause auto-retry, because `retryAdapter` only retries the synchronous error
+returned from `Stream` before any tokens flow (by design, to avoid replaying partial output) —
+mid-stream `{"error":...}` envelopes arrive as channel events after `Stream` already returned. The
+change makes each error *carry* an accurate retryable/terminal verdict through the existing
+`errors.As(&APIError)+Retryable()` seam (terminal-wins, unknowns terminal to spare wasted local
+prompt-eval); wiring an actual mid-stream re-stream loop is a larger, separate change.
 
 **P34.9, P34.10, and P34.12 shipped 2026-07-17**, clearing Tier 2. P34.12 — osv-scanner reporting
 `error: exit status 128` on any tree with no dependency lockfile — was itself the P34.6 "accurate
@@ -238,98 +258,19 @@ the SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "
 
 ## Open Work — Tier 3
 
-Four items: P33.10, P33.11, P33.16, P33.19. Medium-effort with real value; some are
-sequence-dependent. (P32.8 shipped 2026-07-15; P33.9, the keystone unblocking P33.10 and P33.19,
-shipped 2026-07-16 — see [releases.md](releases.md#latest-changes).)
-
-### P33.10 — Ollama keep-alive management and pre-warm
-
-Effort: M — unblocked by P33.9
-
-Ollama unloads models after its default 5-minute `keep_alive`; the next message then pays a full
-cold reload (tens of seconds on 16GB VRAM). P33.4 shipped a phase split that makes this wait
-*visible* ("waiting for first token · Ns"); P33.9 shipped the ability to *name* it as a cold load
-(`Usage.LoadDurationMS`, surfaced as a `KindNotice` when ≥1s) — that half is done. What's left is
-the pre-warm half. Two levers: **(1)** a config knob (e.g. `provider.ollama.keep_alive`) passed on
-chat requests — the native adapter already accepts this (`ollama.WithKeepAlive`, unwired), it just
-needs a `ProviderConfig` field and `providerfactory.buildOne` to pass it through. **(2)** Independent
-lever: a native-API warm ping (in-repo precedent: `internal/cli/ollama.go:17-29` already POSTs
-`keep_alive: 0` to force-unload — the inverse operation) triggered when the TUI regains focus
-(`tea.FocusMsg` is already tracked) or on first keystroke of a new message, gated on `/api/ps` (via
-`ollamainfo`) reporting the model unloaded. Never default `keep_alive: -1` (pin-forever) — the
-machine profile this targets has 16GB system RAM and other workloads; make persistence an explicit
-user choice.
-
-### P33.11 — Transient panels for informational slash commands
-
-Effort: M
-
-`/status`, `/models`, `/help`, `/config`, `/memory` and friends print static blocks into the
-transcript (`internal/tui/slash.go`), so after a session of housekeeping the conversation is
-interleaved with stale panels — a real contributor to the "disjointed" feel, and Claude Code
-renders these ephemerally instead. Plan: render informational command output in a dismissable
-overlay panel (reuse `dialogFrame`/`renderOverlay` from dialog.go) that never enters transcript
-history; action commands' confirmations (e.g. "✓ Configuration saved") stay in-transcript. Add a
-`transient` flag per command in `commandDefs` (`internal/tui/commands.go`) so the existing
-single-source-of-truth table (P14.10 convention) decides, not scattered call sites. Needs a small
-scrolling story for tall output (`/help`, `/models`) — the pane already has the primitives.
-
-Note: P33.6 and P33.7 have since built out the overlay/dialog vocabulary this item reuses
-(`renderOverlay` now carries the approval dialog; `listDialog` gained `noticeItem`, `fixedW`,
-`setNotice`, and a shared `dialogListH`). Read those before starting — the compositing question is
-largely answered, leaving the `commandDefs` flag and the scrolling story as the real work. **Also
-read P33.20 first**: the dialog block currently swallows every message while a dialog is open,
-which is unreachable today only because pickers require `!streaming`. Transient panels shown
-*during* a run would make it reachable, so P33.20 likely stops being parked the moment this starts.
-
-### P33.16 — Should mid-stream provider errors be retryable?
-
-Effort: S — needs a decision before implementing
-
-P33.1 made mid-stream Ollama errors (`{"error": ...}` envelopes: model OOM, context overflow,
-worker crash) surface as `provider.EventError` instead of vanishing into a truncated answer. It
-emits them as a bare `fmt.Errorf`, following the existing `scanner.Err()` idiom in that adapter —
-which means they are **not** picked up by `provider`'s retry logic, unlike errors constructed via
-`provider.NewTransportError`.
-
-Whether that is right is a genuine behavior decision, deliberately left above P33.1's scope. The
-classes differ: a worker crash is plausibly retryable; a context overflow will fail identically on
-every retry and retrying wastes a full prompt-eval on a slow local model, which is precisely the
-cost this batch has been trying to reduce. Likely answer is per-class classification rather than a
-blanket choice. P33.9 shipped its own `errorMessage()` in `internal/provider/ollama/ollama.go`,
-structurally identical to the OpenAI-compat one (same bare-`fmt.Errorf`, not-retryable-by-default
-behavior) — it doesn't yet classify by error text, so the taxonomy work below is still open, just
-now with a second call site (`internal/provider/openai/errorMessage` and
-`internal/provider/ollama/errorMessage`) that any per-class classification needs to reach. Decide
-the policy before writing code.
-
-### P33.19 — Name the post-tool-round wait
-
-Effort: S — unblocked by P33.9
-
-P33.4 shipped a **per-run** phase split: "waiting for first token · Ns" until the first model
-output, then generating. That is correct as specified, but it means after a tool result the bar
-reads `generating…` through the next 10-60s prompt-eval wait — the same dead air the item existed
-to expose, just not on the first round.
-
-A per-model-call phase would catch every round, but "waiting for first token" is the wrong words
-for it: it is neither the first token nor, while the tool is still executing, a model wait at all.
-Distinguishing "tool is running" from "tool finished, model is re-evaluating a now-larger prompt"
-truthfully requires knowing when the model actually started work. P33.9 shipped exactly that signal
-for the native adapter (`provider.Usage.LoadDurationMS`, populated from Ollama's `load_duration`/
-`prompt_eval_count` on every `EventDone`) — it currently reaches the TUI only as a post-turn
-`KindNotice`, one-shot per call, not a live per-round phase word. The remaining work is turning that
-into the live phase label this item wants; do not guess at wording for a state the TUI can now
-measure but doesn't yet render mid-round.
+**Status:** None open. (P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17 — the whole batch, see
+the Status section above; P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and
+P33.19, shipped 2026-07-16.)
 
 ---
 
 ## Open Work — Tier 4
 
-Six items parked — P25.9, P33.12, P33.20, P33.21, P33.22, P34.11. Low urgency, no trigger, or
+Five items parked — P25.9, P33.12, P33.21, P33.22, P34.11. Low urgency, no trigger, or
 explicitly parked pending demand. Do not build speculatively — revisit only if a concrete trigger
 appears, and check with the user before starting any of these.
-(P32.9-P32.11 shipped 2026-07-15.)
+(P33.20 shipped 2026-07-17 alongside P33.11 — its message-allowlist fix was implemented as part of
+that work; P32.9-P32.11 shipped 2026-07-15.)
 
 ### P34.11 — If grype is ever reinstated, `dir:` mode must exclude build artifacts
 
@@ -355,21 +296,6 @@ developer's `go build` output as though it were a scan of the project, and the r
 count is both alarming and almost entirely noise. Note this also makes grype's numbers
 machine-dependent: a clean worktree with no compiled binaries gave **1** finding, the same tree
 with build artifacts gave 55.
-
-### P33.20 — The dialog block swallows every message while a dialog is open
-
-Effort: S — parked, latent (but see trigger)
-
-`Update`'s dialog branch returns early for *every* message while a dialog is open — including
-stream events. This is unreachable today because the pickers that open dialogs all require
-`!streaming`, but it is fragile: it already bit P33.7, whose data-message handlers were silently
-unreachable until the block was made to fall through for `sessionsLoadedMsg`/`backtrackTargetsMsg`
-(`tui.go:1294-1303`). The fix is an allowlist of message types that must always reach the main
-update path, rather than per-message fall-through patches accumulating one item at a time.
-
-**Trigger, likely and specific:** P33.11 (transient slash panels) would render dialogs *during* a
-run, making this immediately reachable and turning a latent fragility into dropped stream events.
-Treat P33.11 as this item's activation, and read this before starting that.
 
 ### P33.21 — Editor/background surfaces ignore `KindToolCallStart`
 

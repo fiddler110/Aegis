@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,10 +19,21 @@ type APIError struct {
 	Message    string        // response body or error detail
 	RetryAfter time.Duration // parsed from a Retry-After header; 0 if absent
 	Err        error         // underlying transport error, if any
+
+	// stream marks a mid-stream error surfaced inside the event stream (a
+	// provider's {"error":...} envelope, not a synchronous Stream failure). It
+	// renders Message verbatim rather than as an HTTP/transport failure, and
+	// carries an explicit per-class retryability in streamRetryable instead of
+	// deriving it from a status code — see NewStreamError / P33.16.
+	stream          bool
+	streamRetryable bool
 }
 
 // Error implements error.
 func (e *APIError) Error() string {
+	if e.stream {
+		return fmt.Sprintf("%s: %s", e.Provider, e.Message)
+	}
 	if e.StatusCode == 0 {
 		if e.Err != nil {
 			return fmt.Sprintf("%s: request failed: %v", e.Provider, e.Err)
@@ -39,6 +51,9 @@ func (e *APIError) Unwrap() error { return e.Err }
 // transient; transport errors are retryable unless they stem from context
 // cancellation. 4xx client errors (other than the above) are permanent.
 func (e *APIError) Retryable() bool {
+	if e.stream {
+		return e.streamRetryable
+	}
 	if errors.Is(e.Err, context.Canceled) || errors.Is(e.Err, context.DeadlineExceeded) {
 		return false
 	}
@@ -86,4 +101,95 @@ func NewHTTPError(providerName string, status int, retryAfter, body string) *API
 // status, e.g. connection refused or DNS error).
 func NewTransportError(providerName string, err error) *APIError {
 	return &APIError{Provider: providerName, Err: err}
+}
+
+// NewStreamError builds the APIError an adapter emits as a mid-stream
+// EventError from a provider's {"error":...} envelope (P33.16). Unlike a
+// synchronous transport/HTTP failure it renders msg verbatim ("<provider>:
+// <msg>"), preserving exactly the text callers surfaced before classification
+// existed, and it carries an explicit retryable/terminal verdict — derived from
+// msg by classifyStreamError — that the retry layer and any future consumer can
+// read through errors.As(&APIError)+Retryable() without re-parsing the string.
+//
+// Transient/infrastructural failures (worker crash, model-load failure, OOM,
+// connection reset mid-stream) are retryable; deterministic ones (context
+// overflow, invalid/malformed request, model-not-found) and anything
+// unrecognized are terminal, because retrying them only burns another full
+// prompt-eval on a slow local model for a result that cannot change — the waste
+// this classification exists to avoid.
+func NewStreamError(providerName, msg string) *APIError {
+	return &APIError{
+		Provider:        providerName,
+		Message:         msg,
+		stream:          true,
+		streamRetryable: classifyStreamError(msg),
+	}
+}
+
+// terminalStreamSignals are substrings marking a deterministic mid-stream
+// failure — one that fails identically on every retry. Matched
+// case-insensitively and checked before retryableStreamSignals, so a message
+// carrying both classes is treated as terminal (the safe, cost-avoiding default
+// this classification exists to serve).
+var terminalStreamSignals = []string{
+	"context length",
+	"context window",
+	"context size",
+	"exceeds context",
+	"exceed the context",
+	"exceeded the context",
+	"maximum context",
+	"too many tokens",
+	"prompt is too long",
+	"input is too large",
+	"invalid request",
+	"invalid_request",
+	"no such model",
+	"model not found",
+	"not found, try pulling",
+	"does not support",
+	"unsupported",
+	"malformed",
+}
+
+// retryableStreamSignals are substrings marking a transient/infrastructural
+// mid-stream failure that could plausibly succeed on retry.
+var retryableStreamSignals = []string{
+	"unexpectedly stopped",
+	"has terminated",
+	"crash",
+	"failed to load model",
+	"error loading model",
+	"unable to load model",
+	"out of memory",
+	"cudamalloc",
+	"failed to allocate",
+	"cannot allocate",
+	"connection reset",
+	"connection refused",
+	"broken pipe",
+	"unexpected eof",
+	"i/o timeout",
+	"timed out",
+	"unknown error was encountered while running the model",
+}
+
+// classifyStreamError reports whether a mid-stream provider error message
+// describes a transient/infrastructural failure worth retrying. Terminal
+// signals win over retryable ones, and an unrecognized message is terminal:
+// retrying it risks wasting a full prompt-eval on a slow local model for a
+// result that will not change (P33.16).
+func classifyStreamError(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, s := range terminalStreamSignals {
+		if strings.Contains(m, s) {
+			return false
+		}
+	}
+	for _, s := range retryableStreamSignals {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
 }

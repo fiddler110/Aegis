@@ -587,3 +587,19 @@ provider:
 ```
 
 A non-zero value overrides detection, with one exception: if Ollama verifiably serves *less* than the configured value, the served value wins (and a warning is logged) — honoring the larger number would just reintroduce silent truncation. `0` or missing means auto-detect; if detection fails entirely (Ollama unreachable), compaction is skipped for local models until a later run detects successfully.
+
+### Keep-alive and pre-warm
+
+Ollama unloads a model from memory after five idle minutes (its default `keep_alive`); the next message then pays a full cold reload (tens of seconds on a 16GB machine). Two independent controls address this:
+
+**Keep the model resident (opt-in).** Set how long Ollama holds the model after each request. Only the native `ollama` adapter (`provider.default: ollama`) sends this — the OpenAI-compat path cannot.
+
+```yaml
+provider:
+  default: ollama
+  keep_alive: "30m"   # a Go duration, or an integer number of seconds
+```
+
+`""`/missing (the **default**) omits the field, leaving Ollama's own 5m default in effect. `"-1"` pins the model in memory forever — never the default, because a pinned model competes with everything else on a RAM-constrained machine. Set it only if you have the memory to spare and want zero reloads.
+
+**Pre-warm (automatic, no config).** When the provider points at Ollama, the TUI fires a background warm-up load the moment you regain focus or start typing a new message — but only if `/api/ps` reports the model is *not* already loaded, so an in-use model is never re-pinged. This overlaps the cold reload with your typing instead of stalling the send, and it does **not** change the residency policy (the warm-up omits `keep_alive`, so the model still unloads on Ollama's normal schedule unless you set `keep_alive` above).

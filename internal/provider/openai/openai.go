@@ -380,13 +380,18 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			if msg := streamErrorMessage(data); msg != "" {
-				emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("openai: %s", msg)})
+				emit(provider.Event{Type: provider.EventError, Err: provider.NewStreamError("openai", msg)})
 				return
 			}
 			continue
 		}
 		if msg := errorMessage(chunk.Error); msg != "" {
-			emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("openai: %s", msg)})
+			// P33.16: classify the mid-stream {"error":...} envelope so a
+			// transient failure (worker crash, model-load failure, OOM) carries a
+			// retryable verdict while a deterministic one (context overflow,
+			// invalid request) stays terminal — retrying the latter only burns
+			// another prompt-eval on a slow local model.
+			emit(provider.Event{Type: provider.EventError, Err: provider.NewStreamError("openai", msg)})
 			return
 		}
 		if chunk.Usage != nil {

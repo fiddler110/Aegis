@@ -32,6 +32,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/commands"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
@@ -50,6 +51,13 @@ type Config struct {
 	Notifications  string              // attention-system mode (P16.1): off/bell/desktop/both
 	ImageRendering string              // inline image thumbnails (P16.9): "auto" (default) or "off"
 	Keybindings    map[string][]string // P13.3.5: action name -> key sequence overrides
+	// OllamaBaseURL is the native Ollama API base (e.g. "http://localhost:11434")
+	// when the provider points at Ollama, else "". Set, it enables the P33.10
+	// pre-warm: a keep_alive-neutral load request fired on focus regain or the
+	// first keystroke of a new message, gated on /api/ps reporting the model
+	// unloaded, so a message sent after Ollama's 5m idle unload no longer opens
+	// with a full cold reload.
+	OllamaBaseURL string
 }
 
 // Run starts the TUI event loop and blocks until the user quits.
@@ -178,6 +186,18 @@ type model struct {
 	firstTokenAt time.Time
 	outBytes     int
 
+	// modelWaitAt is when the current tool round's last result landed and the
+	// model was re-invoked with the enlarged prompt — i.e. the start of a
+	// post-tool-round model wait (P33.19). Zero while a tool is still running
+	// (that is not a model wait) and once the model resumes producing output.
+	// It exists because firstTokenAt only marks the *first* wait of a run; on
+	// every round after the first the model re-evaluates a now-larger prompt
+	// (10-60s of prompt eval on a local model) with firstTokenAt long since
+	// set, so without this the status line reads "generating…" through dead
+	// air. Set only when pendingTools drains to empty, the one moment the TUI
+	// can tell "tool finished, model re-evaluating" from "tool still running".
+	modelWaitAt time.Time
+
 	// followBottom tracks whether the viewport should auto-scroll to the newest
 	// content. It is true while the user is parked at the bottom and false once
 	// they scroll up, so streaming output never yanks them back down mid-read.
@@ -190,6 +210,12 @@ type model struct {
 	// opens the P22.3 backtrack picker. While streaming, ESC interrupts on the
 	// first press (P33.5) and never arms.
 	escPending bool
+
+	// warmPinged guards the P33.10 first-keystroke pre-warm so the async warm
+	// request fires at most once per empty→typing transition, not on every
+	// keystroke. Reset when the composer goes empty again (message sent or
+	// cleared); a fresh idle period can then re-warm if the model has unloaded.
+	warmPinged bool
 
 	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
 	history    []string
@@ -312,6 +338,11 @@ type model struct {
 	// near-identical dialog types into one, tagged by dialog.kind.
 	dialog         *listDialog
 	securityConfig *securityConfigModel
+	// transientPanel is the dismissable, scrollable overlay for informational
+	// slash-command output (/status, /help, /memory …) — P33.11. It renders
+	// over the live chat and never enters the transcript, so housekeeping
+	// commands don't leave stale blocks behind.
+	transientPanel *transientPanel
 	// pendingThreatModelTarget carries the already-parsed /threat-model
 	// target text (scope, "" for the whole project) from the moment the
 	// framework picker opens through to the follow-up dispatch once a
@@ -380,6 +411,32 @@ func pasteClipboardImageCmd() tea.Cmd {
 	return func() tea.Msg {
 		path, ok, err := pasteClipboardImage()
 		return pasteImageResultMsg{path: path, ok: ok, err: err}
+	}
+}
+
+// ollamaWarmedMsg reports the outcome of an async pre-warm attempt (P33.10).
+// It carries no UI state — the warm-up is a latency optimization the user
+// never sees directly — so the Update handler ignores it; the type exists only
+// because a tea.Cmd must return a tea.Msg.
+type ollamaWarmedMsg struct{}
+
+// maybeWarmOllamaCmd returns a tea.Cmd that pre-warms the Ollama model when it
+// makes sense to (P33.10 lever 2), or nil when it doesn't. It is a no-op —
+// returns nil — unless the provider is Ollama (OllamaBaseURL set), a concrete
+// model is pinned (not "" or the unresolved "auto" sentinel), and no stream is
+// in flight (an active run has the model loaded already). The /api/ps
+// unloaded-gate lives inside ollamainfo.WarmIfUnloaded, off the UI goroutine.
+func (m *model) maybeWarmOllamaCmd() tea.Cmd {
+	base := m.cfg.OllamaBaseURL
+	model := m.cfg.Model
+	if base == "" || model == "" || model == "auto" || m.streaming {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ollamainfo.WarmIfUnloaded(ctx, base, model)
+		return ollamaWarmedMsg{}
 	}
 }
 
@@ -1015,14 +1072,27 @@ func (m *model) dispatchSlash(parsed *commands.ParsedCommand) tea.Cmd {
 const (
 	statusWaiting    = "waiting for first token"
 	statusGenerating = "generating…"
+	// statusReeval names the post-tool-round wait (P33.19): the round's tools
+	// have all returned and the model is re-evaluating the enlarged prompt
+	// before it resumes. Deliberately not "cold loading" — whether this wait is
+	// a model reload or prompt eval is only knowable from LoadDurationMS, which
+	// the native adapter reports post-turn (a KindNotice), never live, so the
+	// same indistinguishability that makes the first-token wait unnameable
+	// applies here. What *is* measurable is that the tool results just arrived
+	// and the model hasn't spoken yet, which is exactly what this says.
+	statusReeval = "processing tool results…"
 )
 
 // phaseStatus is the status word for the run's current phase.
 func (m model) phaseStatus() string {
-	if m.firstTokenAt.IsZero() {
+	switch {
+	case m.firstTokenAt.IsZero():
 		return statusWaiting
+	case !m.modelWaitAt.IsZero():
+		return statusReeval
+	default:
+		return statusGenerating
 	}
-	return statusGenerating
 }
 
 // beginStream marks the start of a run and resets the per-run phase state.
@@ -1030,8 +1100,13 @@ func (m model) phaseStatus() string {
 // previous run's clock in the frames before streamStartedMsg lands.
 func (m *model) beginStream() {
 	m.streaming = true
+	// P33.10: re-arm the first-keystroke pre-warm for the next message. The run
+	// starting now loads the model itself, but it may have unloaded again by the
+	// time the user composes their next turn.
+	m.warmPinged = false
 	m.streamStart = time.Time{}
 	m.firstTokenAt = time.Time{}
+	m.modelWaitAt = time.Time{}
 	m.outBytes = 0
 	m.status = statusWaiting
 	// P33.17: the previous turn's inputTokens is now stale for this turn's
@@ -1048,6 +1123,13 @@ func (m *model) beginStream() {
 func (m *model) markModelOutput(n int) {
 	if m.firstTokenAt.IsZero() {
 		m.firstTokenAt = time.Now()
+		m.status = statusGenerating
+	}
+	// The model has resumed producing output, so any post-tool-round wait
+	// (P33.19) has ended — clear it unconditionally, since a later round sets
+	// it afresh from its own last tool result.
+	if !m.modelWaitAt.IsZero() {
+		m.modelWaitAt = time.Time{}
 		m.status = statusGenerating
 	}
 	m.outBytes += n
@@ -1238,6 +1320,19 @@ func waitForEvent(ch <-chan api.Event) tea.Cmd {
 
 // --- update ---
 
+// isStreamLifecycleMsg reports whether msg is a stream-run lifecycle event
+// that must always reach the main Update switch, never be swallowed by an open
+// overlay (P33.20). A transient panel (P33.11) or any future overlay left up
+// during a run would otherwise drop the run's streamed output. Kept in sync
+// with the equivalent allowlist inside the dialog block.
+func isStreamLifecycleMsg(msg tea.Msg) bool {
+	switch msg.(type) {
+	case streamStartedMsg, eventMsg, batchEventMsg, streamClosedMsg, errMsg, steerFailedMsg:
+		return true
+	}
+	return false
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -1247,9 +1342,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg.(type) {
 	case tea.FocusMsg:
 		m.focused = true
-		return m, nil
+		// P33.10: regaining focus is a strong signal the user is about to type,
+		// and enough idle time may have passed for Ollama to have unloaded the
+		// model. Pre-warm now (gated on /api/ps inside the cmd) so the message
+		// they send next doesn't open with a cold reload. No-op off Ollama.
+		return m, m.maybeWarmOllamaCmd()
 	case tea.BlurMsg:
 		m.focused = false
+		return m, nil
+	case ollamaWarmedMsg:
+		// P33.10: the pre-warm finished (or was gated out). It carries no UI
+		// state — swallow it so it never reaches the composer's textarea update.
 		return m, nil
 	}
 
@@ -1295,6 +1398,56 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refresh()
 		}
 		return m, cmd
+	}
+
+	// Transient informational panel (P33.11): a modal, scrollable overlay for
+	// read-only slash output (/status, /help, /memory …). Keys drive
+	// scroll/dismiss; a resize re-wraps it. Everything else is dropped rather
+	// than acted on while it's up — except the stream-lifecycle allowlist
+	// (P33.20), which must reach the main switch so a run's output is never
+	// swallowed by an open overlay. (A transient panel can't actually be open
+	// during a run today — slash commands only dispatch while !streaming and
+	// the panel captures input while up — but the allowlist keeps that a
+	// property of the dispatch gate rather than of this block.)
+	if m.transientPanel != nil {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.width, m.height = msg.Width, msg.Height
+			m.layout()
+			m.transientPanel.resize(m.width, m.height)
+			return m, nil
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "esc", "enter", "q":
+				m.transientPanel = nil
+				m.ta.Focus()
+				m.refresh()
+				return m, nil
+			case "up", "k":
+				m.transientPanel.scroll(-1)
+				return m, nil
+			case "down", "j":
+				m.transientPanel.scroll(1)
+				return m, nil
+			case "pgup", "b":
+				m.transientPanel.scroll(-m.transientPanel.height)
+				return m, nil
+			case "pgdown", "space", "f":
+				m.transientPanel.scroll(m.transientPanel.height)
+				return m, nil
+			case "home":
+				m.transientPanel.scroll(-len(m.transientPanel.lines))
+				return m, nil
+			case "end":
+				m.transientPanel.scroll(len(m.transientPanel.lines))
+				return m, nil
+			}
+			return m, nil // modal: swallow every other key
+		}
+		if !isStreamLifecycleMsg(msg) {
+			return m, nil
+		}
+		// Stream-lifecycle event: fall through to the main switch below.
 	}
 
 	// Dialog overlay (command palette, persona/session/timeline/model picker):
@@ -1394,11 +1547,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// P33.7: the fetches that fill a picker opened on its loading row
-		// belong to their handlers in the main switch below — routing them into
-		// the list instead would leave the spinner up forever.
+		// P33.20 allowlist: message types that must always reach the main update
+		// path rather than be swallowed by this open-dialog block. The two
+		// *LoadedMsg types are the async fetches that fill a picker opened on its
+		// loading row (P33.7) — routing them into the list instead would leave
+		// the spinner up forever. The stream-lifecycle events are here for the
+		// reason P33.20 filed: an overlay left open during a run (a P33.11
+		// transient panel, or any future one) would otherwise drop the run's
+		// streamed output. Expressed as one allowlist so it doesn't accrete
+		// per-message fall-through patches one item at a time.
 		switch msg.(type) {
-		case sessionsLoadedMsg, backtrackTargetsMsg:
+		case sessionsLoadedMsg, backtrackTargetsMsg,
+			streamStartedMsg, eventMsg, batchEventMsg, streamClosedMsg, errMsg, steerFailedMsg:
 		case slashResultMsg:
 			// P33.13: the persona picker opens ahead of its data through the
 			// same generic slashResultMsg every other slash command uses, so
@@ -2291,6 +2451,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refresh()
 			return m, nil
 		}
+		if msg.Transient && msg.Output != "" && msg.Message == "" {
+			// P33.11: informational output opens a dismissable overlay panel
+			// instead of appending to the transcript. Reached only after every
+			// picker / sentinel / Message branch above returned, so a transient
+			// command that opened a picker or sends a message is never
+			// intercepted here — this is the plain-text tail alone.
+			title := msg.TransientTitle
+			if title == "" {
+				title = "info"
+			}
+			p := newTransientPanel(title, msg.Output, msg.IsError, m.width, m.height)
+			m.transientPanel = &p
+			m.ta.Blur()
+			m.refresh()
+			return m, nil
+		}
 		if msg.Output != "" {
 			style := m.th.statusText
 			if msg.IsError {
@@ -2316,6 +2492,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.approval == nil {
 		var cmd tea.Cmd
 		prevTAH := m.ta.Height()
+		prevEmpty := strings.TrimSpace(m.ta.Value()) == ""
 		m.ta, cmd = m.ta.Update(msg)
 		cmds = append(cmds, cmd)
 		// Recompute inline completion after the textarea consumes the key.
@@ -2324,6 +2501,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// update the viewport height immediately so it never overlaps the input.
 			if m.ta.Height() != prevTAH {
 				m.applyViewportHeight()
+			}
+			// P33.10 first-keystroke pre-warm: the composer just went from empty
+			// to non-empty — the user has started a new message. Kick off a warm
+			// load (gated on /api/ps unloaded inside the cmd) so it overlaps the
+			// typing latency instead of stalling the send. warmPinged debounces
+			// it to once per empty→typing transition; it resets when the composer
+			// goes empty again below.
+			nowEmpty := strings.TrimSpace(m.ta.Value()) == ""
+			if prevEmpty && !nowEmpty && !m.warmPinged {
+				if c := m.maybeWarmOllamaCmd(); c != nil {
+					m.warmPinged = true
+					cmds = append(cmds, c)
+				}
+			} else if nowEmpty {
+				m.warmPinged = false
 			}
 			m.syncCompletion()
 			// Any non-ESC key while escPending clears the not-streaming
@@ -2614,15 +2806,29 @@ func (m *model) refresh() {
 		// P33.4: a flavor phrase describes what the model is doing, which is
 		// only knowable once it has started doing it. Before the first output
 		// the honest line is the wait itself and how long it has run.
-		phrase := statusWaiting
-		if !m.firstTokenAt.IsZero() {
+		var phrase, hint string
+		switch {
+		case m.firstTokenAt.IsZero():
+			phrase = statusWaiting
+			hint = formatStreamHint(m.streamStats())
+		case !m.modelWaitAt.IsZero():
+			// P33.19: post-tool-round wait — the round's tools have returned and
+			// the model is re-evaluating the enlarged prompt, no output yet. Like
+			// the first-token wait this is honest dead air, not a flavor phrase;
+			// its clock runs from the last tool result (modelWaitAt), so it times
+			// this wait rather than the whole turn.
+			phrase = statusReeval
+			if secs := int(time.Since(m.modelWaitAt).Seconds()); secs > 0 {
+				hint = fmt.Sprintf(" · %ds", secs)
+			}
+		default:
 			cat := catThinking
 			if n := len(m.tools); n > 0 && m.tools[n-1].status == "pending" {
 				cat = categoryFor(m.tools[n-1].name)
 			}
 			phrase = thinkingPhrase(m.animStep, m.humorMode, cat)
+			hint = formatStreamHint(m.streamStats())
 		}
-		hint := formatStreamHint(m.streamStats())
 		work := shimmerText("● "+phrase, m.animStep, colTextMuted, colAccent)
 		tail.WriteString(wrap(work+m.th.elapsedDim.Render(hint), w))
 	}
@@ -3279,6 +3485,17 @@ func (m *model) applyEvent(ev api.Event) {
 				m.todoItems = parseTodoList(ev.ToolResult)
 			}
 		}
+		// P33.19: with this result the round's last tool has returned (nothing
+		// left pending), so the model has been re-invoked with the enlarged
+		// prompt and is now re-evaluating it. That wait — dead air the status
+		// line otherwise labels "generating…" — begins now and runs until the
+		// next model output calls markModelOutput. Gated on pendingTools being
+		// empty so a result that still leaves concurrent tools running (they are
+		// not a model wait) doesn't start the clock early.
+		if m.streaming && len(m.pendingTools) == 0 {
+			m.modelWaitAt = time.Now()
+			m.status = statusReeval
+		}
 
 	case api.KindTurnDone:
 		// Some local reasoning models (e.g. Gemma4 in Ollama) route their entire
@@ -3697,6 +3914,11 @@ func (m model) render() string {
 		return renderOverlay(base, renderQuitConfirmBox(), m.width, m.height)
 	case m.dialog != nil:
 		return renderOverlay(base, m.dialog.View(), m.width, m.height)
+	case m.transientPanel != nil:
+		// P33.11: the informational panel composites over the live chat (dimmed
+		// behind it) rather than replacing the frame, so dismissing it drops the
+		// user straight back where they were.
+		return renderOverlay(base, m.transientPanel.View(), m.width, m.height)
 	}
 	return base
 }
