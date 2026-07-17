@@ -15,15 +15,28 @@ import (
 var readOnlyShellArgv0 = map[string]bool{
 	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
 	"pwd": true, "stat": true, "file": true,
+	"grep": true, "which": true, "whoami": true, "env": true, "printenv": true,
+	"date": true, "uname": true, "hostname": true, "id": true,
+	"du": true, "df": true, "ps": true, "sort": true, "uniq": true,
+	"cut": true, "tr": true, "nl": true, "less": true, "more": true,
+	"type": true, "tree": true,
 	// PowerShell read-only equivalents (the shell tool runs via PowerShell
 	// on Windows; see shell.go's Description).
 	"get-childitem": true, "get-content": true, "get-item": true, "test-path": true,
+	"get-location": true, "get-process": true, "get-date": true, "select-string": true,
+	"where.exe": true,
 }
 
 // readOnlyGitSubcommands is the allowlist of git subcommands treated as
-// read-only.
+// read-only. Only subcommands that are read-only for every possible
+// argument combination belong here — e.g. "branch"/"tag"/"remote" are
+// excluded because a positional argument turns them into a mutation
+// ("git branch foo" creates a branch), unlike "status"/"log"/"diff"/"show"
+// which stay read-only regardless of extra flags or pathspecs.
 var readOnlyGitSubcommands = map[string]bool{
-	"status": true, "log": true, "diff": true,
+	"status": true, "log": true, "diff": true, "show": true, "blame": true,
+	"rev-parse": true, "describe": true, "ls-files": true, "cat-file": true,
+	"shortlog": true,
 }
 
 // gitConfigOverrideFlags can redirect git's behavior through an arbitrary
