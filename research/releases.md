@@ -8,11 +8,165 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-16 — closed two threat-model findings that had each shipped for only half
-their surface: **FIND-14**'s swarm budget floor (subprocess backend only) and **FIND-17**'s TUI
-output sanitization (answer text only). Earlier the same day: **P34.3** (personas preload the
-deferred tools they declare) and a **P34.2 follow-up fix** (the tool-calling probe was accusing a
-capable model of not supporting tool calls).
+**Last updated:** 2026-07-17 — **P34.5-P34.8**, the whole of the Tier 2 batch: the legacy
+Ollama-compat warning, brakeman's relevance gate, the doctor sandbox test seam, and the
+trivy-vs-grype investigation, which turned out to be a dedup bug. Four parallel sub-agents in
+isolated worktrees, merged one at a time. Earlier: **FIND-14** and **FIND-17**'s second halves,
+**P34.3**, and a **P34.2 follow-up fix**.
+
+---
+
+### P34.5-P34.8 — the Tier 2 batch: three wrong diagnoses and a dedup bug
+
+Four dependency-free items, implemented by four parallel sub-agents each in its own git worktree,
+then merged into `main` one at a time — the same pattern as the P33.13-P33.18 batch, and again
+zero conflicts despite P34.5 and P34.7 both editing `internal/cli/doctor.go` and P34.6 and P34.8
+both editing `internal/security/scanners.go`. Worktree isolation kept the concurrent edits off
+each other on disk; git's merge resolved them at integration time. `go build ./...`,
+`go vet ./...`, `go test ./...` green after every merge, plus `-race` on `internal/security`.
+
+**The batch's headline is not any one fix — it's that three of the four items were wrong about
+their own mechanism, and the specified fix would have failed in two cases.** Details per item
+below. The pattern is recorded in [roadmap.md](roadmap.md#status): the *symptoms* were all real
+and correctly reported; what had decayed was the *explanation* attached to each — a plausible
+mechanism recorded once when checking it was expensive, then read as fact thereafter.
+
+#### P34.5 — nothing told an existing user their Ollama config was on the legacy compat path
+
+A config written before P33.9 says `provider.default: openai` with
+`base_url: http://localhost:11434/v1`. `providerfactory.buildOne` only wires
+`ollama.WithNumCtx`/`WithKeepAlive` and the real load/token telemetry on the `ollama` branch, so
+such a config silently gets none of it, forever. The cost was measured on the maintainer's own
+machine: the compat path cannot send `num_ctx`, so Ollama served every request at its 4096
+default while the configured model supported 40960 — a red-team session hit "context ~142% full"
+on turn one, and P33.9's cold-load notice never fired because the compat path can't see
+`load_duration`.
+
+New `internal/providerfactory/legacyollama.go` (`IsLegacyOllamaCompat`, `LegacyOllamaCompatDetail`,
+`LegacyOllamaCompatFix`), surfaced as a new `provider adapter` row in `aegis doctor` and a
+one-line WARN at daemon startup. The message states the exact three-line config change rather
+than describing it, and names the one real behavior difference so the fix isn't a silent
+downgrade: the `ollama` branch defaults `think: false` while the compat path leaves the model's
+own default alone, so a qwen3-style reasoning model stops thinking unless `think: true` is set.
+
+**The item called its detection rule "trivial and unambiguous"; it wasn't.** `default: openai`
+plus any `/v1` base that isn't `api.openai.com` also matches LM Studio and liteLLM — which
+`buildOne`'s `openai` branch supports *on purpose*, and which have no native `/api/chat` to
+switch to. Telling those users `provider.default: ollama` would break a working config.
+Narrowing to `:11434` would instead miss an Ollama server proxied on another port. Resolution:
+keep the detection as specified, split the *message* — a `:11434` base is stated as fact, a bare
+`/v1` base is worded conditionally ("if that is an Ollama server…"). The suggested fix is
+identical either way, so a false positive costs one dismissable line of advice instead of a
+broken config. Both wordings are pinned by tests. Verified live beyond unit tests: `aegis doctor`
+against a legacy-shaped config renders the WARN, and a real daemon logs it at startup.
+
+#### P34.6 — brakeman reported "error" on every non-Rails project instead of skipping
+
+`brakeman` against a non-Rails repo exits 4 with empty stdout (`Please supply the path to a Rails
+application`) — brakeman working correctly. With no relevance gate, `runContainerCLI` saw a
+non-zero exit with no output and the scan reported `brakeman: error: exit status 4`. A
+`RelevanceChecker` on `brakemanScanner` now mirrors brakeman's own check (`config/environment.rb`
+plus `config/application.rb`/`Rakefile`) and reports `no Rails application found in workspace`,
+the same shape as the existing `no Dockerfile found in workspace`. `PlanScanners`'s
+`!EnabledExplicit` semantics are preserved deliberately: an operator who explicitly sets
+`security.tools.brakeman.enabled: true` still gets the run and brakeman's real error.
+
+**The item under-stated its own blast radius.** It framed the trigger as the multiscanner's `full`
+profile making brakeman easy to *enable* — implying operator opt-in. In fact
+`AutoEnableLanguageScanners` sets `Enabled` while leaving `EnabledExplicit` false, so language
+auto-detection was turning brakeman on for *any* `Gemfile`/`*.rb` project. Every non-Rails Ruby
+repo hit the error; nobody had to opt in.
+
+The item's follow-on question — do `njsscan`, `bandit` or `gosec` also error rather than skip on
+the wrong language? — was answered by running them, not by assumption: all three exit 0 with
+valid empty output (gosec produces no report file, which `runHostToTempSARIF` reads as zero
+findings). **brakeman was the only scanner whose "not applicable" was indistinguishable from
+"failed."** No gates added elsewhere. Exit 3 (brakeman on a real Rails app with findings) is safe
+because `runContainerCLI` tolerates non-zero exit when output exists — which is precisely why
+exit 4 broke: empty stdout.
+
+#### P34.7 — `TestDoctorNamesPodmanMisconfig` only passed on machines without podman
+
+The test patched `sandbox.backend: podman` and asserted doctor emits a WARN naming
+`sandbox.backend`; its premise was "with no podman runtime present." The chain
+`doctorSandboxCheck` → `server.SelectSandbox` → `sandbox.NewContainerBackend` reaches the real
+host, so the assertion was really about the developer's toolchain — and **the greener answer was
+the wrong one**: it passed precisely when it wasn't exercising the misconfig it claimed to cover.
+
+**The item's diagnosis was wrong in a way that mattered.** It named `sandbox.DetectBest` as the
+host dependency to seam, citing `internal/security`'s `detectRuntime` (`method.go:417`) as
+precedent. But with `backend: podman`, config normalizes to `container`+`podman`, so
+`selectRuntime` takes the **`prefer` branch and calls `probeRuntime` directly — `DetectBest` is
+never reached on this path**. Seaming `DetectBest` as specified would have left the test exactly
+as broken. The seam went on the selection call instead: `var selectSandbox = server.SelectSandbox`
+in `internal/cli`, keeping the package-var-over-lower-package-function shape the item asked for.
+The test now asserts both branches through it (runtime absent → WARN naming the key; runtime
+present → PASS), scopes assertions to the sandbox row, and additionally checks `config.Normalize`
+still rewrites `"podman"` → `container`/`podman` — coverage that faking at this level would
+otherwise have lost.
+
+The reproduction was itself instructive: the test *passed* on first run because podman was
+installed but its machine was **stopped**. That is the bug in miniature — the assertion silently
+reads host state. Starting the machine reproduced the failure as filed. Verified green with
+podman both running and stopped, and confirmed load-bearing by mutating the production logic
+three ways (WARN→PASS on fallback; dropping `sandbox.backend` from the Fix hint; PASS→WARN on the
+active branch) and checking each mutation fails.
+
+The item's follow-on about other doctor rows resolved on the distinction between *reads the host*
+and *changes the verdict*: workspace trust, output guard and workdir allowlist are pure config;
+provider and tool-calling sit behind `ollamaNativeBase`, a pure-config predicate; scanners is
+neutralized by `disableAllScanners`. Only the **daemon** row genuinely probes the host, and it
+cannot flip an assertion — it emits PASS/WARN and never FAIL. Left alone, with the reasoning
+documented rather than a seam nothing needs. (The item named a test `TestDoctorNoFailRowsInCleanSetup`
+that does not exist; the real one is `TestDoctorCleanSetupExitsZero`, which needs no seam — the
+`local` default takes `SelectSandbox`'s `case "", "local"` and never probes.)
+
+#### P34.8 — "why does trivy report 3 where grype reported 47?" — both halves of the premise were wrong
+
+Filed as an investigation with an unbounded tail, and the cheap first step was decisive. Measured
+on the host with Aegis's exact flags: **grype 55, trivy 15 (all misconfig, 0 vuln), osv-scanner 5**
+on the maintainer's checkout; **grype 1, trivy 3 misconfig/0 vuln, osv-scanner 1** on a clean
+worktree.
+
+**Grype's extras are not dependency coverage.** 48 of 55 are gitignored compiled `.exe` build
+artifacts (`testrun/aegis.exe`, `aegis-eval.exe`), almost all `stdlib` CVEs from the go1.25.0
+toolchain baked into the binary — `syft` catalogs 574 Go components because it reads binaries,
+against go.mod's 67. 2 more come from a vendored `tsc.exe` in `node_modules`. Only 5 are a real
+dependency finding (`GO-2026-5320`, goldmark v1.7.13, once per nested worktree). The item's
+`dist/` hypothesis was wrong — the mechanism is binary cataloging — and the conclusion runs
+opposite to what the item anticipated: this is **evidence for keeping grype excluded**, not
+against. Parked as [P34.11](roadmap.md#p3411--if-grype-is-ever-reinstated-dir-mode-must-exclude-build-artifacts).
+
+**The osv-scanner=1 anomaly wasn't one.** The item's "1 across 140 npm packages" conflated two
+ecosystems: the "1" was goldmark, from `go.mod`. osv-scanner *did* scan all 140 npm packages and
+correctly reported **0** — the lockfile is 139 devDependencies plus preact, all clean. The detail
+that "didn't sit right" was correct behavior.
+
+**The real bug was in dedup, and it was shipping.** On a control tree where trivy and osv
+genuinely overlap: **28 + 30 = 58 raw → 58 deduped, 0 merged.** Every shared CVE reported twice.
+osv findings were unmergeable on *both* halves of the dedup key:
+
+- **Location** — osv-scanner emits an absolute host path (host method) or the mount point
+  (`/src`, container method); SARIF scanners emit repo-relative. `normalizeLocation` cannot
+  reconcile them — it never knew the scan root. Now trimmed in `osvRelativeSource` at the one
+  place that knows it (`dir` on host, `/src` in a container).
+- **RuleID** — dedup keys SCA findings on an embedded CVE, but osv's group `ids` are `GO-*`/
+  `GHSA-*` only; the CVE sits in the group's **`aliases`**, which the parser never read. `osvRuleID`
+  now appends CVE aliases (only CVEs — `normalizeRuleID` looks for nothing else, and osv's alias
+  sets carry distro IDs that would be noise in a rule ID a user reads).
+
+`dedup.go`'s comment already described the intended shape; the parser just never produced it. The
+suite stayed green because the fixtures recorded a *relative* path and a *bare-CVE* group id —
+not the shape osv-scanner actually emits. Same 58 real findings now dedup to **30, with 28 merged
+groups**; each half verified load-bearing (reverting either alone returns merges to zero).
+
+Two facts worth recording from the measurement. **trivy misses `GO-2026-5320`** even as a direct
+dep — its DB is fresh, the advisory's GHSA alias just hasn't landed — while its Go SCA works fine
+(28 CVEs on a control tree); **osv-scanner covers exactly that gap**, so the trivy+osv pairing is
+complementary, which is the reassuring answer to the item's real worry about SCA coverage. And
+**trivy skips npm dev deps by default**, seeing 1 of 140 packages here; that costs nothing today
+(0 vulns, osv covers them) but is filed as
+[P34.10](roadmap.md#p3410--trivy-sees-1-of-140-npm-packages-because-it-skips-dev-dependencies-by-default).
 
 ---
 

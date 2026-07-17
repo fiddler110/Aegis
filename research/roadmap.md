@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-16
+**Last updated:** 2026-07-17
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,9 +11,29 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 13 — four Tier 2 items (**P34.5, P34.6, P34.7, P34.8**), four Tier 3 items
-(**P33.10, P33.11, P33.16, P33.19**), and five parked (**P25.9, P33.12, P33.20-P33.22**). Tier 1 is
-fully clear.
+**Open items:** 12 — two Tier 2 items (**P34.9, P34.10**), four Tier 3 items
+(**P33.10, P33.11, P33.16, P33.19**), and six parked (**P25.9, P33.12, P33.20-P33.22, P34.11**).
+Tier 1 is fully clear.
+
+**P34.5-P34.8 shipped 2026-07-17** — the whole of the Tier 2 batch, four parallel sub-agents in
+isolated worktrees, merged one at a time. See [releases.md](releases.md#latest-changes).
+**Three of the four items were wrong about something material, and each sub-agent caught it by
+going to the real system rather than implementing the spec as written.** P34.7's item named
+`DetectBest` as the host dependency to seam — that function is never reached on the podman path,
+so the specified fix would have left the test exactly as broken. P34.8's item asked why trivy
+found 3 where grype found 47, and both halves of the premise dissolved: grype's extras are
+gitignored `.exe` build artifacts, and the "1 finding across 140 npm packages" conflated two
+ecosystems (it was a Go finding; osv scanned all 140 npm packages and correctly found zero).
+P34.6's item under-stated its own blast radius — auto-detection, not operator opt-in, was
+enabling brakeman on every Ruby repo.
+
+**The lesson is narrower than "specs are sometimes wrong": all three errors were in the item's
+*diagnosis*, not its symptom.** The observed symptoms were all real and all correctly reported.
+What decayed between filing and implementation was the explanation attached to them — a plausible
+mechanism recorded once, at a moment when checking it was expensive, and thereafter read as
+established fact. P34.8 is the sharpest case: the item's own hypothesis section was honest that
+"they scan different things" was a hypothesis, and it was still wrong. When an item hands the
+implementer a mechanism, that mechanism is the first thing to re-verify, not the thing to build on.
 
 **Two threat-model findings closed 2026-07-16 — both had shipped for only half their surface.**
 **FIND-14**'s fair-share budget floor existed on the subprocess backend only, so every *in-process*
@@ -135,7 +155,9 @@ output, not just text; `outBytes` not `liveText`; tok/s measured from first toke
 otherwise a 60s cold-load is averaged into a throughput the model never ran at). Where an item says
 "show X", the implementer owns the question of whether X is substantiable.
 
-**Next session:** **P33.10** is the best next win — Tier 2 is now clear. **P33.10** has
+**Next session:** **P33.10** is the best next win — the P34.5-P34.8 batch cleared Tier 2 of
+everything except the two items it filed on the way out (**P34.9**, **P34.10**), both small,
+both scanner-scope questions rather than defects. **P33.10** has
 a head start from P34.2: `internal/toolcallprobe` established that a probe at run start is nearly free
 because it shares the load the turn was going to pay, which is the same insight pre-warm turns on, and
 `toolcallprobe.Gate` is a working model of the per-model caching P33.10 needs. With P33.9 shipped, **P33.10
@@ -172,130 +194,67 @@ preflight companion for the same misconfiguration classes.
 
 ## Open Work — Tier 2
 
-Four items: P34.5 — found 2026-07-16 while fixing the P34.2 false positive — plus P34.6, P34.7
-and P34.8, all found 2026-07-16 while live-verifying the multiscanner image. All
-dependency-free; P34.8 is the one with an unbounded tail, and the only one that touches how much
-coverage a scan actually has. (P34.3 shipped 2026-07-16 — see
-[releases.md](releases.md#latest-changes);
-P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16;
-P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped 2026-07-15;
-P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
+Two items, both found 2026-07-17 while shipping the P34.5-P34.8 batch and both about scanner
+coverage being quietly narrower than the numbers imply. Dependency-free. (P34.5, P34.6, P34.7
+and P34.8 shipped 2026-07-17 — see [releases.md](releases.md#latest-changes);
+P34.3 shipped 2026-07-16; P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16;
+P34.4 shipped 2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16;
+P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7
+shipped 2026-07-15.)
 
-### P34.5 — Nothing tells an existing user their Ollama config is on the legacy compat path
-
-Effort: S
-
-Found 2026-07-16 on the maintainer's own machine, which is the point: a config written before
-P33.9 says `provider.default: openai` with `base_url: http://localhost:11434/v1`, and **nothing
-ever says that is now the worse of two paths**. P33.9 shipped the native adapter and
-`providerfactory.buildOne` only wires `ollama.WithNumCtx`/`WithKeepAlive` and the real
-load/token telemetry on the `ollama` branch — a config on the `openai` branch silently gets none
-of it, forever, with no warning and no migration.
-
-The cost is not theoretical. The compat path cannot send `num_ctx`, so Ollama served every request
-at its 4096 default while the configured model supports 40960 — a red-team session was at
-"context ~142% full" on turn one, and P33.9's cold-load notice never fires because the compat
-path can't see `load_duration`. Switching `default: ollama` + `context_window: 32768` fixed all of
-it (verified: `/api/ps` reports `ctx=32768`, and the same session went from overflowing to ~18%
-of the window).
-
-The detection is trivial and unambiguous: `default: openai` **and** a `base_url` that is neither
-empty nor an OpenAI endpoint — an `:11434` host, or any `/v1` base that isn't `api.openai.com` —
-is an Ollama server being driven through the wrong adapter. `aegis doctor` is the natural home
-(it already has a provider check), and startup deserves a one-line warning too, since the point
-is that users never think to look. Suggest the exact three-line config change rather than
-describing it. Note the one real behavior difference so the fix isn't a silent downgrade: the
-`ollama` branch defaults `think: false` while the compat path leaves the model's own default
-alone, so a qwen3-style reasoning model stops thinking unless `think: true` is set explicitly.
-
-### P34.6 — brakeman reports "error" on every non-Rails project instead of skipping
+### P34.9 — Host-method njsscan errors on every project on Windows, whatever the language
 
 Effort: S
 
-Found 2026-07-16 while live-verifying the multiscanner image. `brakeman` against this repo
-exits 4 with empty stdout and `Please supply the path to a Rails application (looking in
-/src).` — which is brakeman working correctly. Aegis has no relevance gate for it, so
-`runContainerCLI` sees a non-zero exit with no output and the scan reports
-`brakeman: error: exit status 4`. Not a container artifact: a host-installed brakeman does
-the same thing, and has since the scanner was added. It only surfaces now because the
-multiscanner's `full` profile makes brakeman trivial to turn on.
+Found 2026-07-17 while answering P34.6's follow-on question (does any other language-targeted
+scanner error rather than skip on the wrong language?). The answer for njsscan was "no, it exits
+0 with empty SARIF" **in the container** — but on the Windows host it crashes with a libsast
+`AttributeError` traceback, and it does so **identically with and without JS files present**. So
+this is not a relevance-gate gap (P34.6's fix would not help): it's njsscan-on-Windows being
+broken outright, because semgrep isn't supported there. Every host-method scan on Windows that
+enables njsscan reports an error row for it, on every project.
 
-The fix is a `RelevanceChecker` on `brakemanScanner` (`internal/security/scanners.go`),
-exactly as `hadolintScanner` and `kubescapeScanner` already have — brakeman's own check is
-`config/environment.rb` plus a `config/application.rb`/`Rakefile`, so mirroring "is there a
-Rails app here" is cheap and unambiguous. It then reports `no Rails application found in
-workspace`, the same shape as `no Dockerfile found in workspace`, instead of an error that
-looks like a broken tool.
+Deliberately left out of P34.6's scope, which was about relevance gating. The interesting
+question here is what the right answer *is*, and it isn't obvious: a host-platform gate that
+skips njsscan on Windows would report a clean "skipped" for a tool the user might reasonably
+expect to run, which is its own kind of lie — the container method runs it fine on the same
+machine. So the choice is between skipping with a reason that names the platform, erroring with
+a message that says "use `method: container` on Windows" instead of surfacing a raw Python
+traceback, or gating on semgrep's own availability rather than on `runtime.GOOS`. Prefer whichever
+of those the evidence supports; the traceback is the only part that is unambiguously wrong.
 
-Worth keeping the existing semantics while doing it: `PlanScanners` only consults a
-`RelevanceChecker` when `!EnabledExplicit`, so an operator who explicitly sets
-`security.tools.brakeman.enabled: true` still gets the run (and brakeman's real error) —
-explicit config beating auto-detection is the intended behavior, not a gap to close here.
+Worth checking whether any other Python-based scanner in the registry (bandit is the obvious one)
+has the same host-Windows dependency on semgrep. Bandit was verified clean on both host and
+container during P34.6, so the answer there is probably no — but the check is cheap and the same
+shape of surprise is what produced this item.
 
-The category is worth a second look beyond brakeman: this is a scanner whose "not
-applicable" answer is indistinguishable from "failed", and it was invisible until something
-made the tool easy to enable. `njsscan`, `bandit` and `gosec` are the other language-targeted
-engines with no relevance gate — check whether any of them also errors rather than skipping
-on a project in the wrong language.
-
-### P34.7 — `TestDoctorNamesPodmanMisconfig` only passes on machines without podman
+### P34.10 — trivy sees 1 of 140 npm packages, because it skips dev dependencies by default
 
 Effort: S
 
-Found 2026-07-16 while live-verifying the multiscanner image, by starting the podman machine
-the work needed. `TestDoctorNamesPodmanMisconfig` (`internal/cli/doctor_test.go:57`) patches
-`sandbox.backend: podman` and asserts doctor emits a `WARN` naming `sandbox.backend` — its
-premise, stated in its own comment, is "with no podman runtime present". With podman actually
-running, doctor correctly reports `PASS sandbox — configured "container", active
-"container:podman"`, and the test fails. Confirmed as pre-existing rather than a regression by
-stashing the branch and re-running against a clean tree with the machine up: identical failure.
+Found 2026-07-17 by P34.8's measurement work, and separable from it: P34.8 fixed the dedup bug
+it uncovered, and deliberately did not make this configuration call.
 
-The test reaches the real host. `doctorSandboxCheck` → `server.SelectSandbox` →
-`sandbox.NewContainerBackend` → `sandbox.DetectBest`, and nothing in that chain is injectable
-from `internal/cli`, so the assertion is really about whether the machine running `go test` has
-podman installed. That is a CI/maintainer-machine tripwire: the suite silently changes meaning
-based on the developer's toolchain, and the greener answer is the wrong one — the test passes
-precisely when it isn't exercising the misconfig it claims to cover.
+`trivy fs` skips npm **dev** dependencies by default. This repo's `package-lock.json` is 139
+devDependencies plus preact, so trivy catalogs **1 of 140** packages — osv-scanner scans all 140.
+Today this costs exactly nothing: those 140 packages currently have **zero** known
+vulnerabilities, and osv-scanner covers them regardless. That is why this is Tier 2 and not Tier
+1 — there is no missed finding to point at, only a missing capability that would matter the day a
+devDependency has a CVE.
 
-`internal/security` already solved this shape: `detectRuntime` (`method.go:417`) is a package
-var wrapping `sandbox.DetectBest` purely so tests can inject a deterministic result. The same
-seam on the sandbox-selection path would let this test assert both branches (runtime absent →
-WARN naming the key; runtime present → PASS) instead of one branch by accident of environment.
-Worth checking whether `TestDoctorNoFailRowsInCleanSetup` and the other doctor rows have the
-same host dependency.
+The decision is `--include-dev-deps`, and it is a real trade rather than an obvious yes: dev
+dependencies don't ship, so a CVE in one is a genuinely lower-severity thing than a CVE in a
+runtime dep, and turning this on will raise finding counts on npm projects for vulnerabilities
+that a user may reasonably not care about. The counter-argument is that a build-time dependency
+still executes on a developer's machine and in CI, which is a real attack surface, and that
+Aegis's own frontend toolchain is exactly that shape. Note the asymmetry that makes this worth
+deciding rather than defaulting: **osv-scanner already includes dev deps**, so the two SCA
+scanners currently disagree about what the scan scope even is — whatever the answer, the two
+should agree, and the answer should be written down where a user can find it.
 
-### P34.8 — Why does trivy report 3 findings where grype reported 47 on the same tree?
-
-Effort: M
-
-Found 2026-07-16 while live-verifying the multiscanner image, and sharpened by the decision to
-drop grype from it. One run, one repo, one moment: **grype 47 findings, trivy 3, osv-scanner 1**
-(alongside opengrep's 26, deduping to 64 total). Those three are supposed to overlap heavily —
-dedup merged only 13 of 77 raw findings — and they are all pointed at the same `go.mod` (67
-packages) and `package-lock.json` (140 packages).
-
-This was noted-and-parked when grype was in the image and the discrepancy was cushioned. It
-isn't cushioned now: **trivy and osv-scanner are the only SCA coverage the multiscanner
-carries**, so if trivy is under-reporting on this tree, container-mode scans are quietly
-shipping less dependency-CVE coverage than the numbers imply. That is the bad direction for a
-security tool to be wrong in — a small findings count reads as good news.
-
-Not filed as Tier 1 because nothing is confirmed broken: the gap may be entirely legitimate.
-`grype dir:` catalogs installed packages and binaries (including, plausibly, the committed
-`internal/server/webui/dist/` bundle), while `trivy fs --scanners vuln,secret,misconfig` is
-lockfile-driven; different inputs can honestly produce different counts. But osv-scanner finding
-**1** across 140 npm packages where grype found 47 is the detail that doesn't sit right, and
-"they scan different things" is a hypothesis, not an answer.
-
-First step is cheap even though the fix isn't bounded: run all three against this repo with a
-host-installed grype, diff the finding sets by (rule/CVE, location), and classify grype's extra
-47 — genuinely-unique CVEs, artifacts of scanning `dist/`, or duplicates that dedup should have
-merged and didn't. Each answer points somewhere different: a trivy configuration gap, a
-scan-scope difference worth documenting, or a `normalizeLocation` bug in `dedup.go`. If grype's
-extra findings turn out to be real and unique, that is also the evidence for revisiting its
-exclusion (`multiscannerExcludedTools`, `internal/security/multiscanner.go`) — it was dropped by
-decision, not by any technical constraint, and it remains a registered scanner runnable via
-`method: host`.
+The safest first step is measurement, which is cheap: run trivy with and without
+`--include-dev-deps` against a tree whose devDependencies *do* have known CVEs and see what the
+delta actually looks like before choosing a default.
 
 ---
 
@@ -389,10 +348,35 @@ measure but doesn't yet render mid-round.
 
 ## Open Work — Tier 4
 
-Five items parked — P25.9, P33.12, P33.20, P33.21, P33.22. Low urgency, no trigger, or
+Six items parked — P25.9, P33.12, P33.20, P33.21, P33.22, P34.11. Low urgency, no trigger, or
 explicitly parked pending demand. Do not build speculatively — revisit only if a concrete trigger
 appears, and check with the user before starting any of these.
 (P32.9-P32.11 shipped 2026-07-15.)
+
+### P34.11 — If grype is ever reinstated, `dir:` mode must exclude build artifacts
+
+Effort: S — parked; activation trigger is any move to re-add grype to the multiscanner
+
+Parked because it is conditional on a decision that currently points the other way. P34.8
+measured grype at 55 findings against this repo where trivy found 0 vulns, and classified them:
+**48 of 55 were gitignored compiled `.exe` build artifacts** (`testrun/aegis.exe`,
+`aegis-eval.exe`), almost all `stdlib` CVEs from the go1.25.0 toolchain baked into the binary,
+plus 2 from a vendored `tsc.exe` inside `node_modules`. `grype dir:` finds these because `syft`
+catalogs **574** Go components by reading binaries, against go.mod's 67.
+
+That is a property of one developer's local build output, not of the project's dependencies —
+which is **evidence for grype's current exclusion** (`multiscannerExcludedTools`,
+`internal/security/multiscanner.go`), not against it. P34.8's item had anticipated the opposite:
+that grype's extras might be real unique coverage and therefore an argument to reinstate it. They
+aren't.
+
+So this item only activates if someone moves to re-add grype for some *other* reason. If that
+happens, the finding to carry forward is that `dir:` mode needs to exclude build outputs
+(honoring `.gitignore`, or an explicit exclude list) — otherwise grype reports a scan of the
+developer's `go build` output as though it were a scan of the project, and the resulting finding
+count is both alarming and almost entirely noise. Note this also makes grype's numbers
+machine-dependent: a clean worktree with no compiled binaries gave **1** finding, the same tree
+with build artifacts gave 55.
 
 ### P33.20 — The dialog block swallows every message while a dialog is open
 
