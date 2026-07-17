@@ -112,6 +112,7 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	checks := []doctorCheck{
 		doctorWorkspaceTrustCheck(cfg),
 		doctorProviderCheck(ctx, cfg),
+		doctorProviderAdapterCheck(cfg),
 		doctorToolCallCheck(ctx, cfg),
 		doctorSandboxCheck(cfg),
 		doctorScannerCheck(ctx, cfg),
@@ -205,6 +206,27 @@ func doctorProviderCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	return doctorCheck{
 		Name: name, Severity: doctorPass,
 		Detail: fmt.Sprintf("provider %q configured, API key present", cfg.Provider.Default),
+	}
+}
+
+// doctorProviderAdapterCheck (P34.5) flags a config that reaches Ollama through
+// the legacy OpenAI-compat adapter. It is a separate row from
+// doctorProviderCheck deliberately: that check's ollama branch fires on a
+// :11434 base_url regardless of provider.default, so it reports a cheerful
+// "ollama reachable, model available" PASS for exactly the config this warns
+// about — reachability is genuinely fine here, it's the adapter that isn't.
+func doctorProviderAdapterCheck(cfg *config.Config) doctorCheck {
+	const name = "provider adapter"
+	if !providerfactory.IsLegacyOllamaCompat(cfg.Provider) {
+		return doctorCheck{
+			Name: name, Severity: doctorPass,
+			Detail: fmt.Sprintf("provider %q uses its native adapter", cfg.Provider.Default),
+		}
+	}
+	return doctorCheck{
+		Name: name, Severity: doctorWarn,
+		Detail: providerfactory.LegacyOllamaCompatDetail(cfg.Provider),
+		Fix:    providerfactory.LegacyOllamaCompatFix(cfg.Provider),
 	}
 }
 

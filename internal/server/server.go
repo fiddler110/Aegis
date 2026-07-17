@@ -454,6 +454,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		logger.Warn("provider not ready; message runs will fail until configured", "err", err)
 		adapter = nil
 	}
+	// P34.5: a pre-P33.9 config silently gets none of the native adapter's
+	// num_ctx/keep_alive/telemetry, forever. `aegis doctor` reports it too, but
+	// the whole problem is that nobody thinks to look — so say it once here,
+	// where every daemon start passes.
+	if detail := providerfactory.LegacyOllamaCompatDetail(cfg.Provider); detail != "" {
+		logger.Warn(detail, "fix", providerfactory.LegacyOllamaCompatFix(cfg.Provider))
+	}
 
 	// Background-task manager shares the session database's single connection.
 	taskStore, err := task.NewStore(store.DB())
