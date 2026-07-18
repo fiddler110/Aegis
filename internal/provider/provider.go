@@ -132,6 +132,14 @@ type Usage struct {
 	// reported (every non-Ollama provider) or when the model was already
 	// warm. Lets a caller distinguish a slow cold load from generation time.
 	LoadDurationMS int64 `json:"load_duration_ms,omitempty"`
+	// PromptEvalDurationMS is how long the provider spent on prefill —
+	// processing the prompt tokens before the first generated token (Ollama's
+	// native `prompt_eval_duration`, nanoseconds on the wire, converted to
+	// milliseconds here). Zero when not reported (every non-Ollama
+	// provider). Read alongside InputTokens to tell a KV-cache hit (prefill
+	// duration/token-count tracks only the newly appended turn) from a full
+	// reprocess (both track the whole running conversation) — see P35.7.
+	PromptEvalDurationMS int64 `json:"prompt_eval_duration_ms,omitempty"`
 }
 
 // EventType enumerates streaming events emitted by an adapter.

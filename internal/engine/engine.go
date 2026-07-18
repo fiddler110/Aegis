@@ -1097,6 +1097,22 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		emit(Event{Kind: KindNotice, Text: fmt.Sprintf("model cold-loaded (%.1fs)", float64(usage.LoadDurationMS)/1000)})
 	}
 
+	// P35.7 diagnostic: Ollama's native adapter reports prompt_eval_count
+	// (prefill token count) and prompt_eval_duration alongside load_duration.
+	// Logged every turn (not gated on a threshold, unlike the cold-load
+	// notice) so a comparison across turns N and N+1 is possible after the
+	// fact: prompt_eval_count staying at the full running conversation total
+	// turn over turn means Ollama's KV-cache prefix reuse is NOT sparing
+	// prefill despite keep_alive residency (P35.4); dropping to roughly the
+	// newly-appended delta means it is. Zero on every non-Ollama provider, so
+	// this is a no-op log line elsewhere.
+	if usage != nil && usage.PromptEvalDurationMS > 0 {
+		e.logger.Debug("prefill (prompt_eval)",
+			"prompt_eval_count", usage.InputTokens,
+			"prompt_eval_duration_ms", usage.PromptEvalDurationMS,
+		)
+	}
+
 	// The conversation must record exactly what the model produced, in order:
 	// thinking blocks first (required by Anthropic for tool use), then text,
 	// then tool-use blocks.

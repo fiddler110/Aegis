@@ -227,6 +227,77 @@ func TestRunSkipsColdLoadNoticeBelowThreshold(t *testing.T) {
 	}
 }
 
+// TestRunLogsPrefillDiagnostic covers P35.7: when a provider reports
+// PromptEvalDurationMS (the native Ollama adapter), the engine logs
+// prompt_eval_count and prompt_eval_duration_ms every turn so a live run can
+// compare turn N vs. turn N+1 and tell a KV-cache hit (count tracks only the
+// newly appended delta) from a full reprocess (count tracks the whole running
+// conversation). A provider that never reports it (PromptEvalDurationMS == 0,
+// every non-Ollama provider) must not log the line.
+func TestRunLogsPrefillDiagnostic(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "hi"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{
+				InputTokens: 4096, OutputTokens: 5, PromptEvalDurationMS: 1234,
+			}},
+		},
+	}}
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	eng, err := New(Options{Adapter: adapter, Model: "test", MaxTokens: 100, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hello"}}})
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "prefill (prompt_eval)") {
+		t.Fatalf("expected prefill diagnostic log line, got: %s", out)
+	}
+	if !strings.Contains(out, "prompt_eval_count=4096") {
+		t.Errorf("expected prompt_eval_count=4096 in log, got: %s", out)
+	}
+	if !strings.Contains(out, "prompt_eval_duration_ms=1234") {
+		t.Errorf("expected prompt_eval_duration_ms=1234 in log, got: %s", out)
+	}
+}
+
+// TestRunSkipsPrefillDiagnosticWhenUnreported: a provider that never reports
+// PromptEvalDurationMS (every non-Ollama adapter) must not emit the P35.7
+// prefill diagnostic log line.
+func TestRunSkipsPrefillDiagnosticWhenUnreported(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "hi"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{
+				InputTokens: 10, OutputTokens: 5,
+			}},
+		},
+	}}
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	eng, err := New(Options{Adapter: adapter, Model: "test", MaxTokens: 100, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hello"}}})
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if strings.Contains(logBuf.String(), "prefill (prompt_eval)") {
+		t.Errorf("expected no prefill diagnostic log line when PromptEvalDurationMS is unreported, got: %s", logBuf.String())
+	}
+}
+
 // TestRunForwardsToolCallStart is the P33.3 guard: an adapter that announces
 // a tool call while its arguments are still streaming
 // (provider.EventToolUseStart) must reach the consumer as KindToolCallStart —

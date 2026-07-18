@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/sse"
@@ -82,9 +83,18 @@ func WithKeepAlive(v string) Option {
 	return func(a *Adapter) { a.keepAlive = v }
 }
 
+// WithResponseHeaderTimeout overrides how long the streamed request waits for
+// response headers (provider.response_header_timeout, P35.5). Ollama
+// withholds the response header until prompt-eval (prefill) finishes, so a
+// large local context can legitimately need longer than the default. <= 0
+// falls back to sse.DefaultResponseHeaderTimeout.
+func WithResponseHeaderTimeout(d time.Duration) Option {
+	return func(a *Adapter) { a.client = sse.NewStreamingClient(d) }
+}
+
 // New constructs a native Ollama adapter.
 func New(opts ...Option) *Adapter {
-	a := &Adapter{baseURL: defaultBaseURL, client: sse.NewStreamingClient()}
+	a := &Adapter{baseURL: defaultBaseURL, client: sse.NewStreamingClient(0)}
 	for _, o := range opts {
 		o(a)
 	}
@@ -266,6 +276,14 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
+		// P35.6: Ollama withholds the response header until prefill finishes,
+		// so a header-timeout here means "prefill is slower than the
+		// configured budget," not "the server is unreachable." Rewrap it into
+		// an actionable, non-retryable error naming the levers instead of the
+		// bare Go transport string.
+		if provider.IsResponseHeaderTimeoutError(err) {
+			return nil, provider.NewResponseHeaderTimeoutError(a.Name(), err)
+		}
 		return nil, provider.NewTransportError(a.Name(), err)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -317,12 +335,13 @@ type wireChunk struct {
 			} `json:"function"`
 		} `json:"tool_calls"`
 	} `json:"message"`
-	Done            bool            `json:"done"`
-	DoneReason      string          `json:"done_reason"`
-	PromptEvalCount int             `json:"prompt_eval_count"`
-	EvalCount       int             `json:"eval_count"`
-	LoadDuration    int64           `json:"load_duration"` // nanoseconds
-	Error           json.RawMessage `json:"error"`
+	Done               bool            `json:"done"`
+	DoneReason         string          `json:"done_reason"`
+	PromptEvalCount    int             `json:"prompt_eval_count"`
+	EvalCount          int             `json:"eval_count"`
+	LoadDuration       int64           `json:"load_duration"`        // nanoseconds
+	PromptEvalDuration int64           `json:"prompt_eval_duration"` // nanoseconds; P35.7 prefill-cost diagnostic
+	Error              json.RawMessage `json:"error"`
 }
 
 func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event) {
@@ -410,6 +429,7 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 			usage.InputTokens = chunk.PromptEvalCount
 			usage.OutputTokens = chunk.EvalCount
 			usage.LoadDurationMS = chunk.LoadDuration / 1e6
+			usage.PromptEvalDurationMS = chunk.PromptEvalDuration / 1e6
 			if stop != provider.StopToolUse && chunk.DoneReason == "length" {
 				stop = provider.StopMaxTokens
 			}

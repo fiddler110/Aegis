@@ -8,7 +8,30 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-18 — **P35.1-P35.4**: the four
+**Last updated:** 2026-07-18 — **P35.7**: root-cause diagnostic for whether P35.4's `keep_alive`
+residency is actually sparing per-turn prefill on the native-Ollama path, closing the P35.5-P35.7
+cluster. Added `prompt_eval_duration` alongside the already-read `prompt_eval_count`/
+`load_duration`, and a per-turn debug log (`prompt_eval_count`, `prompt_eval_duration_ms`) so a
+live run can compare turn N vs. N+1 and read cache-hit-vs-full-reprocess directly. A code-reading
+pass over the roadmap's three named non-determinism candidates (thinking blocks round-tripped into
+history, tool-result formatting, non-deterministic system-prompt regeneration) found no confirmed
+bug in any of them — see the P35.7 entry below for detail. Diagnostic only, no live Ollama server
+available this session to actually observe the counts, so P35.5's "raise the ceiling" vs. "make
+prefill cheap" question is unresolved pending a live run with the new instrumentation. Earlier the
+same day: **P35.6**: when P35.5's response-header timeout fires on the
+native-Ollama or OpenAI-compat path, the bare Go transport string
+(`net/http: timeout awaiting response headers`) — indistinguishable from a dead server, naming no
+remedy — is now rewrapped into an actionable, non-retryable error naming the cause (prefill on a
+local backend slower than the configured budget) and the levers (raise
+`provider.response_header_timeout`, lower `context_window`, reduce per-turn context growth),
+mirroring P35.2's context-truncation precedent. Earlier the same day: **P35.5**: native-Ollama
+agentic runs no longer die outright on a
+large-context prefill — `provider.response_header_timeout` (seconds) now lets a slow-prefill local
+box raise the shared 5-minute HTTP response-header timeout that every provider adapter's streaming
+client enforces, discovered when a live `/threat-model stride` re-run on the doctor-recommended
+native-Ollama setup got 5 turns / 27 tool calls / ~62k input tokens deep and still died with
+`net/http: timeout awaiting response headers`. Default unchanged (5 minutes) so nothing changes
+unless a user opts in. Earlier the same day: **P35.1-P35.4**: the four
 stacked failures found running the threat-modeling skill against an external repo on the
 doctor-recommended local setup (Ollama, qwen3.6:35b). `aegis chat` now wires configured built-in
 skills into its tool registry (P35.1); context-limit truncation mid-tool-call surfaces an
@@ -34,6 +57,126 @@ its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearin
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
 
 ---
+
+### P35.7 — Confirm/instrument inter-turn KV-cache reuse on the native Ollama path
+
+P35.4 kept the model resident across turns (`keep_alive` 30m default; verified live via `ollama
+ps`), on the premise that Ollama's native `/api/chat` reuses its KV-cache prefix across requests
+while the model stays resident. But the P35.5 timeout — hit only after the context grew to ~62k
+tokens over 5 turns — was equally consistent with prefill *not* being spared: each turn
+reprocessing the whole growing conversation from scratch, prefill time climbing with context until
+it crosses the response-header-timeout ceiling. This item is a root-cause diagnostic, not a fix.
+
+**Instrumentation shipped.** Ollama's native `/api/chat` response includes `prompt_eval_duration`
+(nanoseconds) alongside the already-read `prompt_eval_count` and `load_duration`.
+`internal/provider/ollama/ollama.go`'s `wireChunk` gained the field, and `provider.Usage` gained
+`PromptEvalDurationMS` (converted from nanoseconds, following `LoadDurationMS`'s existing
+convention). `internal/engine/engine.go`'s `turn` method logs it every turn via `e.logger.Debug`
+(`"prefill (prompt_eval)"`, fields `prompt_eval_count` and `prompt_eval_duration_ms`), gated only on
+`PromptEvalDurationMS > 0` so it's a no-op on every non-Ollama provider. The diagnostic tell for a
+live run: on turn N+1, does `prompt_eval_count` drop to roughly the newly-appended delta since turn
+N (cache hit — reuse is happening) or stay at the full running conversation total (cache miss — full
+reprocess every turn)?
+
+**Code-reading pass over the three named non-determinism candidates**, none confirmed as bugs:
+
+- **Thinking blocks round-tripped into history.** Confirmed true as stated — `engine.turn` does
+  append `provider.ThinkingBlock`s into the assistant message's `Content` first (required ordering
+  for Anthropic tool use), so they do live in `Conversation.Messages`. But the native-Ollama
+  `translate()` function's assistant-message switch (`internal/provider/ollama/ollama.go`) has no
+  `case` for `provider.ThinkingBlock` — only `TextBlock` and `ToolUseBlock` are handled — so on
+  every re-serialization thinking content is silently and *consistently* dropped, not
+  inconsistently rendered. Not a source of prefix drift on this adapter.
+- **Tool-result formatting.** `translate()`'s `RoleUser` case emits a `role:"tool"` wire message
+  straight from the stored `ToolResultBlock.Content` string with no reformatting — whatever bytes
+  were written into conversation history at tool-execution time are exactly what gets re-sent on
+  every subsequent turn. No bug found.
+- **System prompt regenerated non-deterministically per turn.** Confirmed true that it *is*
+  regenerated every turn — `Server.effectiveSystem` (`internal/server/helpers.go`) is called fresh
+  on every message post, not cached across turns — but every constituent traced through: persona
+  blocks (`persona.PlatformBlock` etc.) are static per-OS strings with no timestamp;
+  `memory.Sources.LoadContext`/`Load` are file reads with a 5s TTL cache but no embedded
+  timestamp/nonce (identical file content re-reads to identical bytes); `skills.BuildIndex` sorts by
+  discovery order and is signature-cached; the deferred-tools block (`deferredToolsBlock`) and the
+  exposed-tool schema list (`tool.Registry.Schemas`) are both explicitly sorted by name
+  (`sort.Slice`, `internal/tool/tool.go`). Given unchanged underlying files/config, the assembled
+  system prompt should render byte-identical turn over turn. No nonce, wall-clock timestamp, or
+  unsorted map iteration was found anywhere in the chain.
+
+No fix was made under this item — the pass found no clear, confident evidence of an actual
+byte-mismatch bug in any of the three named candidates, and the task scope explicitly calls for not
+guess-fixing speculatively. **This is a code-reading conclusion, not a live-verified one:** no
+Ollama server was reachable this session to actually run a multi-turn conversation and observe
+`prompt_eval_count` behavior. P35.5's underlying question — whether a longer
+`response_header_timeout` or genuine prefill-cost reduction is the durable fix — remains open until
+someone runs a multi-turn native-Ollama session with this instrumentation and reads the log.
+
+Tests: `ollama_test.go`'s `TestStreamParsing` asserts `PromptEvalDurationMS` is parsed correctly
+from a sample stream chunk; `engine_test.go` gained `TestRunLogsPrefillDiagnostic` (log line present
+with correct fields when a provider reports `PromptEvalDurationMS`) and
+`TestRunSkipsPrefillDiagnosticWhenUnreported` (no log line when it's zero, i.e. every non-Ollama
+provider).
+
+### P35.6 — Rewrap the response-header-timeout error to be actionable
+
+When P35.5's response-header timeout fires, the surfaced error used to be the bare Go transport
+string (`net/http: timeout awaiting response headers`) — indistinguishable from a dead server and
+naming no remedy. P35.2 set the precedent for the other local-model failure mode (context
+truncation): detect the signal, raise an actionable, correctly-(non-)retryable error naming the
+lever. Same treatment here.
+
+`internal/provider/errors.go` gained `NewResponseHeaderTimeoutError` (builds a terminal `*APIError`
+explaining the likely cause — prefill on a local backend slower than the configured
+`provider.response_header_timeout` budget — and naming the levers: raise that setting, lower
+`context_window`, or reduce per-turn context growth) and `IsResponseHeaderTimeoutError` (matches the
+transport error by its `"timeout awaiting response headers"` substring, the only signal available —
+there is no HTTP status and no server-side error envelope for a header timeout). Both
+`internal/provider/ollama/ollama.go` and `internal/provider/openai/openai.go` check
+`IsResponseHeaderTimeoutError` at their `client.Do` error site — the same site that already called
+`provider.NewTransportError` — and rewrap into the actionable error instead when it matches; the
+Anthropic cloud adapter is untouched, since this is specifically the local-backend
+withhold-the-header-until-prefill-finishes behavior P35.5 documented, not a general transport
+failure. Non-retryable: a blind retry just re-processes the same oversized prefill and times out
+again.
+
+Tests: `ollama_test.go` and `openai_test.go` each gained
+`TestResponseHeaderTimeoutRewrapped`, which drives a real header timeout through an `httptest`
+server that never writes a response header, configured with a short
+`WithResponseHeaderTimeout`, and asserts the returned error names both levers, does not leak the
+bare transport string, and reports `Retryable() == false` through the same
+`errors.As(&provider.APIError)` seam the retry layer uses.
+
+### P35.5 — Native-Ollama agentic runs die on the shared 5-minute response-header timeout
+
+A live `/threat-model stride` run on the doctor-recommended native-Ollama setup
+(`provider.default: ollama`, qwen3.6:35b-a3b-fast, `context_window: 131072`, `keep_alive` resident
+per P35.4) reproducibly died mid-exploration with `ollama: request failed: … net/http: timeout
+awaiting response headers`, before writing any report file — 5 turns / 27 tool calls / ~62k input
+tokens deep, further than the pre-P35.3 run but still a hard failure. Cause:
+`internal/provider/sse/sse.go` hardcoded `responseHeaderTimeout = 5 * time.Minute`, shared by
+*every* adapter via `NewStreamingClient` and configurable nowhere. Ollama withholds the HTTP
+response header until prompt-eval (prefill) completes, so on a large local context a legitimately
+slow prefill trips the cap and the whole turn aborts as a transport error.
+
+Shipped the cheapest of the three fix options the filing named: made the timeout configurable.
+`sse.NewStreamingClient` now takes a `time.Duration` (`<= 0` substitutes the unchanged
+`sse.DefaultResponseHeaderTimeout`, 5 minutes) instead of reading a package constant, and each
+adapter (`anthropic`, `openai`, `ollama`) gained a `WithResponseHeaderTimeout` option that rebuilds
+its client with the given timeout. `ProviderConfig` gained `ResponseHeaderTimeoutSec` (`koanf:
+"response_header_timeout"`, seconds) and a `ResponseHeaderTimeout()` accessor that applies the same
+unset/non-positive-defaults-to-5m rule; `providerfactory.buildOne` threads
+`cfg.Provider.ResponseHeaderTimeout()` into every adapter it constructs, primary and fallback alike.
+Scaling the default with `context_window` (fix option b) and reducing per-turn context growth (c)
+are explicitly out of scope for this item — see roadmap P35.7, which will decide whether a longer
+timeout or genuine inter-turn KV-cache reuse is the durable fix. P35.6 (rewrapping the timeout error
+to be actionable when it does fire) is separate follow-up work.
+
+Tests: `sse` package covers the default/custom/negative-timeout cases directly against the built
+`http.Transport`; `ollama` adds an adapter-level `WithResponseHeaderTimeout` check; `config` covers
+both the accessor's default/override behavior and the env-var override
+(`AEGIS_PROVIDER_RESPONSE_HEADER_TIMEOUT`) end to end through `Load()`. Documented in
+`docs/providers.md` (new "Response-header timeout" section) and `docs/configuration.md`'s sample
+config.
 
 ### P35.1 — `aegis chat` wires configured built-in skills into its tool registry
 

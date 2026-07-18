@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/provider"
@@ -40,7 +41,7 @@ func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
 		logger = slog.Default()
 	}
 
-	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, logger)
+	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +62,7 @@ func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
 			continue
 		}
 		apiKey := config.ProviderAPIKey(fb.Provider)
-		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, logger)
+		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger)
 		if err != nil {
 			logger.Warn("provider fallback: skipping misconfigured fallback", "provider", fb.Provider, "err", err)
 			continue
@@ -156,7 +157,7 @@ func validateBaseURL(name, apiKey, baseURL string, logger *slog.Logger) error {
 // the primary and every fallback target so their construction rules
 // (base URL defaults, thinking/reasoning options, key requirements) stay
 // identical.
-func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, logger *slog.Logger) (provider.Adapter, error) {
+func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, responseHeaderTimeout time.Duration, logger *slog.Logger) (provider.Adapter, error) {
 	if err := validateBaseURL(name, apiKey, baseURL, logger); err != nil {
 		return nil, err
 	}
@@ -168,6 +169,7 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 		opts := []anthropic.Option{
 			anthropic.WithBaseURL(baseURL),
 			anthropic.WithHeaders(headers),
+			anthropic.WithResponseHeaderTimeout(responseHeaderTimeout),
 		}
 		// Enable extended thinking when explicitly requested, budgeting half of
 		// max_tokens for reasoning (clamped to the API's 1024 minimum).
@@ -195,6 +197,7 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 			ollama.WithBaseURL(baseURL),
 			ollama.WithHeaders(headers),
 			ollama.WithThink(think),
+			ollama.WithResponseHeaderTimeout(responseHeaderTimeout),
 		}
 		if contextWindow > 0 {
 			opts = append(opts, ollama.WithNumCtx(contextWindow))
@@ -221,6 +224,7 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 		opts := []openai.Option{
 			openai.WithBaseURL(baseURL),
 			openai.WithHeaders(headers),
+			openai.WithResponseHeaderTimeout(responseHeaderTimeout),
 		}
 		// Only send the Ollama-specific `think` field when targeting an
 		// OpenAI-compatible local server, not the real openai.com API.

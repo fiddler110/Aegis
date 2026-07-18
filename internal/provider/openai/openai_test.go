@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -380,6 +381,48 @@ func TestStreamOutlastsResponseHeaderTimeout(t *testing.T) {
 	}
 	if text != "slow but finished" || !done {
 		t.Errorf("text = %q, done = %v; stream did not survive past the header timeout", text, done)
+	}
+}
+
+// TestResponseHeaderTimeoutRewrapped is the P35.6 regression: when an
+// OpenAI-compat local backend (e.g. Ollama's compat endpoint) withholds its
+// response header past ResponseHeaderTimeout, the bare Go transport string
+// "net/http: timeout awaiting response headers" must not reach the caller
+// unrewrapped — it names no cause and no remedy. Stream must instead return
+// provider.NewResponseHeaderTimeoutError's actionable, non-retryable error
+// naming provider.response_header_timeout and context_window.
+func TestResponseHeaderTimeoutRewrapped(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // never write a header until the client has given up
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	a := New("k", WithBaseURL(srv.URL), WithResponseHeaderTimeout(50*time.Millisecond))
+
+	_, err := a.Stream(context.Background(), provider.Request{
+		Model: "m",
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "provider.response_header_timeout") || !strings.Contains(err.Error(), "context_window") {
+		t.Errorf("error does not name the levers: %v", err)
+	}
+	if strings.Contains(err.Error(), "request failed") {
+		t.Errorf("bare transport string leaked through unrewrapped: %v", err)
+	}
+
+	var apiErr *provider.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *provider.APIError: %T", err)
+	}
+	if apiErr.Retryable() {
+		t.Errorf("a response-header timeout must be terminal, got retryable: %v", err)
 	}
 }
 

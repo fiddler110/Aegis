@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/sse"
@@ -53,6 +54,14 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(a *Adapter) { a.client = c }
 }
 
+// WithResponseHeaderTimeout overrides how long the streamed request waits for
+// response headers (provider.response_header_timeout, P35.5). <= 0 falls back
+// to sse.DefaultResponseHeaderTimeout. Applied after any WithHTTPClient in
+// option order, since both set a.client.
+func WithResponseHeaderTimeout(d time.Duration) Option {
+	return func(a *Adapter) { a.client = sse.NewStreamingClient(d) }
+}
+
 // WithHeaders adds extra HTTP headers to every request (e.g. gateway auth).
 func WithHeaders(h map[string]string) Option {
 	return func(a *Adapter) { a.headers = h }
@@ -73,7 +82,7 @@ func New(apiKey string, opts ...Option) *Adapter {
 	a := &Adapter{
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
-		client:  sse.NewStreamingClient(),
+		client:  sse.NewStreamingClient(0),
 		cache:   true,
 	}
 	for _, o := range opts {
