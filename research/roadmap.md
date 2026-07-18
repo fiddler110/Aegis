@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 — the parked item **P25.9**. **P35.7** shipped 2026-07-18 (see
+**Open items:** 2 — the parked items **P25.9** and **P35.8**. **P35.7** shipped 2026-07-18 (see
 [releases.md](releases.md#latest-changes)), closing out the P35.5-P35.7 cluster. P35.5-P35.7 were a cluster filed
 2026-07-18 from the verification pass that followed the P35.1-P35.4 batch. P35.1-P35.4 were all
 filed the same day from one live dogfooding pass: running the threat-modeling skill's
@@ -111,12 +111,36 @@ P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, 
 
 ## Open Work — Tier 4
 
-One item parked — P25.9. Low urgency, no trigger, or explicitly parked pending demand. Do not
-build speculatively — revisit only if a concrete trigger appears, and check with the user before
-starting.
+Two items parked — P25.9 and P35.8. Low urgency, no trigger, or explicitly parked pending demand.
+Do not build speculatively — revisit only if a concrete trigger appears, and check with the user
+before starting.
 (P33.20 shipped 2026-07-17 alongside P33.11 — its message-allowlist fix was implemented as part of
 that work; P32.9-P32.11 shipped 2026-07-15; P33.12, P33.21, and P33.22 shipped 2026-07-17, see
 releases.md.)
+
+### P35.8 — Unexplained `aegis.exe` process disappearance during a background-launched `chat` run
+
+Effort: M — parked, unconfirmed, no reliable repro
+
+During the P35.7 live-validation run (`aegis chat` against local Ollama, STRIDE threat-modeling an
+external repo), the `aegis.exe` process vanished mid-run with no exit trace anywhere: no crash log,
+no panic, no final answer text, no explicit stop-reason in either the stdout transcript or the
+debug log (`C:\Users\<user>\AppData\Roaming\aegis\aegis.log`). It had completed 8 turns cleanly (no
+timeout, no error — see P35.7's live-confirmed entry in
+[releases.md](releases.md#latest-changes)) and written 5 of the threat-modeling skill's 7 expected
+output files before it stopped short. By the time the harness went to kill the tracked PID, it was
+already gone.
+
+Prime suspect is the test harness, not Aegis itself: the process was launched via a background
+shell (`nohup … &`) from inside a sandboxed bash-tool subshell, and that kind of child can get
+reaped when the spawning subshell's process group is torn down between tool calls on this
+Windows/Git-Bash setup — a harness artifact, not necessarily a daemon/engine bug. Nothing in
+Aegis's own logs points to a self-inflicted abort. Trigger to revisit: the same silent
+disappearance reproducing under a normal (non-harness-launched, e.g. plain terminal or `aegis
+serve`-backed) run, which would rule out the process-group theory and point at something in
+`aegis chat`/`engine.Run` itself. Until then this is parked rather than actively chased — the
+signal-to-noise on debugging an unreproduced, harness-adjacent process death is too low to justify
+speculative work.
 
 ### P25.9 — Per-session scoping of `lsp.Manager`
 
