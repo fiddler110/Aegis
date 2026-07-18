@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-17 (P33.21, P33.22)
+**Last updated:** 2026-07-18 (P35.1-P35.3 shipped; P35.4 scope narrowed)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,15 +11,18 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 — parked (**P25.9**). Tiers 1-3 are fully clear; Tier 4 has just the one parked
-item below. For the shipped-batch history and the lessons drawn from each (P33/P34 diagnosis
-accuracy, threat-model closure surfaces, live-verification findings), see
-[releases.md](releases.md#latest-changes) — that history has been consolidated there so this
-document stays limited to what's actually open.
-
-There is currently no in-progress next batch. Since P25.9 is parked with no active trigger,
-starting new work here means either picking a fresh assessment pass or waiting on a concrete
-trigger to surface (see the item below).
+**Open items:** 2 — **P35.4** (scope narrowed 2026-07-18, below) plus the one parked item,
+**P25.9**. P35.1-P35.4 were all filed 2026-07-18 from the same live dogfooding pass: running the
+threat-modeling skill's `/threat-model stride` flow against an external repo (a small ~15-file
+Python project, not this one) on the local-model setup `aegis doctor` itself recommends
+(Ollama, qwen3.6:35b-a3b-fast). The run never produced a completed threat-model suite — it died
+partway through the mandatory workspace-exploration step every time, for four distinct, stacked
+reasons. **P35.1-P35.3 shipped 2026-07-18** (the three surface-cleanly-then-fix items); P35.4's
+provider-side incremental context reuse — the one genuinely large piece — is the only new work
+left, and it was always sequenced to land last. For the shipped-batch history and the lessons
+drawn from each (P33/P34 diagnosis accuracy, threat-model closure surfaces, live-verification
+findings), see [releases.md](releases.md#latest-changes) — that history has been consolidated
+there so this document stays limited to what's actually open.
 
 ---
 
@@ -34,17 +37,20 @@ trigger to surface (see the item below).
 
 ## Open Work — Tier 1
 
-**Status:** None open. (P33.1 and P33.2 shipped 2026-07-15; P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
+**Status:** 0 open. (P35.1, P35.2 shipped 2026-07-18 — see
+[releases.md](releases.md#latest-changes); P33.1 and P33.2 shipped 2026-07-15;
+P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
 
 ---
 
 ## Open Work — Tier 2
 
-**Status:** None open. (P34.12 shipped 2026-07-17 — see [releases.md](releases.md#latest-changes);
-P34.9 and P34.10 shipped 2026-07-17; P34.5-P34.8 shipped 2026-07-17; P34.3 shipped
-2026-07-16; P34.2 shipped 2026-07-16, both levers; P34.1 shipped 2026-07-16; P34.4 shipped
-2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped 2026-07-16; P33.3-P33.8 shipped
-2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14; P32.5-P32.7 shipped 2026-07-15.)
+**Status:** 0 open. (P35.3 shipped 2026-07-18; P34.12 shipped 2026-07-17 — see
+[releases.md](releases.md#latest-changes); P34.9 and P34.10 shipped 2026-07-17; P34.5-P34.8
+shipped 2026-07-17; P34.3 shipped 2026-07-16; P34.2 shipped 2026-07-16, both levers; P34.1
+shipped 2026-07-16; P34.4 shipped 2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped
+2026-07-16; P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14;
+P32.5-P32.7 shipped 2026-07-15.)
 
 Worth a look for a future item: the same "accurate refusal, error-shaped" question for the other
 scanners' documented exit codes. P34.6 checked the *language*-targeted tools; nothing has swept
@@ -54,9 +60,36 @@ the SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "
 
 ## Open Work — Tier 3
 
-**Status:** None open. (P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17 — see
-[releases.md](releases.md#latest-changes); P32.8 shipped 2026-07-15; P33.9, the keystone that
-unblocked P33.10 and P33.19, shipped 2026-07-16.)
+**Status:** 1 open — P35.4 (scope narrowed 2026-07-18; **this is the next work item**). (P33.10,
+P33.11, P33.16, P33.19 shipped 2026-07-17 — see [releases.md](releases.md#latest-changes); P32.8
+shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, shipped 2026-07-16.)
+
+### P35.4 — No incremental context reuse across turns makes long skill runs cost-prohibitive on local models
+
+Effort: L — the largest of the P35 set; the surface-cleanly-first items (P35.1-P35.3) that were
+sequenced ahead of it have now shipped, so failures during this work will at least be legible.
+
+**Scope narrowed 2026-07-18.** The filing proposed two fixes — provider-side incremental context
+handling, and/or skill-level guidance to read large files in bounded excerpts. The second, cheaper
+half **shipped 2026-07-18**: the threat-modeling skill's §2 workspace-exploration step now tells
+the model to page large files with `read_file` `offset`/`limit` or targeted `grep` rather than
+whole-file reads, since one ~100KB single-file read ate roughly half a 65536-token budget by
+itself. **What remains — and is the actual next work item — is the provider-side half:** genuine
+incremental context handling so unchanged conversation history isn't reprocessed from scratch
+every turn.
+
+Confirmed in llama-server's own log during the live threat-modeling dogfooding run: every
+additional tool round trip reprocesses the *entire* conversation — no incremental
+KV-cache/prompt-cache reuse across turns — so per-turn cost keeps growing with total conversation
+length instead of paying only for the newly-added tokens. By the run's 15th turn, a single
+prompt-processing pass took over three minutes on its own, before any response generation.
+Together with the whole-file reads (now mitigated at the skill level), this made completing a full
+seven-file threat-model suite unreachable in a single session against even a small (~15-file) real
+repo, on a local 35B model, despite `context_window` already raised past P35.3's now-calibrated
+recommendation. Trigger already exists (this dogfooding run reproduced it end-to-end). Next step:
+scope the provider-adapter change (prompt-cache/KV reuse across turns for the Ollama native path,
+where the cost was measured) and confirm whether the skill-level mitigation alone already makes
+small-repo suites completable before committing to the larger adapter work.
 
 ---
 
