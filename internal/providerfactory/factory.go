@@ -15,6 +15,20 @@ import (
 	"github.com/fiddler110/aegis/internal/provider/openai"
 )
 
+// defaultOllamaKeepAlive is the native-adapter keep_alive substituted when the
+// user leaves provider.keep_alive unset (P35.4). Ollama's native /api/chat
+// reuses its KV-cache prefix across requests automatically, but only while the
+// model stays resident; left at Ollama's own 5m idle default, a multi-turn
+// agentic run whose per-turn cost outlasts that window sees the model unload
+// between turns and every turn reprocess the whole conversation from scratch
+// (measured at 3+ min prompt passes by turn 15 of a live threat-model run).
+// A bounded resident window keeps the model loaded across a run's inter-turn
+// gaps so the cache survives, while still letting Ollama unload once genuinely
+// idle — RAM is only held during active work, not "-1"/pinned-forever (the
+// limited-RAM concern that made P33.10 keep this opt-in). Any explicit config
+// value, including "-1" or "0", overrides it.
+const defaultOllamaKeepAlive = "30m"
+
 // Build constructs the adapter selected by cfg.Provider.Default, wrapped with
 // retry/backoff for transient failures, and — when cfg.Provider.Fallback is
 // non-empty — chained with failover to those providers on exhausted retries
@@ -185,12 +199,16 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 		if contextWindow > 0 {
 			opts = append(opts, ollama.WithNumCtx(contextWindow))
 		}
-		// keep_alive is opt-in: "" omits the field so Ollama's own 5m default
-		// stays in effect. A user who sets "-1" to pin the model forever gets
-		// exactly that — but it is never the default (P33.10).
-		if keepAlive != "" {
-			opts = append(opts, ollama.WithKeepAlive(keepAlive))
+		// keep_alive keeps the model resident so Ollama's automatic prefix
+		// KV-cache reuse survives the gaps between turns instead of the whole
+		// conversation reprocessing each turn (P35.4). An unset config value
+		// substitutes a bounded resident default (defaultOllamaKeepAlive), not
+		// "-1"; an explicit value — including "-1" to pin forever or "0" to
+		// unload immediately (P33.10) — always wins.
+		if keepAlive == "" {
+			keepAlive = defaultOllamaKeepAlive
 		}
+		opts = append(opts, ollama.WithKeepAlive(keepAlive))
 		return ollama.New(opts...), nil
 
 	case "openai":
