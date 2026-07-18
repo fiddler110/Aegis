@@ -8,13 +8,76 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-17 — **P34.11**: grype reinstated into the multiscanner image for tool
+**Last updated:** 2026-07-17 — **P33.21 and P33.22**: ACP now surfaces `KindToolCallStart` as a
+`pending` tool-call notification that the matching `KindToolCall` upgrades in place, `bg events`
+prints the same start timing, and `escPending` was renamed to `backtrackArmed`. Earlier the same
+day: **P33.12**: the first-run wizard and `/security-config` editor now
+composite over the live chat via `renderOverlay`, the same treatment the approval dialog (P33.6),
+transient panels (P33.11), and completion popup (P33.18) already use, instead of replacing the
+frame outright. Earlier: **P34.11**: grype reinstated into the multiscanner image for tool
 centralization, which was P34.11's own activation trigger, so the parked build-artifact-exclusion
 fix shipped with it. Earlier: **P34.12**, the last Tier 2 item: osv-scanner's exit-128 "no package
 sources" refusal, which turned out to need two-way disambiguation rather than the one-way mapping
 its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearing the rest of Tier
 2 — njsscan's Windows traceback (a libsast bug, not the semgrep gap the item diagnosed) and
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P33.21 — Editor/background surfaces now use `KindToolCallStart`
+
+P33.3 added `provider.EventToolUseStart` → `KindToolCallStart` and wired it through the engine, the
+api wire, and the TUI, but `internal/acp/agent.go` and `internal/cli/bg.go` ignored the new kind.
+
+Fix: `internal/acp/agent.go`'s `streamEvents` now handles `api.KindToolCallStart` by opening a
+tracker entry and sending an ACP `toolCall` notification with `status: "pending"` (a new
+`statusPending` constant in `protocol.go`) — the "preparing `read_file`…" affordance Zed/Neovim can
+render immediately, before the model has finished streaming the call's arguments. The following
+`api.KindToolCall` for the same call now looks up that pending entry via `tracker.current` and
+sends a `toolCallUpdate` (status `in_progress`, carrying the real `RawInput`) that reuses the same
+ID, instead of opening a second tool call; a daemon that never emits `KindToolCallStart` leaves
+`tracker.current` empty and `KindToolCall` falls back to its old behavior of opening a fresh call
+directly. `internal/cli/bg.go`'s `events` dump — a one-shot replay of a background session's
+buffered events, not a live stream — now prints a `[tool-start]` line for the same kind, giving the
+trace the same earlier timestamp without duplicating the existing `[tool]` line.
+
+Tested: new `TestPromptToolCallStartReconciles` in `internal/acp/agent_test.go` asserts exactly one
+`toolCall` (pending) followed by two `toolCallUpdate`s (in_progress reusing the same ID, then
+completed); `go build ./...`, `go vet ./...`, and `go test ./...` (61 packages) green.
+
+---
+
+### P33.22 — Rename `escPending` to `backtrackArmed`
+
+After P33.5, `escPending` was written by exactly one path (arming the idle backtrack picker) but
+was still cleared defensively in several send/stream-start handlers. The flag was no longer about
+"an Esc is pending" in general — pure naming cleanup, renamed to `backtrackArmed` throughout
+`internal/tui` (the field, its doc comment, all read/write sites in `tui.go`, and the existing
+`backtrack_esc_test.go`/`interrupt_esc_test.go` coverage). No behavior change.
+
+Tested: `go build ./...`, `go vet ./...`, and `go test ./...` (61 packages) green.
+
+---
+
+### P33.12 — Composite the wizard and security-config forms as overlays
+
+Both `wizardModel.view()` and `securityConfigModel.view()` built their bordered panel and then
+called `lipgloss.Place(width, height, Center, Center, panel)` themselves, filling the whole frame
+and replacing `render()`'s output outright. Every other dialog (approval, transient panels, the
+filterable-list pickers, the completion popup) instead builds just its own panel/box and lets
+`render()` composite it over `renderChat()`'s output via `renderOverlay`/`renderAnchoredOverlay`,
+so the live transcript keeps its place underneath and closing the dialog doesn't reflow anything.
+
+Fix: both `view()` methods now return the bare bordered panel (drop the `lipgloss.Place` call), and
+`render()` centers each over `m.renderChat()` with `renderOverlay` — identical to how it already
+handles `m.approval`, `m.dialog`, and `m.transientPanel`. No behavior change to the forms
+themselves (huh form flow, phases, save logic all untouched); this only changes how the panel is
+positioned on screen. `width`/`height` fields on both models became dead (they were only read by
+the removed `lipgloss.Place` call) but are left in place since `tui.go`'s resize handling still
+assigns them and removing the fields isn't part of this item's scope.
+
+Tested: `go build ./...`, `go vet ./...`, and `go test ./...` (all 61 packages) green, including
+`internal/tui`'s existing wizard/security-config coverage.
 
 ---
 

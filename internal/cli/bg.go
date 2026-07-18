@@ -102,6 +102,13 @@ func newBGEventsCmd() *cobra.Command {
 					switch ev.Kind {
 					case api.KindText:
 						fmt.Print(ev.Text)
+					case api.KindToolCallStart:
+						// P33.21: the model has named the call but its
+						// arguments are still streaming; KindToolCall below
+						// still follows for the same call, so this is purely
+						// an earlier timestamp in the trace, not a
+						// duplicate.
+						fmt.Printf("\n[tool-start] %s\n", ev.Tool)
 					case api.KindToolCall:
 						fmt.Printf("\n[tool] %s\n", ev.Tool)
 					case api.KindToolResult:

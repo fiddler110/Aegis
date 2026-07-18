@@ -286,6 +286,80 @@ func TestPromptStreamsUpdates(t *testing.T) {
 	}
 }
 
+// TestPromptToolCallStartReconciles covers P33.21: a KindToolCallStart ahead
+// of the matching KindToolCall should produce one pending toolCall
+// notification followed by an in_progress toolCallUpdate reusing the same
+// ID, not a second toolCall.
+func TestPromptToolCallStartReconciles(t *testing.T) {
+	peer, _, backend, cleanup := newTestPeer(t)
+	defer cleanup()
+	backend.events = []api.Event{
+		{Kind: api.KindToolCallStart, Tool: "read_file"},
+		{Kind: api.KindToolCall, Tool: "read_file", ToolInput: json.RawMessage(`{"path":"x"}`)},
+		{Kind: api.KindToolResult, Tool: "read_file", ToolResult: "file contents"},
+	}
+
+	promptID := peer.request(methodPrompt, promptParams{
+		SessionID: "sess-1",
+		Prompt:    []contentBlock{textBlock("read the file")},
+	})
+
+	var toolCalls []toolCall
+	var toolCallUpdates []toolCall
+	var stop string
+	for {
+		msg := peer.read()
+		if len(msg.ID) > 0 && string(msg.ID) == string(jsonInt(promptID)) {
+			var pr promptResult
+			if err := json.Unmarshal(msg.Result, &pr); err != nil {
+				t.Fatal(err)
+			}
+			stop = pr.StopReason
+			break
+		}
+		var rawUpdate struct {
+			Update map[string]json.RawMessage `json:"update"`
+		}
+		if err := json.Unmarshal(msg.Params, &rawUpdate); err != nil {
+			t.Fatal(err)
+		}
+		var tag string
+		json.Unmarshal(rawUpdate.Update["sessionUpdate"], &tag)
+		var tc toolCall
+		json.Unmarshal(msg.Params, &struct {
+			Update *toolCall `json:"update"`
+		}{&tc})
+		switch tag {
+		case updToolCall:
+			toolCalls = append(toolCalls, tc)
+		case updToolCallUpdate:
+			toolCallUpdates = append(toolCallUpdates, tc)
+		}
+	}
+
+	if stop != stopEndTurn {
+		t.Errorf("stop reason = %q, want %q", stop, stopEndTurn)
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected exactly one toolCall notification (from KindToolCallStart), got %d: %+v", len(toolCalls), toolCalls)
+	}
+	if toolCalls[0].Status != statusPending {
+		t.Errorf("initial toolCall status = %q, want %q", toolCalls[0].Status, statusPending)
+	}
+	if len(toolCallUpdates) != 2 {
+		t.Fatalf("expected two toolCallUpdate notifications (in_progress + completed), got %d: %+v", len(toolCallUpdates), toolCallUpdates)
+	}
+	if toolCallUpdates[0].Status != statusInProgress {
+		t.Errorf("second update status = %q, want %q", toolCallUpdates[0].Status, statusInProgress)
+	}
+	if toolCallUpdates[0].ToolCallID != toolCalls[0].ToolCallID {
+		t.Errorf("KindToolCall reused a different id: start=%q call=%q", toolCalls[0].ToolCallID, toolCallUpdates[0].ToolCallID)
+	}
+	if toolCallUpdates[1].Status != statusCompleted {
+		t.Errorf("final update status = %q, want %q", toolCallUpdates[1].Status, statusCompleted)
+	}
+}
+
 func TestPromptPermissionApproved(t *testing.T) {
 	peer, _, backend, cleanup := newTestPeer(t)
 	defer cleanup()

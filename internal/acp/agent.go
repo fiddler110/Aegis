@@ -219,13 +219,40 @@ func (a *Agent) streamEvents(ctx context.Context, sessionID string, events <-cha
 			a.notifyUpdate(sessionID, messageChunk{SessionUpdate: updAgentMessageChunk, Content: textBlock(ev.Text)})
 		case api.KindThinking:
 			a.notifyUpdate(sessionID, messageChunk{SessionUpdate: updAgentThoughtChunk, Content: textBlock(ev.Text)})
-		case api.KindToolCall:
+		case api.KindToolCallStart:
+			// P33.21: mirrors the TUI's provisional card (P33.3) — announce
+			// the call the moment the model names it, before its arguments
+			// have finished streaming, so an editor client can show
+			// "preparing <tool>…" instead of dead air. The matching
+			// KindToolCall below reuses this id via tracker.current and
+			// upgrades in place; a daemon that never emits this event
+			// leaves tracker.current empty and KindToolCall falls back to
+			// its old open-a-new-call behavior.
 			id := tracker.start(ev.Tool)
 			a.notifyUpdate(sessionID, toolCall{
 				SessionUpdate: updToolCall,
 				ToolCallID:    id,
 				Title:         ev.Tool,
 				Kind:          toolKind(ev.Tool),
+				Status:        statusPending,
+			})
+		case api.KindToolCall:
+			id := tracker.current(ev.Tool)
+			if id == "" {
+				id = tracker.start(ev.Tool)
+				a.notifyUpdate(sessionID, toolCall{
+					SessionUpdate: updToolCall,
+					ToolCallID:    id,
+					Title:         ev.Tool,
+					Kind:          toolKind(ev.Tool),
+					Status:        statusInProgress,
+					RawInput:      ev.ToolInput,
+				})
+				break
+			}
+			a.notifyUpdate(sessionID, toolCall{
+				SessionUpdate: updToolCallUpdate,
+				ToolCallID:    id,
 				Status:        statusInProgress,
 				RawInput:      ev.ToolInput,
 			})

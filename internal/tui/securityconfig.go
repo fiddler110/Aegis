@@ -583,12 +583,10 @@ func (m *securityConfigModel) view() string {
 		}
 	}
 
-	panel := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colAccent).
 		Padding(1, 3).
 		Width(securityConfigPanelW).
 		Render(header + body)
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
 }

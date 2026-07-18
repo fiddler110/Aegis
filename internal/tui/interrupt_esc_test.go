@@ -29,8 +29,8 @@ func TestEsc_Streaming_SinglePressInterrupts(t *testing.T) {
 	if !*canceled {
 		t.Error("expected a single Esc while streaming to cancel the run")
 	}
-	if m.escPending {
-		t.Error("the streaming interrupt should not arm escPending")
+	if m.backtrackArmed {
+		t.Error("the streaming interrupt should not arm backtrackArmed")
 	}
 	if m.queued != nil {
 		t.Errorf("expected the interrupt to discard the queue, got %v", m.queued)

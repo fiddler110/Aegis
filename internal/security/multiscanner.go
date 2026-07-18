@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"sort"
@@ -333,13 +334,31 @@ type multiscannerCheck struct {
 // verify resolution without a real docker/podman install, mirroring how
 // detectRuntime seams sandbox.DetectBest.
 var inspectImageID = func(ctx context.Context, rt sandbox.ContainerRuntime, image string) (string, error) {
-	cmd := exec.CommandContext(ctx, string(rt), "image", "inspect", "--format", "{{.Id}}", image)
+	// wslc's "image inspect" rejects --format outright ("Argument name was
+	// not recognized for the current command: '--format'") — unlike
+	// docker/podman it has no Go-template output mode, so fall back to its
+	// plain JSON array output (same shape as `docker image inspect` without
+	// --format) and pull .Id out ourselves.
+	args := []string{"image", "inspect", "--format", "{{.Id}}", image}
+	if rt == sandbox.RuntimeWSL {
+		args = []string{"image", "inspect", image}
+	}
+	cmd := exec.CommandContext(ctx, string(rt), args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return "", fmt.Errorf("%s image inspect %s: %w: %s", rt, image, err, strings.TrimSpace(string(ee.Stderr)))
 		}
 		return "", fmt.Errorf("%s image inspect %s: %w", rt, image, err)
+	}
+	if rt == sandbox.RuntimeWSL {
+		var records []struct {
+			Id string
+		}
+		if jsonErr := json.Unmarshal(out, &records); jsonErr != nil || len(records) == 0 {
+			return "", fmt.Errorf("%s image inspect %s: could not parse JSON output: %v", rt, image, jsonErr)
+		}
+		return strings.TrimSpace(records[0].Id), nil
 	}
 	return strings.TrimSpace(string(out)), nil
 }
