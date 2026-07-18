@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-18 (P35.1-P35.3 shipped; P35.4 scope narrowed)
+**Last updated:** 2026-07-18 (P35.1-P35.4 shipped)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,18 +11,18 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 2 — **P35.4** (scope narrowed 2026-07-18, below) plus the one parked item,
-**P25.9**. P35.1-P35.4 were all filed 2026-07-18 from the same live dogfooding pass: running the
-threat-modeling skill's `/threat-model stride` flow against an external repo (a small ~15-file
-Python project, not this one) on the local-model setup `aegis doctor` itself recommends
-(Ollama, qwen3.6:35b-a3b-fast). The run never produced a completed threat-model suite — it died
-partway through the mandatory workspace-exploration step every time, for four distinct, stacked
-reasons. **P35.1-P35.3 shipped 2026-07-18** (the three surface-cleanly-then-fix items); P35.4's
-provider-side incremental context reuse — the one genuinely large piece — is the only new work
-left, and it was always sequenced to land last. For the shipped-batch history and the lessons
-drawn from each (P33/P34 diagnosis accuracy, threat-model closure surfaces, live-verification
-findings), see [releases.md](releases.md#latest-changes) — that history has been consolidated
-there so this document stays limited to what's actually open.
+**Open items:** 1 — the one parked item, **P25.9**. P35.1-P35.4 were all filed 2026-07-18 from
+the same live dogfooding pass: running the threat-modeling skill's `/threat-model stride` flow
+against an external repo (a small ~15-file Python project, not this one) on the local-model setup
+`aegis doctor` itself recommends (Ollama, qwen3.6:35b-a3b-fast). The run never produced a
+completed threat-model suite — it died partway through the mandatory workspace-exploration step
+every time, for four distinct, stacked reasons. **All four shipped 2026-07-18**: P35.1-P35.3 (the
+three surface-cleanly-then-fix items) plus both halves of P35.4 — the skill-level bounded-read
+guidance and the provider-side keep-alive residency that lets a native-Ollama run reuse its KV
+cache across turns. For the shipped-batch history and the lessons drawn from each (P33/P34
+diagnosis accuracy, threat-model closure surfaces, live-verification findings), see
+[releases.md](releases.md#latest-changes) — that history has been consolidated there so this
+document stays limited to what's actually open.
 
 ---
 
@@ -60,36 +60,9 @@ the SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "
 
 ## Open Work — Tier 3
 
-**Status:** 1 open — P35.4 (scope narrowed 2026-07-18; **this is the next work item**). (P33.10,
-P33.11, P33.16, P33.19 shipped 2026-07-17 — see [releases.md](releases.md#latest-changes); P32.8
-shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, shipped 2026-07-16.)
-
-### P35.4 — No incremental context reuse across turns makes long skill runs cost-prohibitive on local models
-
-Effort: L — the largest of the P35 set; the surface-cleanly-first items (P35.1-P35.3) that were
-sequenced ahead of it have now shipped, so failures during this work will at least be legible.
-
-**Scope narrowed 2026-07-18.** The filing proposed two fixes — provider-side incremental context
-handling, and/or skill-level guidance to read large files in bounded excerpts. The second, cheaper
-half **shipped 2026-07-18**: the threat-modeling skill's §2 workspace-exploration step now tells
-the model to page large files with `read_file` `offset`/`limit` or targeted `grep` rather than
-whole-file reads, since one ~100KB single-file read ate roughly half a 65536-token budget by
-itself. **What remains — and is the actual next work item — is the provider-side half:** genuine
-incremental context handling so unchanged conversation history isn't reprocessed from scratch
-every turn.
-
-Confirmed in llama-server's own log during the live threat-modeling dogfooding run: every
-additional tool round trip reprocesses the *entire* conversation — no incremental
-KV-cache/prompt-cache reuse across turns — so per-turn cost keeps growing with total conversation
-length instead of paying only for the newly-added tokens. By the run's 15th turn, a single
-prompt-processing pass took over three minutes on its own, before any response generation.
-Together with the whole-file reads (now mitigated at the skill level), this made completing a full
-seven-file threat-model suite unreachable in a single session against even a small (~15-file) real
-repo, on a local 35B model, despite `context_window` already raised past P35.3's now-calibrated
-recommendation. Trigger already exists (this dogfooding run reproduced it end-to-end). Next step:
-scope the provider-adapter change (prompt-cache/KV reuse across turns for the Ollama native path,
-where the cost was measured) and confirm whether the skill-level mitigation alone already makes
-small-repo suites completable before committing to the larger adapter work.
+**Status:** 0 open. (P35.4 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
+P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17; P32.8 shipped 2026-07-15; P33.9, the keystone
+that unblocked P33.10 and P33.19, shipped 2026-07-16.)
 
 ---
 

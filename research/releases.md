@@ -8,15 +8,17 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-18 — **P35.1-P35.3** and the skill-guidance half of **P35.4**: the four
+**Last updated:** 2026-07-18 — **P35.1-P35.4**: the four
 stacked failures found running the threat-modeling skill against an external repo on the
 doctor-recommended local setup (Ollama, qwen3.6:35b). `aegis chat` now wires configured built-in
 skills into its tool registry (P35.1); context-limit truncation mid-tool-call surfaces an
 actionable "raise provider.context_window" error instead of an opaque JSON-parse failure (P35.2);
 `aegis doctor` calibrates its recommended `context_window` against the model's real
-training-context max instead of a fixed 16GB-safe 32768 (P35.3); and the threat-modeling skill now
-steers toward bounded/chunked large-file reads (P35.4, skill half). P35.4's provider-side
-incremental context reuse remains the next open item. Earlier: **P33.21 and P33.22**: ACP now
+training-context max instead of a fixed 16GB-safe 32768 (P35.3); the threat-modeling skill now
+steers toward bounded/chunked large-file reads (P35.4, skill half); and the native Ollama path now
+defaults `keep_alive` to a bounded 30m resident window so a multi-turn run keeps the model loaded
+and reuses its KV cache across turns instead of reprocessing the whole conversation each turn
+(P35.4, provider half). Earlier: **P33.21 and P33.22**: ACP now
 surfaces `KindToolCallStart` as a
 `pending` tool-call notification that the matching `KindToolCall` upgrades in place, `bg events`
 prints the same start timing, and `escPending` was renamed to `backtrackArmed`. Earlier the same
@@ -90,16 +92,33 @@ degrades to baseline), so a 262144-token model gets a 131072 recommendation inst
 daemon startup warn stays on the baseline since it fires before context-window detection. Tests in
 `ollamainfo`, `providerfactory`, and `cli`.
 
-### P35.4 (skill half) — threat-modeling skill steers toward bounded large-file reads
+### P35.4 — Incremental context reuse across turns for local-model runs
 
-The larger P35.4 item — no incremental context reuse across turns — filed two possible fixes; the
-cheaper, skill-level half shipped here. The threat-modeling skill's §2 workspace-exploration step
-now tells the model to page large files with `read_file`'s `offset`/`limit` or a targeted `grep`
-for the entry points, config, and data-access calls it actually needs, rather than pulling a whole
-large file into context in one call — one whole-file read of a ~100KB single-file script ate
-roughly half a 65536-token budget by itself, and every later turn repays that context. Prose-only;
-no Go change. The provider-side incremental-context-reuse half remains open as the next work item
-(see [roadmap.md](roadmap.md) P35.4).
+No incremental context reuse across turns made long skill runs cost-prohibitive on local models:
+in the live threat-modeling dogfooding run, every additional tool round trip reprocessed the
+*entire* conversation (a single prompt-processing pass took over three minutes by the 15th turn),
+so per-turn cost grew with total conversation length instead of paying only for newly-added tokens.
+The filing proposed two fixes; both shipped here.
+
+**Skill half.** The threat-modeling skill's §2 workspace-exploration step now tells the model to
+page large files with `read_file`'s `offset`/`limit` or a targeted `grep` for the entry points,
+config, and data-access calls it actually needs, rather than pulling a whole large file into
+context in one call — one whole-file read of a ~100KB single-file script ate roughly half a 65536-
+token budget by itself, and every later turn repays that context. Prose-only; no Go change.
+
+**Provider half.** Ollama's native `/api/chat` reuses its KV-cache prefix across requests
+automatically, but only while the model stays resident — there is no explicit "reuse cache"
+request field, so the sole adapter-level lever is `keep_alive`. Left at Ollama's own 5m idle
+default, a multi-turn run whose per-turn cost outlasts that window unloads the model between turns
+and wipes the cache, forcing the from-scratch reprocessing measured above. `providerfactory.buildOne`
+now substitutes a bounded resident default (`defaultOllamaKeepAlive`, 30m) when `provider.keep_alive`
+is unset, so the model stays loaded across a run's inter-turn gaps and reuses its cache, while still
+unloading once a run goes genuinely idle — RAM is held only during active work, reconciling the KV
+reuse win with the limited-RAM concern that made P33.10 keep `keep_alive` opt-in. An explicit config
+value still wins, including `"-1"` (pin forever) and `"0"` (unload immediately). The adapter itself
+is unchanged (it still omits `keep_alive` when the option isn't passed — policy lives in the
+factory). Tests in `providerfactory` assert the unset→30m substitution and explicit-value
+passthrough; the config doc and `docs/providers.md` are updated.
 
 ### P33.21 — Editor/background surfaces now use `KindToolCallStart`
 
