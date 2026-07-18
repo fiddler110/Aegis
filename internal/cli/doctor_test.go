@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/security"
 )
@@ -432,5 +433,74 @@ func TestDoctorToolCallCheckWarnsOnTransportFailure(t *testing.T) {
 	got := doctorToolCallCheck(ctx, cfg)
 	if got.Severity != doctorWarn {
 		t.Fatalf("unreachable server: got %v, want warn (never fail); detail=%q", got.Severity, got.Detail)
+	}
+}
+
+// withDetectOllamaInfo injects a deterministic ollamainfo.Detect result for one
+// test, so the P35.3 context_window calibration can be asserted without a live
+// Ollama server — the same seam shape as withSelectSandbox.
+func withDetectOllamaInfo(t *testing.T, fn func(context.Context, string, string) (ollamainfo.Result, bool)) {
+	t.Helper()
+	orig := detectOllamaInfo
+	detectOllamaInfo = fn
+	t.Cleanup(func() { detectOllamaInfo = orig })
+}
+
+// TestDoctorProviderAdapterCalibratesContextWindow (P35.3): a legacy-compat
+// config whose model reports a large real max gets a calibrated
+// context_window recommendation, not the fixed 16GB-VRAM baseline a
+// skill-driven session overruns.
+func TestDoctorProviderAdapterCalibratesContextWindow(t *testing.T) {
+	withDetectOllamaInfo(t, func(context.Context, string, string) (ollamainfo.Result, bool) {
+		return ollamainfo.Result{ModelMax: 262144}, true
+	})
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "openai", BaseURL: "http://localhost:11434/v1", Model: "qwen3.6:35b-a3b-fast",
+	}}
+
+	got := doctorProviderAdapterCheck(context.Background(), cfg)
+	if got.Severity != doctorWarn {
+		t.Fatalf("severity = %v, want WARN; detail=%q", got.Severity, got.Detail)
+	}
+	if !strings.Contains(got.Fix, "provider.context_window: 131072") {
+		t.Errorf("fix should recommend the calibrated 131072, got: %q", got.Fix)
+	}
+	if strings.Contains(got.Fix, "context_window: 32768") {
+		t.Errorf("fix should not fall back to the fixed 32768 when the real max is known, got: %q", got.Fix)
+	}
+}
+
+// TestDoctorProviderAdapterFallsBackWhenUndetectable: when the model's max
+// can't be probed (Ollama unreachable at doctor time), the recommendation
+// falls back to the baseline rather than erroring.
+func TestDoctorProviderAdapterFallsBackWhenUndetectable(t *testing.T) {
+	withDetectOllamaInfo(t, func(context.Context, string, string) (ollamainfo.Result, bool) {
+		return ollamainfo.Result{}, false
+	})
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "openai", BaseURL: "http://localhost:11434/v1", Model: "somemodel",
+	}}
+
+	got := doctorProviderAdapterCheck(context.Background(), cfg)
+	if got.Severity != doctorWarn {
+		t.Fatalf("severity = %v, want WARN; detail=%q", got.Severity, got.Detail)
+	}
+	if !strings.Contains(got.Fix, "provider.context_window: 32768") {
+		t.Errorf("fix should fall back to baseline 32768 when the max is undetectable, got: %q", got.Fix)
+	}
+}
+
+// TestDoctorProviderAdapterPassesOnNativeAdapter: a native "ollama" provider is
+// not on the legacy compat path, so the check passes and never probes.
+func TestDoctorProviderAdapterPassesOnNativeAdapter(t *testing.T) {
+	withDetectOllamaInfo(t, func(context.Context, string, string) (ollamainfo.Result, bool) {
+		t.Fatal("Detect must not be called for a native-adapter config")
+		return ollamainfo.Result{}, false
+	})
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", BaseURL: "http://localhost:11434", Model: "llama3.2",
+	}}
+	if got := doctorProviderAdapterCheck(context.Background(), cfg); got.Severity != doctorPass {
+		t.Fatalf("severity = %v, want PASS; detail=%q", got.Severity, got.Detail)
 	}
 }

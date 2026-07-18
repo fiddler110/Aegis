@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -483,6 +484,61 @@ func TestMidStreamError(t *testing.T) {
 			}
 			if tc.wantErr == "" && !done {
 				t.Errorf("benign chunk aborted the stream")
+			}
+		})
+	}
+}
+
+// TestStreamTruncatedToolCallSurfacesContextLimit is the P35.2 guard: a tool
+// call whose arguments are cut off mid-JSON must be distinguished by the
+// truncation signal (finish_reason "length"), not by the parse failure itself.
+// With the length signal it surfaces the actionable, discoverable context-limit
+// error; a genuinely malformed call that stopped cleanly (finish_reason "stop")
+// still surfaces a plain parse error.
+func TestStreamTruncatedToolCallSurfacesContextLimit(t *testing.T) {
+	// A tool call whose arguments JSON is cut off partway through.
+	cutOffArgs := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"/very/long"}}]}}]}` + "\n\n"
+
+	for _, tc := range []struct {
+		name          string
+		body          string
+		wantTruncated bool
+	}{
+		{
+			name:          "cut off with finish_reason length",
+			body:          cutOffArgs + `data: {"choices":[{"delta":{},"finish_reason":"length"}]}` + "\n\ndata: [DONE]\n\n",
+			wantTruncated: true,
+		},
+		{
+			name:          "malformed with finish_reason stop stays generic",
+			body:          cutOffArgs + `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n",
+			wantTruncated: false,
+		},
+		{
+			// The server may parse tool calls itself and report the failure as
+			// a mid-stream {"error":...} envelope carrying the truncated shape.
+			name:          "server error envelope with truncated shape",
+			body:          `data: {"error":{"message":"invalid tool call arguments for \"read_file\": unexpected end of JSON input"}}` + "\n\ndata: [DONE]\n\n",
+			wantTruncated: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotErr error
+			for _, ev := range streamEvents(t, tc.body) {
+				if ev.Type == provider.EventError {
+					gotErr = ev.Err
+				}
+				if ev.Type == provider.EventToolUse {
+					t.Fatalf("a broken tool call must not be emitted as a tool use: %+v", ev.ToolUse)
+				}
+			}
+			if gotErr == nil {
+				t.Fatal("expected an error event")
+			}
+			gotTruncated := strings.Contains(gotErr.Error(), "context limit") &&
+				strings.Contains(gotErr.Error(), "context_window")
+			if gotTruncated != tc.wantTruncated {
+				t.Errorf("truncation-error = %v, want %v; error was: %v", gotTruncated, tc.wantTruncated, gotErr)
 			}
 		})
 	}

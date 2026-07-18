@@ -590,9 +590,9 @@ A non-zero value overrides detection, with one exception: if Ollama verifiably s
 
 ### Keep-alive and pre-warm
 
-Ollama unloads a model from memory after five idle minutes (its default `keep_alive`); the next message then pays a full cold reload (tens of seconds on a 16GB machine). Two independent controls address this:
+Ollama unloads a model from memory after five idle minutes (its own default `keep_alive`); the next message then pays a full cold reload (tens of seconds on a 16GB machine). Worse, once the model unloads, Ollama's automatic KV-cache reuse is lost — so a multi-turn agentic run whose per-turn cost outlasts that idle window sees the model reload *and* reprocess the whole conversation from scratch each turn (P35.4). Two independent controls address this:
 
-**Keep the model resident (opt-in).** Set how long Ollama holds the model after each request. Only the native `ollama` adapter (`provider.default: ollama`) sends this — the OpenAI-compat path cannot.
+**Keep the model resident.** Set how long Ollama holds the model after each request. Only the native `ollama` adapter (`provider.default: ollama`) sends this — the OpenAI-compat path cannot.
 
 ```yaml
 provider:
@@ -600,6 +600,6 @@ provider:
   keep_alive: "30m"   # a Go duration, or an integer number of seconds
 ```
 
-`""`/missing (the **default**) omits the field, leaving Ollama's own 5m default in effect. `"-1"` pins the model in memory forever — never the default, because a pinned model competes with everything else on a RAM-constrained machine. Set it only if you have the memory to spare and want zero reloads.
+`""`/missing (the **default**) substitutes a bounded resident window of **30m** on the native path, so an agentic run stays loaded across the gaps between turns and reuses its KV cache instead of reprocessing every turn — while still unloading once a run goes genuinely idle, so RAM is held only during active work. `"0"` unloads immediately (falling back to Ollama's per-request behavior); `"-1"` pins the model in memory forever — never the default, because a pinned model competes with everything else on a RAM-constrained machine. Set `"-1"` only if you have the memory to spare and want zero reloads.
 
-**Pre-warm (automatic, no config).** When the provider points at Ollama, the TUI fires a background warm-up load the moment you regain focus or start typing a new message — but only if `/api/ps` reports the model is *not* already loaded, so an in-use model is never re-pinged. This overlaps the cold reload with your typing instead of stalling the send, and it does **not** change the residency policy (the warm-up omits `keep_alive`, so the model still unloads on Ollama's normal schedule unless you set `keep_alive` above).
+**Pre-warm (automatic, no config).** When the provider points at Ollama, the TUI fires a background warm-up load the moment you regain focus or start typing a new message — but only if `/api/ps` reports the model is *not* already loaded, so an in-use model is never re-pinged. This overlaps the cold reload with your typing instead of stalling the send, and it does **not** change the residency policy (the warm-up omits `keep_alive`, so the model unloads on the schedule set by `keep_alive` above).

@@ -126,6 +126,45 @@ func NewStreamError(providerName, msg string) *APIError {
 	}
 }
 
+// NewContextTruncationError builds the actionable error surfaced when a
+// generation is cut off at the model's context ceiling mid-tool-call (P35.2).
+// A local model server (Ollama/llama-server) that runs out of context partway
+// through emitting a tool call stops with the arguments JSON cut short and
+// reports a bare "invalid tool call arguments ... unexpected end of JSON input"
+// — indistinguishable, to a caller, from a genuinely malformed model call, and
+// giving no hint that the fix is to raise provider.context_window. This error
+// names that cause instead. It is terminal (stream, non-retryable): retrying an
+// over-long prompt unchanged fails identically and only burns another
+// prompt-eval on a slow local model. The underlying server message, when
+// present, is preserved parenthetically so nothing is lost.
+func NewContextTruncationError(providerName, underlying string) *APIError {
+	msg := "response truncated at the context limit — raise provider.context_window or reduce session history"
+	if u := strings.TrimSpace(underlying); u != "" {
+		msg += " (server error: " + u + ")"
+	}
+	return &APIError{
+		Provider:        providerName,
+		Message:         msg,
+		stream:          true,
+		streamRetryable: false,
+	}
+}
+
+// IsTruncatedToolCallError reports whether a mid-stream error message is the
+// signature of a tool call cut off at the context ceiling rather than a model
+// producing a syntactically malformed call. On the native Ollama path the
+// server does the tool-call parsing itself and returns only this message, so
+// the message shape is the only truncation signal available: an "invalid tool
+// call arguments" failure whose cause is a *premature end* of the arguments
+// JSON ("unexpected end of JSON input"). That premature-end-of-input — not a
+// syntax error like "invalid character" — is what truncation produces, so this
+// keys on the truncation signal, not on the generic parse failure. (P35.2)
+func IsTruncatedToolCallError(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "invalid tool call arguments") &&
+		strings.Contains(m, "unexpected end of json input")
+}
+
 // terminalStreamSignals are substrings marking a deterministic mid-stream
 // failure — one that fails identically on every retry. Matched
 // case-insensitively and checked before retryableStreamSignals, so a message

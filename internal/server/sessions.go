@@ -149,6 +149,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if workdir != "" {
 		s.sessionWorkdirs.Store(sess.ID, workdir)
 	}
+	if len(s.cfg.Skills.BuiltinEnabled) > 0 {
+		effWorkdir := workdir
+		if effWorkdir == "" {
+			effWorkdir = s.workspace
+		}
+		if err := skills.MaterializeBuiltinsToProject(effWorkdir, s.cfg.Skills.BuiltinEnabled); err != nil {
+			s.logger.Warn("failed to materialize built-in skills into project", "workdir", effWorkdir, "err", err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, Workdir: sess.Workdir, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
 }
 
@@ -407,6 +416,10 @@ func (s *Server) handleActivateSkill(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.store.Get(r.Context(), id); err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	workdir := s.workdirFor(id)
+	if err := skills.MaterializeBuiltinsToProject(workdir, []string{name}); err != nil {
+		s.logger.Warn("failed to materialize built-in skill into project", "skill", name, "workdir", workdir, "err", err)
 	}
 	s.activateSessionSkill(id, name)
 	w.WriteHeader(http.StatusNoContent)

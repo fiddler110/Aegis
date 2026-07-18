@@ -39,7 +39,7 @@ func TestIsLegacyOllamaCompat(t *testing.T) {
 			if gotDetail := LegacyOllamaCompatDetail(p) != ""; gotDetail != tc.want {
 				t.Errorf("LegacyOllamaCompatDetail non-empty = %v, want %v", gotDetail, tc.want)
 			}
-			if gotFix := LegacyOllamaCompatFix(p) != ""; gotFix != tc.want {
+			if gotFix := LegacyOllamaCompatFix(p, 0) != ""; gotFix != tc.want {
 				t.Errorf("LegacyOllamaCompatFix non-empty = %v, want %v", gotFix, tc.want)
 			}
 		})
@@ -50,11 +50,11 @@ func TestIsLegacyOllamaCompat(t *testing.T) {
 // describing the change instead of spelling it out is the failure mode P34.5
 // names explicitly.
 func TestLegacyOllamaCompatFixNamesEveryConfigKey(t *testing.T) {
-	fix := LegacyOllamaCompatFix(config.ProviderConfig{Default: "openai", BaseURL: "http://localhost:11434/v1"})
+	fix := LegacyOllamaCompatFix(config.ProviderConfig{Default: "openai", BaseURL: "http://localhost:11434/v1"}, 0)
 	for _, want := range []string{
 		"provider.default: ollama",
 		"provider.base_url: http://localhost:11434", // the /v1 the native adapter doesn't want, stripped
-		"provider.context_window: 32768",
+		"provider.context_window: 32768",            // baseline: modelMax 0 (undetectable) falls back to it
 		"provider.think: true",
 	} {
 		if !strings.Contains(fix, want) {
@@ -63,6 +63,23 @@ func TestLegacyOllamaCompatFixNamesEveryConfigKey(t *testing.T) {
 	}
 	if strings.Contains(fix, "11434/v1") {
 		t.Errorf("fix suggests the compat /v1 base_url, not the native one: %q", fix)
+	}
+}
+
+// P35.3: when the model's real training-context max is known, the fix must
+// recommend a calibrated context_window (a fraction of that max), not the fixed
+// baseline that a skill-driven session overruns.
+func TestLegacyOllamaCompatFixCalibratesContextWindow(t *testing.T) {
+	p := config.ProviderConfig{Default: "openai", BaseURL: "http://localhost:11434/v1"}
+	fix := LegacyOllamaCompatFix(p, 262144)
+	if !strings.Contains(fix, "provider.context_window: 131072") {
+		t.Errorf("fix should recommend the calibrated 131072 for a 262144-token max, got: %q", fix)
+	}
+	if strings.Contains(fix, "context_window: 32768") {
+		t.Errorf("fix should not fall back to the fixed baseline when the real max is known, got: %q", fix)
+	}
+	if !strings.Contains(fix, "262144") {
+		t.Errorf("fix should cite the model's real max as its sizing basis, got: %q", fix)
 	}
 }
 

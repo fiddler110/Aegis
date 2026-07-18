@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,5 +122,89 @@ func TestActivateSkill_DormantUntilActivated(t *testing.T) {
 	otherPrompt := srv.effectiveSystem("base", other.ID)
 	if strings.Contains(otherPrompt, "threat-modeling") {
 		t.Errorf("expected threat-modeling to stay dormant in an unrelated session:\n%s", otherPrompt)
+	}
+}
+
+// TestActivateSkill_MaterializesIntoProjectWorkdir covers the fix: session-
+// scoped activation (the path /threat-model and friends use) must
+// materialize the builtin's files into the session's own project workdir,
+// synchronously, before the activation request returns — so the very next
+// tool call the model makes (read_file against a references/ or skeletons/
+// asset) finds them already on disk.
+func TestActivateSkill_MaterializesIntoProjectWorkdir(t *testing.T) {
+	cl, _, cleanup := newSkillTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	workdir := t.TempDir()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
+		t.Fatalf("ActivateSkill: %v", err)
+	}
+
+	asset := filepath.Join(workdir, ".aegis", "builtin-skills", "threat-modeling", "references", "stride.md")
+	if _, err := os.Stat(asset); err != nil {
+		t.Fatalf("expected threat-modeling's assets materialized into the session workdir, stat %s: %v", asset, err)
+	}
+}
+
+// TestActivateSkill_RepeatedActivationDoesNotRewriteUnchangedFiles guards
+// against a performance regression: /threat-model and friends call
+// ActivateSkill on every invocation (internal/tui/slash.go), not just the
+// first, so a blind overwrite on each call would churn mtimes and defeat
+// Discover's signature-based cache every time.
+func TestActivateSkill_RepeatedActivationDoesNotRewriteUnchangedFiles(t *testing.T) {
+	cl, _, cleanup := newSkillTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	workdir := t.TempDir()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
+		t.Fatalf("ActivateSkill: %v", err)
+	}
+	asset := filepath.Join(workdir, ".aegis", "builtin-skills", "threat-modeling", "references", "stride.md")
+	info1, err := os.Stat(asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
+		t.Fatalf("second ActivateSkill: %v", err)
+	}
+	info2, err := os.Stat(asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info1.ModTime().Equal(info2.ModTime()) {
+		t.Errorf("expected mtime to stay stable across repeat activation, got %v -> %v", info1.ModTime(), info2.ModTime())
+	}
+}
+
+// TestCreateSession_MaterializesConfigEnabledBuiltins covers the other
+// enablement path: a builtin named in cfg.Skills.BuiltinEnabled (the
+// config-driven /skills enable route) should be materialized into a new
+// session's project workdir at session-creation time, without any explicit
+// activation call.
+func TestCreateSession_MaterializesConfigEnabledBuiltins(t *testing.T) {
+	cl, srv, cleanup := newSkillTestServer(t)
+	defer cleanup()
+	srv.cfg.Skills.BuiltinEnabled = []string{"security-audit"}
+	ctx := context.Background()
+	workdir := t.TempDir()
+
+	if _, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	asset := filepath.Join(workdir, ".aegis", "builtin-skills", "security-audit", "SKILL.md")
+	if _, err := os.Stat(asset); err != nil {
+		t.Fatalf("expected security-audit materialized into the new session's workdir, stat %s: %v", asset, err)
 	}
 }

@@ -265,3 +265,102 @@ func TestDiscoverProjectOverridesBuiltin(t *testing.T) {
 		t.Errorf("expected project skill to override built-in, got description %q", got[0].Description)
 	}
 }
+
+// TestDiscoverProjectMaterializedBuiltin covers the fix for a builtin's
+// bundled reference/skeleton assets being unreachable by the model's
+// sandboxed file tools: once MaterializeBuiltinsToProject has placed a
+// builtin under workDir, Discover should surface it with a
+// workspace-relative <skill_assets dir="..."> (no leading path separator,
+// no ".." escape) instead of the absolute host path the per-user-only copy
+// produces.
+func TestDiscoverProjectMaterializedBuiltin(t *testing.T) {
+	workDir := t.TempDir()
+	if err := MaterializeBuiltinsToProject(workDir, []string{"threat-modeling"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Discover(workDir, "", []string{"threat-modeling"})
+	if len(got) != 1 || got[0].Name != "threat-modeling" {
+		t.Fatalf("expected only threat-modeling, got %v", got)
+	}
+	sk := got[0]
+	if !strings.Contains(sk.Content, `<skill_assets dir="`+filepath.Join(".aegis", "builtin-skills", "threat-modeling")+`"`) {
+		t.Errorf("expected workspace-relative skill_assets dir, got:\n%s", sk.Content)
+	}
+	if strings.Contains(sk.Content, workDir) {
+		t.Errorf("skill_assets dir should not leak the absolute workDir:\n%s", sk.Content)
+	}
+	if !strings.Contains(sk.Content, "references/stride.md") {
+		t.Errorf("expected references/stride.md listed as an asset:\n%s", sk.Content)
+	}
+}
+
+// TestDiscoverProjectMaterializedBuiltinNotWrappedUntrusted asserts a
+// project-materialized builtin keeps the same trusted treatment as the
+// per-user copy — it must NOT get the wrapUntrustedSkill provenance framing
+// project/user-authored skill files get, since this is still first-party
+// content compiled into the binary, just relocated on disk.
+func TestDiscoverProjectMaterializedBuiltinNotWrappedUntrusted(t *testing.T) {
+	workDir := t.TempDir()
+	if err := MaterializeBuiltinsToProject(workDir, []string{"security-audit"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Discover(workDir, "", []string{"security-audit"})
+	if len(got) != 1 {
+		t.Fatalf("expected one skill, got %v", got)
+	}
+	if strings.Contains(got[0].Content, "skill_untrusted_content") {
+		t.Errorf("project-materialized builtin should not be wrapped as untrusted:\n%s", got[0].Content)
+	}
+}
+
+// TestDiscoverPrefersProjectMaterializedOverPerUserBuiltin locks in
+// discoverSpecs' ordering: once a project has its own materialized copy of
+// a builtin, that copy — not the per-user dataDir one — is what Discover
+// returns, since it's the copy read_file can actually reach.
+func TestDiscoverPrefersProjectMaterializedOverPerUserBuiltin(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := MaterializeBuiltins(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	if err := MaterializeBuiltinsToProject(workDir, []string{"security-audit"}); err != nil {
+		t.Fatal(err)
+	}
+	// Diverge the project copy's SKILL.md from the per-user one so the two
+	// are distinguishable.
+	projSkill := filepath.Join(workDir, ".aegis", "builtin-skills", "security-audit", "SKILL.md")
+	data, err := os.ReadFile(projSkill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projSkill, append(data, []byte("\n<!-- project copy marker -->\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Discover(workDir, dataDir, []string{"security-audit"})
+	if len(got) != 1 {
+		t.Fatalf("expected one skill (no duplicate), got %v", got)
+	}
+	if !strings.Contains(got[0].Content, "project copy marker") {
+		t.Errorf("expected the project-materialized copy to win, got:\n%s", got[0].Content)
+	}
+}
+
+// TestDiscoverFallsBackToPerUserBuiltinBeforeProjectMaterialized covers the
+// narrow window before a project's first activation-triggered materialize
+// has run (or if it failed): Discover must still find the builtin via the
+// per-user dataDir copy rather than returning nothing.
+func TestDiscoverFallsBackToPerUserBuiltinBeforeProjectMaterialized(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := MaterializeBuiltins(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir() // never materialized into
+
+	got := Discover(workDir, dataDir, []string{"security-audit"})
+	if len(got) != 1 || got[0].Name != "security-audit" {
+		t.Fatalf("expected fallback to per-user builtin, got %v", got)
+	}
+}

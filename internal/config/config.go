@@ -401,10 +401,14 @@ type ProviderConfig struct {
 	// KeepAlive controls how long Ollama keeps the model resident after a
 	// request, via the native adapter's keep_alive field (P33.10). Only the
 	// native "ollama" adapter honors it; the OpenAI-compat path cannot send it.
-	// "" (default) omits the field, leaving Ollama's own 5m default in effect.
 	// Accepts a Go duration ("30m") or an integer number of seconds; "-1" pins
-	// the model in memory forever. Never defaulted to "-1" — persistence is an
-	// explicit opt-in because the target profile has limited system RAM.
+	// the model in memory forever, "0" unloads it immediately. "" (unset) is
+	// NOT passed through as Ollama's 5m default: the native adapter substitutes
+	// a bounded resident default (providerfactory.defaultOllamaKeepAlive, 30m)
+	// so a multi-turn agentic run reuses its KV cache across turns instead of
+	// reprocessing the whole conversation each turn (P35.4). It is still never
+	// defaulted to "-1" — the model unloads once a run goes idle, so RAM is
+	// held only during active work (the limited-RAM concern behind P33.10).
 	KeepAlive string `koanf:"keep_alive"`
 	// TaskRouting opts a session's user-facing turns into per-turn model
 	// routing (P9.4): a local heuristic classifies each turn as "simple" or
