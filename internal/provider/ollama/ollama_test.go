@@ -3,6 +3,7 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -152,6 +153,92 @@ func TestStreamMidStreamError(t *testing.T) {
 	}
 	if gotErr == nil {
 		t.Fatal("expected an error event")
+	}
+}
+
+// streamError runs body through the adapter and returns the last EventError's
+// error (nil if none), for the mid-stream error-classification tests.
+func streamError(t *testing.T, body string) error {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	stream, err := New(WithBaseURL(srv.URL)).Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var gotErr error
+	for ev := range stream {
+		if ev.Type == provider.EventError {
+			gotErr = ev.Err
+		}
+	}
+	return gotErr
+}
+
+// TestStreamContextTruncationVsMalformed is the P35.2 guard for the native
+// path: a tool call cut off at the context ceiling arrives as the server's
+// opaque "invalid tool call arguments ... unexpected end of JSON input" (the
+// adapter never parses tool args itself), and must surface the actionable,
+// discoverable context-limit error — while a genuinely malformed call, and an
+// unrelated failure, still surface verbatim.
+func TestStreamContextTruncationVsMalformed(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		body          string
+		wantTruncated bool
+	}{
+		{
+			// The exact live shape from the roadmap: no done_reason on the
+			// error line, so the message shape is the only signal.
+			name:          "truncated tool call message shape",
+			body:          `{"error":"llama-server returned invalid tool call arguments for \"read_file\": unexpected end of JSON input"}` + "\n",
+			wantTruncated: true,
+		},
+		{
+			// A prior chunk reported done_reason "length" before the error line.
+			name:          "prior length signal",
+			body: `{"message":{"role":"assistant","content":"partial"},"done":true,"done_reason":"length"}` + "\n" +
+				`{"error":"llama-server returned invalid tool call arguments for \"read_file\": unexpected end of JSON input"}` + "\n",
+			wantTruncated: true,
+		},
+		{
+			// Genuinely malformed model output — a syntax error, not a cut-off.
+			name:          "malformed not truncated",
+			body:          `{"error":"llama-server returned invalid tool call arguments for \"read_file\": invalid character 'x' looking for beginning of value"}` + "\n",
+			wantTruncated: false,
+		},
+		{
+			name:          "unrelated failure",
+			body:          `{"error":"model runner has unexpectedly stopped"}` + "\n",
+			wantTruncated: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := streamError(t, tc.body)
+			if err == nil {
+				t.Fatal("expected an error event")
+			}
+			gotTruncated := strings.Contains(err.Error(), "context limit") &&
+				strings.Contains(err.Error(), "context_window")
+			if gotTruncated != tc.wantTruncated {
+				t.Errorf("truncation-error = %v, want %v; error was: %v", gotTruncated, tc.wantTruncated, err)
+			}
+			if tc.wantTruncated {
+				var apiErr *provider.APIError
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("error is not *provider.APIError: %T", err)
+				}
+				if apiErr.Retryable() {
+					t.Errorf("a context-limit failure must be terminal, got retryable: %v", err)
+				}
+			}
+		})
 	}
 }
 

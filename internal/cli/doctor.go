@@ -16,6 +16,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/server"
@@ -112,7 +113,7 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	checks := []doctorCheck{
 		doctorWorkspaceTrustCheck(cfg),
 		doctorProviderCheck(ctx, cfg),
-		doctorProviderAdapterCheck(cfg),
+		doctorProviderAdapterCheck(ctx, cfg),
 		doctorToolCallCheck(ctx, cfg),
 		doctorSandboxCheck(cfg),
 		doctorScannerCheck(ctx, cfg),
@@ -215,7 +216,7 @@ func doctorProviderCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 // :11434 base_url regardless of provider.default, so it reports a cheerful
 // "ollama reachable, model available" PASS for exactly the config this warns
 // about — reachability is genuinely fine here, it's the adapter that isn't.
-func doctorProviderAdapterCheck(cfg *config.Config) doctorCheck {
+func doctorProviderAdapterCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	const name = "provider adapter"
 	if !providerfactory.IsLegacyOllamaCompat(cfg.Provider) {
 		return doctorCheck{
@@ -223,11 +224,39 @@ func doctorProviderAdapterCheck(cfg *config.Config) doctorCheck {
 			Detail: fmt.Sprintf("provider %q uses its native adapter", cfg.Provider.Default),
 		}
 	}
+	// Calibrate the recommended context_window against the model's real
+	// training-context max (P35.3): the fixed fallback is a 16GB-VRAM-safe
+	// number a skill-driven session overruns before writing any output. This is
+	// best-effort — when the probe can't reach Ollama or read the max, the fix
+	// falls back to the baseline recommendation.
+	modelMax := doctorDetectModelMax(ctx, cfg.Provider)
 	return doctorCheck{
 		Name: name, Severity: doctorWarn,
 		Detail: providerfactory.LegacyOllamaCompatDetail(cfg.Provider),
-		Fix:    providerfactory.LegacyOllamaCompatFix(cfg.Provider),
+		Fix:    providerfactory.LegacyOllamaCompatFix(cfg.Provider, modelMax),
 	}
+}
+
+// detectOllamaInfo is a seam over ollamainfo.Detect so a test can supply a
+// deterministic ModelMax without a live Ollama server, mirroring the
+// selectSandbox seam.
+var detectOllamaInfo = ollamainfo.Detect
+
+// doctorDetectModelMax returns the configured model's training-context maximum
+// from a reachable Ollama server, or 0 when the model is unresolved or the
+// server can't be probed. Never fatal — a 0 result just yields the baseline
+// context_window recommendation.
+func doctorDetectModelMax(ctx context.Context, p config.ProviderConfig) int {
+	if p.Model == "" || p.Model == "auto" {
+		return 0
+	}
+	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	res, ok := detectOllamaInfo(dctx, ollamainfo.NativeBase(p.BaseURL), p.Model)
+	if !ok {
+		return 0
+	}
+	return res.ModelMax
 }
 
 // doctorToolCallSmokePrompt is the obviously-actionable prompt sent to the
