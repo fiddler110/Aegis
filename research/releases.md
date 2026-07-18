@@ -8,17 +8,23 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-18 — **P35.7**: root-cause diagnostic for whether P35.4's `keep_alive`
-residency is actually sparing per-turn prefill on the native-Ollama path, closing the P35.5-P35.7
-cluster. Added `prompt_eval_duration` alongside the already-read `prompt_eval_count`/
-`load_duration`, and a per-turn debug log (`prompt_eval_count`, `prompt_eval_duration_ms`) so a
-live run can compare turn N vs. N+1 and read cache-hit-vs-full-reprocess directly. A code-reading
-pass over the roadmap's three named non-determinism candidates (thinking blocks round-tripped into
-history, tool-result formatting, non-deterministic system-prompt regeneration) found no confirmed
-bug in any of them — see the P35.7 entry below for detail. Diagnostic only, no live Ollama server
-available this session to actually observe the counts, so P35.5's "raise the ceiling" vs. "make
-prefill cheap" question is unresolved pending a live run with the new instrumentation. Earlier the
-same day: **P35.6**: when P35.5's response-header timeout fires on the
+**Last updated:** 2026-07-18 — **P35.7 live-confirmed**: a real `aegis chat` run against Ollama
+(`qwen3:14b`, resident via `keep_alive`) doing a STRIDE threat model of an external repo captured 8
+turns of `prompt_eval_count`/`prompt_eval_duration_ms`. Turn 2 needed only 37 new prefill tokens
+after turn 1's 3944 (103ms), and turns 5-8 held the same pattern as context grew from 17.6k to 19k
+tokens (`prompt_eval_duration_ms` tracking each turn's token *delta* at ~2-4.7ms/token, not the
+running total — turn 8 processed 19038 total context tokens in 3.3s, far below what a full
+reprocess at the observed per-token rate would take). This resolves the question the diagnostic was
+filed to answer: Ollama's KV-cache prefix reuse **is** working under P35.4's `keep_alive` residency,
+so P35.5's timeout was genuinely about the ceiling being too low for large one-off prefill jumps
+(e.g. a tool result dumping a large file listing), not about repeated full-context reprocessing. No
+response-header timeout or error occurred at any point in the run, so P35.6's actionable-error path
+went untested live but also unneeded. Follow-up fix shipped alongside: `aegis chat` never wired
+`cfg.LogLevel` into a real logger, so this debug-level prompt_eval instrumentation was invisible on
+the one CLI path most likely to be used for this exact diagnostic — `internal/cli/chat.go` now
+builds a `logging.New` logger and passes it into `engine.New`, mirroring the existing
+`serve`/`acp`/`mcp-serve` pattern. (Original diagnostic-only writeup, no live data, is preserved
+below for the record.) Earlier the same day: **P35.6**: when P35.5's response-header timeout fires on the
 native-Ollama or OpenAI-compat path, the bare Go transport string
 (`net/http: timeout awaiting response headers`) — indistinguishable from a dead server, naming no
 remedy — is now rewrapped into an actionable, non-retryable error naming the cause (prefill on a
