@@ -86,7 +86,16 @@ type skillDirSpec struct {
 }
 
 // discoverSpecs returns the ordered list of directories Discover scans:
-// project-local, user-global, then (if any are enabled) embedded built-ins.
+// project-local, user-global, then (if any are enabled) embedded built-ins —
+// preferring a project's own materialized copy of a built-in
+// (MaterializeBuiltinsToProject) over the per-user one, so a builtin's
+// reference/skeleton assets resolve to a workspace-relative path the
+// model's sandboxed file tools can actually read (see withAssetManifest).
+// The per-user dataDir spec stays in the list even when a project spec is
+// also present: it's the fallback for the narrow window before a project's
+// first materialization has run (or if it failed), so Discover never
+// returns zero builtins in that window — the shared `seen` map in Discover
+// dedupes it away once the project copy exists.
 func discoverSpecs(workDir, dataDir string, enabledBuiltins []string) []skillDirSpec {
 	specs := []skillDirSpec{
 		{dir: filepath.Join(workDir, ".aegis", "skills")},
@@ -94,8 +103,13 @@ func discoverSpecs(workDir, dataDir string, enabledBuiltins []string) []skillDir
 	if home, err := os.UserHomeDir(); err == nil {
 		specs = append(specs, skillDirSpec{dir: filepath.Join(home, ".aegis", "skills")})
 	}
-	if enabled := enabledSet(enabledBuiltins); len(enabled) > 0 && dataDir != "" {
-		specs = append(specs, skillDirSpec{dir: filepath.Join(dataDir, builtinSkillsDirName), filter: enabled, trusted: true})
+	if enabled := enabledSet(enabledBuiltins); len(enabled) > 0 {
+		if workDir != "" {
+			specs = append(specs, skillDirSpec{dir: filepath.Join(workDir, ".aegis", builtinSkillsDirName), filter: enabled, trusted: true})
+		}
+		if dataDir != "" {
+			specs = append(specs, skillDirSpec{dir: filepath.Join(dataDir, builtinSkillsDirName), filter: enabled, trusted: true})
+		}
 	}
 	return specs
 }
