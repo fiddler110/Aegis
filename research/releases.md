@@ -8,7 +8,16 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-17 — **P33.21 and P33.22**: ACP now surfaces `KindToolCallStart` as a
+**Last updated:** 2026-07-18 — **P35.1-P35.3** and the skill-guidance half of **P35.4**: the four
+stacked failures found running the threat-modeling skill against an external repo on the
+doctor-recommended local setup (Ollama, qwen3.6:35b). `aegis chat` now wires configured built-in
+skills into its tool registry (P35.1); context-limit truncation mid-tool-call surfaces an
+actionable "raise provider.context_window" error instead of an opaque JSON-parse failure (P35.2);
+`aegis doctor` calibrates its recommended `context_window` against the model's real
+training-context max instead of a fixed 16GB-safe 32768 (P35.3); and the threat-modeling skill now
+steers toward bounded/chunked large-file reads (P35.4, skill half). P35.4's provider-side
+incremental context reuse remains the next open item. Earlier: **P33.21 and P33.22**: ACP now
+surfaces `KindToolCallStart` as a
 `pending` tool-call notification that the matching `KindToolCall` upgrades in place, `bg events`
 prints the same start timing, and `escPending` was renamed to `backtrackArmed`. Earlier the same
 day: **P33.12**: the first-run wizard and `/security-config` editor now
@@ -23,6 +32,74 @@ its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearin
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
 
 ---
+
+### P35.1 — `aegis chat` wires configured built-in skills into its tool registry
+
+`internal/cli/chat.go`'s one-shot path built its tool registry via `builtin.Register(reg,
+builtin.Options{...})` but omitted `BuiltinSkills: cfg.Skills.BuiltinEnabled` — a field the
+daemon/TUI path (`internal/server/server.go:561`) already set. So with `threat-modeling` enabled
+via `aegis skills enable threat-modeling`, `aegis chat "Load the threat-modeling skill…"` got
+`no skill named "threat-modeling"` back from the model's own `skill` tool call and silently
+proceeded without any of the skill's instructions. Not threat-modeling-specific: every built-in
+skill was unreachable from the one-shot/scriptable CLI entry point. Fix: the one missing field,
+matching `server.go`. Found live-testing the threat-modeling skill against an external repo.
+
+### P35.2 — Context-limit truncation surfaces an actionable error, not an opaque JSON-parse failure
+
+When a local model server (Ollama/llama-server) ran out of context partway through emitting a tool
+call, it stopped with the arguments JSON cut short and returned a bare `invalid tool call
+arguments for "<tool>": unexpected end of JSON input` — indistinguishable, to a caller, from a
+genuinely malformed model call, and giving no hint the fix was to raise `provider.context_window`.
+Reproduced live: a run died on exactly this while llama-server's own log showed `n_tokens = 65535,
+truncated = 1`. That error string is entirely server-side (it exists nowhere in aegis's Go source
+— grep confirms), arriving as a mid-stream `{"error":…}` envelope; on the native path the server
+does the tool-call parsing itself, so the message shape is the only truncation signal available.
+
+Fix: `provider.NewContextTruncationError` (terminal, non-retryable — retrying an over-long prompt
+unchanged fails identically and only burns another prompt-eval on a slow local model) plus
+`provider.IsTruncatedToolCallError`, which keys on the *premature-end-of-input* shape (`invalid
+tool call arguments` + `unexpected end of JSON input`) that truncation produces, distinct from a
+syntax error like `invalid character` for a genuinely malformed call. Wired into both adapters:
+the native Ollama path (`internal/provider/ollama/ollama.go`) tracks `done_reason "length"` and
+checks the message shape before the generic classifier; the OpenAI-compat path
+(`internal/provider/openai/openai.go`) tracks `finish_reason "length"`, enriches the error-envelope
+path the same way, and adds a `json.Valid` check when finalizing accumulated tool-call args — cut-off
+args with a length signal yield the actionable error, a malformed call without one still yields a
+plain parse error instead of silently forwarding broken JSON downstream. The new message:
+`response truncated at the context limit — raise provider.context_window or reduce session history
+(server error: <original>)`. Tests in both adapters cover both directions.
+
+### P35.3 — `aegis doctor` calibrates the recommended `context_window` against the model's real max
+
+The recommended `provider.context_window` was a hardcoded `suggestedContextWindow = 32768` in
+`internal/providerfactory/legacyollama.go` (a 16GB-VRAM-safe value from P34.5) — not, as the
+filing assumed, derived from the modelfile. A skill-driven workload routinely builds a >40k-token
+prompt before writing any output (the threat-modeling workspace-exploration step alone produced
+41,538 tokens), so that fixed ceiling made the very first real task fail with a hard Ollama 400,
+no compaction attempted first — even though the model's real training-context max (e.g. 262144) is
+far larger and already visible in aegis's "auto-detected Ollama context window" log line as
+`model_max`.
+
+Fix (the actionable option): new `ollamainfo.RecommendContextWindow(modelMax)` recommends half the
+model's real max, capped at `RecommendedContextWindowCap` (131072, a KV-memory guard), floored at
+the `BaselineContextWindow` (32768), never above the max; `modelMax <= 0` falls back to the
+baseline. `LegacyOllamaCompatFix` now takes a `modelMax` argument and includes a sizing note (citing
+the real max when known, an explicit skill-headroom caveat when not). `aegis doctor`'s
+provider-adapter check probes `ModelMax` best-effort via a `detectOllamaInfo` seam (3s timeout,
+degrades to baseline), so a 262144-token model gets a 131072 recommendation instead of 32768; the
+daemon startup warn stays on the baseline since it fires before context-window detection. Tests in
+`ollamainfo`, `providerfactory`, and `cli`.
+
+### P35.4 (skill half) — threat-modeling skill steers toward bounded large-file reads
+
+The larger P35.4 item — no incremental context reuse across turns — filed two possible fixes; the
+cheaper, skill-level half shipped here. The threat-modeling skill's §2 workspace-exploration step
+now tells the model to page large files with `read_file`'s `offset`/`limit` or a targeted `grep`
+for the entry points, config, and data-access calls it actually needs, rather than pulling a whole
+large file into context in one call — one whole-file read of a ~100KB single-file script ate
+roughly half a 65536-token budget by itself, and every later turn repays that context. Prose-only;
+no Go change. The provider-side incremental-context-reuse half remains open as the next work item
+(see [roadmap.md](roadmap.md) P35.4).
 
 ### P33.21 — Editor/background surfaces now use `KindToolCallStart`
 
