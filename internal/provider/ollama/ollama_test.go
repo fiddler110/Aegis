@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 )
@@ -57,7 +58,7 @@ func TestTranslateImage(t *testing.T) {
 const sampleStream = `{"message":{"role":"assistant","content":"Hello "},"done":false}
 {"message":{"role":"assistant","content":"there"},"done":false}
 {"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"search","arguments":{"q":"cats"}}}]},"done":false}
-{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":11,"eval_count":7,"load_duration":8200000000}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":11,"eval_count":7,"load_duration":8200000000,"prompt_eval_duration":150000000}
 `
 
 func TestStreamParsing(t *testing.T) {
@@ -122,6 +123,9 @@ func TestStreamParsing(t *testing.T) {
 	}
 	if done.Usage.LoadDurationMS != 8200 {
 		t.Errorf("load duration = %d ms, want 8200", done.Usage.LoadDurationMS)
+	}
+	if done.Usage.PromptEvalDurationMS != 150 {
+		t.Errorf("prompt eval duration = %d ms, want 150 (P35.7 prefill diagnostic)", done.Usage.PromptEvalDurationMS)
 	}
 }
 
@@ -310,5 +314,71 @@ func TestStreamOmitsKeepAliveByDefault(t *testing.T) {
 	}
 	if strings.Contains(string(rawBody), "keep_alive") {
 		t.Errorf("keep_alive must be omitted when unset, got body: %s", rawBody)
+	}
+}
+
+// TestWithResponseHeaderTimeout is the P35.5 adapter-level regression:
+// WithResponseHeaderTimeout must actually change the transport's configured
+// ResponseHeaderTimeout, and an adapter built with no such option keeps
+// sse.DefaultResponseHeaderTimeout (5m).
+func TestWithResponseHeaderTimeout(t *testing.T) {
+	def := New()
+	tr, ok := def.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport type = %T, want *http.Transport", def.client.Transport)
+	}
+	if tr.ResponseHeaderTimeout != 5*time.Minute {
+		t.Errorf("default ResponseHeaderTimeout = %v, want 5m", tr.ResponseHeaderTimeout)
+	}
+
+	custom := New(WithResponseHeaderTimeout(20 * time.Minute))
+	tr, ok = custom.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport type = %T, want *http.Transport", custom.client.Transport)
+	}
+	if tr.ResponseHeaderTimeout != 20*time.Minute {
+		t.Errorf("ResponseHeaderTimeout = %v, want 20m", tr.ResponseHeaderTimeout)
+	}
+}
+
+// TestResponseHeaderTimeoutRewrapped is the P35.6 regression: when a server
+// withholds its response header past the configured ResponseHeaderTimeout
+// (Ollama does this until prefill finishes, per P35.5), the bare Go transport
+// string "net/http: timeout awaiting response headers" must not reach the
+// caller unrewrapped — it names no cause and no remedy. Stream must instead
+// return provider.NewResponseHeaderTimeoutError's actionable, non-retryable
+// error naming provider.response_header_timeout and context_window.
+func TestResponseHeaderTimeoutRewrapped(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // never write a header until the client has given up
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	a := New(WithBaseURL(srv.URL), WithResponseHeaderTimeout(50*time.Millisecond))
+
+	_, err := a.Stream(context.Background(), provider.Request{
+		Model: "m",
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "provider.response_header_timeout") || !strings.Contains(err.Error(), "context_window") {
+		t.Errorf("error does not name the levers: %v", err)
+	}
+	if strings.Contains(err.Error(), "request failed") {
+		t.Errorf("bare transport string leaked through unrewrapped: %v", err)
+	}
+
+	var apiErr *provider.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *provider.APIError: %T", err)
+	}
+	if apiErr.Retryable() {
+		t.Errorf("a response-header timeout must be terminal, got retryable: %v", err)
 	}
 }

@@ -603,3 +603,14 @@ provider:
 `""`/missing (the **default**) substitutes a bounded resident window of **30m** on the native path, so an agentic run stays loaded across the gaps between turns and reuses its KV cache instead of reprocessing every turn — while still unloading once a run goes genuinely idle, so RAM is held only during active work. `"0"` unloads immediately (falling back to Ollama's per-request behavior); `"-1"` pins the model in memory forever — never the default, because a pinned model competes with everything else on a RAM-constrained machine. Set `"-1"` only if you have the memory to spare and want zero reloads.
 
 **Pre-warm (automatic, no config).** When the provider points at Ollama, the TUI fires a background warm-up load the moment you regain focus or start typing a new message — but only if `/api/ps` reports the model is *not* already loaded, so an in-use model is never re-pinged. This overlaps the cold reload with your typing instead of stalling the send, and it does **not** change the residency policy (the warm-up omits `keep_alive`, so the model unloads on the schedule set by `keep_alive` above).
+
+### Response-header timeout
+
+Every provider adapter shares one HTTP client whose transport bounds only the wait for the response *headers* (not the streamed body that follows) at **5 minutes** by default. Ollama withholds the response header until prompt-eval (prefill) finishes, so on a large local context a legitimately-slow prefill can exceed that window — the whole turn then aborts as a transport error (`net/http: timeout awaiting response headers`) before any content streams, even though the model was still working (P35.5).
+
+```yaml
+provider:
+  response_header_timeout: 900   # seconds; 0 or missing = default (5 minutes)
+```
+
+Raise this if you run large local contexts (`context_window` in the tens of thousands of tokens) on a slower box and see the run die mid-turn with that error. `0` or missing keeps the previous hardcoded 5-minute behavior — no change unless you opt in.

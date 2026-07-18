@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
@@ -383,6 +384,60 @@ func TestLoadDotEnvMissingFileNoOp(t *testing.T) {
 // profile auto-detection: loopback/localhost base URLs (with or without a
 // port, http or https, IPv6 loopback) select the "local" profile; a remote
 // host does not; and an explicit prompt_profile always wins over detection.
+// TestProviderConfig_ResponseHeaderTimeout is the P35.5 regression: unset
+// (zero-value) config keeps the previously-hardcoded 5-minute default, and an
+// explicit provider.response_header_timeout (seconds) is honored.
+func TestProviderConfig_ResponseHeaderTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		sec  int
+		want time.Duration
+	}{
+		{"unset defaults to 5m", 0, 5 * time.Minute},
+		{"negative also defaults to 5m", -1, 5 * time.Minute},
+		{"explicit override wins", 900, 15 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := ProviderConfig{ResponseHeaderTimeoutSec: tt.sec}
+			if got := p.ResponseHeaderTimeout(); got != tt.want {
+				t.Errorf("ResponseHeaderTimeout(response_header_timeout=%d) = %v, want %v", tt.sec, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadDefaults_ResponseHeaderTimeout confirms a fresh Load() with no
+// provider.response_header_timeout set produces the same 5-minute default,
+// end to end through the config layers.
+func TestLoadDefaults_ResponseHeaderTimeout(t *testing.T) {
+	redirectConfigDir(t)
+	clearEnv(t, "AEGIS_PROVIDER_RESPONSE_HEADER_TIMEOUT")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Provider.ResponseHeaderTimeout(); got != 5*time.Minute {
+		t.Errorf("default ResponseHeaderTimeout = %v, want 5m", got)
+	}
+}
+
+// TestEnvOverride_ResponseHeaderTimeout is the env-var half of P35.5: setting
+// AEGIS_PROVIDER_RESPONSE_HEADER_TIMEOUT must change the resolved duration.
+func TestEnvOverride_ResponseHeaderTimeout(t *testing.T) {
+	redirectConfigDir(t)
+	t.Setenv("AEGIS_PROVIDER_RESPONSE_HEADER_TIMEOUT", "600")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Provider.ResponseHeaderTimeout(); got != 10*time.Minute {
+		t.Errorf("ResponseHeaderTimeout after env override = %v, want 10m", got)
+	}
+}
+
 func TestProviderConfig_LocalPromptProfile(t *testing.T) {
 	tests := []struct {
 		name    string

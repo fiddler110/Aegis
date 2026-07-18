@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/sse"
@@ -60,9 +61,16 @@ func WithReasoningEffort(effort string) Option {
 	return func(a *Adapter) { a.reasoningEffort = effort }
 }
 
+// WithResponseHeaderTimeout overrides how long the streamed request waits for
+// response headers (provider.response_header_timeout, P35.5). <= 0 falls back
+// to sse.DefaultResponseHeaderTimeout.
+func WithResponseHeaderTimeout(d time.Duration) Option {
+	return func(a *Adapter) { a.client = sse.NewStreamingClient(d) }
+}
+
 // New constructs an OpenAI adapter.
 func New(apiKey string, opts ...Option) *Adapter {
-	a := &Adapter{apiKey: apiKey, baseURL: defaultBaseURL, client: sse.NewStreamingClient()}
+	a := &Adapter{apiKey: apiKey, baseURL: defaultBaseURL, client: sse.NewStreamingClient(0)}
 	for _, o := range opts {
 		o(a)
 	}
@@ -271,6 +279,15 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
+		// P35.6: on an OpenAI-compat local backend (e.g. Ollama's compat
+		// endpoint) the response header is withheld until prefill finishes,
+		// so a header-timeout here means "prefill is slower than the
+		// configured budget," not "the server is unreachable." Rewrap it into
+		// an actionable, non-retryable error naming the levers instead of the
+		// bare Go transport string.
+		if provider.IsResponseHeaderTimeoutError(err) {
+			return nil, provider.NewResponseHeaderTimeoutError(a.Name(), err)
+		}
 		return nil, provider.NewTransportError(a.Name(), err)
 	}
 	if resp.StatusCode != http.StatusOK {

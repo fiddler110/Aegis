@@ -24,10 +24,15 @@ const (
 	maxBufSize     = 4 * 1024 * 1024
 	maxErrBodySize = 64 * 1024
 
-	// responseHeaderTimeout bounds only the wait for the response headers, not
-	// the stream that follows. It is generous because a cold local backend
-	// (Ollama pulling a model into VRAM) can take minutes to reply at all.
-	responseHeaderTimeout = 5 * time.Minute
+	// DefaultResponseHeaderTimeout bounds only the wait for the response
+	// headers, not the stream that follows. It is generous because a cold
+	// local backend (Ollama pulling a model into VRAM) can take minutes to
+	// reply at all. Callers that want a different bound (e.g. a configured
+	// provider.response_header_timeout, P35.5 — Ollama withholds the response
+	// header until prompt-eval/prefill finishes, so a large local context can
+	// legitimately need longer than this) pass it explicitly to
+	// NewStreamingClient instead of relying on this default.
+	DefaultResponseHeaderTimeout = 5 * time.Minute
 )
 
 // NewStreamingClient returns the http.Client an adapter uses for its streamed
@@ -38,9 +43,14 @@ const (
 // is the caller's context's job; the transport still bounds a server that
 // accepts the connection and then never sends headers. Mirrors the daemon
 // client's split between its SSE and RPC clients (internal/client.New).
-func NewStreamingClient() *http.Client {
+//
+// headerTimeout <= 0 substitutes DefaultResponseHeaderTimeout.
+func NewStreamingClient(headerTimeout time.Duration) *http.Client {
+	if headerTimeout <= 0 {
+		headerTimeout = DefaultResponseHeaderTimeout
+	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.ResponseHeaderTimeout = responseHeaderTimeout
+	tr.ResponseHeaderTimeout = headerTimeout
 	return &http.Client{Timeout: 0, Transport: tr}
 }
 

@@ -150,6 +150,15 @@ provider:
   # configured value breaks long runs). /status shows the value in use.
   context_window: 0
 
+  # How long a streamed request waits for the response headers (not the
+  # streamed body that follows), in seconds. 0 = default (5 minutes) — the
+  # previously-hardcoded value, unchanged unless you opt in. Ollama withholds
+  # the response header until prompt-eval (prefill) finishes, so a large local
+  # context can legitimately need longer than the default; raise this rather
+  # than lower context_window if a run dies mid-turn with
+  # "timeout awaiting response headers" (P35.5). See docs/providers.md#response-header-timeout.
+  response_header_timeout: 0
+
   # Ordered (provider, model) pairs tried in sequence after the primary
   # adapter exhausts max_retries (P5.9). Empty = no failover.
   fallback: []

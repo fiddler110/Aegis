@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
@@ -23,6 +24,7 @@ import (
 	"github.com/knadh/koanf/v2"
 
 	"github.com/fiddler110/aegis/internal/fsguard"
+	"github.com/fiddler110/aegis/internal/provider/sse"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
@@ -410,6 +412,16 @@ type ProviderConfig struct {
 	// defaulted to "-1" — the model unloads once a run goes idle, so RAM is
 	// held only during active work (the limited-RAM concern behind P33.10).
 	KeepAlive string `koanf:"keep_alive"`
+	// ResponseHeaderTimeoutSec bounds how long a streamed request waits for
+	// the response headers, in seconds (P35.5). Shared by every adapter via
+	// sse.NewStreamingClient. Ollama withholds the response header until
+	// prompt-eval (prefill) finishes, so a legitimately slow prefill on a
+	// large local context can trip the default and abort the whole turn as a
+	// transport error before any content streams. 0 (unset) keeps the
+	// existing default (sse.DefaultResponseHeaderTimeout, 5 minutes) so
+	// behavior is unchanged unless a user opts in to raising it. Read via
+	// ResponseHeaderTimeout(), never this field directly.
+	ResponseHeaderTimeoutSec int `koanf:"response_header_timeout"`
 	// TaskRouting opts a session's user-facing turns into per-turn model
 	// routing (P9.4): a local heuristic classifies each turn as "simple" or
 	// "complex" and simple turns run on SmallModel instead of Model. Off by
@@ -437,6 +449,17 @@ type ProviderConfig struct {
 	PromptProfile string `koanf:"prompt_profile"`
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
+}
+
+// ResponseHeaderTimeout returns the configured
+// provider.response_header_timeout as a time.Duration, substituting
+// sse.DefaultResponseHeaderTimeout (5 minutes, the previously-hardcoded
+// value) when unset or non-positive (P35.5).
+func (p ProviderConfig) ResponseHeaderTimeout() time.Duration {
+	if p.ResponseHeaderTimeoutSec <= 0 {
+		return sse.DefaultResponseHeaderTimeout
+	}
+	return time.Duration(p.ResponseHeaderTimeoutSec) * time.Second
 }
 
 // LocalPromptProfile reports whether the "local" prompt profile (P25.6)

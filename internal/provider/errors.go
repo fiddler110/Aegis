@@ -150,6 +150,44 @@ func NewContextTruncationError(providerName, underlying string) *APIError {
 	}
 }
 
+// NewResponseHeaderTimeoutError builds the actionable error surfaced when a
+// request on a native-Ollama/OpenAI-compat local backend fails with Go's bare
+// transport string "net/http: timeout awaiting response headers" (P35.6).
+// Ollama withholds the HTTP response header until prompt-eval (prefill)
+// finishes (see provider.response_header_timeout, P35.5), so this fires when
+// prefill for a large context takes longer than that budget — not when the
+// server is unreachable or crashed, which the raw transport string is
+// indistinguishable from. This error names that cause and the levers instead:
+// raise provider.response_header_timeout, lower context_window, or reduce
+// per-turn context growth. It is terminal (non-retryable): a blind retry
+// re-processes the same oversized prefill and times out again, exactly as
+// P35.2's context-truncation error is terminal for the same reason. The
+// underlying transport error is preserved parenthetically so nothing is lost.
+func NewResponseHeaderTimeoutError(providerName string, underlying error) *APIError {
+	msg := "timed out waiting for the response header — the model is likely still processing " +
+		"a large prompt (prefill) on a local backend and exceeded provider.response_header_timeout; " +
+		"raise that setting, lower context_window, or reduce per-turn context growth"
+	if underlying != nil {
+		msg += " (" + underlying.Error() + ")"
+	}
+	return &APIError{
+		Provider:        providerName,
+		Message:         msg,
+		Err:             underlying,
+		stream:          true,
+		streamRetryable: false,
+	}
+}
+
+// IsResponseHeaderTimeoutError reports whether err is Go's transport-level
+// error for a response-header wait that exceeded the HTTP client's configured
+// ResponseHeaderTimeout — the bare string "net/http: timeout awaiting response
+// headers", with no HTTP status and no server-side error envelope to key off
+// (P35.6).
+func IsResponseHeaderTimeoutError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "timeout awaiting response headers")
+}
+
 // IsTruncatedToolCallError reports whether a mid-stream error message is the
 // signature of a tool call cut off at the context ceiling rather than a model
 // producing a syntactically malformed call. On the native Ollama path the
