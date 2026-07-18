@@ -342,6 +342,7 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 	tools := map[int]*toolAccum{}
 	usage := &provider.Usage{}
 	stop := provider.StopEndTurn
+	sawLength := false // a choice reported finish_reason "length" (context ceiling hit)
 
 	scanner := sse.NewScanner(body)
 	for scanner.Scan() {
@@ -386,6 +387,16 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 			continue
 		}
 		if msg := errorMessage(chunk.Error); msg != "" {
+			// P35.2: a generation truncated at the context ceiling mid-tool-call
+			// can surface as an opaque "invalid tool call arguments ... unexpected
+			// end of JSON input" — name the discoverable fix (raise
+			// context_window) when a truncation signal is present (a prior
+			// finish_reason "length" or the truncated-tool-call message shape)
+			// instead of falling through to the generic parse failure.
+			if sawLength || provider.IsTruncatedToolCallError(msg) {
+				emit(provider.Event{Type: provider.EventError, Err: provider.NewContextTruncationError("openai", msg)})
+				return
+			}
 			// P33.16: classify the mid-stream {"error":...} envelope so a
 			// transient failure (worker crash, model-load failure, OOM) carries a
 			// retryable verdict while a deterministic one (context overflow,
@@ -441,6 +452,7 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 				// of turn. Guarded on StopToolUse for parity with the native
 				// Ollama adapter — a cap reached after the tool call already
 				// landed truncated nothing the caller was waiting for.
+				sawLength = true
 				if stop != provider.StopToolUse {
 					stop = provider.StopMaxTokens
 				}
@@ -461,6 +473,21 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		args := strings.TrimSpace(acc.args.String())
 		if args == "" {
 			args = "{}"
+		}
+		if !json.Valid([]byte(args)) {
+			// P35.2: the accumulated arguments are not valid JSON. When the
+			// stream also reported finish_reason "length" the call was cut off
+			// at the context ceiling, not malformed by the model — surface the
+			// actionable, discoverable fix instead of passing broken JSON
+			// downstream where it fails as an opaque parse error. A genuine
+			// malformed call (no length signal) still yields a plain parse error.
+			detail := fmt.Sprintf("invalid tool call arguments for %q: unexpected end of JSON input", acc.name)
+			if sawLength {
+				emit(provider.Event{Type: provider.EventError, Err: provider.NewContextTruncationError("openai", detail)})
+				return
+			}
+			emit(provider.Event{Type: provider.EventError, Err: provider.NewStreamError("openai", detail)})
+			return
 		}
 		if !emit(provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
 			ID: acc.id, Name: acc.name, Input: json.RawMessage(args),

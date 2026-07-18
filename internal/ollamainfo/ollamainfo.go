@@ -56,6 +56,48 @@ type Result struct {
 // the model has been loaded by a first request.
 func (r Result) Authoritative() bool { return r.Source == SourceLoaded }
 
+// Recommended-window calibration (P35.3). aegis doctor's legacy-compat fix used
+// to suggest a fixed 32768 context_window — a number chosen to fit a 16GB-VRAM
+// budget, not to cover a real session. A skill-driven / long-running workload
+// routinely builds a >40k-token prompt before writing any output, so that fixed
+// ceiling makes the very first real task fail (Ollama returns a hard 400 with no
+// compaction attempted first). When the model's real training-context maximum is
+// detectable (Result.ModelMax), recommend a materially larger, memory-bounded
+// fraction of it instead.
+const (
+	// BaselineContextWindow is the fallback recommendation used when the
+	// model's real max is unknown — the 16GB-VRAM-safe value that predates
+	// P35.3.
+	BaselineContextWindow = 32768
+	// RecommendedContextWindowCap bounds the recommendation so a model with a
+	// very large training context (some report 262144+) doesn't yield a KV
+	// cache that blows past a typical local GPU's memory.
+	RecommendedContextWindowCap = 131072
+)
+
+// RecommendContextWindow calibrates a suggested provider.context_window from a
+// model's detected training-context maximum. It recommends half that maximum —
+// enough headroom for the skill-driven sessions a smoke-test-derived number
+// starves (P35.3) — bounded above by RecommendedContextWindowCap, below by
+// BaselineContextWindow, and never above the model's own max. modelMax <= 0
+// (undetectable) yields BaselineContextWindow unchanged.
+func RecommendContextWindow(modelMax int) int {
+	if modelMax <= 0 {
+		return BaselineContextWindow
+	}
+	rec := modelMax / 2
+	if rec > RecommendedContextWindowCap {
+		rec = RecommendedContextWindowCap
+	}
+	if rec < BaselineContextWindow {
+		rec = BaselineContextWindow
+	}
+	if rec > modelMax {
+		rec = modelMax
+	}
+	return rec
+}
+
 // NativeBase converts an OpenAI-compat base URL (…:11434/v1) to the Ollama
 // native API base. Empty input maps to the local default.
 func NativeBase(baseURL string) string {

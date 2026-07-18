@@ -9,11 +9,6 @@ import (
 	"github.com/fiddler110/aegis/internal/ollamainfo"
 )
 
-// suggestedContextWindow is the provider.context_window the fix suggests: the
-// value verified (P34.5) to make Ollama serve at a usable window instead of its
-// 4096 default, while staying well inside a 16GB-VRAM budget.
-const suggestedContextWindow = 32768
-
 // IsLegacyOllamaCompat reports whether cfg drives an Ollama server through the
 // OpenAI-compat adapter (P34.5) — the shape every pre-P33.9 config has, since
 // `openai` + a loopback base_url was the only way to reach Ollama before the
@@ -84,13 +79,27 @@ func LegacyOllamaCompatDetail(p config.ProviderConfig) string {
 // path passes provider.think through untouched (and omits it entirely when nil),
 // leaving the model's own default alone — so a qwen3-style reasoning model stops
 // thinking after the switch unless think: true is set explicitly.
-func LegacyOllamaCompatFix(p config.ProviderConfig) string {
+//
+// modelMax is the model's detected training-context maximum
+// (ollamainfo.Result.ModelMax), or 0 when it could not be detected. The
+// recommended context_window is calibrated against it (P35.3): a fixed
+// 16GB-VRAM-safe number is overrun by a skill-driven session before it writes
+// any output, and the model's real max is far larger. 0 falls back to the
+// baseline recommendation unchanged.
+func LegacyOllamaCompatFix(p config.ProviderConfig, modelMax int) string {
 	if !IsLegacyOllamaCompat(p) {
 		return ""
 	}
+	win := ollamainfo.RecommendContextWindow(modelMax)
+	sizing := "skill-driven/long-running sessions can build a >40k-token prompt before producing " +
+		"output, so raise it toward the model's max if a run fails on context (P35.3)"
+	if modelMax > 0 {
+		sizing = fmt.Sprintf("sized for skill-driven headroom from this model's %d-token max — "+
+			"lower it to trade context for GPU memory (P35.3)", modelMax)
+	}
 	return fmt.Sprintf(
-		"set provider.default: ollama / provider.base_url: %s / provider.context_window: %d — "+
+		"set provider.default: ollama / provider.base_url: %s / provider.context_window: %d (%s) — "+
 			"note the ollama adapter defaults think: false, so add provider.think: true to keep a reasoning model "+
 			"(qwen3, deepseek-r1) thinking",
-		ollamainfo.NativeBase(p.BaseURL), suggestedContextWindow)
+		ollamainfo.NativeBase(p.BaseURL), win, sizing)
 }

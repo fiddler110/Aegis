@@ -459,7 +459,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// the whole problem is that nobody thinks to look — so say it once here,
 	// where every daemon start passes.
 	if detail := providerfactory.LegacyOllamaCompatDetail(cfg.Provider); detail != "" {
-		logger.Warn(detail, "fix", providerfactory.LegacyOllamaCompatFix(cfg.Provider))
+		// This warning fires before the context window is auto-detected
+		// (initContextWindow, below), so pass modelMax: 0 for the baseline
+		// context_window recommendation. `aegis doctor` probes the model's real
+		// max and calibrates the number (P35.3); this hot-path start does not.
+		logger.Warn(detail, "fix", providerfactory.LegacyOllamaCompatFix(cfg.Provider, 0))
 	}
 
 	// Background-task manager shares the session database's single connection.
