@@ -517,14 +517,12 @@ func (w *wizardModel) view() string {
 		body = w.form.View()
 	}
 
-	panel := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colAccent).
 		Padding(1, 3).
 		Width(wizardPanelW).
 		Render(header + body)
-
-	return lipgloss.Place(w.width, w.height, lipgloss.Center, lipgloss.Center, panel)
 }
 
 // ─── Theme ────────────────────────────────────────────────────────────────────

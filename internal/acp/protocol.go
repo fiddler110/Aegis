@@ -148,6 +148,7 @@ type toolCallContent struct {
 
 // tool-call status values.
 const (
+	statusPending    = "pending"
 	statusInProgress = "in_progress"
 	statusCompleted  = "completed"
 	statusFailed     = "failed"

@@ -13,7 +13,7 @@ func escKeyMsg() tea.KeyMsg { return tea.KeyPressMsg{Code: tea.KeyEscape} }
 // TestEscEsc_EmptyInputNotStreaming_OpensBacktrackPicker is the P22.3
 // regression: two Esc presses in a row, with the input box already empty and
 // no run streaming, must arm-then-fire a fetchBacktrackTargets command
-// instead of the old silent no-op. The first press only arms escPending; the
+// instead of the old silent no-op. The first press only arms backtrackArmed; the
 // dialog/command only appears on the second, genuinely-a-double-tap press —
 // mirroring the streaming double-tap-to-cancel detection this shares a flag
 // with.
@@ -30,8 +30,8 @@ func TestEscEsc_EmptyInputNotStreaming_OpensBacktrackPicker(t *testing.T) {
 	// First Esc: arms the double-tap, does not fire anything yet.
 	next, cmd := m.Update(escKeyMsg())
 	m = next.(model)
-	if !m.escPending {
-		t.Fatal("expected first Esc on empty input to arm escPending")
+	if !m.backtrackArmed {
+		t.Fatal("expected first Esc on empty input to arm backtrackArmed")
 	}
 	if cmd != nil {
 		t.Fatal("expected no command from the first (arming) Esc press")
@@ -40,8 +40,8 @@ func TestEscEsc_EmptyInputNotStreaming_OpensBacktrackPicker(t *testing.T) {
 	// Second Esc: fires the backtrack picker fetch and disarms.
 	next, cmd = m.Update(escKeyMsg())
 	m = next.(model)
-	if m.escPending {
-		t.Error("expected escPending to reset after the second Esc")
+	if m.backtrackArmed {
+		t.Error("expected backtrackArmed to reset after the second Esc")
 	}
 	if cmd == nil {
 		t.Fatal("expected the second Esc to return a fetchBacktrackTargets command")
@@ -58,8 +58,8 @@ func TestEscEsc_SameFrameAltEsc(t *testing.T) {
 
 	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape, Mod: tea.ModAlt})
 	m = next.(model)
-	if m.escPending {
-		t.Error("alt+esc should fire immediately, not leave escPending armed")
+	if m.backtrackArmed {
+		t.Error("alt+esc should fire immediately, not leave backtrackArmed armed")
 	}
 	if cmd == nil {
 		t.Fatal("expected alt+esc (same-frame double-tap) to fire immediately")
@@ -80,7 +80,7 @@ func TestEsc_NonEmptyInput_ClearsWithoutArming(t *testing.T) {
 	if m.ta.Value() != "" {
 		t.Errorf("expected Esc to clear the input, got %q", m.ta.Value())
 	}
-	if m.escPending {
+	if m.backtrackArmed {
 		t.Error("clearing non-empty input should not arm the backtrack double-tap")
 	}
 	if cmd != nil {
@@ -99,8 +99,8 @@ func TestEscEsc_InterveningKeyDisarms(t *testing.T) {
 	m.slash.customs = []api.CommandInfo{}
 
 	m = driveUpdate(t, m, escKeyMsg())
-	if !m.escPending {
-		t.Fatal("expected first Esc to arm escPending")
+	if !m.backtrackArmed {
+		t.Fatal("expected first Esc to arm backtrackArmed")
 	}
 
 	// "down" with no history navigation in progress is a genuine no-op on
@@ -109,8 +109,8 @@ func TestEscEsc_InterveningKeyDisarms(t *testing.T) {
 	// intervening key disarms" behavior from the "Esc always clears
 	// non-empty input first" behavior exercised separately above.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	if m.escPending {
-		t.Fatal("expected a non-Esc key to disarm escPending")
+	if m.backtrackArmed {
+		t.Fatal("expected a non-Esc key to disarm backtrackArmed")
 	}
 	if m.ta.Value() != "" {
 		t.Fatalf("precondition: input should still be empty, got %q", m.ta.Value())
@@ -120,7 +120,7 @@ func TestEscEsc_InterveningKeyDisarms(t *testing.T) {
 	// sequence was broken.
 	next, cmd := m.Update(escKeyMsg())
 	m = next.(model)
-	if !m.escPending {
+	if !m.backtrackArmed {
 		t.Error("expected Esc after the break to re-arm rather than fire")
 	}
 	if cmd != nil {

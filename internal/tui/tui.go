@@ -203,13 +203,13 @@ type model struct {
 	// they scroll up, so streaming output never yanks them back down mid-read.
 	followBottom bool
 
-	// escPending is true after a first ESC press arms a double-tap action; a
+	// backtrackArmed is true after a first ESC press arms a double-tap action; a
 	// second ESC confirms it. Any non-ESC key clears this state. Only the
 	// not-streaming path arms it, and only once the input box is already empty
 	// (so a plain "clear the input" ESC doesn't arm it): a second ESC there
 	// opens the P22.3 backtrack picker. While streaming, ESC interrupts on the
 	// first press (P33.5) and never arms.
-	escPending bool
+	backtrackArmed bool
 
 	// warmPinged guards the P33.10 first-keystroke pre-warm so the async warm
 	// request fires at most once per empty→typing transition, not on every
@@ -1765,7 +1765,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if strings.TrimSpace(m.ta.Value()) != "" {
 					m.ta.Reset()
 					if msg.String() != "alt+esc" {
-						m.escPending = false
+						m.backtrackArmed = false
 						return m, nil
 					}
 				}
@@ -1775,7 +1775,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cancel != nil {
 					m.cancel()
 				}
-				m.escPending = false
+				m.backtrackArmed = false
 				m.queued = nil
 				m.interrupted = true
 				m.refresh()
@@ -1787,25 +1787,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// detection as the streaming branch above, including its
 			// documented same-frame alt+esc quirk.
 			if strings.TrimSpace(m.ta.Value()) == "" {
-				if m.escPending || msg.String() == "alt+esc" {
-					m.escPending = false
+				if m.backtrackArmed || msg.String() == "alt+esc" {
+					m.backtrackArmed = false
 					m.refresh()
 					picker := newBacktrackPicker(m.width, m.height, m.sp.View())
 					m.dialog = &picker
 					return m, tea.Batch(m.fetchBacktrackTargets(), m.sp.Tick)
 				}
-				m.escPending = true
+				m.backtrackArmed = true
 				m.refresh()
 				return m, nil
 			}
 			m.ta.Reset()
-			m.escPending = false
+			m.backtrackArmed = false
 			return m, nil
 
 		case "ctrl+c":
 			if m.streaming && m.cancel != nil {
 				m.cancel() // interrupt the in-flight run; press again to quit
-				m.escPending = false
+				m.backtrackArmed = false
 				m.queued = nil // TQ8: explicit interrupt discards the queue
 				m.interrupted = true
 				return m, nil
@@ -1908,7 +1908,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.ta.Reset()
-				m.escPending = false
+				m.backtrackArmed = false
 				m.queued = append(m.queued, text)
 				m.followBottom = true
 				m.applyViewportHeight() // ta was just Reset; resync pane height
@@ -1950,7 +1950,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.ta.Reset()
 			if m.streaming {
-				m.escPending = false
+				m.backtrackArmed = false
 				m.pendingSteers = append(m.pendingSteers, pendingSteerEntry{text: text, origin: steerOriginUser})
 				m.followBottom = true
 				m.applyViewportHeight() // ta was just Reset; resync pane height
@@ -1964,7 +1964,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.events = msg.ch
 		m.cancel = msg.cancel
 		m.streamStart = time.Now()
-		m.escPending = false
+		m.backtrackArmed = false
 		m.interrupted = false
 		m.setQueueMode(true)
 		return m, tea.Batch(waitForEvent(m.events), m.sp.Tick)
@@ -2003,7 +2003,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.events = nil
 		m.cancel = nil
 		m.status = "ready"
-		m.escPending = false
+		m.backtrackArmed = false
 		m.setQueueMode(false)
 		m.transcript.Append("\n")
 		// P33.2: a steer the daemon never reported a verdict on — an older
@@ -2026,7 +2026,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.streaming = false
-		m.escPending = false
+		m.backtrackArmed = false
 		m.setQueueMode(false)
 		m.transcript.Append(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")
 		// TQ8: don't auto-send into a failing session.
@@ -2518,11 +2518,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.warmPinged = false
 			}
 			m.syncCompletion()
-			// Any non-ESC key while escPending clears the not-streaming
+			// Any non-ESC key while backtrackArmed clears the not-streaming
 			// double-tap-to-backtrack arm state (P22.3) — the ESC case already
-			// returns early and manages escPending itself.
-			if m.escPending {
-				m.escPending = false
+			// returns early and manages backtrackArmed itself.
+			if m.backtrackArmed {
+				m.backtrackArmed = false
 				m.refresh()
 			}
 		}
@@ -3871,23 +3871,24 @@ func (m model) notifyCmd(ev notify.Event) tea.Cmd {
 }
 
 // render dispatches to whichever overlay is active. The wizard and
-// security-config dialogs are large multi-step forms that still replace the
-// frame outright (full-screen makes sense for a form you're filling in);
-// everything else — the filterable-list dialogs, help, and quit-confirm — is
-// composited over the live chat view via renderOverlay (P16.6) so closing
-// them doesn't lose your place.
+// security-config dialogs (P33.12) used to replace the frame outright; they
+// now composite over the live chat view via renderOverlay (P16.6), same as
+// the filterable-list dialogs, help, and quit-confirm, so closing them
+// doesn't lose your place — the transcript keeps running underneath a
+// long multi-step form exactly as it does behind the approval dialog.
 func (m model) render() string {
 	if !m.ready {
 		return "initializing…"
 	}
-	if m.wizard != nil {
-		return m.wizard.view()
-	}
-	if m.securityConfig != nil {
-		return m.securityConfig.view()
-	}
 
 	base := m.renderChat()
+	if m.wizard != nil {
+		return renderOverlay(base, m.wizard.view(), m.width, m.height)
+	}
+	if m.securityConfig != nil {
+		return renderOverlay(base, m.securityConfig.view(), m.width, m.height)
+	}
+
 	if m.completion.active {
 		// P33.18: the completion popup used to insert into the vertical layout
 		// and shrink the transcript pane by its own height, the same reflow
@@ -4137,7 +4138,7 @@ func (m model) renderInputArea() string {
 		// blinking cursor down here) — spell out where input goes instead of
 		// leaving that to be inferred from the missing cursor alone.
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⏸ respond to the approval dialog")
-	} else if !m.streaming && m.escPending {
+	} else if !m.streaming && m.backtrackArmed {
 		// P22.3: armed by a first ESC press on an already-empty input box;
 		// a second press opens the backtrack picker.
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to backtrack")
