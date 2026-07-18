@@ -13,6 +13,7 @@ import (
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/logging"
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
@@ -73,6 +74,24 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
+			// Wire cfg.LogLevel into a real logger (P35.7 follow-up): without
+			// this, engine.New falls back to slog.Default() (info level,
+			// unstructured stderr), so the debug-level prompt_eval
+			// instrumentation added in P35.7 is invisible from `aegis chat`,
+			// the natural non-interactive/scriptable path. Mirrors the
+			// logging.New usage in serve/acp/mcp-serve.
+			if err := cfg.EnsureDataDir(); err != nil {
+				return fmt.Errorf("ensure data dir: %w", err)
+			}
+			logger, logCloser, err := logging.New(logging.Options{
+				Level: cfg.LogLevel,
+				Path:  cfg.LogPath(),
+			})
+			if err != nil {
+				return fmt.Errorf("init logger: %w", err)
+			}
+			defer logCloser.Close()
+
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
@@ -101,6 +120,7 @@ func newChatCmd() *cobra.Command {
 				BudgetUSD: cfg.Cost.BudgetUSD,
 				Model:     cfg.Provider.Model,
 				MaxTokens: cfg.Provider.MaxTokens,
+				Logger:    logger,
 			})
 			if err != nil {
 				return err
