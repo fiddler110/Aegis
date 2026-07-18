@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-18 (P35.1-P35.7 shipped)
+**Last updated:** 2026-07-18 (P35.1-P35.7 shipped; P35.9-P35.12 filed)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,7 +11,8 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 2 — the parked items **P25.9** and **P35.8**. **P35.7** shipped 2026-07-18 (see
+**Open items:** 6 — **P35.9** (Tier 1), **P35.10** and **P35.11** (Tier 2), and the parked items
+**P25.9**, **P35.8**, and **P35.12** (Tier 4). **P35.7** shipped 2026-07-18 (see
 [releases.md](releases.md#latest-changes)), closing out the P35.5-P35.7 cluster. P35.5-P35.7 were a cluster filed
 2026-07-18 from the verification pass that followed the P35.1-P35.4 batch. P35.1-P35.4 were all
 filed the same day from one live dogfooding pass: running the threat-modeling skill's
@@ -65,6 +66,15 @@ whether reuse is *actually* happening in practice remains unconfirmed, and P35.5
 ceiling" vs. "make prefill cheap" question stays open pending a live run with the new
 instrumentation.
 
+**P35.9-P35.12** were filed 2026-07-18 from a code-review pass over the whole P33.9-P35.7
+native-Ollama body of work (adapter, factory wiring, timeout/error handling, health probing,
+telemetry). The headline finding is P35.9: the native adapter mints tool-call IDs from a counter
+that resets every request, so IDs collide across turns, historical tool results get re-labeled
+with the wrong `tool_name` on replay, and the serialized prompt prefix mutates between requests —
+a missed fourth cache-invalidation candidate that P35.7's code-reading pass didn't catch, and one
+that intermittently defeats the P35.4 KV-cache reuse whenever consecutive turns lead with
+different tools. P35.10-P35.12 are the smaller observations from the same pass.
+
 ---
 
 ## Tiering Criteria
@@ -78,15 +88,55 @@ instrumentation.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open. (P35.5 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
+**Status:** 1 open — P35.9. (P35.5 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
 P35.1, P35.2 shipped 2026-07-18; P33.1 and P33.2 shipped 2026-07-15;
 P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
+
+### P35.9 — Native-Ollama tool-call IDs collide across turns: wrong `tool_name` on replayed results + KV-cache churn
+
+Priority: Tier 1 · Effort: S
+
+`consume` (`internal/provider/ollama/ollama.go`) mints tool-use IDs from a counter that resets on
+every request (`toolIndex := 0`, producing `tu_0`, `tu_1`, …). The engine persists those IDs into
+session history (`ToolResultBlock{ToolUseID: tu.ID}`, `internal/engine/engine.go`), so every
+assistant turn's first tool call in a session carries the ID `tu_0`, the second `tu_1`, and so on.
+That collides in `translate`: `toolNames` prebuilds a single ID→name map over the *entire* history,
+last occurrence wins. When a later turn's `tu_0` is a different tool than an earlier turn's `tu_0`
+(read-file in turn 1, run-shell in turn 3 — the normal shape of an agentic run), every earlier
+`tu_0` tool-result message is sent to Ollama with the *wrong* `tool_name`. The native API
+correlates results by name, so the model sees results attributed to tools that didn't produce them.
+
+Two consequences, one correctness and one performance:
+
+1. **Mislabelled history** — the model is shown tool results under the wrong tool's name, a silent
+   quality degradation on exactly the multi-tool agentic runs the local-model work targets.
+2. **KV-cache invalidation** — because the name assigned to an *early* tool result changes whenever
+   a *later* turn's same-index call uses a different tool, the serialized prompt prefix mutates
+   between requests, and Ollama's prefix cache dies at the first changed byte: the whole
+   conversation re-prefills. This is the missed fourth candidate in P35.7's non-determinism sweep
+   (thinking blocks / tool-result formatting / system-prompt regeneration were checked; ID reuse
+   wasn't). P35.7's clean live confirmation (37-token deltas across 8 turns) holds only when each
+   turn's leading tool call happens to repeat the same tool name — plausible for that read-heavy
+   STRIDE run, not for mixed-tool runs, so the live confirmation is weaker than recorded.
+
+Fix (either side suffices; both is best):
+
+- **Positional name resolution in `translate`** — walk the messages once, updating the ID→name map
+  as tool-use blocks appear, so each tool result resolves against the nearest *preceding* use.
+  This alone repairs both the mislabelling and the cache churn, including for existing sessions
+  with colliding IDs already stored.
+- **Per-stream-unique minted IDs** — e.g. a per-request nonce prefix on `tu_%d`, matching how the
+  anthropic/openai adapters rely on server-issued unique IDs.
+
+Regression test: a two-turn translate fixture where turn 1 calls tool A and turn 2 calls tool B
+(both minted as `tu_0`), asserting turn 1's result keeps `tool_name: A`; plus a byte-stability
+assertion that serializing the turn-1 prefix is unchanged by appending turn 2.
 
 ---
 
 ## Open Work — Tier 2
 
-**Status:** 0 open. (P35.6 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
+**Status:** 2 open — P35.10 and P35.11. (P35.6 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
 P35.3 shipped 2026-07-18; P34.12 shipped 2026-07-17; P34.9 and P34.10 shipped 2026-07-17;
 P34.5-P34.8 shipped 2026-07-17; P34.3 shipped 2026-07-16; P34.2 shipped 2026-07-16, both levers;
 P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped
@@ -97,6 +147,33 @@ Worth a look for a future item: the same "accurate refusal, error-shaped" questi
 scanners' documented exit codes, noted while shipping P35.6. P34.6 checked the *language*-targeted
 tools; nothing has swept the SCA/secrets tools for non-zero exits that mean "nothing to do" rather
 than "I broke".
+
+### P35.10 — `InputTokens` on the native-Ollama path means "uncached prefill tokens", not "prompt size"
+
+Priority: Tier 2 · Effort: S
+
+With P35.4's keep_alive residency working, Ollama's `prompt_eval_count` on a KV-cache hit reports
+only *newly evaluated* tokens (the P35.7 live run: 37 after turn 1's 3944), and the native adapter
+maps it straight into `usage.InputTokens` (`internal/provider/ollama/ollama.go`). Compaction is
+safe — the proactive check uses `conv.estimatedTokens()`, not usage — but the engine's estimate
+fallback (`internal/engine/engine.go`, the `InputTokens == 0 && OutputTokens == 0` guard) never
+fires on a cached turn, so per-turn traces, session token totals, and the TUI's `in=` display now
+understate prompt size on every cache-hit turn. Arguably the truthful "work done" number, but the
+shift in meaning is undocumented and anything that later reads `InputTokens` as "context size"
+will be wrong. Work: decide and document the semantics (rename in docs, or record both the raw
+`prompt_eval_count` and an estimated prompt size), and audit the consumers
+(`internal/cost`, turn traces, session totals, TUI/`aegis chat` displays) against the chosen
+meaning.
+
+### P35.11 — `/status` reachability probe live-hits Ollama on every poll
+
+Priority: Tier 2 · Effort: S
+
+`probeProviderReachability` (`internal/server/provider_health.go`) fires a live
+`GET /api/version` against the Ollama server on every `/status` request. Locally cheap, but a UI
+polling at 1-2s means a steady request stream to Ollama for a value that changes rarely. Cache the
+probe result (and its latency) for a few seconds — the same freshness the UI can actually render —
+so a fast poll loop coalesces to one upstream request per window.
 
 ---
 
@@ -111,9 +188,9 @@ P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, 
 
 ## Open Work — Tier 4
 
-Two items parked — P25.9 and P35.8. Low urgency, no trigger, or explicitly parked pending demand.
-Do not build speculatively — revisit only if a concrete trigger appears, and check with the user
-before starting.
+Three items parked — P25.9, P35.8, and P35.12. Low urgency, no trigger, or explicitly parked
+pending demand. Do not build speculatively — revisit only if a concrete trigger appears, and check
+with the user before starting.
 (P33.20 shipped 2026-07-17 alongside P33.11 — its message-allowlist fix was implemented as part of
 that work; P32.9-P32.11 shipped 2026-07-15; P33.12, P33.21, and P33.22 shipped 2026-07-17, see
 releases.md.)
@@ -141,6 +218,23 @@ serve`-backed) run, which would rule out the process-group theory and point at s
 `aegis chat`/`engine.Run` itself. Until then this is parked rather than actively chased — the
 signal-to-noise on debugging an unreproduced, harness-adjacent process death is too low to justify
 speculative work.
+
+### P35.12 — Native-Ollama stream cosmetics: raw-JSON error fallback and the 4MiB line cap
+
+Priority: Tier 4 · Effort: S — parked, cosmetic/edge-case, no concrete trigger
+
+Two minor observations from the P35.9-filing review pass, batched here so they aren't lost:
+
+1. `errorMessage`'s object fallback (`internal/provider/ollama/ollama.go`) returns the raw trimmed
+   JSON when an error envelope is an object without a `message` field — the user would see
+   `{"error":{...}}` innards verbatim instead of a cleaned message. Cosmetic; only reachable via a
+   proxy or future Ollama version that changes the error shape.
+2. The shared 4MiB scanner cap (`internal/provider/sse/sse.go`) was sized for SSE deltas, but the
+   native path delivers each tool call *whole* on one NDJSON line — a tool-call argument payload
+   over 4MiB fails as an opaque `ollama: read stream: bufio.Scanner: token too long` rather than
+   anything actionable. No live occurrence; revisit only if a real run hits it (the fix is either a
+   larger cap for the native path or rewrapping `bufio.ErrTooLong` into an actionable error naming
+   the oversized tool call).
 
 ### P25.9 — Per-session scoping of `lsp.Manager`
 
