@@ -20,6 +20,7 @@ import (
 	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/security"
+	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
@@ -77,7 +78,7 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
 				return err
 			}
 
@@ -108,33 +109,7 @@ func newChatCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer stop()
 
-			// Build the system prompt: explicit --system wins, then --persona, then general.
-			resolvedSystem := system
-			if resolvedSystem == "" {
-				p, _ := persona.Get(personaName)
-				resolvedSystem = p.System
-			}
-			// Append shared blocks (applied to all personas in the server path via
-			// effectiveSystem; mirrored here so the CLI path is equivalent).
-			resolvedSystem = resolvedSystem + "\n\n" + persona.ToolUseBlock()
-			resolvedSystem = resolvedSystem + "\n\n" + persona.CompletingTasksBlock()
-			resolvedSystem = resolvedSystem + "\n\n" + persona.PlatformBlock()
-			// Append memory and context files, matching the daemon's effectiveSystem.
-			src := memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
-			if ctxFiles := src.LoadContext(); ctxFiles != "" {
-				resolvedSystem = resolvedSystem + "\n\n" + ctxFiles
-			}
-			if mem := src.Load(); mem != "" {
-				resolvedSystem = resolvedSystem + "\n\n" + mem
-			}
-			// Inject the cached repository map when present (built via `aegis index`).
-			if rm, fresh, _ := repomap.Load(cwd, repoMapCachePath(cwd), repomap.Options{}); rm != "" && fresh {
-				if block := repomap.Block(rm); block != "" {
-					resolvedSystem = resolvedSystem + "\n\n" + block
-				}
-			}
-
-			conv := &engine.Conversation{System: resolvedSystem}
+			conv := &engine.Conversation{System: buildChatSystem(cfg, cwd, system, personaName)}
 			conv.Append(provider.Message{
 				Role:    provider.RoleUser,
 				Content: []provider.Block{provider.TextBlock{Text: prompt}},
@@ -221,6 +196,45 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&autoApprove, "yes", false, "auto-approve tool calls that would otherwise require confirmation")
 	cmd.Flags().StringVar(&outputFormat, "output-format", "text", "output format: text, json (final result object), or stream-json (one event per line)")
 	return cmd
+}
+
+// buildChatSystem assembles the one-shot chat system prompt so the CLI path is
+// equivalent to the daemon's effectiveSystem (internal/server/helpers.go):
+// persona base + shared blocks + memory/context + the <skills_available> index
+// + the cached repo map. Extracted from the command closure so the assembly —
+// in particular that skills are advertised, without which the registered
+// `skill` tool is undiscoverable — is unit-testable. explicit --system wins,
+// then --persona, then general.
+func buildChatSystem(cfg *config.Config, cwd, system, personaName string) string {
+	resolvedSystem := system
+	if resolvedSystem == "" {
+		p, _ := persona.Get(personaName)
+		resolvedSystem = p.System
+	}
+	resolvedSystem = resolvedSystem + "\n\n" + persona.ToolUseBlock()
+	resolvedSystem = resolvedSystem + "\n\n" + persona.CompletingTasksBlock()
+	resolvedSystem = resolvedSystem + "\n\n" + persona.PlatformBlock()
+	src := memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
+	if ctxFiles := src.LoadContext(); ctxFiles != "" {
+		resolvedSystem = resolvedSystem + "\n\n" + ctxFiles
+	}
+	if mem := src.Load(); mem != "" {
+		resolvedSystem = resolvedSystem + "\n\n" + mem
+	}
+	// Advertise available skills so the model can discover and load them on
+	// demand. builtin.Register wires the `skill` tool into the registry, but
+	// without this <skills_available> index the model is never told the skills
+	// exist and never calls it.
+	if sk := skills.BuildIndex(cwd, cfg.DataDir, cfg.Skills.BuiltinEnabled); sk != "" {
+		resolvedSystem = resolvedSystem + "\n\n" + sk
+	}
+	// Inject the cached repository map when present (built via `aegis index`).
+	if rm, fresh, _ := repomap.Load(cwd, repoMapCachePath(cwd), repomap.Options{}); rm != "" && fresh {
+		if block := repomap.Block(rm); block != "" {
+			resolvedSystem = resolvedSystem + "\n\n" + block
+		}
+	}
+	return resolvedSystem
 }
 
 type outputFormatKind int

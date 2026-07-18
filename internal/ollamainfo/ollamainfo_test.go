@@ -158,6 +158,31 @@ func TestDetectBareDefault(t *testing.T) {
 	}
 }
 
+// TestRecommendContextWindow covers the P35.3 calibration: half the model's
+// real max, capped above and floored at the baseline, never exceeding the max,
+// with an undetectable max (0) falling back to the baseline.
+func TestRecommendContextWindow(t *testing.T) {
+	tests := []struct {
+		name     string
+		modelMax int
+		want     int
+	}{
+		{"undetectable falls back to baseline", 0, BaselineContextWindow},
+		{"very large max is capped", 262144, RecommendedContextWindowCap},
+		{"exactly at the cap boundary", 2 * RecommendedContextWindowCap, RecommendedContextWindowCap},
+		{"half of a mid-size max", 131072, 65536},
+		{"never below the baseline", 65536, BaselineContextWindow},
+		{"never above a small max", 30000, 30000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RecommendContextWindow(tc.modelMax); got != tc.want {
+				t.Errorf("RecommendContextWindow(%d) = %d, want %d", tc.modelMax, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSameModel(t *testing.T) {
 	if !sameModel("llama3.2", "llama3.2:latest") {
 		t.Error("missing :latest tag should match")

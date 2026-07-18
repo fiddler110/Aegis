@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"bytes"
 	"embed"
 	"io/fs"
 	"os"
@@ -21,17 +22,16 @@ var builtinFS embed.FS
 // built-in skills are extracted into.
 const builtinSkillsDirName = "builtin-skills"
 
-// MaterializeBuiltins extracts the embedded built-in skills to
-// <dataDir>/builtin-skills/ so they can be read like any other bundled skill
-// — including their companion assets, via the model's normal file tools. It
-// overwrites existing files on every call so an upgraded binary's built-ins
-// stay in sync; it never touches a project or user skills directory. A blank
-// dataDir is a no-op.
-func MaterializeBuiltins(dataDir string) error {
-	if dataDir == "" {
-		return nil
-	}
-	dest := filepath.Join(dataDir, builtinSkillsDirName)
+// materializeTo extracts the embedded builtin skill tree to dest. When
+// filter is non-nil, only top-level builtin directories whose lowercased
+// name is in filter are written (fs.SkipDir on the rest) — used so a
+// project only picks up the specific skill(s) it enabled/activated, not all
+// embedded builtins. A file is only (re)written when its content differs
+// from what's already on disk: commands like /threat-model call the
+// activation path on every invocation, and a blind overwrite would bump
+// every file's mtime each time, defeating skillsDirSignature's mtime-based
+// Discover cache (P32.7) on every subsequent call in a session.
+func materializeTo(dest string, filter map[string]bool) error {
 	return fs.WalkDir(builtinFS, "builtin", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -39,6 +39,18 @@ func MaterializeBuiltins(dataDir string) error {
 		rel, err := filepath.Rel("builtin", path)
 		if err != nil {
 			return err
+		}
+		if filter != nil && rel != "." {
+			top := rel
+			if i := strings.IndexByte(rel, filepath.Separator); i >= 0 {
+				top = rel[:i]
+			}
+			if !filter[strings.ToLower(top)] {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 		}
 		target := filepath.Join(dest, rel)
 		if d.IsDir() {
@@ -48,8 +60,39 @@ func MaterializeBuiltins(dataDir string) error {
 		if err != nil {
 			return err
 		}
+		if existing, err := os.ReadFile(target); err == nil && bytes.Equal(existing, data) {
+			return nil
+		}
 		return os.WriteFile(target, data, 0o644)
 	})
+}
+
+// MaterializeBuiltins extracts the embedded built-in skills to
+// <dataDir>/builtin-skills/ so they can be read like any other bundled skill
+// — including their companion assets, via the model's normal file tools. It
+// keeps existing files in sync with the embedded content on every call so an
+// upgraded binary's built-ins stay current; it never touches a project or
+// user skills directory. A blank dataDir is a no-op.
+func MaterializeBuiltins(dataDir string) error {
+	if dataDir == "" {
+		return nil
+	}
+	return materializeTo(filepath.Join(dataDir, builtinSkillsDirName), nil)
+}
+
+// MaterializeBuiltinsToProject extracts only the named embedded builtin
+// skills into <workDir>/.aegis/builtin-skills/, mirroring the per-user
+// <dataDir>/builtin-skills/ layout but scoped inside the project workspace
+// so the model's sandboxed file tools (confined to workDir) can reach a
+// builtin skill's reference/skeleton assets — see discoverSpecs and
+// withAssetManifest's dir= fallback, which resolves correctly once a
+// skill's directory is a subpath of workDir. A blank workDir or empty names
+// is a no-op.
+func MaterializeBuiltinsToProject(workDir string, names []string) error {
+	if workDir == "" || len(names) == 0 {
+		return nil
+	}
+	return materializeTo(filepath.Join(workDir, ".aegis", builtinSkillsDirName), enabledSet(names))
 }
 
 // BuiltinSkill describes one embedded built-in skill for listing purposes

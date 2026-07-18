@@ -2,11 +2,16 @@ package providerfactory
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 func testLogger(buf *bytes.Buffer) *slog.Logger {
@@ -169,5 +174,73 @@ func TestBuild_UnsupportedFallbackProviderSkippedNotFatal(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "misconfigured fallback") {
 		t.Fatalf("expected a warning about the bad fallback, got log: %s", buf.String())
+	}
+}
+
+// TestBuildOne_OllamaDefaultsKeepAliveResident is the P35.4 guard: an unset
+// provider.keep_alive must be substituted with the bounded resident default on
+// the native path, so a multi-turn run reuses its KV cache across turns instead
+// of the model unloading between turns and every turn reprocessing the whole
+// conversation.
+func TestBuildOne_OllamaDefaultsKeepAliveResident(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			KeepAlive *string `json:"keep_alive"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.KeepAlive == nil {
+			t.Error("keep_alive must not be omitted when config leaves it unset (P35.4)")
+		} else if *body.KeepAlive != defaultOllamaKeepAlive {
+			t.Errorf("keep_alive = %q, want default %q", *body.KeepAlive, defaultOllamaKeepAlive)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "", nil)
+	if err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+}
+
+// TestBuildOne_OllamaKeepAliveExplicitWins is the P33.10 half of the same
+// contract: an explicit config value is passed through verbatim, including
+// "-1" (pin forever) — the default only fills the unset case.
+func TestBuildOne_OllamaKeepAliveExplicitWins(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			KeepAlive *string `json:"keep_alive"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.KeepAlive == nil || *body.KeepAlive != "-1" {
+			t.Errorf("keep_alive = %v, want explicit %q", body.KeepAlive, "-1")
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "-1", nil)
+	if err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
 	}
 }

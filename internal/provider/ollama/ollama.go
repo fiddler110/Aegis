@@ -334,6 +334,7 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 	usage := &provider.Usage{}
 	stop := provider.StopEndTurn
 	toolIndex := 0
+	sawLength := false // a chunk reported done_reason "length" (context ceiling hit)
 
 	scanner := sse.NewScanner(body)
 	for scanner.Scan() {
@@ -345,7 +346,23 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
 			continue
 		}
+		if chunk.DoneReason == "length" {
+			sawLength = true
+		}
 		if msg := errorMessage(chunk.Error); msg != "" {
+			// P35.2: a generation cut off at the context ceiling mid-tool-call
+			// surfaces here as the server's opaque "invalid tool call arguments
+			// ... unexpected end of JSON input" — the native adapter never parses
+			// tool arguments itself (it passes them through as RawMessage), so
+			// that message is entirely server-side and the only truncation signal
+			// available is a done_reason "length" on this/a prior chunk or the
+			// truncated-tool-call shape of the message. Detect it before the
+			// generic path so the discoverable fix (raise context_window) is
+			// named instead of the opaque parse error.
+			if sawLength || provider.IsTruncatedToolCallError(msg) {
+				emit(provider.Event{Type: provider.EventError, Err: provider.NewContextTruncationError("ollama", msg)})
+				return
+			}
 			// P33.16: classify the {"error":...} envelope so a transient failure
 			// (worker crash, model-load failure, OOM) carries a retryable verdict
 			// while a deterministic one (context overflow, invalid request) stays

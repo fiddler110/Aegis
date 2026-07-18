@@ -68,6 +68,15 @@ Never model an assumed architecture. Before applying any framework:
 
 1. Explore the workspace: list directories, read entry points, config,
    auth/authz code, network-facing handlers, and data-access layers.
+   **Read large files in bounded excerpts, not whole.** When a file is big
+   (a multi-hundred-line handler, a ~100KB single-file script), don't pull
+   it into context in one `read_file` call — page through it with
+   `read_file`'s `offset`/`limit`, or run a targeted `grep`/search for the
+   entry points, config keys, routes, and data-access calls you actually
+   need and read only those regions. On a local model this is not optional:
+   one whole-file read of a large script can eat half a turn's token budget,
+   and every later turn repays that context, so keep each turn's reads small
+   and targeted.
 2. From what you actually found, identify: **assets** (data, credentials,
    capabilities worth protecting), **trust boundaries** (process/network/
    privilege boundaries the system crosses), **entry points** (where
