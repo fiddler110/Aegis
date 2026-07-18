@@ -499,16 +499,21 @@ const projectConfigTemplate = `# ═══════════════�
 
 # ── Notes ─────────────────────────────────────────────────────────────────────
 # Files you should NOT commit from .aegis/:
-#   .aegis/sessions.db     — local session history
-#   .aegis/daemon.token    — auth token for the local daemon
-#   .aegis/mcp.token       — auth token for "aegis mcp-serve", auto-generated
-#                            when AEGIS_MCP_TOKEN is unset (P27.4)
-#   .aegis/acp.token       — auth token for "aegis acp", auto-generated
-#                            when AEGIS_ACP_TOKEN is unset (P27.4)
-#   .aegis/aegis.log       — daemon log
+#   .aegis/sessions.db       — local session history
+#   .aegis/daemon.token      — auth token for the local daemon
+#   .aegis/mcp.token         — auth token for "aegis mcp-serve", auto-generated
+#                              when AEGIS_MCP_TOKEN is unset (P27.4)
+#   .aegis/acp.token         — auth token for "aegis acp", auto-generated
+#                              when AEGIS_ACP_TOKEN is unset (P27.4)
+#   .aegis/aegis.log         — daemon log
+#   .aegis/builtin-skills/   — built-in skills materialized into this project
+#                              so their reference/skeleton assets are reachable
+#                              by the model's sandboxed file tools; regenerated
+#                              automatically, safe to delete
 #
 # Add these lines to your .gitignore if they are not already covered:
 #   .aegis/sessions.db
 #   .aegis/*.token
 #   .aegis/*.log
+#   .aegis/builtin-skills/
 `
