@@ -8,8 +8,23 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-19 — **P35.13 fully shipped** (its final open piece, the summed-token-surface
-decision, resolved today — see the P35.13 entry below). Earlier: **P35.12 and P35.8 shipped**. **P35.12**: two native-Ollama stream
+**Last updated:** 2026-07-19 — **P36.1, P36.2, and P36.3 shipped**. **P36.3**: the threat-modeling
+skill's build stages are now phased through the `agent` tool's `mode: "sequential"` workflow — each
+phase runs in a fresh, isolated sub-agent context, loads only its own reference file(s), writes its
+own report file, and returns only terse stable identifiers (not file content) to the next phase —
+instead of one long-lived, ever-growing run, bounding peak input context per request on local models.
+Verifying the sequential-workflow mechanics strengthened the case: the 10-min cap is a *shared pool*
+across phases (`maxAgentDuration*(phases+1)`, ~70 min for six phases), not a per-phase cap, so a heavy
+phase can run past 10 min, and the spawn depth stays within the depth-3 ceiling. Live local-model
+verification of the peak-context win is still outstanding. **P36.1**: skill-triggering slash commands
+(`/threat-model`, `/report`, `/research`, `/review`) now inject the activated skill's body
+deterministically instead of relying on the model to call the `skill` tool first — closing the Tier 1
+gap where a small local model skipped the load and lost the instruction; a pre-existing Windows-only
+skills-test failure was fixed in passing. **P36.2**: `compaction.pruneStaleToolResults` now also blanks
+confirmed `write_file`/`edit_file` payloads and one-time skill-reference reads in the pre-`keepRecent`
+prefix (live token-growth re-measurement still outstanding). Earlier: **P35.13 fully shipped** (its
+final open piece, the summed-token-surface decision, resolved today — see the P35.13 entry below).
+Earlier: **P35.12 and P35.8 shipped**. **P35.12**: two native-Ollama stream
 cosmetics from the P35.9-filing review. `errorMessage` (`internal/provider/ollama/ollama.go`) no
 longer surfaces raw JSON when an error envelope is an object without a `message` field — it now also
 tries `error`/`detail` string fields and, failing those, compacts the object into a single tidy line
@@ -118,6 +133,107 @@ its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearin
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
 
 ---
+
+### P36.3 — Phase the threat-modeling skill through sub-agents instead of one long-lived run
+
+Filed and shipped 2026-07-19. The threat-modeling skill previously ran as one ever-growing
+conversation — every reference file (172KB of `references/` exists), every workspace-exploration read,
+and every written report file (files ran 18–90KB; one STRIDE analysis was 88KB) accumulated in a
+single context, which on a local model is what kills the run: a large prefill blew the native
+adapter's response-header timeout at ~62k input tokens before a file was written (P35.5–P35.9). P36.2
+made that growth slower without changing the shape; P36.3 changes the shape. `SKILL.md` §4 is
+rewritten so the top-level run does only cheap setup (pick target slug + timestamp, create the
+directory, `write_file` seven `<!-- PENDING -->` stubs) and then issues **one** `agent` call with
+`mode: "sequential"` and a six-entry `agents` array (`subagent_type: "build"` each) — Architecture →
+Model/DFD → Framework analysis → Findings → Assessment+inventory → Review. Each phase runs in a fresh,
+isolated context, loads only its own reference file(s), reads prior files from disk, writes the file(s)
+it owns, and returns **only terse stable identifiers** (component names/anchors, `DF##` ids, threat IDs
+with their tier/severity) — never file content, since the content is durably on disk. A verbatim
+"terse-final-answer contract" block is mandated in every phase prompt because the sequential workflow
+prepends each phase's *full* final answer to the next phase's prompt (`executeWorkflow`'s `spawn`
+closure, `internal/tool/builtin/agent.go`), so a phase that dumps content reintroduces the bloat one
+level down.
+
+Verifying the agent-tool mechanics corrected the roadmap's key assumption and strengthened the case:
+`maxAgentDuration` (10 min) is a hard per-agent cap only in *single-agent foreground* mode; in the
+sequential path the deadline is a **shared pool** `maxAgentDuration*(len(agents)+1)` (~70 min for six
+phases) that every phase draws from, so the heavy framework-analysis phase can run well past 10 min as
+long as the whole run fits — and splitting a phase *raises* the pool while lowering peak context.
+`maxSpawnDepth` (3) is safe: slash command → main run (depth 0) → phase agents (depth 1) → phase-6 P12
+debate roles (depth 2). `subagent_type:"build"` sub-agents get write capability and the spawning
+turn's workdir, and the full tool registry (so phase 6 can run the debate). The governance rule in
+`references/verification-and-updates.md` ("only the orchestrating run writes report files") is replaced
+with phased-orchestration governance: files are written by the owning phase, only stable identifiers
+cross a phase boundary, and the phase-6 review round (re-reading the complete suite fresh from disk) is
+the consistency guarantee for the distributed writes. The incremental-update workflow is explicitly
+mapped onto the phases (baseline inventory IDs thread into phase 1; phase 3 verifies baseline threats;
+phase 5 writes "Changes Since Baseline") so it is not regressed. No Go changes — the skill is
+`go:embed`-ed, so rebuilding the binary re-embeds the edited markdown. **Live verification
+outstanding**: a real local-model `/threat-model stride` run is still needed to confirm peak input
+context per request actually stays under the response-header timeout, and that a small local model
+honors the terse-final-answer contract (it's prose, not code-enforced — the biggest residual risk).
+`go build ./...` clean; `go test ./internal/skills/... ./internal/bundle/... ./internal/tui/...` pass.
+
+### P36.1 — Skill-triggering slash commands now inject the skill body deterministically
+
+Filed and shipped 2026-07-19. `/threat-model`, `/report`, `/research`, and `/review` (content-review)
+used to activate a built-in skill for the session and then send a plain-text "Load the X skill and …"
+message, relying entirely on the model choosing to call the `skill` tool first. A capable cloud model
+follows that; a small local model (Ollama) skipped the tool call, ran a generic directory listing,
+landed on the just-materialized `.aegis/skills/threat-modeling/` folder, and replied as if that
+listing were the whole input — losing the original instruction. The initial top-level skill load is
+now deterministic: `handleActivateSkill` (`internal/server/sessions.go`) loads the just-activated
+skill via `skills.Load` and returns its body in the activation response (`api.ActivateSkillResponse`,
+`internal/api/api.go`); `client.ActivateSkill` (`internal/client/client.go`) now returns
+`(body, error)`; and the TUI's shared `skillTaskMessage` helper (`internal/tui/slash.go`, used by all
+four commands and `cmdReview` in `slash_diff.go`) prepends the body inside a delimited
+`<skill name="…">…</skill>` block ahead of the task text. A load miss degrades gracefully to today's
+name-only behavior with a warning — nothing hard-errors. The `skill` tool stays registered and is
+still the path for the progressive `references/*.md` assets a skill loads later; only the *initial*
+body load — the step a small model was skipping — moved off the tool round-trip. The seam is
+server-side because the TUI `SlashDispatcher` carries only `workDir`, not `dataDir` or the session's
+enabled-builtins set, so it cannot resolve a dormant embedded skill locally. Tests: server-side
+`TestActivateSkill_ReturnsSkillBody`; TUI `TestSkillTaskMessagePrependsBody` and
+`TestSkillTaskMessageDegradesWithoutBody`. The optional second-layer engine turn-budget reminder from
+the filing was deliberately not built — the deterministic inject is the complete fix and the reminder
+would touch the engine loop for marginal gain.
+
+Found alongside (fixed here): `TestDiscoverProjectMaterializedBuiltin`
+(`internal/skills/skills_test.go`) asserted the `<skill_assets dir="…">` manifest path with
+`filepath.Join`, whose OS-native separators are backslashes on Windows, while the production
+`withAssetManifest` correctly normalizes the manifest to forward slashes via `filepath.ToSlash` (what
+the model's file tools expect cross-platform) — so the test spuriously failed on Windows only, on
+clean HEAD, unrelated to any P36 work. The assertion now wraps its expected path in `filepath.ToSlash`
+to match production behavior; the production code was already correct.
+
+### P36.2 — Deterministic pruning now covers write/edit payloads and one-time skill-reference reads
+
+Filed and shipped 2026-07-19. `compaction.pruneStaleToolResults` (`internal/compaction/prune.go`)
+previously blanked only two things in the pre-`keepRecent` prefix: a `read_file` result whose path was
+re-read later, and a large `grep`/`glob`/`ls` dump superseded by an identical later call. Two large,
+avoidable sources of per-turn context growth fell through both rules during a long run (e.g. a
+threat-modeling suite whose written files ran 18–90KB): (1) `write_file`/`edit_file` tool-call
+*payloads* — the full file content is the tool_use **Input**, never rewritten before because the
+function only ever touched `ToolResultBlock`s — and (2) one-time skill-reference reads (`SKILL.md`
+plus the ~70KB of `references/*.md` a STRIDE run loads), which the read_file dedup rule never fires on
+because it only triggers on a *second* read of the same path. Now: once a `write_file`/`edit_file`
+tool_use in the prefix has a *successful* result, its content field(s) (`content` for write;
+`old_string`/`new_string` for edit) are rewritten to minimal well-formed JSON keeping the `path` and a
+`[pruned: N chars … re-read the file if needed]` marker — safe because the file is durably on disk and
+re-readable; and a `read_file` under a skill directory (matched by a `.aegis/skills/` or
+`builtin-skills/` path substring, so no new `workDir`/`dataDir` threading through the compaction seam)
+is pruned even on first use once superseded by `keepRecent`, since skill reference content is static.
+Only the pre-`keepRecent` prefix is touched, error results are never pruned, the recent window is
+untouched, and the char-removed accounting uses the net serialized-size delta (guarded non-negative,
+and refuses to prune when it wouldn't actually shrink). Tests cover both rules, a pruned-Input
+round-trip deserialize, and the failed-write / recent-write negatives. Not covered: `multi_edit`
+(nested `edits[]`), flagged as a follow-up lead. **Live verification outstanding** — the roadmap wants
+a real local-model run confirming reduced measured `prompt_eval_count` growth turn-over-turn; no
+Ollama server was available this session, so that re-measurement remains to be done. Note also an
+interaction to watch with P36.1: its deterministic skill-body inject lands in a *user* message, which
+`pruneStaleToolResults` never touches — so a slash-triggered skill's body is not pruned by P36.2's
+skill-reference rule (which only matches `read_file` results). Weigh whether the injected block should
+itself become prunable if peak context still threatens the response-header timeout.
 
 ### P35.13 — `prompt_eval_count` is the full prompt count on current Ollama, not the cache-hit delta
 

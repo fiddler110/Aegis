@@ -469,19 +469,45 @@ func (d *SlashDispatcher) cmdSkills(args []string) SlashResult {
 // only, right before a command like /threat-model sends a message that
 // invokes it — the skill stays dormant (no system-prompt cost) for every
 // session that never asks for it, and needs no config edit or daemon restart
-// to become available in this one. Returns a warning string to prepend to the
-// command's Output on failure (e.g. daemon unreachable); empty on success, so
-// the model still gets a shot at the skill via a plain-text fallback.
-func (d *SlashDispatcher) activateSkill(name string) string {
+// to become available in this one. Returns the skill's full body (for the
+// caller to prepend to its synthetic message via skillTaskMessage) and a
+// warning string to prepend to the command's Output on failure (e.g. daemon
+// unreachable); both empty on the no-client unit-test path.
+func (d *SlashDispatcher) activateSkill(name string) (body, warn string) {
 	if d.client == nil { // unit tests exercise prompt-building without a live daemon
-		return ""
+		return "", ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := d.client.ActivateSkill(ctx, d.sessionID, name); err != nil {
-		return fmt.Sprintf("Warning: couldn't activate the %s skill (%v); asking anyway.\n\n", name, err)
+	body, err := d.client.ActivateSkill(ctx, d.sessionID, name)
+	if err != nil {
+		return "", fmt.Sprintf("Warning: couldn't activate the %s skill (%v); asking anyway.\n\n", name, err)
 	}
-	return ""
+	return body, ""
+}
+
+// skillTaskMessage builds the synthetic user message a skill-triggering slash
+// command sends. When the skill's body loaded (body != ""), it's prepended in
+// a clearly delimited <skill> block so the model has the full top-level
+// instructions up front — deterministically, rather than depending on it
+// choosing to call the `skill` tool to fetch them, a round-trip small local
+// models were observed to skip and then answer as if a stray directory
+// listing were the whole task (P36.1). The task line still follows, so the
+// model has both the instructions and the specific ask. On a load miss it
+// degrades to the task line alone — today's name-only behavior, where the
+// plain "Load the … skill" phrasing and the still-registered `skill` tool
+// remain the fallback. The `skill` tool stays the path for the progressive
+// reference/*.md files the skill loads later; only the initial top-level load
+// moves here.
+func skillTaskMessage(name, body, task string) string {
+	if strings.TrimSpace(body) == "" {
+		return task
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "The %s skill has been loaded for you. Its full instructions are below — follow them for this task.\n\n", name)
+	fmt.Fprintf(&b, "<skill name=%q>\n%s\n</skill>\n\n", name, body)
+	b.WriteString(task)
+	return b.String()
 }
 
 // cmdSkillsToggle enables or disables a built-in skill by writing the full
@@ -982,8 +1008,8 @@ func (d *SlashDispatcher) cmdThreatModel(args []string) SlashResult {
 		prompt += fmt.Sprintf(" (%s)", d.workDir)
 	}
 	prompt += fmt.Sprintf(". Use the %s framework — this has already been decided, so skip the framework-selection clarifying question.", framework)
-	warn := d.activateSkill("threat-modeling")
-	return SlashResult{Output: warn, Message: prompt}
+	body, warn := d.activateSkill("threat-modeling")
+	return SlashResult{Output: warn, Message: skillTaskMessage("threat-modeling", body, prompt)}
 }
 
 // cmdReport sends a message that directly invokes the html-report or
@@ -1005,8 +1031,8 @@ func (d *SlashDispatcher) cmdReport(args []string) SlashResult {
 	} else {
 		prompt.WriteString("the relevant existing markdown docs in this project into one coherent report. Ask me which docs to include if it isn't already clear from context.")
 	}
-	warn := d.activateSkill(skill)
-	return SlashResult{Output: warn, Message: prompt.String()}
+	body, warn := d.activateSkill(skill)
+	return SlashResult{Output: warn, Message: skillTaskMessage(skill, body, prompt.String())}
 }
 
 // cmdResearch sends a message that directly invokes the deep-research skill
@@ -1023,8 +1049,8 @@ func (d *SlashDispatcher) cmdResearch(args []string) SlashResult {
 		prompt += ". Ask me what to research before running any searches."
 	}
 	prompt += " Follow the skill's round structure, source-quality bar, and citation discipline; end with the cited report."
-	warn := d.activateSkill("deep-research")
-	return SlashResult{Output: warn, Message: prompt}
+	body, warn := d.activateSkill("deep-research")
+	return SlashResult{Output: warn, Message: skillTaskMessage("deep-research", body, prompt)}
 }
 
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {

@@ -422,7 +422,23 @@ func (s *Server) handleActivateSkill(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("failed to materialize built-in skill into project", "skill", name, "workdir", workdir, "err", err)
 	}
 	s.activateSessionSkill(id, name)
-	w.WriteHeader(http.StatusNoContent)
+
+	// Load the just-activated skill's full body and hand it back so the caller
+	// (a slash command) can prepend it to the message it sends (P36.1). The
+	// `skill` tool stays the path for the progressive reference/*.md files a
+	// skill pulls in later; this only makes the *initial* top-level load
+	// deterministic instead of depending on the model choosing to call that
+	// tool. sessionEnabledSkills now includes name (activateSessionSkill just
+	// stored it), so Load resolves the built-in against the same enabled set
+	// and workdir the skill tool would. A miss is non-fatal: activation still
+	// succeeded, so return empty content and let the caller fall back.
+	var body string
+	if sk, ok := skills.Load(workdir, s.cfg.DataDir, s.sessionEnabledSkills(id), name); ok {
+		body = sk.Content
+	} else {
+		s.logger.Warn("activated built-in skill but couldn't load its body for inject", "skill", name, "workdir", workdir)
+	}
+	writeJSON(w, http.StatusOK, api.ActivateSkillResponse{Content: body})
 }
 
 func (s *Server) handleListCommands(w http.ResponseWriter, _ *http.Request) {

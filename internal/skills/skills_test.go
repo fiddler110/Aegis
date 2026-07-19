@@ -284,7 +284,12 @@ func TestDiscoverProjectMaterializedBuiltin(t *testing.T) {
 		t.Fatalf("expected only threat-modeling, got %v", got)
 	}
 	sk := got[0]
-	if !strings.Contains(sk.Content, `<skill_assets dir="`+filepath.Join(".aegis", "builtin-skills", "threat-modeling")+`"`) {
+	// withAssetManifest normalizes the manifest dir to forward slashes
+	// (filepath.ToSlash) so it's identical cross-platform and matches what the
+	// model's file tools expect; assert against that, not filepath.Join's
+	// OS-native separators (which use backslashes on Windows and would spuriously
+	// fail there).
+	if !strings.Contains(sk.Content, `<skill_assets dir="`+filepath.ToSlash(filepath.Join(".aegis", "builtin-skills", "threat-modeling"))+`"`) {
 		t.Errorf("expected workspace-relative skill_assets dir, got:\n%s", sk.Content)
 	}
 	if strings.Contains(sk.Content, workDir) {
