@@ -61,8 +61,15 @@ type StatusInfo struct {
 	SandboxFallbackReason string  `json:"sandbox_fallback_reason,omitempty"`
 	DailyCostUSD          float64 `json:"daily_cost_usd"`
 	DailyCapUSD           float64 `json:"daily_cap_usd,omitempty"`
-	DailyTokens           int     `json:"daily_tokens"`
-	DailyTokenCap         int     `json:"daily_token_cap,omitempty"`
+	// DailyTokens is the cross-session sum of per-turn total token counts
+	// (input+output+cache) — tokens *processed*, the always-enforceable budget
+	// primitive (see cost.Tracker.TotalTokens). The input component sums each
+	// turn's full prompt, matching what a cloud provider bills; on native
+	// Ollama that input part is the full per-turn context size, not prefill
+	// work spared by the KV cache (P35.13), but the daily cap is about tokens
+	// fed to the model, so full counts are the intended basis regardless.
+	DailyTokens   int `json:"daily_tokens"`
+	DailyTokenCap int `json:"daily_token_cap,omitempty"`
 
 	// AgentConcurrency is the adaptive limiter's current cap (P17) on how
 	// many sub-agents a 'parallel' workflow batch runs simultaneously.

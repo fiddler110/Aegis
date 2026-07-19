@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 )
@@ -70,6 +73,103 @@ func TestProbeProviderReachability_Cloud(t *testing.T) {
 				t.Errorf("latencyMS = %d, want 0 (unmeasured for a cloud provider)", latencyMS)
 			}
 		})
+	}
+}
+
+// countingOllama returns an httptest server that answers /api/version like a
+// real Ollama and counts how many times /api/version was hit — the seam the
+// P35.11 caching tests use to prove upstream requests are coalesced.
+func countingOllama(t *testing.T) (*httptest.Server, *int32) {
+	t.Helper()
+	var hits int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/version" {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt32(&hits, 1)
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.1.0"})
+	}))
+	t.Cleanup(ts.Close)
+	return ts, &hits
+}
+
+// TestProbeProviderReachability_CacheCoalesces covers P35.11: repeated probes
+// within reachCacheTTL must reuse the cached (reachable, latencyMS) and fire
+// exactly one upstream GET /api/version, not one per call.
+func TestProbeProviderReachability_CacheCoalesces(t *testing.T) {
+	ts, hits := countingOllama(t)
+	frozen := time.Now()
+	s := &Server{
+		cfg:      &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: ts.URL}},
+		reachNow: func() time.Time { return frozen }, // freeze the clock inside one window
+	}
+
+	reachable, _ := s.probeProviderReachability(context.Background())
+	if !reachable {
+		t.Fatalf("first probe: reachable = false, want true")
+	}
+	for i := 0; i < 5; i++ {
+		if r, _ := s.probeProviderReachability(context.Background()); !r {
+			t.Fatalf("probe %d: reachable = false, want true (cached)", i)
+		}
+	}
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Errorf("upstream /api/version hits = %d, want 1 (5 further polls should coalesce)", got)
+	}
+}
+
+// TestProbeProviderReachability_CacheExpires covers the other side of P35.11:
+// once the freshness window elapses, the next poll re-probes upstream.
+func TestProbeProviderReachability_CacheExpires(t *testing.T) {
+	ts, hits := countingOllama(t)
+	now := time.Now()
+	s := &Server{
+		cfg:      &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: ts.URL}},
+		reachNow: func() time.Time { return now },
+	}
+
+	s.probeProviderReachability(context.Background()) // t0: probes (1)
+	s.probeProviderReachability(context.Background()) // t0: cached (still 1)
+	now = now.Add(reachCacheTTL + time.Millisecond)   // advance past the window
+	s.probeProviderReachability(context.Background()) // re-probes (2)
+
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Errorf("upstream /api/version hits = %d, want 2 (one per window)", got)
+	}
+}
+
+// TestProbeProviderReachability_CacheConcurrent exercises the cache under a
+// burst of concurrent /status-style callers, primarily to run the mutex under
+// `go test -race`. The cache is warmed first, so all concurrent callers land
+// within the same still-fresh window and must add zero upstream hits — proving
+// both thread-safety and that concurrent reads coalesce. (Note: a genuinely
+// simultaneous *cold* burst can let multiple racers through before the entry is
+// populated; that's the documented-harmless expiry-tick race, and it isn't what
+// a 1-2s poll loop — the actual workload — produces.)
+func TestProbeProviderReachability_CacheConcurrent(t *testing.T) {
+	ts, hits := countingOllama(t)
+	frozen := time.Now()
+	s := &Server{
+		cfg:      &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: ts.URL}},
+		reachNow: func() time.Time { return frozen },
+	}
+
+	s.probeProviderReachability(context.Background()) // warm the cache (1 hit)
+
+	const callers = 32
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			s.probeProviderReachability(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Errorf("upstream hits = %d, want 1 (concurrent reads within the window must coalesce)", got)
 	}
 }
 

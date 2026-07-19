@@ -4095,8 +4095,13 @@ func (m model) renderSidebar(h int) string {
 		add("")
 	}
 
-	// promptTokens is the full last-turn prompt size: uncached input plus any
-	// cache reads/writes (Anthropic reports these separately).
+	// promptTokens approximates the last-turn prompt size: uncached input plus
+	// any cache reads/writes (Anthropic reports these separately). P35.10
+	// caveat: on the native-Ollama path m.inputTokens is uncached prefill, not
+	// full prompt size, so on a KV-cache-hit turn (P35.4/P35.7) this meter
+	// understates how full the context window is. Truthful for the work done,
+	// but not a reliable fullness gauge there; a correct fix would need an
+	// estimated-context number the daemon does not currently surface to the UI.
 	promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
 	if promptTokens > 0 {
 		section("CONTEXT")

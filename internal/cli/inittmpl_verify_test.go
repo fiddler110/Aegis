@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -41,5 +42,15 @@ func TestTemplatesParseAndUnmarshal(t *testing.T) {
 	}
 	if _, ok := cfg.Personas["security-architect"]; !ok {
 		t.Errorf("personas map missing security-architect: %+v", cfg.Personas)
+	}
+	// The Ollama-flavored global template must default to the native /api/chat
+	// adapter, not the legacy OpenAI-compat path (default: openai + a /v1
+	// base_url) that serves every request at Ollama's 4096 default and that the
+	// daemon warns against. Guards the P35.13 template fix against regression.
+	if cfg.Provider.Default != "ollama" {
+		t.Errorf("template provider.default = %q, want \"ollama\" (native adapter)", cfg.Provider.Default)
+	}
+	if strings.HasSuffix(strings.TrimRight(cfg.Provider.BaseURL, "/"), "/v1") {
+		t.Errorf("template provider.base_url = %q carries a /v1 OpenAI-compat suffix", cfg.Provider.BaseURL)
 	}
 }

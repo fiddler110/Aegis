@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"sort"
@@ -1101,11 +1102,13 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 	// (prefill token count) and prompt_eval_duration alongside load_duration.
 	// Logged every turn (not gated on a threshold, unlike the cold-load
 	// notice) so a comparison across turns N and N+1 is possible after the
-	// fact: prompt_eval_count staying at the full running conversation total
-	// turn over turn means Ollama's KV-cache prefix reuse is NOT sparing
-	// prefill despite keep_alive residency (P35.4); dropping to roughly the
-	// newly-appended delta means it is. Zero on every non-Ollama provider, so
-	// this is a no-op log line elsewhere.
+	// fact. Read prompt_eval_duration_ms, NOT the count, for cache reuse: on
+	// current Ollama the count stays at the full context size every turn even
+	// on a prefix-cache hit (P35.13), so it's the duration collapsing (e.g.
+	// 15s->0.1s for a similar-sized prompt) that shows KV-cache reuse is
+	// sparing prefill under keep_alive residency (P35.4); a duration that
+	// stays proportional to the count means a full reprocess. Zero on every
+	// non-Ollama provider, so this is a no-op log line elsewhere.
 	if usage != nil && usage.PromptEvalDurationMS > 0 {
 		e.logger.Debug("prefill (prompt_eval)",
 			"prompt_eval_count", usage.InputTokens,
@@ -1169,6 +1172,39 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 
 	results := make([]provider.Block, len(toolUses))
 	traces := make([]trace.ToolCall, len(toolUses))
+
+	// Per-call metadata for same-path ordering. Without it, a model that emits
+	// "write X, then read X back" as two calls in one round hits a
+	// read-before-write race: the read runs concurrently with the write (reads
+	// aren't serialized) and can observe the pre-write — often absent — file.
+	// serialize[i] marks write/exec calls (they take execLock); paths[i] is the
+	// call's filesystem target, if any.
+	serialize := make([]bool, len(toolUses))
+	paths := make([]string, len(toolUses))
+	done := make([]chan struct{}, len(toolUses))
+	for i, tu := range toolUses {
+		serialize[i] = e.serializeTool(tu.Name, tu.Input)
+		paths[i] = toolTargetPath(tu.Input)
+		done[i] = make(chan struct{})
+	}
+	// waitFor[i] lists earlier calls whose completion call i must await: any
+	// prior write/exec call targeting the same non-empty path. It applies
+	// whether call i reads or writes that path, so both write→read and
+	// write→write pairs preserve the model-emitted order for a shared path;
+	// calls on distinct paths (or with no path) never gate one another and
+	// stay fully concurrent.
+	waitFor := make([][]int, len(toolUses))
+	for i := range toolUses {
+		if paths[i] == "" {
+			continue
+		}
+		for j := 0; j < i; j++ {
+			if serialize[j] && paths[j] == paths[i] {
+				waitFor[i] = append(waitFor[i], j)
+			}
+		}
+	}
+
 	var (
 		emitMu   sync.Mutex // serializes emit across goroutines
 		execLock sync.Mutex // exclusive among write/exec calls only
@@ -1190,6 +1226,9 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 		go func(i int, tu provider.ToolUseBlock) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// Signal dependents that this call is complete — even on panic or
+			// interrupt below — so a waiter on done[i] can never hang.
+			defer close(done[i])
 			// A panic in one tool call (a buggy MCP tool, malformed builtin
 			// input) must not cross the goroutine boundary: unrecovered, it
 			// takes down the whole daemon process — every concurrent
@@ -1205,7 +1244,23 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 				}
 			}()
 
-			if e.serializeTool(tu.Name, tu.Input) {
+			// Wait for earlier same-path writes in this round to finish before
+			// touching the path. Deadlock-free: writes never wait on reads, and
+			// every awaited call has a lower index — so it was already spawned
+			// (holding its own semaphore slot) and runs to completion, closing
+			// done[j]. Give up if the run is interrupted.
+			for _, j := range waitFor[i] {
+				select {
+				case <-done[j]:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+
+			if serialize[i] {
 				execLock.Lock()
 				defer execLock.Unlock()
 			}
@@ -1224,6 +1279,29 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 		return nil, nil, ErrInterrupted
 	}
 	return results, traces, nil
+}
+
+// toolTargetPath extracts a tool call's filesystem target from its JSON input,
+// used to order same-path writes and reads within one tool round. Builtin file
+// tools (read_file, write_file, edit_file, multiedit, ls, …) all name their
+// target "path"; the value is cleaned so equivalent spellings ("f.py",
+// "./f.py") compare equal. Returns "" when the input carries no "path" string,
+// so non-file tools never gate one another. Matching is exact after cleaning:
+// on a case-insensitive filesystem two differently-cased spellings of one path
+// won't be ordered, but a model emitting a write→read pair reuses the same
+// string, so this is a non-issue in practice and avoids wrongly serializing
+// distinct paths on a case-sensitive filesystem.
+func toolTargetPath(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var probe struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(input, &probe); err != nil || probe.Path == "" {
+		return ""
+	}
+	return filepath.Clean(probe.Path)
 }
 
 // runToolsSequential is the simple in-order path used for a single tool call.

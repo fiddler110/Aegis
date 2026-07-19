@@ -1,0 +1,51 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'background': '#ffffff', 'primaryColor': '#ffffff', 'lineColor': '#666666' }}}%%
+flowchart LR
+    classDef process fill:#6baed6,stroke:#2171b5,stroke-width:2px,color:#000000
+    classDef external fill:#fdae61,stroke:#d94701,stroke-width:2px,color:#000000
+    classDef datastore fill:#74c476,stroke:#238b45,stroke-width:2px,color:#000000
+    linkStyle default stroke:#666666,stroke-width:2px
+
+    Operator["Operator"]:::external
+    Harness["ExternalHarness"]:::external
+
+    subgraph ClientProcess["Client Process"]
+        ClientStack(("Client Stack<br/>(TerminalUI, Client)")):::process
+    end
+
+    subgraph DaemonProcess["Daemon Process"]
+        Server(("Server<br/>(+ WebUI, MCPServer, ACPAgent, ToolCallProbe)")):::process
+        Engine(("Engine<br/>(+ Providers, Persona, Skills, Guard)")):::process
+        ToolRegistry(("ToolRegistry")):::process
+        PermissionGate(("PermissionGate")):::process
+        ExecutionSandbox(("ExecutionSandbox")):::process
+        TrustGate(("WorkspaceTrust<br/>(+ ConfigLoader)")):::process
+        SupportServices(("Support Services<br/>(Swarm, MCPClient, Cron, Hooks, Security)")):::process
+        DataStores[("Data Stores<br/>(Session, Checkpoint, Memory, Knowledge, Mailbox)")]:::datastore
+    end
+
+    subgraph External["External Services"]
+        ModelEndpoints["Model Endpoints<br/>(AnthropicAPI, OpenAICompatibleEndpoint, OllamaNativeEndpoint)"]:::external
+        ExternalIO["External IO<br/>(GitHub, Internet, MCP servers, Container runtime)"]:::external
+    end
+
+    Operator <-->|"SDF01 terminal / HTTPS /ui / aegis trust"| ClientStack
+    Operator <-->|"SDF02 HTTPS /ui / aegis trust"| Server
+    Harness <-->|"SDF03 stdio JSON-RPC"| Server
+    ClientStack <-->|"SDF04 HTTP+SSE (bearer, TLS by default)"| Server
+    Server <-->|"SDF05 run / schedule / spawn"| Engine
+    Server <-->|"SDF06 support ops"| SupportServices
+    Server <-->|"SDF17 is trusted?"| TrustGate
+    Engine <-->|"SDF07 check"| PermissionGate
+    Engine <-->|"SDF08 dispatch"| ToolRegistry
+    Engine <-->|"SDF09 persist"| DataStores
+    ToolRegistry <-->|"SDF10 exec"| ExecutionSandbox
+    ToolRegistry <-->|"SDF11 support"| SupportServices
+    ToolRegistry <-->|"SDF12 data"| DataStores
+    Engine <-->|"SDF13 HTTPS/HTTP"| ModelEndpoints
+    ToolRegistry <-->|"SDF14 HTTPS (SSRF-guarded)"| ExternalIO
+    SupportServices <-->|"SDF15 stdio/HTTP (SSRF-guarded)/socket"| ExternalIO
+    ExecutionSandbox <-->|"SDF16 CLI/socket"| ExternalIO
+
+    style ClientProcess fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style DaemonProcess fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style External fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5

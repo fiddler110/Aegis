@@ -9,9 +9,11 @@
 package ollama
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -152,24 +154,20 @@ type wireRequest struct {
 	Options   *wireOptions  `json:"options,omitempty"`
 }
 
-// toolNames maps every ToolUseBlock ID appearing in msgs to its tool name, so
-// a later ToolResultBlock (which carries only the ID) can be translated into
-// the tool_name field the native API expects instead.
-func toolNames(msgs []provider.Message) map[string]string {
-	names := make(map[string]string)
-	for _, m := range msgs {
-		for _, b := range m.Content {
-			if tu, ok := b.(provider.ToolUseBlock); ok {
-				names[tu.ID] = tu.Name
-			}
-		}
-	}
-	return names
-}
-
 // translate converts harness messages to native chat-message wire format.
+//
+// The native adapter mints tool-use IDs from a per-request counter (see
+// consume), so the same ID (e.g. "tu_0") recurs across turns naming whatever
+// tool happened to be called first each time. Resolving a ToolResultBlock's
+// name from a map built over the *entire* history (last write wins) would
+// therefore mislabel every earlier turn's result once a later turn reuses its
+// ID with a different tool. Walking messages in order and updating the ID->
+// name map as ToolUseBlocks appear resolves each result against the nearest
+// *preceding* use instead, which is correct regardless of ID reuse and is
+// stable turn-over-turn — required for Ollama's prefix cache to survive
+// mixed-tool runs (P35.9).
 func translate(system string, msgs []provider.Message) []wireMessage {
-	names := toolNames(msgs)
+	names := make(map[string]string)
 	out := make([]wireMessage, 0, len(msgs)+1)
 	if system != "" {
 		out = append(out, wireMessage{Role: "system", Content: system})
@@ -184,6 +182,7 @@ func translate(system string, msgs []provider.Message) []wireMessage {
 				case provider.TextBlock:
 					text += v.Text
 				case provider.ToolUseBlock:
+					names[v.ID] = v.Name
 					args := v.Input
 					if len(bytes.TrimSpace(args)) == 0 {
 						args = json.RawMessage("{}")
@@ -310,16 +309,29 @@ func errorMessage(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &s) == nil {
 		return strings.TrimSpace(s)
 	}
+	// P35.12: try common alternate string fields Ollama/proxies use for the
+	// message before giving up on the object shape.
 	var obj struct {
 		Message string `json:"message"`
+		Error   string `json:"error"`
+		Detail  string `json:"detail"`
 	}
 	if json.Unmarshal(raw, &obj) != nil {
 		return ""
 	}
-	if msg := strings.TrimSpace(obj.Message); msg != "" {
-		return msg
+	for _, s := range []string{obj.Message, obj.Error, obj.Detail} {
+		if s = strings.TrimSpace(s); s != "" {
+			return s
+		}
 	}
-	return trimmed
+	// P35.12: object with none of those string fields — never swallow a
+	// present error into "", but don't surface raw multi-line JSON either.
+	// Compact it into a single tidy line; fall back to trimmed if that fails.
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return trimmed
+	}
+	return buf.String()
 }
 
 // wireChunk is one line of the newline-delimited JSON stream /api/chat
@@ -426,6 +438,24 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		}
 
 		if chunk.Done {
+			// P35.13: prompt_eval_count is the FULL prompt/context token count
+			// this turn, not a cache-hit delta. Live-verified on Ollama 0.30.10
+			// (P35.10's "a P35.7 live run saw 37 after turn 1's 3944" was a
+			// misread: 3981-3944=37 is the growth in the count, but the field
+			// itself reported the full 3981): sending an identical prompt twice
+			// returns the same full prompt_eval_count both times while
+			// prompt_eval_duration collapses (84ms->24ms), and a warm Aegis turn
+			// reported prompt_eval_count=7195 in 86ms — 7195 real prefill tokens
+			// in 86ms is impossible, so the prefix was a cache hit yet the full
+			// count was still reported. So on this Ollama, prompt_eval_duration
+			// (not the count) is the only cache-hit signal; the count tracks
+			// context size. Mapped straight through as usage.InputTokens. Older
+			// Ollama versions may have reported deltas, so this stays
+			// version-dependent — compaction must keep using an estimate (the
+			// engine's estimateTokens / conv.estimatedTokens) rather than trust
+			// InputTokens for context size across backends. See the
+			// PromptEvalDurationMS comment and the InputTokens doc in
+			// internal/provider/provider.go.
 			usage.InputTokens = chunk.PromptEvalCount
 			usage.OutputTokens = chunk.EvalCount
 			usage.LoadDurationMS = chunk.LoadDuration / 1e6
@@ -436,6 +466,17 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		// P35.12: the native path delivers each tool call whole on one NDJSON
+		// line, so a tool-call argument payload over the 4MiB scanner cap
+		// (sse.maxBufSize) trips bufio.ErrTooLong. The generic wrap surfaces it
+		// as the opaque "token too long"; name the actual cause instead so the
+		// reader can act on it (a runaway/oversized tool-call argument).
+		if errors.Is(err, bufio.ErrTooLong) {
+			emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf(
+				"ollama: read stream: a single stream line exceeded the 4MiB line limit "+
+					"(most likely a tool-call argument payload the model emitted is too large): %w", err)})
+			return
+		}
 		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("ollama: read stream: %w", err)})
 		return
 	}

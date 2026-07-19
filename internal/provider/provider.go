@@ -121,6 +121,16 @@ const (
 // heuristic because the provider returned zero usage (common with local models).
 // Cost calculations must be skipped for estimated usage.
 type Usage struct {
+	// InputTokens is the number of prompt tokens the provider reports for this
+	// request. On the native-Ollama path this is prompt_eval_count, which on
+	// current Ollama (0.30.10, live-verified P35.13) is the FULL prompt/context
+	// size every turn — NOT a cache-hit delta, even when KV-cache residency
+	// (P35.4) makes the turn a prefix-cache hit (there, prompt_eval_duration
+	// collapses but the count stays full). Older Ollama versions may have
+	// reported deltas, so this is version-dependent: consumers that need a
+	// reliable context size across backends (e.g. compaction) must use an
+	// estimate — see engine.Conversation.estimatedTokens. To detect a cache
+	// hit vs. a full reprocess, read PromptEvalDurationMS, not this count.
 	InputTokens         int  `json:"input_tokens"`
 	OutputTokens        int  `json:"output_tokens"`
 	CacheCreationTokens int  `json:"cache_creation_tokens,omitempty"`
@@ -136,9 +146,10 @@ type Usage struct {
 	// processing the prompt tokens before the first generated token (Ollama's
 	// native `prompt_eval_duration`, nanoseconds on the wire, converted to
 	// milliseconds here). Zero when not reported (every non-Ollama
-	// provider). Read alongside InputTokens to tell a KV-cache hit (prefill
-	// duration/token-count tracks only the newly appended turn) from a full
-	// reprocess (both track the whole running conversation) — see P35.7.
+	// provider). This duration is the KV-cache-hit signal: on current Ollama
+	// it collapses on a prefix-cache hit (e.g. 15s->0.1s) while InputTokens
+	// stays at the full context size, so duration — not the token count —
+	// distinguishes a cache hit from a full reprocess (P35.7, P35.13).
 	PromptEvalDurationMS int64 `json:"prompt_eval_duration_ms,omitempty"`
 }
 
