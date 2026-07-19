@@ -38,6 +38,58 @@ func TestTranslateToolResultUsesName(t *testing.T) {
 	}
 }
 
+// TestTranslateReusedToolIDsResolvePositionally guards P35.9: the native
+// adapter mints tool-use IDs from a per-request counter, so "tu_0" recurs
+// across turns naming whatever tool was called first each time. A map built
+// over the whole history (last write wins) would mislabel turn 1's result
+// once turn 2 reuses "tu_0" for a different tool, and that mutated label
+// would also change the serialized prefix of turn 1 between requests,
+// defeating Ollama's prefix cache. translate must resolve each result
+// against the nearest *preceding* use instead.
+func TestTranslateReusedToolIDsResolvePositionally(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			provider.ToolUseBlock{ID: "tu_0", Name: "read_file", Input: json.RawMessage(`{}`)},
+		}},
+		{Role: provider.RoleUser, Content: []provider.Block{
+			provider.ToolResultBlock{ToolUseID: "tu_0", Content: "file contents"},
+		}},
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			provider.ToolUseBlock{ID: "tu_0", Name: "run_shell", Input: json.RawMessage(`{}`)},
+		}},
+		{Role: provider.RoleUser, Content: []provider.Block{
+			provider.ToolResultBlock{ToolUseID: "tu_0", Content: "shell output"},
+		}},
+	}
+
+	wire := translate("", msgs)
+	if len(wire) != 4 {
+		t.Fatalf("got %d messages, want 4: %+v", len(wire), wire)
+	}
+	if wire[1].Role != "tool" || wire[1].ToolName != "read_file" || wire[1].Content != "file contents" {
+		t.Errorf("turn 1 result mislabelled: %+v", wire[1])
+	}
+	if wire[3].Role != "tool" || wire[3].ToolName != "run_shell" || wire[3].Content != "shell output" {
+		t.Errorf("turn 2 result mislabelled: %+v", wire[3])
+	}
+
+	// Byte-stability: serializing turn 1's prefix must be unchanged by
+	// appending turn 2 — the property Ollama's prefix cache depends on.
+	prefixOnly := translate("", msgs[:2])
+	full := translate("", msgs)
+	b1, err := json.Marshal(prefixOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := json.Marshal(full[:2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b1) != string(b2) {
+		t.Errorf("turn 1 prefix mutated by appending turn 2:\nbefore: %s\nafter:  %s", b1, b2)
+	}
+}
+
 func TestTranslateImage(t *testing.T) {
 	msgs := []provider.Message{{
 		Role: provider.RoleUser,
@@ -206,7 +258,7 @@ func TestStreamContextTruncationVsMalformed(t *testing.T) {
 		},
 		{
 			// A prior chunk reported done_reason "length" before the error line.
-			name:          "prior length signal",
+			name: "prior length signal",
 			body: `{"message":{"role":"assistant","content":"partial"},"done":true,"done_reason":"length"}` + "\n" +
 				`{"error":"llama-server returned invalid tool call arguments for \"read_file\": unexpected end of JSON input"}` + "\n",
 			wantTruncated: true,
@@ -243,6 +295,71 @@ func TestStreamContextTruncationVsMalformed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestErrorMessage is the P35.12 guard for errorMessage: a present error
+// envelope must never be swallowed into "", alternate string fields
+// (message/error/detail) are honoured, and an object with none of those
+// surfaces as a compacted single line rather than raw multi-line JSON.
+func TestErrorMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty", ``, ""},
+		{"null", `null`, ""},
+		{"plain string", `"model runner has unexpectedly stopped"`, "model runner has unexpectedly stopped"},
+		{"object message", `{"message":"boom"}`, "boom"},
+		{"object detail only", `{"detail":"boom detail"}`, "boom detail"},
+		{"object error only", `{"error":"boom error"}`, "boom error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errorMessage(json.RawMessage(tc.raw)); got != tc.want {
+				t.Errorf("errorMessage(%s) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+
+	// Object with none of the known string fields: must stay non-empty, be a
+	// single compacted line (no raw newlines/indent), not the verbatim bytes.
+	raw := "{\n  \"code\": 500,\n  \"nested\": {\n    \"x\": 1\n  }\n}"
+	got := errorMessage(json.RawMessage(raw))
+	if got == "" {
+		t.Fatal("a present error envelope must never be swallowed into \"\"")
+	}
+	if strings.ContainsAny(got, "\n") {
+		t.Errorf("compacted output still contains newlines: %q", got)
+	}
+	if got != `{"code":500,"nested":{"x":1}}` {
+		t.Errorf("compacted output = %q, want compacted single line", got)
+	}
+}
+
+// TestStreamOversizedLineActionable is the P35.12 guard: a single NDJSON line
+// past the shared 4MiB scanner cap (sse.maxBufSize) trips bufio.ErrTooLong,
+// and the native path must surface an actionable error naming the line-limit /
+// tool-call-argument cause rather than the opaque "token too long".
+func TestStreamOversizedLineActionable(t *testing.T) {
+	// One NDJSON line well over 4MiB: a tool call whose argument payload is huge.
+	var b strings.Builder
+	b.WriteString(`{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"x","arguments":{"blob":"`)
+	b.WriteString(strings.Repeat("a", 5*1024*1024))
+	b.WriteString(`"}}}]},"done":false}` + "\n")
+
+	err := streamError(t, b.String())
+	if err == nil {
+		t.Fatal("expected an error event")
+	}
+	// The actionable message names the line limit and probable cause; the raw
+	// wrapped "token too long" may still trail after %w, but must not be the
+	// only thing surfaced.
+	if !strings.Contains(err.Error(), "4MiB line limit") {
+		t.Errorf("error is not the actionable line-limit message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "tool-call argument") {
+		t.Errorf("error does not name the probable cause: %v", err)
 	}
 }
 

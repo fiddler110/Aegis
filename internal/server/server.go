@@ -79,6 +79,17 @@ type Server struct {
 	// turn. Written only when a model actually fails the probe.
 	toolCallWarned   map[string]struct{}
 	toolCallWarnedMu sync.Mutex
+
+	// reachCache coalesces the P35.11 provider-reachability probe. /status
+	// polls at 1-2s and each Ollama-path probe is a live GET /api/version;
+	// without caching a fast poll loop is a steady upstream request stream to
+	// Ollama for a value that changes rarely. reachCacheMu guards a single
+	// last-probe entry reused within reachCacheTTL (see
+	// probeProviderReachability). reachNow is a clock seam (nil == time.Now),
+	// injected by tests to exercise expiry deterministically.
+	reachCacheMu sync.Mutex
+	reachCache   reachEntry
+	reachNow     func() time.Time
 	knowledge        *knowledge.Store // project knowledge base (P3.3); nil when unavailable
 	longMem          *longmem.Store   // long-term entity memory (P3.1); nil when unavailable
 	embedder         embed.Embedder   // shared semantic-recall embedder (P5.8); nil = BM25-only

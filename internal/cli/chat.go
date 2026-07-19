@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
+	"syscall"
 
 	"github.com/fiddler110/aegis/internal/commands"
 	"github.com/fiddler110/aegis/internal/config"
@@ -83,14 +86,36 @@ func newChatCmd() *cobra.Command {
 			if err := cfg.EnsureDataDir(); err != nil {
 				return fmt.Errorf("ensure data dir: %w", err)
 			}
+			// At debug level, also mirror logs to stderr so the diagnostics an
+			// operator explicitly opted into (prompt_eval prefill counts, tool
+			// timings) are visible immediately without tailing aegis.log. The
+			// answer streams to stdout, so stderr mirroring never corrupts it.
+			// Kept off below debug so a normal `aegis chat` run stays quiet on
+			// stderr (info-level WARNs about sandbox/MCP would otherwise leak
+			// into scripted output).
+			debugToStderr := strings.EqualFold(strings.TrimSpace(cfg.LogLevel), "debug")
 			logger, logCloser, err := logging.New(logging.Options{
-				Level: cfg.LogLevel,
-				Path:  cfg.LogPath(),
+				Level:    cfg.LogLevel,
+				Path:     cfg.LogPath(),
+				ToStderr: debugToStderr,
 			})
 			if err != nil {
 				return fmt.Errorf("init logger: %w", err)
 			}
 			defer logCloser.Close()
+
+			// P35.8: capture an otherwise-silent panic to aegis.log before the
+			// process dies. A live `aegis chat` run once vanished mid-turn
+			// leaving nothing on disk — no panic, no signal record, no final
+			// answer. Registered AFTER logCloser's defer so, by LIFO ordering,
+			// this log write runs before the log file is closed; we re-panic so
+			// the crash stays visible and the exit code stays non-zero.
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("chat: panic", "value", r, "stack", string(debug.Stack()))
+					panic(r)
+				}
+			}()
 
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -126,7 +151,13 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			// P35.8: derive the run context from an explicit signal handler that
+			// LOGS which signal fired before cancelling. The bare
+			// signal.NotifyContext(os.Interrupt) it replaces recorded nothing —
+			// when a live chat run vanished mid-turn there was no way to tell a
+			// signal from a silent death. Also covers SIGTERM (portable in Go's
+			// os/signal), which NotifyContext(os.Interrupt) ignored.
+			ctx, stop := installSignalCancel(context.Background(), logger)
 			defer stop()
 
 			conv := &engine.Conversation{System: buildChatSystem(cfg, cwd, system, personaName)}
@@ -143,6 +174,11 @@ func newChatCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			var answer strings.Builder
 			toolCalls := 0
+			// P35.8: bracket the engine run with boundary markers. A silent
+			// mid-run disappearance then shows up as a "run starting" line with
+			// no matching "run finished" — exactly the diagnostic signal that
+			// was missing when a live chat turn vanished without a trace.
+			logger.Info("chat: run starting", "prompt_bytes", len(prompt))
 			runErr := eng.Run(ctx, conv, func(ev engine.Event) {
 				// Counted for every format: both json and stream-json report
 				// this in their trailer, so counting it per-branch left
@@ -180,6 +216,7 @@ func newChatCmd() *cobra.Command {
 					}
 				}
 			})
+			logger.Info("chat: run finished", "err", errString(runErr), "tool_calls", toolCalls)
 
 			snap := tracker.Snapshot()
 			switch format {
@@ -201,6 +238,15 @@ func newChatCmd() *cobra.Command {
 					ToolCalls: toolCalls, Error: errString(runErr),
 				})
 			default:
+				// P35.13: the "in" figure is the summed per-turn input-token
+				// count — total input *processed*, which is the billable-input
+				// basis a cloud provider charges (each turn re-sends the whole
+				// conversation; cache reads are priced separately in cost). This
+				// trailer is gated on TotalUSD > 0, so it only prints for a
+				// priced/cloud run, where that is exactly the number to show;
+				// local runs (cost $0, and where the count is Ollama's full
+				// per-turn context size, not prefill work — P35.13) never reach
+				// this branch.
 				if snap.TotalUSD > 0 {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n[cost: $%.4f over %d turn(s), %d in / %d out tokens]\n",
 						snap.TotalUSD, snap.Turns, snap.Usage.InputTokens, snap.Usage.OutputTokens)
@@ -216,6 +262,45 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&autoApprove, "yes", false, "auto-approve tool calls that would otherwise require confirmation")
 	cmd.Flags().StringVar(&outputFormat, "output-format", "text", "output format: text, json (final result object), or stream-json (one event per line)")
 	return cmd
+}
+
+// installSignalCancel derives a cancellable context from parent that cancels
+// when an interrupt (Ctrl-C) or SIGTERM arrives, logging which signal fired
+// first. It returns the context and a cleanup func that stops signal delivery
+// and cancels the context (which also lets the watcher goroutine exit, so it
+// does not leak). Ctrl-C behavior is preserved — an interrupt still cancels
+// the run.
+//
+// P35.8: the bare signal.NotifyContext(os.Interrupt) this replaces recorded
+// nothing about which signal fired, so a signal-driven exit was
+// indistinguishable from a silent mid-run death in aegis.log. syscall.SIGTERM
+// is portable in Go's os/signal across win32 and unix.
+func installSignalCancel(parent context.Context, logger *slog.Logger) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go watchSignal(ctx, cancel, sigCh, logger)
+	return ctx, func() {
+		signal.Stop(sigCh)
+		cancel()
+	}
+}
+
+// watchSignal blocks until either a signal arrives (logs it, then cancels) or
+// the context is done (run completed / cleanup called — nothing to log, just
+// return so the goroutine does not leak). Split out from installSignalCancel so
+// the log-and-cancel behavior is unit-testable without delivering a real OS
+// signal.
+func watchSignal(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os.Signal, logger *slog.Logger) {
+	select {
+	case sig := <-sigCh:
+		if logger != nil {
+			// P35.8: log the signal cause BEFORE cancelling the run.
+			logger.Warn("chat: received signal, cancelling run", "signal", sig.String())
+		}
+		cancel()
+	case <-ctx.Done():
+	}
 }
 
 // buildChatSystem assembles the one-shot chat system prompt so the CLI path is
@@ -280,14 +365,24 @@ func parseOutputFormat(s string) (outputFormatKind, error) {
 
 // chatResult is the machine-readable summary emitted in json / stream-json mode.
 type chatResult struct {
-	Type         string  `json:"type,omitempty"` // "result" in stream-json trailer
-	Answer       string  `json:"answer,omitempty"`
-	CostUSD      float64 `json:"cost_usd"`
-	Turns        int     `json:"turns"`
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	ToolCalls    int     `json:"tool_calls"`
-	Error        string  `json:"error,omitempty"`
+	Type    string  `json:"type,omitempty"` // "result" in stream-json trailer
+	Answer  string  `json:"answer,omitempty"`
+	CostUSD float64 `json:"cost_usd"`
+	Turns   int     `json:"turns"`
+	// InputTokens is the sum of the per-turn prompt-token counts across every
+	// turn of the run — i.e. total input tokens *processed*, which is the
+	// billable-input basis for a cloud provider (each agentic turn re-sends the
+	// growing conversation and is charged for it; prompt-cache reads are billed
+	// separately and priced at the discounted rate — see internal/cost). It is
+	// deliberately NOT a de-duplicated or cache-adjusted figure. On the
+	// native-Ollama path this is prompt_eval_count, the full context size every
+	// turn (P35.13), so the sum overstates the *local prefill work actually
+	// done* by the KV-cache-hit factor — but local cost is $0, so the number is
+	// informational there; it is the cloud cost figure it must be accurate for.
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	ToolCalls    int    `json:"tool_calls"`
+	Error        string `json:"error,omitempty"`
 }
 
 // streamEvent is one line of stream-json output.

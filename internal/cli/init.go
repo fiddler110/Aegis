@@ -58,29 +58,33 @@ const globalConfigTemplateRaw = `# ═══════════════
 
 
 # ┌─────────────────────────────────────────────────────────────────────────────
-# │  PROVIDER  ·  ACTIVE: Ollama  (local, no API key required by the model)
+# │  PROVIDER  ·  ACTIVE: Ollama  (local, no API key required)
 # └─────────────────────────────────────────────────────────────────────────────
 #
-# Ollama uses the OpenAI-compatible adapter. The harness still reads
-# OPENAI_API_KEY to authenticate the HTTP request, but Ollama accepts any
-# non-empty value. Set a dummy value once so the harness does not refuse to
-# start:
-#
-#   Windows PowerShell:   $env:OPENAI_API_KEY = "ollama"
-#   Windows (permanent):  Add to: System → Advanced → Environment Variables
-#   macOS / Linux:        export OPENAI_API_KEY=ollama    (add to ~/.zshrc etc.)
+# Aegis talks to Ollama's native /api/chat endpoint (provider.default: ollama),
+# which needs NO API key — leave OPENAI_API_KEY unset. The native adapter sends
+# a per-request context window (context_window below), controls keep_alive, and
+# reads real token/load telemetry — none of which the older OpenAI-compat path
+# (default: openai + a /v1 base_url) can do. That path silently served every
+# request at Ollama's 4096 default, and the daemon warns against it.
 #
 # Ollama is started automatically if it is installed but not yet running.
 # Model library:       https://ollama.com/library
 #
 provider:
-  default: openai
-  base_url: "http://localhost:11434/v1"
+  default: ollama
+  base_url: "http://localhost:11434"
   model: "auto"              # "auto" picks the first available Ollama model
                              # automatically. Or pin a model you have pulled:
                              #   llama3.2, mistral, gemma3, qwen2.5, phi4, etc.
-  max_tokens: 8192           # Adjust to fit your model's context window.
+  max_tokens: 8192           # Cap on generated tokens per turn.
   max_retries: 3
+  # context_window sets the per-request serving window (num_ctx) the native
+  # adapter sends to Ollama, so Aegis's compaction threshold and Ollama's real
+  # serving window agree. Larger = more context but more VRAM for the KV cache
+  # — tune to your GPU (e.g. 8192 on a small card, 32768 on 16GB). Unset leaves
+  # Ollama's own default (OLLAMA_CONTEXT_LENGTH or the modelfile value).
+  # context_window: 32768
   think: false               # true only for extended-thinking models such as
                              #   qwen3 or deepseek-r1 served via Ollama.
   # small_model: "llama3.2"  # Optional fast model for background calls

@@ -8,7 +8,62 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-18 — **P35.7 live-confirmed**: a real `aegis chat` run against Ollama
+**Last updated:** 2026-07-19 — **P35.13 fully shipped** (its final open piece, the summed-token-surface
+decision, resolved today — see the P35.13 entry below). Earlier: **P35.12 and P35.8 shipped**. **P35.12**: two native-Ollama stream
+cosmetics from the P35.9-filing review. `errorMessage` (`internal/provider/ollama/ollama.go`) no
+longer surfaces raw JSON when an error envelope is an object without a `message` field — it now also
+tries `error`/`detail` string fields and, failing those, compacts the object into a single tidy line
+rather than dumping raw multi-line bytes (it still never swallows a present error into ""). Second,
+because the native path delivers each tool call *whole* on one NDJSON line, a tool-call argument
+payload over the shared 4MiB scanner cap (`internal/provider/sse/sse.go`) previously failed as the
+opaque `bufio.Scanner: token too long`; `consume` now detects `bufio.ErrTooLong` and emits an
+actionable error naming the cause (an oversized tool-call payload past the 4MiB line limit). Table
+tests cover the error-fallback shapes and a >4MiB line. **P35.8**: exit-trace instrumentation for
+`aegis chat` (`internal/cli/chat.go`) after a live run once vanished mid-turn leaving nothing on
+disk — no panic, no signal record, no final answer. Three seams now log to `aegis.log`: a deferred
+`recover` writes the panic value + `debug.Stack()` before re-panicking (registered after the
+log-closer defer so LIFO ordering flushes the log before the file closes); the run context now comes
+from an extracted `installSignalCancel` helper that logs *which* signal fired (Ctrl-C or SIGTERM,
+portable) before cancelling, replacing a bare `signal.NotifyContext(os.Interrupt)` that recorded
+nothing; and "run starting"/"run finished" boundary markers bracket `eng.Run`, so a silent
+disappearance now shows as a start with no matching finish. The signal helper is unit-tested via a
+split-out `watchSignal` (no real OS signal needed). No behavior change beyond the panic re-raise.
+Earlier the same day: **P35.10 and P35.11 shipped**, closing out Tier 2. **P35.10**:
+`InputTokens` on the native-Ollama path is the tokens Ollama actually evaluated this turn
+(`prompt_eval_count`), which with P35.4 KV-cache residency is only the *newly appended* delta on a
+cache-hit turn (37 after turn 1's 3944, per P35.7) — the truthful "prefill work done" number, not
+the full prompt/context size. That shift in meaning was undocumented. A consumer audit over every
+`InputTokens` reader confirmed the billing/budget/work paths (`internal/cost`, engine run usage,
+turn traces, session totals, all `in=` displays) are correct under this meaning, and compaction
+already avoids it (the proactive check uses `conv.estimatedTokens()`, not usage). The one genuine
+"context size" consumer — the TUI's context-fullness bar (`renderContextBar`) — understates on a
+native-Ollama cache-hit turn; left as-is (display-only, no compaction/cost impact; a correct fix
+needs an estimated-context number the daemon doesn't yet surface to the UI) with the caveat
+documented at the call site, the mapping site (`internal/provider/ollama/ollama.go`), and the
+`Usage.InputTokens` doc (`internal/provider/provider.go`). No behavior change. **P35.11**:
+`probeProviderReachability` (`internal/server/provider_health.go`) fired a live Ollama
+`GET /api/version` on every `/status` poll; a 1-2s UI poll loop meant a steady upstream request
+stream for a value that changes rarely. The probe result (reachable + latency) is now cached for a
+3s window under a mutex, so a fast poll loop coalesces to at most one upstream request per window;
+the actual probe runs outside the lock (it can block on a 2s timeout), and a same-tick cold race
+just writes an equivalent entry. Tests (with an injected clock seam and a counting fake Ollama
+server) assert coalescing, expiry-triggered re-probe, and clean behavior under `-race` with 32
+concurrent callers. Earlier the same day: **P35.9 shipped**: the native-Ollama adapter's `translate()`
+(`internal/provider/ollama/ollama.go`) resolved tool-result names from a single ID→name map built
+over the *entire* message history, last write wins. Because `consume` mints tool-use IDs from a
+counter that resets every request (`tu_0`, `tu_1`, …), the same ID recurs across turns naming
+whatever tool was called first each time — a normal shape for a mixed-tool agentic run (e.g.
+read-file in turn 1, run-shell in turn 3, both minted as `tu_0`). That collision meant every
+earlier turn's tool result got silently relabeled with a later turn's tool name, both misleading
+the model about which tool produced which result and mutating the serialized prefix between
+requests — defeating Ollama's KV-cache prefix reuse (the fourth cache-invalidation candidate that
+P35.7's non-determinism sweep didn't catch, since it only checked same-index-same-tool runs).
+Fixed by resolving each `ToolResultBlock` against the nearest *preceding* `ToolUseBlock` in message
+order instead of a whole-history map — correct regardless of ID reuse, requires no change to ID
+minting, and repairs already-stored sessions with colliding IDs on next read. Regression test
+(`TestTranslateReusedToolIDsResolvePositionally`) covers both the mislabelling and a byte-stability
+assertion that turn 1's serialized prefix is unchanged by appending turn 2. Earlier the same day:
+**P35.7 live-confirmed**: a real `aegis chat` run against Ollama
 (`qwen3:14b`, resident via `keep_alive`) doing a STRIDE threat model of an external repo captured 8
 turns of `prompt_eval_count`/`prompt_eval_duration_ms`. Turn 2 needed only 37 new prefill tokens
 after turn 1's 3944 (103ms), and turns 5-8 held the same pattern as context grew from 17.6k to 19k
@@ -61,6 +116,128 @@ sources" refusal, which turned out to need two-way disambiguation rather than th
 its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearing the rest of Tier
 2 — njsscan's Windows traceback (a libsast bug, not the semgrep gap the item diagnosed) and
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P35.13 — `prompt_eval_count` is the full prompt count on current Ollama, not the cache-hit delta
+
+Filed 2026-07-18 from the first live telemetry run, which inverted an assumption P35.10 had baked
+into two package docs. On Ollama 0.30.10 (qwen3:14b), `prompt_eval_count` — and therefore
+`Usage.InputTokens` on the native path — is the **full** prompt/context size *every* turn, not the
+newly-appended prefill delta P35.10 claimed. Live evidence: an identical prompt sent twice to raw
+`/api/chat` returned the same full `prompt_eval_count` both times while `prompt_eval_duration`
+collapsed (84ms→24ms); a warm Aegis turn reported `prompt_eval_count=7195` in 86ms, which is
+impossible for real prefill — the prefix was a cache hit yet the full count was still reported.
+P35.10's cited "37 after turn 1's 3944" was a misread of the growth in the count (3981−3944) as
+the count itself. So `prompt_eval_duration` — not the count — is the only KV-cache-hit signal on
+this Ollama.
+
+Items 1 and 2 (the doc/comment corrections) shipped 2026-07-18: the `chunk.Done` block in
+`internal/provider/ollama/ollama.go`, the `Usage.InputTokens`/`Usage.PromptEvalDurationMS` docs in
+`internal/provider/provider.go`, and the P35.7 diagnostic comment in `internal/engine/engine.go`
+now describe full-count semantics and name duration (not count) as the cache signal, keeping a
+note that older Ollama versions may have reported deltas (version-dependent, so compaction keeps
+using `estimatedTokens` regardless). A related fix landed the same pass: `internal/cli/init.go`'s
+`--first-init` template now emits the native `default: ollama` adapter with a `context_window`
+guidance block instead of the legacy `default: openai` + `/v1` compat path the daemon warns
+against (guarded by an `inittmpl_verify_test.go` assertion).
+
+**Item 3 (the summed-token-surface decision) shipped 2026-07-19**, resolved as **"tokens
+processed"** and driven by the maintainer's priority that the figure be accurate as *cloud cost*.
+The roadmap's "overstates prefill work by the cache-hit factor" concern is a *local-compute*
+property with no cost consequence: a cloud provider re-sends and re-bills the growing conversation
+on every agentic turn, and prompt-cache reads are billed separately (tracked as
+`CacheReadTokens`/`CacheCreationTokens` and priced at the discounted rate in `internal/cost`), so
+summing per-turn `InputTokens` *is* the billable-input basis — the "prefill work done" alternative
+would have made the cloud-cost number wrong. No behavior change; the chosen meaning is now stated
+at each display surface: the `chatResult.InputTokens` JSON field and the text-trailer print site in
+`internal/cli/chat.go` (the trailer is already gated on `TotalUSD > 0`, so it only appears for a
+priced/cloud run), and the `StatusInfo.DailyTokens` doc in `internal/api/api.go`. Noted for a
+future item while here: sweep the SCA/secrets scanners for non-zero exit codes that mean "nothing
+to do" rather than "I broke" (the P35.6 question, which P34.6 only checked for language-targeted
+tools).
+
+### P35.10 — `InputTokens` on the native-Ollama path means "uncached prefill tokens", not "prompt size"
+
+Filed from the same P33.9-P35.7 native-Ollama code-review pass. With P35.4's `keep_alive` residency
+reusing the KV cache, Ollama's `prompt_eval_count` on a cache-hit turn counts only the *newly
+evaluated* prefill tokens (a P35.7 live run: 37 after turn 1's 3944), and the native adapter maps
+it straight into `usage.InputTokens`. That is arguably the truthful "prefill work done" number, but
+the shift in meaning from "full prompt size" was undocumented, and anything reading `InputTokens`
+as context size would be silently wrong on every cached turn.
+
+**Resolution:** documented the semantics rather than restructuring the data model (no new
+`provider.Usage` field), backed by a full audit of every `InputTokens` reader:
+
+- **Billing / budget / work-accounting** (`internal/cost` `CostUSD` and the `Tracker`, engine
+  per-run usage accumulation, the `prompt_eval_count` debug log) — **correct** under this meaning:
+  "work done" *is* the right number to bill and budget against.
+- **Displays** (per-turn traces, session token totals, every `in=`/`tokens` surface in the TUI and
+  `aegis chat`/`sessions`/`bg`/`worker`) — **truthful understatement**: they show work done, not
+  context size; no change.
+- **Compaction** — already safe: the proactive per-turn check (`internal/engine/engine.go`) uses
+  `conv.estimatedTokens()`, never usage. Confirmed in code.
+- **The one genuine "context size" consumer** — the TUI context-fullness bar (`renderContextBar`,
+  `internal/tui/tui.go`) divides `inputTokens (+cache)` by the context window, so it understates
+  fullness on a native-Ollama cache-hit turn. Left display-only as-is (no compaction/cost/budget
+  impact); a correct fix would need an estimated-context number the daemon doesn't currently
+  surface to the UI — out of scope for an effort-S item. Flagged as the sole follow-up candidate if
+  an accurate native-path fullness gauge is ever wanted.
+
+Comments added at the mapping site (`internal/provider/ollama/ollama.go`), the `Usage.InputTokens`
+doc (`internal/provider/provider.go`), and the context-bar call site (`internal/tui/tui.go`), each
+cross-referencing P35.10 and the existing `PromptEvalDurationMS` note. No behavior change.
+
+---
+
+### P35.11 — `/status` reachability probe live-hits Ollama on every poll
+
+Filed from the same review pass. `probeProviderReachability` (`internal/server/provider_health.go`)
+fired a live `GET /api/version` at the Ollama server on every `/status` request. Locally cheap, but
+the TUI/web UI poll `/status` at 1-2s, so a fast poll loop was a steady upstream request stream to
+Ollama for a reachability value that changes rarely.
+
+**Fix:** the probe result — both `reachable` and the measured `latencyMS` — is now cached for a 3s
+window (`reachCacheTTL`, chosen to sit just above the UI's poll cadence: coalesces a fast loop to
+one upstream request per window while still reflecting an up/down change within a poll or two). The
+cache lives on the `Server` struct next to the existing `toolCallWarned` probe cache, guarded by
+`reachCacheMu`. The fresh-check and the write both take the lock, but the actual probe runs
+*outside* it — holding the mutex across a 2s network timeout would serialize every concurrent
+`/status` behind one slow probe; a same-tick cold race where two callers both probe just writes an
+equivalent fresh entry and coalesces thereafter. A `reachNow` clock seam (nil ⇒ `time.Now`) lets
+tests drive expiry deterministically. Regression tests (`internal/server/provider_health_test.go`)
+use a counting fake Ollama `httptest` server to assert: five polls after a warm-up hit Ollama
+exactly once; advancing the clock past the TTL forces one re-probe per window; and 32 concurrent
+callers against a warm cache add zero upstream hits — the last under `-race`.
+
+---
+
+### P35.9 — Native-Ollama tool-call IDs collide across turns: wrong `tool_name` on replayed results + KV-cache churn
+
+Filed from a code-review pass over the whole P33.9-P35.7 native-Ollama body of work. `consume`
+mints tool-use IDs from a counter that resets on every request, so an assistant turn's first tool
+call is always `tu_0`, its second always `tu_1`, regardless of which turn it's in. `translate`'s
+`toolNames` helper prebuilt a single ID→name map over the entire message history before emitting
+any wire messages, so a later turn's `tu_0` (say, `run_shell`) silently overwrote an earlier turn's
+`tu_0` (say, `read_file`) in that map — and every already-emitted-looking-up-later tool-result
+message for the earlier turn resolved against the *last* writer, not the one that actually produced
+it. Two consequences: the model sees tool results attributed to the wrong tool (a silent quality
+regression on exactly the multi-tool agentic runs the local-model work targets), and the label
+change mutates the serialized prompt bytes for the earlier turn between requests, killing Ollama's
+prefix cache at the first changed byte — a full reprocess of the whole conversation on the very
+mixed-tool runs P35.4's `keep_alive` residency was meant to speed up.
+
+**Fix:** `translate` now walks messages once, updating the ID→name map as `ToolUseBlock`s are
+encountered and resolving each `ToolResultBlock` against the nearest *preceding* use, instead of
+building the map ahead of time over the whole history. This is correct independent of ID reuse (no
+change to how `consume` mints IDs was needed), and — because it's applied at translate time rather
+than at storage time — it also repairs sessions that already have colliding IDs persisted from
+before the fix. Regression test `TestTranslateReusedToolIDsResolvePositionally`
+(`internal/provider/ollama/ollama_test.go`) covers a two-turn fixture where turn 1 calls
+`read_file` and turn 2 calls `run_shell`, both minted as `tu_0`: asserts turn 1's result keeps
+`tool_name: read_file`, and asserts byte-for-byte that serializing turn 1's prefix alone is
+identical to the first two wire messages of the full four-message translation — the property
+Ollama's prefix cache actually depends on.
 
 ---
 
