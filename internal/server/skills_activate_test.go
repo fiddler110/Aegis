@@ -68,7 +68,7 @@ func TestActivateSkill_UnknownName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := cl.ActivateSkill(ctx, meta.ID, "not-a-real-skill"); err == nil {
+	if _, err := cl.ActivateSkill(ctx, meta.ID, "not-a-real-skill"); err == nil {
 		t.Fatal("expected an error activating an unknown skill name")
 	}
 }
@@ -95,7 +95,7 @@ func TestActivateSkill_DormantUntilActivated(t *testing.T) {
 		t.Fatal("expected the skill tool to reject a dormant skill before activation")
 	}
 
-	if err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
+	if _, err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
 		t.Fatalf("ActivateSkill: %v", err)
 	}
 
@@ -125,6 +125,28 @@ func TestActivateSkill_DormantUntilActivated(t *testing.T) {
 	}
 }
 
+// TestActivateSkill_ReturnsSkillBody covers P36.1: activation hands the
+// just-loaded skill body back to the caller so a slash command can prepend it
+// deterministically to its message, instead of relying on the model calling
+// the `skill` tool to fetch the top-level instructions itself.
+func TestActivateSkill_ReturnsSkillBody(t *testing.T) {
+	cl, _, cleanup := newSkillTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	body, err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling")
+	if err != nil {
+		t.Fatalf("ActivateSkill: %v", err)
+	}
+	if !strings.Contains(body, "STRIDE") {
+		t.Errorf("expected the returned skill body to mention STRIDE, got:\n%s", body)
+	}
+}
+
 // TestActivateSkill_MaterializesIntoProjectWorkdir covers the fix: session-
 // scoped activation (the path /threat-model and friends use) must
 // materialize the builtin's files into the session's own project workdir,
@@ -141,7 +163,7 @@ func TestActivateSkill_MaterializesIntoProjectWorkdir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
+	if _, err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
 		t.Fatalf("ActivateSkill: %v", err)
 	}
 
@@ -166,7 +188,7 @@ func TestActivateSkill_RepeatedActivationDoesNotRewriteUnchangedFiles(t *testing
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
+	if _, err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
 		t.Fatalf("ActivateSkill: %v", err)
 	}
 	asset := filepath.Join(workdir, ".aegis", "builtin-skills", "threat-modeling", "references", "stride.md")
@@ -175,7 +197,7 @@ func TestActivateSkill_RepeatedActivationDoesNotRewriteUnchangedFiles(t *testing
 		t.Fatal(err)
 	}
 
-	if err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
+	if _, err := cl.ActivateSkill(ctx, meta.ID, "threat-modeling"); err != nil {
 		t.Fatalf("second ActivateSkill: %v", err)
 	}
 	info2, err := os.Stat(asset)

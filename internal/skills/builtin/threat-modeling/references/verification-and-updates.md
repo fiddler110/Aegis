@@ -65,27 +65,59 @@ last time":
    timestamped directory; the old one remains the artifact this run was
    diffed against.
 
-## Sub-agent governance (when delegating exploration or verification)
+An update run uses the **same phased orchestration** as a fresh run
+(SKILL.md §4.2), with the baseline threaded in: the top-level run locates the
+baseline (step 1) and reads its `inventory.yaml`, then passes the baseline's
+component and threat IDs into phase 1's prompt so those IDs are reused rather
+than reinvented (the ID-stability rules above). Phase 3 verifies each
+baseline threat against the current code and assigns new threats the next
+free IDs; phase 5 adds the `## Changes Since Baseline` section and writes the
+`baseline` block and per-threat `change_status`. The terse-identifier
+contract between phases is unchanged — the baseline IDs are exactly the kind
+of stable identifier that is meant to cross a phase boundary.
 
-A threat model run can legitimately delegate narrow, read-only work to the
-`agent` tool — searching for auth-related code across a large tree, or
-running the final self-check below with a fresh context window once the
-suite is written. Two rules keep that delegation from turning into
-duplicated or inconsistent work:
+## Phased-orchestration governance
 
-- **Only the orchestrating run writes report files.** Every `write_file` /
-  `edit_file` call against `.aegis/security/threat-model/<dir>/` happens in
-  the top-level run, never inside a delegated sub-agent — a sub-agent that
-  independently writes `0.1-architecture.md` produces content the parent
-  never reviewed against the rest of the suite.
-- **Sub-agent prompts are narrow and read-only.** "Read these files and
-  return a table of every function that handles credentials" is a good
-  delegation; "analyze this codebase and write the threat model" is not —
-  the latter causes the sub-agent to redo the whole run with no visibility
-  into decisions (framework choice, component anchors, deployment
-  classification) the parent already made. This is the same narrowing
-  discipline the `debate` step in SKILL.md §5 already applies to the
-  arbiter call — extend it to any other delegation, not just debate.
+SKILL.md §4.2 builds the suite as a sequence of isolated build sub-agents —
+one `agent` call with `mode:"sequential"`, one phase per file (or file
+group), each running in a fresh context that unloads when it returns. This is
+a deliberate change from an earlier design in which only the top-level run
+wrote files: peak context per request, not who holds the pen, is what kills a
+local-model run, and phasing bounds that peak by never carrying one phase's
+reads or writes into the next. The rules that keep distributed writes
+consistent are therefore different — and stricter about *what crosses phase
+boundaries* — not about *who writes*:
+
+- **Report files are written by the phase that owns them, and only that
+  phase.** Phase 1 owns `0.1-architecture.md`, phase 2 the model files, phase
+  3 `2-<framework>-analysis.md`, and so on (SKILL.md §4.2's table). A phase
+  never writes a file another phase owns; the phase-6 review round is the
+  only step that edits across all files, and it only reconciles seams, it
+  does not author new content.
+- **Only stable identifiers cross a phase boundary — never file content.**
+  Each phase's final answer is the *sole* thing threaded into the next
+  phase's context, so it must be a terse list of the identifiers the next
+  phase needs (component names + anchors, `DF##` ids, threat IDs with their
+  category/prerequisite/tier/severity) — never the file's prose or tables,
+  which are already on disk. A verbose final answer reintroduces the same
+  context bloat one phase down; this is the contract SKILL.md §4.2 marks as
+  its single most important detail.
+- **Handing the exact prior identifiers forward is what enforces
+  consistency.** Because phase N+1 is grounded in phase N's verbatim
+  names/ids, no phase can invent a divergent component name or threat id.
+  What that grounding cannot catch — a name a later phase still drifts on, a
+  `DF##` referenced but never defined, a count that disagrees — is caught by
+  the phase-6 review round re-reading the complete suite fresh from disk and
+  fixing it in place (SKILL.md §5). That review round is mandatory precisely
+  because writes are now distributed across contexts that never saw each
+  other.
+- **Any *additional* delegation is narrow and read-only.** Delegating extra
+  work beyond the six phases (searching for auth-related code across a large
+  tree, for instance) is fine, but keep it narrow and read-only —
+  "return a table of every function that handles credentials", never
+  "analyze this codebase and write the threat model". The same narrowing
+  discipline the `debate` step in SKILL.md §5 applies to the arbiter call
+  extends to any such helper.
 
 ## Final self-check
 
