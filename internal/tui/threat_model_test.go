@@ -40,6 +40,45 @@ func TestExtractThreatModelFramework(t *testing.T) {
 	}
 }
 
+// TestSkillTaskMessagePrependsBody covers the P36.1 deterministic inject: when
+// a skill-triggering slash command has the skill's body in hand (returned by
+// ActivateSkill), skillTaskMessage prepends it in a delimited <skill> block so
+// the model gets the full top-level instructions up front, with the original
+// task still present after it — rather than naming the skill and relying on a
+// `skill` tool round-trip a small local model may skip.
+func TestSkillTaskMessagePrependsBody(t *testing.T) {
+	body := "## Threat modeling\nUse the STRIDE-A method and explore the real workspace."
+	task := "Load the threat-modeling skill and produce a threat model for the auth service."
+	msg := skillTaskMessage("threat-modeling", body, task)
+
+	if !strings.Contains(msg, "STRIDE-A method") {
+		t.Errorf("expected the injected skill body in the message, got: %q", msg)
+	}
+	if !strings.Contains(msg, `<skill name="threat-modeling">`) {
+		t.Errorf("expected the body wrapped in a delimited <skill> block, got: %q", msg)
+	}
+	if !strings.Contains(msg, task) {
+		t.Errorf("expected the original task to still be present, got: %q", msg)
+	}
+	if strings.Index(msg, "STRIDE-A method") > strings.Index(msg, task) {
+		t.Errorf("expected the skill body to be prepended before the task, got: %q", msg)
+	}
+}
+
+// TestSkillTaskMessageDegradesWithoutBody checks the graceful fallback: when
+// the skill body couldn't be loaded (empty), the message is exactly today's
+// name-only task text, so a load failure never hard-errors or produces an
+// empty/half block.
+func TestSkillTaskMessageDegradesWithoutBody(t *testing.T) {
+	task := "Load the threat-modeling skill and produce a threat model."
+	if got := skillTaskMessage("threat-modeling", "", task); got != task {
+		t.Errorf("expected name-only fallback equal to the task, got: %q", got)
+	}
+	if got := skillTaskMessage("threat-modeling", "   \n  ", task); got != task {
+		t.Errorf("expected blank body to fall back to the task, got: %q", got)
+	}
+}
+
 func TestCmdThreatModelUsesGivenFramework(t *testing.T) {
 	d := NewSlashDispatcher(nil, "sess", "build", "test-model", "")
 	res := d.Dispatch(&commands.ParsedCommand{Name: "threat-model", Args: []string{"PASTA", "the", "auth", "service"}})

@@ -64,7 +64,10 @@ improvise one from a process description alone.
 
 ## 2. Explore the workspace before modeling
 
-Never model an assumed architecture. Before applying any framework:
+This exploration happens **inside the architecture phase (phase 1 of §4.2)**,
+not the top-level run — and the bounded-read discipline below is what keeps
+that phase's peak context small enough to survive a local model. Never model
+an assumed architecture. Before applying any framework:
 
 1. Explore the workspace: list directories, read entry points, config,
    auth/authz code, network-facing handlers, and data-access layers.
@@ -126,7 +129,7 @@ the whole suite its credibility. Before writing any "missing X" threat:
   a setting. A threat you cannot evidence goes in `0-assessment.md`'s
   "Needs Verification" table, not the threat table.
 
-## 4. Build the seven-file suite, writing as you go
+## 4. Build the suite as isolated phases
 
 Every run produces the same seven files, in the same directory, regardless
 of framework — the file list, naming, and directory convention are in
@@ -135,104 +138,157 @@ after a partial pass — populate every category/stage/cell the chosen
 framework defines, even ones with no findings ("none identified" is a valid,
 complete entry; a missing cell is not).
 
-**Write incrementally, never all-at-once at the end.** A threat model is a
-long task; holding the whole analysis in conversation until one final batch
-of writes means an interrupted run — context exhaustion on a local model, a
-step limit, a crash — loses everything. Instead:
+**A threat model that runs as one ever-growing conversation accumulates
+every reference file, every workspace read, and every written report's
+content in a single context.** On a local model that peak context is what
+kills the run: a large prefill can blow the model server's response-header
+timeout before a single file is written. The fix is structural — **build the
+suite as a sequence of isolated phases, each in its own throwaway context,
+passing forward only short structured identifiers, never file content,
+because the content is already durably on disk.** What changes from a naive
+run is only *where* each file is filled: not in this top-level run's context,
+but in a delegated build sub-agent that loads only that phase's inputs and
+unloads when it returns.
 
-### 4.1 Skeleton stubs for all seven files
+### 4.1 Top-level setup (this run)
 
-Create the directory
-`.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>/` and
-`write_file` a stub for **all seven files** before filling any of them:
-`0-assessment.md`, `0.1-architecture.md`, `1.1-model.mmd`, `1-model.md`,
-`2-<framework>-analysis.md`, `3-findings.md`, `inventory.yaml` — each with
-its top-level headings from `output-formats.md` (or
-`skeletons/skeleton-<framework>.md` for the framework-analysis file) and
-`<!-- PENDING -->` under every section.
+Do only the cheap, decision-bearing setup here, then delegate the heavy work.
+Keep this run's own context small — do **not** explore the workspace or read
+framework skeletons here; each phase reads what it needs in its own context.
 
-The `<target>` slug is **mandatory, never omitted**: use the scoped
-feature/system name when the model covers one (`webui`, `auth-service`), or
-the repo/workspace directory name when it covers the whole project
-(`aegis`) — a reader scanning `.aegis/security/threat-model/` must be able
-to tell what each directory modeled without opening it. The
-`<YYYY-MM-DD-HHMM>` timestamp (local time, 24h, dash-separated — e.g.
-`stride-aegis-2026-07-08-1432`) is what keeps two same-day runs from
-colliding; a date alone isn't enough since a full run plus an update can
-both land on one day.
+1. Framework is already chosen (§1). Decide the `<target>` slug and the
+   `<YYYY-MM-DD-HHMM>` timestamp (local time, 24h, dash-separated — get it
+   from the `shell` `date` command, never guess it), and create the directory
+   `.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>/`.
 
-### 4.2 Fill in dependency order
+   The `<target>` slug is **mandatory, never omitted**: use the scoped
+   feature/system name when the model covers one (`webui`, `auth-service`),
+   or the repo/workspace directory name when it covers the whole project
+   (`aegis`) — a reader scanning `.aegis/security/threat-model/` must be able
+   to tell what each directory modeled without opening it. The timestamp
+   (e.g. `stride-aegis-2026-07-08-1432`) keeps two same-day runs from
+   colliding; a date alone isn't enough since a full run plus an update can
+   both land on one day.
 
-Files depend on each other — fill them in this order, replacing that file's
-`<!-- PENDING -->` markers with real content section by section as each
-section's analysis completes, per that file's template in
-`output-formats.md` (or the framework skeleton for step 3 below):
-
-1. **`0.1-architecture.md`** first — everything downstream cites its
-   component names, anchors, and Component Exposure Table.
-2. **`1.1-model.mmd` then `1-model.md`** — the diagram and its tables reuse
-   `0.1-architecture.md`'s exact component names (`diagram-conventions.md`
-   for the Mermaid conventions).
-3. **`2-<framework>-analysis.md`** — read
-   `references/skeletons/skeleton-<framework>.md` first, and copy its
-   structure exactly, same columns, same order, same fixed value lists
-   (prerequisite, tier, severity, deployment classification). Run the
-   skeleton's inline `<!-- ⛔ POST-*-CHECK -->` comments right after writing
-   each table — they travel with the copied content and are invisible once
-   rendered, but skipping them is how column drift and missing cells
-   happen.
-4. **`3-findings.md`** — every threat with a non-empty mitigation column in
-   step 3 becomes a finding here, with tier, CVSS 4.0, CWE, and OWASP per
-   `output-formats.md`'s mandatory-fields table (and its per-framework
-   applicability notes — not every framework's threats map to CVSS/CWE the
-   same way). Run the Threat Coverage Verification loop before moving on.
-5. **`0-assessment.md`** last — its counts and links depend on every file
-   above being complete.
-6. **`inventory.yaml`** — the sidecar, per
-   `references/skeletons/skeleton-inventory.md`.
-
-Do not batch several finished sections in memory — the files on disk are
-the working state, and once a section is written you no longer need to keep
-its details in the conversation (this is what lets a long run survive
-context compaction).
-
-**Resume, don't restart.** If the target directory already exists and any
-file still contains `<!-- PENDING -->` markers, a previous run was
-interrupted: re-read what's there, keep every completed section, and
-continue from the first pending one, in the dependency order above. Only
-the final §5 review round re-examines completed sections.
+2. `write_file` a `<!-- PENDING -->` stub for **all seven files** before
+   delegating any of them: `0-assessment.md`, `0.1-architecture.md`,
+   `1.1-model.mmd`, `1-model.md`, `2-<framework>-analysis.md`,
+   `3-findings.md`, `inventory.yaml` — each with just a top-level heading and
+   `<!-- PENDING -->`. The phase that fills a file overwrites its stub with
+   the exact skeleton, so these stubs need no real structure; they exist so a
+   crash leaves a resumable, self-describing directory (§4.2 "Resume").
 
 Never delete or overwrite a *prior dated run directory* — an update is a new
 directory, and the old one is the baseline it was diffed against (editing
-today's own in-progress directory is, of course, the normal flow above).
+today's own in-progress directory is, of course, the normal flow).
 
-Three cross-framework rules while filling the template:
+### 4.2 Delegate the build to isolated phases, in dependency order
 
-- **Every threat states its prerequisite** (what access the attacker
-  already needs: none / authenticated user / internal network / local
-  process / host compromise), and no prerequisite may sit below the
-  deployment classification's floor from §2, or the derived tier
-  (`output-formats.md`) will be wrong.
+Issue **one** `agent` tool call with `mode: "sequential"` and an `agents`
+array — one entry per phase, `subagent_type: "build"` for **every** entry
+(each phase writes files, so it needs write access; a plan-mode session
+cannot run this skill, same as today). The sequential workflow runs each
+phase in a fresh, isolated context and threads **only the prior phase's final
+text answer** forward into the next phase's prompt — a real context unload,
+so phase N never carries phase N-1's reads or writes.
+
+Each phase entry's `prompt` must state explicitly: the output directory path
+and framework; which reference file(s) to read (**only its own**); which
+file(s) it owns and must fill; and — verbatim — the terse-final-answer
+contract below.
+
+**⛔ The terse-final-answer contract — the single most important detail.**
+Every phase's final answer is prepended verbatim to the next phase's prompt
+(that is how the sequential workflow threads context). A phase that ends by
+dumping its file's content, or re-narrating the threats it just wrote,
+reinjects exactly the bloat this design exists to remove — one level down,
+into every later phase. So end **every** phase prompt with this instruction:
+
+> *Your files on disk are the deliverable. Your final answer must be ONLY a
+> terse structured list of the stable identifiers the next phase needs —
+> component names and anchors, `DF##` ids, threat IDs with their (component,
+> category, prerequisite, tier, severity) — never the file's prose or table
+> content. Keep it under ~40 lines.*
+
+The phases, in the dependency order of the file suite:
+
+| # | Phase | Reads (only this, plus prior files from disk) | Owns / fills | Returns (terse identifiers only) |
+|---|---|---|---|---|
+| 1 | Architecture | `output-formats.md`; the workspace (§2 exploration + §3 evidence rules) | `0.1-architecture.md` | component names + types + anchors; deployment classification; each component's exposure floor; security-infra component names |
+| 2 | Model / DFD | `diagram-conventions.md`; `0.1-architecture.md` | `1.1-model.mmd`, `1-model.md` | element names; `DF##` ids with source→target; trust-boundary names |
+| 3 | Framework analysis | `skeletons/skeleton-<framework>.md`, the framework reference (`stride.md`/etc.), `companion-techniques.md`; `0.1-architecture.md`, `1-model.md` | `2-<framework>-analysis.md` | every threat ID with (component, category, prerequisite, tier, severity, has-mitigation) |
+| 4 | Findings | `output-formats.md` (findings section); `2-<framework>-analysis.md`, `0.1-architecture.md`'s exposure table | `3-findings.md` | `FIND-##` ids with (threat IDs covered, tier, severity) |
+| 5 | Assessment + inventory | `output-formats.md` (assessment section), `skeletons/skeleton-inventory.md`; all prior files | `0-assessment.md`, `inventory.yaml` | tier/threat/finding counts; confirmation both written |
+| 6 | Review round (§5) | the **complete** suite, fresh from disk | edits in place across all files | seams fixed; final self-check pass/fail |
+
+Phase 3 must **copy the skeleton structure exactly** (same columns, same
+order, same fixed value lists) and run its inline `<!-- ⛔ POST-*-CHECK -->`
+comments right after writing each table, and **run the technology sweep** in
+`companion-techniques.md` — the same rules as before, now inside that phase's
+context. Phase 4 runs the Threat Coverage Verification loop. Phase 5 recounts
+from the finished files, never carrying a stale mid-analysis number.
+
+Grounding each phase in the prior phase's exact identifiers (threaded as the
+sequential workflow's forwarded context) is what keeps names from diverging
+across files — phase 2 gets phase 1's verbatim component names, phase 3 gets
+phase 2's `DF##` ids, and so on, so no phase can invent a divergent name.
+Together with the phase-6 review round re-reading the whole suite from disk,
+this replaces the old "only the top-level run writes files" rule
+(`references/verification-and-updates.md`, revised for this design).
+
+**Within a phase, still write incrementally, never all-at-once.** The files
+on disk are the working state. This matters most in phase 3: `write_file` the
+skeleton stub, then `edit_file` **one component/section at a time**, so the
+phase's own context never has to hold every section it already wrote — that
+is what bounds even a large analysis file's peak context, the failure mode
+this whole restructure targets.
+
+**Resume, don't restart.** If the target directory already exists and any
+file still contains `<!-- PENDING -->` markers, a previous run was
+interrupted. Re-run the same sequential workflow: each phase must first check
+whether its own file is already complete and free of `<!-- PENDING -->`, and
+if so return its identifiers from a quick re-read without rewriting, so the
+run continues from the first unfinished phase in dependency order.
+
+Two cross-framework rules every phase enforces while filling the template:
+
+- **Every threat states its prerequisite** (none / authenticated user /
+  internal network / local process / host compromise), and no prerequisite
+  may sit below the deployment classification's floor from §2, or the derived
+  tier (`output-formats.md`) will be wrong.
 - **Risk acceptance is not yours to make.** Never mark a threat "accepted
-  risk" on your own authority — an unmitigated threat is an open finding
-  with a proposed mitigation, and accepting it is the owning team's
-  decision (Trike formalizes exactly this; see its reference).
-- **Run the technology sweep** in `references/companion-techniques.md`
-  after the framework pass — it catches cross-cutting gaps (database auth
-  defaults, containers running as root, secrets reaching external LLMs)
-  that a per-element pass tends to miss.
+  risk" on your own authority — an unmitigated threat is an open finding with
+  a proposed mitigation, and accepting it is the owning team's decision
+  (Trike formalizes exactly this; see its reference).
 
 If the ask also touches attacker realism, backlog integration, or
-Agile-native framing, check `references/companion-techniques.md` for Attack
-Trees, MITRE ATT&CK mapping, and Evil User Stories — optional add-ons layered
-on top of the chosen primary framework, not replacements for it.
+Agile-native framing, phase 3 should also pull Attack Trees, MITRE ATT&CK
+mapping, or Evil User Stories from `references/companion-techniques.md` —
+optional add-ons layered on top of the chosen primary framework, not
+replacements for it.
+
+**Time budget.** The sequential workflow shares one deadline of roughly
+`10 min × (phases + 1)` across all phases — about **70 minutes** of
+wall-clock for the six phases above — drawn from a shared pool, not a hard
+per-phase cap, so a slow phase (the framework-analysis phase writing a large
+file on local hardware) can run well past 10 minutes as long as the whole run
+fits the pool. If a target is large enough that one phase would still
+dominate, **split that phase** — e.g. give the framework analysis two entries,
+one per subsystem — which both lowers that phase's peak context *and raises*
+the shared pool (the deadline grows with phase count). If the pool is
+exhausted mid-run, the completed phases' files are already on disk; a
+follow-up "continue the threat model" run resumes from the pending markers.
 
 ## 5. Final review round — consistency, then debate (P12) when enabled
 
-After every file's `<!-- PENDING -->` markers are gone, re-read the
-**complete suite from disk** and review it as a whole — the files were
-written one at a time, each depending on the last, so this is where seams
-show:
+This is **phase 6** of §4.2 — the last entry in the sequential `agents`
+array, run in its own fresh context. Because the earlier phases each wrote
+their files in an isolated context that has since unloaded, this phase is the
+one place the whole suite is seen together. After every file's
+`<!-- PENDING -->` markers are gone, re-read the **complete suite from disk**
+and review it as a whole — the files were written one phase at a time, each
+grounded only in the last phase's forwarded identifiers, so this is where
+seams show:
 
 - Component names and threat IDs are consistent across all seven files; no
   file refers to a component another file renamed or dropped.
@@ -250,21 +306,23 @@ Then, if your system prompt's "Debate mode (P12)" section marks threat
 modeling enabled, route the **contested entries** — high-severity threats
 and any whose severity or mitigation is genuinely arguable — through the
 `agent` tool's `mode:"debate"`, with `claim` set to the threat description,
-severity, and proposed mitigation. Patch the arbiter's verdict back into
-`2-<framework>-analysis.md` and `3-findings.md`: adjust severity/mitigation
-per a REVISE verdict, drop the entry per a REJECT verdict, keep it as-is per
-UPHOLD. Skip clear-cut, uncontroversial entries. Debating at the end, over
-the assembled suite, both keeps a long run from stalling mid-analysis and
-lets the debaters see each threat in the context of the whole model rather
-than in isolation.
+severity, and proposed mitigation. This phase is itself a build sub-agent and
+has the `agent` tool, so it runs the debate directly and patches the
+arbiter's verdict back into `2-<framework>-analysis.md` and `3-findings.md`:
+adjust severity/mitigation per a REVISE verdict, drop the entry per a REJECT
+verdict, keep it as-is per UPHOLD. (At the normal slash-command invocation
+this run is depth 0, phase 6 is depth 1, and its debate roles are depth 2 —
+within the depth-3 spawn ceiling.) Skip clear-cut, uncontroversial entries.
+Debating here, over the assembled suite, lets the debaters see each threat in
+the context of the whole model rather than in isolation.
 
 ## 6. Self-check, inventory, and updates
 
 Read `references/verification-and-updates.md` before finishing. It covers
-four things: **sub-agent governance** (if any exploration or verification
-was delegated to the `agent` tool, only the top-level run writes report
-files — a sub-agent is a narrow, read-only helper, never an independent
-producer of `0.1-architecture.md` or any other suite file), the **inventory
+four things: **phased-orchestration governance** (each phase owns specific
+files and returns only stable identifiers, and consistency is guaranteed by
+threading those identifiers forward plus the phase-6 review round re-reading
+the whole suite — the revised rule for §4.2's design), the **inventory
 sidecar** (`inventory.yaml`, with stable component/threat IDs so a future
 run can diff against this one), the **update workflow** for when the ask is
 "update/refresh the threat model" or "what changed since last time" (locate
@@ -277,15 +335,18 @@ fails before reporting).
 
 ## 7. Report
 
-The directory in `.aegis/security/threat-model/` (built incrementally per
-§4) is the deliverable — a chat-only summary is not a complete threat
+The directory in `.aegis/security/threat-model/` (built by the phases in
+§4.2) is the deliverable — a chat-only summary is not a complete threat
 model, since the whole point is a navigable suite mitigations can be
-tracked against. State which framework was used (and why, if inferred
-rather than requested) and the deployment classification up front — both
-also belong in `0-assessment.md`'s Executive Summary. The task is done only
-when no `<!-- PENDING -->` marker remains in any of the seven files, the §5
-review round has run over the assembled suite, the final self-check passes,
-and `inventory.yaml` exists and agrees with the documents. If the run must
+tracked against. Write this report in the top-level run, after the sequential
+workflow returns (its combined terse phase summaries are all you need — the
+file content is on disk, not in this run's context). State which framework
+was used (and why, if inferred rather than requested) and the deployment
+classification up front — both also belong in `0-assessment.md`'s Executive
+Summary. The task is done only when no `<!-- PENDING -->` marker remains in
+any of the seven files, the §5 review round (phase 6) has run over the
+assembled suite, the final self-check passes, and `inventory.yaml` exists and
+agrees with the documents. If the run must
 stop early anyway (step limit, context pressure), say plainly which files
 are complete on disk and that a follow-up "continue the threat model" run
 will resume from the pending markers, in the dependency order from §4.2.

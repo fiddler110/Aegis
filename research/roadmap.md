@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-19 (P35.1-P35.13 shipped; P35.13 closed by resolving its summed-token-surface decision)
+**Last updated:** 2026-07-19 (P36.1, P36.2, P36.3 shipped; P35.1-P35.13 shipped)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,7 +11,24 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 — the parked item **P25.9** (Tier 4). **P35.13** shipped 2026-07-19: its
+**Open items:** 1 — the parked item **P25.9** (Tier 4). The whole **P36.1-P36.3** batch shipped
+2026-07-19, all filed the same day from a `/threat-model stride` dogfooding session against this repo
+on a local-model (Ollama) setup, with one shared **live-verification debt** carried forward (see the
+note under Tier 3 — the batch landed without an Ollama server available to confirm the token-growth
+and peak-context wins live).
+
+**P36.1-P36.3 shipped 2026-07-19** (see [releases.md](releases.md#latest-changes)). **P36.1** (Tier 1)
+— the model skipped the `skill` tool call entirely, wandered into a plain directory listing of the
+just-materialized `.aegis/skills/threat-modeling/` folder, and lost the original instruction; fixed by
+making the initial skill-body load deterministic (slash commands now inject the body server-side
+instead of relying on a tool round-trip). **P36.2** (Tier 3) — the per-turn context-growth question
+P35.5 explicitly scoped out is now addressed: `write_file`/`edit_file` payloads and one-time
+skill-reference reads are pruned by `compaction.pruneStaleToolResults` in the pre-`keepRecent` prefix.
+**P36.3** (Tier 3) — the threat-modeling skill's build stages are now phased through the `agent` tool's
+`mode: "sequential"` workflow (each phase in a fresh, isolated sub-agent context, only terse stable
+identifiers threaded forward) instead of one long-lived, ever-growing run, bounding peak context per
+request on local models. **P35.13**
+shipped 2026-07-19: its
 doc/comment corrections and the `--first-init` native-adapter default landed 2026-07-18, and its
 final open piece — the summed-token-surface decision — was resolved 2026-07-19 as "tokens
 processed" (the correct cloud-cost basis; see Tier 2 below). **P35.12** shipped 2026-07-18 (native-Ollama
@@ -101,7 +118,8 @@ shipped 2026-07-18.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open. (P35.9 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
+**Status:** 0 open. (P36.1 shipped 2026-07-19 — see [releases.md](releases.md#latest-changes);
+P35.9 shipped 2026-07-18;
 P35.5 shipped 2026-07-18; P35.1, P35.2 shipped 2026-07-18; P33.1 and P33.2 shipped 2026-07-15;
 P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
 
@@ -123,14 +141,32 @@ P34.6 checked the _language_-targeted tools; nothing has swept the SCA/secrets t
 exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading yet — filed here
 as a lead so the status script doesn't treat it as active work.
 
+**Note (future item, not yet filed):** P36.2's write/edit Input-pruning rule covers `write_file` and
+`edit_file` but not `multi_edit`, whose nested `edits[]` array (each with `old_string`/`new_string`)
+also embeds verbatim file content that survives unpruned. Extending `pruneWriteEditInput` to the
+array shape is a mechanical follow-up. No `### P<n>.<m>` heading yet — lead only.
+
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 0 open. (P35.7 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
+**Status:** 0 open. (P36.3 shipped 2026-07-19 — see [releases.md](releases.md#latest-changes);
+P36.2 shipped 2026-07-19;
+P35.7 shipped 2026-07-18;
 P35.4 shipped 2026-07-18; P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17;
 P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, shipped
 2026-07-16.)
+
+> **Live-verification debt (P36.1-P36.3):** the P36 batch shipped without a live local-model run —
+> no Ollama server was available the session it landed. Three things still need a real
+> `/threat-model stride` run on the doctor-recommended native-Ollama setup to confirm: (a) P36.2's
+> pruning actually reduces measured `prompt_eval_count` growth turn-over-turn (P35.7
+> instrumentation); (b) P36.3's phased restructure keeps peak input context per request under the
+> native adapter's response-header timeout (the P35.5-P35.9 failure was at ~62k tokens); and (c) the
+> phased skill's terse-final-answer contract holds under a small local model — it's prose, not
+> code-enforced, so a phase that dumps content instead of identifiers would silently reintroduce the
+> bloat one level down. File a fresh `### P<n>.<m>` item only if a live run shows any of these
+> regressed; otherwise this is a verification task, not open design work.
 
 ---
 

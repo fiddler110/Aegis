@@ -503,8 +503,16 @@ func (c *Client) AppendMemory(ctx context.Context, req api.AppendMemoryRequest) 
 // ActivateSkill enables a dormant embedded built-in skill for this session
 // only, effective immediately (no daemon restart, no config write) — used by
 // slash commands like /threat-model that invoke a specific skill on demand.
-func (c *Client) ActivateSkill(ctx context.Context, sessionID, name string) error {
-	return c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/skills/activate", api.ActivateSkillRequest{Name: name}, nil)
+// Returns the skill's full body so the caller can prepend those top-level
+// instructions to the message it sends rather than relying on the model to
+// fetch them via the `skill` tool (P36.1); the body is empty when it couldn't
+// be loaded (activation still succeeded).
+func (c *Client) ActivateSkill(ctx context.Context, sessionID, name string) (string, error) {
+	var out api.ActivateSkillResponse
+	if err := c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/skills/activate", api.ActivateSkillRequest{Name: name}, &out); err != nil {
+		return "", err
+	}
+	return out.Content, nil
 }
 
 // ListPersonas returns available persona names and descriptions.

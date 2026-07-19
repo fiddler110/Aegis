@@ -280,6 +280,17 @@ type ActivateSkillRequest struct {
 	Name string `json:"name"`
 }
 
+// ActivateSkillResponse returns the loaded skill's full body so a caller that
+// activated it (e.g. a /threat-model slash command) can deterministically
+// prepend those top-level instructions to the message it sends, instead of
+// naming the skill and hoping the model calls the `skill` tool to fetch them
+// itself — a round-trip small local models were observed to skip (P36.1).
+// Content is empty when the body couldn't be loaded (activation still
+// succeeded); the caller falls back to its name-only prompt.
+type ActivateSkillResponse struct {
+	Content string `json:"content"`
+}
+
 // PersonaInfo describes an available persona.
 type PersonaInfo struct {
 	Name        string `json:"name"`

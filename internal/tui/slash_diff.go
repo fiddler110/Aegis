@@ -156,7 +156,8 @@ func (d *SlashDispatcher) cmdReview(args []string) SlashResult {
 	}
 	prompt.WriteString("\nRead whatever surrounding code, tests, or history the skill's ground-truth step calls for — don't limit yourself to the diff hunks. Report the ranked findings summary in chat per the skill's format.")
 
-	res := SlashResult{Message: prompt.String(), Output: d.activateSkill("content-review")}
+	body, warn := d.activateSkill("content-review")
+	res := SlashResult{Message: skillTaskMessage("content-review", body, prompt.String()), Output: warn}
 	if d.mode != "plan" {
 		prevMode, newMode := d.mode, "plan"
 		if _, err := d.client.UpdateSession(ctx, d.sessionID, api.UpdateSessionRequest{Mode: &newMode}); err == nil {
