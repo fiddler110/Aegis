@@ -1,6 +1,8 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-19 (P36.1, P36.2, P36.3 shipped; P35.1-P35.13 shipped)
+**Last updated:** 2026-07-20 (P36 live-verification attempted on qwen3:14b — P36.1 confirmed, P36.3
+refuted live, debt NOT retired; P38.1-P38.3 filed; two P37-script fixes shipped. Earlier: P37.1-P37.5
+shipped — threat-model suite scripting complete; P36.1-P36.3 shipped; P35.1-P35.13 shipped)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,7 +13,28 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 — the parked item **P25.9** (Tier 4). The whole **P36.1-P36.3** batch shipped
+**Open items:** 4 — **P38.1** (Tier 1), **P38.2** (Tier 2), **P38.3** (Tier 3), all filed 2026-07-20
+from the P36 live-verification run (see the debt note under Tier 3), plus the parked **P25.9** (Tier 4).
+The **P38** trio is the fallout of finally driving a live local-model threat model: the phased
+orchestration P36.3 shipped **does not execute on the config-default qwen3:14b** (the model mis-routes
+the sequential-`agent` spawn to the `skill` tool — P38.1), one-shot `aegis chat` yields mid-workflow
+instead of completing it (P38.2), and peak-context-per-phase isn't externally measurable anyway (P38.3),
+so the P36.1-P36.3 live-verification debt is **NOT retired** (P36.1 confirmed, P37.1/`recon.py`
+confirmed live, P36.3 refuted, P36.2 untested). The **P37.1-P37.5** threat-model
+suite-scripting batch shipped 2026-07-19 (see [releases.md](releases.md#latest-changes)): five bundled
+stdlib scripts that codify the mechanical parts of the threat-modeling skill and leave judgment to the
+model. **P37.1** (`recon.py`) replaces the exhaustive workspace read with one deterministic digest pass
+(git/langs/deps/bind-sites/env-keys/security-infra signals/component candidates), cutting a ~500-file
+repo's phase-1 gathering from megabytes of raw source to a ~11KB digest and making component ids /
+deployment class / `inventory.yaml` ids stable across runs. **P37.2** (`inventory.py`) generates and
+`--check`-validates the `inventory.yaml` sidecar deterministically (deriving each tier from its
+prerequisite), killing the sibling skill's two most-cited failure modes (truncated arrays, field-name
+drift). **P37.3** (`verify.py`) mechanizes the phase-6 cross-file self-check (name consistency,
+threat↔coverage bijection, tier/prerequisite, counts). **P37.4** (`lint_dfd.py`) validates the DFD's
+Mermaid conventions and `.mmd`↔`.md` equality. **P37.5** (`diff_inventory.py`) diffs two sidecars for
+the update workflow's Changes Since Baseline section. Together they lift the Aegis builtin past the
+`.claude/skills/threat-model-analyst` sibling it was benchmarked against. The whole **P36.1-P36.3**
+batch shipped
 2026-07-19, all filed the same day from a `/threat-model stride` dogfooding session against this repo
 on a local-model (Ollama) setup, with one shared **live-verification debt** carried forward (see the
 note under Tier 3 — the batch landed without an Ollama server available to confirm the token-growth
@@ -118,22 +141,87 @@ shipped 2026-07-18.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open. (P36.1 shipped 2026-07-19 — see [releases.md](releases.md#latest-changes);
+**Status:** 1 open — **P38.1** (non-orchestrated, single-context threat-model build — the primary path
+for local models; filed 2026-07-20, reframed from the abandoned phased-orchestration approach after the
+P36 live-verification run). (P36.1 shipped 2026-07-19 — see [releases.md](releases.md#latest-changes);
 P35.9 shipped 2026-07-18;
 P35.5 shipped 2026-07-18; P35.1, P35.2 shipped 2026-07-18; P33.1 and P33.2 shipped 2026-07-15;
 P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
+
+### P38.1 — Phased threat-model orchestration is mis-invoked on small local models
+
+The P36.3 phased restructure has the model drive the six-phase build through the **`agent`** tool with
+`mode:"sequential"`. In the 2026-07-20 live run (qwen3:14b, `aegis chat`), the model instead attached the
+`{mode:"sequential",agents:[…]}` payload to the **`skill`** tool — which has no such parameter, so the
+call errored and the whole phased build collapsed to nothing (7 `<!-- PENDING -->` stubs). The `agent`
+tool was registered and available; this is a routing error, plausibly because SKILL.md §4.2 describes
+the phased workflow in prose ("through the `agent` tool's `mode:"sequential"` workflow") while the model
+has just been repeatedly calling `skill`, so a 14B model conflates "invoke the skill's phased workflow"
+with "call the skill tool". Fix candidates: make §4.2 carry an unmistakable, copy-pasteable invocation —
+the literal tool name `agent`, the exact JSON, and an explicit "this is the `agent` tool, NOT the `skill`
+tool" — and/or a lightweight guard/hint when a `skill` call arrives carrying an `agents` array. Without
+this, the skill's headline optimization doesn't engage on the primary local-model target class; on
+qwen3:14b it produced no usable suite at all.
+
+**First fix shipped 2026-07-20 — and live verification shows it is INSUFFICIENT.** Two changes landed:
+(a) SKILL.md §4.2 now leads with an unmistakable copy-pasteable `agent` call and an explicit "use the
+tool named `agent`, NOT the `skill` tool" callout; (b) the `skill` tool grew a corrective guard — a
+`skill` call carrying `mode`/`agents` now returns an error pointing at the `agent` tool instead of
+silently dropping the fields (P37.6-adjacent; see [releases.md](releases.md#latest-changes)). Three live
+re-runs against AiGateway with the rebuilt binary:
+- **qwen3:14b** — mis-routed the `{mode,agents}` payload to **`ls`** this time (not `skill`), which
+  accepts and silently ignores unknown args, so the guard never fired; the model then degraded to
+  hand-writing a thin suite (2 `<!-- PENDING -->` stubs, no gate scripts) and **falsely claimed
+  completion**. The misroute target *varies by run* (`skill` pre-fix, `ls` post-fix) — the model isn't
+  confusing two named tools, it sprays the workflow payload onto whatever tool it emits.
+- **mythos-sec:24b** — failed even further upstream: could not invoke `recon.py` in the PowerShell
+  sandbox (no `python` prefix, bad relative paths, invented tool names like `execute_command`), looped
+  on identical failing shell calls, and the engine's loop detector aborted it before orchestration.
+- Net: **neither tested local model (14B, 24B) can drive the multi-agent phased workflow.** This is a
+  model-capability limit, not just prompt clarity; the shipped fixes are correct but insufficient.
+
+Remaining work (this item stays open, reframed): (1) **generalize the guard to the engine** — intercept
+*any* non-`agent` tool call carrying a top-level `agents` array or a workflow `mode`, and return the
+corrective redirect (the per-tool `skill` guard can't catch the `ls` misroute); (2) **a non-orchestrated
+local fallback** — when the driving model can't reliably spawn, the threat-modeling skill should fall
+back to a single-context linear build (the model writes the 7 files itself, with the deterministic
+scripts + P36.2 pruning bounding context) rather than a broken phased attempt that yields stubs;
+(3) confirm the phased path on a genuinely capable model (cloud, or a larger local MoE than 24B) to
+establish the capability floor and document a minimum-model recommendation. See also the mythos
+shell-invocation-competence observation, worth its own lead.
+
+Priority: Tier 1 — the shipped P36.3 optimization does not execute on any tested local model, and on
+qwen3:14b it silently emits an incomplete suite with a false completion claim (worse than an error). The
+engine-level interceptor (1) and the local fallback (2) are the substantive fixes; (3) is verification.
 
 ---
 
 ## Open Work — Tier 2
 
-**Status:** 0 open. (P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
+**Status:** 1 open — **P38.2** (one-shot `aegis chat` yields mid-workflow, filed 2026-07-20). (P37.2, P37.3 shipped 2026-07-19; P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18 — see [releases.md](releases.md#latest-changes);
 P35.6 shipped 2026-07-18;
 P35.3 shipped 2026-07-18; P34.12 shipped 2026-07-17; P34.9 and P34.10 shipped 2026-07-17;
 P34.5-P34.8 shipped 2026-07-17; P34.3 shipped 2026-07-16; P34.2 shipped 2026-07-16, both levers;
 P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped
 2026-07-16; P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14;
 P32.5-P32.7 shipped 2026-07-15.)
+
+### P38.2 — One-shot `aegis chat` yields mid-workflow instead of completing long skill runs
+
+Both 2026-07-20 live threat-model runs ended with the model asking *"Would you like me to proceed? The
+process will take approximately 70 minutes"* and returning — the second one *after* an explicit
+"this is a NON-INTERACTIVE run: do not stop to ask for confirmation and do not return a partial result".
+A one-shot `aegis chat` turn ends when the model yields, and nothing drives a long, multi-phase skill
+workflow to completion; the model treats a scripted run as interactive and hands back a stub. This makes
+`aegis chat` unsuitable for dogfooding or automating any skill whose work spans many turns (threat
+model, deep research, security audit). Options: a `--continue`/`--max-turns` drive-to-completion mode for
+chat, an auto-continue when a skill workflow is mid-run with `<!-- PENDING -->` markers still on disk,
+or — at minimum — document that multi-phase skills need the interactive/daemon path and have `chat`
+say so instead of silently yielding. Entangled with P38.1 (even a drive-to-completion loop needs the
+phased `agent` call to route correctly), but independently real.
+
+Priority: Tier 2 — blocks scripted/automated skill runs and the P36 live-verification itself; a bounded
+drive-to-completion mode is a contained change.
 
 **Note (future item, not yet filed):** the same "accurate refusal, error-shaped" question for the
 other scanners' documented exit codes, noted while shipping P35.6 and again while closing P35.13.
@@ -150,23 +238,101 @@ array shape is a mechanical follow-up. No `### P<n>.<m>` heading yet — lead on
 
 ## Open Work — Tier 3
 
-**Status:** 0 open. (P36.3 shipped 2026-07-19 — see [releases.md](releases.md#latest-changes);
+**Status:** 1 open — **P38.3** (peak-context telemetry not externally observable, filed 2026-07-20). (P37.4, P37.5 shipped 2026-07-19; P36.3 shipped 2026-07-19 — see [releases.md](releases.md#latest-changes);
 P36.2 shipped 2026-07-19;
 P35.7 shipped 2026-07-18;
 P35.4 shipped 2026-07-18; P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17;
 P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, shipped
 2026-07-16.)
 
-> **Live-verification debt (P36.1-P36.3):** the P36 batch shipped without a live local-model run —
-> no Ollama server was available the session it landed. Three things still need a real
-> `/threat-model stride` run on the doctor-recommended native-Ollama setup to confirm: (a) P36.2's
-> pruning actually reduces measured `prompt_eval_count` growth turn-over-turn (P35.7
-> instrumentation); (b) P36.3's phased restructure keeps peak input context per request under the
-> native adapter's response-header timeout (the P35.5-P35.9 failure was at ~62k tokens); and (c) the
-> phased skill's terse-final-answer contract holds under a small local model — it's prose, not
-> code-enforced, so a phase that dumps content instead of identifiers would silently reintroduce the
-> bloat one level down. File a fresh `### P<n>.<m>` item only if a live run shows any of these
-> regressed; otherwise this is a verification task, not open design work.
+### P38.3 — Peak-context-per-phase is not externally observable
+
+Verifying P36.3's core claim (the phased restructure keeps peak input context per request bounded)
+needs per-request/per-phase token numbers, and the 2026-07-20 run found none are exposed:
+`--output-format stream-json`'s `turn_done` events carry **no usage**, the engine emits **no per-request
+token log line** at info/debug (grep of `internal/engine`/`internal/provider` finds none), and one-shot
+`aegis chat` uses an ephemeral session store so nothing is queryable afterward. The only figure available
+was the final aggregate (`input_tokens` in the `result` event). Add per-turn usage to `turn_done`
+(and/or a `slog.Debug` line per provider request with prompt-token count), so a phased run's peak
+context — and P36.2's turn-over-turn growth — become measurable from the outside without SQLite
+spelunking. Precondition for ever retiring the P36.2/P36.3 half of the live-verification debt, even once
+P38.1 makes the phased path actually run.
+
+Priority: Tier 3 — instrumentation, not a user-facing defect; but the P36 debt cannot be *measured*
+closed without it.
+
+**Note (two doc-inconsistency leads, not yet filed — surfaced while building the P37 scripts):**
+(a) **threat-ID form** — `references/skeletons/skeleton-stride.md` writes threat IDs as bare sequential
+`T1`/`T2`, but `output-formats.md`'s coverage / Related-Threats examples use composite `T04.S` form;
+the P37 scripts match literally and handle both, but the docs should settle on one canonical form.
+(b) **inventory YAML style** — `skeleton-inventory.md`'s example is block-style (`- id:` on its own
+line) while directive #13 says list entries are one-line, and `inventory.py` emits one-line flow
+mappings (`- {id: "T1", ...}`); `diff_inventory.py` parses both, but the skeleton example should match
+what the generator produces. Both are cosmetic doc drift, not code bugs. No `### P<n>.<m>` heading yet.
+
+**Note (future item, not yet filed):** `recon.py` (P37.1) depth follow-ups, left out of v1
+deliberately and each worth its own item when a concrete need appears: (a) **data-flow edge inference** —
+seed the DFD's `DF##` flows from import graphs / client instantiations (which component calls which) so
+phase 2 starts from real edges instead of re-deriving them; (b) **config-default resolution** — recon
+currently punts a config/flag-driven bind address to the model ("confirm the default"); parsing the
+actual default from the config struct / `config.yaml` would settle the deployment class deterministically
+in the common case — and (b′) a specialization surfaced by the 2026-07-20 AiGateway eval: when the only
+internet-facing evidence is `EXPOSE`/`0.0.0.0` but the k8s `Service` is `NodePort`/`ClusterIP` (not
+`LoadBalancer`/`Ingress`) and no TLS terminator is present, recon should downgrade the suggestion to
+`internal-network` rather than `internet-facing`; it already parses the compose/k8s files, so it has the
+signal to be less alarmist (recon suggested `internet-facing` for AiGateway, whose real class is
+`internal-network`); (c) **richer symbol extraction** — functions/methods and route→handler maps,
+optionally via `ctags`/tree-sitter when on PATH, falling back to today's regex; (d) **target-commit in
+the sidecar** — `inventory.py`'s `git_commit()` runs `git -C <run-dir>`, so when the run directory is
+kept outside the target repo (the recommended clean-target setup) the sidecar records *no* commit for
+the analyzed code, losing the one field a future diff most wants; let it take an optional
+`--target-dir`/`--repo` or read the commit from `0-assessment.md`'s Git Commit row. No `### P<n>.<m>`
+heading yet — leads only, so the status script doesn't treat them as active work. (The `inventory.py`
+deployment-classification mis-parse and the missing architecture↔analysis classification check that the
+same eval surfaced were **fixed** 2026-07-20 — see [releases.md](releases.md#latest-changes).)
+
+> **Live-verification debt (P36.1-P36.3) — attempted 2026-07-20, NOT retired.** A real live run
+> finally happened: the rebuilt binary drove `aegis chat` STRIDE threat models of an external target
+> (`D:\Development\AiGateway`, a FastAPI AI gateway) against the config-default **qwen3:14b** on the
+> native Ollama adapter (32k window). Two runs (a plain prompt, then a forceful "run recon first, use
+> the §4.2 sequential agent workflow, produce all 7 files, do not stop to ask"). Results:
+> - **P36.1 (deterministic skill load): CONFIRMED.** Both runs' first tool call was
+>   `skill{threat-modeling}`; the model never wandered off the instruction.
+> - **P37.1 (`recon.py`) live: CONFIRMED.** Run 2 executed it from the materialized
+>   `builtin-skills/threat-modeling/recon.py` path — the `go:embed`→materialize→run pipeline works
+>   end-to-end on a real model.
+> - **P36.3 (phased sequential orchestration): REFUTED on qwen3:14b.** The model **mis-invokes** it:
+>   it knows the `{mode:"sequential",agents:[…]}` payload but attaches it to the **`skill`** tool
+>   instead of the **`agent`** tool (both are registered/available), which errors — then it bails.
+>   The phased path never executes, so its peak-context bound can't even be measured. Both runs
+>   produced no usable suite (run 1: 2 shallow files; run 2: 7 `<!-- PENDING -->` stubs).
+> - **P36.2 (pruning): still UNTESTED** — both runs ended at ~8 turns, far too short to stress
+>   compaction/pruning.
+>
+> Two reproducible blockers (now filed): **P38.1** (the `skill`/`agent` mis-routing that kills the
+> phased workflow on small local models) and **P38.2** (one-shot `aegis chat` yields mid-workflow —
+> both runs ended with "Would you like me to proceed? (~70 min)" despite an explicit "do not stop").
+> Also **P38.3**: peak-context-per-phase is not externally observable (`turn_done` stream events carry
+> no usage, the engine logs no per-request token count, and one-shot chat doesn't persist to the
+> session store) — so the P36.3 claim is unmeasurable until that's fixed, independent of whether the
+> path runs. Caveat: only qwen3:14b was tested; the doctor-recommended larger MoE
+> (qwen3.6:35b-a3b) wasn't on-disk to try and may drive the orchestration correctly — re-testing on it
+> is part of closing this. The debt stays open behind P38.1-P38.3.
+>
+> **Update 2026-07-20 (post-fix):** the P38.1 first fix (SKILL.md `agent`-call callout + `skill`-tool
+> guard) was shipped and re-verified with three more live runs — **it did not work.** qwen3:14b
+> mis-routed the workflow payload to `ls` (guard never fired) and hand-wrote an incomplete suite with a
+> false completion claim; mythos-sec:24b couldn't even invoke `recon.py` and loop-aborted. Neither
+> tested local model drives the phased workflow — see the reframed P38.1 (engine-level interceptor +
+> non-orchestrated local fallback). The debt is no closer to retired.
+
+**Note (lead, not yet filed):** mythos-sec:24b's failure mode in the 2026-07-20 run was pure
+shell-invocation incompetence in the PowerShell sandbox — it never prefixed `python`, used bad relative
+paths (`../recon.py`, `cd /d /c …`), and invented tool names (`execute_command`, `run_tool`), looping
+until the engine's loop detector killed it. Some of this is model quality, but it hints the shell tool's
+error messages could coach better (e.g. when a bare `*.py` command fails on Windows, suggest the
+`python <path>` form; when an unknown tool name is called, name the real one). Worth a small usability
+item if other local models show the same flailing.
 
 ---
 

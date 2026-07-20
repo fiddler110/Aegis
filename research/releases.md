@@ -8,7 +8,24 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-19 — **P36.1, P36.2, and P36.3 shipped**. **P36.3**: the threat-modeling
+**Last updated:** 2026-07-20 — a **P38.1 first fix shipped** (SKILL.md §4.2 now leads with an
+unmistakable copy-pasteable `agent` call + a "use `agent`, NOT `skill`" callout, and the `skill` tool
+gained a corrective guard that redirects a misrouted `mode`/`agents` payload to the `agent` tool instead
+of silently dropping it) — but **three more live runs proved it insufficient**: qwen3:14b just mis-routed
+the payload to `ls` instead (guard never fires there) and hand-wrote an incomplete suite with a false
+"complete" claim, and mythos-sec:24b couldn't even invoke `recon.py` (shell flailing) and loop-aborted.
+**Neither tested local model (14B/24B) can drive the phased multi-agent workflow** — P38.1 stays open,
+reframed toward an engine-level interceptor + a non-orchestrated local fallback (see
+[roadmap.md](roadmap.md)). Also today: **P37.6 shipped** (two threat-model script fixes from a live
+dogfood eval — see its entry below), and the **P36 live-verification of P36.1-P36.3 was attempted** on a
+real local model (qwen3:14b) for the first time: P36.1 (deterministic skill load) and P37.1 (`recon.py`)
+confirmed live, but P36.3's phased orchestration is **refuted** on that model, so the debt is **not
+retired** and **P38.1-P38.3** were filed. Earlier: **P37.1-P37.5 shipped** — the
+threat-model suite-scripting batch is complete — five bundled stdlib scripts (`recon.py`, `inventory.py`,
+`verify.py`, `lint_dfd.py`, `diff_inventory.py`) that codify the mechanical parts of the threat-modeling
+skill and leave judgment to the model (see the P37.x entries below). This is the work that lifts the
+Aegis builtin past the `.claude/skills/threat-model-analyst` sibling it was benchmarked against. Earlier:
+**P36.1, P36.2, and P36.3 shipped**. **P36.3**: the threat-modeling
 skill's build stages are now phased through the `agent` tool's `mode: "sequential"` workflow — each
 phase runs in a fresh, isolated sub-agent context, loads only its own reference file(s), writes its
 own report file, and returns only terse stable identifiers (not file content) to the next phase —
@@ -133,6 +150,127 @@ its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearin
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
 
 ---
+
+### P37.6 — Two threat-model script fixes from the AiGateway live dogfood eval
+
+Filed and shipped 2026-07-20. A sub-agent drove the improved threat-modeling skill end-to-end against a
+real external target (`D:\Development\AiGateway`, a FastAPI AI gateway), following the SKILL.md playbook
+and running all five bundled scripts. The suite came out clean (verify 9/9, lint_dfd 6/6, inventory
+--check 10/10), but the eval surfaced one genuine, previously-uncaught bug and one missing guard:
+
+- **`inventory.py` deployment-classification mis-parse (the real bug).** `parse_deployment()` returned
+  the first of the fixed class list (`internet-facing`, `internal-network`, …) that appeared *anywhere*
+  in the Deployment Classification section, by **list order**. Since SKILL.md §2 *requires* documenting
+  where you overrode recon's suggestion, a section that asserts `internal-network` but discusses the
+  rejected `internet-facing` recorded the wrong class in the sidecar — and nothing caught it
+  (`--check` re-parses the same prose so it agreed; the classification value had no cross-check). Fixed
+  to prefer an explicit `Deployment classification:` label line (the skeletons' binding form), then fall
+  back to the first class token in **document order** (the asserted class leads; evidence prose follows),
+  with HTML comments stripped so a leftover template comment can't seed a false match. Verified across
+  override-prose, label-precedence, comment, and plain cases.
+- **New `verify.py` check #10 — architecture↔analysis classification agreement.** Nothing asserted that
+  `0.1-architecture.md` and `2-<framework>-analysis.md` name the *same* deployment class, though it is
+  binding on every prerequisite floor and CVSS `AV`. `verify.py` now imports `inventory.py`'s hardened
+  parse (single-sourced, so the two scripts can't disagree) and fails on a divergence. `verify.py` is now
+  ten checks; SKILL.md and the skill README updated to match.
+
+`python -m py_compile` clean on both; verify.py 10/10 and inventory.py --check 10/10 on the eval's suite;
+the new check confirmed to fire on a synthetic divergence. Two related recon/inventory follow-ups the
+same eval raised (recon downgrading `internet-facing`→`internal-network` when the k8s Service is
+NodePort/ClusterIP with no ingress/TLS; `inventory.py` capturing the *target* repo's commit when the run
+dir lives outside it) are filed as leads under the roadmap's Tier-3 recon note.
+
+### P37.5 — Deterministic baseline diff for incremental threat-model updates
+
+Filed and shipped 2026-07-19. The update workflow (SKILL.md §6) compares a baseline run against a fresh
+one and reports new / resolved / still-present / changed threats. Matching is defined on the stable ids
+and fingerprints `inventory.yaml` carries, so it is a script's job, not the model's. `diff_inventory.py`
+takes two sidecars and classifies each threat: id-match first, then a fingerprint fallback
+(component + category + title-ish) so a threat that kept its identity but changed id is still tracked;
+it reports category and tier deltas per changed threat. It parses both the block-style and the one-line
+flow-mapping YAML `inventory.py` emits (a bug caught and fixed during review — the generator writes flow
+mappings, the diff originally only read block style). The STRIDE-A 7th-category letter was corrected to
+**Abuse** (`A`); authorization failures stay under Elevation (`E`). Deterministic, sorted output; drives
+the Changes Since Baseline section free of the eyeballing-two-YAMLs error class. `python -m py_compile`
+clean; verified end-to-end against a real `inventory.py`-generated pair (correctly classified
+changed/new/resolved/still-present).
+
+### P37.4 — Mermaid DFD pre-render lint script
+
+Filed and shipped 2026-07-19. `references/diagram-conventions.md`'s pre-render checklist for
+`1.1-model.mmd` is entirely mechanical, so `lint_dfd.py` (stdlib) now runs it: `flowchart LR` direction,
+the three-palette `classDef` fills/strokes, no stray markdown code fence or leftover keyword, balanced
+`subgraph`/`end` pairs, labeled edges, and `.mmd`↔`.md` equality (the diagram embedded in `1-model.md`
+must match the standalone `.mmd`). Accepts a `.mmd` file, a `1-model.md`, or a run directory; tolerant of
+`%%` comments and the `%%{init}%%` block. Six checks, run in phase 6 whenever the DFD changed, catching
+at review time the errors the model otherwise self-polices before anyone renders the diagram.
+`python -m py_compile` clean; 6/6 pass on conformant input, each check confirmed to catch its break.
+
+### P37.3 — Mechanical cross-file self-check as `verify.py`
+
+Filed and shipped 2026-07-19. SKILL.md §5's review round and `verification-and-updates.md`'s "Final
+self-check" are largely *mechanical* cross-file assertions, and the P36.3 phased design (each phase in
+its own context) is exactly what *creates* the cross-file drift they target. `verify.py` runs the
+grep-able subset over a finished run: no leftover skeleton syntax, component-name consistency across the
+files that name them, every `DF##` reference defined, threat↔coverage bijection (every analysis threat
+appears exactly once in the coverage table), finding ids sequential, tier/prerequisite consistency,
+count agreement, no forbidden coverage statuses, and external-AV consistency (nine checks). Built on a
+generic markdown-table parser so it survives column reordering. Prints PASS/FAIL per check; the phase-6
+sub-agent then reasons only about genuinely judgment-bound seams (does this control actually contradict
+that one). `python -m py_compile` clean; 9/9 pass on a clean run and each check confirmed to catch a
+seeded defect.
+
+### P37.2 — Generate and validate `inventory.yaml` with a script, not from model memory
+
+Filed and shipped 2026-07-19. The `inventory.yaml` sidecar is a machine-readable index (stable
+component/threat ids, tiers, statuses) whose whole purpose is *matching* — a later run diffing against
+it. The sibling `.claude/skills/threat-model-analyst` documents that generating this from model memory
+is its **#1 and #2** quality issues: truncated arrays (large repos exhaust output tokens mid-serialize)
+and field-name drift. Both vanish with `inventory.py`, which parses the finished `2-<framework>-analysis.md`
++ `3-findings.md` + `0.1-architecture.md`, extracts every threat/finding/component row, **derives each
+threat's tier from its prerequisite** (so the sidecar can't disagree with the analysis), sorts by id,
+and emits deterministic YAML — metadata block-style, list entries as one-line flow mappings. A `--check`
+mode regenerates in-memory and diffs against the on-disk file, exiting non-zero on any drift; phase 5
+runs the generator, the phase-6 review round runs `--check`. Same split as `recon.py`: the script owns
+the mechanical extraction, the model owns none of it. `python -m py_compile` clean; 10/10 checks pass on
+a generated-then-validated run.
+
+### P37.1 — Deterministic recon script for the threat-modeling skill's architecture phase
+
+Filed and shipped 2026-07-19. The threat-modeling skill's phase-1 architecture step (SKILL.md §2) was
+pure model labour: list directories, read entry points, config, auth code, network handlers, and
+data-access layers, then infer components/boundaries/flows from what it happened to read. On a large
+repo that means pulling megabytes of source through the context window — the exact peak-context load
+the P36.3 phased restructure exists to bound — and it is inherently non-deterministic, which is why the
+skill (and its `.claude/skills/threat-model-analyst` sibling) spend hundreds of lines of prose trying to
+force stable component ids, boundary counts, and fingerprints out of an LLM. P37.1 moves the mechanical
+half of that work into a bundled `internal/skills/builtin/threat-modeling/recon.py` (Python 3, stdlib
+only, `go:embed`-ed with the skill and surfaced in its `<skill_assets>` manifest like the latex-report
+scripts). One deterministic filesystem pass emits a compact digest: git metadata, language histogram,
+parsed dependency manifests (go.mod / package.json / requirements / pyproject / Cargo / composer /
+Gemfile / pom / gradle / Dockerfile / compose / Helm), bind/listen sites split into real listener calls
+vs bare address literals (test files excluded) with an evidence-based **suggested** deployment class,
+entry points, config/env keys, security-infrastructure signal families, external-egress signals, and
+per-file declared symbols ranked security-relevant-first as component candidates. On this repo (~540
+source files) the digest is ~11KB vs the megabytes a raw read would cost; on a synthetic Flask app it
+correctly flags `internet-facing` (0.0.0.0 bind + Dockerfile EXPOSE, `USER root`), extracts env keys and
+classes, and handles non-git/empty/missing dirs cleanly.
+
+The design line is strict: **facts only, never decisions.** Everything the digest labels a suggestion
+(deployment class, security infra, component candidates) is evidence the model confirms or overrides per
+§2's rules — the script lists only symbols that actually exist, so it structurally cannot invent the
+`ConfigurationStore`/`DataLayer` abstractions the skill warns against, but it also never decides
+eligibility, boundaries, threats, or severities. A known limit surfaced and is handled honestly: when a
+listener's bind address is config/flag-driven (Go's `srv.ListenAndServe()` reading `srv.Addr`, as in
+Aegis's own daemon) the address isn't a literal recon can read, so it detects listener *presence*,
+suggests `localhost-service`, and explicitly tells the model to confirm the config default and any
+bind-to-all/allow-remote flag — rather than mis-classifying in either direction. SKILL.md §2 is
+rewritten to run recon first and read its digest *instead of* the raw tree, then read selectively only
+to confirm or fill gaps; the §4.2 phase-1 row and §1 reference table point at it. No Go changes — the
+skill is `go:embed`-ed, so rebuilding re-embeds the script and its edited markdown.
+`go test ./internal/skills/...` passes; `python -m py_compile recon.py` clean. Follow-ups
+(P37.2-P37.5) extend the same approach to `inventory.yaml` generation/validation, the final self-check,
+DFD linting, and incremental diffing.
 
 ### P36.3 — Phase the threat-modeling skill through sub-agents instead of one long-lived run
 
