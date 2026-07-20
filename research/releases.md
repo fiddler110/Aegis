@@ -14,9 +14,12 @@ gained a corrective guard that redirects a misrouted `mode`/`agents` payload to 
 of silently dropping it) — but **three more live runs proved it insufficient**: qwen3:14b just mis-routed
 the payload to `ls` instead (guard never fires there) and hand-wrote an incomplete suite with a false
 "complete" claim, and mythos-sec:24b couldn't even invoke `recon.py` (shell flailing) and loop-aborted.
-**Neither tested local model (14B/24B) can drive the phased multi-agent workflow** — P38.1 stays open,
-reframed toward an engine-level interceptor + a non-orchestrated local fallback (see
-[roadmap.md](roadmap.md)). Also today: **P37.6 shipped** (two threat-model script fixes from a live
+**Neither tested local model (14B/24B) can drive the phased multi-agent workflow.** Decision:
+**abandon orchestration for local models and pivot the threat-modeling skill to a non-orchestrated,
+single-context linear build** as its primary path (the model works the phases itself and writes all seven
+files; context is bounded by recon's digest + P36.2 pruning + incremental writes + the deterministic P37
+scripts — no sub-agents). That is the reframed P38.1 (Tier 1); the phased `agent` path is parked. See
+[roadmap.md](roadmap.md). Also today: **P37.6 shipped** (two threat-model script fixes from a live
 dogfood eval — see its entry below), and the **P36 live-verification of P36.1-P36.3 was attempted** on a
 real local model (qwen3:14b) for the first time: P36.1 (deterministic skill load) and P37.1 (`recon.py`)
 confirmed live, but P36.3's phased orchestration is **refuted** on that model, so the debt is **not

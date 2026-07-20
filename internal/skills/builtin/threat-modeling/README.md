@@ -59,11 +59,15 @@ a new `verify.py` check that the architecture and analysis files agree on the
 classification. See [`research/releases.md`](../../../../research/releases.md) for
 per-item detail.
 
-The same live eval also exercised the skill through the **real Aegis binary on a
-local model** and found the phased orchestration doesn't execute on qwen3:14b —
-those findings are **P38.1–P38.3** in
-[`research/roadmap.md`](../../../../research/roadmap.md) (they're about the skill's
-sub-agent workflow and the `aegis chat` driver, not these scripts).
+The same live eval also exercised the skill through the **real Aegis binary on
+local models** (qwen3:14b, mythos-sec:24b) and found that **none of them can drive
+the phased sub-agent orchestration** — so the skill is being **pivoted to a
+non-orchestrated, single-context linear build** as its primary path (the model
+works the phases itself and writes all seven files; these scripts + P36.2 pruning
+do the context-bounding that phasing was meant to provide). That rework and its
+dependencies are **P38.1–P38.3** in
+[`research/roadmap.md`](../../../../research/roadmap.md); they concern the skill's
+build strategy and the `aegis chat` driver, not these scripts.
 
 The remaining **script** leads (filed under the roadmap's Tier-3 recon note, not
 yet promoted to `### P<n>.<m>` items):
