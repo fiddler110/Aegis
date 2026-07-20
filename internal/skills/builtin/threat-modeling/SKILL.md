@@ -54,6 +54,7 @@ improvise one from a process description alone.
 
 | Reference file | Read when | Contains |
 |---|---|---|
+| `scaffold.py` (bundled script) | **Setup (§4.1 step 2), before filling any file** | Pre-writes all seven files from the skeletons — real structure (headings, table headers, fixed-value lists, DFD `flowchart LR` + `classDef`s) with `<!-- PENDING -->` per fillable section, so you fill sections rather than author structure |
 | `recon.py` (bundled script, not a reference doc) | **Start of the architecture phase, before any manual exploration (§2 step 1)** | Deterministic one-pass repo digest — run it, read its stdout; replaces reading source files raw |
 | `inventory.py` (bundled script) | **Phase 5**, to generate `inventory.yaml` from the finished markdown; **phase 6**, with `--check`, to verify it still agrees | `python inventory.py <run-dir>` writes the sidecar (IDs, derived tiers) deterministically; `--check` regenerates in-memory and diffs vs disk, exit non-zero on drift |
 | `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis) |
@@ -182,9 +183,9 @@ already built for exactly this keep a single-context build inside the window:
   written, its `write_file`/`edit_file` payload — and one-time skill/reference
   reads — fall out of the running context, so a phase you have finished stops
   costing tokens on every later turn.
-- **Incremental writes keep the working set small.** Stub each file, then
-  `edit_file` one section at a time (§4.2), so you never hold a whole file in
-  context to produce it.
+- **Incremental writes keep the working set small.** `scaffold.py` writes the
+  structured stubs once (§4.1), then you `edit_file` one section at a time
+  (§4.2), so you never hold a whole file in context to produce it.
 - **The deterministic scripts do the bulk mechanical work outside your
   context.** `inventory.py`, `verify.py`, and `lint_dfd.py` mean you never
   have to hold the entire analysis in context to generate the sidecar or run
@@ -213,13 +214,23 @@ Do the cheap, decision-bearing setup first, then work the phases in order.
    colliding; a date alone isn't enough since a full run plus an update can
    both land on one day.
 
-2. `write_file` a `<!-- PENDING -->` stub for **all seven files** before
-   filling any of them: `0-assessment.md`, `0.1-architecture.md`,
-   `1.1-model.mmd`, `1-model.md`, `2-<framework>-analysis.md`,
-   `3-findings.md`, `inventory.yaml` — each with just a top-level heading and
-   `<!-- PENDING -->`. The phase that fills a file overwrites its stub with
-   the exact skeleton, so these stubs need no real structure; they exist so a
-   crash leaves a resumable, self-describing directory (§4.2 "Resume").
+2. **Run `scaffold.py` to pre-write all seven files with real structure** —
+   don't hand-write bare stubs. `python <path>/scaffold.py <run-dir>
+   --framework <name> [--target <slug>] [--date <YYYY-MM-DD>]` writes
+   `0-assessment.md`, `0.1-architecture.md`, `1.1-model.mmd`, `1-model.md`,
+   `2-<framework>-analysis.md`, `3-findings.md`, and an `inventory.yaml`
+   placeholder, each with its **fixed structure already in place** — every
+   heading, every table's header row and separator, the DFD's `flowchart LR`
+   header and three `classDef`s, the fixed-value reference lists — and a
+   `<!-- PENDING -->` marker wherever run-specific content goes. You then
+   **fill sections** (`edit_file`, §4.2) rather than authoring the structure:
+   the skeletons determine the shape, the script applies it, and you supply
+   only the judgment. This is what makes `verify.py`/`lint_dfd.py` check a
+   real structure from turn one (a freshly-scaffolded DFD already lints clean)
+   and keeps every file resumable and self-describing (§4.2 "Resume"). The
+   script never clobbers a file whose `<!-- PENDING -->` markers are already
+   gone (i.e. one you've started filling), so re-running it on an in-progress
+   directory is safe. Pass `--framework stride-a` for a STRIDE-A run.
 
 Never delete or overwrite a *prior dated run directory* — an update is a new
 directory, and the old one is the baseline it was diffed against (editing
@@ -269,10 +280,13 @@ that catches any drift the note missed (`references/verification-and-updates.md`
 **Write incrementally, never all-at-once.** The files on disk are the working
 state, and — with context pruning dropping each spent write payload — writing
 in small pieces is what keeps a single-context build bounded. This matters most
-in phase 3: `write_file` the skeleton stub, then `edit_file` **one component/
-section at a time**, so your context never has to hold every section you
-already wrote — that is what bounds even a large analysis file's peak context,
-the failure mode this whole approach targets.
+in phase 3: `scaffold.py` already wrote the analysis file's structure (§4.1), so
+`edit_file` it **one component/section at a time** — replacing one
+`<!-- PENDING -->` marker per edit — rather than regenerating the whole file
+with `write_file`. Your context never has to hold every section you already
+wrote; that is what bounds even a large analysis file's peak context, the
+failure mode this whole approach targets. (Re-authoring the whole file each
+pass is exactly the non-convergent behavior scaffolding exists to prevent.)
 
 **Resume, don't restart.** If the target directory already exists and any file
 still contains `<!-- PENDING -->` markers, a previous run was interrupted.
