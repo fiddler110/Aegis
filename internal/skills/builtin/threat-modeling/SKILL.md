@@ -65,14 +65,14 @@ improvise one from a process description alone.
 | `references/skeletons/skeleton-<framework>.md` | **Before writing `2-<framework>-analysis.md` (§4.2), and again before filling each of its sections** | Verbatim document structure for the framework's own analysis file, fixed value lists, inline `<!-- ⛔ POST-*-CHECK -->` self-verification comments |
 | `references/companion-techniques.md` | After the framework pass, or if attacker realism/backlog framing was asked for | Technology sweep, Attack Trees, MITRE ATT&CK mapping, Evil User Stories |
 | `references/skeletons/skeleton-inventory.md` | Writing `inventory.yaml` (§6) | Exact field names and structure for the sidecar |
-| `references/verification-and-updates.md` | Before finishing (§6) | Final self-check, sidecar rules, update workflow, sub-agent governance |
+| `references/verification-and-updates.md` | Before finishing (§6) | Final self-check, sidecar rules, update workflow, single-context build governance |
 
 ## 2. Explore the workspace before modeling
 
-This exploration happens **inside the architecture phase (phase 1 of §4.2)**,
-not the top-level run — and the bounded-read discipline below is what keeps
-that phase's peak context small enough to survive a local model. Never model
-an assumed architecture. Before applying any framework:
+This exploration is the **architecture phase (phase 1 of §4.2)** — and the
+bounded-read discipline below is what keeps that phase's peak context small
+enough to survive a local model. Never model an assumed architecture. Before
+applying any framework:
 
 1. **Run the recon script first — it does the bulk gathering deterministically,
    outside your context.** `recon.py` (Python 3, stdlib only, bundled with this
@@ -157,7 +157,7 @@ the whole suite its credibility. Before writing any "missing X" threat:
   a setting. A threat you cannot evidence goes in `0-assessment.md`'s
   "Needs Verification" table, not the threat table.
 
-## 4. Build the suite as isolated phases
+## 4. Build the suite yourself, one phase at a time
 
 Every run produces the same seven files, in the same directory, regardless
 of framework — the file list, naming, and directory convention are in
@@ -166,23 +166,38 @@ after a partial pass — populate every category/stage/cell the chosen
 framework defines, even ones with no findings ("none identified" is a valid,
 complete entry; a missing cell is not).
 
-**A threat model that runs as one ever-growing conversation accumulates
-every reference file, every workspace read, and every written report's
-content in a single context.** On a local model that peak context is what
-kills the run: a large prefill can blow the model server's response-header
-timeout before a single file is written. The fix is structural — **build the
-suite as a sequence of isolated phases, each in its own throwaway context,
-passing forward only short structured identifiers, never file content,
-because the content is already durably on disk.** What changes from a naive
-run is only *where* each file is filled: not in this top-level run's context,
-but in a delegated build sub-agent that loads only that phase's inputs and
-unloads when it returns.
+**You build the whole suite yourself, in one context — no sub-agents, no
+delegation.** A threat model that runs as one ever-growing conversation would
+accumulate every reference file, every workspace read, and every written
+report's content in a single context, and on a local model that peak context
+is what kills the run: a large prefill can blow the model server's
+response-header timeout before a single file is written. Bounding that peak
+does **not** require phasing work out to throwaway contexts — four levers
+already built for exactly this keep a single-context build inside the window:
 
-### 4.1 Top-level setup (this run)
+- **`recon.py` replaces the megabyte architecture reads with an ~11KB digest**
+  (§2 step 1), so the architecture phase never pulls the whole tree into
+  context.
+- **Context pruning drops spent payloads automatically.** Once a file is
+  written, its `write_file`/`edit_file` payload — and one-time skill/reference
+  reads — fall out of the running context, so a phase you have finished stops
+  costing tokens on every later turn.
+- **Incremental writes keep the working set small.** Stub each file, then
+  `edit_file` one section at a time (§4.2), so you never hold a whole file in
+  context to produce it.
+- **The deterministic scripts do the bulk mechanical work outside your
+  context.** `inventory.py`, `verify.py`, and `lint_dfd.py` mean you never
+  have to hold the entire analysis in context to generate the sidecar or run
+  the checks.
 
-Do only the cheap, decision-bearing setup here, then delegate the heavy work.
-Keep this run's own context small — do **not** explore the workspace or read
-framework skeletons here; each phase reads what it needs in its own context.
+Work the phases **in dependency order** (architecture → DFD → framework
+analysis → findings → assessment → self-check), letting the prior phase's file
+on disk — plus a short running note of its stable identifiers — ground the
+next, rather than re-reading everything.
+
+### 4.1 Setup
+
+Do the cheap, decision-bearing setup first, then work the phases in order.
 
 1. Framework is already chosen (§1). Decide the `<target>` slug and the
    `<YYYY-MM-DD-HHMM>` timestamp (local time, 24h, dash-separated — get it
@@ -199,7 +214,7 @@ framework skeletons here; each phase reads what it needs in its own context.
    both land on one day.
 
 2. `write_file` a `<!-- PENDING -->` stub for **all seven files** before
-   delegating any of them: `0-assessment.md`, `0.1-architecture.md`,
+   filling any of them: `0-assessment.md`, `0.1-architecture.md`,
    `1.1-model.mmd`, `1-model.md`, `2-<framework>-analysis.md`,
    `3-findings.md`, `inventory.yaml` — each with just a top-level heading and
    `<!-- PENDING -->`. The phase that fills a file overwrites its stub with
@@ -210,59 +225,21 @@ Never delete or overwrite a *prior dated run directory* — an update is a new
 directory, and the old one is the baseline it was diffed against (editing
 today's own in-progress directory is, of course, the normal flow).
 
-### 4.2 Delegate the build to isolated phases, in dependency order
+### 4.2 Work the phases, in dependency order
 
-> **⛔ Use the tool named `agent` — NOT the `skill` tool.** This one `agent`
-> call spawns the entire phased build. The `skill` tool only *loads* a skill
-> body: it takes a single `name` argument and has no `mode` or `agents`
-> parameter — putting them there does nothing and the phased build silently
-> never runs. Call `agent` with exactly this shape (one `agents` entry per
-> phase from the table below; fill in the real directory path and per-phase
-> prompts):
->
-> ```json
-> {
->   "mode": "sequential",
->   "agents": [
->     {"subagent_type": "build", "description": "Phase 1 — architecture", "prompt": "…"},
->     {"subagent_type": "build", "description": "Phase 2 — model/DFD",   "prompt": "…"},
->     {"subagent_type": "build", "description": "Phase 3 — analysis",    "prompt": "…"},
->     {"subagent_type": "build", "description": "Phase 4 — findings",    "prompt": "…"},
->     {"subagent_type": "build", "description": "Phase 5 — assessment",  "prompt": "…"},
->     {"subagent_type": "build", "description": "Phase 6 — review",      "prompt": "…"}
->   ]
-> }
-> ```
-
-Issue **one** `agent` tool call with `mode: "sequential"` and an `agents`
-array — one entry per phase, `subagent_type: "build"` for **every** entry
-(each phase writes files, so it needs write access; a plan-mode session
-cannot run this skill, same as today). The sequential workflow runs each
-phase in a fresh, isolated context and threads **only the prior phase's final
-text answer** forward into the next phase's prompt — a real context unload,
-so phase N never carries phase N-1's reads or writes.
-
-Each phase entry's `prompt` must state explicitly: the output directory path
-and framework; which reference file(s) to read (**only its own**); which
-file(s) it owns and must fill; and — verbatim — the terse-final-answer
-contract below.
-
-**⛔ The terse-final-answer contract — the single most important detail.**
-Every phase's final answer is prepended verbatim to the next phase's prompt
-(that is how the sequential workflow threads context). A phase that ends by
-dumping its file's content, or re-narrating the threats it just wrote,
-reinjects exactly the bloat this design exists to remove — one level down,
-into every later phase. So end **every** phase prompt with this instruction:
-
-> *Your files on disk are the deliverable. Your final answer must be ONLY a
-> terse structured list of the stable identifiers the next phase needs —
-> component names and anchors, `DF##` ids, threat IDs with their (component,
-> category, prerequisite, tier, severity) — never the file's prose or table
-> content. Keep it under ~40 lines.*
+Work each phase yourself, in order, reading **only that phase's inputs** and
+writing **only that phase's file(s)**. You do not need to carry a phase's full
+output forward — its file is on disk, and pruning will drop the write payload
+from your running context — so between phases keep only a **short running note
+of the stable identifiers** the next phase needs (component names + anchors,
+`DF##` ids, threat IDs with their component/category/prerequisite/tier/
+severity). That compact note is what keeps names consistent across files
+without re-reading each prior file whole; it is cheap to hold, while the bulk
+(prose, tables) stays on disk where it belongs.
 
 The phases, in the dependency order of the file suite:
 
-| # | Phase | Reads (only this, plus prior files from disk) | Owns / fills | Returns (terse identifiers only) |
+| # | Phase | Reads (only this, plus prior files from disk) | Owns / fills | Note forward (stable identifiers only) |
 |---|---|---|---|---|
 | 1 | Architecture | runs `recon.py` (§2 step 1) then reads its digest; `output-formats.md`; targeted confirmation reads (§2 steps 2–5 + §3 evidence rules) | `0.1-architecture.md` | component names + types + anchors; deployment classification; each component's exposure floor; security-infra component names |
 | 2 | Model / DFD | `diagram-conventions.md`; `0.1-architecture.md` | `1.1-model.mmd`, `1-model.md` | element names; `DF##` ids with source→target; trust-boundary names |
@@ -274,36 +251,35 @@ The phases, in the dependency order of the file suite:
 Phase 3 must **copy the skeleton structure exactly** (same columns, same
 order, same fixed value lists) and run its inline `<!-- ⛔ POST-*-CHECK -->`
 comments right after writing each table, and **run the technology sweep** in
-`companion-techniques.md` — the same rules as before, now inside that phase's
-context. Phase 4 runs the Threat Coverage Verification loop. Phase 5 recounts
-from the finished files, never carrying a stale mid-analysis number, and
-generates `inventory.yaml` by running `python inventory.py <run-dir>` rather
-than hand-writing it — the script derives each threat's tier from its
-prerequisite and emits stable, sorted, deterministic YAML, so the sidecar
-can't drift from the analysis or vary between runs. Phase 6 runs the three
-bundled check scripts (below) over the assembled suite before any debate.
+`companion-techniques.md`. Phase 4 runs the Threat Coverage Verification loop.
+Phase 5 recounts from the finished files, never carrying a stale mid-analysis
+number, and generates `inventory.yaml` by running `python inventory.py
+<run-dir>` rather than hand-writing it — the script derives each threat's tier
+from its prerequisite and emits stable, sorted, deterministic YAML, so the
+sidecar can't drift from the analysis or vary between runs. Phase 6 runs the
+three bundled check scripts (below) over the assembled suite before any debate.
 
-Grounding each phase in the prior phase's exact identifiers (threaded as the
-sequential workflow's forwarded context) is what keeps names from diverging
-across files — phase 2 gets phase 1's verbatim component names, phase 3 gets
-phase 2's `DF##` ids, and so on, so no phase can invent a divergent name.
-Together with the phase-6 review round re-reading the whole suite from disk,
-this replaces the old "only the top-level run writes files" rule
-(`references/verification-and-updates.md`, revised for this design).
+Grounding each phase in the prior phase's exact identifiers — the running note
+above, cross-checked against the file on disk — is what keeps names from
+diverging across files: phase 2 reuses phase 1's verbatim component names,
+phase 3 phase 2's `DF##` ids, and so on, so no phase invents a divergent name.
+The phase-6 review round re-reading the whole suite from disk is the backstop
+that catches any drift the note missed (`references/verification-and-updates.md`).
 
-**Within a phase, still write incrementally, never all-at-once.** The files
-on disk are the working state. This matters most in phase 3: `write_file` the
-skeleton stub, then `edit_file` **one component/section at a time**, so the
-phase's own context never has to hold every section it already wrote — that
-is what bounds even a large analysis file's peak context, the failure mode
-this whole restructure targets.
+**Write incrementally, never all-at-once.** The files on disk are the working
+state, and — with context pruning dropping each spent write payload — writing
+in small pieces is what keeps a single-context build bounded. This matters most
+in phase 3: `write_file` the skeleton stub, then `edit_file` **one component/
+section at a time**, so your context never has to hold every section you
+already wrote — that is what bounds even a large analysis file's peak context,
+the failure mode this whole approach targets.
 
-**Resume, don't restart.** If the target directory already exists and any
-file still contains `<!-- PENDING -->` markers, a previous run was
-interrupted. Re-run the same sequential workflow: each phase must first check
-whether its own file is already complete and free of `<!-- PENDING -->`, and
-if so return its identifiers from a quick re-read without rewriting, so the
-run continues from the first unfinished phase in dependency order.
+**Resume, don't restart.** If the target directory already exists and any file
+still contains `<!-- PENDING -->` markers, a previous run was interrupted.
+Resume from the **first unfinished phase in dependency order**: check each
+file for `<!-- PENDING -->` and skip a phase whose file is already complete
+(re-read just its identifiers into your note without rewriting), continuing
+from the first file that still has pending work.
 
 Two cross-framework rules every phase enforces while filling the template:
 
@@ -322,28 +298,29 @@ mapping, or Evil User Stories from `references/companion-techniques.md` —
 optional add-ons layered on top of the chosen primary framework, not
 replacements for it.
 
-**Time budget.** The sequential workflow shares one deadline of roughly
-`10 min × (phases + 1)` across all phases — about **70 minutes** of
-wall-clock for the six phases above — drawn from a shared pool, not a hard
-per-phase cap, so a slow phase (the framework-analysis phase writing a large
-file on local hardware) can run well past 10 minutes as long as the whole run
-fits the pool. If a target is large enough that one phase would still
-dominate, **split that phase** — e.g. give the framework analysis two entries,
-one per subsystem — which both lowers that phase's peak context *and raises*
-the shared pool (the deadline grows with phase count). If the pool is
-exhausted mid-run, the completed phases' files are already on disk; a
-follow-up "continue the threat model" run resumes from the pending markers.
+**This is a long, single-context run — drive it to completion, keep it
+resumable.** The build is many turns in one session, and there is no shared
+agent deadline to split across sub-agents — you are the single context doing
+every phase. Two consequences. First, **do not stop mid-build to ask whether
+to continue**: a threat model is a long, non-interactive job, so work straight
+through until no `<!-- PENDING -->` marker remains, rather than writing a few
+files and handing back a partial suite with a question. Second, because you
+write incrementally, an interrupted run always leaves complete files on disk
+with only `<!-- PENDING -->` work outstanding — so if the run genuinely must
+stop (step limit, real context pressure), say which files are complete and a
+follow-up "continue the threat model" run resumes from the pending markers in
+dependency order.
 
 ## 5. Final review round — consistency, then debate (P12) when enabled
 
-This is **phase 6** of §4.2 — the last entry in the sequential `agents`
-array, run in its own fresh context. Because the earlier phases each wrote
-their files in an isolated context that has since unloaded, this phase is the
-one place the whole suite is seen together. After every file's
-`<!-- PENDING -->` markers are gone, re-read the **complete suite from disk**
-and review it as a whole — the files were written one phase at a time, each
-grounded only in the last phase's forwarded identifiers, so this is where
-seams show:
+This is **phase 6** — the final phase, which you run yourself over the finished
+suite. Because the earlier phases were written incrementally and context
+pruning has since dropped most of that content from your context, this phase
+deliberately re-reads the **complete suite fresh from disk** — it is the one
+place the whole model is seen together at once. After every file's
+`<!-- PENDING -->` markers are gone, re-read the whole suite and review it as a
+whole — the files were written one phase at a time, each grounded only in your
+running identifier note, so this is where seams show:
 
 - Component names and threat IDs are consistent across all seven files; no
   file refers to a component another file renamed or dropped.
@@ -380,23 +357,24 @@ Then, if your system prompt's "Debate mode (P12)" section marks threat
 modeling enabled, route the **contested entries** — high-severity threats
 and any whose severity or mitigation is genuinely arguable — through the
 `agent` tool's `mode:"debate"`, with `claim` set to the threat description,
-severity, and proposed mitigation. This phase is itself a build sub-agent and
-has the `agent` tool, so it runs the debate directly and patches the
-arbiter's verdict back into `2-<framework>-analysis.md` and `3-findings.md`:
-adjust severity/mitigation per a REVISE verdict, drop the entry per a REJECT
-verdict, keep it as-is per UPHOLD. (At the normal slash-command invocation
-this run is depth 0, phase 6 is depth 1, and its debate roles are depth 2 —
-within the depth-3 spawn ceiling.) Skip clear-cut, uncontroversial entries.
+severity, and proposed mitigation. Debate is a separate primitive from the
+(now removed) build orchestration — a single `agent` call that returns an
+arbiter verdict, not a workflow to drive — so you run it directly and patch
+the verdict back into `2-<framework>-analysis.md` and `3-findings.md`: adjust
+severity/mitigation per a REVISE verdict, drop the entry per a REJECT verdict,
+keep it as-is per UPHOLD. (At the normal slash-command invocation this run is
+depth 0 and its debate roles are depth 1 — within the depth-3 spawn ceiling.)
+Skip clear-cut, uncontroversial entries.
 Debating here, over the assembled suite, lets the debaters see each threat in
 the context of the whole model rather than in isolation.
 
 ## 6. Self-check, inventory, and updates
 
 Read `references/verification-and-updates.md` before finishing. It covers
-four things: **phased-orchestration governance** (each phase owns specific
-files and returns only stable identifiers, and consistency is guaranteed by
-threading those identifiers forward plus the phase-6 review round re-reading
-the whole suite — the revised rule for §4.2's design), the **inventory
+four things: **single-context build governance** (each phase owns specific
+files and you carry only stable identifiers forward between them, with
+consistency guaranteed by that note plus the phase-6 review round re-reading
+the whole suite — the rule for §4.2's linear build), the **inventory
 sidecar** (`inventory.yaml`, with stable component/threat IDs so a future
 run can diff against this one), the **update workflow** for when the ask is
 "update/refresh the threat model" or "what changed since last time" (locate
@@ -415,9 +393,9 @@ fails before reporting).
 The directory in `.aegis/security/threat-model/` (built by the phases in
 §4.2) is the deliverable — a chat-only summary is not a complete threat
 model, since the whole point is a navigable suite mitigations can be
-tracked against. Write this report in the top-level run, after the sequential
-workflow returns (its combined terse phase summaries are all you need — the
-file content is on disk, not in this run's context). State which framework
+tracked against. Write this report after the phases complete — the file
+content is on disk, so your running identifier note plus a re-read of
+`0-assessment.md` are all you need to summarize it. State which framework
 was used (and why, if inferred rather than requested) and the deployment
 classification up front — both also belong in `0-assessment.md`'s Executive
 Summary. The task is done only when no `<!-- PENDING -->` marker remains in
