@@ -8,17 +8,43 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-20 — a **P38.1 first fix shipped** (SKILL.md §4.2 now leads with an
-unmistakable copy-pasteable `agent` call + a "use `agent`, NOT `skill`" callout, and the `skill` tool
-gained a corrective guard that redirects a misrouted `mode`/`agents` payload to the `agent` tool instead
-of silently dropping it) — but **three more live runs proved it insufficient**: qwen3:14b just mis-routed
-the payload to `ls` instead (guard never fires there) and hand-wrote an incomplete suite with a false
-"complete" claim, and mythos-sec:24b couldn't even invoke `recon.py` (shell flailing) and loop-aborted.
-**Neither tested local model (14B/24B) can drive the phased multi-agent workflow.** Decision:
-**abandon orchestration for local models and pivot the threat-modeling skill to a non-orchestrated,
-single-context linear build** as its primary path (the model works the phases itself and writes all seven
-files; context is bounded by recon's digest + P36.2 pruning + incremental writes + the deterministic P37
-scripts — no sub-agents). That is the reframed P38.1 (Tier 1); the phased `agent` path is parked. See
+**Last updated:** 2026-07-20 — **P38.2 shipped and the P38.1 linear build was live-tested.** `aegis chat`
+gained **`--skill <name>`**: it preloads the named skill's full body into the prompt (so a small local
+model never has to discover-and-fetch it via the `skill` tool — the P36.1 skip) and **drives the run to
+completion** — after each yield, while any file under `.aegis/` still carries a `<!-- PENDING -->` marker,
+it appends a "continue, don't stop" turn on the *same* conversation and re-runs, bounded by `--max-turns`
+(default 40) and a no-progress guard. It also adds the `MaterializeBuiltins` call `aegis chat` was missing
+(only the daemon did it before), so a scripted run's builtin skill body and bundled scripts are on disk.
+The **live test** (qwen3:14b vs AiGateway) confirmed the P38.1 linear build's mechanism — one context, no
+orchestration, **no `{mode,agents}` mis-route**, `recon.py` → all seven files → the P37 check scripts,
+inside the context window (~44K input tokens / 33 tool calls) — but the 14B output does **not conform**
+(it skips the skeleton templates, so `verify.py` fails 6/10 and it can't self-converge). That gap is the
+new Tier-1 **P38.4** (deterministic skeleton scaffolding); mythos-sec:24b proved a dead end (400s on
+`think` → new **P38.5**, and can't drive tools even with thinking off). See [roadmap.md](roadmap.md).
+
+Earlier today — the **P38.1 linear-build rework of the threat-modeling skill shipped.**
+`SKILL.md` §4 no longer delegates the build through the `agent` tool's `mode:"sequential"` workflow: it
+now instructs the driving model to build all seven files itself, in one context, phase by phase in
+dependency order, carrying only a short running note of stable identifiers between phases. The
+`agent`/`mode:"sequential"` call block, the terse-final-answer contract, and the shared-pool time budget
+(all of which existed only to serve orchestration) are removed; the phase *ordering* and per-file
+structure are kept. Context stays bounded by the four levers that were already doing the real work —
+recon's ~11KB digest, P36.2 pruning of spent write/read payloads, incremental section-at-a-time writes,
+and the deterministic P37 scripts. `references/verification-and-updates.md`'s "Phased-orchestration
+governance" section was rewritten to "Single-context build governance" and the update-workflow paragraph
+de-orchestrated to match; the debate step (§5) stays, reframed as a standalone `agent` `mode:"debate"`
+call at depth 1 (not a phase-6 sub-agent at depth 2). What remains **open** is the live verification that
+a full seven-file linear build actually stays inside the context window on the target local models — that
+needs **P38.2** (chat drive-to-completion) and **P38.3** (per-turn telemetry) plus a live run. See
+[roadmap.md](roadmap.md).
+
+Earlier today, a **P38.1 first fix** (SKILL.md §4.2 `agent`-call callout + a `skill`-tool corrective
+guard) was shipped and then **superseded by the rework above** after three live runs proved it
+insufficient: qwen3:14b mis-routed the workflow payload to `ls` (guard never fires there) and hand-wrote
+an incomplete suite with a false "complete" claim, and mythos-sec:24b couldn't even invoke `recon.py`
+(shell flailing) and loop-aborted. **Neither tested local model (14B/24B) can drive the phased
+multi-agent workflow** — which is why orchestration is abandoned for local models and the phased `agent`
+path is parked (still available for capable cloud/large models, no longer the default). See
 [roadmap.md](roadmap.md). Also today: **P37.6 shipped** (two threat-model script fixes from a live
 dogfood eval — see its entry below), and the **P36 live-verification of P36.1-P36.3 was attempted** on a
 real local model (qwen3:14b) for the first time: P36.1 (deterministic skill load) and P37.1 (`recon.py`)
@@ -151,6 +177,38 @@ sources" refusal, which turned out to need two-way disambiguation rather than th
 its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearing the rest of Tier
 2 — njsscan's Windows traceback (a libsast bug, not the semgrep gap the item diagnosed) and
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P38.2 — `aegis chat --skill`: preload a skill body and drive it to completion
+
+Filed and shipped 2026-07-20. A one-shot `aegis chat` turn ends when the model yields, so a long,
+multi-phase skill (threat model, deep research) — many turns in one context — stops at the first pause
+with a partial suite. Both prior live threat-model runs did exactly this, ending on *"Would you like me to
+proceed? (~70 min)"* even after an explicit "do not stop". `aegis chat` gained **`--skill <name>`**, which
+makes a scripted skill run actually finish:
+
+- **Preloads the skill body.** The named skill's full instructions are prepended to the first user message
+  (framed like the TUI's `/threat-model` path), so a small local model never depends on the
+  `skill`-tool round-trip that progressive disclosure assumes and that P36.1 showed such models skip. The
+  skill is enabled on top of the config's builtin list for the run, and — new for the CLI path — the
+  embedded built-ins are materialized to `<dataDir>/builtin-skills/` (only the daemon did this before), so
+  a freshly-built binary's skill body and its bundled scripts (`recon.py`, `verify.py`, …) are on disk.
+- **Drives to completion.** After each engine run yields, if any file under `.aegis/` still contains a
+  `<!-- PENDING -->` marker, chat appends a continuation turn naming the unfinished files and re-runs —
+  reusing the *same* `engine.Conversation`, so context threads and pruning/compaction apply across the
+  whole drive. Bounded by `--max-turns` (default 40) and a no-progress guard (three consecutive yields
+  that call no tool at all → stop, rather than burn tokens on a model that's only talking).
+
+The completion oracle is the stub-first `<!-- PENDING -->` pattern the skills already use (SKILL.md §4.1):
+a marker is unambiguous unfinished work, and zero markers ends the drive. A model that writes full file
+content without ever stubbing (observed on qwen3:14b, which skips the setup step) simply ends when it
+yields — correct when it finished, a known limitation when it didn't, but never a wrong forced
+continuation; making the stubs deterministic is P38.4's job. New logic (`scanPendingMarkers`,
+`continuePrompt`, `skillPreamble`, `appendUnique`) is unit-tested in `internal/cli/chat_drive_test.go`.
+This is what made the P38.1 linear-build live test possible: qwen3:14b drove the full seven-file build in
+one context, no orchestration and no `{mode,agents}` mis-route — see [roadmap.md](roadmap.md)'s P38.1 and
+P38.4 for the mechanism-confirmed / conformance-still-open result.
 
 ---
 

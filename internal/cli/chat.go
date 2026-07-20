@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -37,12 +39,15 @@ func newChatCmd() *cobra.Command {
 		personaName  string
 		autoApprove  bool
 		outputFormat string
+		skillName    string
+		maxTurns     int
 	)
 
 	cmd := &cobra.Command{
 		Use:   "chat [prompt]",
 		Short: "Run a one-shot chat turn through the agent engine (no TUI)",
-		Long:  "Sends a single prompt to the model and streams the response. Reads the prompt from arguments, or from stdin if none are given.",
+		Long: "Sends a single prompt to the model and streams the response. Reads the prompt from arguments, or from stdin if none are given.\n\n" +
+			"With --skill <name>, the named skill's full instructions are preloaded into the prompt (so a small local model never has to discover and fetch them via the `skill` tool) and the run is driven to completion: after each turn, if any file under .aegis/ still contains a `<!-- PENDING -->` marker, chat auto-continues rather than stopping when the model yields. This is what lets a long, multi-phase skill (threat model, deep research) finish non-interactively; a plain one-shot turn would stop at the first yield with a partial suite (P38.2). --max-turns bounds the drive.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -121,8 +126,26 @@ func newChatCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// P38.2: --skill preloads a specific skill for this run. Enable it on
+			// top of config's builtin list (so the `skill` tool and the
+			// <skills_available> index both see it) and materialize the embedded
+			// built-ins to <dataDir>/builtin-skills — the daemon does this at
+			// startup, but `aegis chat` runs in-process and never did, so without
+			// it a freshly-installed binary's builtin skill body and its bundled
+			// scripts (recon.py, verify.py, …) wouldn't be on disk to read.
+			enabledBuiltins := cfg.Skills.BuiltinEnabled
+			if skillName != "" && skills.IsBuiltin(skillName) {
+				enabledBuiltins = appendUnique(enabledBuiltins, skillName)
+			}
+			if skillName != "" || len(enabledBuiltins) > 0 {
+				if err := skills.MaterializeBuiltins(cfg.DataDir); err != nil {
+					return fmt.Errorf("materialize built-in skills: %w", err)
+				}
+			}
+
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, BuiltinSkills: enabledBuiltins, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
 				return err
 			}
 
@@ -160,7 +183,21 @@ func newChatCmd() *cobra.Command {
 			ctx, stop := installSignalCancel(context.Background(), logger)
 			defer stop()
 
-			conv := &engine.Conversation{System: buildChatSystem(cfg, cwd, system, personaName)}
+			// P38.2: preload the named skill's full body into the first user
+			// message. Small local models were observed to skip the `skill`-tool
+			// round-trip that progressive disclosure relies on (P36.1); prepending
+			// the instructions verbatim removes that dependency for a scripted run.
+			driveToCompletion := false
+			if skillName != "" {
+				if sk, ok := skills.Load(cwd, cfg.DataDir, enabledBuiltins, skillName); ok && strings.TrimSpace(sk.Content) != "" {
+					prompt = skillPreamble(skillName, sk.Content) + prompt
+					driveToCompletion = true
+				} else {
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n[warning: --skill %q not found or empty; running without preloaded skill body]\n", skillName)
+				}
+			}
+
+			conv := &engine.Conversation{System: buildChatSystem(cfg, cwd, enabledBuiltins, system, personaName)}
 			conv.Append(provider.Message{
 				Role:    provider.RoleUser,
 				Content: []provider.Block{provider.TextBlock{Text: prompt}},
@@ -174,17 +211,14 @@ func newChatCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			var answer strings.Builder
 			toolCalls := 0
-			// P35.8: bracket the engine run with boundary markers. A silent
-			// mid-run disappearance then shows up as a "run starting" line with
-			// no matching "run finished" — exactly the diagnostic signal that
-			// was missing when a live chat turn vanished without a trace.
-			logger.Info("chat: run starting", "prompt_bytes", len(prompt))
-			runErr := eng.Run(ctx, conv, func(ev engine.Event) {
+			iterToolCalls := 0
+			onEvent := func(ev engine.Event) {
 				// Counted for every format: both json and stream-json report
 				// this in their trailer, so counting it per-branch left
 				// stream-json's summary permanently reading zero.
 				if ev.Kind == engine.KindToolCall {
 					toolCalls++
+					iterToolCalls++
 				}
 				switch format {
 				case outputStreamJSON:
@@ -215,8 +249,66 @@ func newChatCmd() *cobra.Command {
 						fmt.Fprintln(out)
 					}
 				}
-			})
-			logger.Info("chat: run finished", "err", errString(runErr), "tool_calls", toolCalls)
+			}
+
+			// P35.8: bracket the engine run with boundary markers. A silent
+			// mid-run disappearance then shows up as a "run starting" line with
+			// no matching "run finished" — exactly the diagnostic signal that
+			// was missing when a live chat turn vanished without a trace.
+			logger.Info("chat: run starting", "prompt_bytes", len(prompt), "drive", driveToCompletion)
+
+			// P38.2 drive-to-completion. A multi-phase skill (threat model, deep
+			// research) is many turns in one context; a plain one-shot chat stops
+			// at the first yield, so a model that pauses to ask "shall I proceed?"
+			// mid-build (the motivating failure) leaves a partial suite behind its
+			// unresolved `<!-- PENDING -->` stubs. When --skill preloaded such a
+			// skill, keep running while any file under .aegis/ still carries a
+			// PENDING marker: append a continuation turn and run again — reusing
+			// the SAME conversation so context threads (and pruning/compaction
+			// apply) across the whole drive. Bounded by --max-turns and a
+			// no-progress guard (three consecutive yields that call no tool at all
+			// means the model is only talking, so stop rather than burn tokens).
+			//
+			// The oracle is the stub-first pattern the skill uses (SKILL.md §4.1):
+			// a PENDING marker is unambiguous unfinished work. If a model instead
+			// writes full file content without ever stubbing (observed on
+			// qwen3:14b, which skips the setup step), no markers appear and the
+			// drive simply ends when the model yields — correct when it finished,
+			// and a known limitation when it didn't, but never a wrong forced
+			// continuation.
+			pendingRoot := filepath.Join(cwd, ".aegis")
+			noProgress := 0
+			var runErr error
+			for iter := 0; ; iter++ {
+				iterToolCalls = 0
+				runErr = eng.Run(ctx, conv, onEvent)
+				logger.Info("chat: run finished", "iter", iter, "err", errString(runErr), "tool_calls", toolCalls, "iter_tool_calls", iterToolCalls)
+				if runErr != nil || !driveToCompletion || ctx.Err() != nil {
+					break
+				}
+				pending := scanPendingMarkers(pendingRoot)
+				if len(pending) == 0 {
+					break // no unfinished stubs remain — the run is complete
+				}
+				if iter+1 >= maxTurns {
+					msg := fmt.Sprintf("drive-to-completion hit --max-turns=%d with %d file(s) still PENDING: %s", maxTurns, len(pending), strings.Join(pending, ", "))
+					logger.Warn("chat: " + msg)
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: %s — re-run to resume]\n", msg)
+					break
+				}
+				if iterToolCalls == 0 {
+					if noProgress++; noProgress >= 3 {
+						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: model yielded %d times without calling a tool; stopping]\n", noProgress)
+						break
+					}
+				} else {
+					noProgress = 0
+				}
+				conv.Append(provider.Message{
+					Role:    provider.RoleUser,
+					Content: []provider.Block{provider.TextBlock{Text: continuePrompt(pending)}},
+				})
+			}
 
 			snap := tracker.Snapshot()
 			switch format {
@@ -261,6 +353,8 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().StringVar(&personaName, "persona", "", "persona to use (e.g. security, developer, sre)")
 	cmd.Flags().BoolVar(&autoApprove, "yes", false, "auto-approve tool calls that would otherwise require confirmation")
 	cmd.Flags().StringVar(&outputFormat, "output-format", "text", "output format: text, json (final result object), or stream-json (one event per line)")
+	cmd.Flags().StringVar(&skillName, "skill", "", "preload the named skill's full instructions into the prompt and drive the run to completion (auto-continue while `<!-- PENDING -->` markers remain under .aegis/) — for multi-phase skills like threat-modeling that a one-shot turn would leave half-finished")
+	cmd.Flags().IntVar(&maxTurns, "max-turns", 40, "with --skill, the maximum number of drive-to-completion turns before stopping with a resumable partial result")
 	return cmd
 }
 
@@ -310,7 +404,7 @@ func watchSignal(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os
 // in particular that skills are advertised, without which the registered
 // `skill` tool is undiscoverable — is unit-testable. explicit --system wins,
 // then --persona, then general.
-func buildChatSystem(cfg *config.Config, cwd, system, personaName string) string {
+func buildChatSystem(cfg *config.Config, cwd string, enabledBuiltins []string, system, personaName string) string {
 	resolvedSystem := system
 	if resolvedSystem == "" {
 		p, _ := persona.Get(personaName)
@@ -330,7 +424,7 @@ func buildChatSystem(cfg *config.Config, cwd, system, personaName string) string
 	// demand. builtin.Register wires the `skill` tool into the registry, but
 	// without this <skills_available> index the model is never told the skills
 	// exist and never calls it.
-	if sk := skills.BuildIndex(cwd, cfg.DataDir, cfg.Skills.BuiltinEnabled); sk != "" {
+	if sk := skills.BuildIndex(cwd, cfg.DataDir, enabledBuiltins); sk != "" {
 		resolvedSystem = resolvedSystem + "\n\n" + sk
 	}
 	// Inject the cached repository map when present (built via `aegis index`).
@@ -477,4 +571,75 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// appendUnique adds name to list unless a case-insensitive match is already
+// present, returning a copy so the caller's slice (cfg's) is never mutated.
+func appendUnique(list []string, name string) []string {
+	for _, e := range list {
+		if strings.EqualFold(e, name) {
+			return list
+		}
+	}
+	out := make([]string, len(list), len(list)+1)
+	copy(out, list)
+	return append(out, name)
+}
+
+// skillPreamble frames a preloaded skill body as authoritative instructions
+// ahead of the task, mirroring the TUI's skillTaskMessage (internal/tui) so the
+// scripted --skill path and the interactive /threat-model path present the skill
+// to the model identically.
+func skillPreamble(name, body string) string {
+	return fmt.Sprintf("The %s skill has been loaded for you. Its full instructions are below — follow them for this task.\n\n<skill name=%q>\n%s\n</skill>\n\n", name, name, body)
+}
+
+// continuePrompt is the drive-to-completion continuation turn (P38.2): it names
+// the files still carrying `<!-- PENDING -->` markers and tells the model to
+// resume in dependency order without pausing to ask, matching the resume
+// contract in the threat-modeling skill's SKILL.md §4.2. Only called with a
+// non-empty list (the drive loop stops when no markers remain).
+func continuePrompt(pending []string) string {
+	return "Continue — the task is not finished. These files still contain `<!-- PENDING -->` markers and must be completed:\n- " +
+		strings.Join(pending, "\n- ") +
+		"\n\nResume from the first unfinished file in dependency order and keep working until NO `<!-- PENDING -->` marker remains in any file. This is a non-interactive run: do not stop to ask whether to proceed, and do not return a partial result."
+}
+
+// scanPendingMarkers walks root (typically <cwd>/.aegis) and returns the
+// root-relative paths of text files that still contain a `<!-- PENDING -->`
+// marker — the stub-first pattern multi-phase skills use to mark unfinished
+// files. Only small text-ish files are read (the marker only ever appears in
+// generated markdown/yaml/mmd), so the walk stays cheap. A missing root yields
+// no matches.
+func scanPendingMarkers(root string) []string {
+	const marker = "<!-- PENDING -->"
+	const maxFileSize = 1 << 20 // 1 MiB — generated report files are far smaller
+	var hits []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".md", ".mmd", ".markdown", ".yaml", ".yml", ".txt":
+		default:
+			return nil
+		}
+		if info, err := d.Info(); err != nil || info.Size() > maxFileSize {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		if strings.Contains(string(data), marker) {
+			if rel, err := filepath.Rel(root, path); err == nil {
+				hits = append(hits, filepath.ToSlash(rel))
+			} else {
+				hits = append(hits, filepath.ToSlash(path))
+			}
+		}
+		return nil
+	})
+	sort.Strings(hits)
+	return hits
 }
