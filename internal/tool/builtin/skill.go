@@ -37,10 +37,20 @@ func (t *skillTool) InputSchema() json.RawMessage {
 }
 func (t *skillTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
-		Name string `json:"name"`
+		Name   string          `json:"name"`
+		Mode   string          `json:"mode"`
+		Agents json.RawMessage `json:"agents"`
 	}
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
+	}
+	// Corrective guard: models sometimes route a sub-agent workflow to the
+	// skill tool because a skill body told them to "run the phased agent
+	// workflow". The skill tool only loads a body; misrouting mode/agents here
+	// used to be a silent no-op (unknown JSON fields are dropped). Point the
+	// model at the `agent` tool instead of failing opaquely.
+	if strings.TrimSpace(args.Mode) != "" || len(args.Agents) > 0 {
+		return tool.Result{Content: "The `skill` tool only loads a skill body and takes a single `name` argument — it has no `mode` or `agents` parameter. To run a sub-agent workflow (sequential/parallel/loop/debate), call the tool named `agent` with `mode` and `agents` instead.", IsError: true}, nil
 	}
 	args.Name = strings.TrimSpace(args.Name)
 	if args.Name == "" {

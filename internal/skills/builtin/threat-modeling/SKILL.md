@@ -54,6 +54,11 @@ improvise one from a process description alone.
 
 | Reference file | Read when | Contains |
 |---|---|---|
+| `recon.py` (bundled script, not a reference doc) | **Start of the architecture phase, before any manual exploration (§2 step 1)** | Deterministic one-pass repo digest — run it, read its stdout; replaces reading source files raw |
+| `inventory.py` (bundled script) | **Phase 5**, to generate `inventory.yaml` from the finished markdown; **phase 6**, with `--check`, to verify it still agrees | `python inventory.py <run-dir>` writes the sidecar (IDs, derived tiers) deterministically; `--check` regenerates in-memory and diffs vs disk, exit non-zero on drift |
+| `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis) |
+| `lint_dfd.py` (bundled script) | **Phase 6** review round, whenever the DFD changed | `python lint_dfd.py <run-dir>` — Mermaid DFD linter (LR flowchart, three-palette classDefs, no stray fences/keywords, subgraph balance, labeled edges, `.mmd`↔`.md` equality) |
+| `diff_inventory.py` (bundled script) | **Update workflow (§6)**, when refreshing a baseline model | `python diff_inventory.py <baseline-inventory.yaml> <current-inventory.yaml>` — classifies threats new/resolved/still-present/changed for the Changes Since Baseline section |
 | `references/stride.md` / `linddun.md` / `pasta.md` / `trike.md` / `vast.md` / `nist-800-154.md` | Framework chosen, before exploring the workspace | That framework's process/stages and category definitions |
 | `references/output-formats.md` | Before writing any of the five framework-agnostic files (`0-assessment.md`, `0.1-architecture.md`, `1.1-model.mmd`, `1-model.md`, `3-findings.md`) | Verbatim templates, mandatory fields (tier, CVSS 4.0, CWE, OWASP), the Threat Coverage Verification loop, and per-file post-write checks |
 | `references/diagram-conventions.md` | Before writing `1.1-model.mmd` or any diagram in `0.1-architecture.md` | Mermaid shapes, fixed color palette, DFD direction, pre-render checklist |
@@ -69,42 +74,65 @@ not the top-level run — and the bounded-read discipline below is what keeps
 that phase's peak context small enough to survive a local model. Never model
 an assumed architecture. Before applying any framework:
 
-1. Explore the workspace: list directories, read entry points, config,
-   auth/authz code, network-facing handlers, and data-access layers.
-   **Read large files in bounded excerpts, not whole.** When a file is big
-   (a multi-hundred-line handler, a ~100KB single-file script), don't pull
-   it into context in one `read_file` call — page through it with
-   `read_file`'s `offset`/`limit`, or run a targeted `grep`/search for the
-   entry points, config keys, routes, and data-access calls you actually
-   need and read only those regions. On a local model this is not optional:
-   one whole-file read of a large script can eat half a turn's token budget,
-   and every later turn repays that context, so keep each turn's reads small
-   and targeted.
-2. From what you actually found, identify: **assets** (data, credentials,
+1. **Run the recon script first — it does the bulk gathering deterministically,
+   outside your context.** `recon.py` (Python 3, stdlib only, bundled with this
+   skill — its path is in the skill-assets manifest) walks the whole workspace
+   in one pass and prints a compact digest: git metadata, languages, dependency
+   manifests, bind/listen sites with a suggested deployment classification,
+   entry points, config/env keys, security-infrastructure signals, external
+   egress signals, and per-file declared symbols ranked security-relevant
+   first. Run it against the workspace root —
+   `python <path>/recon.py <workspace-root>` — and read its stdout digest
+   *instead of* reading dozens of source files yourself. The digest for a
+   500-file repo is a few KB; reading those files raw would be megabytes, and
+   on a local model that peak context is exactly what kills the run. The
+   script's output is deterministic (same repo → same digest), which is what
+   makes component names, the exposure classification, and `inventory.yaml`
+   ids stable across runs. Everything the digest labels a *suggestion*
+   (deployment class, security infra, component candidates) is evidence for
+   **you** to confirm or override per the rules below — not a decision the
+   script made; verify at the cited file before relying on it.
+2. **Then read selectively, only to confirm or fill gaps the digest leaves.**
+   The digest points you at the exact files that matter — the listener call
+   sites, the auth/secret-handling files, the entry points, the component
+   candidates carrying security signals. Open *those* to confirm the finding,
+   and **read large files in bounded excerpts, not whole**: page through with
+   `read_file`'s `offset`/`limit`, or `grep` for the specific route, config
+   key, or data-access call the digest flagged, and read only that region.
+   Never re-read the whole tree the script already summarized. On a local
+   model this is not optional: one whole-file read of a large handler can eat
+   half a turn's token budget, and every later turn repays that context.
+3. From what recon reported and you confirmed, identify: **assets** (data, credentials,
    capabilities worth protecting), **trust boundaries** (process/network/
    privilege boundaries the system crosses), **entry points** (where
    untrusted input enters), and **data flows** (how data moves between
    components, including third-party/external dependencies).
-3. **Anchor every component to a real code artifact.** For each component
-   in the model you must be able to cite the specific class, file, or
-   manifest that is its anchor — if you can't cite one, the component
-   doesn't exist; delete it rather than modeling an invented abstraction
-   (`ConfigurationStore`, `DataLayer`) that no code implements. Name
-   components after their anchors, not synonyms of them, so a re-run on the
-   same code produces the same names, and so `inventory.yaml`'s ids stay
-   stable across runs.
-4. **Classify the deployment, and let it bound severity.** From the same
-   evidence (listeners and bind addresses, ingress/proxy config, ports
-   mappings, service manifests) classify the system: `internet-facing`,
-   `internal-network`, `localhost-service` (daemon bound to 127.0.0.1), or
-   `local-desktop` (no listener at all). The classification is binding: a
-   localhost-only daemon has no "unauthenticated remote attacker" threats —
-   the floor prerequisite for every threat is local process access, and
-   severity must reflect that. Record it, with evidence, in
-   `0.1-architecture.md`'s Component Exposure Table — that table is the
-   single source of truth every later file's prerequisite/tier must respect
-   (`output-formats.md`).
-5. Only then apply the chosen framework's process against this real map —
+4. **Anchor every component to a real code artifact.** The recon digest's
+   "component candidates" are already anchored to a file — that is their whole
+   point. For each component you keep in the model you must be able to cite the
+   specific class, file, or manifest that is its anchor — if you can't cite one,
+   the component doesn't exist; delete it rather than modeling an invented
+   abstraction (`ConfigurationStore`, `DataLayer`) that no code implements
+   (the digest lists only symbols that actually exist, so it structurally
+   can't invent these — but you can, so don't). Curate the candidates down to
+   real components per §4.2 eligibility, and name each after its anchor, not a
+   synonym of it, so a re-run on the same code produces the same names and
+   `inventory.yaml`'s ids stay stable across runs.
+5. **Classify the deployment, and let it bound severity.** Recon prints a
+   *suggested* classification with its evidence (listener call sites, bind
+   addresses, Dockerfile/Helm/compose signals) — confirm or override it, don't
+   just copy it. The classes are `internet-facing`, `internal-network`,
+   `localhost-service` (daemon bound to 127.0.0.1), or `local-desktop` (no
+   listener at all). Watch the case recon flags explicitly: a listener whose
+   bind address is config/flag-driven rather than a literal — check the config
+   default and any bind-to-all / allow-remote flag before settling the class.
+   The classification is binding: a localhost-only daemon has no
+   "unauthenticated remote attacker" threats — the floor prerequisite for
+   every threat is local process access, and severity must reflect that.
+   Record it, with evidence, in `0.1-architecture.md`'s Component Exposure
+   Table — that table is the single source of truth every later file's
+   prerequisite/tier must respect (`output-formats.md`).
+6. Only then apply the chosen framework's process against this real map —
    not a generic web-app shape.
 
 ## 3. Evidence rules — verify before flagging
@@ -184,6 +212,28 @@ today's own in-progress directory is, of course, the normal flow).
 
 ### 4.2 Delegate the build to isolated phases, in dependency order
 
+> **⛔ Use the tool named `agent` — NOT the `skill` tool.** This one `agent`
+> call spawns the entire phased build. The `skill` tool only *loads* a skill
+> body: it takes a single `name` argument and has no `mode` or `agents`
+> parameter — putting them there does nothing and the phased build silently
+> never runs. Call `agent` with exactly this shape (one `agents` entry per
+> phase from the table below; fill in the real directory path and per-phase
+> prompts):
+>
+> ```json
+> {
+>   "mode": "sequential",
+>   "agents": [
+>     {"subagent_type": "build", "description": "Phase 1 — architecture", "prompt": "…"},
+>     {"subagent_type": "build", "description": "Phase 2 — model/DFD",   "prompt": "…"},
+>     {"subagent_type": "build", "description": "Phase 3 — analysis",    "prompt": "…"},
+>     {"subagent_type": "build", "description": "Phase 4 — findings",    "prompt": "…"},
+>     {"subagent_type": "build", "description": "Phase 5 — assessment",  "prompt": "…"},
+>     {"subagent_type": "build", "description": "Phase 6 — review",      "prompt": "…"}
+>   ]
+> }
+> ```
+
 Issue **one** `agent` tool call with `mode: "sequential"` and an `agents`
 array — one entry per phase, `subagent_type: "build"` for **every** entry
 (each phase writes files, so it needs write access; a plan-mode session
@@ -214,19 +264,24 @@ The phases, in the dependency order of the file suite:
 
 | # | Phase | Reads (only this, plus prior files from disk) | Owns / fills | Returns (terse identifiers only) |
 |---|---|---|---|---|
-| 1 | Architecture | `output-formats.md`; the workspace (§2 exploration + §3 evidence rules) | `0.1-architecture.md` | component names + types + anchors; deployment classification; each component's exposure floor; security-infra component names |
+| 1 | Architecture | runs `recon.py` (§2 step 1) then reads its digest; `output-formats.md`; targeted confirmation reads (§2 steps 2–5 + §3 evidence rules) | `0.1-architecture.md` | component names + types + anchors; deployment classification; each component's exposure floor; security-infra component names |
 | 2 | Model / DFD | `diagram-conventions.md`; `0.1-architecture.md` | `1.1-model.mmd`, `1-model.md` | element names; `DF##` ids with source→target; trust-boundary names |
 | 3 | Framework analysis | `skeletons/skeleton-<framework>.md`, the framework reference (`stride.md`/etc.), `companion-techniques.md`; `0.1-architecture.md`, `1-model.md` | `2-<framework>-analysis.md` | every threat ID with (component, category, prerequisite, tier, severity, has-mitigation) |
 | 4 | Findings | `output-formats.md` (findings section); `2-<framework>-analysis.md`, `0.1-architecture.md`'s exposure table | `3-findings.md` | `FIND-##` ids with (threat IDs covered, tier, severity) |
-| 5 | Assessment + inventory | `output-formats.md` (assessment section), `skeletons/skeleton-inventory.md`; all prior files | `0-assessment.md`, `inventory.yaml` | tier/threat/finding counts; confirmation both written |
-| 6 | Review round (§5) | the **complete** suite, fresh from disk | edits in place across all files | seams fixed; final self-check pass/fail |
+| 5 | Assessment + inventory | `output-formats.md` (assessment section), `skeletons/skeleton-inventory.md`; all prior files | `0-assessment.md`, then run `python inventory.py <run-dir>` to generate `inventory.yaml` | tier/threat/finding counts; confirmation both written |
+| 6 | Review round (§5) | the **complete** suite, fresh from disk; runs `verify.py`, `lint_dfd.py`, `inventory.py --check` | edits in place across all files | seams fixed; all three scripts' pass/fail |
 
 Phase 3 must **copy the skeleton structure exactly** (same columns, same
 order, same fixed value lists) and run its inline `<!-- ⛔ POST-*-CHECK -->`
 comments right after writing each table, and **run the technology sweep** in
 `companion-techniques.md` — the same rules as before, now inside that phase's
 context. Phase 4 runs the Threat Coverage Verification loop. Phase 5 recounts
-from the finished files, never carrying a stale mid-analysis number.
+from the finished files, never carrying a stale mid-analysis number, and
+generates `inventory.yaml` by running `python inventory.py <run-dir>` rather
+than hand-writing it — the script derives each threat's tier from its
+prerequisite and emits stable, sorted, deterministic YAML, so the sidecar
+can't drift from the analysis or vary between runs. Phase 6 runs the three
+bundled check scripts (below) over the assembled suite before any debate.
 
 Grounding each phase in the prior phase's exact identifiers (threaded as the
 sequential workflow's forwarded context) is what keeps names from diverging
@@ -299,8 +354,27 @@ seams show:
   `3-findings.md`'s Threat Coverage Verification table.
 - No two files contradict each other about the same control or data flow.
 
-Fix what fails by editing the files in place — the full checklist is
-`references/verification-and-updates.md`'s "Final self-check".
+Run the three bundled check scripts first — they mechanize this checklist so
+the manual read confirms rather than hunts:
+
+- `python verify.py <run-dir>` — cross-file consistency (leftover skeleton
+  syntax, component-name consistency, dataflow refs defined, threat↔coverage
+  bijection, finding-id sequence, tier/prerequisite consistency, count
+  agreement, forbidden coverage statuses, external-AV consistency, and that
+  `0.1-architecture.md` and the analysis file agree on the deployment
+  classification — a divergence silently skews every derived tier).
+- `python lint_dfd.py <run-dir>` — the DFD's Mermaid conventions and
+  `.mmd`↔`.md` equality.
+- `python inventory.py <run-dir> --check` — that `inventory.yaml` still
+  regenerates identically from the current markdown (catches a threat added or
+  a tier changed after the sidecar was written).
+
+Each exits non-zero and names the failing check. Fix what any script flags,
+then re-run it until clean. Then do the manual read for the judgment calls no
+script can make (does a control actually contradict a data flow; is a
+prerequisite realistic). Fix what fails by editing the files in place — the
+full checklist is `references/verification-and-updates.md`'s "Final
+self-check".
 
 Then, if your system prompt's "Debate mode (P12)" section marks threat
 modeling enabled, route the **contested entries** — high-severity threats
@@ -329,7 +403,10 @@ run can diff against this one), the **update workflow** for when the ask is
 the baseline directory, verify each baseline threat against the current
 code, produce a standalone new directory with a Changes Since Baseline
 section, rather than modeling from scratch or trusting the old files'
-claims), and the **final self-check** (coverage, prerequisite/tier
+claims — once the new directory's `inventory.yaml` exists, run `python
+diff_inventory.py <baseline>/inventory.yaml <new>/inventory.yaml` to classify
+threats new/resolved/still-present/changed and drive that section
+mechanically), and the **final self-check** (coverage, prerequisite/tier
 consistency, anchors, evidence, cross-file agreement — run it and fix what
 fails before reporting).
 
