@@ -1,32 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-21 (**P38.1's conformance re-test was executed** — qwen3:14b does *not* reach a
-verify-clean threat-model suite even with P38.4 scaffolding: with `think` on it fabricates a completed run
-and writes nothing, with `think` off it runs recon/scaffold but nukes a file via `edit_file replace_all`
-across scaffold.py's identical `<!-- PENDING -->` markers. The P38.4 *mechanism* is live-confirmed; the
-conformance goal is unmet on-disk and now gated on a stronger local model. Two actionable engineering
-findings split out as **P38.6** (thinking-mode fabrication) and **P38.7** (identical-marker `replace_all`
-footgun). Same day, a local-14b-model harness-improvement research pass filed four more items: **P39.1**
-(Tier 1, system-prompt byte-stability regression test), **P39.2** (Tier 2, coach tool-execution error
-messages), **P39.3** (Tier 3, grammar/schema-constrained tool-call decoding investigation), and **P39.4**
-(Tier 2, toolcallprobe/doctor doesn't predict multi-turn structured-fill capability) — see each item's
-section below. Earlier: **P38.3 and P38.5 shipped** — both Tier 3. P38.3: per-turn usage
-(`InputTokens`/`OutputTokens`/cache counts/`PromptEvalDurationMS`) is now on the wire for both the daemon
-SSE `turn_done` event and `aegis chat --output-format stream-json`'s `turn_done` line, closing the gap
-where the latter carried no usage at all. P38.5: the native Ollama adapter now retries once with `think`
-omitted (and warns) when a model 400s on the parameter entirely, instead of aborting the run. See
-[releases.md](releases.md#latest-changes). Earlier 2026-07-20: **P38.4 shipped** — `scaffold.py`
-pre-writes all seven threat-model files from the skeletons, real structure + `<!-- PENDING -->` per
-fillable section, so a weak model fills sections instead of authoring structure it gets wrong; a
-freshly-scaffolded suite lints 6/6 and a filled one verifies 9/9. This closes the conformance gap the
-qwen3:14b live test exposed and unblocks P38.1's re-test. Earlier: **P38.2 shipped** — `aegis chat
---skill <name>` preloads a skill body and drives it to completion while `<!-- PENDING -->` markers
-remain — and the **P38.1 linear build was live-tested** on qwen3:14b vs AiGateway: mechanism
-**confirmed** but output did not conform, which P38.4 fixed. P38.1 is Tier 2 (mechanism done;
-conformance re-test now unblocked by P38.4). Earlier: the threat-modeling skill was reworked to the
-non-orchestrated linear build (SKILL.md + verification-and-updates.md); orchestration parked. Earlier:
-P37.6 + two P37-script fixes shipped; P37.1-P37.5 shipped — threat-model suite scripting complete;
-P36.1-P36.3 shipped; P35.1-P35.13 shipped)
+**Last updated:** 2026-07-21
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -37,156 +11,18 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 2 — **P38.1** (Tier 2, re-test executed 2026-07-21, now environment-gated on a stronger
-local model), plus the parked **P25.9** (Tier 4). **P38.6** and **P38.7** (both Tier 2, split out of the
-P38.1 re-test) **shipped 2026-07-21** — see [releases.md](releases.md#latest-changes): P38.6 disables
-`think` for `--skill` drive-to-completion runs and adds an empty-output floor check to the completion oracle;
-P38.7 makes `scaffold.py`'s per-section `<!-- PENDING -->` markers unique and section-keyed
-(`<!-- PENDING: <section> -->`) so a section fill can't `replace_all`-nuke a whole file. All four items from
-the 2026-07-21 local-14b-model harness-improvement research pass are also closed same-day: **P39.1**
-(system-prompt byte-stability regression test), **P39.2** (coach tool-execution error messages), and
-**P39.4** (`aegis doctor --deep`'s structured multi-turn fill probe) all **shipped**; **P39.3**
-(grammar/schema-constrained tool-call decoding) was spiked and closed **NO-GO** (see Tier 3). **P38.3** and
-**P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
+**Open items:** 1 actionable-blocked + 1 parked.
 
-**Update 2026-07-21 — P38.1's conformance re-test was run and is a negative on qwen3:14b.** With P38.4
-scaffolding in place, `aegis chat --skill threat-modeling` against AiGateway does **not** produce a
-verify-clean suite on the config-default model, in two `think`-dependent modes: with `think` on (the
-default) the model **fabricates** a completed build in its reasoning trace and writes nothing (→ **P38.6**);
-with `think` off it runs `recon.py`/`scaffold.py` (confirming the P38.4 mechanism live — seven files
-scaffolded) but then destroys architecture.md with an `edit_file … replace_all` across scaffold.py's
-identical `<!-- PENDING -->` markers and loops to abort (→ **P38.7**). The P38.4 *mechanism* is now
-live-confirmed; the *conformance* goal is unmet on qwen3:14b (whose weakness moved from authoring structure
-to filling it) and the stronger `qwen3.6:35b-a3b` MoE is not on disk to try. Details in P38.1 below.
+- **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. The build path is shipped
+  and its mechanism is live-confirmed (qwen3:14b scaffolds all seven files in one context). What remains
+  is a **live conformance re-test on a stronger local model**: qwen3:14b does not reach a verify-clean
+  suite, and the doctor-recommended `qwen3.6:35b-a3b` MoE is not on disk. Genuinely environment-gated —
+  re-run once a capable-enough model is installed. See the item below.
+- **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
+  Parked pending demand; do not build speculatively.
 
-The prior active focus was **P38.1's conformance re-test**, which **P38.4 unblocked**. P38.4
-(deterministic skeleton scaffolding, `scaffold.py`) shipped 2026-07-20 — see
-[releases.md](releases.md#latest-changes): a stdlib script pre-writes all seven threat-model files *from
-the skeletons* with real structure (headings, table headers + separators, fixed-value lists, the DFD's
-`flowchart LR` + three `classDef`s) and a `<!-- PENDING -->` marker per fillable section, so the model
-**fills sections** (`edit_file`) instead of authoring the structure the 14B model got wrong. It closed the
-exact gap the 2026-07-20 live test exposed (qwen3:14b, via the newly-shipped **P38.2** `aegis chat --skill`
-drive-to-completion): that test **confirmed the P38.1 linear build's mechanism** — one context, no
-sub-agents, **no `{mode,agents}` mis-route** (the P36.3 failure), `recon.py` → all seven files → the P37
-scripts, inside the window (~44K input tokens / 33 tool calls) — **but the output did not conform** because
-the 14B model never loaded the skeleton/`output-formats` templates and re-authored freeform structure each
-pass. With scaffolding, a freshly-scaffolded suite lints 6/6 and a minimally-filled one verifies 9/9, so
-self-correction now converges against a real structure. **P38.1**'s remaining work is the re-test itself:
-confirm a verify-clean seven-file build on a capable-enough local model.
-**P38.5** (models that reject `think` should degrade, not 400) came out of the same test: mythos-sec:24b
-400'd on `think` and, with it disabled, proved too weak a tool-caller to matter (it invents tool names and
-doesn't substitute command placeholders — a model-quality dead end, not a skill problem). It shipped
-2026-07-21 (adapter-level retry-without-think + warning) — see [releases.md](releases.md#latest-changes);
-the underlying model-quality dead end is unaffected. Already confirmed from the run: **P36.1**
-(deterministic skill load), **P37.1** (`recon.py`), and now the P38.1 linear-build mechanism and P38.2.
-
-The **P37.1-P37.5** threat-model
-suite-scripting batch shipped 2026-07-19 (see [releases.md](releases.md#latest-changes)): five bundled
-stdlib scripts that codify the mechanical parts of the threat-modeling skill and leave judgment to the
-model. **P37.1** (`recon.py`) replaces the exhaustive workspace read with one deterministic digest pass
-(git/langs/deps/bind-sites/env-keys/security-infra signals/component candidates), cutting a ~500-file
-repo's phase-1 gathering from megabytes of raw source to a ~11KB digest and making component ids /
-deployment class / `inventory.yaml` ids stable across runs. **P37.2** (`inventory.py`) generates and
-`--check`-validates the `inventory.yaml` sidecar deterministically (deriving each tier from its
-prerequisite), killing the sibling skill's two most-cited failure modes (truncated arrays, field-name
-drift). **P37.3** (`verify.py`) mechanizes the phase-6 cross-file self-check (name consistency,
-threat↔coverage bijection, tier/prerequisite, counts). **P37.4** (`lint_dfd.py`) validates the DFD's
-Mermaid conventions and `.mmd`↔`.md` equality. **P37.5** (`diff_inventory.py`) diffs two sidecars for
-the update workflow's Changes Since Baseline section. Together they lift the Aegis builtin past the
-`.claude/skills/threat-model-analyst` sibling it was benchmarked against. The whole **P36.1-P36.3**
-batch shipped
-2026-07-19, all filed the same day from a `/threat-model stride` dogfooding session against this repo
-on a local-model (Ollama) setup, with one shared **live-verification debt** carried forward (see the
-note under Tier 3 — the batch landed without an Ollama server available to confirm the token-growth
-and peak-context wins live).
-
-**P36.1-P36.3 shipped 2026-07-19** (see [releases.md](releases.md#latest-changes)). **P36.1** (Tier 1)
-— the model skipped the `skill` tool call entirely, wandered into a plain directory listing of the
-just-materialized `.aegis/skills/threat-modeling/` folder, and lost the original instruction; fixed by
-making the initial skill-body load deterministic (slash commands now inject the body server-side
-instead of relying on a tool round-trip). **P36.2** (Tier 3) — the per-turn context-growth question
-P35.5 explicitly scoped out is now addressed: `write_file`/`edit_file` payloads and one-time
-skill-reference reads are pruned by `compaction.pruneStaleToolResults` in the pre-`keepRecent` prefix.
-**P36.3** (Tier 3) — the threat-modeling skill's build stages are now phased through the `agent` tool's
-`mode: "sequential"` workflow (each phase in a fresh, isolated sub-agent context, only terse stable
-identifiers threaded forward) instead of one long-lived, ever-growing run, bounding peak context per
-request on local models. **P35.13**
-shipped 2026-07-19: its
-doc/comment corrections and the `--first-init` native-adapter default landed 2026-07-18, and its
-final open piece — the summed-token-surface decision — was resolved 2026-07-19 as "tokens
-processed" (the correct cloud-cost basis; see Tier 2 below). **P35.12** shipped 2026-07-18 (native-Ollama
-stream cosmetics) and **P35.8** shipped 2026-07-18 as exit-trace instrumentation for `aegis chat`
-(see [releases.md](releases.md#latest-changes)). **P35.10** and
-**P35.11** shipped 2026-07-18 (see [releases.md](releases.md#latest-changes)), closing out Tier 2.
-**P35.9** shipped 2026-07-18 (see
-[releases.md](releases.md#latest-changes)), the last Tier 1 item. **P35.7** shipped 2026-07-18 (see
-[releases.md](releases.md#latest-changes)), closing out the P35.5-P35.7 cluster. P35.5-P35.7 were a cluster filed
-2026-07-18 from the verification pass that followed the P35.1-P35.4 batch. P35.1-P35.4 were all
-filed the same day from one live dogfooding pass: running the threat-modeling skill's
-`/threat-model stride` flow against an external repo (a small ~15-file Python project, not this
-one) on the local-model setup `aegis doctor` itself recommends (Ollama, qwen3.6:35b-a3b-fast). The
-run never produced a completed threat-model suite — it died partway through the mandatory
-workspace-exploration step every time, for four distinct, stacked reasons. **All four shipped
-2026-07-18**: P35.1-P35.3 (the three surface-cleanly-then-fix items) plus both halves of P35.4 —
-the skill-level bounded-read guidance and the provider-side keep-alive residency that lets a
-native-Ollama run reuse its KV cache across turns. For the shipped-batch history and the lessons
-drawn from each (P33/P34 diagnosis accuracy, threat-model closure surfaces, live-verification
-findings), see [releases.md](releases.md#latest-changes) — that history has been consolidated
-there so this document stays limited to what's actually open.
-
-**The P35.5-P35.7 cluster** came out of re-running that same `/threat-model stride` flow with the
-P35 fixes applied, to verify closure. Two things happened. First, a _fifth_ stacked blocker
-surfaced and was fixed on the spot (`aegis chat` registered the built-in `skill` tool but never
-injected the `<skills_available>` index into its system prompt, so the model couldn't discover the
-skill to load it — the daemon path does this via `skills.BuildIndex`, the CLI path didn't; fix in
-`internal/cli/chat.go`, shipped separately). Second, with discovery fixed the model _did_ load the
-skill and explore properly — 5 turns, 27 tool calls, ~62k input tokens deep — and then still died,
-this time on the native adapter's hardcoded 5-minute HTTP response-header timeout during a
-large-context prefill, before writing any report file. P35.5-P35.7 are that timeout and its
-root-cause diagnosis. **P35.5 shipped 2026-07-18**: `provider.response_header_timeout` (seconds)
-now lets a slow-prefill local box raise the ceiling, defaulting unchanged at 5 minutes — fix option
-(a) from the filing; scaling the default with context (b) and shrinking per-turn context growth (c)
-remain out of scope for that item. **P35.6 shipped 2026-07-18**: the bare Go transport string a
-response-header timeout used to surface as (`net/http: timeout awaiting response headers`) is now
-rewrapped, on the native-Ollama and OpenAI-compat paths, into an actionable, non-retryable error
-naming the cause and the levers — mirroring P35.2's context-truncation precedent. The `keep_alive`
-residency from P35.4 was confirmed working live (`ollama ps` showed the model resident with
-`CONTEXT 131072`), so P35.7 existed to establish whether that residency is actually sparing per-turn
-prefill or whether prefill is being reprocessed in full every turn — which decides whether a longer
-timeout or genuine cache reuse is the durable fix. **P35.7 shipped 2026-07-18** as instrumentation
-plus a code-reading pass over the three named non-determinism candidates: `prompt_eval_duration`
-is now read off the wire and logged every turn (`prompt_eval_count`/`prompt_eval_duration_ms`)
-alongside the existing `prompt_eval_count`/`load_duration` telemetry, so a live run can compare
-turn N vs. N+1 and read off cache-hit-vs-full-reprocess directly. The code-reading pass found no
-confirmed bug in any of the three candidates — thinking blocks are round-tripped into
-`Conversation.Messages` but the native-Ollama `translate()` (`internal/provider/ollama/ollama.go`)
-has no case for `ThinkingBlock` in its assistant-message switch, so they're silently and
-consistently dropped on every re-serialization, not a source of drift; tool-result content is
-re-emitted byte-for-byte from stored `ToolResultBlock.Content`, no reformatting on replay; and the
-system prompt (`Server.effectiveSystem`, `internal/server/helpers.go`) is rebuilt fresh every turn
-but every constituent (persona blocks, memory/context files, the skills index, the sorted deferred-
-tools list, the sorted tool schema list) is either static or deterministically sorted, with no
-timestamp or nonce found anywhere in the chain — given unchanged underlying files/config it should
-render byte-identical turn over turn. This is a code-reading conclusion, not a live one: no Ollama
-server was available this session to actually observe `prompt_eval_count` behavior across turns, so
-whether reuse is _actually_ happening in practice remains unconfirmed, and P35.5's "raise the
-ceiling" vs. "make prefill cheap" question stays open pending a live run with the new
-instrumentation.
-
-**P35.9-P35.12** were filed 2026-07-18 from a code-review pass over the whole P33.9-P35.7
-native-Ollama body of work (adapter, factory wiring, timeout/error handling, health probing,
-telemetry). The headline finding was P35.9: the native adapter mints tool-call IDs from a counter
-that resets every request, so IDs collide across turns, historical tool results got re-labeled
-with the wrong `tool_name` on replay, and the serialized prompt prefix mutated between requests —
-a missed fourth cache-invalidation candidate that P35.7's code-reading pass didn't catch, and one
-that intermittently defeated the P35.4 KV-cache reuse whenever consecutive turns led with
-different tools. **P35.9 shipped 2026-07-18** (see [releases.md](releases.md#latest-changes)):
-`translate` now resolves each tool result against the nearest preceding tool-use by walking
-messages in order, instead of a whole-history ID→name map — fixes both the mislabelling and the
-cache churn without touching how IDs are minted. P35.10-P35.12 were the smaller observations from
-the same pass; **P35.10** (InputTokens semantics), **P35.11** (status-probe caching), and
-**P35.12** (error-fallback cleanup + an actionable over-4MiB-line error on the native path) all
-shipped 2026-07-18.
+A handful of unfiled **leads** (condensed under Tier 2/Tier 3 below) capture mechanical follow-ups worth
+their own item when a concrete need appears.
 
 ---
 
@@ -201,308 +37,86 @@ shipped 2026-07-18.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open. **P39.1** (system-prompt byte-stability regression test) shipped 2026-07-21 — see
-`TestEffectiveSystem_ByteStable` / `TestEffectiveSystem_DeferredToolsOrderIndependent` in
-`internal/server/server_test.go`. (**P38.4** shipped
-2026-07-20 — deterministic skeleton scaffolding, `scaffold.py`; see
-[releases.md](releases.md#latest-changes). P38.2 shipped 2026-07-20; P36.1 shipped 2026-07-19;
-P35.9 shipped 2026-07-18;
-P35.5 shipped 2026-07-18; P35.1, P35.2 shipped 2026-07-18; P33.1 and P33.2 shipped 2026-07-15;
-P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
-
-The remaining threat-modeling work — the P38.1 conformance re-test that P38.4 unblocked — is tracked in
-Tier 2 below (it's a live-run verification, not independent build work).
-
-**P39.1 shipped 2026-07-21** — `effectiveSystem` byte-stability regression test. See
-[releases.md](releases.md#latest-changes) for the full write-up.
+**Status:** 0 open.
 
 ---
 
 ## Open Work — Tier 2
 
-**Status:** 1 open — **P38.1** (non-orchestrated linear threat-model build; rework shipped 2026-07-20,
-mechanism live-confirmed; conformance **re-test executed 2026-07-21** — qwen3:14b does not reach a
-verify-clean suite, and no stronger local model is on disk, so this is now environment-gated on a bigger
-model). **P38.6** and **P38.7** (both split out of the 2026-07-21 re-test — see P38.1) **shipped
-2026-07-21**. **P39.2**
-(coach tool-execution error messages for weak local models) and **P39.4** (`aegis doctor --deep`'s
-structured multi-turn fill probe) both shipped 2026-07-21, the same day they were filed. (P38.4, P38.2 shipped 2026-07-20 —
-see [releases.md](releases.md#latest-changes); P37.2, P37.3 shipped 2026-07-19; P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18;
-P35.6 shipped 2026-07-18;
-P35.3 shipped 2026-07-18; P34.12 shipped 2026-07-17; P34.9 and P34.10 shipped 2026-07-17;
-P34.5-P34.8 shipped 2026-07-17; P34.3 shipped 2026-07-16; P34.2 shipped 2026-07-16, both levers;
-P34.1 shipped 2026-07-16; P34.4 shipped 2026-07-16; P33.13, P33.14, P33.15, P33.17, P33.18 shipped
-2026-07-16; P33.3-P33.8 shipped 2026-07-15; P30.4-P30.8 and P31.3-P31.5 shipped 2026-07-14;
-P32.5-P32.7 shipped 2026-07-15.)
+**Status:** 1 open — **P38.1** (environment-gated on a stronger local model).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
-**The rework shipped 2026-07-20** (see [releases.md](releases.md#latest-changes)): the threat-modeling
-skill's primary build is now a single-context linear build the driving model runs itself — no sub-agents,
-no `agent`-tool orchestration. SKILL.md and `references/verification-and-updates.md` were de-orchestrated
-(the §4.2 `agent`/`mode:"sequential"` call block, the terse-final-answer contract, and the shared-pool
-time budget all removed; phase ordering and per-file structure kept; the debate step reframed as a
-standalone `agent` `mode:"debate"` call at depth 1). Context stays bounded, without phasing, by levers
-that already exist (SKILL.md §4): `recon.py`'s ~11KB digest, P36.2 pruning of spent write/read payloads,
-incremental section-at-a-time writes, and the deterministic P37 scripts. This closes out the abandoned
-phased-orchestration approach (P36.3), which no tested local model could drive — qwen3:14b sprayed the
-`{mode,agents}` payload onto whatever tool it emitted and a first fix (SKILL.md callout + `skill`-tool
-guard) didn't help.
+The threat-modeling skill's primary build is a single-context linear build the driving model runs itself —
+no sub-agents, no `agent`-tool orchestration. Context stays bounded by levers that already exist (SKILL.md
+§4): `recon.py`'s ~11KB digest, P36.2 pruning of spent write/read payloads, incremental section-at-a-time
+writes, and the deterministic P37 scripts. `scaffold.py` (P38.4) pre-writes all seven files from the
+skeletons with real structure + a unique `<!-- PENDING: <section> -->` marker per fillable section, so the
+model fills sections instead of authoring structure.
 
-**Live-test result (2026-07-20, qwen3:14b vs AiGateway, via P38.2 drive-to-completion):**
-- ✅ **Mechanism confirmed.** One context, no orchestration, **no `{mode,agents}` mis-route** — the model
-  loaded the (preloaded) skill, ran `recon.py`, wrote all seven files itself, and ran `verify.py`,
-  `lint_dfd.py`, `inventory.py`. The P36.3-era failure that killed every prior run is gone.
-- ✅ **Stayed inside context.** ~44K input tokens over 33 tool calls with no overflow — a partial live
-  confirmation of the P36.2-pruning + recon bound (the run was too short to stress compaction hard, so
-  this is "held for a 33-call run", not "proven for the worst case").
-- ❌ **Output did not conform** — the 14B model skipped the skeleton templates, so `verify.py` failed 6/10
-  and it couldn't self-converge. **That gap was P38.4, now shipped** (deterministic skeleton scaffolding,
-  `scaffold.py`): the seven files are pre-written from the skeletons with real structure + `<!-- PENDING -->`
-  per fillable section, so the model fills sections instead of authoring structure. A freshly-scaffolded
-  suite lints 6/6 and a filled one verifies 9/9 — the remaining work here is the live re-test that this
-  actually carries the 14B (or a stronger local) model to a verify-clean suite end-to-end.
-- mythos-sec:24b is **not viable** independent of the skill: it 400s on `think` (→ P38.5) and, with that
-  disabled, invents tool names and doesn't substitute command placeholders — a model-quality dead end.
+**Mechanism: live-confirmed.** In the 2026-07-21 re-test (qwen3:14b vs AiGateway, `aegis chat --skill
+threat-modeling` drive-to-completion) the model ran `recon.py` → `scaffold.py` and wrote all seven files in
+one context with no orchestration mis-route — the P36.3-era failure that killed every prior run is gone.
 
-**Re-test result (2026-07-21, qwen3:14b vs AiGateway, P38.4 scaffolding in place, `aegis chat --skill
-threat-modeling` drive-to-completion):** the re-test ran and **qwen3:14b does not reach a verify-clean
-suite** — in two distinct `think`-dependent failure modes, neither of which the 2026-07-20 run showed:
-- **`think` on (the config default, `provider.think: true`): total fabrication, zero real tool calls.**
-  The model fetched the timestamp, then **simulated the entire seven-file build inside its reasoning
-  trace** (recon → scaffold → fill → verify, all narrated in `thinking`) and emitted a final report
-  claiming the suite was written and "all check scripts ran clean" — while writing **nothing** (the
-  claimed directory never existed). Because `scaffold.py` never ran, no `<!-- PENDING -->` markers were
-  ever created, so the drive-to-completion oracle saw "no markers" and stopped as if complete
-  (`turns:3, tool_calls:1`). This is the exact no-marker limitation the drive already documents
-  (`internal/cli/chat.go`), but with a newly-identified **trigger (thinking mode)** and a worse shape
-  (fabrication, not just un-stubbed content). Filed as **P38.6**.
-- **`think` off: engages the tools but can't fill.** recon.py ✅ and scaffold.py ✅ wrote all seven files,
-  confirming the P38.4 mechanism live — but then: (a) it skipped the `date` step and scaffolded into the
-  **literal example timestamp** from SKILL.md §4.1 (`…-2026-07-08-1432`); (b) one turn hit the
-  `provider.max_tokens: 8192` output cap (`out=8192`, truncated); (c) fatally, it ran
-  `edit_file(old="<!-- PENDING -->", new="internet-facing", replace_all=true)` and **blanket-overwrote all
-  12 of architecture.md's identical PENDING markers with one wrong string**, because `scaffold.py` emits an
-  *identical* `<!-- PENDING -->` marker for every section; (d) it then looped on failing edits until
-  loop-detection aborted at turn 11. Five of seven files stayed all-PENDING; `verify.py` failed. The
-  identical-marker `replace_all` footgun is filed as **P38.7**.
+**Conformance: still unmet on qwen3:14b.** The 14B model's weakness has moved from "authoring structure"
+(P38.4 fixed that) to "incrementally filling it via `edit_file`": it scaffolds but can't drive the fill to a
+verify-clean suite. The two *actionable* findings from that re-test — think-mode fabrication and the
+identical-marker `replace_all` footgun — were split out and **shipped** as P38.6 and P38.7 (see
+[releases.md](releases.md#latest-changes)). What's left is not code: no stronger local model was on disk
+(`qwen3.6:35b-a3b` not installed) to exercise the "or a stronger local" arm.
 
-**Net:** the P38.4 scaffolding *mechanism* is now live-confirmed (7 files scaffolded from the skeletons in
-one run), but the conformance goal — a verify-clean seven-file suite driven end-to-end — is **still unmet
-on qwen3:14b**, whose weakness has moved from "authoring structure" (P38.4 fixed that) to "incrementally
-filling it via `edit_file`". No stronger local model was on disk to try: the doctor-recommended
-`qwen3.6:35b-a3b` MoE is not installed (only qwen3:14b, mythos-sec:24b, and qwen2.5-coder:1.5b are), so the
-"or a stronger local" arm of the re-test could not be exercised.
+P36.2 (pruning that keeps a single-context linear build inside the window) is the load-bearing mechanism
+here and is **partially confirmed live** (a 33-call run held inside ~44K input tokens with no overflow); its
+definitive confirmation rides on a scaffolded, verify-clean re-test measured through P38.3's per-turn usage
+telemetry.
 
-Priority: Tier 2 — the re-test has been **executed** and the P38.4 mechanism is live-confirmed, but the
-verify-clean goal is unmet on the only capable-enough on-disk model. What remains is genuinely
-environment-gated: **re-run on a stronger local model** (`qwen3.6:35b-a3b` or similar, once installed).
-The two *actionable* engineering findings the re-test surfaced — think-mode fabrication and the
-identical-marker `replace_all` footgun — are split out as **P38.6** and **P38.7** so they can be fixed
-independently of obtaining a bigger model. Not Tier 1 because this is a live-run verification, not
-independent build work — the whole build path exists and is confirmed to run.
+Priority: Tier 2 — the re-test has been executed and the mechanism is live-confirmed; the verify-clean goal
+is unmet on the only capable-enough on-disk model. What remains is genuinely environment-gated: **re-run on
+a stronger local model** (`qwen3.6:35b-a3b` or similar, once installed). Not Tier 1 because this is a
+live-run verification, not independent build work — the whole build path exists and is confirmed to run.
 
-### P38.6 — Thinking-mode models fabricate a completed drive instead of executing it
-
-**Shipped 2026-07-21** — see [releases.md](releases.md#latest-changes). Both levers landed in
-`internal/cli/chat.go`: (a) `--skill` runs force-disable `provider.think` for the drive (loud stderr notice
-when overriding an explicitly-enabled setting), and (b) a `suiteFileCount` floor check flags a completed
-drive that wrote no files under `.aegis/` as a possible fabricated success. `TestSuiteFileCount` added. The
-original filing follows.
-
-**Surfaced by the 2026-07-21 P38.1 re-test.** With `provider.think: true` (the current config default) and
-a reasoning-capable model (qwen3:14b), `aegis chat --skill threat-modeling` drove **zero** real tool calls:
-the model narrated the whole multi-phase build inside its `thinking` trace and then emitted a final answer
-asserting all seven files were written and every check script passed clean — having written nothing. The
-drive-to-completion oracle (`internal/cli/chat.go`) keys off `<!-- PENDING -->` markers under `.aegis/`;
-since `scaffold.py` never ran, no markers existed, so the drive stopped as "complete" (`turns:3,
-tool_calls:1`). The code already documents the no-marker case as a known limitation, but attributes it to a
-model "writing full file content without stubbing" — the re-test shows the real trigger is **thinking mode
-letting the model mentally simulate the tool workflow and report it as done**, and that the output is
-*fabrication* (no content at all), which is strictly worse than the documented case.
-
-Two candidate levers, not yet chosen: (a) **disable `think` for `--skill` drive-to-completion runs** (or
-warn loudly when it's on) — the whole point of the drive is tool-executed multi-phase work, which
-reasoning-mode simulation defeats; the mythos-sec test already ran with `think` disabled by hand, so
-"think off for these runs" is precedented. (b) **Strengthen the completion oracle** so "no PENDING markers"
-is not accepted as done when the run created **no** suite files at all this drive (i.e. distinguish "never
-scaffolded" from "finished") — a floor check that a threat-model run directory with the expected files
-actually exists before the drive reports success. (a) is the smaller, higher-leverage fix; (b) hardens the
-oracle against any future fabrication path, not just the thinking one.
-
-Priority: Tier 2 — cheap, self-contained, and it removes a *silent false-success* on the shipped default
-config, which is the worst failure shape (a user believes they have a threat model and have nothing). Pairs
-naturally with P38.1's re-test (fixing this is a precondition for a clean think-on re-run).
-
-### P38.7 — `scaffold.py`'s identical `<!-- PENDING -->` markers make `edit_file replace_all` a file-nuke
-
-**Shipped 2026-07-21** — see [releases.md](releases.md#latest-changes). `scaffold.py` now emits a unique,
-section-keyed `<!-- PENDING: <section> -->` marker per fillable section (new `pending(key)` builder;
-`table`/`prose` take a `key`); `verify.py` and `internal/cli/chat.go`'s `scanPendingMarkers` match the
-`<!-- PENDING` prefix so keyed markers still count as unfinished; `continuePrompt` and SKILL.md §4.1/§4.2 now
-warn off `replace_all`. Verified: all seven frameworks scaffold with no duplicate/bare markers, fresh
-scaffold lints 6/6 and still fails the leftover-marker check. The original filing follows.
-
-**Surfaced by the 2026-07-21 P38.1 re-test (think off).** `scaffold.py` writes the *same* literal
-`<!-- PENDING -->` marker for every fillable section of every file. A weak model filling section-by-section
-naturally reaches for `edit_file(old="<!-- PENDING -->", new=…)`, which matches all N markers in the file;
-`edit_file` then either errors ("occurs 12 times") or, when the model retries with `replace_all: true`,
-**overwrites all 12 of the file's distinct sections with one wrong string** — exactly what corrupted
-architecture.md in the re-test (every heading's body became the literal `internet-facing`). The scaffolding
-that P38.4 added to *prevent* structural mistakes thus introduced a new footgun for the fill step.
-
-Fix direction: make each marker **unique and self-describing** — e.g. `<!-- PENDING: deployment-classification -->`
-keyed to the section — so (a) an `edit_file` old-string naturally targets exactly one site, (b) `replace_all`
-can't blanket-nuke a file, and (c) the leftover-marker checks get *more* specific, not less. This is a
-coordinated change: `scaffold.py` (emit keyed markers), `verify.py`'s no-leftover-skeleton check, the
-drive's `scanPendingMarkers` substring match and `continuePrompt` in `internal/cli/chat.go` (all key off
-the exact literal `<!-- PENDING -->` today), SKILL.md §4.1/§4.2 wording, and the `chat_drive_test.go` /
-scaffold tests. Keep a marker *prefix* (`<!-- PENDING`) so the existing substring scans still match.
-
-Priority: Tier 2 — directly caused a verify-fail in the re-test and is a mechanical, well-bounded change;
-it makes the P38.4 scaffold actually safe to fill incrementally, which is the whole point of scaffolding.
-
-**P39.2 shipped 2026-07-21** — coach tool-execution errors (unknown-tool name list + shell interpreter
-hint). See [releases.md](releases.md#latest-changes) for the full write-up.
-
-**P39.4 shipped 2026-07-21** — `aegis doctor --deep`'s structured multi-turn fill probe. See
-[releases.md](releases.md#latest-changes) for the full write-up.
-
-**Note (future item, not yet filed):** the same "accurate refusal, error-shaped" question for the
-other scanners' documented exit codes, noted while shipping P35.6 and again while closing P35.13.
-P34.6 checked the _language_-targeted tools; nothing has swept the SCA/secrets tools for non-zero
-exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading yet — filed here
-as a lead so the status script doesn't treat it as active work.
-
-**Note (lead — RESOLVED 2026-07-21):** P36.2's write/edit Input-pruning rule covered `write_file` and
-`edit_file` but not `multi_edit`, whose nested `edits[]` array (each with `old_string`/`new_string`)
-also embeds verbatim file content that survived unpruned. **Fixed:** `pruneWriteEditInput`
-(`internal/compaction/prune.go`) now dispatches `multi_edit` to a new `pruneMultiEditInput` that blanks
-`old_string`/`new_string` in every edit (preserving each edit's `path` and the array structure), sharing a
-`blankContentField` helper with the flat path so the marker text is identical; failed / in-window calls are
-left verbatim by the existing `succeeded`/`keepRecent` gates. `TestPruneSuccessfulMultiEditInput` and
-`TestPruneKeepsFailedMultiEditInput` added. Flat-tool prune output is byte-for-byte unchanged.
+**Lead (not yet filed):** the "accurate refusal, error-shaped" exit-code question for the SCA/secrets
+scanners. P34.6 checked the *language*-targeted tools; nothing has swept the SCA/secrets tools for non-zero
+exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading yet.
 
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 0 open. **P39.3** (grammar/schema-constrained tool-call argument decoding on the Ollama
-adapter), filed 2026-07-21, was spiked the same day against a live Ollama server and closed **NO-GO**: a
-`format` JSON-schema constraint and native `tools`/`tool_calls` are mutually exclusive on a single Ollama
-request (confirmed on two models), so the originally-scoped approach isn't possible as designed — see the
-item's write-up below for the larger "format-instead-of-tools" idea left as an unfiled lead. **P38.3**
-(peak-context telemetry not externally observable) and **P38.5** (models
-that reject `think` fail with a raw 400) both shipped 2026-07-21 — see
-[releases.md](releases.md#latest-changes). (P37.4, P37.5 shipped 2026-07-19; P36.3 shipped 2026-07-19;
-P36.2 shipped 2026-07-19;
-P35.7 shipped 2026-07-18;
-P35.4 shipped 2026-07-18; P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17;
-P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, shipped
-2026-07-16.)
+**Status:** 0 filed. Open leads only (each worth its own item when a concrete need appears):
 
-**P39.3 spiked and closed 2026-07-21 — NO-GO.** Investigated grammar/schema-constrained decoding for
-tool-call arguments on the Ollama adapter; a live-server spike found Ollama's `format` JSON-schema
-constraint and native `tools`/`tool_calls` are mutually exclusive on one request (confirmed on two models),
-so the originally-scoped approach isn't possible as designed. A larger, distinct idea (route shaky models
-through `format`-only prompting with a dynamically-built tool-call envelope, reusing the existing
-tool-call-as-text fallback parser in `internal/engine`) is left as an unfiled lead. See
-[releases.md](releases.md#latest-changes) for the full spike transcript and reasoning.
-
-**Note (two doc-inconsistency leads, not yet filed — surfaced while building the P37 scripts):**
+**Lead — doc-inconsistency (surfaced building the P37 scripts):**
 (a) **threat-ID form** — `references/skeletons/skeleton-stride.md` writes threat IDs as bare sequential
-`T1`/`T2`, but `output-formats.md`'s coverage / Related-Threats examples use composite `T04.S` form;
-the P37 scripts match literally and handle both, but the docs should settle on one canonical form.
-(b) **inventory YAML style** — `skeleton-inventory.md`'s example is block-style (`- id:` on its own
-line) while directive #13 says list entries are one-line, and `inventory.py` emits one-line flow
-mappings (`- {id: "T1", ...}`); `diff_inventory.py` parses both, but the skeleton example should match
-what the generator produces. Both are cosmetic doc drift, not code bugs. No `### P<n>.<m>` heading yet.
+`T1`/`T2`, but `output-formats.md`'s coverage / Related-Threats examples use composite `T04.S` form; the
+P37 scripts match both, but the docs should settle on one canonical form.
+(b) **inventory YAML style** — `skeleton-inventory.md`'s example is block-style while directive #13 says
+list entries are one-line, and `inventory.py` emits one-line flow mappings; the skeleton example should
+match what the generator produces. Both cosmetic doc drift, not code bugs.
 
-**Note (future item, not yet filed):** `recon.py` (P37.1) depth follow-ups, left out of v1
-deliberately and each worth its own item when a concrete need appears: (a) **data-flow edge inference** —
-seed the DFD's `DF##` flows from import graphs / client instantiations (which component calls which) so
-phase 2 starts from real edges instead of re-deriving them; (b) **config-default resolution** — recon
-currently punts a config/flag-driven bind address to the model ("confirm the default"); parsing the
-actual default from the config struct / `config.yaml` would settle the deployment class deterministically
-in the common case — and (b′) a specialization surfaced by the 2026-07-20 AiGateway eval: when the only
-internet-facing evidence is `EXPOSE`/`0.0.0.0` but the k8s `Service` is `NodePort`/`ClusterIP` (not
-`LoadBalancer`/`Ingress`) and no TLS terminator is present, recon should downgrade the suggestion to
-`internal-network` rather than `internet-facing`; it already parses the compose/k8s files, so it has the
-signal to be less alarmist (recon suggested `internet-facing` for AiGateway, whose real class is
-`internal-network`); (c) **richer symbol extraction** — functions/methods and route→handler maps,
-optionally via `ctags`/tree-sitter when on PATH, falling back to today's regex; (d) **target-commit in
-the sidecar** — `inventory.py`'s `git_commit()` runs `git -C <run-dir>`, so when the run directory is
-kept outside the target repo (the recommended clean-target setup) the sidecar records *no* commit for
-the analyzed code, losing the one field a future diff most wants; let it take an optional
-`--target-dir`/`--repo` or read the commit from `0-assessment.md`'s Git Commit row. No `### P<n>.<m>`
-heading yet — leads only, so the status script doesn't treat them as active work. (The `inventory.py`
-deployment-classification mis-parse and the missing architecture↔analysis classification check that the
-same eval surfaced were **fixed** 2026-07-20 — see [releases.md](releases.md#latest-changes).)
-
-> **Live-verification debt (P36.1-P36.3) — attempted 2026-07-20, NOT retired.** A real live run
-> finally happened: the rebuilt binary drove `aegis chat` STRIDE threat models of an external target
-> (`D:\Development\AiGateway`, a FastAPI AI gateway) against the config-default **qwen3:14b** on the
-> native Ollama adapter (32k window). Two runs (a plain prompt, then a forceful "run recon first, use
-> the §4.2 sequential agent workflow, produce all 7 files, do not stop to ask"). Results:
-> - **P36.1 (deterministic skill load): CONFIRMED.** Both runs' first tool call was
->   `skill{threat-modeling}`; the model never wandered off the instruction.
-> - **P37.1 (`recon.py`) live: CONFIRMED.** Run 2 executed it from the materialized
->   `builtin-skills/threat-modeling/recon.py` path — the `go:embed`→materialize→run pipeline works
->   end-to-end on a real model.
-> - **P36.3 (phased sequential orchestration): REFUTED on qwen3:14b.** The model **mis-invokes** it:
->   it knows the `{mode:"sequential",agents:[…]}` payload but attaches it to the **`skill`** tool
->   instead of the **`agent`** tool (both are registered/available), which errors — then it bails.
->   The phased path never executes, so its peak-context bound can't even be measured. Both runs
->   produced no usable suite (run 1: 2 shallow files; run 2: 7 `<!-- PENDING -->` stubs).
-> - **P36.2 (pruning): still UNTESTED** — both runs ended at ~8 turns, far too short to stress
->   compaction/pruning.
->
-> Two reproducible blockers (now filed): **P38.1** (the `skill`/`agent` mis-routing that kills the
-> phased workflow on small local models) and **P38.2** (one-shot `aegis chat` yields mid-workflow —
-> both runs ended with "Would you like me to proceed? (~70 min)" despite an explicit "do not stop").
-> Also **P38.3**: peak-context-per-phase is not externally observable (`turn_done` stream events carry
-> no usage, the engine logs no per-request token count, and one-shot chat doesn't persist to the
-> session store) — so the P36.3 claim is unmeasurable until that's fixed, independent of whether the
-> path runs. Caveat: only qwen3:14b was tested; the doctor-recommended larger MoE
-> (qwen3.6:35b-a3b) wasn't on-disk to try and may drive the orchestration correctly — re-testing on it
-> is part of closing this. The debt stays open behind P38.1-P38.3.
->
-> **Update 2026-07-20 (post-fix):** the P38.1 first fix (SKILL.md `agent`-call callout + `skill`-tool
-> guard) was shipped and re-verified with three more live runs — **it did not work.** qwen3:14b
-> mis-routed the workflow payload to `ls` (guard never fired) and hand-wrote an incomplete suite with a
-> false completion claim; mythos-sec:24b couldn't even invoke `recon.py` and loop-aborted. Neither
-> tested local model drives the phased workflow.
->
-> **Decision 2026-07-20 — the phased-orchestration approach is abandoned for local models.** This part
-> of the debt (P36.3) is not being retired; it is being *superseded* by the **P38.1 non-orchestrated
-> linear build**, now the skill's primary path. What still carries forward from this debt is **P36.2**:
-> its pruning is now the load-bearing mechanism that must keep a single-context linear build inside the
-> window, so verifying P36.2 live (via a completed P38.1 linear run, measured through P38.3) is the
-> remaining verification task. P36.1 (deterministic skill load) and P37.1 (`recon.py`) were confirmed
-> live and need nothing further. In short: the debt's P36.3 half is closed-by-abandonment; its P36.2
-> half folds into P38.1's "what must be verified".
->
-> **Update 2026-07-20 (linear-build live test):** a completed P38.1 linear run finally happened
-> (qwen3:14b vs AiGateway, driven by P38.2). **P36.2 is now partially confirmed live** — the run wrote all
-> seven files and ran the check scripts inside the window (~44K input tokens / 33 tool calls, no
-> overflow). It's "held for a 33-call run", not "proven for the worst case": qwen3:14b couldn't produce a
-> *conforming* suite (→ P38.4), so the run was shorter than a clean build would be. The definitive P36.2
-> confirmation now rides on the P38.4-scaffolded re-test, measured through P38.3.
-
-**Note (lead, not yet filed):** mythos-sec:24b's failure mode is pure shell-invocation incompetence —
-**reconfirmed in the 2026-07-20 P38.1 linear-build test** (with `think` disabled per P38.5): it invented
-tool names (`recon.py` and `execute` as if they were tools), ran the skill's literal placeholder command
-`` <path>/recon.py <workspace-root>`` without substituting, used wrong paths (`D:\…\recon.py` — the script
-lives under the materialized `builtin-skills/` path, not the target), and doubled a directory name. The
-earlier run showed the same class (no `python` prefix, bad relative paths, invented `execute_command`/
-`run_tool`, looping until the loop detector fired). Mostly model quality, but it hints the shell tool's
-error messages could coach better (when a bare `*.py` command fails on Windows, suggest `python <path>`;
-when an unknown tool name is called, name the real one). Worth a small usability item if other local
-models show the same flailing — but note mythos-sec:24b itself is a dead end regardless.
+**Lead — `recon.py` (P37.1) depth follow-ups**, left out of v1 deliberately:
+(a) **data-flow edge inference** — seed the DFD's `DF##` flows from import graphs / client instantiations
+so phase 2 starts from real edges;
+(b) **config-default resolution** — parse the actual bind-address default from the config struct /
+`config.yaml` to settle the deployment class deterministically (and downgrade `EXPOSE`/`0.0.0.0` to
+`internal-network` when the k8s `Service` is `NodePort`/`ClusterIP` with no TLS terminator, rather than
+over-flagging `internet-facing`);
+(c) **richer symbol extraction** — functions/methods and route→handler maps, optionally via
+`ctags`/tree-sitter when on PATH;
+(d) **target-commit in the sidecar** — let `inventory.py` take an optional `--target-dir`/`--repo` (or read
+the commit from `0-assessment.md`) so a run directory kept outside the target repo still records the
+analyzed code's commit.
 
 ---
 
 ## Open Work — Tier 4
+
+### P25.9 — per-session scoping of `lsp.Manager` (remaining daemon singleton)
+
+Five of the six daemon-singleton services were per-session-scoped when P25.9 first shipped; `lsp.Manager`
+was deliberately left as a shared singleton — its per-session resource-growth tradeoff was judged worse
+than the isolation gap. Parked pending a concrete multi-tenant need.
+
+Priority: Tier 4 — no trigger, explicitly parked. Do not build speculatively.
 
 ---
 
