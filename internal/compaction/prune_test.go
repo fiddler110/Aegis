@@ -218,6 +218,81 @@ func TestPruneSuccessfulEditInput(t *testing.T) {
 	}
 }
 
+// TestPruneSuccessfulMultiEditInput blanks the before/after snippets of every
+// edit in a committed multi_edit call while preserving each edit's path and
+// the overall array structure — the P36.2 rule extended to multi_edit's nested
+// "edits" shape.
+func TestPruneSuccessfulMultiEditInput(t *testing.T) {
+	oldA := strings.Repeat("old alpha line\n", 100)
+	newA := strings.Repeat("new alpha line\n", 100)
+	oldB := strings.Repeat("old beta line\n", 100)
+	newB := strings.Repeat("new beta line\n", 100)
+	input := json.RawMessage(`{"edits":[` +
+		`{"path":"a.go","old_string":` + mustJSONString(oldA) + `,"new_string":` + mustJSONString(newA) + `},` +
+		`{"path":"b.go","old_string":` + mustJSONString(oldB) + `,"new_string":` + mustJSONString(newB) + `}` +
+		`]}`)
+	msgs := []provider.Message{
+		toolUse("m", "multi_edit", input),
+		toolResult("m", "applied 2 edit(s) across 2 file(s)"),
+		text(provider.RoleAssistant, "edited"),
+		text(provider.RoleUser, "thanks"),
+	}
+	out, pruned := pruneStaleToolResults(msgs, 1)
+	if pruned == 0 {
+		t.Fatal("expected the multi_edit snippets to be pruned")
+	}
+	tu := out[0].Content[0].(provider.ToolUseBlock)
+	var args struct {
+		Edits []struct {
+			Path      string `json:"path"`
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(tu.Input, &args); err != nil {
+		t.Fatalf("pruned multi_edit Input no longer deserializes: %v", err)
+	}
+	if len(args.Edits) != 2 {
+		t.Fatalf("edits array must be preserved, got %d edits", len(args.Edits))
+	}
+	wantPaths := []string{"a.go", "b.go"}
+	for i, e := range args.Edits {
+		if e.Path != wantPaths[i] {
+			t.Errorf("edit %d path must be preserved, got %q", i, e.Path)
+		}
+		if strings.Contains(e.OldString, "old ") || strings.Contains(e.NewString, "new ") {
+			t.Errorf("edit %d snippets should have been blanked, got old=%q new=%q", i, e.OldString, e.NewString)
+		}
+		if !strings.Contains(e.OldString, "pruned") || !strings.Contains(e.NewString, "pruned") {
+			t.Errorf("edit %d expected pruned markers, got old=%q new=%q", i, e.OldString, e.NewString)
+		}
+	}
+}
+
+// TestPruneKeepsFailedMultiEditInput is the safety counterpart: a multi_edit
+// whose result is an error changed nothing on disk, so its Input (and every
+// snippet) must survive verbatim for a retry.
+func TestPruneKeepsFailedMultiEditInput(t *testing.T) {
+	body := strings.Repeat("body\n", 200)
+	input := json.RawMessage(`{"edits":[{"path":"a.go","old_string":` + mustJSONString(body) + `,"new_string":"x"}]}`)
+	msgs := []provider.Message{
+		toolUse("m", "multi_edit", input),
+		{Role: provider.RoleUser, Content: []provider.Block{
+			provider.ToolResultBlock{ToolUseID: "m", Content: "edit 1: old_string not found in a.go", IsError: true},
+		}},
+		text(provider.RoleAssistant, "failed"),
+		text(provider.RoleUser, "retry"),
+	}
+	out, pruned := pruneStaleToolResults(msgs, 1)
+	if pruned != 0 {
+		t.Errorf("a failed multi_edit must not be pruned, pruned=%d", pruned)
+	}
+	tu := out[0].Content[0].(provider.ToolUseBlock)
+	if string(tu.Input) != string(input) {
+		t.Errorf("failed multi_edit Input was modified")
+	}
+}
+
 // TestPruneKeepsFailedWriteInput is the safety counterpart: a write whose
 // result is an error left nothing on disk to re-read, so its Input must be
 // preserved verbatim.
