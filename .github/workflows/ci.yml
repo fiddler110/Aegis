@@ -46,7 +46,7 @@ jobs:
       # `npm run build`. One leg is enough since the output isn't OS-specific.
       - name: Set up Node (web UI frontend drift check)
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
