@@ -8,8 +8,42 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-21 — **P39.1, P39.2, and P39.4 shipped; P39.3 spiked and closed NO-GO** (all
-from a same-day local-14b-model harness-improvement research pass — see [roadmap.md](roadmap.md)).
+**Last updated:** 2026-07-21 — **P38.6 and P38.7 shipped** (the two actionable engineering findings split
+out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and P39.4 shipped;
+P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass — see
+[roadmap.md](roadmap.md)).
+
+**P38.6 — thinking-mode models fabricate a completed drive instead of executing it.** The P38.1 re-test
+found that `aegis chat --skill threat-modeling` with `provider.think: true` drove **zero** real tool calls:
+qwen3:14b narrated the whole multi-phase build inside its `thinking` trace and reported all seven files
+written and every check clean — having written nothing. Because `scaffold.py` never ran, no `<!-- PENDING`
+markers existed, so the drive-to-completion oracle saw "no markers" and stopped as if complete — a silent
+false success on the shipped default config (the worst shape: a user believes they have a threat model and
+have nothing). Both levers from the filing shipped, in `internal/cli/chat.go`: **(a)** a `--skill` run now
+force-disables `provider.think` for the drive (with a loud stderr notice when it overrides an
+explicitly-enabled setting), since the whole point of the drive is tool-executed multi-phase work that
+reasoning-mode simulation defeats — precedented by the mythos-sec test that ran with think off by hand;
+**(b)** a floor check hardens the oracle against any *other* fabrication path — after a completed drive,
+`suiteFileCount(pendingRoot)` distinguishes "finished, every marker resolved" from "nothing was ever
+written" (both leave `scanPendingMarkers` empty) and prints a notice when a drive reported completion but
+wrote no files under `.aegis/`. Tests: `TestSuiteFileCount` in `internal/cli/chat_drive_test.go`.
+
+**P38.7 — `scaffold.py`'s identical `<!-- PENDING -->` markers made `edit_file replace_all` a file-nuke.**
+`scaffold.py` used to write the *same* literal `<!-- PENDING -->` marker for every fillable section of every
+file. A weak model filling section-by-section naturally reached for `edit_file(old="<!-- PENDING -->", …)`,
+which matched all N markers in the file; `edit_file` then errored ("occurs 12 times") or, on a
+`replace_all: true` retry, **overwrote all of the file's distinct sections with one wrong string** — exactly
+what corrupted architecture.md in the re-test. Fix: `scaffold.py` now emits a **unique, self-describing**
+marker per section, keyed to the section (`<!-- PENDING: deployment-classification -->`), so an `edit_file`
+old-string naturally targets exactly one site and `replace_all` can't blanket-nuke a file. A shared prefix
+(`<!-- PENDING`) keeps every downstream substring scan working: `verify.py`'s no-leftover-skeleton check
+(`SKELETON_MARKERS`) and the drive's `scanPendingMarkers` both match the prefix now, not the bare literal,
+so keyed markers still count as unfinished. Coordinated across `scaffold.py` (a new `pending(key)` builder;
+`table`/`prose` take a `key`; every builder passes a section key), `verify.py`, `internal/cli/chat.go`
+(`scanPendingMarkers` + `continuePrompt`, which now warns off `replace_all`), and SKILL.md §4.1/§4.2 wording.
+Verified: all seven frameworks scaffold with zero duplicate or bare markers per file, a fresh scaffold still
+lints 6/6 (`lint_dfd.py`) and fails `verify.py`'s leftover-marker check as before, and `scanPendingMarkers`
+detects keyed markers (extended `TestScanPendingMarkers`).
 
 **P39.1 — regression test that `effectiveSystem` is byte-stable turn over turn.** P35.7's code-reading pass
 had concluded `Server.effectiveSystem` (`internal/server/helpers.go:42`) *should* render byte-identical

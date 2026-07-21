@@ -78,8 +78,12 @@ TID_FULL_RE = re.compile(r"^T\d+(?:\.[A-Za-z0-9]+)?$")
 DF_RE = re.compile(r"DF\d+")
 FIND_HEADING_RE = re.compile(r"^###\s+(FIND-\d+)\b")
 
-# Leftover skeleton syntax — any hit is a placeholder never filled in.
-SKELETON_MARKERS = ("[FILL", "[REPEAT", "[END-REPEAT", "<!-- PENDING -->")
+# Leftover skeleton syntax — any hit is a placeholder never filled in. The
+# PENDING entry is a *prefix* (P38.7): scaffold.py now emits keyed markers
+# (`<!-- PENDING: deployment-classification -->`), so matching the bare
+# `<!-- PENDING -->` would miss every unfilled section; the prefix catches them
+# all, keyed or not.
+SKELETON_MARKERS = ("[FILL", "[REPEAT", "[END-REPEAT", "<!-- PENDING")
 
 # Files scanned for leftover skeleton syntax (check 1). The whole suite.
 TEXT_EXTS = (".md", ".mmd", ".yaml", ".yml", ".txt")
