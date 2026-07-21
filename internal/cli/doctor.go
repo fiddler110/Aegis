@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
+	xterm "github.com/charmbracelet/x/term"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/ollamainfo"
@@ -21,6 +23,7 @@ import (
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/toolcallprobe"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -110,11 +113,141 @@ func newDoctorCmd() *cobra.Command {
 	return cmd
 }
 
+// renderDoctorChecks picks plain (unchanged, script/redirect-safe) or rich
+// (colored, wrapped, severity-grouped) rendering depending on whether w is
+// actually an interactive terminal. Piped/redirected output — including
+// every test in doctor_test.go, which renders into a bytes.Buffer — always
+// gets the plain form, so its exact layout (severity label at column 0, name
+// as the second whitespace-separated field, a "-> fix" line immediately
+// following) is a stable contract callers can parse.
 func renderDoctorChecks(w io.Writer, checks []doctorCheck) {
+	if f, ok := w.(*os.File); ok && (isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd())) {
+		renderDoctorChecksRich(w, checks, doctorTerminalWidth(f))
+		return
+	}
+	renderDoctorChecksPlain(w, checks)
+}
+
+func renderDoctorChecksPlain(w io.Writer, checks []doctorCheck) {
 	for _, c := range checks {
 		fmt.Fprintf(w, "%-4s %-20s %s\n", c.Severity.label(), c.Name, c.Detail)
 		if c.Fix != "" && c.Severity != doctorPass {
 			fmt.Fprintf(w, "     -> %s\n", c.Fix)
+		}
+	}
+}
+
+// doctorTerminalWidth reads the real terminal width for wrapping, clamped to
+// a readable range: wide enough to avoid ragged one-word-per-line wrapping
+// on a narrow pane, capped so prose doesn't stretch edge-to-edge on an
+// ultrawide terminal. Falls back to 100 when the ioctl fails (e.g. a pty
+// that doesn't report size).
+func doctorTerminalWidth(f *os.File) int {
+	w, _, err := xterm.GetSize(f.Fd())
+	if err != nil || w <= 0 {
+		return 100
+	}
+	switch {
+	case w > 120:
+		return 120
+	case w < 60:
+		return 60
+	default:
+		return w
+	}
+}
+
+// trimTrailingSpaces strips the right-padding lipgloss's Width() adds to
+// every wrapped line (it pads short lines out to the box width) so a
+// terminal's trailing-whitespace highlighting doesn't light up the whole
+// report, and so piping through another tool doesn't carry invisible padding.
+func trimTrailingSpaces(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
+var (
+	doctorColorPass = lipgloss.Color("2")
+	doctorColorWarn = lipgloss.Color("3")
+	doctorColorFail = lipgloss.Color("1")
+	doctorColorDim  = lipgloss.Color("8")
+)
+
+func (s doctorSeverity) badge() string {
+	style := lipgloss.NewStyle().Bold(true)
+	switch s {
+	case doctorPass:
+		return style.Foreground(doctorColorPass).Render("✓ PASS")
+	case doctorWarn:
+		return style.Foreground(doctorColorWarn).Render("! WARN")
+	default:
+		return style.Foreground(doctorColorFail).Render("✗ FAIL")
+	}
+}
+
+// renderDoctorChecksRich renders a terminal-friendly report: a one-line
+// summary, then failures and warnings first (grouped, wrapped to the
+// terminal width, detail/fix on their own indented lines since those are
+// often the longest strings in the report) followed by a compact list of
+// passes. Severity order beats declaration order here because the whole
+// point of a preflight report is "what needs my attention", and that's
+// exactly what got lost in the flat, unwrapped list this replaces.
+func renderDoctorChecksRich(w io.Writer, checks []doctorCheck, width int) {
+	var fails, warns, passes []doctorCheck
+	for _, c := range checks {
+		switch c.Severity {
+		case doctorFail:
+			fails = append(fails, c)
+		case doctorWarn:
+			warns = append(warns, c)
+		default:
+			passes = append(passes, c)
+		}
+	}
+
+	summary := fmt.Sprintf("%d check(s): ", len(checks))
+	var parts []string
+	if len(fails) > 0 {
+		parts = append(parts, lipgloss.NewStyle().Bold(true).Foreground(doctorColorFail).Render(fmt.Sprintf("%d failed", len(fails))))
+	}
+	if len(warns) > 0 {
+		parts = append(parts, lipgloss.NewStyle().Bold(true).Foreground(doctorColorWarn).Render(fmt.Sprintf("%d warning(s)", len(warns))))
+	}
+	parts = append(parts, lipgloss.NewStyle().Foreground(doctorColorPass).Render(fmt.Sprintf("%d passed", len(passes))))
+	fmt.Fprintln(w, summary+strings.Join(parts, ", "))
+	fmt.Fprintln(w, strings.Repeat("─", width))
+
+	nameStyle := lipgloss.NewStyle().Bold(true)
+	detailStyle := lipgloss.NewStyle().PaddingLeft(3).Width(width - 3)
+	fixStyle := lipgloss.NewStyle().PaddingLeft(3).Width(width - 3).Foreground(doctorColorDim)
+
+	for i, c := range append(append([]doctorCheck{}, fails...), warns...) {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintf(w, "%s  %s\n", c.Severity.badge(), nameStyle.Render(c.Name))
+		fmt.Fprintln(w, trimTrailingSpaces(detailStyle.Render(c.Detail)))
+		if c.Fix != "" {
+			fmt.Fprintln(w, trimTrailingSpaces(fixStyle.Render("→ "+c.Fix)))
+		}
+	}
+
+	if len(passes) > 0 {
+		if len(fails)+len(warns) > 0 {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, strings.Repeat("─", width))
+		}
+		nameW := 0
+		for _, c := range passes {
+			if len(c.Name) > nameW {
+				nameW = len(c.Name)
+			}
+		}
+		for _, c := range passes {
+			fmt.Fprintf(w, "%s  %-*s  %s\n", c.Severity.badge(), nameW, c.Name, c.Detail)
 		}
 	}
 }
