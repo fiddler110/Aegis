@@ -11,13 +11,17 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 actionable-blocked + 1 parked.
+**Open items:** 6 actionable (3 Tier 2, 3 Tier 3) + 2 parked (Tier 4).
 
-- **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. The build path is shipped
-  and its mechanism is live-confirmed (qwen3:14b scaffolds all seven files in one context). What remains
-  is a **live conformance re-test on a stronger local model**: qwen3:14b does not reach a verify-clean
-  suite, and the doctor-recommended `qwen3.6:35b-a3b` MoE is not on disk. Genuinely environment-gated —
-  re-run once a capable-enough model is installed. See the item below.
+- **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. **Environment gate lifted:**
+  the doctor-recommended `qwen3.6:35b-a3b` is now installed and the conformance re-test has been run
+  (2026-07-21, against FirewallRiskRater). The build **mechanism** re-confirms, but the autonomous
+  `--skill` drive still does **not** reach a verify-clean suite on the stronger model. The reasons are
+  now root-caused and split into **P39.5–P39.9**; an interim external wrapper is parked as **P38.8**.
+- **P39.5–P39.9** (Tier 2/3) — the harness-side fixes surfaced by the P38.1 re-test: bound the drive-loop
+  context (P39.5), fold phase-6 verification into the drive (P39.6), a no-progress guard (P39.7), robust
+  compaction/guard on weak local models (P39.8), and native-Ollama adapter reliability (P39.9).
+- **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
 
@@ -43,7 +47,8 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 2
 
-**Status:** 1 open — **P38.1** (environment-gated on a stronger local model).
+**Status:** 3 open — **P38.1** (conformance umbrella; gate now lifted), **P39.6** (fold phase-6
+verification into the drive loop), **P39.7** (no-progress guard).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -62,28 +67,116 @@ one context with no orchestration mis-route — the P36.3-era failure that kille
 (P38.4 fixed that) to "incrementally filling it via `edit_file`": it scaffolds but can't drive the fill to a
 verify-clean suite. The two *actionable* findings from that re-test — think-mode fabrication and the
 identical-marker `replace_all` footgun — were split out and **shipped** as P38.6 and P38.7 (see
-[releases.md](releases.md#latest-changes)). What's left is not code: no stronger local model was on disk
-(`qwen3.6:35b-a3b` not installed) to exercise the "or a stronger local" arm.
+[releases.md](releases.md#latest-changes)).
+
+**2026-07-21 re-test on `qwen3.6:35b-a3b` (environment gate lifted).** The MoE is now installed; run against
+FirewallRiskRater (a Rust/Axum API + Flask frontend), both the `-deep` and a 32k-`num_ctx` `-fast` derivative.
+Findings: (1) the **mechanism re-confirms** — `recon.py` → `scaffold.py` → seven files in one context, no
+mis-route, and the architecture doc it produced was genuinely high quality (correct anchors, deployment
+class, security-infra inventory); (2) but the autonomous `--skill` drive still does **not** converge to a
+verify-clean suite — one scaffolded resume made **86 tool calls across 3 drive iterations and cleared 0 of 23
+`PENDING` markers**, because the ~9K-token SKILL.md preload rides *every* turn (`prompt_bytes≈31534` at turn 0)
+and fills the 32K local window before the model can `edit_file` (→ **P39.5**); (3) the native Ollama adapter
+emitted no tool call at all, forcing the legacy `/v1` adapter + a `num_ctx 32768` modelfile (→ **P39.9**);
+(4) compaction/`output_guard` return empty on this model (42× `summarizer returned empty output` in the daemon
+log, → **P39.8**); (5) the finished suite carried duplicate threat IDs, tier↔prerequisite mismatches and stale
+counts that no autonomous verify pass caught (→ **P39.6**). Driving the *same* model one phase at a time
+**without** the preload completed all seven files and verified clean after a fix loop — proof the blocker is
+harness-side context bounding, **not** model capability. Full evidence + reference wrapper: FirewallRiskRater
+`tools/THREAT-MODEL-AUTOMATION.md` (recorded as **P38.8**).
 
 P36.2 (pruning that keeps a single-context linear build inside the window) is the load-bearing mechanism
 here and is **partially confirmed live** (a 33-call run held inside ~44K input tokens with no overflow); its
 definitive confirmation rides on a scaffolded, verify-clean re-test measured through P38.3's per-turn usage
 telemetry.
 
-Priority: Tier 2 — the re-test has been executed and the mechanism is live-confirmed; the verify-clean goal
-is unmet on the only capable-enough on-disk model. What remains is genuinely environment-gated: **re-run on
-a stronger local model** (`qwen3.6:35b-a3b` or similar, once installed). Not Tier 1 because this is a
-live-run verification, not independent build work — the whole build path exists and is confirmed to run.
+Priority: Tier 2 — the environment gate is **lifted** and the re-test is done; the verify-clean goal is still
+unmet autonomously, but the reasons are now root-caused and filed as **P39.5–P39.9**. This item stays open as
+the conformance **umbrella** — closeable once the built-in `--skill` drive reaches a verify-clean suite on a
+local model (which P39.5 + P39.6 are the load-bearing fixes for). Not Tier 1 because it is live-run
+verification tracking, not independent build work.
 
 **Lead (not yet filed):** the "accurate refusal, error-shaped" exit-code question for the SCA/secrets
 scanners. P34.6 checked the *language*-targeted tools; nothing has swept the SCA/secrets tools for non-zero
 exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading yet.
 
+### P39.6 — Fold phase-6 verification into the drive-to-completion loop
+
+The `--skill` drive stops when no `<!-- PENDING -->` marker remains, but it never runs the bundled P37 checks
+(`verify.py`, `lint_dfd.py`, `inventory.py --check`). In the 2026-07-21 P38.1 re-test the "complete" suite
+carried a duplicate threat ID (`T7` twice), tier↔prerequisite mismatches (Local-Process threats filed under
+Tier 2), and stale tier counts in `0-assessment.md` — every one flagged by `verify.py`, all shipped uncaught
+because nothing ran it. Fold the checks into the loop: when markers hit zero, run all three; if any fails,
+feed the failure text back to the model to fix in place and re-run, bounded to a few rounds. This is the
+autonomous analogue of SKILL.md §5's phase-6 round, and it is what the P38.8 wrapper already does as a
+proof-of-shape.
+
+Priority: Tier 2 — cheap, self-contained, no dependency. Turns the drive's done-condition from "all markers
+filled" into "verifies clean," which is the real done-condition for an autonomous run.
+
+### P39.7 — No-progress guard on the drive loop (counters "announce then yield")
+
+Weak local models sometimes end a turn with a plan ("Now I'll write the file…") and *no* tool call: a
+one-shot fill on the 35B model returned `turns=3` with 0 `edit_file` calls. The drive loop should detect a
+turn that mutated no file while `PENDING` markers remain and re-prompt with an explicit "act now — call
+edit_file, no narration" nudge (bounded retries) instead of yielding a partial suite. Extends P39.2's
+tool-execution coaching from the malformed-call case to the no-call case. The P38.8 wrapper works around this
+today by prefixing every phase prompt with an "ACT IMMEDIATELY" preamble and re-invoking while the file still
+has markers.
+
+Priority: Tier 2 — small, no dependency; recovers a common local-model stall without human intervention.
+
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 0 filed. Open leads only (each worth its own item when a concrete need appears):
+**Status:** 3 filed — **P39.5** (bound the drive-loop context), **P39.8** (compaction/guard on weak
+local models), **P39.9** (native-Ollama adapter reliability) — plus open leads below.
+
+### P39.5 — Bound the skill drive-loop's peak context so local-model fills converge (P38.1 root cause)
+
+The 2026-07-21 P38.1 re-test root-caused why the drive-to-completion fill doesn't reach a verify-clean suite
+on a stronger local model: `aegis chat --skill <name>` re-injects the full SKILL.md (~9K tokens;
+`prompt_bytes≈31534` at turn 0) into **every** turn, so on a 32K local window the architecture recon + a few
+file reads leave no room to `edit_file`. On a scaffolded resume, one run made **86 tool calls across 3 drive
+iterations and cleared 0 of 23 `PENDING` markers** — the model re-reads the partial suite each iteration and
+never converges. The fix is context discipline the harness enforces: after phase 1, load only the *current
+phase's* reference (not the whole SKILL.md), leaning on P36.2 pruning to drop spent reads. Proof this is the
+right lever: an external wrapper (P38.8) driving the same model one phase at a time **without** the preload
+completed all seven files. Sequence-dependent — pairs with P39.6 (verify loop) and rides P38.3 telemetry to
+confirm the window stays bounded.
+
+Priority: Tier 3 — the load-bearing blocker behind P38.1's unmet conformance, now root-caused; larger than a
+config tweak and interacts with the drive loop, per-phase reference loading, and P36.2.
+
+### P39.8 — Compaction / output-guard secondary LLM calls are unreliable on weak local models
+
+Aegis's proactive context-compaction summarizer and the `output_guard` rubric check each make a secondary LLM
+call to the *same* local model, which returns empty output — the daemon log shows **42×
+`summarizer returned empty output`** across the 2026-07-21 runs. The existing deterministic fallback (P36.2)
+fires after two empty summaries so a run degrades rather than hard-fails, but the guard call and the degraded
+summaries still cost latency and quality on exactly the long runs that most need compaction. Options: a
+`provider.summarizer_model` that routes compaction/guard to a small dedicated model, or auto-skipping the LLM
+summarizer for models flagged weak (straight to the deterministic path). `output_guard.enabled: false` is the
+current manual workaround (set in the FirewallRiskRater `.aegis/config.yaml`).
+
+Priority: Tier 3 — a real robustness gap on local models, but partly mitigated by the existing fallback and
+larger than config since it needs a routing / opt-out mechanism.
+
+### P39.9 — Native-Ollama adapter emits no tool call on large skill-preload turns; `/v1` path ignores `context_window`
+
+Two adapter-level snags surfaced in the 2026-07-21 runs. (a) With `provider.default: ollama` (native adapter)
+the skill-preload turn produced **no tool call and no run directory after 8+ minutes on two runs** — the same
+prompt on the legacy openai-compat (`/v1`) adapter emitted tool calls immediately; needs a focused repro
+(think-mode? oversized system prompt?) before it's actionable. (b) The `/v1` compat path never sends `num_ctx`,
+so Ollama serves the model's modelfile default (16384 for stock `qwen3.6:35b-a3b-fast`), producing
+`request (34774 tokens) exceeds the available context size (16384)`; the user must bake a `num_ctx 32768`
+modelfile derivative. Either honor `provider.context_window` on the `/v1` path, or surface the modelfile
+requirement in `aegis doctor` / first-init. Relates to P35.2/P35.3 (context-window guidance) and
+P35.9/P39.3 (native-adapter work).
+
+Priority: Tier 3 — the `/v1`+`num_ctx` half is documented-workaround-able today; the native-adapter hang is
+investigation-gated (needs a repro) rather than a ready fix.
 
 **Lead — doc-inconsistency (surfaced building the P37 scripts):**
 (a) **threat-ID form** — `references/skeletons/skeleton-stride.md` writes threat IDs as bare sequential
@@ -109,6 +202,22 @@ analyzed code's commit.
 ---
 
 ## Open Work — Tier 4
+
+### P38.8 — External per-phase threat-model wrapper as interim autonomous-build workaround (parked)
+
+Until P39.5–P39.7 land, a completed, verify-clean suite is reachable **today** by driving Aegis outside the
+`--skill` loop, one phase at a time with bounded context. A reference implementation is recorded at
+`tools/aegis-threatmodel.sh` (+ `tools/THREAT-MODEL-AUTOMATION.md`) in the FirewallRiskRater repo: it runs
+`scaffold.py`, then a small **skill-free** `aegis chat` per phase (architecture → DFD → STRIDE → findings →
+assessment), re-invoking while a phase's file still has `PENDING` markers with an "act now" preamble, then
+runs the P37 checks and loops their failures back to the model until clean. Because each turn's context is
+just the prompt + that phase's files, the compaction wedge (P39.8) and preload bloat (P39.5) never trigger.
+Validated per-phase on `qwen3.6-fast-32k`, 2026-07-21 — all five content phases completed and the suite
+verified clean after the fix loop.
+
+Priority: Tier 4 — a workaround that lives *outside* the harness and duplicates what the drive loop should do
+natively. Recorded so the working recipe isn't lost; **superseded by P39.5 + P39.6 + P39.7** once the built-in
+path converges. Do not invest in it beyond the reference.
 
 ### P25.9 — per-session scoping of `lsp.Manager` (remaining daemon singleton)
 
