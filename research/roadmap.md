@@ -1,6 +1,12 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-21 (**P38.3 and P38.5 shipped** — both Tier 3. P38.3: per-turn usage
+**Last updated:** 2026-07-21 (**P38.1's conformance re-test was executed** — qwen3:14b does *not* reach a
+verify-clean threat-model suite even with P38.4 scaffolding: with `think` on it fabricates a completed run
+and writes nothing, with `think` off it runs recon/scaffold but nukes a file via `edit_file replace_all`
+across scaffold.py's identical `<!-- PENDING -->` markers. The P38.4 *mechanism* is live-confirmed; the
+conformance goal is unmet on-disk and now gated on a stronger local model. Two actionable engineering
+findings split out as **P38.6** (thinking-mode fabrication) and **P38.7** (identical-marker `replace_all`
+footgun). Earlier: **P38.3 and P38.5 shipped** — both Tier 3. P38.3: per-turn usage
 (`InputTokens`/`OutputTokens`/cache counts/`PromptEvalDurationMS`) is now on the wire for both the daemon
 SSE `turn_done` event and `aegis chat --output-format stream-json`'s `turn_done` line, closing the gap
 where the latter carried no usage at all. P38.5: the native Ollama adapter now retries once with `think`
@@ -27,10 +33,21 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 — **P38.1** (Tier 2, now unblocked), plus the parked **P25.9** (Tier 4). **P38.3** and
-**P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
+**Open items:** 3 — **P38.1** (Tier 2, re-test executed 2026-07-21, now environment-gated on a stronger
+local model), **P38.6** and **P38.7** (both Tier 2, split out of that re-test), plus the parked **P25.9**
+(Tier 4). **P38.3** and **P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
 
-The active focus is now **P38.1's conformance re-test**, which **P38.4 just unblocked**. P38.4
+**Update 2026-07-21 — P38.1's conformance re-test was run and is a negative on qwen3:14b.** With P38.4
+scaffolding in place, `aegis chat --skill threat-modeling` against AiGateway does **not** produce a
+verify-clean suite on the config-default model, in two `think`-dependent modes: with `think` on (the
+default) the model **fabricates** a completed build in its reasoning trace and writes nothing (→ **P38.6**);
+with `think` off it runs `recon.py`/`scaffold.py` (confirming the P38.4 mechanism live — seven files
+scaffolded) but then destroys architecture.md with an `edit_file … replace_all` across scaffold.py's
+identical `<!-- PENDING -->` markers and loops to abort (→ **P38.7**). The P38.4 *mechanism* is now
+live-confirmed; the *conformance* goal is unmet on qwen3:14b (whose weakness moved from authoring structure
+to filling it) and the stronger `qwen3.6:35b-a3b` MoE is not on disk to try. Details in P38.1 below.
+
+The prior active focus was **P38.1's conformance re-test**, which **P38.4 unblocked**. P38.4
 (deterministic skeleton scaffolding, `scaffold.py`) shipped 2026-07-20 — see
 [releases.md](releases.md#latest-changes): a stdlib script pre-writes all seven threat-model files *from
 the skeletons* with real structure (headings, table headers + separators, fixed-value lists, the DFD's
@@ -185,8 +202,10 @@ Tier 2 below (it's a live-run verification, not independent build work).
 
 ## Open Work — Tier 2
 
-**Status:** 1 open — **P38.1** (non-orchestrated linear threat-model build; rework shipped 2026-07-20,
-mechanism live-confirmed, conformance re-test now unblocked by P38.4). (P38.4, P38.2 shipped 2026-07-20 —
+**Status:** 3 open — **P38.1** (non-orchestrated linear threat-model build; rework shipped 2026-07-20,
+mechanism live-confirmed; conformance **re-test executed 2026-07-21** — qwen3:14b does not reach a
+verify-clean suite, and no stronger local model is on disk, so this is now environment-gated on a bigger
+model), plus **P38.6** and **P38.7** (both split out of the 2026-07-21 re-test — see P38.1). (P38.4, P38.2 shipped 2026-07-20 —
 see [releases.md](releases.md#latest-changes); P37.2, P37.3 shipped 2026-07-19; P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18;
 P35.6 shipped 2026-07-18;
 P35.3 shipped 2026-07-18; P34.12 shipped 2026-07-17; P34.9 and P34.10 shipped 2026-07-17;
@@ -225,9 +244,89 @@ guard) didn't help.
 - mythos-sec:24b is **not viable** independent of the skill: it 400s on `think` (→ P38.5) and, with that
   disabled, invents tool names and doesn't substitute command placeholders — a model-quality dead end.
 
-Priority: Tier 2 — the mechanism is done and live-confirmed and the conformance blocker (P38.4) has
-shipped; what remains is the re-test to a **verify-clean** suite on a capable-enough local model. Not Tier 1
-because this is a live-run verification, not independent build work — the whole build path now exists.
+**Re-test result (2026-07-21, qwen3:14b vs AiGateway, P38.4 scaffolding in place, `aegis chat --skill
+threat-modeling` drive-to-completion):** the re-test ran and **qwen3:14b does not reach a verify-clean
+suite** — in two distinct `think`-dependent failure modes, neither of which the 2026-07-20 run showed:
+- **`think` on (the config default, `provider.think: true`): total fabrication, zero real tool calls.**
+  The model fetched the timestamp, then **simulated the entire seven-file build inside its reasoning
+  trace** (recon → scaffold → fill → verify, all narrated in `thinking`) and emitted a final report
+  claiming the suite was written and "all check scripts ran clean" — while writing **nothing** (the
+  claimed directory never existed). Because `scaffold.py` never ran, no `<!-- PENDING -->` markers were
+  ever created, so the drive-to-completion oracle saw "no markers" and stopped as if complete
+  (`turns:3, tool_calls:1`). This is the exact no-marker limitation the drive already documents
+  (`internal/cli/chat.go`), but with a newly-identified **trigger (thinking mode)** and a worse shape
+  (fabrication, not just un-stubbed content). Filed as **P38.6**.
+- **`think` off: engages the tools but can't fill.** recon.py ✅ and scaffold.py ✅ wrote all seven files,
+  confirming the P38.4 mechanism live — but then: (a) it skipped the `date` step and scaffolded into the
+  **literal example timestamp** from SKILL.md §4.1 (`…-2026-07-08-1432`); (b) one turn hit the
+  `provider.max_tokens: 8192` output cap (`out=8192`, truncated); (c) fatally, it ran
+  `edit_file(old="<!-- PENDING -->", new="internet-facing", replace_all=true)` and **blanket-overwrote all
+  12 of architecture.md's identical PENDING markers with one wrong string**, because `scaffold.py` emits an
+  *identical* `<!-- PENDING -->` marker for every section; (d) it then looped on failing edits until
+  loop-detection aborted at turn 11. Five of seven files stayed all-PENDING; `verify.py` failed. The
+  identical-marker `replace_all` footgun is filed as **P38.7**.
+
+**Net:** the P38.4 scaffolding *mechanism* is now live-confirmed (7 files scaffolded from the skeletons in
+one run), but the conformance goal — a verify-clean seven-file suite driven end-to-end — is **still unmet
+on qwen3:14b**, whose weakness has moved from "authoring structure" (P38.4 fixed that) to "incrementally
+filling it via `edit_file`". No stronger local model was on disk to try: the doctor-recommended
+`qwen3.6:35b-a3b` MoE is not installed (only qwen3:14b, mythos-sec:24b, and qwen2.5-coder:1.5b are), so the
+"or a stronger local" arm of the re-test could not be exercised.
+
+Priority: Tier 2 — the re-test has been **executed** and the P38.4 mechanism is live-confirmed, but the
+verify-clean goal is unmet on the only capable-enough on-disk model. What remains is genuinely
+environment-gated: **re-run on a stronger local model** (`qwen3.6:35b-a3b` or similar, once installed).
+The two *actionable* engineering findings the re-test surfaced — think-mode fabrication and the
+identical-marker `replace_all` footgun — are split out as **P38.6** and **P38.7** so they can be fixed
+independently of obtaining a bigger model. Not Tier 1 because this is a live-run verification, not
+independent build work — the whole build path exists and is confirmed to run.
+
+### P38.6 — Thinking-mode models fabricate a completed drive instead of executing it
+
+**Surfaced by the 2026-07-21 P38.1 re-test.** With `provider.think: true` (the current config default) and
+a reasoning-capable model (qwen3:14b), `aegis chat --skill threat-modeling` drove **zero** real tool calls:
+the model narrated the whole multi-phase build inside its `thinking` trace and then emitted a final answer
+asserting all seven files were written and every check script passed clean — having written nothing. The
+drive-to-completion oracle (`internal/cli/chat.go`) keys off `<!-- PENDING -->` markers under `.aegis/`;
+since `scaffold.py` never ran, no markers existed, so the drive stopped as "complete" (`turns:3,
+tool_calls:1`). The code already documents the no-marker case as a known limitation, but attributes it to a
+model "writing full file content without stubbing" — the re-test shows the real trigger is **thinking mode
+letting the model mentally simulate the tool workflow and report it as done**, and that the output is
+*fabrication* (no content at all), which is strictly worse than the documented case.
+
+Two candidate levers, not yet chosen: (a) **disable `think` for `--skill` drive-to-completion runs** (or
+warn loudly when it's on) — the whole point of the drive is tool-executed multi-phase work, which
+reasoning-mode simulation defeats; the mythos-sec test already ran with `think` disabled by hand, so
+"think off for these runs" is precedented. (b) **Strengthen the completion oracle** so "no PENDING markers"
+is not accepted as done when the run created **no** suite files at all this drive (i.e. distinguish "never
+scaffolded" from "finished") — a floor check that a threat-model run directory with the expected files
+actually exists before the drive reports success. (a) is the smaller, higher-leverage fix; (b) hardens the
+oracle against any future fabrication path, not just the thinking one.
+
+Priority: Tier 2 — cheap, self-contained, and it removes a *silent false-success* on the shipped default
+config, which is the worst failure shape (a user believes they have a threat model and have nothing). Pairs
+naturally with P38.1's re-test (fixing this is a precondition for a clean think-on re-run).
+
+### P38.7 — `scaffold.py`'s identical `<!-- PENDING -->` markers make `edit_file replace_all` a file-nuke
+
+**Surfaced by the 2026-07-21 P38.1 re-test (think off).** `scaffold.py` writes the *same* literal
+`<!-- PENDING -->` marker for every fillable section of every file. A weak model filling section-by-section
+naturally reaches for `edit_file(old="<!-- PENDING -->", new=…)`, which matches all N markers in the file;
+`edit_file` then either errors ("occurs 12 times") or, when the model retries with `replace_all: true`,
+**overwrites all 12 of the file's distinct sections with one wrong string** — exactly what corrupted
+architecture.md in the re-test (every heading's body became the literal `internet-facing`). The scaffolding
+that P38.4 added to *prevent* structural mistakes thus introduced a new footgun for the fill step.
+
+Fix direction: make each marker **unique and self-describing** — e.g. `<!-- PENDING: deployment-classification -->`
+keyed to the section — so (a) an `edit_file` old-string naturally targets exactly one site, (b) `replace_all`
+can't blanket-nuke a file, and (c) the leftover-marker checks get *more* specific, not less. This is a
+coordinated change: `scaffold.py` (emit keyed markers), `verify.py`'s no-leftover-skeleton check, the
+drive's `scanPendingMarkers` substring match and `continuePrompt` in `internal/cli/chat.go` (all key off
+the exact literal `<!-- PENDING -->` today), SKILL.md §4.1/§4.2 wording, and the `chat_drive_test.go` /
+scaffold tests. Keep a marker *prefix* (`<!-- PENDING`) so the existing substring scans still match.
+
+Priority: Tier 2 — directly caused a verify-fail in the re-test and is a mechanical, well-bounded change;
+it makes the P38.4 scaffold actually safe to fill incrementally, which is the whole point of scaffolding.
 
 **Note (future item, not yet filed):** the same "accurate refusal, error-shaped" question for the
 other scanners' documented exit codes, noted while shipping P35.6 and again while closing P35.13.

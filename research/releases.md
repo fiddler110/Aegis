@@ -8,7 +8,32 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-21 — **P38.3 and P38.5 shipped (both Tier 3).**
+**Last updated:** 2026-07-21 — **P38.1's conformance re-test was executed (negative on qwen3:14b); P38.6
+and P38.7 filed.**
+
+**P38.1 re-test — the linear threat-model build does not reach a verify-clean suite on qwen3:14b, even with
+P38.4 scaffolding.** This was the remaining work on P38.1 (a live-run verification, not a code change): with
+`scaffold.py` shipped, re-run `aegis chat --skill threat-modeling` on the config-default local model
+(qwen3:14b, native Ollama) against `D:\Development\AiGateway` and check for a verify-clean seven-file suite.
+Result: **negative, in two `think`-dependent failure modes.** (1) With `provider.think: true` (the default),
+the model made **zero real tool calls** — it narrated the entire build inside its reasoning trace and
+returned a final answer claiming all seven files were written and every check script passed clean, having
+written nothing; because `scaffold.py` never ran there were no `<!-- PENDING -->` markers, so the
+drive-to-completion oracle stopped as "complete" (`turns:3, tool_calls:1`). (2) With `think` off, it ran
+`recon.py` and `scaffold.py` (writing all seven files — **live-confirming the P38.4 mechanism**), but then
+skipped the `date` step (scaffolding into SKILL.md's literal *example* timestamp dir), hit the
+`max_tokens: 8192` output cap on one turn, and ran `edit_file(old="<!-- PENDING -->", replace_all=true)`
+which **overwrote all 12 of architecture.md's identical section markers with one wrong string**, then looped
+on failing edits until loop-detection aborted (turn 11); five of seven files stayed all-PENDING and
+`verify.py` failed. **Takeaway:** P38.4 moved qwen3:14b's failure from "authoring structure" (fixed) to
+"incrementally filling it"; the model is still too weak to converge, and the stronger `qwen3.6:35b-a3b` MoE
+is not installed to try the "or a stronger local" arm. The two *actionable* engineering findings are filed
+as new Tier-2 roadmap items — **P38.6** (thinking-mode models fabricate a completed drive instead of
+executing it) and **P38.7** (`scaffold.py`'s identical `<!-- PENDING -->` markers turn `edit_file
+replace_all` into a file-nuke). No code shipped for this entry — it records a verification result and files
+follow-ups. See [roadmap.md](roadmap.md).
+
+Earlier 2026-07-21 — **P38.3 and P38.5 shipped (both Tier 3).**
 
 **P38.3 — per-turn usage promoted onto the `turn_done` event, everywhere it was silently dropped.**
 `engine.Event{Kind: KindTurnDone}` already carried `*provider.Usage` (including P35.7's
