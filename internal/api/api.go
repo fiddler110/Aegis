@@ -204,6 +204,12 @@ type Event struct {
 	// Cache token usage (Anthropic prompt caching), surfaced for observability.
 	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	// PromptEvalDurationMS mirrors provider.Usage.PromptEvalDurationMS (P38.3):
+	// how long the native-Ollama path spent on prefill this turn. Zero on
+	// every non-Ollama provider. Read alongside InputTokens to tell a
+	// KV-cache-hit turn (duration collapses, InputTokens stays full — P35.13)
+	// from a full reprocess, without SQLite spelunking or debug-log tailing.
+	PromptEvalDurationMS int64 `json:"prompt_eval_duration_ms,omitempty"`
 	// TokensEstimated is true when token counts were inferred from character
 	// length because the provider did not report usage (e.g. local/Ollama models).
 	TokensEstimated bool `json:"tokens_estimated,omitempty"`

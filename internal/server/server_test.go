@@ -1224,3 +1224,25 @@ func TestToAPIEventGuard(t *testing.T) {
 		t.Error("GuardRetrying = false, want true")
 	}
 }
+
+// TestToAPIEventTurnDoneCarriesPromptEvalDuration is the P38.3 regression:
+// PromptEvalDurationMS (the KV-cache-hit signal, P35.7/P35.13) must survive
+// the engine→API translation alongside the other usage fields, or an SSE
+// consumer has no way to distinguish a cache-hit turn from a full reprocess
+// without debug-log tailing.
+func TestToAPIEventTurnDoneCarriesPromptEvalDuration(t *testing.T) {
+	ev := toAPIEvent(engine.Event{
+		Kind: engine.KindTurnDone,
+		Usage: &provider.Usage{
+			InputTokens:          100,
+			PromptEvalDurationMS: 250,
+		},
+		CostUSD: 0.01,
+	})
+	if ev.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", ev.InputTokens)
+	}
+	if ev.PromptEvalDurationMS != 250 {
+		t.Errorf("PromptEvalDurationMS = %d, want 250", ev.PromptEvalDurationMS)
+	}
+}

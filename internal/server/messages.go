@@ -771,6 +771,7 @@ func toAPIEvent(ev engine.Event) api.Event {
 		out.CacheReadTokens = ev.Usage.CacheReadTokens
 		out.CacheCreationTokens = ev.Usage.CacheCreationTokens
 		out.TokensEstimated = ev.Usage.IsEstimated
+		out.PromptEvalDurationMS = ev.Usage.PromptEvalDurationMS
 	}
 	out.CostUSD = ev.CostUSD
 	return out

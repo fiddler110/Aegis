@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 func TestParseOutputFormat(t *testing.T) {
@@ -54,6 +55,37 @@ func TestEmitStreamEvent(t *testing.T) {
 	}
 	if notice.Type != "notice" || notice.Text != "model emitted a tool call as text" {
 		t.Errorf("notice lost its text: %+v", notice)
+	}
+}
+
+// TestEmitStreamEventTurnDone is the P38.3 regression: turn_done previously
+// fell through emitStreamEvent's switch with none of its Usage/CostUSD
+// payload serialized, leaving a stream-json consumer with no per-turn token
+// figures at all (only the final "result" trailer).
+func TestEmitStreamEventTurnDone(t *testing.T) {
+	var buf bytes.Buffer
+	emitStreamEvent(&buf, engine.Event{
+		Kind: engine.KindTurnDone,
+		Usage: &provider.Usage{
+			InputTokens:          123,
+			OutputTokens:         45,
+			CacheReadTokens:      6,
+			CacheCreationTokens:  7,
+			PromptEvalDurationMS: 89,
+		},
+		CostUSD: 0.02,
+	})
+
+	var got streamEvent
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "turn_done" {
+		t.Fatalf("Type = %q, want turn_done", got.Type)
+	}
+	if got.InputTokens != 123 || got.OutputTokens != 45 || got.CacheReadTokens != 6 ||
+		got.CacheCreationTokens != 7 || got.PromptEvalDurationMS != 89 || got.CostUSD != 0.02 {
+		t.Errorf("usage not carried through: %+v", got)
 	}
 }
 

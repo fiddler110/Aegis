@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ type Adapter struct {
 	think     *bool  // nil = omit; false = disable extended thinking
 	numCtx    int    // 0 = omit, let Ollama use its own default
 	keepAlive string // "" = omit, let Ollama use its own default (5m)
+	logger    *slog.Logger
 }
 
 // Option configures the adapter.
@@ -94,11 +96,21 @@ func WithResponseHeaderTimeout(d time.Duration) Option {
 	return func(a *Adapter) { a.client = sse.NewStreamingClient(d) }
 }
 
+// WithLogger sets the logger used to warn about degraded behavior (e.g. a
+// think-rejected request retried without it — P38.5). Defaults to
+// slog.Default() when unset.
+func WithLogger(l *slog.Logger) Option {
+	return func(a *Adapter) { a.logger = l }
+}
+
 // New constructs a native Ollama adapter.
 func New(opts ...Option) *Adapter {
 	a := &Adapter{baseURL: defaultBaseURL, client: sse.NewStreamingClient(0)}
 	for _, o := range opts {
 		o(a)
+	}
+	if a.logger == nil {
+		a.logger = slog.Default()
 	}
 	return a
 }
@@ -233,12 +245,52 @@ func translateTools(tools []provider.ToolSchema) []wireTool {
 
 // Stream implements provider.Adapter.
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	resp, err := a.doChat(ctx, req, a.think)
+	if err != nil {
+		// P38.5: some models (e.g. mythos-sec:24b) 400 the instant `think` is
+		// sent at all — "does not support thinking" — rather than accepting
+		// and ignoring it. That aborts the run with a raw provider error and
+		// zero tool calls, and nothing tells the user why. Retry once with
+		// `think` omitted entirely and warn, rather than surfacing the raw
+		// 400 — only when we actually sent a non-nil think value, so this
+		// never masks an unrelated 400 or loops on a second failure.
+		if a.think != nil && isThinkRejected(err) {
+			a.logger.Warn("ollama: model rejected the think parameter; retrying without it",
+				"model", req.Model, "error", err)
+			resp, err = a.doChat(ctx, req, nil)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	out := make(chan provider.Event)
+	go consume(ctx, resp.Body, out)
+	return out, nil
+}
+
+// isThinkRejected reports whether err is the HTTP 400 Ollama returns when a
+// model doesn't support the `think` parameter at all (as opposed to any
+// other 400, e.g. a malformed request, which must not trigger the retry).
+func isThinkRejected(err error) bool {
+	var apiErr *provider.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(apiErr.Message, "does not support thinking")
+}
+
+// doChat sends one /api/chat request with the given think override (nil
+// omits the field) and returns the raw response on success. The caller owns
+// closing resp.Body.
+func (a *Adapter) doChat(ctx context.Context, req provider.Request, think *bool) (*http.Response, error) {
 	wr := wireRequest{
 		Model:     req.Model,
 		Messages:  translate(req.System, req.Messages),
 		Tools:     translateTools(req.Tools),
 		Stream:    true,
-		Think:     a.think,
+		Think:     think,
 		KeepAlive: a.keepAlive,
 	}
 	var opts wireOptions
@@ -288,10 +340,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if resp.StatusCode != http.StatusOK {
 		return nil, sse.HandleErrorResponse(a.Name(), resp)
 	}
-
-	out := make(chan provider.Event)
-	go consume(ctx, resp.Body, out)
-	return out, nil
+	return resp, nil
 }
 
 // errorMessage extracts a human-readable message from a chunk's "error"

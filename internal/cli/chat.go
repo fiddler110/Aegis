@@ -488,6 +488,16 @@ type streamEvent struct {
 	ToolResult string          `json:"tool_result,omitempty"`
 	IsError    bool            `json:"is_error,omitempty"`
 	Error      string          `json:"error,omitempty"`
+	// Usage fields, populated on a "turn_done" line (P38.3) so per-turn context
+	// growth is observable from a stream-json consumer without SQLite
+	// spelunking or debug-log tailing — previously this Kind fell through the
+	// switch below with none of its Usage/CostUSD payload serialized at all.
+	InputTokens          int     `json:"input_tokens,omitempty"`
+	OutputTokens         int     `json:"output_tokens,omitempty"`
+	CacheReadTokens      int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens  int     `json:"cache_creation_tokens,omitempty"`
+	PromptEvalDurationMS int64   `json:"prompt_eval_duration_ms,omitempty"`
+	CostUSD              float64 `json:"cost_usd,omitempty"`
 }
 
 func emitStreamEvent(w io.Writer, ev engine.Event) {
@@ -504,6 +514,15 @@ func emitStreamEvent(w io.Writer, ev engine.Event) {
 		se.Tool, se.ToolResult, se.IsError = ev.ToolName, ev.ToolResult, ev.ToolIsError
 	case engine.KindError:
 		se.Error = errString(ev.Err)
+	case engine.KindTurnDone:
+		if ev.Usage != nil {
+			se.InputTokens = ev.Usage.InputTokens
+			se.OutputTokens = ev.Usage.OutputTokens
+			se.CacheReadTokens = ev.Usage.CacheReadTokens
+			se.CacheCreationTokens = ev.Usage.CacheCreationTokens
+			se.PromptEvalDurationMS = ev.Usage.PromptEvalDurationMS
+		}
+		se.CostUSD = ev.CostUSD
 	case engine.KindTrace:
 		return // server-internal; never emit
 	}
