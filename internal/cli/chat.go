@@ -77,6 +77,20 @@ func newChatCmd() *cobra.Command {
 				return handleCLISlash(cmd, cfg, parsed)
 			}
 
+			// P38.6: a --skill run drives a tool-executed, multi-phase task to
+			// completion. A reasoning model with think enabled was observed to
+			// *simulate* the whole build inside its thinking trace and then report
+			// it done while writing nothing (qwen3:14b: recon→scaffold→fill→verify
+			// all narrated in `thinking`, zero real tool calls, no files on disk —
+			// a silent false success on the shipped default config). Force think
+			// off for the drive so the phases execute as real tool calls, warning
+			// when we override an explicitly-enabled setting.
+			if skillName != "" && cfg.Provider.Think != nil && *cfg.Provider.Think {
+				off := false
+				cfg.Provider.Think = &off
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: --skill drives the run to completion via tool calls; disabling provider.think for this run so the model executes the phases instead of simulating them in its reasoning trace (P38.6)]\n")
+			}
+
 			adapter, err := providerfactory.Build(cfg, nil)
 			if err != nil {
 				return err
@@ -308,6 +322,19 @@ func newChatCmd() *cobra.Command {
 					Role:    provider.RoleUser,
 					Content: []provider.Block{provider.TextBlock{Text: continuePrompt(pending)}},
 				})
+			}
+
+			// P38.6 floor check against fabricated completion. A drive that ends
+			// with no PENDING markers is normally "finished" — but a model can
+			// report the whole build as done without executing it, leaving .aegis/
+			// empty. "No markers" then means "never started", not "complete", and
+			// the empty result reads as success — the worst shape (a user believing
+			// they have a threat model and having nothing). Distinguish the two: if
+			// a completed drive produced no suite files at all, say so. Lever (a)
+			// above prevents the observed think-mode trigger; this hardens the
+			// oracle against any other fabrication path.
+			if driveToCompletion && runErr == nil && ctx.Err() == nil && suiteFileCount(pendingRoot) == 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: the run reported completion but wrote no files under .aegis/ — the model may have described the work instead of executing it. Nothing was produced; re-run (with provider.think disabled if it is on) and check the transcript.]\n")
 			}
 
 			snap := tracker.Snapshot()
@@ -619,19 +646,23 @@ func skillPreamble(name, body string) string {
 // contract in the threat-modeling skill's SKILL.md §4.2. Only called with a
 // non-empty list (the drive loop stops when no markers remain).
 func continuePrompt(pending []string) string {
-	return "Continue — the task is not finished. These files still contain `<!-- PENDING -->` markers and must be completed:\n- " +
+	return "Continue — the task is not finished. These files still contain `<!-- PENDING: … -->` markers and must be completed:\n- " +
 		strings.Join(pending, "\n- ") +
-		"\n\nResume from the first unfinished file in dependency order and keep working until NO `<!-- PENDING -->` marker remains in any file. This is a non-interactive run: do not stop to ask whether to proceed, and do not return a partial result."
+		"\n\nResume from the first unfinished file in dependency order and keep working until NO `<!-- PENDING` marker remains in any file. Each marker is section-keyed (`<!-- PENDING: <section> -->`): edit that exact marker one at a time — never a bare `<!-- PENDING -->` and never `replace_all` on a marker, which would overwrite every section at once. This is a non-interactive run: do not stop to ask whether to proceed, and do not return a partial result."
 }
 
 // scanPendingMarkers walks root (typically <cwd>/.aegis) and returns the
-// root-relative paths of text files that still contain a `<!-- PENDING -->`
+// root-relative paths of text files that still contain a `<!-- PENDING`
 // marker — the stub-first pattern multi-phase skills use to mark unfinished
-// files. Only small text-ish files are read (the marker only ever appears in
-// generated markdown/yaml/mmd), so the walk stays cheap. A missing root yields
-// no matches.
+// files. The match is the marker *prefix*, not the exact `<!-- PENDING -->`
+// literal: scaffold.py now emits section-keyed markers
+// (`<!-- PENDING: deployment-classification -->`, P38.7) so an `edit_file` can
+// target one section without a `replace_all` file-nuke, and the prefix catches
+// those as well as any bare legacy marker. Only small text-ish files are read
+// (the marker only ever appears in generated markdown/yaml/mmd), so the walk
+// stays cheap. A missing root yields no matches.
 func scanPendingMarkers(root string) []string {
-	const marker = "<!-- PENDING -->"
+	const marker = "<!-- PENDING"
 	const maxFileSize = 1 << 20 // 1 MiB — generated report files are far smaller
 	var hits []string
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -661,4 +692,24 @@ func scanPendingMarkers(root string) []string {
 	})
 	sort.Strings(hits)
 	return hits
+}
+
+// suiteFileCount returns how many text-ish files exist anywhere under root
+// (typically <cwd>/.aegis). The P38.6 drive-to-completion floor check uses it to
+// tell "finished — every marker resolved" from "nothing was ever written" —
+// both of which leave scanPendingMarkers empty, but only the latter is a
+// fabricated success. A missing root yields zero.
+func suiteFileCount(root string) int {
+	n := 0
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".md", ".mmd", ".markdown", ".yaml", ".yml", ".txt":
+			n++
+		}
+		return nil
+	})
+	return n
 }

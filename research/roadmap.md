@@ -37,13 +37,17 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 4 — **P38.1** (Tier 2, re-test executed 2026-07-21, now environment-gated on a stronger
-local model), **P38.6** and **P38.7** (both Tier 2, split out of that re-test), plus the parked **P25.9**
-(Tier 4). All four items from the 2026-07-21 local-14b-model harness-improvement research pass are now
-closed same-day: **P39.1** (system-prompt byte-stability regression test), **P39.2** (coach tool-execution
-error messages), and **P39.4** (`aegis doctor --deep`'s structured multi-turn fill probe) all **shipped**;
-**P39.3** (grammar/schema-constrained tool-call decoding) was spiked and closed **NO-GO** (see Tier 3).
-**P38.3** and **P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
+**Open items:** 2 — **P38.1** (Tier 2, re-test executed 2026-07-21, now environment-gated on a stronger
+local model), plus the parked **P25.9** (Tier 4). **P38.6** and **P38.7** (both Tier 2, split out of the
+P38.1 re-test) **shipped 2026-07-21** — see [releases.md](releases.md#latest-changes): P38.6 disables
+`think` for `--skill` drive-to-completion runs and adds an empty-output floor check to the completion oracle;
+P38.7 makes `scaffold.py`'s per-section `<!-- PENDING -->` markers unique and section-keyed
+(`<!-- PENDING: <section> -->`) so a section fill can't `replace_all`-nuke a whole file. All four items from
+the 2026-07-21 local-14b-model harness-improvement research pass are also closed same-day: **P39.1**
+(system-prompt byte-stability regression test), **P39.2** (coach tool-execution error messages), and
+**P39.4** (`aegis doctor --deep`'s structured multi-turn fill probe) all **shipped**; **P39.3**
+(grammar/schema-constrained tool-call decoding) was spiked and closed **NO-GO** (see Tier 3). **P38.3** and
+**P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
 
 **Update 2026-07-21 — P38.1's conformance re-test was run and is a negative on qwen3:14b.** With P38.4
 scaffolding in place, `aegis chat --skill threat-modeling` against AiGateway does **not** produce a
@@ -216,10 +220,11 @@ Tier 2 below (it's a live-run verification, not independent build work).
 
 ## Open Work — Tier 2
 
-**Status:** 3 open — **P38.1** (non-orchestrated linear threat-model build; rework shipped 2026-07-20,
+**Status:** 1 open — **P38.1** (non-orchestrated linear threat-model build; rework shipped 2026-07-20,
 mechanism live-confirmed; conformance **re-test executed 2026-07-21** — qwen3:14b does not reach a
 verify-clean suite, and no stronger local model is on disk, so this is now environment-gated on a bigger
-model), plus **P38.6** and **P38.7** (both split out of the 2026-07-21 re-test — see P38.1). **P39.2**
+model). **P38.6** and **P38.7** (both split out of the 2026-07-21 re-test — see P38.1) **shipped
+2026-07-21**. **P39.2**
 (coach tool-execution error messages for weak local models) and **P39.4** (`aegis doctor --deep`'s
 structured multi-turn fill probe) both shipped 2026-07-21, the same day they were filed. (P38.4, P38.2 shipped 2026-07-20 —
 see [releases.md](releases.md#latest-changes); P37.2, P37.3 shipped 2026-07-19; P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18;
@@ -299,6 +304,12 @@ independent build work — the whole build path exists and is confirmed to run.
 
 ### P38.6 — Thinking-mode models fabricate a completed drive instead of executing it
 
+**Shipped 2026-07-21** — see [releases.md](releases.md#latest-changes). Both levers landed in
+`internal/cli/chat.go`: (a) `--skill` runs force-disable `provider.think` for the drive (loud stderr notice
+when overriding an explicitly-enabled setting), and (b) a `suiteFileCount` floor check flags a completed
+drive that wrote no files under `.aegis/` as a possible fabricated success. `TestSuiteFileCount` added. The
+original filing follows.
+
 **Surfaced by the 2026-07-21 P38.1 re-test.** With `provider.think: true` (the current config default) and
 a reasoning-capable model (qwen3:14b), `aegis chat --skill threat-modeling` drove **zero** real tool calls:
 the model narrated the whole multi-phase build inside its `thinking` trace and then emitted a final answer
@@ -324,6 +335,13 @@ config, which is the worst failure shape (a user believes they have a threat mod
 naturally with P38.1's re-test (fixing this is a precondition for a clean think-on re-run).
 
 ### P38.7 — `scaffold.py`'s identical `<!-- PENDING -->` markers make `edit_file replace_all` a file-nuke
+
+**Shipped 2026-07-21** — see [releases.md](releases.md#latest-changes). `scaffold.py` now emits a unique,
+section-keyed `<!-- PENDING: <section> -->` marker per fillable section (new `pending(key)` builder;
+`table`/`prose` take a `key`); `verify.py` and `internal/cli/chat.go`'s `scanPendingMarkers` match the
+`<!-- PENDING` prefix so keyed markers still count as unfinished; `continuePrompt` and SKILL.md §4.1/§4.2 now
+warn off `replace_all`. Verified: all seven frameworks scaffold with no duplicate/bare markers, fresh
+scaffold lints 6/6 and still fails the leftover-marker check. The original filing follows.
 
 **Surfaced by the 2026-07-21 P38.1 re-test (think off).** `scaffold.py` writes the *same* literal
 `<!-- PENDING -->` marker for every fillable section of every file. A weak model filling section-by-section

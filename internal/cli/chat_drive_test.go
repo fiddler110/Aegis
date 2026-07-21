@@ -27,11 +27,15 @@ func TestScanPendingMarkers(t *testing.T) {
 	write("security/threat-model/run/2-analysis.md", "# Analysis\n<!-- PENDING -->\n")
 	write("security/threat-model/run/0.1-architecture.md", "# Architecture\nfully written, no marker\n")
 	write("security/threat-model/run/1.1-model.mmd", "flowchart LR\n<!-- PENDING -->\n")
+	// P38.7: scaffold.py emits section-keyed markers; scanPendingMarkers matches
+	// the `<!-- PENDING` prefix, so a keyed marker must still count as unfinished.
+	write("security/threat-model/run/0-assessment.md", "# Assessment\n<!-- PENDING: key-components -->\n")
 	write("security/threat-model/run/inventory.yaml", "components: []\n") // resolved
 	write("security/threat-model/run/notes.bin", "<!-- PENDING -->")       // non-text ext, ignored
 
 	got := scanPendingMarkers(root)
 	want := []string{
+		"security/threat-model/run/0-assessment.md",
 		"security/threat-model/run/1.1-model.mmd",
 		"security/threat-model/run/2-analysis.md",
 	}
@@ -55,6 +59,40 @@ func TestScanPendingMarkers(t *testing.T) {
 	}
 }
 
+// suiteFileCount is the P38.6 floor check: it distinguishes "finished, every
+// marker resolved" from "nothing was ever written" (a fabricated completion) —
+// both leave scanPendingMarkers empty. It counts text-ish files anywhere under
+// root and ignores non-suite extensions; a missing root is zero.
+func TestSuiteFileCount(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An empty tree (the fabrication signature) counts zero.
+	if n := suiteFileCount(root); n != 0 {
+		t.Fatalf("empty tree: got %d, want 0", n)
+	}
+	// A missing root is zero, not an error.
+	if n := suiteFileCount(filepath.Join(root, "nope")); n != 0 {
+		t.Fatalf("missing root: got %d, want 0", n)
+	}
+
+	write("security/threat-model/run/0-assessment.md", "x")
+	write("security/threat-model/run/1.1-model.mmd", "y")
+	write("security/threat-model/run/inventory.yaml", "z")
+	write("security/threat-model/run/scratch.bin", "ignored") // non-suite ext
+	if n := suiteFileCount(root); n != 3 {
+		t.Fatalf("populated tree: got %d, want 3", n)
+	}
+}
+
 func TestAppendUnique(t *testing.T) {
 	base := []string{"a", "b"}
 	// Case-insensitive dedupe, and the input slice is never mutated.
@@ -74,7 +112,8 @@ func TestAppendUnique(t *testing.T) {
 // so a small local model resumes the exact remaining work instead of yielding.
 func TestContinuePrompt(t *testing.T) {
 	p := continuePrompt([]string{"a/1.md", "a/2.md"})
-	for _, want := range []string{"a/1.md", "a/2.md", "PENDING", "do not stop", "dependency order"} {
+	// P38.7: the continuation must warn off the replace_all file-nuke.
+	for _, want := range []string{"a/1.md", "a/2.md", "PENDING", "do not stop", "dependency order", "replace_all"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("continuePrompt missing %q in:\n%s", want, p)
 		}

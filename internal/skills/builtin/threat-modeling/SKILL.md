@@ -54,7 +54,7 @@ improvise one from a process description alone.
 
 | Reference file | Read when | Contains |
 |---|---|---|
-| `scaffold.py` (bundled script) | **Setup (§4.1 step 2), before filling any file** | Pre-writes all seven files from the skeletons — real structure (headings, table headers, fixed-value lists, DFD `flowchart LR` + `classDef`s) with `<!-- PENDING -->` per fillable section, so you fill sections rather than author structure |
+| `scaffold.py` (bundled script) | **Setup (§4.1 step 2), before filling any file** | Pre-writes all seven files from the skeletons — real structure (headings, table headers, fixed-value lists, DFD `flowchart LR` + `classDef`s) with a section-keyed `<!-- PENDING: <section> -->` per fillable section, so you fill sections rather than author structure |
 | `recon.py` (bundled script, not a reference doc) | **Start of the architecture phase, before any manual exploration (§2 step 1)** | Deterministic one-pass repo digest — run it, read its stdout; replaces reading source files raw |
 | `inventory.py` (bundled script) | **Phase 5**, to generate `inventory.yaml` from the finished markdown; **phase 6**, with `--check`, to verify it still agrees | `python inventory.py <run-dir>` writes the sidecar (IDs, derived tiers) deterministically; `--check` regenerates in-memory and diffs vs disk, exit non-zero on drift |
 | `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis) |
@@ -222,13 +222,16 @@ Do the cheap, decision-bearing setup first, then work the phases in order.
    placeholder, each with its **fixed structure already in place** — every
    heading, every table's header row and separator, the DFD's `flowchart LR`
    header and three `classDef`s, the fixed-value reference lists — and a
-   `<!-- PENDING -->` marker wherever run-specific content goes. You then
+   **section-keyed** `<!-- PENDING: <section> -->` marker (e.g.
+   `<!-- PENDING: deployment-classification -->`) wherever run-specific content
+   goes. Each marker is unique in its file, so you target exactly one with
+   `edit_file` — see §4.2. You then
    **fill sections** (`edit_file`, §4.2) rather than authoring the structure:
    the skeletons determine the shape, the script applies it, and you supply
    only the judgment. This is what makes `verify.py`/`lint_dfd.py` check a
    real structure from turn one (a freshly-scaffolded DFD already lints clean)
    and keeps every file resumable and self-describing (§4.2 "Resume"). The
-   script never clobbers a file whose `<!-- PENDING -->` markers are already
+   script never clobbers a file whose `<!-- PENDING` markers are already
    gone (i.e. one you've started filling), so re-running it on an in-progress
    directory is safe. Pass `--framework stride-a` for a STRIDE-A run.
 
@@ -282,18 +285,27 @@ state, and — with context pruning dropping each spent write payload — writin
 in small pieces is what keeps a single-context build bounded. This matters most
 in phase 3: `scaffold.py` already wrote the analysis file's structure (§4.1), so
 `edit_file` it **one component/section at a time** — replacing one
-`<!-- PENDING -->` marker per edit — rather than regenerating the whole file
-with `write_file`. Your context never has to hold every section you already
-wrote; that is what bounds even a large analysis file's peak context, the
+`<!-- PENDING: <section> -->` marker per edit — rather than regenerating the
+whole file with `write_file`. Your context never has to hold every section you
+already wrote; that is what bounds even a large analysis file's peak context, the
 failure mode this whole approach targets. (Re-authoring the whole file each
 pass is exactly the non-convergent behavior scaffolding exists to prevent.)
 
+**Each PENDING marker is section-keyed — edit it exactly, never `replace_all`.**
+`scaffold.py` writes a *distinct* marker per section
+(`<!-- PENDING: key-components -->`, `<!-- PENDING: deployment-classification -->`,
+…), so your `edit_file` `old_string` is that one exact marker and it matches a
+single site. **Never** pass a bare `<!-- PENDING -->` or set `replace_all: true`
+on a PENDING marker: the markers used to be identical across a file, and a
+`replace_all` blanket-overwrote every section with one string — a whole-file nuke
+(the P38.7 footgun). One keyed marker per edit keeps every other section intact.
+
 **Resume, don't restart.** If the target directory already exists and any file
-still contains `<!-- PENDING -->` markers, a previous run was interrupted.
-Resume from the **first unfinished phase in dependency order**: check each
-file for `<!-- PENDING -->` and skip a phase whose file is already complete
-(re-read just its identifiers into your note without rewriting), continuing
-from the first file that still has pending work.
+still contains a `<!-- PENDING` marker (in any keyed form), a previous run was
+interrupted. Resume from the **first unfinished phase in dependency order**:
+check each file for the `<!-- PENDING` prefix and skip a phase whose file is
+already complete (re-read just its identifiers into your note without
+rewriting), continuing from the first file that still has pending work.
 
 Two cross-framework rules every phase enforces while filling the template:
 
@@ -317,10 +329,10 @@ resumable.** The build is many turns in one session, and there is no shared
 agent deadline to split across sub-agents — you are the single context doing
 every phase. Two consequences. First, **do not stop mid-build to ask whether
 to continue**: a threat model is a long, non-interactive job, so work straight
-through until no `<!-- PENDING -->` marker remains, rather than writing a few
+through until no `<!-- PENDING` marker remains, rather than writing a few
 files and handing back a partial suite with a question. Second, because you
 write incrementally, an interrupted run always leaves complete files on disk
-with only `<!-- PENDING -->` work outstanding — so if the run genuinely must
+with only `<!-- PENDING` work outstanding — so if the run genuinely must
 stop (step limit, real context pressure), say which files are complete and a
 follow-up "continue the threat model" run resumes from the pending markers in
 dependency order.
@@ -332,7 +344,7 @@ suite. Because the earlier phases were written incrementally and context
 pruning has since dropped most of that content from your context, this phase
 deliberately re-reads the **complete suite fresh from disk** — it is the one
 place the whole model is seen together at once. After every file's
-`<!-- PENDING -->` markers are gone, re-read the whole suite and review it as a
+`<!-- PENDING` markers are gone, re-read the whole suite and review it as a
 whole — the files were written one phase at a time, each grounded only in your
 running identifier note, so this is where seams show:
 
@@ -412,7 +424,7 @@ content is on disk, so your running identifier note plus a re-read of
 `0-assessment.md` are all you need to summarize it. State which framework
 was used (and why, if inferred rather than requested) and the deployment
 classification up front — both also belong in `0-assessment.md`'s Executive
-Summary. The task is done only when no `<!-- PENDING -->` marker remains in
+Summary. The task is done only when no `<!-- PENDING` marker remains in
 any of the seven files, the §5 review round (phase 6) has run over the
 assembled suite, the final self-check passes, and `inventory.yaml` exists and
 agrees with the documents. If the run must
