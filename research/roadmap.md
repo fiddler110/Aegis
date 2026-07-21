@@ -85,6 +85,22 @@ counts that no autonomous verify pass caught (→ **P39.6**). Driving the *same*
 harness-side context bounding, **not** model capability. Full evidence + reference wrapper: FirewallRiskRater
 `tools/THREAT-MODEL-AUTOMATION.md` (recorded as **P38.8**).
 
+**2026-07-21 corroboration (`gpt-oss:20b` MoE vs AiGateway).** A second model/target pair reproduces the same
+harness-side wall. `gpt-oss:20b` is the **first local model to pass `aegis doctor --deep`** (the synthetic
+structured multi-turn fill probe) where qwen3:14b, gemma4:12b and mythos-sec:24b all fail it — yet passing
+`--deep` did **not** predict a verify-clean build, because the probe never exercises the P39.5 SKILL.md-preload
+pressure (it is a necessary-not-sufficient gate, not a conformance signal). Three `--skill` runs against
+AiGateway: (1) pointed at a *pre-existing* complete suite, it ran `scaffold.py` as a no-op and then
+**confabulated** a full build+verify report (0 `edit_file`, verify scripts never run) — an output-text analogue
+of the P38.6 think fabrication; (2) on a clean fresh scaffold it filled **0 of 35 `PENDING` markers** and
+yielded 3× with markers still present — a second instance of the **P39.7** "announce-then-yield" stall; (3)
+adding an explicit "one section per turn, act now via `edit_file`" preamble to the prompt **unstuck the fill**
+(first real `edit_file` landed) before it snagged on two lower-level faults — `scaffold.py .` dumping skeletons
+into the repo root (bad run-dir + malformed `--framework stride-a` args) and an Ollama tool-call JSON parse
+error on a rich markdown-table `new_string` (invalid `\'` escape + a non-ASCII hyphen). Takeaways: the preamble
+result is direct corroboration that **P39.7's "act now" nudge is the right lever**, on a second model; and
+`gpt-oss:20b`'s tool-call serialization is fragile on large `edit_file` payloads (relates to **P39.9**).
+
 P36.2 (pruning that keeps a single-context linear build inside the window) is the load-bearing mechanism
 here and is **partially confirmed live** (a 33-call run held inside ~44K input tokens with no overflow); its
 definitive confirmation rides on a scaffolded, verify-clean re-test measured through P38.3's per-turn usage
@@ -117,7 +133,10 @@ filled" into "verifies clean," which is the real done-condition for an autonomou
 ### P39.7 — No-progress guard on the drive loop (counters "announce then yield")
 
 Weak local models sometimes end a turn with a plan ("Now I'll write the file…") and *no* tool call: a
-one-shot fill on the 35B model returned `turns=3` with 0 `edit_file` calls. The drive loop should detect a
+one-shot fill on the 35B model returned `turns=3` with 0 `edit_file` calls; a `gpt-oss:20b` `--skill` run
+against AiGateway reproduced it exactly (0 of 35 markers filled, yielded 3× with markers present), and adding
+an explicit "one section per turn, act now" preamble to that run's prompt unstuck the fill — direct evidence
+the nudge works. The drive loop should detect a
 turn that mutated no file while `PENDING` markers remain and re-prompt with an explicit "act now — call
 edit_file, no narration" nudge (bounded retries) instead of yielding a partial suite. Extends P39.2's
 tool-execution coaching from the malformed-call case to the no-call case. The P38.8 wrapper works around this
