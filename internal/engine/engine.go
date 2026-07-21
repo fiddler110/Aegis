@@ -1437,6 +1437,25 @@ func repairOrphanedToolUses(msgs []provider.Message) []provider.Message {
 	return out
 }
 
+// registeredToolNames lists every tool registered on reg (regardless of
+// exposure/deferred state — the model should be told every real name, not
+// just what's currently exposed), sorted and comma-joined for use in a
+// model-visible error message (P39.2): a small local model that invents a
+// tool name can self-correct from this list instead of spending a turn
+// guessing at a name that doesn't exist.
+func registeredToolNames(reg *tool.Registry) string {
+	if reg == nil {
+		return "(none)"
+	}
+	all := reg.All()
+	names := make([]string, 0, len(all))
+	for _, t := range all {
+		names = append(names, t.Name())
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // executeTool looks up and runs a single tool, converting failures into
 // model-visible error results rather than aborting the whole run.
 func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (string, bool) {
@@ -1452,7 +1471,7 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	}
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
-		return fmt.Sprintf("unknown tool %q", tu.Name), true
+		return fmt.Sprintf("unknown tool %q; registered tools: %s", tu.Name, registeredToolNames(e.tools)), true
 	}
 	if e.gate != nil {
 		if allowed, reason := e.gate.Check(ctx, t, tu.Input); !allowed {

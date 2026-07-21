@@ -6,7 +6,11 @@ and writes nothing, with `think` off it runs recon/scaffold but nukes a file via
 across scaffold.py's identical `<!-- PENDING -->` markers. The P38.4 *mechanism* is live-confirmed; the
 conformance goal is unmet on-disk and now gated on a stronger local model. Two actionable engineering
 findings split out as **P38.6** (thinking-mode fabrication) and **P38.7** (identical-marker `replace_all`
-footgun). Earlier: **P38.3 and P38.5 shipped** — both Tier 3. P38.3: per-turn usage
+footgun). Same day, a local-14b-model harness-improvement research pass filed four more items: **P39.1**
+(Tier 1, system-prompt byte-stability regression test), **P39.2** (Tier 2, coach tool-execution error
+messages), **P39.3** (Tier 3, grammar/schema-constrained tool-call decoding investigation), and **P39.4**
+(Tier 2, toolcallprobe/doctor doesn't predict multi-turn structured-fill capability) — see each item's
+section below. Earlier: **P38.3 and P38.5 shipped** — both Tier 3. P38.3: per-turn usage
 (`InputTokens`/`OutputTokens`/cache counts/`PromptEvalDurationMS`) is now on the wire for both the daemon
 SSE `turn_done` event and `aegis chat --output-format stream-json`'s `turn_done` line, closing the gap
 where the latter carried no usage at all. P38.5: the native Ollama adapter now retries once with `think`
@@ -33,9 +37,13 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 3 — **P38.1** (Tier 2, re-test executed 2026-07-21, now environment-gated on a stronger
+**Open items:** 4 — **P38.1** (Tier 2, re-test executed 2026-07-21, now environment-gated on a stronger
 local model), **P38.6** and **P38.7** (both Tier 2, split out of that re-test), plus the parked **P25.9**
-(Tier 4). **P38.3** and **P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
+(Tier 4). All four items from the 2026-07-21 local-14b-model harness-improvement research pass are now
+closed same-day: **P39.1** (system-prompt byte-stability regression test), **P39.2** (coach tool-execution
+error messages), and **P39.4** (`aegis doctor --deep`'s structured multi-turn fill probe) all **shipped**;
+**P39.3** (grammar/schema-constrained tool-call decoding) was spiked and closed **NO-GO** (see Tier 3).
+**P38.3** and **P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
 
 **Update 2026-07-21 — P38.1's conformance re-test was run and is a negative on qwen3:14b.** With P38.4
 scaffolding in place, `aegis chat --skill threat-modeling` against AiGateway does **not** produce a
@@ -189,7 +197,10 @@ shipped 2026-07-18.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open. (**P38.4** shipped 2026-07-20 — deterministic skeleton scaffolding, `scaffold.py`; see
+**Status:** 0 open. **P39.1** (system-prompt byte-stability regression test) shipped 2026-07-21 — see
+`TestEffectiveSystem_ByteStable` / `TestEffectiveSystem_DeferredToolsOrderIndependent` in
+`internal/server/server_test.go`. (**P38.4** shipped
+2026-07-20 — deterministic skeleton scaffolding, `scaffold.py`; see
 [releases.md](releases.md#latest-changes). P38.2 shipped 2026-07-20; P36.1 shipped 2026-07-19;
 P35.9 shipped 2026-07-18;
 P35.5 shipped 2026-07-18; P35.1, P35.2 shipped 2026-07-18; P33.1 and P33.2 shipped 2026-07-15;
@@ -198,6 +209,9 @@ P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
 The remaining threat-modeling work — the P38.1 conformance re-test that P38.4 unblocked — is tracked in
 Tier 2 below (it's a live-run verification, not independent build work).
 
+**P39.1 shipped 2026-07-21** — `effectiveSystem` byte-stability regression test. See
+[releases.md](releases.md#latest-changes) for the full write-up.
+
 ---
 
 ## Open Work — Tier 2
@@ -205,7 +219,9 @@ Tier 2 below (it's a live-run verification, not independent build work).
 **Status:** 3 open — **P38.1** (non-orchestrated linear threat-model build; rework shipped 2026-07-20,
 mechanism live-confirmed; conformance **re-test executed 2026-07-21** — qwen3:14b does not reach a
 verify-clean suite, and no stronger local model is on disk, so this is now environment-gated on a bigger
-model), plus **P38.6** and **P38.7** (both split out of the 2026-07-21 re-test — see P38.1). (P38.4, P38.2 shipped 2026-07-20 —
+model), plus **P38.6** and **P38.7** (both split out of the 2026-07-21 re-test — see P38.1). **P39.2**
+(coach tool-execution error messages for weak local models) and **P39.4** (`aegis doctor --deep`'s
+structured multi-turn fill probe) both shipped 2026-07-21, the same day they were filed. (P38.4, P38.2 shipped 2026-07-20 —
 see [releases.md](releases.md#latest-changes); P37.2, P37.3 shipped 2026-07-19; P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18;
 P35.6 shipped 2026-07-18;
 P35.3 shipped 2026-07-18; P34.12 shipped 2026-07-17; P34.9 and P34.10 shipped 2026-07-17;
@@ -328,6 +344,12 @@ scaffold tests. Keep a marker *prefix* (`<!-- PENDING`) so the existing substrin
 Priority: Tier 2 — directly caused a verify-fail in the re-test and is a mechanical, well-bounded change;
 it makes the P38.4 scaffold actually safe to fill incrementally, which is the whole point of scaffolding.
 
+**P39.2 shipped 2026-07-21** — coach tool-execution errors (unknown-tool name list + shell interpreter
+hint). See [releases.md](releases.md#latest-changes) for the full write-up.
+
+**P39.4 shipped 2026-07-21** — `aegis doctor --deep`'s structured multi-turn fill probe. See
+[releases.md](releases.md#latest-changes) for the full write-up.
+
 **Note (future item, not yet filed):** the same "accurate refusal, error-shaped" question for the
 other scanners' documented exit codes, noted while shipping P35.6 and again while closing P35.13.
 P34.6 checked the _language_-targeted tools; nothing has swept the SCA/secrets tools for non-zero
@@ -343,7 +365,12 @@ array shape is a mechanical follow-up. No `### P<n>.<m>` heading yet — lead on
 
 ## Open Work — Tier 3
 
-**Status:** 0 open. **P38.3** (peak-context telemetry not externally observable) and **P38.5** (models
+**Status:** 0 open. **P39.3** (grammar/schema-constrained tool-call argument decoding on the Ollama
+adapter), filed 2026-07-21, was spiked the same day against a live Ollama server and closed **NO-GO**: a
+`format` JSON-schema constraint and native `tools`/`tool_calls` are mutually exclusive on a single Ollama
+request (confirmed on two models), so the originally-scoped approach isn't possible as designed — see the
+item's write-up below for the larger "format-instead-of-tools" idea left as an unfiled lead. **P38.3**
+(peak-context telemetry not externally observable) and **P38.5** (models
 that reject `think` fail with a raw 400) both shipped 2026-07-21 — see
 [releases.md](releases.md#latest-changes). (P37.4, P37.5 shipped 2026-07-19; P36.3 shipped 2026-07-19;
 P36.2 shipped 2026-07-19;
@@ -351,6 +378,14 @@ P35.7 shipped 2026-07-18;
 P35.4 shipped 2026-07-18; P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17;
 P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, shipped
 2026-07-16.)
+
+**P39.3 spiked and closed 2026-07-21 — NO-GO.** Investigated grammar/schema-constrained decoding for
+tool-call arguments on the Ollama adapter; a live-server spike found Ollama's `format` JSON-schema
+constraint and native `tools`/`tool_calls` are mutually exclusive on one request (confirmed on two models),
+so the originally-scoped approach isn't possible as designed. A larger, distinct idea (route shaky models
+through `format`-only prompting with a dynamically-built tool-call envelope, reusing the existing
+tool-call-as-text fallback parser in `internal/engine`) is left as an unfiled lead. See
+[releases.md](releases.md#latest-changes) for the full spike transcript and reasoning.
 
 **Note (two doc-inconsistency leads, not yet filed — surfaced while building the P37 scripts):**
 (a) **threat-ID form** — `references/skeletons/skeleton-stride.md` writes threat IDs as bare sequential

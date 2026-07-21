@@ -8,7 +8,78 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-21 — **P38.1's conformance re-test was executed (negative on qwen3:14b); P38.6
+**Last updated:** 2026-07-21 — **P39.1, P39.2, and P39.4 shipped; P39.3 spiked and closed NO-GO** (all
+from a same-day local-14b-model harness-improvement research pass — see [roadmap.md](roadmap.md)).
+
+**P39.1 — regression test that `effectiveSystem` is byte-stable turn over turn.** P35.7's code-reading pass
+had concluded `Server.effectiveSystem` (`internal/server/helpers.go:42`) *should* render byte-identical
+across turns given unchanged inputs (persona blocks, memory/context files, the skills index, the
+deferred-tools list are all either static or deterministically sorted), but flagged it as unconfirmed live —
+the whole KV-cache-reuse story local models depend on (P35.4's `keep_alive` residency, P35.9's stable
+tool-call IDs) relies on the serialized prompt prefix staying identical turn to turn, and nothing would have
+caught a future regression (an unsorted map range, a nondeterministic file walk) before a live run did.
+Added two tests to `internal/server/server_test.go`: `TestEffectiveSystem_ByteStable` (two calls with
+identical inputs must produce identical output) and `TestEffectiveSystem_DeferredToolsOrderIndependent` (the
+sharpest case — `tool.Registry.Deferred()` at `internal/tool/tool.go:160-171` ranges a Go map and relies
+entirely on a trailing `sort.Slice`; registering the same two tools in reverse order across two registries
+must still produce byte-identical `deferredToolsBlock` output). Pure test addition, no product code changed
+— the `sort.Slice` was already correct.
+
+**P39.2 — coach tool-execution error messages for weak local models.** Two independent, small changes
+targeting failure classes the P38.1 live tests actually reproduced (mythos-sec:24b inventing tool names,
+running bare script paths without an interpreter prefix). (a) `engine.executeTool`'s unknown-tool branch
+(`internal/engine/engine.go`, ~line 1453-1456) now returns `unknown tool %q; registered tools: <sorted,
+comma-joined names>` instead of a bare name — via a new `registeredToolNames` helper using
+`tool.Registry.All()` — so a model that invents a name can self-correct from the error itself instead of
+guessing again next turn. Extended `TestRunUnknownTool` (content assertion) and added
+`TestRunUnknownTool_ListsRegisteredNames`. (b) the shell tool (`internal/tool/builtin/shell.go`) now appends
+an interpreter hint on failure only — e.g. `(did you mean to run this with an interpreter, e.g. `python
+recon.py`?)` — when a failing command's first token has a known scripting extension (`.py`/`.sh`/`.js`/
+`.rb`) and isn't already prefixed by a known interpreter; never touches the success path or blocks
+execution. Added `TestShellFailedScriptHintsInterpreter` and `TestShellFailedNonScriptNoHint` (guards
+against over-eager hinting).
+
+**P39.3 — investigation spike into grammar/schema-constrained tool-call decoding on the Ollama adapter:
+closed NO-GO.** A live Ollama server was reachable (`qwen2.5-coder:1.5b`, `qwen3:14b` pulled), so the spike
+sent real `/api/chat` requests instead of relying on docs. Baseline: `qwen3:14b` with only `tools` set
+returns a proper native `tool_calls` array. Adding a `format` JSON-schema field to the *same* request
+(alongside the same `tools` array) changes the result completely — the model returns plain schema-conforming
+`content` with **no `tool_calls` field at all**, reproduced identically on both models tested. **Ollama's
+`format` and native tool-calling are mutually exclusive on one request** — `format` cannot be layered on top
+of `tools` to constrain tool-name/argument generation while still getting native `tool_calls` out, so the
+originally-scoped "smallest useful win" (constrain tool name via `format`, no new request fields) isn't
+actually free. No code shipped — the client-side reject-and-inform alternative is what P39.2 already ships.
+A larger, distinct idea (route shaky models through `format`-only prompting with a dynamically-built
+tool-call-envelope schema, reusing the existing tool-call-as-text fallback parser in
+`internal/engine`/`internal/engine/toolcallastext_test.go`) is noted as an unfiled lead in
+[roadmap.md](roadmap.md), not built or filed as a follow-up item, since its value depends on how often Aegis
+actually drives models that need it. See roadmap.md's P39.3 section for the full spike transcript and
+reasoning.
+
+**P39.4 — `aegis doctor --deep`'s structured multi-turn fill probe.** `toolcallprobe.Run`'s existing
+single-turn smoke test only answers "did a structured tool call come back at all" — the P38.1 arc found
+qwen3:14b passes that cleanly and still fails a real multi-phase scaffold-and-fill skill run, one level up
+(losing track of which of several near-identical `<!-- PENDING -->` sections it already filled, blanket
+`edit_file replace_all` footguns, and think-mode fabrication). Added `internal/toolcallprobe/deepprobe.go`:
+a self-contained (no `internal/eval` dependency) `RunDeepFill(ctx, adapter, model) (DeepResult, error)` that
+drives a real `internal/engine` agentic loop — the same tool-calling loop a real session uses, not a second
+hand-rolled one — through a tiny in-memory synthetic document (3 sections, each stubbed with the same
+`<!-- PENDING -->` marker `internal/cli/chat.go` already uses) and one fake `edit_fill` tool deliberately
+mirroring `edit_file`'s real semantics (`old_string` must occur exactly once unless `replace_all` is set, so
+the P38.7 footgun reproduces faithfully). `DeepResult{FabricatedCompletion, ClobberedMarkers, TimedOut}`
+reports the three P38.1-observed failure shapes independently, never folded into the existing binary
+`Verdict`. Wired into `aegis doctor` as an opt-in `--deep` flag (`internal/cli/doctor.go`): a new
+`doctorDeepFillCheck` row, gated to local (Ollama-style) providers only, WARN-not-FAIL on any probe failure,
+strictly additive — `aegis doctor` with no flag is byte-for-byte unchanged. Tests: four scripted-adapter
+cases in `internal/toolcallprobe/deepprobe_test.go` (clean pass, each failure shape in isolation) plus
+`internal/cli/doctor_test.go` coverage that the row only appears with `--deep`, skips for cloud providers,
+and degrades to WARN on transport failure — all deterministic, no live model needed for `go test ./...`.
+Live-verified against a real `qwen3:14b` (native Ollama, `think` disabled): `aegis doctor --deep` first hit
+its initial 90s timeout budget mid-probe (cold model load plus several fill turns exceeded it — WARN, not a
+crash, confirming the degrade-gracefully contract), then, after bumping `deepFillCheckTimeout` to 4 minutes,
+completed cleanly end-to-end with a `PASS structured multi-turn fill` row.
+
+Earlier 2026-07-21 — **P38.1's conformance re-test was executed (negative on qwen3:14b); P38.6
 and P38.7 filed.**
 
 **P38.1 re-test — the linear threat-model build does not reach a verify-clean suite on qwen3:14b, even with

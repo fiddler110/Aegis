@@ -48,6 +48,19 @@ func (e *echoTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	return tool.Result{Content: "echo:" + args.Msg}, nil
 }
 
+// namedFakeTool is a minimal registrable tool for tests that only need a
+// distinct, chosen name (e.g. asserting sorted-name output in an error
+// message), without any real behavior.
+type namedFakeTool struct{ name string }
+
+func (f *namedFakeTool) Name() string                 { return f.name }
+func (f *namedFakeTool) Description() string          { return f.name + " description" }
+func (f *namedFakeTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (f *namedFakeTool) Capability() tool.Capability  { return tool.CapRead }
+func (f *namedFakeTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{}, nil
+}
+
 // oddShapeWriteTool declares CapWrite but takes an input shape
 // writtenPathsFromInput doesn't recognize (no "path"/"file_path"/
 // "edits[].path"), simulating an MCP tool or a future builtin whose field
@@ -442,11 +455,13 @@ func TestRunUnknownTool(t *testing.T) {
 	eng, _ := New(Options{Adapter: adapter, Tools: reg, Model: "test"})
 
 	var gotErrResult bool
+	var gotContent string
 	conv := &Conversation{}
 	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
 	err := eng.Run(context.Background(), conv, func(ev Event) {
 		if ev.Kind == KindToolResult && ev.ToolIsError {
 			gotErrResult = true
+			gotContent = ev.ToolResult
 		}
 	})
 	if err != nil {
@@ -454,6 +469,49 @@ func TestRunUnknownTool(t *testing.T) {
 	}
 	if !gotErrResult {
 		t.Error("expected an error tool result for the unknown tool")
+	}
+	if !strings.Contains(gotContent, "registered tools:") {
+		t.Errorf("unknown-tool error should list the registered-tools marker, got %q", gotContent)
+	}
+}
+
+// TestRunUnknownTool_ListsRegisteredNames is P39.2: a small local model that
+// invents a tool name should see the real registered names in the error, so
+// it can self-correct without spending another turn guessing.
+func TestRunUnknownTool_ListsRegisteredNames(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_1", Name: "run_tool", Input: json.RawMessage(`{}`)}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse},
+		},
+		{
+			{Type: provider.EventTextDelta, Text: "recovered"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn},
+		},
+	}}
+	reg := tool.NewRegistry()
+	if err := reg.Register(&namedFakeTool{name: "zebra_tool"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&namedFakeTool{name: "alpha_tool"}); err != nil {
+		t.Fatal(err)
+	}
+	eng, _ := New(Options{Adapter: adapter, Tools: reg, Model: "test"})
+
+	var gotContent string
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+	err := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindToolResult && ev.ToolIsError {
+			gotContent = ev.ToolResult
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantOrder := strings.Index(gotContent, "alpha_tool") < strings.Index(gotContent, "zebra_tool")
+	if !strings.Contains(gotContent, "alpha_tool") || !strings.Contains(gotContent, "zebra_tool") || !wantOrder {
+		t.Errorf("expected sorted registered tool names alpha_tool, zebra_tool in error, got %q", gotContent)
 	}
 }
 
