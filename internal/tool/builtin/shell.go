@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -107,9 +108,49 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		text = text[:maxOutput] + fmt.Sprintf("\n[...%d bytes truncated — use background:true and task_output for large commands]", len(text)-maxOutput)
 	}
 	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("%v\n%s", err, text), IsError: true}, nil
+		content := fmt.Sprintf("%v\n%s", err, text)
+		if hint := interpreterHint(args.Command); hint != "" {
+			content += "\n" + hint
+		}
+		return tool.Result{Content: content, IsError: true}, nil
 	}
 	return tool.Result{Content: text}, nil
+}
+
+// scriptExtInterpreters maps a scripting file extension to the interpreter
+// commonly used to run it, for interpreterHint's suggestion (P39.2).
+var scriptExtInterpreters = map[string]string{
+	".py": "python", ".sh": "sh", ".js": "node", ".rb": "ruby",
+}
+
+// knownInterpreterPrefixes are first-token values that already indicate the
+// command runs through an interpreter, so no hint is needed.
+var knownInterpreterPrefixes = []string{"python", "python3", "bash", "sh", "node", "ruby"}
+
+// interpreterHint returns a "did you mean to run this with an interpreter"
+// suggestion when command's first token looks like a bare script path with a
+// known scripting extension and isn't already prefixed by a known
+// interpreter, or "" otherwise. Small local models were observed in live
+// testing (P38.1) invoking a bare script path (e.g. `recon.py`) as if it were
+// an executable, which fails differently on Windows (no shebang support)
+// than Unix. This only appends a hint on the failure path — it never blocks
+// or rewrites the command pre-execution, so the shell tool stays permissive.
+func interpreterHint(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	first := fields[0]
+	for _, p := range knownInterpreterPrefixes {
+		if strings.EqualFold(first, p) {
+			return ""
+		}
+	}
+	interp, ok := scriptExtInterpreters[strings.ToLower(filepath.Ext(first))]
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("(did you mean to run this with an interpreter, e.g. `%s %s`?)", interp, first)
 }
 
 // exec runs a command synchronously, delegating to the sandbox backend if set.

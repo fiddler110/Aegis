@@ -357,6 +357,94 @@ func TestDoctorToolCallCheckSkipsUnresolvedModel(t *testing.T) {
 	}
 }
 
+// TestDoctorDeepFlagAddsRow confirms `--deep` appends the P39.4 structured
+// multi-turn fill row, and that omitting it leaves `aegis doctor`'s output
+// byte-for-byte unchanged — this tier must be strictly opt-in, since (unlike
+// doctor's other checks) it needs a live, reachable model and takes
+// meaningfully longer.
+func TestDoctorDeepFlagAddsRow(t *testing.T) {
+	redirectConfigDir(t)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+	disableAllScanners(t)
+
+	without, err := runDoctor(t)
+	if err != nil {
+		t.Fatalf("doctor: %v\noutput:\n%s", err, without)
+	}
+	if strings.Contains(without, "structured multi-turn fill") {
+		t.Errorf("expected no structured-multi-turn-fill row without --deep, got:\n%s", without)
+	}
+
+	with, err := runDoctor(t, "--deep")
+	if err != nil {
+		t.Fatalf("doctor --deep: %v\noutput:\n%s", err, with)
+	}
+	if !strings.Contains(with, "structured multi-turn fill") {
+		t.Errorf("expected a structured-multi-turn-fill row with --deep, got:\n%s", with)
+	}
+	// A cloud provider config means the check must skip (no live network
+	// call), same gating as doctorToolCallCheck.
+	if !strings.Contains(with, "skipped") {
+		t.Errorf("expected the deep-fill row to skip for a cloud provider, got:\n%s", with)
+	}
+}
+
+// TestDoctorDeepFillCheckSkipsCloudProvider mirrors
+// TestDoctorToolCallCheckSkipsCloudProvider: the P39.4 probe is scoped to
+// local (Ollama-style) providers only.
+func TestDoctorDeepFillCheckSkipsCloudProvider(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "anthropic", APIKey: "sk-test-fake", Model: "claude-x"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got := doctorDeepFillCheck(ctx, cfg)
+	if got.Severity != doctorPass {
+		t.Errorf("cloud provider: got %v, want pass (skipped)", got.Severity)
+	}
+	if !strings.Contains(got.Detail, "skipped") {
+		t.Errorf("expected a skipped detail message, got %q", got.Detail)
+	}
+}
+
+// TestDoctorDeepFillCheckDetectsFabrication drives the P39.4 probe against a
+// scripted local model that claims the fill task is complete on its first
+// turn with zero tool calls — P38.6's shape — and confirms it WARNs (never
+// FAILs) and names the failure shape.
+func TestDoctorDeepFillCheckDetectsFabrication(t *testing.T) {
+	const body = `{"message":{"role":"assistant","content":"The document is now complete — all sections filled."},"done":false}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}
+`
+	srv := sseServer(t, body)
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: srv.URL, Model: "qwen3:14b"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	got := doctorDeepFillCheck(ctx, cfg)
+	if got.Severity != doctorWarn {
+		t.Fatalf("fabricated completion: got %v, want warn; detail=%q", got.Severity, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "claimed completion without executing the work") {
+		t.Errorf("expected detail to name the fabrication shape, got %q", got.Detail)
+	}
+}
+
+// TestDoctorDeepFillCheckWarnsOnTransportFailure confirms an unreachable
+// local model server degrades to WARN, not FAIL, matching
+// doctorToolCallCheck's contract.
+func TestDoctorDeepFillCheckWarnsOnTransportFailure(t *testing.T) {
+	srv := sseServer(t, "")
+	unreachable := srv.URL
+	srv.Close()
+
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: unreachable, Model: "qwen3:14b"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	got := doctorDeepFillCheck(ctx, cfg)
+	if got.Severity != doctorWarn {
+		t.Fatalf("unreachable server: got %v, want warn (never fail); detail=%q", got.Severity, got.Detail)
+	}
+}
+
 // sseServer starts an httptest server that answers any POST with the given
 // newline-delimited-JSON body, mimicking Ollama's native /api/chat streaming
 // response (the shape internal/provider/ollama consumes; provider "ollama"

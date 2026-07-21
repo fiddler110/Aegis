@@ -868,6 +868,64 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 	}
 }
 
+// TestEffectiveSystem_ByteStable is P39.1: effectiveSystem's assembly (persona
+// blocks, memory, skills, repo map, deferred-tools, debate block) must render
+// byte-identically across calls given unchanged inputs. This is the
+// determinism the KV-cache-reuse story for local models (P35.4, P35.9) relies
+// on — a non-deterministic system prompt silently defeats prefill reuse on
+// every turn.
+func TestEffectiveSystem_ByteStable(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.Open(filepath.Join(root, "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{Provider: config.ProviderConfig{Model: "test"}, Permission: config.PermissionConfig{Mode: "plan"}}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.memory = memory.Sources{ProjectRoot: root, DataDir: filepath.Join(root, "data")}
+	if err := memory.Append(srv.memory.ProjectMemoryPath(), "test fact"); err != nil {
+		t.Fatal(err)
+	}
+
+	got1 := srv.effectiveSystem("base prompt", "")
+	got2 := srv.effectiveSystem("base prompt", "")
+	if got1 != got2 {
+		t.Errorf("effectiveSystem not byte-stable across calls with unchanged inputs:\n--- call 1 ---\n%s\n--- call 2 ---\n%s", got1, got2)
+	}
+}
+
+// TestEffectiveSystem_DeferredToolsOrderIndependent is P39.1's map-iteration
+// regression guard: tool.Registry.Deferred() ranges a Go map (randomized
+// iteration order) and relies entirely on its trailing sort.Slice for stable
+// output. Registering the same tools in reverse order across two registries
+// must still produce byte-identical deferredToolsBlock output — this is the
+// test that would actually catch a regression if that sort were ever removed.
+func TestEffectiveSystem_DeferredToolsOrderIndependent(t *testing.T) {
+	regAB := tool.NewRegistry()
+	if err := regAB.RegisterDeferred(&preloadFakeTool{name: "alpha_tool"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := regAB.RegisterDeferred(&preloadFakeTool{name: "beta_tool"}); err != nil {
+		t.Fatal(err)
+	}
+
+	regBA := tool.NewRegistry()
+	if err := regBA.RegisterDeferred(&preloadFakeTool{name: "beta_tool"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := regBA.RegisterDeferred(&preloadFakeTool{name: "alpha_tool"}); err != nil {
+		t.Fatal(err)
+	}
+
+	outAB := deferredToolsBlock(regAB)
+	outBA := deferredToolsBlock(regBA)
+	if outAB != outBA {
+		t.Errorf("deferredToolsBlock depends on registration order:\n--- registered A,B ---\n%s\n--- registered B,A ---\n%s", outAB, outBA)
+	}
+}
+
 func TestAuditCloseCleanup(t *testing.T) {
 	dir := t.TempDir()
 	a := hooks.NewAudit(filepath.Join(dir, "audit.jsonl"))

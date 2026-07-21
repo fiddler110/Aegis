@@ -108,6 +108,46 @@ func TestShellEcho(t *testing.T) {
 	}
 }
 
+// TestShellFailedScriptHintsInterpreter is P39.2: a failing command whose
+// first token is a bare script path (e.g. recon.py) should get an
+// interpreter-prefix hint appended, since small local models were observed
+// invoking scripts this way and failing to self-correct.
+func TestShellFailedScriptHintsInterpreter(t *testing.T) {
+	root := t.TempDir()
+	sh := newShellTool(root, 30, nil, nil)
+	res, err := sh.Execute(context.Background(), mustJSON(t, map[string]any{"command": "nonexistent_recon.py --flag"}))
+	if err != nil {
+		t.Fatalf("shell: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected the bare script invocation to fail, got %+v", res)
+	}
+	if !strings.Contains(res.Content, "did you mean to run this with an interpreter") {
+		t.Errorf("expected interpreter hint in failure content, got %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "python nonexistent_recon.py") {
+		t.Errorf("expected hint to name python and the script path, got %q", res.Content)
+	}
+}
+
+// TestShellFailedNonScriptNoHint guards against over-eager hinting: a
+// failing command with no recognizable script extension must not get an
+// interpreter suggestion appended.
+func TestShellFailedNonScriptNoHint(t *testing.T) {
+	root := t.TempDir()
+	sh := newShellTool(root, 30, nil, nil)
+	res, err := sh.Execute(context.Background(), mustJSON(t, map[string]any{"command": "nonexistent_command_xyz --flag"}))
+	if err != nil {
+		t.Fatalf("shell: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected the bad command to fail, got %+v", res)
+	}
+	if strings.Contains(res.Content, "did you mean to run this with an interpreter") {
+		t.Errorf("did not expect an interpreter hint for a non-script command, got %q", res.Content)
+	}
+}
+
 func TestRegisterAll(t *testing.T) {
 	reg := tool.NewRegistry()
 	if err := Register(reg, Options{Root: t.TempDir()}); err != nil {

@@ -56,6 +56,7 @@ type doctorCheck struct {
 }
 
 func newDoctorCmd() *cobra.Command {
+	var deep bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Preflight self-diagnostic: provider, sandbox, scanners, guard, workdir, daemon",
@@ -66,7 +67,12 @@ func newDoctorCmd() *cobra.Command {
 			"(P25.1), and whether a running daemon is reachable and in sync with the config on " +
 			"disk. Every check but the last works standalone, with no daemon required — this is a " +
 			"true preflight, safe to run before `aegis serve`. Exits non-zero if any check fails, " +
-			"so it can gate scripts.",
+			"so it can gate scripts. --deep adds a slower, opt-in multi-turn probe (P39.4) that a " +
+			"single-call tool-calling smoke test can't catch: a model that fabricates a completed " +
+			"multi-file task instead of executing it, blanket-overwrites several identical " +
+			"placeholder markers instead of targeting one, or never converges within a small turn " +
+			"budget — the failure shapes a live scaffolded-skill run (e.g. threat-modeling) actually " +
+			"hit on a model that passed the plain tool-calling check.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
 			cfg, err := config.Load()
@@ -75,10 +81,17 @@ func newDoctorCmd() *cobra.Command {
 				return fmt.Errorf("config failed to load")
 			}
 
-			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+			timeout := 30 * time.Second
+			if deep {
+				timeout += deepFillCheckTimeout
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
 
 			checks := runDoctorChecks(ctx, cfg)
+			if deep {
+				checks = append(checks, doctorDeepFillCheck(ctx, cfg))
+			}
 			renderDoctorChecks(out, checks)
 
 			failed := 0
@@ -93,6 +106,7 @@ func newDoctorCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&deep, "deep", false, "also run a slower, opt-in multi-turn structured-fill probe against the configured local model (see docs/providers.md)")
 	return cmd
 }
 
@@ -336,6 +350,80 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	return doctorCheck{
 		Name: name, Severity: doctorPass,
 		Detail: fmt.Sprintf("model %q made %d tool call(s) on the smoke-test prompt", cfg.Provider.Model, res.ToolCalls),
+	}
+}
+
+// deepFillCheckTimeout bounds doctorDeepFillCheck: it drives up to
+// deepFillMaxTurns real model turns (internal/toolcallprobe.RunDeepFill),
+// well beyond a single-request smoke test's budget. Measured generous rather
+// than tight, the same way toolcallprobe.ProbeTimeout is: a live run against
+// qwen3:14b (cold load ~18s, native Ollama, think disabled) on modest local
+// hardware needed more than an initial 90s budget to complete several
+// multi-turn fill rounds — a tight cap would misreport a merely-slow local
+// model as a transport failure.
+const deepFillCheckTimeout = 4 * time.Minute
+
+// doctorDeepFillCheck (P39.4, --deep only) drives the configured local model
+// through a tiny synthetic multi-section fill task and reports which of the
+// three failure shapes the P38.1 live threat-modeling tests actually hit —
+// fabricating a completed run instead of executing it (P38.6), blanket-
+// overwriting several identical placeholder markers instead of targeting one
+// (P38.7), or never converging within a small turn budget — were reproduced.
+// A model can pass doctorToolCallCheck's single-call smoke test cleanly and
+// still fail all three of these; they are a genuinely different capability
+// claim ("can it drive a multi-turn scaffold-and-fill workflow"), so this is
+// reported as its own row rather than folded into "tool-calling". Same gating
+// and WARN-not-FAIL-on-transport-error posture as doctorToolCallCheck: scoped
+// to local (Ollama-style) providers, skips (PASS) when unconfigured/
+// unresolved, and any probe failure degrades to WARN, never FAIL.
+func doctorDeepFillCheck(ctx context.Context, cfg *config.Config) doctorCheck {
+	const name = "structured multi-turn fill"
+
+	if ollamaNativeBase(cfg) == "" {
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — only checked for local Ollama-style providers"}
+	}
+	if cfg.Provider.Model == "" || cfg.Provider.Model == "auto" {
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — no model resolved yet"}
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adapter, err := providerfactory.Build(cfg, logger)
+	if err != nil {
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — provider not configured"}
+	}
+
+	rctx, cancel := context.WithTimeout(ctx, deepFillCheckTimeout)
+	defer cancel()
+
+	res, err := toolcallprobe.RunDeepFill(rctx, adapter, cfg.Provider.Model)
+	if err != nil {
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: fmt.Sprintf("structured-fill probe could not run: %v", err),
+			Fix:    "best-effort check, not fatal — retry `aegis doctor --deep` once the model server is responsive",
+		}
+	}
+	if res.Clean() {
+		return doctorCheck{
+			Name: name, Severity: doctorPass,
+			Detail: fmt.Sprintf("model %q completed the synthetic multi-section fill task cleanly", cfg.Provider.Model),
+		}
+	}
+
+	var shapes []string
+	if res.FabricatedCompletion {
+		shapes = append(shapes, "claimed completion without executing the work")
+	}
+	if res.ClobberedMarkers {
+		shapes = append(shapes, "blanket-overwrote multiple sections instead of targeting one")
+	}
+	if res.TimedOut {
+		shapes = append(shapes, "did not converge within the turn budget")
+	}
+	return doctorCheck{
+		Name: name, Severity: doctorWarn,
+		Detail: fmt.Sprintf("model %q failed the synthetic multi-section fill task: %s", cfg.Provider.Model, strings.Join(shapes, "; ")),
+		Fix:    "this model may fail scaffolded, multi-file skills (e.g. threat-modeling) even though it passes the plain tool-calling check — see docs/providers.md's local-model guidance",
 	}
 }
 
