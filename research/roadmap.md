@@ -1,17 +1,22 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-20 (**P38.4 shipped** — `scaffold.py` pre-writes all seven threat-model files
-from the skeletons, real structure + `<!-- PENDING -->` per fillable section, so a weak model fills sections
-instead of authoring structure it gets wrong; a freshly-scaffolded suite lints 6/6 and a filled one
-verifies 9/9. This closes the conformance gap the qwen3:14b live test exposed and unblocks P38.1's re-test.
-Earlier today: **P38.2 shipped** — `aegis chat --skill <name>` preloads a skill body and drives it to
-completion while `<!-- PENDING -->` markers remain — and the **P38.1 linear build was live-tested** on
-qwen3:14b vs AiGateway: mechanism **confirmed** but output did not conform, which is what P38.4 now fixes.
-**P38.5** (graceful handling of models that reject `think`, filed after mythos-sec:24b 400'd) is Tier 3.
-P38.1 is Tier 2 (mechanism done; conformance re-test now unblocked by P38.4). Earlier: the threat-modeling
-skill was reworked to the non-orchestrated linear build (SKILL.md + verification-and-updates.md);
-orchestration parked. Earlier: P37.6 + two P37-script fixes shipped; P37.1-P37.5 shipped — threat-model
-suite scripting complete; P36.1-P36.3 shipped; P35.1-P35.13 shipped)
+**Last updated:** 2026-07-21 (**P38.3 and P38.5 shipped** — both Tier 3. P38.3: per-turn usage
+(`InputTokens`/`OutputTokens`/cache counts/`PromptEvalDurationMS`) is now on the wire for both the daemon
+SSE `turn_done` event and `aegis chat --output-format stream-json`'s `turn_done` line, closing the gap
+where the latter carried no usage at all. P38.5: the native Ollama adapter now retries once with `think`
+omitted (and warns) when a model 400s on the parameter entirely, instead of aborting the run. See
+[releases.md](releases.md#latest-changes). Earlier 2026-07-20: **P38.4 shipped** — `scaffold.py`
+pre-writes all seven threat-model files from the skeletons, real structure + `<!-- PENDING -->` per
+fillable section, so a weak model fills sections instead of authoring structure it gets wrong; a
+freshly-scaffolded suite lints 6/6 and a filled one verifies 9/9. This closes the conformance gap the
+qwen3:14b live test exposed and unblocks P38.1's re-test. Earlier: **P38.2 shipped** — `aegis chat
+--skill <name>` preloads a skill body and drives it to completion while `<!-- PENDING -->` markers
+remain — and the **P38.1 linear build was live-tested** on qwen3:14b vs AiGateway: mechanism
+**confirmed** but output did not conform, which P38.4 fixed. P38.1 is Tier 2 (mechanism done;
+conformance re-test now unblocked by P38.4). Earlier: the threat-modeling skill was reworked to the
+non-orchestrated linear build (SKILL.md + verification-and-updates.md); orchestration parked. Earlier:
+P37.6 + two P37-script fixes shipped; P37.1-P37.5 shipped — threat-model suite scripting complete;
+P36.1-P36.3 shipped; P35.1-P35.13 shipped)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -22,8 +27,8 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 3 — **P38.1** (Tier 2, now unblocked), **P38.3** and **P38.5** (Tier 3), plus the
-parked **P25.9** (Tier 4).
+**Open items:** 1 — **P38.1** (Tier 2, now unblocked), plus the parked **P25.9** (Tier 4). **P38.3** and
+**P38.5** (Tier 3) shipped 2026-07-21 — see [releases.md](releases.md#latest-changes).
 
 The active focus is now **P38.1's conformance re-test**, which **P38.4 just unblocked**. P38.4
 (deterministic skeleton scaffolding, `scaffold.py`) shipped 2026-07-20 — see
@@ -41,9 +46,10 @@ self-correction now converges against a real structure. **P38.1**'s remaining wo
 confirm a verify-clean seven-file build on a capable-enough local model.
 **P38.5** (models that reject `think` should degrade, not 400) came out of the same test: mythos-sec:24b
 400'd on `think` and, with it disabled, proved too weak a tool-caller to matter (it invents tool names and
-doesn't substitute command placeholders — a model-quality dead end, not a skill problem). Already
-confirmed from the run: **P36.1** (deterministic skill load), **P37.1** (`recon.py`), and now the P38.1
-linear-build mechanism and P38.2.
+doesn't substitute command placeholders — a model-quality dead end, not a skill problem). It shipped
+2026-07-21 (adapter-level retry-without-think + warning) — see [releases.md](releases.md#latest-changes);
+the underlying model-quality dead end is unaffected. Already confirmed from the run: **P36.1**
+(deterministic skill load), **P37.1** (`recon.py`), and now the P38.1 linear-build mechanism and P38.2.
 
 The **P37.1-P37.5** threat-model
 suite-scripting batch shipped 2026-07-19 (see [releases.md](releases.md#latest-changes)): five bundled
@@ -238,46 +244,14 @@ array shape is a mechanical follow-up. No `### P<n>.<m>` heading yet — lead on
 
 ## Open Work — Tier 3
 
-**Status:** 2 open — **P38.3** (peak-context telemetry not externally observable, filed 2026-07-20) and
-**P38.5** (models that reject `think` fail with a raw 400, filed 2026-07-20). (P37.4, P37.5 shipped 2026-07-19; P36.3 shipped 2026-07-19 — see [releases.md](releases.md#latest-changes);
+**Status:** 0 open. **P38.3** (peak-context telemetry not externally observable) and **P38.5** (models
+that reject `think` fail with a raw 400) both shipped 2026-07-21 — see
+[releases.md](releases.md#latest-changes). (P37.4, P37.5 shipped 2026-07-19; P36.3 shipped 2026-07-19;
 P36.2 shipped 2026-07-19;
 P35.7 shipped 2026-07-18;
 P35.4 shipped 2026-07-18; P33.10, P33.11, P33.16, P33.19 shipped 2026-07-17;
 P32.8 shipped 2026-07-15; P33.9, the keystone that unblocked P33.10 and P33.19, shipped
 2026-07-16.)
-
-### P38.3 — Per-turn context usage is not externally observable
-
-Confirming that the P38.1 linear build stays inside the context window needs per-turn token numbers, and
-the exposed surfaces are thin: `--output-format stream-json`'s `turn_done` events carry **no usage**, and
-one-shot `aegis chat` uses an ephemeral session store so nothing is queryable afterward. The only
-machine-readable figure is the final aggregate (`input_tokens` in the `result` event — e.g. the 44K the
-2026-07-20 test reported). **Partial correction from that test:** a per-request line *does* exist —
-`engine.go`'s P35.7 `slog.Debug("prefill (prompt_eval)", "prompt_eval_count", …)` — but only at debug
-level and only on the native-Ollama path, so it is invisible to a normal `stream-json` consumer. Promote
-per-turn usage to the `turn_done` stream event (and/or add an info/debug line on every provider path), so
-the **linear build's turn-over-turn context growth** — whether recon + P36.2 pruning + incremental writes
-keep it bounded across a *long* run, not just the 33-call one already observed — is measurable from the
-outside without SQLite spelunking or debug-log tailing.
-
-Priority: Tier 3 — instrumentation, not a user-facing defect, and the 2026-07-20 test already showed the
-build holding context for a short run via the final aggregate; this is what turns "held once" into
-"measured turn-over-turn", which matters most for the longer, scaffolded P38.4 re-test.
-
-### P38.5 — Models that reject `think` fail with a raw HTTP 400 instead of degrading
-
-The 2026-07-20 test found `supergoatscriptguy/mythos-sec:24b` returns
-`ollama: status 400: "…mythos-sec:24b" does not support thinking` the instant Aegis sends `think`
-(config `provider.think: true`), aborting the run with a raw provider error and zero tool calls. The
-workaround is `AEGIS_PROVIDER_THINK=false`, but nothing tells the user that. `aegis doctor` should detect
-a model that 400s on `think` (a one-shot probe) and recommend `provider.think: false`, and/or the adapter
-should retry a `think`-rejected request once with `think` omitted and log a warning rather than surfacing
-the raw 400. Small usability item, and it does **not** make such a model viable on its own — mythos-sec:24b
-with thinking disabled still can't drive the tools (see the shell-invocation lead below); it only removes
-a misleading, run-killing error for models that happen to reject the parameter.
-
-Priority: Tier 3 — usability/robustness on an uncommon local-model path, surfaced only by testing an
-unusual model; no shipping path is broken by it.
 
 **Note (two doc-inconsistency leads, not yet filed — surfaced while building the P37 scripts):**
 (a) **threat-ID form** — `references/skeletons/skeleton-stride.md` writes threat IDs as bare sequential

@@ -198,6 +198,7 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 			ollama.WithHeaders(headers),
 			ollama.WithThink(think),
 			ollama.WithResponseHeaderTimeout(responseHeaderTimeout),
+			ollama.WithLogger(logger),
 		}
 		if contextWindow > 0 {
 			opts = append(opts, ollama.WithNumCtx(contextWindow))

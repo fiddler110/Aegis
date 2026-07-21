@@ -8,7 +8,38 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-20 — **P38.4 shipped: deterministic skeleton scaffolding (`scaffold.py`).** The
+**Last updated:** 2026-07-21 — **P38.3 and P38.5 shipped (both Tier 3).**
+
+**P38.3 — per-turn usage promoted onto the `turn_done` event, everywhere it was silently dropped.**
+`engine.Event{Kind: KindTurnDone}` already carried `*provider.Usage` (including P35.7's
+`PromptEvalDurationMS`, the KV-cache-hit signal), and the daemon's `toAPIEvent` already forwarded
+`InputTokens`/`OutputTokens`/cache counts to `api.Event` for the SSE path the TUI/web UI read — but two
+gaps meant a run's turn-over-turn context growth still wasn't externally observable without SQLite
+spelunking or debug-log tailing: (1) `PromptEvalDurationMS` itself was never on the wire in `api.Event`
+at all, so even the daemon SSE path couldn't tell a KV-cache-hit turn from a full reprocess without
+reading the debug log; (2) `aegis chat --output-format stream-json`'s `emitStreamEvent` had no `case`
+for `KindTurnDone` — it fell through the switch with `Type: "turn_done"` set and *nothing else*, so a
+one-shot scripted run's only usage figure was the final `result` trailer, never a per-turn number. Fixed
+both: `api.Event` gained `PromptEvalDurationMS`, populated in `toAPIEvent`; `streamEvent` gained the same
+usage fields (`input_tokens`, `output_tokens`, cache counts, `prompt_eval_duration_ms`, `cost_usd`),
+populated on `KindTurnDone`. Turn-over-turn growth across a long scripted run (not just the single
+aggregate) is now readable from a `stream-json` pipe or the SSE stream directly. Tests:
+`TestToAPIEventTurnDoneCarriesPromptEvalDuration` (server), `TestEmitStreamEventTurnDone` (cli).
+
+**P38.5 — a model that rejects `think` now degrades instead of aborting the run.** The 2026-07-20 test
+found `supergoatscriptguy/mythos-sec:24b` 400s the instant Aegis sends `think` at all
+(`"...mythos-sec:24b" does not support thinking"`), killing the run before a single tool call. The native
+Ollama adapter (`internal/provider/ollama`) now retries once, automatically: `Stream` first tries the
+request with the configured `think` value; on an HTTP 400 whose body contains "does not support
+thinking" **and** only when a non-nil `think` was actually sent (so an unrelated 400 — malformed request,
+model not found — never triggers it and never masks itself behind a second failure), it logs a
+`slog.Warn` naming the model and retries once with `think` omitted entirely. `ollama.WithLogger` (default
+`slog.Default()`) wires the daemon's real logger through `providerfactory`. This does not make such a
+model viable on its own — mythos-sec:24b with thinking disabled still can't drive tools — it only removes
+a misleading, run-killing error for models that happen to reject the parameter. Tests:
+`TestStreamRetriesWhenModelRejectsThink`, `TestStreamDoesNotRetryOtherBadRequests` (ollama).
+
+Earlier — **P38.4 shipped: deterministic skeleton scaffolding (`scaffold.py`).** The
 threat-modeling skill gained a sixth bundled script, `scaffold.py`, that pre-writes all seven report files
 **from the skeletons** — real structure (every heading, every table's header row + separator, the fixed
 value lists, the DFD's `flowchart LR` header and three `classDef`s) with a `<!-- PENDING -->` marker per

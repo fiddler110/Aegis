@@ -499,3 +499,74 @@ func TestResponseHeaderTimeoutRewrapped(t *testing.T) {
 		t.Errorf("a response-header timeout must be terminal, got retryable: %v", err)
 	}
 }
+
+// TestStreamRetriesWhenModelRejectsThink is the P38.5 regression: a model
+// that 400s the instant `think` is sent at all (observed on
+// supergoatscriptguy/mythos-sec:24b) must not abort the run with a raw
+// provider error. Stream should retry once with `think` omitted and succeed.
+func TestStreamRetriesWhenModelRejectsThink(t *testing.T) {
+	var thinkFields []bool // whether "think" key was present, per request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &raw)
+		_, hasThink := raw["think"]
+		thinkFields = append(thinkFields, hasThink)
+		if hasThink {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"\"mythos-sec:24b\" does not support thinking"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	falseVal := false
+	a := New(WithBaseURL(srv.URL), WithThink(&falseVal))
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "mythos-sec:24b",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var gotText string
+	for ev := range stream {
+		if ev.Type == provider.EventTextDelta {
+			gotText += ev.Text
+		}
+	}
+	if gotText != "hi" {
+		t.Errorf("gotText = %q, want %q (retry-without-think should have succeeded)", gotText, "hi")
+	}
+	if len(thinkFields) != 2 || !thinkFields[0] || thinkFields[1] {
+		t.Fatalf("expected [think-present, think-absent] requests, got %v", thinkFields)
+	}
+}
+
+// TestStreamDoesNotRetryOtherBadRequests guards against over-matching: a 400
+// unrelated to `think` support must surface as-is, not trigger a silent
+// think-omitted retry that could mask a real request error.
+func TestStreamDoesNotRetryOtherBadRequests(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid request"}`))
+	}))
+	defer srv.Close()
+
+	falseVal := false
+	a := New(WithBaseURL(srv.URL), WithThink(&falseVal))
+	_, err := a.Stream(context.Background(), provider.Request{
+		Model:    "m",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if calls != 1 {
+		t.Errorf("expected exactly 1 request (no think-rejection retry), got %d", calls)
+	}
+}
