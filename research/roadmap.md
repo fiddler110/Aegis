@@ -374,10 +374,14 @@ P34.6 checked the _language_-targeted tools; nothing has swept the SCA/secrets t
 exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading yet — filed here
 as a lead so the status script doesn't treat it as active work.
 
-**Note (future item, not yet filed):** P36.2's write/edit Input-pruning rule covers `write_file` and
+**Note (lead — RESOLVED 2026-07-21):** P36.2's write/edit Input-pruning rule covered `write_file` and
 `edit_file` but not `multi_edit`, whose nested `edits[]` array (each with `old_string`/`new_string`)
-also embeds verbatim file content that survives unpruned. Extending `pruneWriteEditInput` to the
-array shape is a mechanical follow-up. No `### P<n>.<m>` heading yet — lead only.
+also embeds verbatim file content that survived unpruned. **Fixed:** `pruneWriteEditInput`
+(`internal/compaction/prune.go`) now dispatches `multi_edit` to a new `pruneMultiEditInput` that blanks
+`old_string`/`new_string` in every edit (preserving each edit's `path` and the array structure), sharing a
+`blankContentField` helper with the flat path so the marker text is identical; failed / in-window calls are
+left verbatim by the existing `succeeded`/`keepRecent` gates. `TestPruneSuccessfulMultiEditInput` and
+`TestPruneKeepsFailedMultiEditInput` added. Flat-tool prune output is byte-for-byte unchanged.
 
 ---
 

@@ -31,7 +31,9 @@ var searchDumpTools = map[string]bool{
 // blanked once the write/edit has a successful result: the content is durably
 // on disk and re-readable, so keeping the literal bytes in every subsequent
 // request buys nothing. write_file's whole payload is "content"; edit_file
-// carries the before/after snippets in "old_string"/"new_string".
+// carries the before/after snippets in "old_string"/"new_string". multi_edit
+// is handled separately (pruneMultiEditInput) because its content lives inside
+// a nested "edits" array, not at the top level.
 var writeEditContentFields = map[string][]string{
 	"write_file": {"content"},
 	"edit_file":  {"old_string", "new_string"},
@@ -222,6 +224,9 @@ func isSkillReferencePath(path string) bool {
 // false for any non-write/edit tool, unparseable input, or a payload already
 // small enough that blanking it wouldn't actually save space.
 func pruneWriteEditInput(tu provider.ToolUseBlock) (json.RawMessage, int, bool) {
+	if tu.Name == "multi_edit" {
+		return pruneMultiEditInput(tu)
+	}
 	fields, ok := writeEditContentFields[tu.Name]
 	if !ok {
 		return nil, 0, false
@@ -236,21 +241,9 @@ func pruneWriteEditInput(tu provider.ToolUseBlock) (json.RawMessage, int, bool) 
 	}
 	changed := false
 	for _, f := range fields {
-		v, ok := raw[f]
-		if !ok {
-			continue
+		if blankContentField(raw, f, pruneVerb(tu.Name), path) {
+			changed = true
 		}
-		var s string
-		if err := json.Unmarshal(v, &s); err != nil || s == "" {
-			continue
-		}
-		marker := fmt.Sprintf("[pruned: %d chars %s to %s; re-read the file if needed]", len(s), pruneVerb(tu.Name), path)
-		mb, err := json.Marshal(marker)
-		if err != nil {
-			continue
-		}
-		raw[f] = mb
-		changed = true
 	}
 	if !changed {
 		return nil, 0, false
@@ -266,6 +259,78 @@ func pruneWriteEditInput(tu provider.ToolUseBlock) (json.RawMessage, int, bool) 
 		return nil, 0, false
 	}
 	return out, removed, true
+}
+
+// pruneMultiEditInput is pruneWriteEditInput's counterpart for multi_edit,
+// whose Input is {"edits":[{"path","old_string","new_string"}, ...]}: the
+// verbatim before/after content lives once per element, not at the top level.
+// It blanks old_string/new_string in every edit (preserving each edit's path)
+// so a successful multi_edit's snippets stop riding along in every subsequent
+// request — the same dead-weight the flat edit_file case removes (P36.2).
+func pruneMultiEditInput(tu provider.ToolUseBlock) (json.RawMessage, int, bool) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(tu.Input, &raw); err != nil {
+		return nil, 0, false
+	}
+	editsRaw, ok := raw["edits"]
+	if !ok {
+		return nil, 0, false
+	}
+	var edits []map[string]json.RawMessage
+	if err := json.Unmarshal(editsRaw, &edits); err != nil {
+		return nil, 0, false
+	}
+	changed := false
+	for _, e := range edits {
+		var path string
+		if p, ok := e["path"]; ok {
+			_ = json.Unmarshal(p, &path)
+		}
+		for _, f := range []string{"old_string", "new_string"} {
+			if blankContentField(e, f, "edited in", path) {
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return nil, 0, false
+	}
+	nb, err := json.Marshal(edits)
+	if err != nil {
+		return nil, 0, false
+	}
+	raw["edits"] = nb
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return nil, 0, false
+	}
+	removed := len(tu.Input) - len(out)
+	if removed <= 0 {
+		return nil, 0, false
+	}
+	return out, removed, true
+}
+
+// blankContentField replaces the string value of raw[field] with a short
+// prune marker (preserving JSON structure), leaving structural fields like
+// "path" intact. It reports whether it actually blanked a non-empty string —
+// false for a missing field, a non-string value, or an already-empty one.
+func blankContentField(raw map[string]json.RawMessage, field, verb, path string) bool {
+	v, ok := raw[field]
+	if !ok {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil || s == "" {
+		return false
+	}
+	marker := fmt.Sprintf("[pruned: %d chars %s to %s; re-read the file if needed]", len(s), verb, path)
+	mb, err := json.Marshal(marker)
+	if err != nil {
+		return false
+	}
+	raw[field] = mb
+	return true
 }
 
 // pruneVerb picks a natural-reading verb for a write/edit prune marker.
