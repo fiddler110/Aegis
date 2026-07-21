@@ -1,16 +1,17 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-20 (**P38.2 shipped** — `aegis chat --skill <name>` preloads a skill body and
-drives it to completion while `<!-- PENDING -->` markers remain — and the **P38.1 linear build was
-live-tested** on qwen3:14b vs AiGateway: the mechanism is **confirmed** (one context, no orchestration, no
-`{mode,agents}` mis-route, all seven files written, P37 scripts run) but the **output does not conform** —
-the 14B model skips the skeleton templates, so `verify.py` fails 6/10 and it can't self-converge. That gap
-is the new Tier-1 item **P38.4** (deterministic skeleton scaffolding); **P38.5** (graceful handling of
-models that reject `think`, filed after mythos-sec:24b 400'd) is Tier 3. P38.1 drops to Tier 2 (mechanism
-done; conformance verification blocked on P38.4). Earlier today: the threat-modeling skill was reworked to
-the non-orchestrated linear build (SKILL.md + verification-and-updates.md); orchestration parked. Earlier:
-P37.6 + two P37-script fixes shipped; P37.1-P37.5 shipped — threat-model suite scripting complete;
-P36.1-P36.3 shipped; P35.1-P35.13 shipped)
+**Last updated:** 2026-07-20 (**P38.4 shipped** — `scaffold.py` pre-writes all seven threat-model files
+from the skeletons, real structure + `<!-- PENDING -->` per fillable section, so a weak model fills sections
+instead of authoring structure it gets wrong; a freshly-scaffolded suite lints 6/6 and a filled one
+verifies 9/9. This closes the conformance gap the qwen3:14b live test exposed and unblocks P38.1's re-test.
+Earlier today: **P38.2 shipped** — `aegis chat --skill <name>` preloads a skill body and drives it to
+completion while `<!-- PENDING -->` markers remain — and the **P38.1 linear build was live-tested** on
+qwen3:14b vs AiGateway: mechanism **confirmed** but output did not conform, which is what P38.4 now fixes.
+**P38.5** (graceful handling of models that reject `think`, filed after mythos-sec:24b 400'd) is Tier 3.
+P38.1 is Tier 2 (mechanism done; conformance re-test now unblocked by P38.4). Earlier: the threat-modeling
+skill was reworked to the non-orchestrated linear build (SKILL.md + verification-and-updates.md);
+orchestration parked. Earlier: P37.6 + two P37-script fixes shipped; P37.1-P37.5 shipped — threat-model
+suite scripting complete; P36.1-P36.3 shipped; P35.1-P35.13 shipped)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -21,23 +22,23 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 4 — **P38.4** (Tier 1), **P38.1** (Tier 2), **P38.3** and **P38.5** (Tier 3), plus the
+**Open items:** 3 — **P38.1** (Tier 2, now unblocked), **P38.3** and **P38.5** (Tier 3), plus the
 parked **P25.9** (Tier 4).
 
-The active focus is **P38.4: deterministic skeleton scaffolding for the threat-modeling skill**, the gap
-the 2026-07-20 live test exposed. That test (qwen3:14b vs AiGateway, driven by the newly-shipped **P38.2**
-`aegis chat --skill` drive-to-completion) **confirmed the P38.1 linear build's mechanism**: the model
-works the phases itself in one context — no sub-agents, no `agent`-tool orchestration, **no `{mode,agents}`
-mis-route** (the P36.3 failure that killed every prior run) — running `recon.py` then writing all seven
-files and running the P37 check scripts. It also completed inside the context window (~44K input tokens
-over 33 tool calls, no overflow), a partial live confirmation of the P36.2-pruning bound. **But it did
-not produce a *conforming* suite:** the 14B model never loads the skeleton/`output-formats` templates, so
-its files lack the required tables/headings (`verify.py` fails 6/10, DFD lint fails), and it can't
-self-converge because it re-authors freeform structure each pass instead of filling a fixed one. **P38.4**
-closes that by having a script pre-write the seven files *from the skeletons* (real structure +
-`<!-- PENDING -->` per section) so the model fills sections rather than authoring structure — which also
-makes the P38.2 marker-oracle reliable (the 14B model otherwise skips the stubs entirely). Once P38.4
-lands, **P38.1**'s remaining work is a re-test to confirm a verify-clean suite on a capable local model.
+The active focus is now **P38.1's conformance re-test**, which **P38.4 just unblocked**. P38.4
+(deterministic skeleton scaffolding, `scaffold.py`) shipped 2026-07-20 — see
+[releases.md](releases.md#latest-changes): a stdlib script pre-writes all seven threat-model files *from
+the skeletons* with real structure (headings, table headers + separators, fixed-value lists, the DFD's
+`flowchart LR` + three `classDef`s) and a `<!-- PENDING -->` marker per fillable section, so the model
+**fills sections** (`edit_file`) instead of authoring the structure the 14B model got wrong. It closed the
+exact gap the 2026-07-20 live test exposed (qwen3:14b, via the newly-shipped **P38.2** `aegis chat --skill`
+drive-to-completion): that test **confirmed the P38.1 linear build's mechanism** — one context, no
+sub-agents, **no `{mode,agents}` mis-route** (the P36.3 failure), `recon.py` → all seven files → the P37
+scripts, inside the window (~44K input tokens / 33 tool calls) — **but the output did not conform** because
+the 14B model never loaded the skeleton/`output-formats` templates and re-authored freeform structure each
+pass. With scaffolding, a freshly-scaffolded suite lints 6/6 and a minimally-filled one verifies 9/9, so
+self-correction now converges against a real structure. **P38.1**'s remaining work is the re-test itself:
+confirm a verify-clean seven-file build on a capable-enough local model.
 **P38.5** (models that reject `think` should degrade, not 400) came out of the same test: mythos-sec:24b
 400'd on `think` and, with it disabled, proved too weak a tool-caller to matter (it invents tool names and
 doesn't substitute command placeholders — a model-quality dead end, not a skill problem). Already
@@ -165,56 +166,22 @@ shipped 2026-07-18.
 
 ## Open Work — Tier 1
 
-**Status:** 1 open — **P38.4** (deterministic skeleton scaffolding for the threat-modeling skill; filed
-2026-07-20 after the P38.1 live test showed the linear build runs but its output does not conform). (P38.2
-shipped 2026-07-20 — see [releases.md](releases.md#latest-changes); P36.1 shipped 2026-07-19;
+**Status:** 0 open. (**P38.4** shipped 2026-07-20 — deterministic skeleton scaffolding, `scaffold.py`; see
+[releases.md](releases.md#latest-changes). P38.2 shipped 2026-07-20; P36.1 shipped 2026-07-19;
 P35.9 shipped 2026-07-18;
 P35.5 shipped 2026-07-18; P35.1, P35.2 shipped 2026-07-18; P33.1 and P33.2 shipped 2026-07-15;
 P31.1, P31.2, P30.1-P30.3 shipped 2026-07-14; P32.1-P32.4 shipped 2026-07-15.)
 
-### P38.4 — Deterministic skeleton scaffolding so weak local models fill structure instead of authoring it
-
-The 2026-07-20 live test of the P38.1 linear build (qwen3:14b vs AiGateway, driven to completion via the
-newly-shipped P38.2 `aegis chat --skill`) confirmed the *mechanism* works — one context, no orchestration,
-no `{mode,agents}` mis-route, `recon.py` → all seven files written → the P37 check scripts all run, inside
-the context window (~44K input tokens / 33 tool calls, no overflow) — **but the output does not conform.**
-The 14B model never loads `references/output-formats.md` or `references/skeletons/skeleton-stride.md`, so
-its files have no Element Table, no Data-Flow Table, no `### FIND-##` headings, use `graph TD` instead of
-`flowchart LR`, and bake headings into content. `verify.py` fails 6/10 and `lint_dfd.py` fails; the model
-tries to self-correct three times against the scripts but can't converge — it re-authors freeform
-structure each pass (full-content `write_file`, not the incremental `edit_file` the skill asks for) — then
-yields. Net: a complete-but-non-conforming suite.
-
-**Root cause:** the skill *relies on the model reading and copying the skeleton templates*, and a 14B
-model skips that step. The fix moves that determinism out of the model's hands: a **scaffolding script
-pre-writes the seven files from the skeletons** — real structure (tables, headings, fixed value lists)
-with `<!-- PENDING -->` in each fillable section — so the model **fills sections** (via `edit_file`)
-instead of authoring the structure it gets wrong. This:
-- makes `verify.py`/`lint_dfd.py` check a real structure from turn one, so self-correction converges (fill
-  a cell, don't re-derive a table);
-- makes the P38.2 drive-to-completion marker oracle reliable — the script writes the `<!-- PENDING -->`
-  stubs the drive keys on, which qwen3:14b otherwise skipped entirely (it wrote full content, no markers);
-- makes the incremental-write discipline the skill wants (edit one section at a time) the *only* way to
-  fill a scaffolded file, rather than a rule the model can ignore.
-
-**Deliverable:** a `scaffold.py` (new script, or an extension of the existing suite) that, given the run
-dir + framework, writes the seven skeleton-structured files with per-section `<!-- PENDING -->`; SKILL.md
-§4.1 setup calls it instead of hand-writing bare stubs; the skill/`verify.py` treat a scaffolded-but-
-unfilled section as PENDING. Re-test qwen3:14b to confirm it now drives to a **verify-clean** suite (that
-re-test is also P38.1's remaining verification).
-
-Priority: Tier 1 — the live test proved this is the exact gap between "the linear build runs" and "the
-linear build produces a usable threat model" on local models, and it directly unblocks P38.1's conformance
-verification. Everything upstream (the linear build, the P37 scripts, P38.2's drive-to-completion) already
-exists to make this the last missing piece for a local run.
+The remaining threat-modeling work — the P38.1 conformance re-test that P38.4 unblocked — is tracked in
+Tier 2 below (it's a live-run verification, not independent build work).
 
 ---
 
 ## Open Work — Tier 2
 
 **Status:** 1 open — **P38.1** (non-orchestrated linear threat-model build; rework shipped 2026-07-20,
-mechanism live-confirmed, conformance verification blocked on P38.4). (P38.2 shipped 2026-07-20 — see
-[releases.md](releases.md#latest-changes); P37.2, P37.3 shipped 2026-07-19; P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18;
+mechanism live-confirmed, conformance re-test now unblocked by P38.4). (P38.4, P38.2 shipped 2026-07-20 —
+see [releases.md](releases.md#latest-changes); P37.2, P37.3 shipped 2026-07-19; P35.13 shipped 2026-07-19; P35.10 and P35.11 shipped 2026-07-18;
 P35.6 shipped 2026-07-18;
 P35.3 shipped 2026-07-18; P34.12 shipped 2026-07-17; P34.9 and P34.10 shipped 2026-07-17;
 P34.5-P34.8 shipped 2026-07-17; P34.3 shipped 2026-07-16; P34.2 shipped 2026-07-16, both levers;
@@ -244,15 +211,17 @@ guard) didn't help.
   confirmation of the P36.2-pruning + recon bound (the run was too short to stress compaction hard, so
   this is "held for a 33-call run", not "proven for the worst case").
 - ❌ **Output did not conform** — the 14B model skipped the skeleton templates, so `verify.py` failed 6/10
-  and it couldn't self-converge. **This is the entire remaining gap, and it is now P38.4** (deterministic
-  skeleton scaffolding).
+  and it couldn't self-converge. **That gap was P38.4, now shipped** (deterministic skeleton scaffolding,
+  `scaffold.py`): the seven files are pre-written from the skeletons with real structure + `<!-- PENDING -->`
+  per fillable section, so the model fills sections instead of authoring structure. A freshly-scaffolded
+  suite lints 6/6 and a filled one verifies 9/9 — the remaining work here is the live re-test that this
+  actually carries the 14B (or a stronger local) model to a verify-clean suite end-to-end.
 - mythos-sec:24b is **not viable** independent of the skill: it 400s on `think` (→ P38.5) and, with that
   disabled, invents tool names and doesn't substitute command placeholders — a model-quality dead end.
 
-Priority: Tier 2 — the mechanism is done and live-confirmed; what remains is a re-test to a **verify-clean**
-suite, which is blocked on **P38.4** landing and needs a capable-enough local model to run it. Not Tier 1
-because there is no independent work here until P38.4 ships — this item's verification *is* P38.4's
-re-test.
+Priority: Tier 2 — the mechanism is done and live-confirmed and the conformance blocker (P38.4) has
+shipped; what remains is the re-test to a **verify-clean** suite on a capable-enough local model. Not Tier 1
+because this is a live-run verification, not independent build work — the whole build path now exists.
 
 **Note (future item, not yet filed):** the same "accurate refusal, error-shaped" question for the
 other scanners' documented exit codes, noted while shipping P35.6 and again while closing P35.13.

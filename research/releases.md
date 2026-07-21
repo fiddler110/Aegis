@@ -8,7 +8,25 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-20 — **P38.2 shipped and the P38.1 linear build was live-tested.** `aegis chat`
+**Last updated:** 2026-07-20 — **P38.4 shipped: deterministic skeleton scaffolding (`scaffold.py`).** The
+threat-modeling skill gained a sixth bundled script, `scaffold.py`, that pre-writes all seven report files
+**from the skeletons** — real structure (every heading, every table's header row + separator, the fixed
+value lists, the DFD's `flowchart LR` header and three `classDef`s) with a `<!-- PENDING -->` marker per
+fillable section — so a weak local model **fills sections** (via `edit_file`) instead of authoring the
+structure it gets wrong. It closes the exact gap the 2026-07-20 qwen3:14b live test exposed: the 14B model
+skipped the skeleton templates, so its files lacked the required tables/headings, `verify.py` failed 6/10,
+and it re-authored freeform structure on every self-correction pass instead of converging. SKILL.md §4.1
+step 2 now calls `scaffold.py` instead of hand-writing bare stubs, and §4.2 tells the model to fill
+`<!-- PENDING -->` markers one section at a time rather than regenerate whole files. Validation: a
+freshly-scaffolded suite already passes `lint_dfd.py` 6/6, and a minimally-filled one passes `verify.py`
+9/9 (only the intentionally-unfilled DFD stub's PENDING marker trips the leftover-syntax check) — proving
+the scaffolded structure is verify-clean once filled, so self-correction now converges against a real
+structure. The script is stdlib-only, deterministic (reads no clock — timestamps stay PENDING), and never
+clobbers a file whose PENDING markers are already gone. It supports all six frameworks (plus `stride-a`).
+This unblocks **P38.1**'s remaining work: a re-test of the linear build to a verify-clean suite on a
+capable local model. See [roadmap.md](roadmap.md).
+
+Earlier today — **P38.2 shipped and the P38.1 linear build was live-tested.** `aegis chat`
 gained **`--skill <name>`**: it preloads the named skill's full body into the prompt (so a small local
 model never has to discover-and-fetch it via the `skill` tool — the P36.1 skip) and **drives the run to
 completion** — after each yield, while any file under `.aegis/` still carries a `<!-- PENDING -->` marker,
@@ -177,6 +195,48 @@ sources" refusal, which turned out to need two-way disambiguation rather than th
 its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearing the rest of Tier
 2 — njsscan's Windows traceback (a libsast bug, not the semgrep gap the item diagnosed) and
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P38.4 — Deterministic skeleton scaffolding: fill structure, don't author it
+
+Filed and shipped 2026-07-20. The 2026-07-20 qwen3:14b live test (via P38.2 drive-to-completion) confirmed
+the P38.1 linear build's *mechanism* — one context, no orchestration, `recon.py` → all seven files → the
+P37 check scripts, inside the window — **but its output did not conform.** The 14B model never loaded
+`references/output-formats.md` or the framework skeleton, so its files had no Element/Data-Flow tables, no
+`### FIND-##` headings, used `graph TD` instead of `flowchart LR`, and baked headings into content;
+`verify.py` failed 6/10 and it couldn't self-converge because it **re-authored freeform structure on every
+correction pass** (full-content `write_file`) instead of filling a fixed one. The root cause was that the
+skill *relied on the model reading and copying the skeleton templates*, and a 14B model skips that step.
+
+The fix moves that determinism out of the model's hands. A new bundled script, **`scaffold.py`** (the
+skill's sixth `.py`, stdlib-only, deterministic), pre-writes all seven files *from the skeletons*:
+
+- **Real structure, machine-applied.** Every fixed heading, every table's header row + separator (matching
+  `verify.py`'s `find_table` requirements exactly), the fixed-value reference lists, and the DFD's
+  `flowchart LR` header + three verbatim `classDef`s — the five framework-agnostic files from
+  `output-formats.md` and the one framework-specific analysis file from `skeletons/skeleton-<framework>.md`.
+- **A `<!-- PENDING -->` marker per fillable section**, so the model **edits cells into a fixed table**
+  rather than inventing the table — and the P38.2 drive-to-completion marker oracle (which the 14B model
+  otherwise starved by writing full content, no markers) is now fed reliably.
+- **Facts only, never decisions.** It writes empty structure; every judgment cell is a PENDING the model
+  fills. It reads no clock (timestamps stay PENDING, so they're never guessed) and invents no component,
+  threat, severity, or deployment class. It never clobbers a file whose PENDING markers are already gone,
+  so re-running on an in-progress directory is safe (`--force` overrides).
+- **All six frameworks** (`stride`, `linddun`, `pasta`, `trike`, `vast`, `nist-800-154`) plus `stride-a`.
+
+SKILL.md §4.1 step 2 now calls `scaffold.py` instead of hand-writing bare stubs; §4 and §4.2 were updated
+so the model fills PENDING markers one section at a time (the non-convergent whole-file re-author is called
+out as exactly what scaffolding prevents). README.md documents the sixth script.
+
+**Validation.** A freshly-scaffolded suite passes `lint_dfd.py` 6/6 (the DFD stub is deliberately
+lint-clean from turn one — `flowchart LR`, the three classDefs, and a `%%`-commented PENDING that lint
+ignores but `verify.py`/the drive-oracle still see, plus a byte-identical `1-model.md` fence). A
+minimally-filled suite passes `verify.py` 9/9 — the sole remaining failure is the intentionally-unfilled
+DFD stub's PENDING marker — proving the scaffolded structure is verify-clean once filled, so self-correction
+now converges against a real structure instead of a freshly-authored one each pass. `go test
+./internal/skills/...` and `./internal/cli/...` stay green (the scripts are `//go:embed builtin`-recursive,
+so `scaffold.py` embeds automatically). This directly unblocks **P38.1**'s conformance re-test.
 
 ---
 
