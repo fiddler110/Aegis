@@ -810,6 +810,14 @@ func expandFileMentions(text, workspace string) string {
 			continue
 		}
 		abs := filepath.Join(workspace, filepath.FromSlash(atPath))
+		// Confine the resolved path to the workspace: filepath.Join cleans
+		// ".." segments but does not prevent them from escaping the root, so a
+		// mention like @../../etc/passwd would otherwise read outside the
+		// workspace. Leave any escaping token as-is (CWE-22).
+		if rel, relErr := filepath.Rel(workspace, abs); relErr != nil ||
+			rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
 		data, err := os.ReadFile(abs)
 		if err != nil {
 			continue
