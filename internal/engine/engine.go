@@ -65,6 +65,14 @@ func (c *Conversation) invalidate() {
 	c.Persisted = -1
 }
 
+// Invalidate is the exported form of invalidate, for callers that rewrite a
+// message's content in place outside the engine (P39.5: the `aegis chat
+// --skill` drive loop compacts the one-time SKILL.md preamble out of the first
+// user message after the opening turn so it stops riding every request). After
+// mutating Messages, call this so the cached token estimate is recomputed and
+// the caller re-persists rather than blindly appends.
+func (c *Conversation) Invalidate() { c.invalidate() }
+
 // estimatedTokens returns the total estimated token count across system +
 // messages, recomputing only when the conversation has been rewritten since
 // the last call (P8.4 — avoids double-scanning the full conversation every
@@ -434,6 +442,16 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// since a single Run already loops through every tool round of a long
 	// local-model task (the failure mode this guards against).
 	compactionFailures := 0
+	// compactionLLMFailuresTotal is the cumulative (non-reset) count of LLM
+	// summarizer failures this run, and summarizerLatchedOff records that we have
+	// given up on the LLM summarizer for the rest of the run (P39.8). A weak local
+	// model that reliably returns empty output from the summarization prompt would
+	// otherwise be re-tried on every compaction cycle — two wasted LLM calls each
+	// time before the deterministic fallback fires (42× "summarizer returned empty
+	// output" in one observed run). Once the total crosses the threshold, later
+	// compactions skip straight to the deterministic fallback.
+	compactionLLMFailuresTotal := 0
+	summarizerLatchedOff := false
 
 	// runUsage accumulates token counts across every turn of this run so the
 	// terminal KindDone event can carry a total (P25.5) — previously it was
@@ -499,9 +517,33 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				pct := est * 100 / e.contextWindowTokens
 				compacted := false
 				if e.compactor != nil {
-					if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
+					// P39.8: once the LLM summarizer has proven unreliable this run,
+					// stop calling it — go straight to the deterministic fallback so
+					// we don't burn two empty summary calls per compaction cycle on a
+					// model that will only ever return empty. The latch is per-run.
+					if summarizerLatchedOff {
+						if fc, ok := e.compactor.(FallbackCompactor); ok {
+							if out, changed := fc.FallbackCompact(conv.Messages); changed {
+								e.logger.Info("proactive compaction: summarizer latched off, using deterministic fallback",
+									"before", len(conv.Messages), "after", len(out))
+								emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — compacted %d→%d messages (deterministic; summarizer disabled for this run)", pct, len(conv.Messages), len(out))})
+								conv.Messages = out
+								conv.invalidate()
+								compacted = true
+							}
+						}
+					} else if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
 						e.logger.Warn("proactive compaction failed", "err", compErr)
 						compactionFailures++
+						compactionLLMFailuresTotal++
+						// P39.8: after enough cumulative LLM-summarizer failures this
+						// run (not just consecutive), give up on it entirely — a weak
+						// local model that reliably returns empty output would otherwise
+						// be re-tried every compaction cycle (42× in one observed run).
+						if compactionLLMFailuresTotal >= summarizerGiveUpThreshold && !summarizerLatchedOff {
+							summarizerLatchedOff = true
+							e.logger.Warn("proactive compaction: disabling LLM summarizer for the rest of this run after repeated failures", "failures", compactionLLMFailuresTotal)
+						}
 						// P28.4: the LLM summarizer has now failed twice in a row for
 						// this run — a local model unreliably returning empty output
 						// (the observed live-eval failure mode) would otherwise skip
@@ -787,6 +829,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 // guardCorrectivePrefix opens every guard corrective message; besides framing
 // the retry prompt, it is the marker retractGuardCorrectives keys on to strip
 // retry scaffolding from the durable transcript once the run settles.
+// summarizerGiveUpThreshold is the cumulative number of LLM-summarizer failures
+// in one run after which the engine stops calling the summarizer and compacts
+// deterministically for the rest of the run (P39.8). Set above the P28.4
+// consecutive-failure fallback trigger (2) so a run gets a couple of real
+// attempts — enough to ride out a transient error — before concluding the model
+// simply can't summarize and latching the LLM call off.
+const summarizerGiveUpThreshold = 4
+
 const guardCorrectivePrefix = "[Your previous response did not pass output validation: "
 
 // retractGuardCorrectives removes guard-retry scaffolding — each corrective
