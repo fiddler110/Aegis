@@ -231,7 +231,7 @@ func parseGitleaks(data []byte) ([]Finding, error) {
 			RuleID:      d.RuleID,
 			Severity:    SevHigh, // leaked secrets are high severity by default
 			Title:       firstNonEmpty(d.Description, "potential secret"),
-			Location:    fmt.Sprintf("%s:%d", filepath.ToSlash(d.File), d.StartLine),
+			Location:    fmt.Sprintf("%s:%d", toForwardSlash(d.File), d.StartLine),
 			Remediation: "rotate the exposed credential and remove it from the codebase",
 		})
 	}
@@ -337,7 +337,7 @@ func parseTrufflehog(data []byte, verifyAttempted bool) ([]Finding, error) {
 			RuleID:       d.DetectorName,
 			Severity:     SevHigh, // leaked secrets are high severity by default, same as gitleaks
 			Title:        firstNonEmpty(d.DetectorName, "potential secret") + " (" + d.Redacted + ")",
-			Location:     fmt.Sprintf("%s:%d", filepath.ToSlash(d.SourceMetadata.Data.Filesystem.File), d.SourceMetadata.Data.Filesystem.Line),
+			Location:     fmt.Sprintf("%s:%d", toForwardSlash(d.SourceMetadata.Data.Filesystem.File), d.SourceMetadata.Data.Filesystem.Line),
 			Remediation:  "rotate the exposed credential and remove it from the codebase",
 			Verification: verification,
 		})

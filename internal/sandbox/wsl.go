@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"math"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -98,7 +97,10 @@ func WSLBinaryAvailable(ctx context.Context, bin, distro string) bool {
 // path with backslashes silently corrupts. Forward slashes survive untouched
 // and wslpath accepts them equally.
 func WSLPath(ctx context.Context, winPath, distro string) (string, error) {
-	out, err := wslRun(ctx, distro, "wslpath", "-a", filepath.ToSlash(winPath))
+	// winPath is a Windows-style path — always backslash-separated, since
+	// this only runs on a Windows host — so convert explicitly rather than
+	// with filepath.ToSlash, which is a no-op except on a windows build.
+	out, err := wslRun(ctx, distro, "wslpath", "-a", strings.ReplaceAll(winPath, `\`, "/"))
 	if err != nil {
 		return "", fmt.Errorf("wslpath %s: %w", winPath, err)
 	}

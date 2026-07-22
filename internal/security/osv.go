@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -179,8 +178,8 @@ func osvRelativeSource(root, path string) string {
 	if root == "" || path == "" {
 		return path
 	}
-	r := strings.TrimSuffix(filepath.ToSlash(root), "/")
-	p := filepath.ToSlash(path)
+	r := strings.TrimSuffix(toForwardSlash(root), "/")
+	p := toForwardSlash(path)
 	if r == "" || len(p) <= len(r) {
 		return p
 	}
