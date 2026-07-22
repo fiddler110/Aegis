@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 13 actionable (7 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
+**Open items:** 14 actionable (1 Tier 1, 7 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
 
 Threat-model fix priority order (do-first to least-urgent): **P39.7 → P39.5 → P39.6 → P39.9 → P39.8**,
 with **P38.1** as the tracking umbrella that closes once the first three land. Rationale: P39.7 is
@@ -21,6 +21,10 @@ only has something to check once a build reaches zero markers; P39.9 and P39.8 a
 polish, with P39.9 ranked first because a dead tool-call path blocks everything, whereas P39.8 already
 degrades gracefully via the P36.2 fallback.
 
+- **P41.1** (Tier 1) — proactive compaction gates on a flat `chars/4` token estimate
+  (`compaction.EstimateTokens`) instead of the engine's script-aware one (`engine.estimateTokens`), so a
+  CJK/non-ASCII-heavy conversation can silently skip compaction the engine itself has already determined is
+  needed. Surfaced by a 2026-07-22 data-flow review, not yet fixed.
 - **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. **Environment gate lifted:**
   the doctor-recommended `qwen3.6:35b-a3b` is now installed and the conformance re-test has been run
   (2026-07-21, against FirewallRiskRater). The build **mechanism** re-confirms, but the autonomous
@@ -49,7 +53,32 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open.
+**Status:** 1 open.
+
+### P41.1 — Compaction's own token estimate disagrees with the engine's script-aware one, silently skipping compaction it shouldn't
+
+`internal/compaction/compaction.go:101` (`EstimateTokens`) is a flat `chars/4` heuristic with no script
+awareness. `internal/engine/engine.go:113` (`estimateTokens`) is script-aware — CJK/Hangul/Kana at ~1
+token/char, other non-ASCII scripts at ~0.5 token/char — specifically because flat `chars/4` badly
+undercounts dense scripts (see that function's own doc comment). The engine uses its accurate version for
+the proactive 85%/95% "context nearly full" checks (`engine.go:496-538`) and `MaxTokensPerRun` enforcement,
+but `Summarizer.compact` (`compaction.go:136`) — the *primary* compaction gate, called unconditionally at
+the top of every `engine.Run`, not just the mid-run safety net — decides whether to actually compact using
+its own, separate, less-accurate `EstimateTokens`. The two never share an implementation.
+
+Net effect: for a CJK-heavy (or Cyrillic/Greek/Arabic/emoji-heavy) conversation, the engine can correctly
+determine the context is 85%+ full and call `compactor.Compact`, only for the summarizer's cruder internal
+`shouldCompact` check to decide there's still room and silently no-op — no error, no log beyond the outer
+"not compacted" path. That's exactly the failure mode the script-aware estimator was built to prevent,
+except the fix was never propagated into the package that owns the actual compaction trigger. Worst case: a
+local model server (Ollama) silently truncates from the front — dropping the system prompt — before
+compaction ever fires, the specific failure P2.7's proactive-compaction machinery exists to avoid.
+
+Fix direction: export the engine's script-aware estimator (or move it to a shared package) and have
+`compaction.Summarizer` use it instead of maintaining a second, independent heuristic.
+
+Priority: Tier 1 — a real, currently-triggerable robustness gap (any non-ASCII-heavy conversation hits it),
+small fix (swap one function for the other / share an implementation), no dependency on other roadmap work.
 
 ---
 
