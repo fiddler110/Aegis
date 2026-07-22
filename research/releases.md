@@ -8,10 +8,68 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-21 — **P38.6 and P38.7 shipped** (the two actionable engineering findings split
-out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and P39.4 shipped;
+**Last updated:** 2026-07-21 — **P39.5, P39.6, P39.7, P39.8 shipped and P39.9 partially shipped** — the
+harness-side drive-loop fixes root-caused by the P38.1 conformance re-test (see below). These land the code;
+the **P38.1 umbrella stays open** pending a live re-test that confirms the built-in `--skill` drive now
+reaches a verify-clean suite on a local model. Earlier the same day: **P38.6 and P38.7 shipped** (the two
+actionable engineering findings split out of the P38.1 re-test); **P39.1, P39.2, and P39.4 shipped;
 P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass — see
 [roadmap.md](roadmap.md)).
+
+**P39.7 — no-progress guard turns "announce then yield" into an "act now" nudge.** The drive loop
+(`internal/cli/chat.go`) previously just counted three consecutive zero-tool turns and stopped. It now
+tracks whether a turn actually *mutated a suite file* (`write_file`/`edit_file`/`multi_edit`) or *changed the
+PENDING marker set* — the two signals of real progress — and when a turn does neither while markers remain,
+re-prompts with an explicit `actNowNudge()` ("STOP NARRATING — ACT NOW … call `edit_file` now … one section,
+one edit") prepended to the continuation, bounded to `maxNoProgressTurns` (3) consecutive stalls before
+stopping. Direct evidence this is the right lever: adding an "act now" preamble to a stalled `gpt-oss:20b`
+run landed its first real `edit_file` in the P38.1 corroboration. Tests: `TestActNowNudge`, `TestSameStrings`,
+`TestMutatingTools` in `internal/cli/chat_drive_test.go`.
+
+**P39.5 — the drive stops re-sending the whole SKILL.md every turn.** Root cause of P38.1's unmet
+conformance: `aegis chat --skill` prepends the ~9K-token SKILL.md body to the first user message, which
+threads through the conversation and rides *every* request (`prompt_bytes≈31534` at turn 0), so on a 32K
+local window the recon digest plus a few reads left no room to `edit_file` (a scaffolded resume made 86 tool
+calls across 3 iterations and cleared 0 of 23 markers). After the opening turn — when the model has already
+seen the full instructions — `compactFirstSkillMessage` rewrites the first message once, swapping the skill
+body for a compact pointer (`compactSkillPreamble`) that names the on-disk `SKILL.md` to re-read on demand,
+the same disposable-skill-reference logic P36.2 already applies to skill-reference *reads*. A new exported
+`engine.Conversation.Invalidate()` keeps the cached token estimate correct after the in-place rewrite. Guarded
+to fire only while the message still carries the preamble. Tests: `TestCompactSkillPreamble`,
+`TestCompactFirstSkillMessage`.
+
+**P39.6 — the drive's done-condition is now "verifies clean," not "all markers filled."** When the drive's
+PENDING markers hit zero it now runs the threat-modeling skill's bundled phase-6 checks (`verify.py`,
+`lint_dfd.py`, `inventory.py --check`) against the completed run directory; on failure it feeds the failure
+text back with `verifyFixPrompt` for an in-place fix and re-runs, bounded to `maxVerifyRounds` (3). This is the
+autonomous analogue of SKILL.md §5's fix-and-re-run round — the duplicate threat ID, tier↔prerequisite
+mismatches and stale counts that shipped uncaught in the re-test were all flagged by `verify.py`, which
+nothing was running. Gated on the skill actually bundling a `verify.py` and a run directory existing, so other
+skills are unaffected (`ran=false` → the pre-P39.6 "markers cleared = done" path). New code in
+`internal/cli/chat_verify.go`; `pythonExe` probes `--version` so Windows' `python` App-execution-alias shim
+can't make every drive spuriously "fail verification." Tests: `TestVerifyFixPrompt`,
+`TestVerifySkillOutputsGate`, `TestLatestThreatModelRunDir`, `TestVerifySkillOutputsRuns`.
+
+**P39.8 — a proven-broken LLM summarizer is latched off for the rest of the run.** Compaction and
+`output_guard` route to `provider.small_model` when set (existing), but with only a weak main model the
+summarizer returns empty and the engine re-tried it two calls per compaction cycle forever (**42×** "summarizer
+returned empty output" in one run). `internal/engine/engine.go` now tracks cumulative LLM-summarizer failures
+per run and, past `summarizerGiveUpThreshold` (4), latches the LLM summarizer off and compacts deterministically
+(P36.2 fallback) for the rest of the run — the P28.4 two-consecutive-failure fallback still fires meanwhile, so
+context always keeps shrinking. Per-run state, never carried across runs. Test:
+`TestProactiveCompactionLatchesOffSummarizer` in `internal/engine/contextnotice_test.go`.
+
+**P39.9 (partial) — `/v1` compat drives now warn before overflowing; the native-adapter hang stays open.**
+The actionable half shipped: `aegis chat --skill` on the legacy OpenAI-compat (`/v1`) Ollama adapter — which
+cannot send `num_ctx`, so `context_window` is ignored and Ollama serves the modelfile default — now probes the
+served window up front and, when it's too small for a skill-driven prompt, prints a notice naming the fix
+(`warnCompatDriveWindow` / `compatDriveWindowNotice` in `internal/cli/chat.go`), including a runnable
+modelfile-derivative recipe (`providerfactory.LegacyOllamaModelfileRecipe`: `printf 'FROM <m>\nPARAMETER
+num_ctx <n>\n' | ollama create <m>-ctx<n> -f -`) for when the native adapter can't be used. Tests:
+`TestCompatDriveWindowNotice`, `TestLegacyOllamaModelfileRecipe`. The **native-Ollama-adapter half — no tool
+call / no run directory after 8+ minutes on the skill-preload turn — remains open**: it is investigation-gated
+(needs a focused repro: think-mode? oversized system prompt?) and was not touched, so P39.9 stays open for
+that half.
 
 **P38.6 — thinking-mode models fabricate a completed drive instead of executing it.** The P38.1 re-test
 found that `aegis chat --skill threat-modeling` with `provider.think: true` drove **zero** real tool calls:

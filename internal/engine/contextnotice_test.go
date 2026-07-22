@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -171,5 +172,80 @@ func TestContextFullNoticeWithoutCompactor(t *testing.T) {
 	// Two iterations both exceed the threshold, but the warning fires once.
 	if len(notices) != 1 || !strings.Contains(notices[0], "context") {
 		t.Errorf("notices = %v, want exactly one context-full warning", notices)
+	}
+}
+
+// latchCompactor always fails Compact (a weak local-model summarizer that only
+// ever returns empty) and its FallbackCompact returns the messages unchanged so
+// the token estimate stays over threshold and compaction keeps triggering every
+// iteration. It counts both call kinds so a test can assert the P39.8 latch.
+type latchCompactor struct {
+	compactCalls  int
+	fallbackCalls int
+}
+
+func (c *latchCompactor) Compact(_ context.Context, _ string, msgs []provider.Message) ([]provider.Message, bool, error) {
+	c.compactCalls++
+	return msgs, false, errors.New("summarizer returned empty output")
+}
+
+func (c *latchCompactor) FallbackCompact(msgs []provider.Message) ([]provider.Message, bool) {
+	c.fallbackCalls++
+	return msgs, true // "changed" but same content, so compaction keeps firing each turn
+}
+
+// TestProactiveCompactionLatchesOffSummarizer is the P39.8 regression: a
+// summarizer that reliably fails must be given up on after a bounded number of
+// cumulative attempts, not re-tried on every one of many compaction cycles
+// (the observed 42× "summarizer returned empty output"). Once latched, the
+// engine compacts deterministically and stops calling Compact.
+func TestProactiveCompactionLatchesOffSummarizer(t *testing.T) {
+	// Eight tool-call turns then a final text turn: every tool round crosses the
+	// 85% threshold, so compaction is attempted far more times than the latch
+	// allows the LLM summarizer to run.
+	var turns [][]provider.Event
+	for i := 0; i < 8; i++ {
+		// Vary the input each turn so the loop detector doesn't abort the run
+		// before we've exercised enough compaction cycles to prove the latch.
+		input := json.RawMessage(fmt.Sprintf(`{"msg":"hi-%d"}`, i))
+		turns = append(turns, []provider.Event{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: fmt.Sprintf("tu-%d", i), Name: "echo", Input: input}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 1}},
+		})
+	}
+	turns = append(turns, []provider.Event{
+		{Type: provider.EventTextDelta, Text: "done"},
+		{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 1}},
+	})
+	adapter := &scriptedAdapter{turns: turns}
+	reg := tool.NewRegistry()
+	if err := reg.Register(&echoTool{}); err != nil {
+		t.Fatal(err)
+	}
+	comp := &latchCompactor{}
+	eng, err := New(Options{Adapter: adapter, Tools: reg, Compactor: comp, Model: "test", MaxTokens: 100, ContextWindowTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var latchNotice bool
+	err = eng.Run(context.Background(), bigConversation(), func(ev Event) {
+		if ev.Kind == KindNotice && strings.Contains(ev.Text, "summarizer disabled for this run") {
+			latchNotice = true
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The run-start pass calls Compact once; the proactive path may call it up to
+	// the give-up threshold before latching. It must NOT keep calling per turn.
+	if comp.compactCalls > summarizerGiveUpThreshold+1 {
+		t.Errorf("Compact called %d times; expected it to latch off at <= %d despite 8+ compaction cycles", comp.compactCalls, summarizerGiveUpThreshold+1)
+	}
+	if comp.fallbackCalls == 0 {
+		t.Error("expected the deterministic FallbackCompact to take over after latching")
+	}
+	if !latchNotice {
+		t.Error("expected a notice announcing the summarizer was disabled for the run")
 	}
 }
