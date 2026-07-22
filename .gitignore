@@ -16,6 +16,7 @@ internal/server/webui/frontend/node_modules/
 !/.aegis/skills
 *.db
 *.log
+*.err
 
 # Editor / OS
 .DS_Store
