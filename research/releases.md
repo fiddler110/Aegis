@@ -8,10 +8,24 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-21 — **P38.6 and P38.7 shipped** (the two actionable engineering findings split
+**Last updated:** 2026-07-22 — **P39.7 shipped** (no-progress guard on the `--skill` drive loop — see
+below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (the two actionable engineering findings split
 out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and P39.4 shipped;
 P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass — see
 [roadmap.md](roadmap.md)).
+
+**P39.7 — No-progress guard on the drive loop escalates to an "act now" nudge.** Weak local models
+sometimes end a drive turn with narration ("Now I'll write the file…") and no tool call at all —
+corroborated on two independent models (a 35B MoE returning `turns=3` with 0 `edit_file` calls; a
+`gpt-oss:20b` `--skill` run against AiGateway filling 0 of 35 markers and yielding 3× with markers still
+present). The drive loop already counted these no-tool-call iterations (`noProgress`, aborting after
+three) but kept sending the same plain continuation prompt every time. It now escalates: once an
+iteration makes zero tool calls, the next continuation swaps in `actNowPrompt` — an explicit "ACT NOW:
+call `edit_file`... do not describe or narrate" instruction wrapping the existing `continuePrompt` — instead
+of repeating the prompt the model just narrated past. Matches the evidence from the P38.1 re-test, where
+adding exactly this kind of preamble by hand was what unstuck both stalled runs. `internal/cli/chat.go`
+(`actNowPrompt`, wired into the drive loop around the existing `noProgress` counter). Tests:
+`TestActNowPrompt` in `internal/cli/chat_drive_test.go`.
 
 **P38.6 — thinking-mode models fabricate a completed drive instead of executing it.** The P38.1 re-test
 found that `aegis chat --skill threat-modeling` with `provider.think: true` drove **zero** real tool calls:

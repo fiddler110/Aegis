@@ -11,15 +11,15 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 14 actionable (1 Tier 1, 7 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
+**Open items:** 13 actionable (1 Tier 1, 6 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
 
-Threat-model fix priority order (do-first to least-urgent): **P39.7 → P39.5 → P39.6 → P39.9 → P39.8**,
-with **P38.1** as the tracking umbrella that closes once the first three land. Rationale: P39.7 is
-cheapest and already corroborated on two independent local models; P39.5 is the actual root cause
-(SKILL.md re-injected every turn starves the fill of context) and everything else rides on it; P39.6
-only has something to check once a build reaches zero markers; P39.9 and P39.8 are adapter/robustness
-polish, with P39.9 ranked first because a dead tool-call path blocks everything, whereas P39.8 already
-degrades gracefully via the P36.2 fallback.
+Threat-model fix priority order (do-first to least-urgent): **P39.7 (shipped) → P39.5 → P39.6 → P39.9 →
+P39.8**, with **P38.1** as the tracking umbrella that closes once the remaining three land. Rationale:
+P39.7 was cheapest and already corroborated on two independent local models — now shipped (see
+[releases.md](releases.md)); P39.5 is the actual root cause (SKILL.md re-injected every turn starves the
+fill of context) and everything else rides on it; P39.6 only has something to check once a build reaches
+zero markers; P39.9 and P39.8 are adapter/robustness polish, with P39.9 ranked first because a dead
+tool-call path blocks everything, whereas P39.8 already degrades gracefully via the P36.2 fallback.
 
 - **P41.1** (Tier 1) — proactive compaction gates on a flat `chars/4` token estimate
   (`compaction.EstimateTokens`) instead of the engine's script-aware one (`engine.estimateTokens`), so a
@@ -29,10 +29,12 @@ degrades gracefully via the P36.2 fallback.
   the doctor-recommended `qwen3.6:35b-a3b` is now installed and the conformance re-test has been run
   (2026-07-21, against FirewallRiskRater). The build **mechanism** re-confirms, but the autonomous
   `--skill` drive still does **not** reach a verify-clean suite on the stronger model. The reasons are
-  now root-caused and split into **P39.5–P39.9**; an interim external wrapper is parked as **P38.8**.
-- **P39.5–P39.9** (Tier 2/3) — the harness-side fixes surfaced by the P38.1 re-test: a no-progress guard
-  (P39.7), bound the drive-loop context (P39.5), fold phase-6 verification into the drive (P39.6),
+  now root-caused and split into **P39.5–P39.9** (P39.7 shipped 2026-07-22); an interim external wrapper
+  is parked as **P38.8**.
+- **P39.5, P39.6, P39.8, P39.9** (Tier 2/3) — the remaining harness-side fixes surfaced by the P38.1
+  re-test: bound the drive-loop context (P39.5), fold phase-6 verification into the drive (P39.6),
   native-Ollama adapter reliability (P39.9), and robust compaction/guard on weak local models (P39.8).
+  **P39.7** (no-progress guard) shipped 2026-07-22 — see [releases.md](releases.md).
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
@@ -84,27 +86,10 @@ small fix (swap one function for the other / share an implementation), no depend
 
 ## Open Work — Tier 2
 
-**Status:** 7 open. Threat-model track, in priority order — **P39.7** (no-progress guard: cheapest,
-twice-corroborated), **P39.6** (fold phase-6 verification into the drive loop), **P38.1** (conformance
-umbrella; gate now lifted, closes once the fixes below land). TUI/UX track (independent, see Tier 2/3 note
-above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual footer), **P40.2** (consistent hjkl/g/G),
-**P40.5** (dark/light auto-detect).
-
-### P39.7 — No-progress guard on the drive loop (counters "announce then yield")
-
-Weak local models sometimes end a turn with a plan ("Now I'll write the file…") and *no* tool call: a
-one-shot fill on the 35B model returned `turns=3` with 0 `edit_file` calls; a `gpt-oss:20b` `--skill` run
-against AiGateway reproduced it exactly (0 of 35 markers filled, yielded 3× with markers present), and adding
-an explicit "one section per turn, act now" preamble to that run's prompt unstuck the fill — direct evidence
-the nudge works. The drive loop should detect a
-turn that mutated no file while `PENDING` markers remain and re-prompt with an explicit "act now — call
-edit_file, no narration" nudge (bounded retries) instead of yielding a partial suite. Extends P39.2's
-tool-execution coaching from the malformed-call case to the no-call case. The P38.8 wrapper works around this
-today by prefixing every phase prompt with an "ACT IMMEDIATELY" preamble and re-invoking while the file still
-has markers.
-
-Priority: Tier 2 — small, no dependency; recovers a common local-model stall without human intervention.
-Do first: cheapest fix here and corroborated on two independent models.
+**Status:** 6 open. Threat-model track, in priority order — **P39.6** (fold phase-6 verification into the
+drive loop), **P38.1** (conformance umbrella; gate now lifted, closes once the fixes below land). TUI/UX
+track (independent, see Tier 2/3 note above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual
+footer), **P40.2** (consistent hjkl/g/G), **P40.5** (dark/light auto-detect).
 
 ### P39.6 — Fold phase-6 verification into the drive-to-completion loop
 
@@ -119,7 +104,7 @@ proof-of-shape.
 
 Priority: Tier 2 — cheap, self-contained, no dependency. Turns the drive's done-condition from "all markers
 filled" into "verifies clean," which is the real done-condition for an autonomous run. Sequence after
-P39.5/P39.7 land — nothing meaningful to verify until a build actually reaches zero markers.
+P39.5 lands — nothing meaningful to verify until a build actually reaches zero markers.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -358,7 +343,7 @@ wizard, a scanner-config form) rather than a small addition.
 
 ### P38.8 — External per-phase threat-model wrapper as interim autonomous-build workaround (parked)
 
-Until P39.5–P39.7 land, a completed, verify-clean suite is reachable **today** by driving Aegis outside the
+Until P39.5–P39.6 land, a completed, verify-clean suite is reachable **today** by driving Aegis outside the
 `--skill` loop, one phase at a time with bounded context. A reference implementation is recorded at
 `tools/aegis-threatmodel.sh` (+ `tools/THREAT-MODEL-AUTOMATION.md`) in the FirewallRiskRater repo: it runs
 `scaffold.py`, then a small **skill-free** `aegis chat` per phase (architecture → DFD → STRIDE → findings →
@@ -369,8 +354,8 @@ Validated per-phase on `qwen3.6-fast-32k`, 2026-07-21 — all five content phase
 verified clean after the fix loop.
 
 Priority: Tier 4 — a workaround that lives *outside* the harness and duplicates what the drive loop should do
-natively. Recorded so the working recipe isn't lost; **superseded by P39.5 + P39.6 + P39.7** once the built-in
-path converges. Do not invest in it beyond the reference.
+natively. Recorded so the working recipe isn't lost; **superseded by P39.5 + P39.6** (P39.7 shipped
+2026-07-22) once the built-in path converges. Do not invest in it beyond the reference.
 
 ### P25.9 — per-session scoping of `lsp.Manager` (remaining daemon singleton)
 

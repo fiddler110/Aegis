@@ -318,9 +318,15 @@ func newChatCmd() *cobra.Command {
 				} else {
 					noProgress = 0
 				}
+				nudge := continuePrompt(pending)
+				if noProgress > 0 {
+					// P39.7: the plain continuation alone did not unstick a model
+					// that yielded with narration and no tool call; escalate.
+					nudge = actNowPrompt(pending)
+				}
 				conv.Append(provider.Message{
 					Role:    provider.RoleUser,
-					Content: []provider.Block{provider.TextBlock{Text: continuePrompt(pending)}},
+					Content: []provider.Block{provider.TextBlock{Text: nudge}},
 				})
 			}
 
@@ -649,6 +655,18 @@ func continuePrompt(pending []string) string {
 	return "Continue — the task is not finished. These files still contain `<!-- PENDING: … -->` markers and must be completed:\n- " +
 		strings.Join(pending, "\n- ") +
 		"\n\nResume from the first unfinished file in dependency order and keep working until NO `<!-- PENDING` marker remains in any file. Each marker is section-keyed (`<!-- PENDING: <section> -->`): edit that exact marker one at a time — never a bare `<!-- PENDING -->` and never `replace_all` on a marker, which would overwrite every section at once. This is a non-interactive run: do not stop to ask whether to proceed, and do not return a partial result."
+}
+
+// actNowPrompt is the P39.7 no-progress nudge: a weak local model sometimes
+// ends a drive turn with narration ("Now I'll write the file…") and no tool
+// call at all, so the plain continuePrompt above just gets narrated at again.
+// Two independent local models (qwen3.6:35b-a3b, gpt-oss:20b) reproduced the
+// stall, and prefixing an explicit "act now" instruction is what broke it in
+// both cases (research/roadmap.md P39.7). Swapped in once an iteration has
+// made zero tool calls, bounded by the same noProgress counter that aborts
+// the drive after three consecutive occurrences.
+func actNowPrompt(pending []string) string {
+	return "ACT NOW: call `edit_file` in this turn. Do not describe or narrate what you are about to do — make the edit immediately, one PENDING marker at a time.\n\n" + continuePrompt(pending)
 }
 
 // scanPendingMarkers walks root (typically <cwd>/.aegis) and returns the

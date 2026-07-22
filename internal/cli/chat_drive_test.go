@@ -120,6 +120,18 @@ func TestContinuePrompt(t *testing.T) {
 	}
 }
 
+// actNowPrompt (P39.7) must still name every pending file (it wraps
+// continuePrompt) and additionally forbid narration, so a model that yielded
+// with no tool call is pushed to act instead of describing its plan again.
+func TestActNowPrompt(t *testing.T) {
+	p := actNowPrompt([]string{"a/1.md", "a/2.md"})
+	for _, want := range []string{"a/1.md", "a/2.md", "PENDING", "ACT NOW", "edit_file", "Do not describe or narrate"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("actNowPrompt missing %q in:\n%s", want, p)
+		}
+	}
+}
+
 // skillPreamble frames the body as authoritative instructions the same way the
 // TUI's /threat-model path does, so both surfaces present the skill identically.
 func TestSkillPreamble(t *testing.T) {
