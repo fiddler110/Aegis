@@ -11,7 +11,13 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 2 actionable (P38.1 conformance umbrella + P39.9 native-adapter half) + 2 parked (Tier 4).
+**Open items:** 8 actionable (P38.1 conformance umbrella + P39.9 native-adapter half + P40.1–P40.6
+codebase-review findings) + 2 parked (Tier 4).
+
+**Codebase review 2026-07-21** added P40.1–P40.6: **P40.1** (Tier 1) a plan-mode secret-leak via
+`env`/`printenv` in the read-only shell allowlist; **P40.2–P40.4** (Tier 2) file-mode-clobber on write,
+`read_file` bounded-read allocation, and repo-root `*.err` cleanup; **P40.5–P40.6** (Tier 3) decomposing
+the 4.7K-line `tui.go` and the ~456-line `engine.Run`.
 
 **P39.5, P39.6, P39.7, P39.8 shipped 2026-07-21** (code + unit tests — see
 [releases.md](releases.md#latest-changes)); **P39.9 partially shipped** (the `/v1`-can't-send-`num_ctx`
@@ -47,7 +53,30 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open.
+**Status:** 1 open — **P40.1** (codebase-review finding, 2026-07-21: `env`/`printenv` read-only-allowlist secret leak).
+
+### P40.1 — `env`/`printenv` in the read-only shell allowlist can leak API keys into the transcript
+
+`internal/tool/builtin/shell_readonly.go` classifies `env` and `printenv` (argv0 allowlist,
+`readOnlyShellArgv0`) as `CapRead`. API keys live in the **daemon's process environment** —
+`internal/config/config.go` `loadDotEnv` does `os.Setenv` from `.aegis/.env`, and `ProviderAPIKey`
+reads `os.Getenv("ANTHROPIC_API_KEY")`/`OPENAI_API_KEY`/etc. So in **plan mode** (the nominally
+"read-only, safe" posture) a model can run `shell {"command":"env"}`, have it auto-approved as
+`CapRead` (`permission.go` Decide → Allow for `CapRead` in plan), and pull the provider keys straight
+into the conversation and the SQLite session store. The plan-mode network gate (`CapNetwork` → Ask)
+stops *egress* without approval, but the secret is already exposed in context/logs by that point.
+
+Fix: drop `env`/`printenv` from `readOnlyShellArgv0` (they are low-value as read-only anyway) so they
+fall back to the normal `CapExecute` approval — or, if kept, scrub known secret-bearing env keys
+(`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `daemon.token`) from their output before returning it.
+
+**Related design caution (not its own item):** `readOnlyShellCommand` is a lexical scan that does not
+parse quotes, so a metacharacter nested in quotes isn't caught — the fallback is safe (it just requires
+the normal execute approval), but resist growing `readOnlyShellArgv0`/`readOnlyGitSubcommands` with any
+binary/subcommand that takes an `--exec`/`-e`/format-string escape hatch (the existing `git -c` exclusion
+is the pattern to follow).
+
+Priority: Tier 1 — a concrete, currently-reachable plan-mode secret-exposure path; small, self-contained fix.
 
 ---
 
@@ -128,6 +157,37 @@ exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading
 
 ---
 
+### P40.2 — `write_file`/`edit_file` clobber existing file mode on overwrite
+
+`internal/tool/builtin/file.go` hardcodes `0o644` on every write, including overwrites
+(`writeTool.Execute`, `editTool.Execute`). Editing an existing mode-sensitive file (a `0700` script, a
+key/token file) silently resets its permissions — drops the executable bit and widens to world-readable.
+Note also the asymmetry: parent directories are created `0o750` (`os.MkdirAll`) but files land `0o644`.
+
+Fix: `os.Stat` an existing target and preserve its mode on overwrite; keep `0o644` only for create-new.
+Decide and comment the intended file mode vs. the `0o750` dir mode either way.
+
+Priority: Tier 2 — small self-contained robustness/hardening fix, no dependency.
+
+### P40.3 — `read_file` allocates the whole line slice even for a bounded `offset`/`limit` read
+
+`internal/tool/builtin/file.go` reads up to `maxReadBytes` (50 MiB) then `strings.Split`s the entire
+file into a `[]string` before applying `offset`/`limit`. A `limit:20` read of a large file still
+allocates every line. Switch to a `bufio.Scanner` that stops at `offset+limit` so memory is bounded by
+what's actually returned. Low urgency given the 50 MiB cap, but a cheap opportunistic win.
+
+Priority: Tier 2 — small efficiency win, no dependency.
+
+### P40.4 — repo-root housekeeping: stray `*.err` debug files
+
+`chat1.err`, `chat2.err`, and `scan.err` sit untracked in the repo root (stray debug/redirect output).
+Confirm they're disposable, delete them, and add a `.gitignore` entry (e.g. `*.err` at root) so future
+redirected runs don't reintroduce them. Trivial cleanup surfaced during the 2026-07-21 codebase review.
+
+Priority: Tier 2 — housekeeping, no dependency.
+
+---
+
 ## Open Work — Tier 3
 
 **Status:** 1 half-open — **P39.9** (the native-Ollama-adapter no-tool-call hang; the `/v1`+`num_ctx` warning
@@ -178,6 +238,29 @@ over-flagging `internet-facing`);
 (d) **target-commit in the sidecar** — let `inventory.py` take an optional `--target-dir`/`--repo` (or read
 the commit from `0-assessment.md`) so a run directory kept outside the target repo still records the
 analyzed code's commit.
+
+### P40.5 — Decompose `internal/tui/tui.go` (4,731 lines in one file)
+
+The single largest source file in the tree and the main structural maintainability liability. The
+package is already partially split (`slash.go` 1,841, `transcript.go`, `toolview.go`), but `tui.go`
+itself still mixes Bubbletea model state, the `Update` message-routing switch, and view rendering.
+Split the `Update` switch by message domain (streaming, dialogs, persona/session pickers, cost) and
+lift rendering into its own file(s). Behavior-preserving refactor — pair with a `go test ./internal/tui/...`
+run and, ideally, a live TUI smoke check.
+
+Priority: Tier 3 — real maintainability value but a larger, careful refactor; no external dependency,
+sequence it when TUI work is already in flight.
+
+### P40.6 — Decompose `engine.Run` (~456 lines, `internal/engine/engine.go:397`)
+
+The core agent loop interleaves turn execution, compaction, output-guard retraction, nudge logic, and
+budget enforcement in one function. Extract the post-turn corrective/nudge bookkeeping
+(`retractGuardCorrectives`, `retractNudges`, `looksActionable`) into a small state helper to cut the
+cognitive load without changing behavior. Guard the refactor with the existing eval golden transcripts
+(`AEGIS_EVAL_UPDATE=1 go test ./internal/eval/...` should show **no** diff if truly behavior-preserving).
+
+Priority: Tier 3 — value is maintainability, not correctness; touches the hottest path so it needs the
+eval harness as a safety net.
 
 ---
 
