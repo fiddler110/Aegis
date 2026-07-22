@@ -141,6 +141,65 @@ func TestRunConcessionSkipsRebuttalAndFurtherRounds(t *testing.T) {
 	}
 }
 
+// TestRunHedgedCritiqueIsNotMisreadAsConcession is the P43.1 regression: a
+// critique that uses the word "concede" mid-sentence while actually raising a
+// substantiated challenge must not be misdetected as a full concession — that
+// would discard the challenge and wrongly tell the arbiter the critic backed
+// down, per security-arbiter.md's "conceded round counts in the claim's
+// favor" instruction.
+func TestRunHedgedCritiqueIsNotMisreadAsConcession(t *testing.T) {
+	hedged := "I won't concede this point — the claim is missing a rate limit check, see api.go:42."
+	run := scriptedRun(t, map[string][]string{
+		"critic": {hedged},
+		"proposer": {
+			"Rate limiting is enforced upstream by the gateway, not api.go.",
+		},
+		"arbiter": {
+			"VERDICT: REVISE\nCONFIDENCE: medium\nREASON: The rebuttal doesn't fully address round 1.",
+		},
+	})
+
+	tr, err := Run(context.Background(), "Claim under test.", Config{MaxRounds: 1}, run)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(tr.Rounds) != 1 {
+		t.Fatalf("len(Rounds) = %d, want 1", len(tr.Rounds))
+	}
+	if tr.Rounds[0].Conceded {
+		t.Fatalf("Rounds[0].Conceded = true, want false — hedged mid-text \"concede\" must not count as a concession")
+	}
+	if tr.Rounds[0].Rebuttal == "" {
+		t.Fatalf("Rounds[0].Rebuttal is empty, want the proposer's rebuttal to have run (round was wrongly treated as conceded)")
+	}
+}
+
+// TestConcedeRegexAnchoredToStart directly exercises isConcession against the
+// two shapes concedeRe must tell apart: the compliant opening keyword the
+// critic persona instructs, and the same word buried mid-sentence in a
+// hedge/negation.
+func TestConcedeRegexAnchoredToStart(t *testing.T) {
+	tests := []struct {
+		name   string
+		text   string
+		expect bool
+	}{
+		{"compliant", "CONCEDE — I found no defensible flaw in this claim.", true},
+		{"compliant lowercase", "concede, the claim holds.", true},
+		{"markdown bold", "**CONCEDE** — no flaw found.", true},
+		{"leading whitespace", "  \n CONCEDE.", true},
+		{"negated mid-text", "I won't concede this point — see api.go:42.", false},
+		{"concede later in sentence", "The proposer might concede the edge case, but the core flaw remains.", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isConcession(tc.text); got != tc.expect {
+				t.Errorf("isConcession(%q) = %v, want %v", tc.text, got, tc.expect)
+			}
+		})
+	}
+}
+
 // TestRunMaxRoundsDefault proves the hard default (P12.6) applies when the
 // caller doesn't specify one.
 func TestRunMaxRoundsDefault(t *testing.T) {
