@@ -2,7 +2,6 @@ package lsp
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
@@ -43,14 +42,20 @@ var trustedCommands = map[string]bool{
 }
 
 // commandBasename normalizes a configured LSP command for allowlist
-// comparison: strips any directory path, lowercases, and strips a
-// Windows executable extension.
+// comparison: strips any directory path, lowercases, and strips a Windows
+// executable extension. A config's command can be a Windows-style path
+// (`C:\tools\gopls.exe`) regardless of the OS aegis itself runs on, so this
+// splits on both `/` and `\` explicitly rather than using filepath.Base —
+// filepath's separator handling follows the build's GOOS, not the string's.
 func commandBasename(command string) string {
-	base := filepath.Base(command)
+	base := command
+	if idx := strings.LastIndexAny(base, `/\`); idx >= 0 {
+		base = base[idx+1:]
+	}
 	base = strings.ToLower(base)
-	switch filepath.Ext(base) {
-	case ".exe", ".bat", ".cmd":
-		base = strings.TrimSuffix(base, filepath.Ext(base))
+	switch {
+	case strings.HasSuffix(base, ".exe"), strings.HasSuffix(base, ".bat"), strings.HasSuffix(base, ".cmd"):
+		base = base[:len(base)-4]
 	}
 	return base
 }

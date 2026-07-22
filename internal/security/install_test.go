@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -35,8 +36,9 @@ func TestRunGuidedInstallUnknownToolErrors(t *testing.T) {
 }
 
 // otherGOOS returns the two supported OS names that are not the one running
-// this test, so descriptor fixtures stay valid regardless of which platform
-// CI happens to run on.
+// this test, sorted to match InstallAvailability.OtherOSes's documented
+// (sorted) contract, so descriptor fixtures stay valid regardless of which
+// platform CI happens to run on.
 func otherGOOS() []string {
 	out := make([]string, 0, 2)
 	for _, os := range []string{"windows", "darwin", "linux"} {
@@ -44,6 +46,7 @@ func otherGOOS() []string {
 			out = append(out, os)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 

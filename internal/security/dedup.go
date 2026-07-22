@@ -2,12 +2,19 @@ package security
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 )
+
+// toForwardSlash converts backslashes to forward slashes unconditionally.
+// Scanner output and user-configured paths can be Windows-style regardless
+// of the OS aegis itself is built/run on, so filepath.ToSlash — a no-op
+// except on a windows build — can't be used to normalize them.
+func toForwardSlash(s string) string {
+	return strings.ReplaceAll(s, `\`, "/")
+}
 
 // cveRe extracts a CVE identifier embedded anywhere in a rule ID string —
 // osv-scanner findings carry alias IDs joined as "GO-2021-0053, CVE-2023-1234"
@@ -39,7 +46,7 @@ func normalizeLocation(loc string) string {
 			loc = inner
 		}
 	}
-	loc = filepath.ToSlash(loc)
+	loc = toForwardSlash(loc)
 	if idx := strings.LastIndex(loc, ":"); idx != -1 {
 		if _, err := strconv.Atoi(loc[idx+1:]); err == nil {
 			loc = loc[:idx]
