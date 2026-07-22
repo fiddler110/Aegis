@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-21
+**Last updated:** 2026-07-22
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 6 actionable (3 Tier 2, 3 Tier 3) + 2 parked (Tier 4).
+**Open items:** 13 actionable (7 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
 
 Threat-model fix priority order (do-first to least-urgent): **P39.7 → P39.5 → P39.6 → P39.9 → P39.8**,
 with **P38.1** as the tracking umbrella that closes once the first three land. Rationale: P39.7 is
@@ -55,9 +55,11 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 2
 
-**Status:** 3 open, in priority order — **P39.7** (no-progress guard: cheapest, twice-corroborated),
-**P39.6** (fold phase-6 verification into the drive loop), **P38.1** (conformance umbrella; gate now
-lifted, closes once the fixes below land).
+**Status:** 7 open. Threat-model track, in priority order — **P39.7** (no-progress guard: cheapest,
+twice-corroborated), **P39.6** (fold phase-6 verification into the drive loop), **P38.1** (conformance
+umbrella; gate now lifted, closes once the fixes below land). TUI/UX track (independent, see Tier 2/3 note
+above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual footer), **P40.2** (consistent hjkl/g/G),
+**P40.5** (dark/light auto-detect).
 
 ### P39.7 — No-progress guard on the drive loop (counters "announce then yield")
 
@@ -156,14 +158,66 @@ verification tracking, not independent build work.
 scanners. P34.6 checked the *language*-targeted tools; nothing has swept the SCA/secrets tools for non-zero
 exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading yet.
 
+**P40.1–P40.7** file TUI/UX gaps from a 2026-07-22 competitive review of `internal/tui` against best-in-class
+open source TUIs (lazygit, k9s, yazi, zellij, btop/bottom, lnav, glow/soft-serve). Independent track from the
+threat-model items above — no priority ordering implied between the two; within TUI/UX itself, **P40.1**
+(pane resize), **P40.6** (contextual footer), **P40.2** (consistent hjkl/g/G), and **P40.5** (dark/light
+auto-detect) are the cheap Tier 2 wins, while **P40.3** (transcript search) is the highest-value item overall
+but large enough to sit in Tier 3 alongside **P40.7** (unify bespoke dialogs) and **P40.4** (real inline image
+protocols, riskiest — needs a terminal-compat prototype).
+
+### P40.1 — Resizable panes (sidebar, terminal pane)
+
+The optional left sidebar and right-docked terminal pane (`Ctrl+B`/`Ctrl+X`) are fixed-width constants
+(`sidebarInnerW`, `termPaneTotalW` in `tui.go`), toggled on/off but never resized; `layout()` (`tui.go:2587`)
+recomputes viewport width from whichever panes are open but always at the same constant width. Best-in-class
+multiplexer/dashboard TUIs (`zellij`, `tmux`, `k9s`) let a user grow/shrink a focused pane with a keybind
+without leaving the app. Add a resize keybind (e.g. a modifier + arrow while a pane has focus) that adjusts a
+stored width within min/max bounds and re-runs `layout()`.
+
+Priority: Tier 2 — additive, no architecture change; turns an existing constant into a small piece of
+persisted state plus a keybinding.
+
+### P40.2 — Consistent hjkl/g/G navigation across every scrollable surface
+
+`j`/`k` currently work only in the completion popup (`tui.go:1426`) and transcript scroll
+(`transcript.go:746`); `bubbles/list`-backed dialogs get full hjkl for free but the transcript, tool-card
+view, and terminal pane are inconsistent with each other. Tools like `yazi`, `lazygit`, `k9s`, and `lnav`
+commit to hjkl plus `g`/`G` (top/bottom) on every scrollable surface, not just list widgets. Extend the same
+handling to the remaining panes.
+
+Priority: Tier 2 — small, self-contained; the pattern is already proven at two call sites, just needs
+replicating to the rest.
+
+### P40.5 — Auto-detect terminal light/dark background for the default theme
+
+Aegis always defaults to `darkScheme()` (`colorscheme.go:261`) and requires an explicit `/theme` command or
+config value to switch to light; tools built on the same lipgloss/termenv stack (`glow`, `soft-serve`) call
+`termenv.HasDarkBackground()` at startup to pick a sane default automatically.
+
+Priority: Tier 2 — small, no-dependency; a single startup check feeding into the same scheme-selection path
+that `/theme`/config already use.
+
+### P40.6 — Contextual per-pane keybinding footer
+
+`F1` (`renderHelpBox`, `tui.go:4505`) always renders the full static keymap regardless of what has focus
+(chat vs. sidebar vs. terminal pane vs. an open dialog). `lazygit`'s bottom bar instead shows only the hints
+relevant to whichever panel is currently focused. A one-line contextual footer would reduce how often users
+need the full overlay for common actions.
+
+Priority: Tier 2 — additive; `keyMap.helpEntries()` already exists as the single source of truth, this just
+needs a focus-scoped subset and a footer render path.
+
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 3 filed, in priority order — **P39.5** (bound the drive-loop context: root cause, do first),
-**P39.9** (native-Ollama adapter reliability: a dead tool-call path blocks everything downstream),
-**P39.8** (compaction/guard on weak local models: already mitigated by a fallback, least urgent) —
-plus open leads below.
+**Status:** 6 filed. Threat-model track, in priority order — **P39.5** (bound the drive-loop context: root
+cause, do first), **P39.9** (native-Ollama adapter reliability: a dead tool-call path blocks everything
+downstream), **P39.8** (compaction/guard on weak local models: already mitigated by a fallback, least
+urgent) — plus open leads below. TUI/UX track (independent, see Tier 2/3 note above P40.1) — **P40.3**
+(transcript search, highest value of the batch), **P40.7** (unify bespoke dialogs), **P40.4** (real inline
+image protocols, riskiest).
 
 ### P39.5 — Bound the skill drive-loop's peak context so local-model fills converge (P38.1 root cause)
 
@@ -231,6 +285,43 @@ over-flagging `internet-facing`);
 (d) **target-commit in the sidecar** — let `inventory.py` take an optional `--target-dir`/`--repo` (or read
 the commit from `0-assessment.md`) so a run directory kept outside the target repo still records the
 analyzed code's commit.
+
+### P40.3 — Full-text search within a session's transcript/history
+
+Every picker (session, persona, model, timeline, command palette) gets fuzzy filtering via the shared
+`listDialog` (`dialog.go`), but nothing greps the actual message content of the open session or across
+sessions — the timeline picker lists turns, not matches within them, and `/knowledge query` is a model-facing
+tool, not a UI widget. `lnav`'s incremental `/`-search-with-`n`/`N`-next-match (and plain `less`) is the
+standard here. Aegis sessions run long (agentic, multi-hour), so "find the earlier message where I asked
+about X" is a real, recurring need with no current answer short of manual scrolling.
+
+Priority: Tier 3 — highest end-user value of the TUI/UX batch (P40.1–P40.7), but needs a new
+incremental-search widget and match-navigation state rather than a keybinding, so it's larger than the Tier 2
+items in that batch.
+
+### P40.4 — Real inline image protocol support (kitty graphics / iTerm2 / sixel)
+
+`imagerender.go:17-33` explicitly descopes true inline-image protocols today because Bubbletea's cell-grid
+redraw model has no primitive for "opaque out-of-band terminal state" the way it does for OSC 8 hyperlinks —
+only a half-block SGR-text fallback ships. `yazi` and `superfile` solve the identical problem by writing image
+escapes directly to the terminal *outside* the Bubbletea render loop, tracking the pane's screen position, and
+redrawing only on scroll/resize/focus change. Worth a focused prototype against that specific technique before
+treating the gap as permanently closed — `imagerender.go`'s own comment already flags it as "a candidate
+follow-up once [richer protocols] can be verified against real terminals."
+
+Priority: Tier 3 — real value (currently a documented, deliberate gap) but risky: needs verification against
+real terminals before it's safe to ship, per the caveat already recorded in the code.
+
+### P40.7 — Migrate `securityConfigModel` and `wizardModel` onto the unified `listDialog` overlay system
+
+`dialog.go`'s `listDialog` unified four previously-separate picker types (palette/persona/session/timeline/
+model/history/threat-model/backtrack pickers), but `securityConfigModel` (`securityconfig.go`) and
+`wizardModel` (`wizard.go`) remain bespoke, hand-rolled overlays outside that system. Not user-visible as a
+bug today, but every future fix to shared dialog behavior (theming, dimming, resize, centering) has to be
+duplicated across three implementations instead of one.
+
+Priority: Tier 3 — real maintenance value but a larger refactor of two working, non-trivial forms (a 5-step
+wizard, a scanner-config form) rather than a small addition.
 
 ---
 
