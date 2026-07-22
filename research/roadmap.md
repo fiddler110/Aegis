@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 13 actionable (1 Tier 1, 6 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
+**Open items:** 14 actionable (1 Tier 1, 7 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
 
 Threat-model fix priority order (do-first to least-urgent): **P39.7 (shipped) → P39.5 → P39.6 → P39.9 →
 P39.8**, with **P38.1** as the tracking umbrella that closes once the remaining three land. Rationale:
@@ -38,6 +38,9 @@ tool-call path blocks everything, whereas P39.8 already degrades gracefully via 
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
+- **P44.1** (Tier 2) — bundled skill assets (scripts under a project/user `.aegis/skills/<name>/`) never go
+  through admission scanning before being surfaced to the model. Filed 2026-07-22 from a DefenseClaw
+  comparison.
 
 A handful of unfiled **leads** (condensed under Tier 2/Tier 3 below) capture mechanical follow-ups worth
 their own item when a concrete need appears.
@@ -221,6 +224,42 @@ need the full overlay for common actions.
 
 Priority: Tier 2 — additive; `keyMap.helpEntries()` already exists as the single source of truth, this just
 needs a focus-scoped subset and a footer render path.
+
+### P44.1 — Bundled skill assets (scripts, not just prose) never go through admission scanning
+
+Surfaced 2026-07-22 comparing Aegis against Cisco's DefenseClaw, whose CodeGuard admission gate statically
+scans a skill/MCP asset for secrets, dangerous exec, unsafe deserialization, and injection patterns *before*
+it's trusted. Aegis has no equivalent for the one place it has genuinely untrusted executable content on
+disk: a bundled skill directory (`.aegis/skills/<name>/SKILL.md` plus companion `scripts/`, `references/`)
+can ship arbitrary `.py`/`.sh` files. `appendFromDir` (`internal/skills/skills.go:214`) loads such a bundle
+and `withAssetManifest` (`skills.go:301`) lists every companion file in a `<skill_assets>` block telling the
+model to read them with its own file tools — and, if the skill's own instructions say so, run them via the
+shell tool. `wrapUntrustedSkill` (`skills.go:269`) only wraps the `SKILL.md` prose in a provenance marker
+(deliberately `scan=false` — skill prose about its own instructions makes the heuristic noisy, per that
+function's comment); it never touches the bundled scripts' actual content, and nothing else in the discovery
+path does either. A compromised contributor's commit (project `.aegis/skills/`) or a bad drop into a user's
+`~/.aegis/skills/` gets its scripts surfaced to the model, and potentially executed, with zero static
+scrutiny — the same class of supply-chain gap DefenseClaw's admission control targets, but for skills instead
+of MCP servers (Aegis doesn't fetch/build MCP server code itself — `cfg.MCP.servers` just points at an
+already-installed external command — so that half of DefenseClaw's model doesn't apply here today).
+
+Fix direction: reuse the filesystem-scan path `aegis security scan` already drives
+(`security.DefaultScanners`/`security.PlanScanners` against a directory, backed by the multiscanner container
+image — `internal/security/multiscanner.go`) rather than building a second static-analysis engine. On first
+discovery of a *bundled, untrusted* skill directory (the `!trusted` branch of `appendFromDir`, i.e. never the
+embedded built-ins), run it through the same scan and fold any HIGH/CRITICAL finding into the
+`<skill_assets>` block as a visible warning — same "frame it as data, never drop it" precedent
+`trust.Wrap`'s scan-hit path and `mcp.wrapUntrustedSkill`'s sibling `wrapUntrustedOutput` already set. Cache
+the verdict the same way `discoverCache`/`skillsDirSignature` (`skills.go:70-146`) already cache the parsed
+skill by directory signature, so re-scanning only happens when the bundle's files actually change. Must
+degrade to a silent no-op (not a hard failure) when the multiscanner image hasn't been built — mirror the
+existing `verifyMultiscannerImage`/`verifyMultiscannerCache` fallback pattern — since most sessions won't have
+run `aegis security build-image`.
+
+Priority: Tier 2 — self-contained hardening that reuses existing scanner and caching infrastructure end to
+end, no dependency on other open roadmap work. Not Tier 1: bundled skills are typically project-authored
+content at the same trust level as the rest of the repo already, so this is defense-in-depth against a
+supply-chain scenario rather than a currently-demonstrated exploit path.
 
 ---
 
