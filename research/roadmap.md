@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 13 actionable (1 Tier 1, 6 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
+**Open items:** 14 actionable (2 Tier 1, 6 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
 
 Threat-model fix priority order (do-first to least-urgent): **P39.7 (shipped) → P39.5 → P39.6 → P39.9 →
 P39.8**, with **P38.1** as the tracking umbrella that closes once the remaining three land. Rationale:
@@ -25,6 +25,11 @@ tool-call path blocks everything, whereas P39.8 already degrades gracefully via 
   (`compaction.EstimateTokens`) instead of the engine's script-aware one (`engine.estimateTokens`), so a
   CJK/non-ASCII-heavy conversation can silently skip compaction the engine itself has already determined is
   needed. Surfaced by a 2026-07-22 data-flow review, not yet fixed.
+- **P43.1** (Tier 1) — `internal/debate`'s concession detector (`concedeRe`) matches the bare word
+  "concede" anywhere in a critic's response with no negation handling, so a hedged critique ("I won't
+  concede this — the claim is missing X") is misdetected as a full concession, discarding the actual
+  challenge and telling the arbiter the critic backed down. Confirmed with a live regex test, not yet
+  fixed. Surfaced examining `internal/debate`/`internal/swarm` reliability as a candidate next-phase area.
 - **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. **Environment gate lifted:**
   the doctor-recommended `qwen3.6:35b-a3b` is now installed and the conformance re-test has been run
   (2026-07-21, against FirewallRiskRater). The build **mechanism** re-confirms, but the autonomous
@@ -55,7 +60,7 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 1
 
-**Status:** 1 open.
+**Status:** 2 open.
 
 ### P41.1 — Compaction's own token estimate disagrees with the engine's script-aware one, silently skipping compaction it shouldn't
 
@@ -81,6 +86,40 @@ Fix direction: export the engine's script-aware estimator (or move it to a share
 
 Priority: Tier 1 — a real, currently-triggerable robustness gap (any non-ASCII-heavy conversation hits it),
 small fix (swap one function for the other / share an implementation), no dependency on other roadmap work.
+
+### P43.1 — Debate's concession detector has no negation handling, misreading a hedged critique as a full concession
+
+`concedeRe` (`internal/debate/debate.go:161`, `` (?i)\bconcede\b` ``) is used two ways in `Run`
+(`internal/debate/debate.go:251-304`): inside `hasEvidence` (line 175-180, a concession is evidence-exempt)
+and directly at line 274 to set `Round.Conceded`, which short-circuits the round — `if round.Conceded { ...
+break }` (line 275-278) skips the proposer's rebuttal entirely, and `formatRounds` (line 331-336) renders the
+round to the arbiter as `"(critic conceded — no rebuttal needed)"` instead of showing a rebuttal. The
+critic persona (`internal/persona/builtin/security-critic.md`, mirrored in `critic.md`) instructs the model
+to reply with exactly `CONCEDE, followed by one sentence` when it finds no flaw — but `concedeRe` is
+unanchored: it matches the literal word "concede" **anywhere** in the response, with no negation awareness.
+A critique that hedges — `"I won't concede this point — the claim is missing a rate-limit check, see
+api.go:42."` — contains the word "concede" and is misdetected as `Conceded: true`, discarding a real,
+evidence-cited challenge and telling the arbiter the critic backed down. The arbiter persona
+(`security-arbiter.md`) is explicitly instructed to weigh a conceded round "in the claim's favor," so this
+isn't just lost transcript detail — it can flip a debate that should REJECT/REVISE into an UPHOLD. Confirmed
+live: `concedeRe.MatchString("I won't concede this point — the claim is missing a rate limit check, see
+api.go:42.")` returns `true`. Notably, the same file's `verdictOutcomeRe`/`verdictConfidenceRe`
+(`internal/debate/debate.go:185-186`) already anchor to line-start (`(?im)^\s*VERDICT\s*:...`) for exactly
+this reason on the arbiter's output — `concedeRe` just never got the same treatment for the critic's.
+
+Surfaced by examining `internal/debate`/`internal/swarm` reliability as a candidate next-phase roadmap area
+(2026-07-22) — parallel to the local-model strict-format-adherence theme already tracked in the
+threat-model track (P38.1/P39.x): a model that hedges instead of replying with the bare instructed keyword
+is exactly the failure mode weaker/local models are more likely to hit, but a fully compliant cloud model
+saying "I'll concede that X is a minor concern, but the core flaw stands" would trip the same bug.
+
+Fix direction: anchor the concession check the same way `verdictOutcomeRe` already does — require "CONCEDE"
+at (or very near) the start of the trimmed response, not a bare word match anywhere in it. Add a regression
+test asserting a hedged/negated mid-text "concede" is *not* detected as a concession, alongside the existing
+compliant-format case.
+
+Priority: Tier 1 — real, currently-triggerable (any critique phrasing that uses "concede" other than as the
+literal first word), small self-contained regex fix, no dependency on other roadmap work.
 
 ---
 
