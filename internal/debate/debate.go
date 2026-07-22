@@ -155,10 +155,23 @@ type Transcript struct {
 	Verdict Verdict
 }
 
-// concedeRe matches an explicit concession, case-insensitive, so a critic
-// stating "CONCEDE" (as its persona instructs) is recognized regardless of
-// capitalization or surrounding punctuation.
-var concedeRe = regexp.MustCompile(`(?i)\bconcede\b`)
+// concedeRe matches an explicit concession, case-insensitive. Anchored to the
+// start of the (trimmed, markdown-emphasis-stripped) response — the critic
+// persona instructs a concession to be the literal opening of the reply
+// ("CONCEDE, followed by one sentence...") — rather than matching "concede"
+// anywhere in the text (P43.1): an unanchored match misreads a hedge like "I
+// won't concede this point — the claim is missing X" as a full concession,
+// discarding a real evidence-cited challenge and telling the arbiter the
+// critic backed down. Mirrors why verdictOutcomeRe/verdictConfidenceRe below
+// anchor to line-start for the arbiter's structured output.
+var concedeRe = regexp.MustCompile(`(?i)^[\s*_]*concede\b`)
+
+// isConcession reports whether critique is an explicit concession per
+// concedeRe, trimming surrounding whitespace first so the anchor lines up
+// with the start of the model's actual content.
+func isConcession(critique string) bool {
+	return concedeRe.MatchString(strings.TrimSpace(critique))
+}
 
 // citationRe recognizes the evidence shapes the critic persona is instructed
 // to cite: a file:line reference, an explicit "Evidence:" tag, or a mention of
@@ -173,7 +186,7 @@ var citationRe = regexp.MustCompile(`(?i)(evidence\s*:|[\w./\\-]+\.\w+:\d+|\b(gr
 // concession is exempt — there is nothing to substantiate when the critic
 // found no flaw.
 func hasEvidence(critique string) bool {
-	if concedeRe.MatchString(critique) {
+	if isConcession(critique) {
 		return true
 	}
 	return citationRe.MatchString(critique)
@@ -271,7 +284,7 @@ func Run(ctx context.Context, claim string, cfg Config, run RunFunc) (Transcript
 			return t, fmt.Errorf("debate round %d critique: %w", i, err)
 		}
 
-		round := Round{N: i, Critique: critique, Evidence: hasEvidence(critique), Conceded: concedeRe.MatchString(critique)}
+		round := Round{N: i, Critique: critique, Evidence: hasEvidence(critique), Conceded: isConcession(critique)}
 		if round.Conceded {
 			t.Rounds = append(t.Rounds, round)
 			break

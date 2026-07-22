@@ -8,12 +8,32 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-22 — **P42.1 and P42.2 shipped** (workspace-trust and capability-spoofing gaps in
-`internal/plugins`, found by a scoped security self-review — see below). Earlier the same day: **P39.7
-shipped** (no-progress guard on the `--skill` drive loop — see below). Previously, 2026-07-21: **P38.6 and
-P38.7 shipped** (the two actionable engineering findings split out of the P38.1 conformance re-test — see
-below). Earlier the same day: **P39.1, P39.2, and P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a
-local-14b-model harness-improvement research pass — see [roadmap.md](roadmap.md)).
+**Last updated:** 2026-07-22 — **P43.1 shipped** (debate concession-detector negation blindness, found
+examining `internal/debate`/`internal/swarm` reliability — see below). Earlier the same day: **P42.1 and
+P42.2 shipped** (workspace-trust and capability-spoofing gaps in `internal/plugins`, found by a scoped
+security self-review — see below). Earlier still: **P39.7 shipped** (no-progress guard on the `--skill`
+drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (the two actionable engineering
+findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
+P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
+— see [roadmap.md](roadmap.md)).
+
+**P43.1 — Debate's concession detector no longer misreads a hedged critique as a full concession.** Examining
+`internal/debate`/`internal/swarm` reliability as a candidate next-phase roadmap area found `concedeRe`
+(`internal/debate/debate.go`) matched the bare word "concede" anywhere in a critic's response with no
+negation handling — confirmed live: a critique reading "I won't concede this point — the claim is missing a
+rate limit check, see api.go:42." matched as a full concession. Because `Round.Conceded` short-circuits the
+round (skips the proposer's rebuttal) and the arbiter persona is explicitly instructed to weigh a conceded
+round in the claim's favor, this could flip a debate that should REJECT/REVISE into an UPHOLD purely from
+critique phrasing — not model capability, since even a fully compliant model saying "I'll concede X is
+minor, but the core flaw stands" would trip it. The same file's `verdictOutcomeRe`/`verdictConfidenceRe`
+already anchor to line-start for the arbiter's structured output for exactly this reason; `concedeRe` never
+got the same treatment. Fixed: `concedeRe` is now anchored to the start of the trimmed response
+(`^[\s*_]*concede\b`, tolerating leading whitespace/markdown emphasis), and both call sites (`hasEvidence`,
+`Run`'s `Round.Conceded` assignment) go through a new `isConcession` helper instead of calling the regex
+directly. Tests: `TestRunHedgedCritiqueIsNotMisreadAsConcession` (full `Run` regression — proves the
+proposer's rebuttal now actually executes instead of being skipped) and `TestConcedeRegexAnchoredToStart`
+(direct regex table test covering compliant/markdown/negated/mid-sentence shapes),
+`internal/debate/debate_test.go`. Full `go test ./...` green (58 packages).
 
 **P42.1/P42.2 — `internal/plugins` closed the two gaps a scoped post-2026-07-03 security self-review found.**
 A review targeted at exactly the packages that shipped after the 2026-07-03 architecture/security review
