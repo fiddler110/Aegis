@@ -11,13 +11,14 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 8 actionable (P38.1 conformance umbrella + P39.9 native-adapter half + P40.1–P40.6
-codebase-review findings) + 2 parked (Tier 4).
+**Open items:** 1 actionable (P38.1 conformance umbrella) + P39.9 (native-adapter half investigated 2026-07-21,
+adapter exonerated — residual is repro-gated) + 2 parked (Tier 4).
 
-**Codebase review 2026-07-21** added P40.1–P40.6: **P40.1** (Tier 1) a plan-mode secret-leak via
-`env`/`printenv` in the read-only shell allowlist; **P40.2–P40.4** (Tier 2) file-mode-clobber on write,
+**Codebase review 2026-07-21** added P40.1–P40.6, **all shipped 2026-07-21**: **P40.1** (Tier 1) a plan-mode
+secret-leak via `env`/`printenv` in the read-only shell allowlist; **P40.2–P40.4** (Tier 2) file-mode-clobber on write,
 `read_file` bounded-read allocation, and repo-root `*.err` cleanup; **P40.5–P40.6** (Tier 3) decomposing
-the 4.7K-line `tui.go` and the ~456-line `engine.Run`.
+the 4.7K-line `tui.go` (now 2.3K + `view.go`/`stream.go`/`update.go`) and the nudge/guard bookkeeping in
+`engine.Run`. See [releases.md](releases.md#latest-changes).
 
 **P39.5, P39.6, P39.7, P39.8 shipped 2026-07-21** (code + unit tests — see
 [releases.md](releases.md#latest-changes)); **P39.9 partially shipped** (the `/v1`-can't-send-`num_ctx`
@@ -30,9 +31,12 @@ warning half). What remains open:
   and confirm (a) the P39.5 preamble compaction keeps the per-turn window bounded, (b) the P39.7 nudge unsticks
   stalls, (c) the P39.6 verify loop catches the consistency faults, (d) the P39.8 latch stops the summarizer
   waste. An interim external wrapper is parked as **P38.8**.
-- **P39.9** (Tier 3) — **half open.** The actionable `/v1`+`num_ctx` warning shipped; the **native-Ollama
-  adapter hang** (no tool call / no run directory after 8+ min on the skill-preload turn) is untouched and
-  investigation-gated — it needs a focused repro (think-mode? oversized system prompt?) before it's a ready fix.
+- **P39.9** (Tier 3) — **investigated 2026-07-21.** The `/v1`+`num_ctx` warning shipped; the native-adapter
+  "no tool call after 8+ min" half was **reproduced against and disproven for** the available models
+  (gpt-oss:20b, qwen3:14b — tool calls emit promptly, `think` on/off, even under prompt overflow). The
+  residual is not an adapter tool-call defect but (i) a prefill-latency observability gap and (ii) a
+  `server/contextwindow.go` `/api/ps`-verification lead; both want a constrained-VRAM (or `qwen3.6-fast-32k`)
+  repro before coding. See the P39.9 body.
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
@@ -53,30 +57,13 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 1
 
-**Status:** 1 open — **P40.1** (codebase-review finding, 2026-07-21: `env`/`printenv` read-only-allowlist secret leak).
+**Status:** 0 open. **P40.1 shipped 2026-07-21** — see [releases.md](releases.md#latest-changes).
 
-### P40.1 — `env`/`printenv` in the read-only shell allowlist can leak API keys into the transcript
-
-`internal/tool/builtin/shell_readonly.go` classifies `env` and `printenv` (argv0 allowlist,
-`readOnlyShellArgv0`) as `CapRead`. API keys live in the **daemon's process environment** —
-`internal/config/config.go` `loadDotEnv` does `os.Setenv` from `.aegis/.env`, and `ProviderAPIKey`
-reads `os.Getenv("ANTHROPIC_API_KEY")`/`OPENAI_API_KEY`/etc. So in **plan mode** (the nominally
-"read-only, safe" posture) a model can run `shell {"command":"env"}`, have it auto-approved as
-`CapRead` (`permission.go` Decide → Allow for `CapRead` in plan), and pull the provider keys straight
-into the conversation and the SQLite session store. The plan-mode network gate (`CapNetwork` → Ask)
-stops *egress* without approval, but the secret is already exposed in context/logs by that point.
-
-Fix: drop `env`/`printenv` from `readOnlyShellArgv0` (they are low-value as read-only anyway) so they
-fall back to the normal `CapExecute` approval — or, if kept, scrub known secret-bearing env keys
-(`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `daemon.token`) from their output before returning it.
-
-**Related design caution (not its own item):** `readOnlyShellCommand` is a lexical scan that does not
-parse quotes, so a metacharacter nested in quotes isn't caught — the fallback is safe (it just requires
-the normal execute approval), but resist growing `readOnlyShellArgv0`/`readOnlyGitSubcommands` with any
-binary/subcommand that takes an `--exec`/`-e`/format-string escape hatch (the existing `git -c` exclusion
-is the pattern to follow).
-
-Priority: Tier 1 — a concrete, currently-reachable plan-mode secret-exposure path; small, self-contained fix.
+*(P40.1 — `env`/`printenv` dropped from the read-only shell allowlist, closing a plan-mode
+provider-API-key leak. The **related design caution** — `readOnlyShellCommand` is a lexical scan that
+does not parse quotes, so resist growing `readOnlyShellArgv0`/`readOnlyGitSubcommands` with any
+binary/subcommand that takes an `--exec`/`-e`/format-string escape hatch; the `git -c` exclusion is the
+pattern to follow — carries forward as standing guidance, not an open item.)*
 
 ---
 
@@ -157,42 +144,24 @@ exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading
 
 ---
 
-### P40.2 — `write_file`/`edit_file` clobber existing file mode on overwrite
+**P40.2, P40.3, P40.4 shipped 2026-07-21** — see [releases.md](releases.md#latest-changes).
 
-`internal/tool/builtin/file.go` hardcodes `0o644` on every write, including overwrites
-(`writeTool.Execute`, `editTool.Execute`). Editing an existing mode-sensitive file (a `0700` script, a
-key/token file) silently resets its permissions — drops the executable bit and widens to world-readable.
-Note also the asymmetry: parent directories are created `0o750` (`os.MkdirAll`) but files land `0o644`.
-
-Fix: `os.Stat` an existing target and preserve its mode on overwrite; keep `0o644` only for create-new.
-Decide and comment the intended file mode vs. the `0o750` dir mode either way.
-
-Priority: Tier 2 — small self-contained robustness/hardening fix, no dependency.
-
-### P40.3 — `read_file` allocates the whole line slice even for a bounded `offset`/`limit` read
-
-`internal/tool/builtin/file.go` reads up to `maxReadBytes` (50 MiB) then `strings.Split`s the entire
-file into a `[]string` before applying `offset`/`limit`. A `limit:20` read of a large file still
-allocates every line. Switch to a `bufio.Scanner` that stops at `offset+limit` so memory is bounded by
-what's actually returned. Low urgency given the 50 MiB cap, but a cheap opportunistic win.
-
-Priority: Tier 2 — small efficiency win, no dependency.
-
-### P40.4 — repo-root housekeeping: stray `*.err` debug files
-
-`chat1.err`, `chat2.err`, and `scan.err` sit untracked in the repo root (stray debug/redirect output).
-Confirm they're disposable, delete them, and add a `.gitignore` entry (e.g. `*.err` at root) so future
-redirected runs don't reintroduce them. Trivial cleanup surfaced during the 2026-07-21 codebase review.
-
-Priority: Tier 2 — housekeeping, no dependency.
+*(P40.2 — `write_file`/`edit_file` now preserve an existing file's permission bits on overwrite via a
+`writePreservingMode` helper (`os.Stat` the target, reuse its mode; `newFileMode` 0o644 only for
+create-new), so overwriting a `0700` script or a key/token file no longer drops the exec bit or widens to
+world-readable. P40.3 — `read_file` switched from whole-file `strings.Split` to a `bufio.Scanner` with a
+`splitLinesKeepFinal` split func that stops at `offset+limit`, so a bounded read allocates only what it
+returns; a 10-case oracle test asserts byte-identical output to the old renderer. P40.4 — the stray
+repo-root `*.err` files and the `*.gitignore` entry were already handled in the prior review commit.)*
 
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 1 half-open — **P39.9** (the native-Ollama-adapter no-tool-call hang; the `/v1`+`num_ctx` warning
-half shipped). **P39.5 and P39.8 shipped 2026-07-21** — see [releases.md](releases.md#latest-changes).
-Plus open leads below.
+**Status:** **P39.9** investigated 2026-07-21 — the native-adapter no-tool-call "hang" was reproduced against
+and disproven for the available models; residual is a repro-gated observability + `/api/ps`-verification lead
+(the `/v1`+`num_ctx` warning half already shipped). **P39.5, P39.8, P40.5, P40.6 shipped 2026-07-21** — see
+[releases.md](releases.md#latest-changes). Plus open leads below.
 
 *(P39.5 drive-loop context bounding shipped 2026-07-21 — the drive rewrites the first user message once after
 the opening turn, swapping the ~9K-token SKILL.md body for a compact re-read pointer. The fuller "per-phase
@@ -200,19 +169,57 @@ reference loading" form is subsumed by this compact-pointer approach; revisit on
 model needs a specific phase's reference re-injected. Full write-up in
 [releases.md](releases.md#latest-changes).)*
 
-### P39.9 — Native-Ollama adapter emits no tool call on large skill-preload turns (`/v1` `num_ctx` half SHIPPED)
+### P39.9 — Native-Ollama adapter emits no tool call on large skill-preload turns (`/v1` `num_ctx` half SHIPPED; (a) investigated 2026-07-21)
 
 **Half shipped 2026-07-21.** (b, shipped) The `/v1` compat path can't send `num_ctx`, so a skill drive on it
 overflows the modelfile default (`request (34774 tokens) exceeds the available context size (16384)`); `aegis
 chat --skill` now probes the served window and warns up front with a runnable modelfile-derivative recipe
-(`LegacyOllamaModelfileRecipe`) — see [releases.md](releases.md#latest-changes). (a, **still open**) With
-`provider.default: ollama` (native adapter) the skill-preload turn produced **no tool call and no run directory
-after 8+ minutes on two runs** — the same prompt on the `/v1` adapter emitted tool calls immediately. This half
-is untouched: it needs a focused repro (think-mode? oversized system prompt?) before it's a ready fix. Relates
-to P35.9/P39.3 (native-adapter work).
+(`LegacyOllamaModelfileRecipe`) — see [releases.md](releases.md#latest-changes). (a, **investigated
+2026-07-21 — adapter exonerated; residual reclassified below**) With `provider.default: ollama` (native
+adapter) the original report was **no tool call and no run directory after 8+ min on the skill-preload turn**.
 
-Priority: Tier 3 — investigation-gated (needs a repro) rather than a ready fix, now that the workaround-able
-`/v1` half is handled.
+**Repro run** (this machine: RX 7900 GRE 16GB VRAM / 16GB RAM; native `/api/chat` with a big system prompt +
+tool schemas + a "call the tool now" user message, faithfully mirroring the adapter's wire shape):
+
+| model | think | num_ctx | prompt | result |
+|---|---|---|---|---|
+| gpt-oss:20b | false | 32768 | ~10.6K tok | header 47s (prefill 10668 tok), **tool call at 48.5s** ✓ |
+| qwen3:14b | false | 32768 | ~10.6K tok | header 67s, **instant tool call** ✓ |
+| qwen3:14b | true | 32768 | ~10.6K tok | header 2.6s (warm), **tool call 9.2s** ✓ |
+| qwen3:14b | false | 32768 | ~34K tok (**overflow**) | silently truncated to prompt_eval=**28577**, header 153s, **tool call still correct** ✓ |
+
+`/api/ps` after the 32768 request reported `context_length=32768`, fully in VRAM (`size_vram==size`).
+
+**Findings:**
+1. **The native adapter is not structurally broken.** It emits tool calls promptly (once prefill completes)
+   on two tool-capable models, with `think` on *and* off (the default is `think=false` per
+   `providerfactory.buildOne`), and even under prompt overflow. The "think-mode? / oversized-prompt?"
+   hypotheses in the prior note are **ruled out** for the models tested.
+2. **Prefill withholds the response header for its entire duration** (153s for ~28K tokens here; it scales
+   with prompt size and model). The default `provider.response_header_timeout` is **5 min**
+   (`sse.DefaultResponseHeaderTimeout`), and the adapter already rewraps a prefill that exceeds it into an
+   actionable header-timeout error (P35.6). So an *8-min* wait implies either a raised timeout **or** the
+   specific failing model (`qwen3.6-fast-32k`, not installed here) generating non-tool content — **not** an
+   adapter tool-call defect. The user-facing gap is *observability*: a multi-minute prefill is
+   indistinguishable from a hang because nothing is emitted until the header arrives.
+3. **Silent front-truncation is real and reproduced** (34774 → 28577), but on the tested models the tool
+   schemas survived and tool-calling still worked; the hazard is the *system-prompt / skill* front being
+   dropped, which degrades instruction-following — exactly what **P39.5** (preamble compaction to bound the
+   per-turn window) already targets.
+
+**Ready-fix lead surfaced by the investigation** — `server/contextwindow.go:32-38` trusts native
+`num_ctx = cfgWin` as authoritative and **skips the `/api/ps` probe** ("the served window is exactly what's
+configured"). That assumption held on this machine (allocation matched, fully in VRAM), but on
+VRAM-constrained hardware Ollama can allocate *less* than the requested `num_ctx` (or offload KV/layers to
+CPU, turning prefill into the multi-minute wait of finding 2) — either reintroduces the silent truncation the
+daemon then can't see. A ready fix: still call `ollamainfo.Detect` (reads `/api/ps`) for the native+`cfgWin>0`
+case and, when the loaded allocation is below `cfgWin`, treat the loaded value as effective and emit the same
+warning `applyDetectedWindow` already logs for the compat path. **Not shipped** — needs a constrained-VRAM
+repro to validate, since on this machine the allocation matched exactly. Relates to P35.9/P39.3.
+
+Priority: Tier 3 — investigation done; the adapter tool-call defect is disproven for available models. What
+remains is (i) the prefill-latency observability gap and (ii) the `/api/ps`-verification lead above, both of
+which want a constrained-VRAM or `qwen3.6-fast-32k` repro before coding.
 
 *(P39.8 weak-local-model compaction robustness shipped 2026-07-21 — the engine latches the LLM summarizer off
 for the rest of a run after `summarizerGiveUpThreshold` cumulative failures, compacting deterministically
@@ -239,28 +246,17 @@ over-flagging `internet-facing`);
 the commit from `0-assessment.md`) so a run directory kept outside the target repo still records the
 analyzed code's commit.
 
-### P40.5 — Decompose `internal/tui/tui.go` (4,731 lines in one file)
+**P40.5 and P40.6 shipped 2026-07-21** — behavior-preserving refactors, see
+[releases.md](releases.md#latest-changes).
 
-The single largest source file in the tree and the main structural maintainability liability. The
-package is already partially split (`slash.go` 1,841, `transcript.go`, `toolview.go`), but `tui.go`
-itself still mixes Bubbletea model state, the `Update` message-routing switch, and view rendering.
-Split the `Update` switch by message domain (streaming, dialogs, persona/session pickers, cost) and
-lift rendering into its own file(s). Behavior-preserving refactor — pair with a `go test ./internal/tui/...`
-run and, ideally, a live TUI smoke check.
-
-Priority: Tier 3 — real maintainability value but a larger, careful refactor; no external dependency,
-sequence it when TUI work is already in flight.
-
-### P40.6 — Decompose `engine.Run` (~456 lines, `internal/engine/engine.go:397`)
-
-The core agent loop interleaves turn execution, compaction, output-guard retraction, nudge logic, and
-budget enforcement in one function. Extract the post-turn corrective/nudge bookkeeping
-(`retractGuardCorrectives`, `retractNudges`, `looksActionable`) into a small state helper to cut the
-cognitive load without changing behavior. Guard the refactor with the existing eval golden transcripts
-(`AEGIS_EVAL_UPDATE=1 go test ./internal/eval/...` should show **no** diff if truly behavior-preserving).
-
-Priority: Tier 3 — value is maintainability, not correctness; touches the hottest path so it needs the
-eval harness as a safety net.
+*(P40.5 — `internal/tui/tui.go` dropped from 4,731 to 2,285 lines via pure code motion into three new
+same-package files: `view.go` (the `View`/`render*` layer, 733 lines), `stream.go` (`applyStreamBatch`/
+`applyEvent` + tool-card management, 509 lines), and `update.go` (the `Update` message-routing switch,
+1,249 lines). No logic changed; `go test ./internal/tui/...` stays green. The finer per-domain split of the
+`Update` switch itself is left as opportunistic follow-up when TUI work is next in flight. P40.6 — the three
+parallel nudge/guard counters in `engine.Run` (`guardRetries`, `zeroToolNudges`, `emptyAnswerNudges`) and
+their trio of terminal retraction if-blocks collapsed into a `nudgeState` struct with a single `retractAll`
+method; the eval golden transcripts show **no** diff, confirming behavior preservation.)*
 
 ---
 
