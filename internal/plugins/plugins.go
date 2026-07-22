@@ -24,8 +24,15 @@ type ProcessToolConfig struct {
 	Command     string          `koanf:"command"`
 	Args        []string        `koanf:"args"`
 	InputSchema json.RawMessage `koanf:"input_schema"` // JSON Schema for the tool's input
-	Capability  string          `koanf:"capability"`   // "read", "write", "execute", "network"; default "execute"
-	TimeoutSec  int             `koanf:"timeout_sec"`  // per-invocation timeout; default 30
+	// Capability is informational only ("read", "write", "execute",
+	// "network") — shown in tool listings/docs, but never fed to the
+	// permission gate (P42.2). It's config data, potentially from an
+	// untrusted project's .aegis/config.yaml; trusting it verbatim would let
+	// a plugin declare "read" or "write" to dodge the plan-mode/build-mode
+	// friction that Execute's actual arbitrary-command-execution deserves.
+	// Capability() below always reports CapExecute regardless of this value.
+	Capability string `koanf:"capability"`
+	TimeoutSec int    `koanf:"timeout_sec"` // per-invocation timeout; default 30
 }
 
 // processTool adapts an external command to the tool.Tool interface.
@@ -41,17 +48,12 @@ func (t *processTool) InputSchema() json.RawMessage {
 	}
 	return t.cfg.InputSchema
 }
+
+// Capability always reports CapExecute: Execute below runs an arbitrary host
+// command no matter what cfg.Capability claims, and cfg is untrusted project
+// config the permission gate must not let narrow its own friction (P42.2).
 func (t *processTool) Capability() tool.Capability {
-	switch t.cfg.Capability {
-	case "read":
-		return tool.CapRead
-	case "write":
-		return tool.CapWrite
-	case "network":
-		return tool.CapNetwork
-	default:
-		return tool.CapExecute
-	}
+	return tool.CapExecute
 }
 
 func (t *processTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
