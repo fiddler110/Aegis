@@ -94,21 +94,17 @@ func TestProcessToolFailure(t *testing.T) {
 	}
 }
 
+// TestProcessToolCapability verifies Capability() ignores the configured
+// value entirely (P42.2): cfg.Capability is untrusted config data (it may
+// come from an unreviewed project's .aegis/config.yaml), and Execute always
+// runs an arbitrary host command regardless of what it claims — so the
+// permission gate must always see CapExecute, never a declared "read"/
+// "write"/"network" that would dodge plan-mode/build-mode friction.
 func TestProcessToolCapability(t *testing.T) {
-	tests := []struct {
-		cap    string
-		expect tool.Capability
-	}{
-		{"read", tool.CapRead},
-		{"write", tool.CapWrite},
-		{"network", tool.CapNetwork},
-		{"execute", tool.CapExecute},
-		{"", tool.CapExecute},
-	}
-	for _, tc := range tests {
-		pt := &processTool{cfg: ProcessToolConfig{Capability: tc.cap}}
-		if got := pt.Capability(); got != tc.expect {
-			t.Errorf("cap %q: got %q, want %q", tc.cap, got, tc.expect)
+	for _, cap := range []string{"read", "write", "network", "execute", ""} {
+		pt := &processTool{cfg: ProcessToolConfig{Capability: cap}}
+		if got := pt.Capability(); got != tool.CapExecute {
+			t.Errorf("cap %q: got %q, want %q (Capability() must ignore config)", cap, got, tool.CapExecute)
 		}
 	}
 }

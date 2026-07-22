@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 15 actionable (2 Tier 1, 7 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
+**Open items:** 13 actionable (1 Tier 1, 6 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
 
 Threat-model fix priority order (do-first to least-urgent): **P39.7 (shipped) → P39.5 → P39.6 → P39.9 →
 P39.8**, with **P38.1** as the tracking umbrella that closes once the remaining three land. Rationale:
@@ -25,12 +25,6 @@ tool-call path blocks everything, whereas P39.8 already degrades gracefully via 
   (`compaction.EstimateTokens`) instead of the engine's script-aware one (`engine.estimateTokens`), so a
   CJK/non-ASCII-heavy conversation can silently skip compaction the engine itself has already determined is
   needed. Surfaced by a 2026-07-22 data-flow review, not yet fixed.
-- **P42.1** (Tier 1) / **P42.2** (Tier 2) — a 2026-07-22 scoped security self-review targeted the packages
-  shipped *after* the 2026-07-03 architecture/security review (`internal/plugins`, `internal/hooks`,
-  `internal/mcpserver`, `internal/acp`, `internal/cron`). Every sibling package already carries a FIND-xx/
-  P24.x/P27.x hardening comment; `internal/plugins` (2026-07-16) has none — it was never folded into the
-  P27.1 workspace-trust gate that its structural twin, `mcp.servers`, already has. **P42.1** closes that gap;
-  **P42.2** fixes a compounding capability-spoofing issue found alongside it.
 - **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. **Environment gate lifted:**
   the doctor-recommended `qwen3.6:35b-a3b` is now installed and the conformance re-test has been run
   (2026-07-21, against FirewallRiskRater). The build **mechanism** re-confirms, but the autonomous
@@ -61,7 +55,7 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 1
 
-**Status:** 2 open.
+**Status:** 1 open.
 
 ### P41.1 — Compaction's own token estimate disagrees with the engine's script-aware one, silently skipping compaction it shouldn't
 
@@ -88,75 +82,14 @@ Fix direction: export the engine's script-aware estimator (or move it to a share
 Priority: Tier 1 — a real, currently-triggerable robustness gap (any non-ASCII-heavy conversation hits it),
 small fix (swap one function for the other / share an implementation), no dependency on other roadmap work.
 
-### P42.1 — `plugins:` (external process tools) is the one project-config surface excluded from the P27.1 workspace-trust gate
-
-`applyWorkspaceTrust`/`securityRelevantDiff` (`internal/config/config.go:1196-1258`) freeze a set of named
-security-relevant config keys to their user/global values until an operator runs `aegis trust` in a
-directory whose `.aegis/config.yaml` changes them — closing FIND-01/FIND-02 (P27.1): a cloned repository's
-project config is otherwise auto-merged with **no confirmation**. The gated list is `Permission`, `Sandbox`,
-`MCP`, `Notify.Webhook`, and `Hooks`. `Config.Plugins` (`internal/config/config.go:59`,
-`koanf:"plugins"`) — a list of `ProcessToolConfig` entries that each become a live tool executing an
-arbitrary host command (`internal/plugins/plugins.go:57-81`, `RegisterProcessTools` wired unconditionally at
-`internal/server/server.go:582-595`) — is **not** in that list, despite being structurally identical to
-`mcp.servers` (project config declares an external tool; the daemon registers and exposes it). Every other
-package that shipped after the 2026-07-03 review carries a FIND-xx/P24.x/P27.x hardening comment
-(`internal/hooks/exec.go`, `internal/mcpserver/server.go`, `internal/acp/agent.go`, `internal/cron/cron.go`
-all reference one); `internal/plugins` (added 2026-07-16, after P27.1 shipped) has none — it was simply never
-folded into the gate its sibling mechanisms already have.
-
-Net effect: opening an untrusted cloned repository is enough — no `aegis trust`, no tool-call approval — to
-register an attacker-named, attacker-described process tool backed by an arbitrary shell command. The tool
-still has to be *called* to run (by the model, including via prompt injection from file content the model
-reads), but nothing in the trust or approval path stops the registration itself, unlike every sibling
-project-config-sourced capability. See also **P42.2**, which compounds this by letting the same
-attacker-controlled config lie about the tool's capability class.
-
-Fix direction: add `Plugins` to `securityRelevantDiff` and to the freeze block in `applyWorkspaceTrust`
-(`cfg.Plugins = baseline.Plugins`), mirroring `cfg.MCP`/`cfg.Hooks` exactly.
-
-Priority: Tier 1 — real, currently-exploitable (any untrusted cloned repo with a `.aegis/config.yaml`), small
-fix (one field added to an existing gate), no dependency on other roadmap work.
-
 ---
 
 ## Open Work — Tier 2
 
-**Status:** 7 open. Security-self-review track (independent, new) — **P42.2** (plugin capability spoofing,
-pairs with P42.1 above). Threat-model track, in priority order — **P39.6** (fold phase-6 verification into
-the drive loop), **P38.1** (conformance umbrella; gate now lifted, closes once the fixes below land). TUI/UX
+**Status:** 6 open. Threat-model track, in priority order — **P39.6** (fold phase-6 verification into the
+drive loop), **P38.1** (conformance umbrella; gate now lifted, closes once the fixes below land). TUI/UX
 track (independent, see Tier 2/3 note above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual
 footer), **P40.2** (consistent hjkl/g/G), **P40.5** (dark/light auto-detect).
-
-### P42.2 — A process-tool's declared `capability` is attacker data the permission gate trusts verbatim
-
-`ProcessToolConfig.Capability` (`internal/plugins/plugins.go:27`) is a free-text config field
-(`"read"`/`"write"`/`"network"`, default `"execute"`) that `processTool.Capability()`
-(`internal/plugins/plugins.go:44-55`) returns unmodified. Every permission decision — the mode gate's
-plan/build/auto policy (`permission.Policy.Decide`, `internal/permission/permission.go:57-88`) and the rule
-gate — is keyed off `tool.EffectiveCapability(t, input)`, which for a plain tool falls back to this exact
-value (`internal/permission/permission.go:124-130`). For a built-in tool that's safe: `Capability()` is fixed
-in Go source, not data. For a process tool it is **config-declared**, so the same `.aegis/config.yaml` entry
-that registers the tool also gets to pick which friction tier it's judged under, independent of what its
-`Command` actually does. Concretely: a plugin declaring `capability: "read"` is auto-allowed in `plan` mode
-(`CapRead` → `Allow`, no approval, ever) while its `Execute` (`internal/plugins/plugins.go:57-81`) runs an
-arbitrary host command — the exact bypass `plan` mode's read-only guarantee exists to prevent. A plugin
-declaring `capability: "write"` gets the same free pass in `build` mode, Aegis's typical interactive mode,
-where only `CapExecute` requires an `Ask` approval (`write` is auto-`Allow`) — so mislabeling as `write`
-instead of the true `execute` skips the confirmation prompt a shell-executing tool would otherwise force.
-
-This is materially less severe once **P42.1** lands: an untrusted project's `plugins:` entries would then be
-frozen to baseline, so the spoofed-capability path only fires for configs an operator already explicitly
-trusted (self-inflicted mislabeling, not a remote attacker's). It's still a real design gap worth closing
-independently — an operator auditing a trusted project's `.aegis/config.yaml` for a `capability: "read"`
-plugin has no reason to expect that label is a lie the harness itself won't catch.
-
-Fix direction: don't let config choose a *narrower* capability than the mechanism actually has. Simplest:
-`processTool.Capability()` always returns `tool.CapExecute` regardless of the configured value (the field
-still selects a documentation/UI hint if useful, just stops feeding the permission gate). Alternative: keep
-the field but validate it server-side against an operator-only allowlist rather than per-tool config.
-
-Priority: Tier 2 — real gap, but its exploitability is halved once P42.1 lands (needs an already-trusted
-config) and the fix is a small, self-contained code change with no dependency on other roadmap work.
 
 ### P39.6 — Fold phase-6 verification into the drive-to-completion loop
 

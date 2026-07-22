@@ -1195,7 +1195,7 @@ func WorkspaceTrustStorePath() string {
 
 // securityRelevantDiff returns a human-readable line for each
 // security-relevant setting (per FIND-01/FIND-02: permission.*, sandbox.*,
-// mcp.servers, notify.webhook, hooks) where full differs from base.
+// mcp.servers, notify.webhook, hooks, plugins) where full differs from base.
 func securityRelevantDiff(full, base *Config) []string {
 	var diffs []string
 	if !reflect.DeepEqual(full.Permission, base.Permission) {
@@ -1213,15 +1213,22 @@ func securityRelevantDiff(full, base *Config) []string {
 	if !reflect.DeepEqual(full.Hooks, base.Hooks) {
 		diffs = append(diffs, fmt.Sprintf("hooks: %d configured -> %d configured", len(base.Hooks), len(full.Hooks)))
 	}
+	// Plugins (P42.1): a project's plugins: entries register live tools that
+	// execute an arbitrary host command (internal/plugins.RegisterProcessTools),
+	// structurally identical to mcp.servers above — same gate applies.
+	if !reflect.DeepEqual(full.Plugins, base.Plugins) {
+		diffs = append(diffs, fmt.Sprintf("plugins: %d configured -> %d configured", len(base.Plugins), len(full.Plugins)))
+	}
 	return diffs
 }
 
 // applyWorkspaceTrust implements the P27.1 workspace-trust gate: a project's
 // .aegis/config.yaml is auto-merged with no confirmation today (FIND-02),
 // letting a cloned repository silently widen permission.mode, add an
-// attacker MCP server, set a notify.webhook exfiltration channel, or run
-// session_start/pre_tool_use hooks (FIND-01). Until an operator explicitly
-// trusts the current directory (`aegis trust`), the security-relevant keys
+// attacker MCP server or process-tool plugin, set a notify.webhook
+// exfiltration channel, or run session_start/pre_tool_use hooks (FIND-01).
+// Until an operator explicitly trusts the current directory (`aegis trust`),
+// the security-relevant keys
 // are frozen to their user/global values — cfg (already unmarshalled with
 // the project layer applied) is mutated in place to fall back to baseline
 // (project layer excluded) for exactly those keys.
@@ -1253,6 +1260,7 @@ func applyWorkspaceTrust(cfg, baseline *Config) {
 	cfg.MCP = baseline.MCP
 	cfg.Notify.Webhook = baseline.Notify.Webhook
 	cfg.Hooks = baseline.Hooks
+	cfg.Plugins = baseline.Plugins
 	cfg.WorkspaceTrust.Frozen = true
 	cfg.WorkspaceTrust.Changes = diffs
 }

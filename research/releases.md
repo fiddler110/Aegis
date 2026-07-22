@@ -8,11 +8,30 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-22 — **P39.7 shipped** (no-progress guard on the `--skill` drive loop — see
-below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (the two actionable engineering findings split
-out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and P39.4 shipped;
-P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass — see
-[roadmap.md](roadmap.md)).
+**Last updated:** 2026-07-22 — **P42.1 and P42.2 shipped** (workspace-trust and capability-spoofing gaps in
+`internal/plugins`, found by a scoped security self-review — see below). Earlier the same day: **P39.7
+shipped** (no-progress guard on the `--skill` drive loop — see below). Previously, 2026-07-21: **P38.6 and
+P38.7 shipped** (the two actionable engineering findings split out of the P38.1 conformance re-test — see
+below). Earlier the same day: **P39.1, P39.2, and P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a
+local-14b-model harness-improvement research pass — see [roadmap.md](roadmap.md)).
+
+**P42.1/P42.2 — `internal/plugins` closed the two gaps a scoped post-2026-07-03 security self-review found.**
+A review targeted at exactly the packages that shipped after the 2026-07-03 architecture/security review
+(`internal/plugins`, `internal/hooks`, `internal/mcpserver`, `internal/acp`, `internal/cron`) found every
+sibling already carried a FIND-xx/P24.x/P27.x hardening comment except `internal/plugins` (added
+2026-07-16) — it was never folded into the P27.1 workspace-trust gate its structural twin, `mcp.servers`,
+already has. **P42.1:** `Config.Plugins` is now part of `securityRelevantDiff`/`applyWorkspaceTrust`
+(`internal/config/config.go`), so an untrusted project's `.aegis/config.yaml` can no longer register a
+process-tool plugin (an arbitrary host command exposed as a live tool) with no confirmation — mirrors the
+existing `cfg.MCP`/`cfg.Hooks` freeze exactly. **P42.2:** `ProcessToolConfig.Capability`
+(`internal/plugins/plugins.go`) was a free-text config field the permission gate trusted verbatim; since it's
+config data (potentially from that same untrusted project), a plugin could declare `capability: "read"` to
+be auto-allowed even in plan mode, or `"write"` to skip build mode's execute-`Ask` prompt, while its
+`Execute` ran an arbitrary command regardless. `processTool.Capability()` now always reports `CapExecute`,
+full stop — the field stays for documentation purposes but no longer feeds the gate. Tests:
+`internal/config/workspacetrust_test.go` (plugins added to the freeze/unfreeze regression),
+`internal/plugins/plugins_test.go` (`TestProcessToolCapability` now asserts `CapExecute` regardless of
+config). Full `go test ./...` green (58 packages).
 
 **P39.7 — No-progress guard on the drive loop escalates to an "act now" nudge.** Weak local models
 sometimes end a drive turn with narration ("Now I'll write the file…") and no tool call at all —
