@@ -12,7 +12,8 @@ keep it when adding items.
 ## Status
 
 **Open items:** 1 actionable (P38.1 conformance umbrella) + P39.9 (native-adapter half investigated 2026-07-21,
-adapter exonerated — residual is repro-gated) + 2 parked (Tier 4).
+adapter exonerated; `/api/ps`-verification fix shipped 2026-07-21 — residual is one repro-gated observability
+gap) + 2 parked (Tier 4).
 
 **Codebase review 2026-07-21** added P40.1–P40.6, **all shipped 2026-07-21**: **P40.1** (Tier 1) a plan-mode
 secret-leak via `env`/`printenv` in the read-only shell allowlist; **P40.2–P40.4** (Tier 2) file-mode-clobber on write,
@@ -31,12 +32,13 @@ warning half). What remains open:
   and confirm (a) the P39.5 preamble compaction keeps the per-turn window bounded, (b) the P39.7 nudge unsticks
   stalls, (c) the P39.6 verify loop catches the consistency faults, (d) the P39.8 latch stops the summarizer
   waste. An interim external wrapper is parked as **P38.8**.
-- **P39.9** (Tier 3) — **investigated 2026-07-21.** The `/v1`+`num_ctx` warning shipped; the native-adapter
-  "no tool call after 8+ min" half was **reproduced against and disproven for** the available models
-  (gpt-oss:20b, qwen3:14b — tool calls emit promptly, `think` on/off, even under prompt overflow). The
-  residual is not an adapter tool-call defect but (i) a prefill-latency observability gap and (ii) a
-  `server/contextwindow.go` `/api/ps`-verification lead; both want a constrained-VRAM (or `qwen3.6-fast-32k`)
-  repro before coding. See the P39.9 body.
+- **P39.9** (Tier 3) — **investigated 2026-07-21; `/api/ps`-verification fix shipped 2026-07-21.** The
+  `/v1`+`num_ctx` warning shipped; the native-adapter "no tool call after 8+ min" half was **reproduced
+  against and disproven for** the available models (gpt-oss:20b, qwen3:14b — tool calls emit promptly, `think`
+  on/off, even under prompt overflow). The `server/contextwindow.go` `/api/ps`-verification lead is now fixed
+  (native path probes the real allocation and downgrades below-`cfgWin` loaded windows, same as the compat
+  path). The only residual is (i) a prefill-latency observability gap, which wants a constrained-VRAM (or
+  `qwen3.6-fast-32k`) repro before coding. See the P39.9 body.
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
@@ -159,8 +161,9 @@ repo-root `*.err` files and the `*.gitignore` entry were already handled in the 
 ## Open Work — Tier 3
 
 **Status:** **P39.9** investigated 2026-07-21 — the native-adapter no-tool-call "hang" was reproduced against
-and disproven for the available models; residual is a repro-gated observability + `/api/ps`-verification lead
-(the `/v1`+`num_ctx` warning half already shipped). **P39.5, P39.8, P40.5, P40.6 shipped 2026-07-21** — see
+and disproven for the available models; the `/api/ps`-verification fix **shipped 2026-07-21**, leaving only
+the repro-gated prefill-latency observability gap (the `/v1`+`num_ctx` warning half already shipped). **P39.5,
+P39.8, P40.5, P40.6 shipped 2026-07-21** — see
 [releases.md](releases.md#latest-changes). Plus open leads below.
 
 *(P39.5 drive-loop context bounding shipped 2026-07-21 — the drive rewrites the first user message once after
@@ -169,7 +172,7 @@ reference loading" form is subsumed by this compact-pointer approach; revisit on
 model needs a specific phase's reference re-injected. Full write-up in
 [releases.md](releases.md#latest-changes).)*
 
-### P39.9 — Native-Ollama adapter emits no tool call on large skill-preload turns (`/v1` `num_ctx` half SHIPPED; (a) investigated 2026-07-21)
+### P39.9 — Native-Ollama adapter emits no tool call on large skill-preload turns (`/v1` `num_ctx` half SHIPPED; (a) investigated 2026-07-21; `/api/ps`-verification fix SHIPPED 2026-07-21)
 
 **Half shipped 2026-07-21.** (b, shipped) The `/v1` compat path can't send `num_ctx`, so a skill drive on it
 overflows the modelfile default (`request (34774 tokens) exceeds the available context size (16384)`); `aegis
@@ -207,19 +210,24 @@ tool schemas + a "call the tool now" user message, faithfully mirroring the adap
    dropped, which degrades instruction-following — exactly what **P39.5** (preamble compaction to bound the
    per-turn window) already targets.
 
-**Ready-fix lead surfaced by the investigation** — `server/contextwindow.go:32-38` trusts native
-`num_ctx = cfgWin` as authoritative and **skips the `/api/ps` probe** ("the served window is exactly what's
+**Ready-fix lead — SHIPPED 2026-07-21.** `server/contextwindow.go` previously trusted native
+`num_ctx = cfgWin` as authoritative and **skipped the `/api/ps` probe** ("the served window is exactly what's
 configured"). That assumption held on this machine (allocation matched, fully in VRAM), but on
 VRAM-constrained hardware Ollama can allocate *less* than the requested `num_ctx` (or offload KV/layers to
 CPU, turning prefill into the multi-minute wait of finding 2) — either reintroduces the silent truncation the
-daemon then can't see. A ready fix: still call `ollamainfo.Detect` (reads `/api/ps`) for the native+`cfgWin>0`
-case and, when the loaded allocation is below `cfgWin`, treat the loaded value as effective and emit the same
-warning `applyDetectedWindow` already logs for the compat path. **Not shipped** — needs a constrained-VRAM
-repro to validate, since on this machine the allocation matched exactly. Relates to P35.9/P39.3.
+daemon then can't see. **Fix landed:** `initContextWindow` no longer short-circuits the native+`cfgWin>0`
+case; it runs the same `ollamainfo.Detect` (`/api/ps`-backed) detection as the compat path and lets
+`applyDetectedWindow` downgrade to — and warn about — the real allocation whenever a *loaded* (authoritative)
+reading comes back below `cfgWin`. A non-authoritative reading (model not loaded yet) keeps `cfgWin` and
+retries via `maybeRefreshContextWindow` after the first run; an unreachable Ollama keeps `cfgWin`, stashes the
+base, and stays non-final. Four new `contextwindow_test.go` cases cover downgrade / honored-config /
+unreachable / not-loaded; `go test ./internal/server/...` green. Relates to P35.9/P39.3. *(The
+constrained-VRAM repro remains the only way to observe the downgrade fire on real hardware; the logic is
+behavior-preserving where allocation matches — the common well-resourced case still serves `cfgWin`/`config`.)*
 
-Priority: Tier 3 — investigation done; the adapter tool-call defect is disproven for available models. What
-remains is (i) the prefill-latency observability gap and (ii) the `/api/ps`-verification lead above, both of
-which want a constrained-VRAM or `qwen3.6-fast-32k` repro before coding.
+Priority: Tier 3 — investigation done and the `/api/ps`-verification lead now shipped; the adapter tool-call
+defect is disproven for available models. What remains open is only (i) the prefill-latency observability gap,
+which wants a constrained-VRAM or `qwen3.6-fast-32k` repro before coding.
 
 *(P39.8 weak-local-model compaction robustness shipped 2026-07-21 — the engine latches the LLM summarizer off
 for the rest of a run after `summarizerGiveUpThreshold` cumulative failures, compacting deterministically

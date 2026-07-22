@@ -29,17 +29,21 @@ func (s *Server) initContextWindow(ctx context.Context) {
 	}
 
 	p := s.cfg.Provider
-	if p.Default == "ollama" && cfgWin > 0 {
-		// The native Ollama adapter (P33.9) pins options.num_ctx to cfgWin on
-		// every request, so the served window is exactly what's configured —
-		// no probing needed, unlike the OpenAI-compat path below.
-		s.ctxWinFinal = true
-		return
-	}
+	// The native Ollama adapter (P33.9) pins options.num_ctx to cfgWin on every
+	// request, so on well-resourced hardware the served window is exactly what's
+	// configured. But num_ctx is a *request*, not a guarantee: on VRAM-constrained
+	// hardware Ollama can allocate less than asked (or offload KV/layers to CPU),
+	// silently truncating prompts from the front just like the compat path (P39.9).
+	// So we no longer trust cfgWin outright for native either — we run the same
+	// /api/ps-backed detection and let applyDetectedWindow downgrade to the real
+	// allocation when a *loaded* (authoritative) reading comes back below cfgWin.
+	// A non-authoritative reading (model not loaded yet) keeps cfgWin and retries
+	// via maybeRefreshContextWindow after the first run loads the model.
+	//
 	// Only probe when the target could plausibly be Ollama: the explicit
-	// "ollama" provider (with no configured window to pin), or an "openai"
-	// provider re-pointed at a custom base URL (the documented way to run
-	// Aegis against a local server via the OpenAI-compat endpoint).
+	// "ollama" provider, or an "openai" provider re-pointed at a custom base URL
+	// (the documented way to run Aegis against a local server via the
+	// OpenAI-compat endpoint).
 	if p.Default != "ollama" && (p.Default != "openai" || p.BaseURL == "") {
 		s.ctxWinFinal = true
 		return

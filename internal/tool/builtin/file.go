@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,7 +18,23 @@ import (
 const (
 	maxReadBytes    = 50 << 20 // 50 MiB
 	maxWriteContent = 10 << 20 // 10 MiB
+	// newFileMode is the permission for files we create; parent dirs are made
+	// 0o750 (see os.MkdirAll calls). On overwrite we preserve the existing
+	// file's mode instead — see writePreservingMode.
+	newFileMode = 0o644
 )
+
+// writePreservingMode writes data to abs. When abs already exists its current
+// permission bits are preserved (so overwriting a 0o700 script or a
+// mode-sensitive key/token file doesn't silently drop the exec bit or widen to
+// world-readable); a newly created file lands at newFileMode.
+func writePreservingMode(abs string, data []byte) error {
+	mode := os.FileMode(newFileMode)
+	if info, err := os.Stat(abs); err == nil {
+		mode = info.Mode().Perm()
+	}
+	return os.WriteFile(abs, data, mode)
+}
 
 // --- read ---
 
@@ -54,29 +71,60 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes))
-	f.Close()
-	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
-	}
+	defer f.Close()
 	if t.tracker != nil {
 		t.tracker.RecordRead(abs)
 	}
-	lines := strings.Split(string(data), "\n")
 	start := 1
 	if args.Offset > 0 {
 		start = args.Offset
 	}
+	// Scan line-by-line and stop once we've emitted `limit` lines from `start`,
+	// so a bounded read of a large file allocates only what it returns rather
+	// than splitting the whole file up front. The scanner is capped at
+	// maxReadBytes of total input, matching the old io.LimitReader behavior;
+	// splitLinesKeepFinal replicates strings.Split(data, "\n") semantics,
+	// including the trailing empty "line" for a file ending in a newline.
+	sc := bufio.NewScanner(io.LimitReader(f, maxReadBytes))
+	sc.Split(splitLinesKeepFinal)
+	sc.Buffer(make([]byte, 0, 64*1024), maxReadBytes)
 	var b strings.Builder
+	lineNo := 0
 	count := 0
-	for i := start - 1; i < len(lines); i++ {
+	for sc.Scan() {
+		lineNo++
+		if lineNo < start {
+			continue
+		}
 		if args.Limit > 0 && count >= args.Limit {
 			break
 		}
-		fmt.Fprintf(&b, "%d\t%s\n", i+1, lines[i])
+		fmt.Fprintf(&b, "%d\t%s\n", lineNo, sc.Text())
 		count++
 	}
+	if err := sc.Err(); err != nil {
+		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
+	}
 	return tool.Result{Content: b.String()}, nil
+}
+
+// splitLinesKeepFinal is a bufio.SplitFunc that splits on "\n" the same way
+// strings.Split(s, "\n") does: each token is the text between newlines with the
+// "\n" stripped, and a trailing "\n" yields a final empty token (so a file
+// ending in a newline reports one more line than it has content lines, matching
+// the prior strings.Split behavior). Unlike bufio.ScanLines it does not strip a
+// trailing "\r", preserving CRLF bytes in the emitted line.
+func splitLinesKeepFinal(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if i := strings.IndexByte(string(data), '\n'); i >= 0 {
+		return i + 1, data[:i], nil
+	}
+	if atEOF {
+		// Final chunk with no trailing newline: emit it as the last line. When
+		// data is empty at EOF we still must emit one token for an empty input
+		// (strings.Split("", "\n") == [""]) but not loop forever afterward.
+		return len(data), data, bufio.ErrFinalToken
+	}
+	return 0, nil, nil
 }
 
 // --- write ---
@@ -123,7 +171,7 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
 		return tool.Result{Content: fmt.Sprintf("mkdir failed: %v", err), IsError: true}, nil
 	}
-	if err := os.WriteFile(abs, []byte(args.Content), 0o644); err != nil {
+	if err := writePreservingMode(abs, []byte(args.Content)); err != nil {
 		return tool.Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}, nil
 	}
 	if t.tracker != nil {
@@ -190,7 +238,7 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		updated = strings.Replace(content, args.OldString, args.NewString, 1)
 	}
 	checkpoint.SnapshotterFrom(ctx).Capture(abs)
-	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
+	if err := writePreservingMode(abs, []byte(updated)); err != nil {
 		return tool.Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}, nil
 	}
 	if t.tracker != nil {

@@ -117,22 +117,101 @@ func TestInitContextWindowNonOllamaIsFinal(t *testing.T) {
 	}
 }
 
-// TestInitContextWindowNativeOllamaWithConfigSkipsProbe: the native Ollama
-// adapter (P33.9) pins options.num_ctx to the configured window on every
-// request, so a configured context_window is trusted outright — no /api/ps
-// or /api/show probe needed. Uses a bogus, unreachable base_url to prove no
-// network call happens: a probe attempt would time out and this test would
-// fail on the deadline instead of returning immediately.
-func TestInitContextWindowNativeOllamaWithConfigSkipsProbe(t *testing.T) {
+// fakeOllamaServer stands up the three native endpoints initContextWindow's
+// detection touches, with a /api/ps that reports psCtx as the loaded model's
+// context_length (0 = model not loaded / field absent).
+func fakeOllamaServer(t *testing.T, model string, psCtx int) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"version": "0.12.0"})
+	})
+	mux.HandleFunc("GET /api/ps", func(w http.ResponseWriter, _ *http.Request) {
+		if psCtx <= 0 {
+			json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"models": []map[string]any{
+			{"name": model, "model": model, "context_length": psCtx},
+		}})
+	})
+	mux.HandleFunc("POST /api/show", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// TestInitContextWindowNativeOllamaDowngradesUnderVRAMLimit: the P39.9 fix. On
+// VRAM-constrained hardware Ollama may allocate less than the requested
+// num_ctx; the native path now probes /api/ps and serves the smaller *loaded*
+// allocation instead of blindly trusting the configured window (which would
+// reintroduce the silent front-truncation detection exists to prevent).
+func TestInitContextWindowNativeOllamaDowngradesUnderVRAMLimit(t *testing.T) {
+	ts := fakeOllamaServer(t, "gemma4:12b", 8192) // asked for 32768, got 8192
+	s := ctxWinServer(32768, "ollama", ts.URL)
+	s.initContextWindow(context.Background())
+	win, src := s.effectiveContextWindow()
+	if win != 8192 || src != "ollama:loaded" {
+		t.Errorf("got %d/%q, want 8192/ollama:loaded", win, src)
+	}
+	if !s.ctxWinFinal {
+		t.Error("a loaded-model reading should be final")
+	}
+}
+
+// TestInitContextWindowNativeOllamaHonoredConfigStaysConfig: when the loaded
+// allocation matches (or exceeds) the configured window — the common
+// well-resourced case — the config value stands and its provenance stays
+// "config", not "ollama:loaded".
+func TestInitContextWindowNativeOllamaHonoredConfigStaysConfig(t *testing.T) {
+	ts := fakeOllamaServer(t, "gemma4:12b", 32768) // asked for 32768, got 32768
+	s := ctxWinServer(32768, "ollama", ts.URL)
+	s.initContextWindow(context.Background())
+	win, src := s.effectiveContextWindow()
+	if win != 32768 || src != "config" {
+		t.Errorf("got %d/%q, want 32768/config", win, src)
+	}
+	if !s.ctxWinFinal {
+		t.Error("a matching loaded reading should be final")
+	}
+}
+
+// TestInitContextWindowNativeOllamaUnreachableKeepsConfigAndRetries: when
+// Ollama is not answering yet (the daemon commonly starts first), the native
+// path keeps the configured window, stashes the base for a run-time retry, and
+// stays non-final so maybeRefreshContextWindow re-detects once the model loads.
+func TestInitContextWindowNativeOllamaUnreachableKeepsConfigAndRetries(t *testing.T) {
 	s := ctxWinServer(32768, "ollama", "http://127.0.0.1:1")
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	s.initContextWindow(ctx)
 	win, src := s.effectiveContextWindow()
 	if win != 32768 || src != "config" {
 		t.Errorf("got %d/%q, want 32768/config", win, src)
 	}
-	if !s.ctxWinFinal {
-		t.Error("a configured window on the native ollama adapter should be final immediately")
+	if s.ctxWinFinal {
+		t.Error("an unreachable Ollama should stay non-final so it re-detects at run time")
+	}
+	if s.ollamaBase == "" {
+		t.Error("the native base should be stashed for a run-time retry")
+	}
+}
+
+// TestInitContextWindowNativeOllamaNotLoadedKeepsConfig: Ollama is up but the
+// model is not loaded yet — /api/ps has no reading, /api/show pins nothing, so
+// detection is non-authoritative. The configured window stands and the server
+// stays non-final to re-detect after the first run loads the model.
+func TestInitContextWindowNativeOllamaNotLoadedKeepsConfig(t *testing.T) {
+	ts := fakeOllamaServer(t, "gemma4:12b", 0) // reachable, nothing loaded
+	s := ctxWinServer(32768, "ollama", ts.URL)
+	s.initContextWindow(context.Background())
+	win, src := s.effectiveContextWindow()
+	if win != 32768 || src != "config" {
+		t.Errorf("got %d/%q, want 32768/config", win, src)
+	}
+	if s.ctxWinFinal {
+		t.Error("a non-authoritative reading should stay non-final until a loaded reading confirms it")
 	}
 }

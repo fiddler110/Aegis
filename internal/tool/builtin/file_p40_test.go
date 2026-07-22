@@ -1,0 +1,134 @@
+package builtin
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// TestWritePreservesExistingFileMode covers P40.2: overwriting an existing
+// mode-sensitive file must not silently reset its permission bits (drop the
+// exec bit / widen to world-readable), while a newly created file still lands
+// at newFileMode. Unix-only — Windows doesn't carry POSIX permission bits.
+func TestWritePreservesExistingFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes not meaningful on Windows")
+	}
+	dir := t.TempDir()
+
+	// Pre-existing 0o700 file (e.g. a private script): overwrite must keep 0o700.
+	existing := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(existing, []byte("old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := &writeTool{root: dir}
+	res, err := w.Execute(context.Background(), mustJSON(t, map[string]any{"path": "script.sh", "content": "new"}))
+	if err != nil || res.IsError {
+		t.Fatalf("write overwrite: %v %+v", err, res)
+	}
+	if got := statMode(t, existing); got != 0o700 {
+		t.Errorf("overwrite reset mode to %o, want 0700 preserved", got)
+	}
+
+	// New file: lands at newFileMode.
+	created := filepath.Join(dir, "fresh.txt")
+	res, err = w.Execute(context.Background(), mustJSON(t, map[string]any{"path": "fresh.txt", "content": "hi"}))
+	if err != nil || res.IsError {
+		t.Fatalf("write new: %v %+v", err, res)
+	}
+	if got := statMode(t, created); got != os.FileMode(newFileMode) {
+		t.Errorf("new file mode = %o, want %o", got, newFileMode)
+	}
+
+	// edit_file must preserve mode too.
+	res, err = (&editTool{root: dir}).Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "script.sh", "old_string": "new", "new_string": "edited",
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("edit: %v %+v", err, res)
+	}
+	if got := statMode(t, existing); got != 0o700 {
+		t.Errorf("edit reset mode to %o, want 0700 preserved", got)
+	}
+}
+
+func statMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
+
+// TestReadBoundedMatchesFullSplit covers P40.3: the bufio.Scanner-based bounded
+// read must produce byte-identical output to the previous whole-file
+// strings.Split approach across the tricky cases (trailing newline, CRLF,
+// empty file, offset past EOF, offset+limit windows).
+func TestReadBoundedMatchesFullSplit(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		offset  int
+		limit   int
+	}{
+		{"trailing-newline", "a\nb\nc\n", 0, 0},
+		{"no-trailing-newline", "a\nb\nc", 0, 0},
+		{"empty", "", 0, 0},
+		{"single-line", "only", 0, 0},
+		{"crlf", "a\r\nb\r\nc\r\n", 0, 0},
+		{"offset-mid", "l1\nl2\nl3\nl4\nl5\n", 3, 0},
+		{"offset-and-limit", "l1\nl2\nl3\nl4\nl5\n", 2, 2},
+		{"limit-only", "l1\nl2\nl3\nl4\n", 0, 2},
+		{"offset-past-eof", "l1\nl2\n", 10, 0},
+		{"blank-lines", "\n\n\n", 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "f"), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r := &readTool{root: dir}
+			args := map[string]any{"path": "f"}
+			if tc.offset > 0 {
+				args["offset"] = tc.offset
+			}
+			if tc.limit > 0 {
+				args["limit"] = tc.limit
+			}
+			res, err := r.Execute(context.Background(), mustJSON(t, args))
+			if err != nil || res.IsError {
+				t.Fatalf("read: %v %+v", err, res)
+			}
+			want := referenceRender(tc.content, tc.offset, tc.limit)
+			if res.Content != want {
+				t.Errorf("bounded read mismatch\n got: %q\nwant: %q", res.Content, want)
+			}
+		})
+	}
+}
+
+// referenceRender reproduces the pre-P40.3 whole-file strings.Split rendering,
+// serving as the oracle the new scanner must match.
+func referenceRender(content string, offset, limit int) string {
+	lines := strings.Split(content, "\n")
+	start := 1
+	if offset > 0 {
+		start = offset
+	}
+	var b strings.Builder
+	count := 0
+	for i := start - 1; i < len(lines); i++ {
+		if limit > 0 && count >= limit {
+			break
+		}
+		fmt.Fprintf(&b, "%d\t%s\n", i+1, lines[i])
+		count++
+	}
+	return b.String()
+}

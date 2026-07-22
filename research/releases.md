@@ -8,6 +8,74 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**P39.9 (`/api/ps`-verification half) — the native-Ollama context-window path now verifies the real allocation
+instead of trusting `num_ctx = context_window` outright.** `internal/server/contextwindow.go`'s
+`initContextWindow` short-circuited the native `provider.default: ollama` + configured-`context_window` case:
+it set `ctxWinFinal = true` and returned without ever probing, on the theory that the native adapter (P33.9)
+pins `options.num_ctx` to the configured window on every request, so "the served window is exactly what's
+configured." That holds on well-resourced hardware, but `num_ctx` is a *request*, not a guarantee — on
+VRAM-constrained hardware Ollama can allocate *less* than asked (or offload KV/layers to CPU), silently
+front-truncating prompts (system prompt first) exactly like the OpenAI-compat path, and the daemon could not
+see it. The fix removes the short-circuit so the native path runs the same `ollamainfo.Detect` (`/api/ps`- and
+`/api/show`-backed) detection as the compat path and lets `applyDetectedWindow` reconcile: a *loaded*
+(authoritative) `/api/ps` reading below the configured window is served as the effective window with the
+existing "configured context_window exceeds what Ollama is serving" warning; a matching/larger reading keeps
+the configured value (provenance stays `config`); a non-authoritative reading (model not loaded yet) keeps the
+configured value and stays non-final so `maybeRefreshContextWindow` re-detects after the first run loads the
+model; an unreachable Ollama keeps the configured value, stashes the native base, and stays non-final for a
+run-time retry. This is the ready-fix lead surfaced by the P39.9 investigation (the adapter's tool-calling
+itself was exonerated for the available models; see [roadmap.md](roadmap.md)). The behavior is preserving
+where the allocation matches — the common well-resourced case still serves `config`/`config`. Tests: the old
+`TestInitContextWindowNativeOllamaWithConfigSkipsProbe` (which pinned the now-removed skip) is replaced by four
+cases in `contextwindow_test.go` — VRAM-limited downgrade to the loaded value, honored-config staying
+`config`, unreachable-Ollama keeping config + non-final, and reachable-but-not-loaded keeping config +
+non-final — against a fake native-endpoint server. `go test ./internal/server/...` green. The remaining open
+half of P39.9 is the repro-gated prefill-latency observability gap.
+
+**P40.1 — `env`/`printenv` dropped from the read-only shell allowlist (plan-mode secret-leak fix).**
+`internal/tool/builtin/shell_readonly.go` classified `env`/`printenv` as `CapRead` via
+`readOnlyShellArgv0`, so under plan mode a model could run `shell {"command":"env"}`, have it
+auto-approved as read-only, and pull the daemon's process environment — which holds the provider API
+keys (`config.loadDotEnv` `os.Setenv`s `.aegis/.env`, `ProviderAPIKey` reads `os.Getenv`) — straight
+into the transcript and SQLite session store before the `CapNetwork` egress gate ever fires. The two
+argv0 entries are removed (with a comment recording why they must not return), so the commands now fall
+back to the normal `CapExecute` approval flow. They are low value as read-only anyway. Tests:
+`env`/`printenv`/`printenv <key>` now assert `false` in `TestReadOnlyShellCommand`
+(`internal/tool/builtin/shell_readonly_test.go`).
+
+**P40.2 — `write_file`/`edit_file` preserve an existing file's mode on overwrite.**
+`internal/tool/builtin/file.go` previously hardcoded `0o644` on every write, so overwriting or editing a
+mode-sensitive file (a `0700` script, a key/token file) silently dropped the exec bit and widened it to
+world-readable — while parent dirs were made `0o750`. Both tools now route through a `writePreservingMode`
+helper that `os.Stat`s the target and reuses its permission bits when it already exists, falling back to the
+named `newFileMode` (0o644) only for create-new. A Unix-only test asserts a `0700` file keeps its mode
+across both `write_file` and `edit_file` overwrites, and a fresh file lands at `newFileMode`.
+
+**P40.3 — `read_file` bounds its allocation to what a bounded read returns.** The tool used to `strings.Split`
+the entire file (up to the 50 MiB `maxReadBytes` cap) into a `[]string` before applying `offset`/`limit`, so a
+`limit:20` read of a large file still allocated every line. It now scans with a `bufio.Scanner` and a custom
+`splitLinesKeepFinal` split func — which reproduces `strings.Split(data, "\n")` semantics exactly, including
+the trailing empty final line for a file ending in a newline and preserving CRLF bytes — and stops once
+`offset+limit` lines are emitted. A 10-case table test renders each input through both the new path and a
+reference oracle mirroring the old renderer and asserts byte-identical output (trailing newline, no trailing
+newline, empty file, CRLF, blank lines, offset/limit windows, offset-past-EOF).
+
+**P40.4 — stray repo-root `*.err` files.** Already handled in the prior codebase-review commit (files dropped,
+`*.err` added to `.gitignore`); verified none remain tracked or on disk.
+
+**P40.5 — `internal/tui/tui.go` decomposed from 4,731 to 2,285 lines.** Pure code motion into three new
+same-package files, no logic change: `view.go` (the `View`/`render*` rendering layer, 733 lines), `stream.go`
+(`applyStreamBatch`/`applyEvent` and the pending-tool-card lifecycle, 509 lines), and `update.go` (the
+`Update` message-routing switch, 1,249 lines). Imports were resolved with `goimports`; `go test
+./internal/tui/...` stays green. The finer per-message-domain split of the `Update` switch is left as
+opportunistic follow-up.
+
+**P40.6 — `engine.Run` nudge/guard bookkeeping folded into a `nudgeState` helper.** The three parallel
+counters (`guardRetries`, `zeroToolNudges`, `emptyAnswerNudges`) and the matching trio of terminal
+retraction if-blocks became a single `nudgeState` struct with a `retractAll(conv)` method. Behavior is
+unchanged — same retractions, same guards, same order — and the eval golden transcripts show **no** diff
+(`go test ./internal/eval/...`), which is the safety net the refactor was gated on.
+
 **Last updated:** 2026-07-21 — **P39.5, P39.6, P39.7, P39.8 shipped and P39.9 partially shipped** — the
 harness-side drive-loop fixes root-caused by the P38.1 conformance re-test (see below). These land the code;
 the **P38.1 umbrella stays open** pending a live re-test that confirms the built-in `--skill` drive now
