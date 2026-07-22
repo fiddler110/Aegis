@@ -15,11 +15,19 @@ import (
 var readOnlyShellArgv0 = map[string]bool{
 	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
 	"pwd": true, "stat": true, "file": true,
-	"grep": true, "which": true, "whoami": true, "env": true, "printenv": true,
+	"grep": true, "which": true, "whoami": true,
 	"date": true, "uname": true, "hostname": true, "id": true,
 	"du": true, "df": true, "ps": true, "sort": true, "uniq": true,
 	"cut": true, "tr": true, "nl": true, "less": true, "more": true,
 	"type": true, "tree": true,
+	// Deliberately NOT here (P40.1): env/printenv. They are read-only in the
+	// filesystem sense but dump the daemon's process environment, which holds
+	// the provider API keys (config.loadDotEnv os.Setenv's .aegis/.env into the
+	// process, ProviderAPIKey reads os.Getenv). Downgrading them to CapRead
+	// auto-approves them under plan mode, leaking the keys into the transcript
+	// and SQLite session store before the CapNetwork egress gate ever fires.
+	// Falling back to the normal CapExecute approval is the safe posture, and
+	// they are low value as read-only anyway.
 	// PowerShell read-only equivalents (the shell tool runs via PowerShell
 	// on Windows; see shell.go's Description).
 	"get-childitem": true, "get-content": true, "get-item": true, "test-path": true,
