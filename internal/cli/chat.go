@@ -160,6 +160,14 @@ func newChatCmd() *cobra.Command {
 				}
 			}
 
+			// Screen untrusted bundled skill directories through the same scan
+			// `aegis security scan` drives (P44.1); silent no-op when no scanner
+			// is available.
+			chatScanOpts := security.OptionsFromConfig(cfg.Security)
+			skills.SetBundleScanner(func(ctx context.Context, dir string) []string {
+				return security.ScanBundleWarnings(ctx, dir, chatScanOpts)
+			})
+
 			reg := tool.NewRegistry()
 			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, BuiltinSkills: enabledBuiltins, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand, GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second}); err != nil {
 				return err

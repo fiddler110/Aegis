@@ -467,6 +467,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	if err := skills.MaterializeBuiltins(cfg.DataDir); err != nil {
 		logger.Warn("failed to materialize built-in skills", "err", err)
 	}
+	// Screen untrusted bundled skill directories through the same filesystem
+	// scan `aegis security scan` drives, so a compromised .aegis/skills/ bundle's
+	// scripts surface a HIGH/CRITICAL warning rather than reaching the model
+	// unflagged (P44.1). Degrades to a silent no-op when the multiscanner image
+	// isn't built and no host scanner is installed.
+	scanOpts := security.OptionsFromConfig(cfg.Security)
+	skills.SetBundleScanner(func(ctx context.Context, dir string) []string {
+		return security.ScanBundleWarnings(ctx, dir, scanOpts)
+	})
 	store, err := session.Open(cfg.SessionDBPath())
 	if err != nil {
 		return nil, err
