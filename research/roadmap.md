@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-22
+**Last updated:** 2026-07-23
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 14 actionable (1 Tier 1, 7 Tier 2, 6 Tier 3) + 2 parked (Tier 4).
+**Open items:** 18 actionable (1 Tier 1, 9 Tier 2, 8 Tier 3) + 2 parked (Tier 4).
 
 Threat-model fix priority order (do-first to least-urgent): **P39.7 (shipped) → P39.5 → P39.6 → P39.9 →
 P39.8**, with **P38.1** as the tracking umbrella that closes once the remaining three land. Rationale:
@@ -41,6 +41,14 @@ tool-call path blocks everything, whereas P39.8 already degrades gracefully via 
 - **P44.1** (Tier 2) — bundled skill assets (scripts under a project/user `.aegis/skills/<name>/`) never go
   through admission scanning before being surfaced to the model. Filed 2026-07-22 from a DefenseClaw
   comparison.
+- **P45.1** (Tier 2) — `worktree.Manager.Add` never carries uncommitted/untracked files into a new worktree.
+  Filed 2026-07-23 from an xAI `grok-build` (`xai-fast-worktree`) comparison.
+- **P45.2** (Tier 3) — no hunk-level agent-vs-external attribution; `filetracker` only does whole-file mtime
+  staleness. Filed 2026-07-23 from the same comparison (`xai-hunk-tracker`).
+- **P40.8** (Tier 2) — no LaTeX math rendering in the transcript; `$...$`/`$$...$$` show as raw text. Filed
+  2026-07-23 from a `grok-build` (`xai-grok-markdown`) comparison, joins the P40.x TUI/UX track.
+- **P40.9** (Tier 3) — no inline mermaid diagram rendering in chat; `render_diagram` only produces file
+  output. Filed 2026-07-23, same comparison, joins the P40.x TUI/UX track.
 
 A handful of unfiled **leads** (condensed under Tier 2/Tier 3 below) capture mechanical follow-ups worth
 their own item when a concrete need appears.
@@ -89,10 +97,12 @@ small fix (swap one function for the other / share an implementation), no depend
 
 ## Open Work — Tier 2
 
-**Status:** 6 open. Threat-model track, in priority order — **P39.6** (fold phase-6 verification into the
+**Status:** 8 open. Threat-model track, in priority order — **P39.6** (fold phase-6 verification into the
 drive loop), **P38.1** (conformance umbrella; gate now lifted, closes once the fixes below land). TUI/UX
 track (independent, see Tier 2/3 note above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual
-footer), **P40.2** (consistent hjkl/g/G), **P40.5** (dark/light auto-detect).
+footer), **P40.2** (consistent hjkl/g/G), **P40.5** (dark/light auto-detect), **P40.8** (LaTeX math
+rendering). Independent hardening — **P44.1** (skill-asset scanning), **P45.1** (worktree dirty-file
+replication).
 
 ### P39.6 — Fold phase-6 verification into the drive-to-completion loop
 
@@ -225,6 +235,20 @@ need the full overlay for common actions.
 Priority: Tier 2 — additive; `keyMap.helpEntries()` already exists as the single source of truth, this just
 needs a focus-scoped subset and a footer render path.
 
+### P40.8 — Render LaTeX math in the transcript instead of showing it raw
+
+`newGlamourRenderer` (`tui.go:4633`) wires up plain `glamour.NewTermRenderer` with no math extension, so a
+model response containing `$E=mc^2$` or a `$$...$$` block renders as literal dollar-sign text — goldmark
+(glamour's underlying parser) has no math awareness by default. xAI's `grok-build` (`xai-grok-markdown`)
+solves this the terminal-appropriate way: it doesn't attempt real TeX typesetting, it converts common LaTeX
+math markup to a Unicode approximation (`$E=mc^2$` → `E=mc²`) as a preprocessing pass before the existing
+renderer sees it — superscripts/subscripts/Greek letters/common operators via Unicode codepoints. Personas
+that discuss math (general math help, algorithm complexity, crypto primitives) currently degrade to raw
+markup with no visual distinction from prose.
+
+Priority: Tier 2 — small, self-contained preprocessing step ahead of the existing `newGlamourRenderer` call;
+no new rendering pipeline, no new dependency (a regex/parser pass over recognized delimiters).
+
 ### P44.1 — Bundled skill assets (scripts, not just prose) never go through admission scanning
 
 Surfaced 2026-07-22 comparing Aegis against Cisco's DefenseClaw, whose CodeGuard admission gate statically
@@ -261,16 +285,38 @@ end, no dependency on other open roadmap work. Not Tier 1: bundled skills are ty
 content at the same trust level as the rest of the repo already, so this is defense-in-depth against a
 supply-chain scenario rather than a currently-demonstrated exploit path.
 
+### P45.1 — `worktree.Manager.Add` doesn't carry uncommitted/untracked files into the new worktree
+
+`Add` (`internal/worktree/worktree.go:54`) is a thin wrapper over `git worktree add [-b branch] dest`, which
+only checks out the **committed** tree (HEAD or a new branch from it) — any staged, unstaged, or untracked
+files in the caller's working tree are invisible to the new worktree. Surfaced 2026-07-23 comparing against
+xAI's `grok-build`, whose `xai-fast-worktree` crate exists specifically to replicate dirty and (optionally)
+ignored files into a freshly created worktree — on top of CoW/BTRFS-snapshot cloning for speed, which Aegis
+doesn't need. The correctness half does apply here: today, spawning a subagent into an isolated worktree
+(the package's own doc comment frames this as "the 2026-standard mechanism for safe parallel agent
+execution") silently drops any in-progress uncommitted work in the source tree — the subagent operates on a
+clean HEAD checkout with no signal that it's missing the user's current edits, which can produce duplicate or
+conflicting work rather than an explicit error.
+
+Fix direction: after `git worktree add --no-checkout dest`, diff `git status --porcelain` against the source
+tree and copy modified/staged/untracked files (respecting `.gitignore` for untracked, mirroring
+`xai-fast-worktree`'s dirty/ignored split) into `dest` before returning, or surface a clear warning in the
+tool result when dirty state exists and isn't copied.
+
+Priority: Tier 2 — a real correctness surprise (silent, not exploitable) with a small, self-contained fix
+(`git status --porcelain` + file copy); no dependency on other roadmap work.
+
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 6 filed. Threat-model track, in priority order — **P39.5** (bound the drive-loop context: root
+**Status:** 8 filed. Threat-model track, in priority order — **P39.5** (bound the drive-loop context: root
 cause, do first), **P39.9** (native-Ollama adapter reliability: a dead tool-call path blocks everything
 downstream), **P39.8** (compaction/guard on weak local models: already mitigated by a fallback, least
 urgent) — plus open leads below. TUI/UX track (independent, see Tier 2/3 note above P40.1) — **P40.3**
 (transcript search, highest value of the batch), **P40.7** (unify bespoke dialogs), **P40.4** (real inline
-image protocols, riskiest).
+image protocols, riskiest), **P40.9** (inline mermaid rendering). Independent hardening — **P45.2**
+(hunk-level agent-vs-external attribution).
 
 ### P39.5 — Bound the skill drive-loop's peak context so local-model fills converge (P38.1 root cause)
 
@@ -365,6 +411,20 @@ follow-up once [richer protocols] can be verified against real terminals."
 Priority: Tier 3 — real value (currently a documented, deliberate gap) but risky: needs verification against
 real terminals before it's safe to ship, per the caveat already recorded in the code.
 
+### P40.9 — Inline mermaid diagram rendering in the transcript
+
+`render_diagram` (`internal/tool/builtin/diagram.go`) is the only path from mermaid/plantuml/graphviz source
+to a viewable diagram, and it always produces a **file** (SVG/PNG/draw.io) via Kroki or a local CLI fallback
+— there's no ASCII-art rendering of a ` ```mermaid ` fenced block inline in the chat transcript itself, the
+way `xai-grok-markdown`'s dedicated `mermaid` module renders diagrams directly into the terminal pager. Today
+a model that inlines a small mermaid snippet in its response (rather than calling `render_diagram`) just gets
+it shown as an unstyled code block; a user has to explicitly ask for the tool call and open the resulting
+file to see the shape of the diagram.
+
+Priority: Tier 3 — real value (diagrams are common in architecture/threat-model personas' prose, not just
+tool output) but needs an actual mermaid-to-ASCII/box-drawing layout engine (or shelling out to Kroki for a
+preview render), which is a materially bigger lift than P40.8's text substitution.
+
 ### P40.7 — Migrate `securityConfigModel` and `wizardModel` onto the unified `listDialog` overlay system
 
 `dialog.go`'s `listDialog` unified four previously-separate picker types (palette/persona/session/timeline/
@@ -375,6 +435,27 @@ duplicated across three implementations instead of one.
 
 Priority: Tier 3 — real maintenance value but a larger refactor of two working, non-trivial forms (a 5-step
 wizard, a scanner-config form) rather than a small addition.
+
+### P45.2 — No hunk-level agent-vs-external change attribution
+
+`internal/filetracker` (`tracker.go`) only tracks whole-file mtimes: `RecordRead` stamps a file's mtime,
+`CheckWrite` rejects a write if the file changed since the last read (stale-read discipline), but it has no
+concept of *which lines* in a file are agent-authored versus user-authored. Surfaced 2026-07-23 comparing
+against xAI's `grok-build`, whose `xai-hunk-tracker` crate runs an actor that attributes each diff hunk to
+`Agent` or `External` (fed by both the agent's own edit tool and an fs-notify watch for out-of-band changes),
+giving the rest of the system a per-hunk source label rather than a per-file timestamp. Aegis's
+`internal/checkpoint` restores whole turns, and there's no way today to answer "which of the changes
+currently in this file did the agent make" (e.g. to revert only the agent's hunks after the user has since
+hand-edited the same file, or to render a diff view scoped to just the AI's contribution).
+
+Fix direction: extend `filetracker` (or a new package it composes with) to record, per successful `edit_file`/
+`write_file` call, the resulting hunk ranges attributed to the agent, and reconcile against external mtime
+changes the same way `CheckWrite` already detects staleness — so external edits invalidate only the
+overlapping agent-attributed hunks rather than the whole file's tracking state.
+
+Priority: Tier 3 — real value for `/rewind`-adjacent precision and diff UX, but a materially bigger lift than
+P45.1: needs actual hunk-diffing (not just mtime comparison) and touches `checkpoint`'s restore model, not a
+self-contained change.
 
 ---
 
