@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 18 actionable (1 Tier 1, 9 Tier 2, 8 Tier 3) + 2 parked (Tier 4).
+**Open items:** 21 actionable (1 Tier 1, 11 Tier 2, 9 Tier 3) + 2 parked (Tier 4).
 
 Threat-model fix priority order (do-first to least-urgent): **P39.7 (shipped) → P39.5 → P39.6 → P39.9 →
 P39.8**, with **P38.1** as the tracking umbrella that closes once the remaining three land. Rationale:
@@ -49,6 +49,12 @@ tool-call path blocks everything, whereas P39.8 already degrades gracefully via 
   2026-07-23 from a `grok-build` (`xai-grok-markdown`) comparison, joins the P40.x TUI/UX track.
 - **P40.9** (Tier 3) — no inline mermaid diagram rendering in chat; `render_diagram` only produces file
   output. Filed 2026-07-23, same comparison, joins the P40.x TUI/UX track.
+- **P46.1** (Tier 2) — per-task file-write scope has no mechanical enforcement, only session-wide permission
+  rules. Filed 2026-07-23 from a `codex-build` (Claude-orchestrates-Codex) comparison.
+- **P46.2** (Tier 2) — `git_commit` has no pre-commit test gate; it's a straight passthrough regardless of
+  test state. Filed 2026-07-23, same comparison.
+- **P46.3** (Tier 3) — structured-build skill packaging declared scope + test-gated commit + one-task-one-
+  commit discipline. Filed 2026-07-23, same comparison; sequenced after P46.1/P46.2.
 
 A handful of unfiled **leads** (condensed under Tier 2/Tier 3 below) capture mechanical follow-ups worth
 their own item when a concrete need appears.
@@ -97,12 +103,12 @@ small fix (swap one function for the other / share an implementation), no depend
 
 ## Open Work — Tier 2
 
-**Status:** 8 open. Threat-model track, in priority order — **P39.6** (fold phase-6 verification into the
+**Status:** 11 open. Threat-model track, in priority order — **P39.6** (fold phase-6 verification into the
 drive loop), **P38.1** (conformance umbrella; gate now lifted, closes once the fixes below land). TUI/UX
 track (independent, see Tier 2/3 note above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual
 footer), **P40.2** (consistent hjkl/g/G), **P40.5** (dark/light auto-detect), **P40.8** (LaTeX math
 rendering). Independent hardening — **P44.1** (skill-asset scanning), **P45.1** (worktree dirty-file
-replication).
+replication), **P46.1** (per-task scope enforcement), **P46.2** (pre-commit test gate).
 
 ### P39.6 — Fold phase-6 verification into the drive-to-completion loop
 
@@ -306,17 +312,64 @@ tool result when dirty state exists and isn't copied.
 Priority: Tier 2 — a real correctness surprise (silent, not exploitable) with a small, self-contained fix
 (`git status --porcelain` + file copy); no dependency on other roadmap work.
 
+### P46.1 — Per-task file-write scope is never mechanically enforced, only advisory permission rules
+
+Surfaced 2026-07-23 comparing against `codex-build` (a Claude-orchestrates-Codex build workflow), whose
+`check_scope.py` mechanically checks that a task's file modifications stay within a declared per-task
+allowlist of exact paths, verified before and after code generation. Aegis's write-path gating has two
+mechanisms, both coarser and neither task-scoped: the mode gate (`internal/permission/permission.go:56-88`)
+decides per-capability (read/write/execute/network/spawn) with no path awareness at all, and the rule-based
+allow/deny gate (`internal/permission/rules.go`) matches glob patterns like `allow write_file(src/**)`
+against a file path (`ParseRule`, rules.go:69-92; `RuleGate.Check`, rules.go:321-341) — but these rules are
+parsed once at session/config load (`ParseRules`, rules.go:96-110) and apply for the whole session, not a
+single task. `ContextualGate` (`internal/permission/contextual.go`) is the closest existing shape — extra
+gate state layered on top of the base mode/rule check — but it tracks session-lifetime facts (e.g. "network
+was used this session"), not a per-task path allowlist. No built-in persona or skill even encodes "stay
+within a declared file scope" as prose (grepped `internal/persona/builtin/*.md` and
+`internal/skills/builtin/*/SKILL.md` — no hits). So a skill or subagent that should only be touching a
+handful of files for one task has no way to say so, and nothing would catch it if it strayed.
+
+Fix direction: add a gate layer with `ContextualGate`'s shape that a skill/tool call can push a declared path
+allowlist onto for the duration of a task (e.g. a dedicated `scope` tool call or skill front-matter field),
+checked the same way `RuleGate` matches glob patterns against every `write_file`/`edit_file` call, popped
+when the task/skill run ends.
+
+Priority: Tier 2 — additive new gate layer following an existing pattern (`ContextualGate`), self-contained,
+no dependency on other roadmap work. Not Tier 1: no currently-demonstrated exploit — this is blast-radius
+containment for agent-authored changes, not a response to an active gap.
+
+### P46.2 — No pre-commit test gate; `git_commit` always executes regardless of test state
+
+Same `codex-build` comparison (2026-07-23): its orchestration loop refuses to commit a task's changes unless
+the configured test command has just passed — "tests run before every commit, not usually, every one; red
+gate → no commit." Aegis's `gitCommitTool.Execute` (`internal/tool/builtin/git.go:192-247`) is a straight
+passthrough: validate message/paths → stage (`git add -A` or explicit paths) → `git commit -m` → return the
+hash and diffstat. There's no test-command config, no check that a test tool ran (let alone passed) since the
+last edit to a staged file, and no engine-level gate inspecting commit calls for a preceding test run — it's
+gated only by the ordinary `CapWrite` permission check, identical to any other write. The `developer` persona
+already tells the model in prose to "run the relevant build or test command to verify correctness" after
+edits (`internal/persona/builtin/developer.md:59-62`), but that's unenforced guidance disconnected from the
+commit call itself — a model can skip it, or lose it under context pressure, and commit broken code anyway.
+
+Fix direction: an optional config (e.g. `git.pre_commit_test_command`, or a skill/persona-declared test
+command) that `gitCommitTool` checks before running `git commit` — either require a matching test-tool
+invocation to have succeeded since the last staged edit, or shell out to the configured command itself and
+refuse the commit with the failure output on non-zero exit. Must default to a no-op when unconfigured so it
+doesn't retroactively break sessions with no test command declared.
+
+Priority: Tier 2 — self-contained change scoped to one tool, no dependency on other roadmap work.
+
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 8 filed. Threat-model track, in priority order — **P39.5** (bound the drive-loop context: root
+**Status:** 9 filed. Threat-model track, in priority order — **P39.5** (bound the drive-loop context: root
 cause, do first), **P39.9** (native-Ollama adapter reliability: a dead tool-call path blocks everything
 downstream), **P39.8** (compaction/guard on weak local models: already mitigated by a fallback, least
 urgent) — plus open leads below. TUI/UX track (independent, see Tier 2/3 note above P40.1) — **P40.3**
 (transcript search, highest value of the batch), **P40.7** (unify bespoke dialogs), **P40.4** (real inline
 image protocols, riskiest), **P40.9** (inline mermaid rendering). Independent hardening — **P45.2**
-(hunk-level agent-vs-external attribution).
+(hunk-level agent-vs-external attribution), **P46.3** (structured-build skill; sequenced after P46.1/P46.2).
 
 ### P39.5 — Bound the skill drive-loop's peak context so local-model fills converge (P38.1 root cause)
 
@@ -456,6 +509,32 @@ overlapping agent-attributed hunks rather than the whole file's tracking state.
 Priority: Tier 3 — real value for `/rewind`-adjacent precision and diff UX, but a materially bigger lift than
 P45.1: needs actual hunk-diffing (not just mtime comparison) and touches `checkpoint`'s restore model, not a
 self-contained change.
+
+### P46.3 — Structured-build skill: declared scope + test-gated commit + one-task-one-commit discipline
+
+`codex-build`'s remaining property (2026-07-23 comparison, alongside P46.1/P46.2) is workflow discipline
+layered on top of its scope and test-gate mechanisms: one task produces exactly one commit, one plan produces
+exactly one PR — eliminating mega-diffs and giving each commit a reviewable, single-purpose unit of change.
+Aegis has no equivalent packaged workflow: nothing steers a multi-task feature build toward one-commit-per-
+task, and the `git_commit` tool has no opinion on commit granularity today.
+
+Fix direction: once **P46.1** (per-task scope enforcement) and **P46.2** (test-gated commit) land as actual
+mechanisms rather than prose, package them into a skill (e.g. `structured-build`) that, for each task in a
+plan: declares the task's file scope, drives edits, requires the test gate to pass, and commits — one task,
+one commit. Sequenced after P46.1/P46.2 specifically because a skill enforcing this only in prose would repeat
+the same weakness the roadmap has already flagged elsewhere (e.g. **P44.1**, **P39.6**) — instructions a
+model can drop under context pressure are not a substitute for a mechanical check.
+
+**Related, not yet filed as its own item:** `codex-build` also halts entirely and presents the current diff
+to the user if a task fails 3 times, rather than continuing to retry or silently rewriting code. Aegis's
+`loopDetector` (`internal/engine/loopdetect.go`) only catches literal repeated tool-call signatures
+(`engine.go:734-739`), and `BudgetUSD`/`MaxTokensPerRun` (`engine.go:470-476`, `741-751`) only catch
+session-wide cost/token exhaustion — neither tracks "this specific task has failed N times" as its own
+signal, and neither produces a diff/summary artifact on stopping (both just emit a `KindError` event). Worth
+its own item once a "task" boundary exists (e.g. via P46.3) to count failures against.
+
+Priority: Tier 3 — real value (reviewable history, bounded blast radius per task) but sequence-dependent on
+P46.1 and P46.2 landing as enforced mechanisms first; not self-contained today.
 
 ---
 
