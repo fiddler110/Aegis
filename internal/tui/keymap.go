@@ -32,6 +32,8 @@ type keyMap struct {
 	PasteImage    key.Binding
 	Diagnose      key.Binding
 	HistorySearch key.Binding
+	PaneNarrower  key.Binding
+	PaneWider     key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -61,6 +63,11 @@ func defaultKeyMap() keyMap {
 		// (it previously held Ctrl+R — see docs/tui-guide.md and
 		// docs/sessions.md, updated alongside this change).
 		HistorySearch: key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "search input history")),
+		// P40.1: resize the focused pane (terminal when it has focus, else the
+		// sidebar). ctrl+left/right are free — the textarea uses alt+arrows for
+		// word navigation and ctrl+home/end for begin/end.
+		PaneNarrower: key.NewBinding(key.WithKeys("ctrl+left"), key.WithHelp("ctrl+←", "shrink focused pane")),
+		PaneWider:    key.NewBinding(key.WithKeys("ctrl+right"), key.WithHelp("ctrl+→", "grow focused pane")),
 	}
 }
 
@@ -90,6 +97,8 @@ func (km *keyMap) bindingsByName() map[string]*key.Binding {
 		"pasteimage":    &km.PasteImage,
 		"diagnose":      &km.Diagnose,
 		"historysearch": &km.HistorySearch,
+		"panenarrower":  &km.PaneNarrower,
+		"panewider":     &km.PaneWider,
 	}
 }
 
@@ -183,5 +192,7 @@ func (km keyMap) helpEntries() []keyHelpEntry {
 		{km.HistUp.Help().Key, km.HistUp.Help().Desc},
 		{km.HistDown.Help().Key, km.HistDown.Help().Desc},
 		{km.HistorySearch.Help().Key, km.HistorySearch.Help().Desc},
+		{km.PaneNarrower.Help().Key, km.PaneNarrower.Help().Desc},
+		{km.PaneWider.Help().Key, km.PaneWider.Help().Desc},
 	}
 }

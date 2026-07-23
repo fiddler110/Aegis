@@ -2,6 +2,21 @@ package tui
 
 import "testing"
 
+func TestIsAutoTheme(t *testing.T) {
+	auto := []string{"", "auto", "AUTO", "  Auto  "}
+	explicit := []string{"dark", "light", "dracula", "gruvbox"}
+	for _, n := range auto {
+		if !isAutoTheme(n) {
+			t.Errorf("isAutoTheme(%q) = false, want true", n)
+		}
+	}
+	for _, n := range explicit {
+		if isAutoTheme(n) {
+			t.Errorf("isAutoTheme(%q) = true, want false", n)
+		}
+	}
+}
+
 func TestApplyThemeSwitchesSchemeAndGlamourStyle(t *testing.T) {
 	defer applyTheme("dark", "") // restore for other tests: styles read package vars
 

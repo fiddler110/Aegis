@@ -113,16 +113,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "down", "j":
 				m.transientPanel.scroll(1)
 				return m, nil
-			case "pgup", "b":
+			// P40.2: u/d half-page mirror the transcript pane's vi vocabulary so
+			// both scrollable content surfaces navigate identically.
+			case "u", "ctrl+u":
+				m.transientPanel.scroll(-m.transientPanel.height / 2)
+				return m, nil
+			case "d", "ctrl+d":
+				m.transientPanel.scroll(m.transientPanel.height / 2)
+				return m, nil
+			case "pgup", "b", "ctrl+b":
 				m.transientPanel.scroll(-m.transientPanel.height)
 				return m, nil
-			case "pgdown", "space", "f":
+			case "pgdown", "space", "f", "ctrl+f":
 				m.transientPanel.scroll(m.transientPanel.height)
 				return m, nil
-			case "home":
+			case "g", "home":
 				m.transientPanel.scroll(-len(m.transientPanel.lines))
 				return m, nil
-			case "end":
+			case "G", "end":
 				m.transientPanel.scroll(len(m.transientPanel.lines))
 				return m, nil
 			}
@@ -306,6 +314,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refresh()
 		m.ready = true
 
+	case tea.BackgroundColorMsg:
+		// P40.5: the terminal answered our RequestBackgroundColor. Only act in
+		// "auto" mode (an explicit /theme opts out by clearing autoTheme). Pick
+		// light vs. dark and rebuild the styles/renderer the same way the live
+		// /theme switch does — the provisional scheme was bound at startup.
+		if m.autoTheme {
+			want := "dark"
+			if !msg.IsDark() {
+				want = "light"
+			}
+			if want != m.cfg.Theme {
+				m.cfg.Theme = applyTheme(want, m.cfg.WorkDir)
+				m.th = newTheme()
+				// rendererW is 0 until the first WindowSizeMsg; if this arrives
+				// first, layout() rebuilds the renderer with the new glamour
+				// style on the imminent resize, so only rebuild here once sized.
+				if m.rendererW > 0 {
+					m.renderer = newGlamourRenderer(m.rendererW)
+				}
+				m.refresh()
+			}
+		}
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
@@ -432,6 +463,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, m.keys.Diagnose) {
 			if cmd := m.diagnoseLastFailureCmd(); cmd != nil {
 				return m, cmd
+			}
+		}
+
+		// P40.1: resize the sidebar when it has focus (terminal-focused resize
+		// is handled in handleTerminalKey). A no-op when the sidebar is closed
+		// or too narrow to show — the keys then fall through harmlessly.
+		if key.Matches(msg, m.keys.PaneNarrower) {
+			if m.resizePane(-paneResizeStep) {
+				return m, nil
+			}
+		}
+		if key.Matches(msg, m.keys.PaneWider) {
+			if m.resizePane(paneResizeStep) {
+				return m, nil
 			}
 		}
 
@@ -1051,6 +1096,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// colors, same limitation /humor and /sidebar already have for
 			// past output.
 			name := strings.TrimPrefix(msg.Output, "\x00theme ")
+			// P40.5: "/theme auto" re-enables background detection; any explicit
+			// name opts out so a later BackgroundColorMsg can't override it.
+			if isAutoTheme(name) {
+				m.autoTheme = true
+				m.cfg.Theme = applyTheme("dark", m.cfg.WorkDir) // provisional until the terminal replies
+				m.th = newTheme()
+				m.renderer = newGlamourRenderer(m.rendererW)
+				m.transcript.Append(m.th.statusText.Render("Theme set to auto — detecting terminal background. Set tui.theme: auto in config to persist.") + "\n\n")
+				m.refresh()
+				return m, tea.RequestBackgroundColor
+			}
+			m.autoTheme = false
 			name = applyTheme(name, m.cfg.WorkDir)
 			m.cfg.Theme = name
 			m.th = newTheme()

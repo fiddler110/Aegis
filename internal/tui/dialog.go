@@ -331,7 +331,7 @@ func (p transientPanel) View() string {
 
 	hint := "esc to close"
 	if p.scrollable() {
-		hint = fmt.Sprintf("%d–%d of %d · ↑/↓ pgup/pgdn scroll · esc close", p.offset+1, end, len(p.lines))
+		hint = fmt.Sprintf("%d–%d of %d · j/k ↑/↓ · g/G top/bottom · esc close", p.offset+1, end, len(p.lines))
 	}
 	footer := lipgloss.NewStyle().Foreground(colTextMuted).Render(hint)
 

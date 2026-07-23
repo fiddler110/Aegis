@@ -221,7 +221,7 @@ func (m model) renderTitleBar() string {
 
 func (m model) renderSidebar(h int) string {
 	var b strings.Builder
-	w := sidebarInnerW - 2 // usable text width (inner - left padding)
+	w := m.sidebarW - 2 // usable text width (inner - left padding)
 
 	add := func(s string) { b.WriteString(s + "\n") }
 	// Section headers carry a small diamond marker (Crush-style) so the panel
@@ -332,7 +332,7 @@ func (m model) renderSidebar(h int) string {
 	}
 
 	return lipgloss.NewStyle().
-		Width(sidebarInnerW).
+		Width(m.sidebarW).
 		Height(h).
 		MaxHeight(h). // prevent overflow: lipgloss Height() pads but never truncates
 		BorderRight(true).
@@ -373,7 +373,7 @@ func (m model) renderInputArea() string {
 	// tail so lower-value segments disappear first on narrow terminals.
 	//   badge (always)  →  hints  →  stats  →  context/agents (sidebar off)  →  cwd
 	segs := []string{m.renderModeBadge()}
-	segs = append(segs, m.th.statusDim.Render("ctrl+k · f1 · ctrl+e"))
+	segs = append(segs, m.th.statusDim.Render(m.contextualFooterHints()))
 	if stats := m.renderStats(); stats != "" {
 		segs = append(segs, m.th.statusDim.Render(stats))
 	}
@@ -705,6 +705,36 @@ func saveStash(path, draft string) {
 }
 
 // --- help overlay ---
+
+// contextualFooterHints (P40.6) returns the compact key-hint segment for the
+// status bar, scoped to whatever input surface currently has focus — the
+// terminal pane owns input when termFocused, otherwise the chat composer does.
+// Keys come from m.keys (the same single source of truth as the F1 overlay and
+// /help) so a tui.keybindings override is reflected here too. lazygit's bottom
+// bar sets the precedent: show only the hints relevant to the focused panel
+// rather than the full static keymap.
+func (m model) contextualFooterHints() string {
+	sep := " · "
+	if m.termFocused {
+		// Terminal pane: the actions that matter while typing shell commands.
+		return strings.Join([]string{
+			"esc chat",
+			m.keys.Diagnose.Help().Key + " diagnose",
+			m.keys.PaneNarrower.Help().Key + "/" + m.keys.PaneWider.Help().Key + " resize",
+		}, sep)
+	}
+	// Chat composer (default): palette, help overlay, external editor — plus a
+	// resize hint when a resizable pane is showing so the binding is discoverable.
+	parts := []string{
+		m.keys.Palette.Help().Key,
+		m.keys.Help.Help().Key,
+		m.keys.Editor.Help().Key,
+	}
+	if m.sidebarOpen && m.width >= sidebarMinTermW {
+		parts = append(parts, m.keys.PaneNarrower.Help().Key+"/"+m.keys.PaneWider.Help().Key+" resize")
+	}
+	return strings.Join(parts, sep)
+}
 
 // renderHelpBox renders just the keyboard-shortcuts box; render() composites
 // it over the chat via renderOverlay (P16.6) rather than placing it on a

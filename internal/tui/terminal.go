@@ -23,6 +23,10 @@ const (
 	termPaneVpW = 43
 	// termPaneTotalW is the total rendered width (inner + left border).
 	termPaneTotalW = 45
+	// termPaneMinW / termPaneMaxW bound the adjustable inner viewport width
+	// (P40.1: ctrl+left/ctrl+right resize the focused pane).
+	termPaneMinW = 24
+	termPaneMaxW = 100
 )
 
 // termOutputMsg delivers incremental shell output to the TUI.
@@ -89,6 +93,7 @@ type termPane struct {
 	workDir string          // cwd for shell commands (updated by cd)
 	running bool
 	height  int // full pane height passed to lipgloss Height()
+	width   int // inner viewport width (P40.1: adjustable; defaults to termPaneVpW)
 
 	// P13.3.1: the terminal pane runs commands the model never automatically
 	// sees (unlike the shell tool, whose result flows back to the model on
@@ -130,8 +135,9 @@ func newTermPane(workDir string, h int) termPane {
 		workDir: workDir,
 		histIdx: -1,
 		height:  h,
+		width:   termPaneVpW,
 	}
-	tp.vp = viewport.New(viewport.WithWidth(termPaneVpW), viewport.WithHeight(vpH))
+	tp.vp = viewport.New(viewport.WithWidth(tp.width), viewport.WithHeight(vpH))
 	return tp
 }
 
@@ -139,7 +145,24 @@ func newTermPane(workDir string, h int) termPane {
 func (tp *termPane) resize(h int) {
 	tp.height = h
 	tp.vp.SetHeight(max(h-3, 1))
-	tp.vp.SetWidth(termPaneVpW)
+	tp.vp.SetWidth(tp.width)
+}
+
+// totalW is the pane's full rendered width: the inner viewport plus the left
+// border and padding column (was the termPaneTotalW constant, P40.1).
+func (tp *termPane) totalW() int { return tp.width + (termPaneTotalW - termPaneVpW) }
+
+// setWidth adjusts the inner viewport width within bounds and re-wraps the
+// buffer (P40.1). Returns whether the width actually changed.
+func (tp *termPane) setWidth(w int) bool {
+	w = max(termPaneMinW, min(w, termPaneMaxW))
+	if w == tp.width {
+		return false
+	}
+	tp.width = w
+	tp.vp.SetWidth(w)
+	tp.refreshVP()
+	return true
 }
 
 // appendText appends text to the output buffer and refreshes the viewport.
@@ -154,7 +177,7 @@ func (tp *termPane) refreshVP() {
 	if strings.IndexByte(raw, 0x1b) >= 0 {
 		raw = remapANSI16(raw, ansiPalette)
 	}
-	tp.vp.SetContent(wrap(raw, termPaneVpW))
+	tp.vp.SetContent(wrap(raw, tp.width))
 	tp.vp.GotoBottom()
 }
 
@@ -269,14 +292,14 @@ func (tp termPane) view(th theme, focused bool, diagnoseKey string) string {
 		statusRight = lipgloss.NewStyle().Foreground(colAccent).Render("running…")
 	case tp.lastFailed:
 		statusRight = lipgloss.NewStyle().Foreground(colDanger).Render(
-			truncate(fmt.Sprintf("exit %d · %s diagnose", tp.lastExitCode, diagnoseKey), termPaneVpW-12))
+			truncate(fmt.Sprintf("exit %d · %s diagnose", tp.lastExitCode, diagnoseKey), tp.width-12))
 	default:
 		statusRight = lipgloss.NewStyle().Foreground(colTextMuted).Render(
-			truncate(shortenPath(tp.workDir), termPaneVpW-12))
+			truncate(shortenPath(tp.workDir), tp.width-12))
 	}
 	header := indicator + "  " + statusRight
 
-	sep := th.turnSep.Render(strings.Repeat("─", termPaneVpW))
+	sep := th.turnSep.Render(strings.Repeat("─", tp.width))
 
 	// Input row: prompt + current input + optional blinking cursor.
 	var inputLine string
@@ -288,7 +311,7 @@ func (tp termPane) view(th theme, focused bool, diagnoseKey string) string {
 			cursor = "▋"
 		}
 		prompt := lipgloss.NewStyle().Foreground(colAccent).Render("❯ ")
-		inputLine = prompt + truncate(tp.input, termPaneVpW-4) + cursor
+		inputLine = prompt + truncate(tp.input, tp.width-4) + cursor
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, header, tp.vp.View(), sep, inputLine)
@@ -299,7 +322,7 @@ func (tp termPane) view(th theme, focused bool, diagnoseKey string) string {
 	}
 
 	return lipgloss.NewStyle().
-		Width(termPaneInnerW).
+		Width(tp.width + (termPaneInnerW - termPaneVpW)). // content box = viewport + paddingLeft (P40.1)
 		Height(tp.height).
 		MaxHeight(tp.height).
 		BorderLeft(true).

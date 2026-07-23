@@ -166,7 +166,8 @@ type TUIConfig struct {
 	// HumorMode enables D&D-themed thinking phrases while the model generates.
 	// Set to false for plain "thinking…" / "working…" status text.
 	HumorMode bool `koanf:"humor_mode"`
-	// Theme selects the TUI color scheme: "dark" (default), "light", an
+	// Theme selects the TUI color scheme: "auto" (default — detect the
+	// terminal's light/dark background at startup, P40.5), "dark", "light", an
 	// embedded builtin (catppuccin, dracula, gruvbox, tokyonight), or a
 	// custom name loaded from .aegis/themes/<name>.json (project) or
 	// ~/.aegis/themes/<name>.json (user) — see internal/tui/theme_loader.go.
@@ -986,7 +987,7 @@ func defaults() map[string]any {
 		"output_guard.max_retries":               1,
 		"output_guard.rubric":                    DefaultGuardRubric,
 		"tui.humor_mode":                         true,
-		"tui.theme":                              "dark",
+		"tui.theme":                              "auto",
 		"tui.notifications":                      "both",
 		"tui.image_rendering":                    "auto",
 		"embeddings.enabled":                     false,
