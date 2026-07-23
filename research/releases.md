@@ -8,7 +8,9 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-22 — **P43.1 shipped** (debate concession-detector negation blindness, found
+**Last updated:** 2026-07-23 — **P41.1 shipped** (compaction's flat chars/4 token estimate replaced with
+the engine's script-aware one via a new shared `internal/tokenest` package — see below). Previously,
+2026-07-22: **P43.1 shipped** (debate concession-detector negation blindness, found
 examining `internal/debate`/`internal/swarm` reliability — see below). Earlier the same day: **P42.1 and
 P42.2 shipped** (workspace-trust and capability-spoofing gaps in `internal/plugins`, found by a scoped
 security self-review — see below). Earlier still: **P39.7 shipped** (no-progress guard on the `--skill`
@@ -16,6 +18,23 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P41.1 — Compaction now shares the engine's script-aware token estimate instead of a flat chars/4 one.**
+A 2026-07-22 data-flow review found the proactive compaction gate could silently no-op a compaction the
+engine had already decided was needed: `compaction.EstimateTokens` was a flat `chars/4` heuristic, while the
+engine's own `estimateTokens` is script-aware (CJK/Hangul/Kana at ~1 token/char, other non-ASCII at ~0.5
+token/char) precisely because flat `chars/4` badly undercounts dense scripts. The engine used its accurate
+version for the 85%/95% "context nearly full" checks and `MaxTokensPerRun`, but `Summarizer.compact` — the
+primary gate, called unconditionally at the top of every `engine.Run` — decided whether to actually compact
+using its own cruder estimate. So for a CJK/Cyrillic/Greek/Arabic/emoji-heavy conversation the engine could
+correctly call `Compact`, only for the summarizer's `shouldCompact` to decide there was still room and no-op
+— worst case letting a local (Ollama) server truncate from the front and drop the system prompt before
+compaction ever fired, the exact P2.7 failure the proactive machinery exists to avoid. Fixed by extracting
+the script-aware estimator into a new shared `internal/tokenest` package (`Estimate`, `Message`, `Messages`)
+that both the engine and `compaction.EstimateTokens` now call — one implementation, no second heuristic to
+drift. The engine's estimator tests moved to `internal/tokenest/tokenest_test.go`, joined by
+`TestMessagesIsScriptAware` (the P41.1 regression guard proving the whole-conversation estimate counts CJK
+far above flat chars/4). Full `go test ./...` green.
 
 **P43.1 — Debate's concession detector no longer misreads a hedged critique as a full concession.** Examining
 `internal/debate`/`internal/swarm` reliability as a candidate next-phase roadmap area found `concedeRe`

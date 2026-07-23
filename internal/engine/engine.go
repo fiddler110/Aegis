@@ -23,6 +23,7 @@ import (
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/security"
+	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/trace"
 )
@@ -54,7 +55,7 @@ type Conversation struct {
 func (c *Conversation) Append(m provider.Message) {
 	c.Messages = append(c.Messages, m)
 	if c.tokenEstimateValid {
-		c.tokenEstimate += messageTokens(m)
+		c.tokenEstimate += tokenest.Message(m)
 	}
 }
 
@@ -79,80 +80,13 @@ func (c *Conversation) Invalidate() { c.invalidate() }
 // turn).
 func (c *Conversation) estimatedTokens() int {
 	if !c.tokenEstimateValid {
-		c.tokenEstimate = estimateTokens(c.System)
+		c.tokenEstimate = tokenest.Estimate(c.System)
 		for _, m := range c.Messages {
-			c.tokenEstimate += messageTokens(m)
+			c.tokenEstimate += tokenest.Message(m)
 		}
 		c.tokenEstimateValid = true
 	}
 	return c.tokenEstimate
-}
-
-func messageTokens(m provider.Message) int {
-	n := 0
-	for _, b := range m.Content {
-		switch v := b.(type) {
-		case provider.TextBlock:
-			n += estimateTokens(v.Text)
-		case provider.ToolUseBlock:
-			n += estimateTokens(v.Name) + estimateTokens(string(v.Input))
-		case provider.ToolResultBlock:
-			n += estimateTokens(v.Content)
-		}
-	}
-	return n
-}
-
-// estimateTokens approximates a token count for s with a script-aware
-// heuristic instead of a flat chars/4. Plain ASCII (the common case for code
-// and English prose) is priced at the conventional ~4 characters per token,
-// but CJK (Chinese/Japanese/Korean) text tokenizes far denser than that —
-// often close to one token per character — so a flat chars/4 estimate
-// silently undercounts a CJK-heavy conversation, which matters here because
-// this estimate drives two real decisions: the P2.7 proactive-compaction
-// threshold check (undercounting delays compaction past where it should have
-// fired, risking a hard context-limit error mid-run) and the P10.5 estimated
-// token usage recorded for providers that report none (local/Ollama models),
-// which session/daily token caps are checked against. Other non-ASCII
-// scripts (Cyrillic, Greek, Arabic, emoji, ...) are priced at ~2 characters
-// per token as a middle-ground approximation. Still a cheap heuristic, not a
-// real tokenizer — providers that report real usage never go through this
-// path at all.
-func estimateTokens(s string) int {
-	var ascii, dense, other int
-	for _, r := range s {
-		switch {
-		case r < 0x80:
-			ascii++
-		case isDenseScript(r):
-			dense++
-		default:
-			other++
-		}
-	}
-	return (ascii+3)/4 + dense + (other+1)/2
-}
-
-// isDenseScript reports whether r belongs to a script whose written
-// characters each carry roughly a full token's worth of information (CJK
-// Unified Ideographs and common extensions, Hiragana, Katakana, Hangul
-// syllables) — the scripts responsible for chars/4 most badly
-// underestimating token count.
-func isDenseScript(r rune) bool {
-	switch {
-	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs
-		return true
-	case r >= 0x3400 && r <= 0x4DBF: // CJK Unified Ideographs Extension A
-		return true
-	case r >= 0x3040 && r <= 0x30FF: // Hiragana + Katakana
-		return true
-	case r >= 0xAC00 && r <= 0xD7A3: // Hangul syllables
-		return true
-	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs
-		return true
-	default:
-		return false
-	}
 }
 
 // EventKind classifies engine events delivered to consumers (TUI, CLI, logs).
@@ -1152,11 +1086,11 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 	}
 
 	// Providers that don't report usage (common with local/Ollama models) return
-	// zero counts. Estimate from the script-aware heuristic (estimateTokens)
+	// zero counts. Estimate from the script-aware heuristic (tokenest.Estimate)
 	// so compaction thresholds and token-count display remain meaningful.
 	if usage != nil && usage.InputTokens == 0 && usage.OutputTokens == 0 {
 		usage.InputTokens = conv.estimatedTokens()
-		usage.OutputTokens = estimateTokens(string(text))
+		usage.OutputTokens = tokenest.Estimate(string(text))
 		usage.IsEstimated = true
 	}
 
