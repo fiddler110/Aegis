@@ -53,18 +53,136 @@ full stop — the field stays for documentation purposes but no longer feeds the
 `internal/plugins/plugins_test.go` (`TestProcessToolCapability` now asserts `CapExecute` regardless of
 config). Full `go test ./...` green (58 packages).
 
-**P39.7 — No-progress guard on the drive loop escalates to an "act now" nudge.** Weak local models
-sometimes end a drive turn with narration ("Now I'll write the file…") and no tool call at all —
-corroborated on two independent models (a 35B MoE returning `turns=3` with 0 `edit_file` calls; a
-`gpt-oss:20b` `--skill` run against AiGateway filling 0 of 35 markers and yielding 3× with markers still
-present). The drive loop already counted these no-tool-call iterations (`noProgress`, aborting after
-three) but kept sending the same plain continuation prompt every time. It now escalates: once an
-iteration makes zero tool calls, the next continuation swaps in `actNowPrompt` — an explicit "ACT NOW:
-call `edit_file`... do not describe or narrate" instruction wrapping the existing `continuePrompt` — instead
-of repeating the prompt the model just narrated past. Matches the evidence from the P38.1 re-test, where
-adding exactly this kind of preamble by hand was what unstuck both stalled runs. `internal/cli/chat.go`
-(`actNowPrompt`, wired into the drive loop around the existing `noProgress` counter). Tests:
-`TestActNowPrompt` in `internal/cli/chat_drive_test.go`.
+**P39.9 (`/api/ps`-verification half) — the native-Ollama context-window path now verifies the real allocation
+instead of trusting `num_ctx = context_window` outright.** `internal/server/contextwindow.go`'s
+`initContextWindow` short-circuited the native `provider.default: ollama` + configured-`context_window` case:
+it set `ctxWinFinal = true` and returned without ever probing, on the theory that the native adapter (P33.9)
+pins `options.num_ctx` to the configured window on every request, so "the served window is exactly what's
+configured." That holds on well-resourced hardware, but `num_ctx` is a *request*, not a guarantee — on
+VRAM-constrained hardware Ollama can allocate *less* than asked (or offload KV/layers to CPU), silently
+front-truncating prompts (system prompt first) exactly like the OpenAI-compat path, and the daemon could not
+see it. The fix removes the short-circuit so the native path runs the same `ollamainfo.Detect` (`/api/ps`- and
+`/api/show`-backed) detection as the compat path and lets `applyDetectedWindow` reconcile: a *loaded*
+(authoritative) `/api/ps` reading below the configured window is served as the effective window with the
+existing "configured context_window exceeds what Ollama is serving" warning; a matching/larger reading keeps
+the configured value (provenance stays `config`); a non-authoritative reading (model not loaded yet) keeps the
+configured value and stays non-final so `maybeRefreshContextWindow` re-detects after the first run loads the
+model; an unreachable Ollama keeps the configured value, stashes the native base, and stays non-final for a
+run-time retry. This is the ready-fix lead surfaced by the P39.9 investigation (the adapter's tool-calling
+itself was exonerated for the available models; see [roadmap.md](roadmap.md)). The behavior is preserving
+where the allocation matches — the common well-resourced case still serves `config`/`config`. Tests: the old
+`TestInitContextWindowNativeOllamaWithConfigSkipsProbe` (which pinned the now-removed skip) is replaced by four
+cases in `contextwindow_test.go` — VRAM-limited downgrade to the loaded value, honored-config staying
+`config`, unreachable-Ollama keeping config + non-final, and reachable-but-not-loaded keeping config +
+non-final — against a fake native-endpoint server. `go test ./internal/server/...` green. The remaining open
+half of P39.9 is the repro-gated prefill-latency observability gap.
+
+**P40.1 — `env`/`printenv` dropped from the read-only shell allowlist (plan-mode secret-leak fix).**
+`internal/tool/builtin/shell_readonly.go` classified `env`/`printenv` as `CapRead` via
+`readOnlyShellArgv0`, so under plan mode a model could run `shell {"command":"env"}`, have it
+auto-approved as read-only, and pull the daemon's process environment — which holds the provider API
+keys (`config.loadDotEnv` `os.Setenv`s `.aegis/.env`, `ProviderAPIKey` reads `os.Getenv`) — straight
+into the transcript and SQLite session store before the `CapNetwork` egress gate ever fires. The two
+argv0 entries are removed (with a comment recording why they must not return), so the commands now fall
+back to the normal `CapExecute` approval flow. They are low value as read-only anyway. Tests:
+`env`/`printenv`/`printenv <key>` now assert `false` in `TestReadOnlyShellCommand`
+(`internal/tool/builtin/shell_readonly_test.go`).
+
+**P40.2 — `write_file`/`edit_file` preserve an existing file's mode on overwrite.**
+`internal/tool/builtin/file.go` previously hardcoded `0o644` on every write, so overwriting or editing a
+mode-sensitive file (a `0700` script, a key/token file) silently dropped the exec bit and widened it to
+world-readable — while parent dirs were made `0o750`. Both tools now route through a `writePreservingMode`
+helper that `os.Stat`s the target and reuses its permission bits when it already exists, falling back to the
+named `newFileMode` (0o644) only for create-new. A Unix-only test asserts a `0700` file keeps its mode
+across both `write_file` and `edit_file` overwrites, and a fresh file lands at `newFileMode`.
+
+**P40.3 — `read_file` bounds its allocation to what a bounded read returns.** The tool used to `strings.Split`
+the entire file (up to the 50 MiB `maxReadBytes` cap) into a `[]string` before applying `offset`/`limit`, so a
+`limit:20` read of a large file still allocated every line. It now scans with a `bufio.Scanner` and a custom
+`splitLinesKeepFinal` split func — which reproduces `strings.Split(data, "\n")` semantics exactly, including
+the trailing empty final line for a file ending in a newline and preserving CRLF bytes — and stops once
+`offset+limit` lines are emitted. A 10-case table test renders each input through both the new path and a
+reference oracle mirroring the old renderer and asserts byte-identical output (trailing newline, no trailing
+newline, empty file, CRLF, blank lines, offset/limit windows, offset-past-EOF).
+
+**P40.4 — stray repo-root `*.err` files.** Already handled in the prior codebase-review commit (files dropped,
+`*.err` added to `.gitignore`); verified none remain tracked or on disk.
+
+**P40.5 — `internal/tui/tui.go` decomposed from 4,731 to 2,285 lines.** Pure code motion into three new
+same-package files, no logic change: `view.go` (the `View`/`render*` rendering layer, 733 lines), `stream.go`
+(`applyStreamBatch`/`applyEvent` and the pending-tool-card lifecycle, 509 lines), and `update.go` (the
+`Update` message-routing switch, 1,249 lines). Imports were resolved with `goimports`; `go test
+./internal/tui/...` stays green. The finer per-message-domain split of the `Update` switch is left as
+opportunistic follow-up.
+
+**P40.6 — `engine.Run` nudge/guard bookkeeping folded into a `nudgeState` helper.** The three parallel
+counters (`guardRetries`, `zeroToolNudges`, `emptyAnswerNudges`) and the matching trio of terminal
+retraction if-blocks became a single `nudgeState` struct with a `retractAll(conv)` method. Behavior is
+unchanged — same retractions, same guards, same order — and the eval golden transcripts show **no** diff
+(`go test ./internal/eval/...`), which is the safety net the refactor was gated on.
+
+**Last updated:** 2026-07-21 — **P39.5, P39.6, P39.7, P39.8 shipped and P39.9 partially shipped** — the
+harness-side drive-loop fixes root-caused by the P38.1 conformance re-test (see below). These land the code;
+the **P38.1 umbrella stays open** pending a live re-test that confirms the built-in `--skill` drive now
+reaches a verify-clean suite on a local model. Earlier the same day: **P38.6 and P38.7 shipped** (the two
+actionable engineering findings split out of the P38.1 re-test); **P39.1, P39.2, and P39.4 shipped;
+P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass — see
+[roadmap.md](roadmap.md)).
+
+**P39.7 — no-progress guard turns "announce then yield" into an "act now" nudge.** The drive loop
+(`internal/cli/chat.go`) previously just counted three consecutive zero-tool turns and stopped. It now
+tracks whether a turn actually *mutated a suite file* (`write_file`/`edit_file`/`multi_edit`) or *changed the
+PENDING marker set* — the two signals of real progress — and when a turn does neither while markers remain,
+re-prompts with an explicit `actNowNudge()` ("STOP NARRATING — ACT NOW … call `edit_file` now … one section,
+one edit") prepended to the continuation, bounded to `maxNoProgressTurns` (3) consecutive stalls before
+stopping. Direct evidence this is the right lever: adding an "act now" preamble to a stalled `gpt-oss:20b`
+run landed its first real `edit_file` in the P38.1 corroboration. Tests: `TestActNowNudge`, `TestSameStrings`,
+`TestMutatingTools` in `internal/cli/chat_drive_test.go`.
+
+**P39.5 — the drive stops re-sending the whole SKILL.md every turn.** Root cause of P38.1's unmet
+conformance: `aegis chat --skill` prepends the ~9K-token SKILL.md body to the first user message, which
+threads through the conversation and rides *every* request (`prompt_bytes≈31534` at turn 0), so on a 32K
+local window the recon digest plus a few reads left no room to `edit_file` (a scaffolded resume made 86 tool
+calls across 3 iterations and cleared 0 of 23 markers). After the opening turn — when the model has already
+seen the full instructions — `compactFirstSkillMessage` rewrites the first message once, swapping the skill
+body for a compact pointer (`compactSkillPreamble`) that names the on-disk `SKILL.md` to re-read on demand,
+the same disposable-skill-reference logic P36.2 already applies to skill-reference *reads*. A new exported
+`engine.Conversation.Invalidate()` keeps the cached token estimate correct after the in-place rewrite. Guarded
+to fire only while the message still carries the preamble. Tests: `TestCompactSkillPreamble`,
+`TestCompactFirstSkillMessage`.
+
+**P39.6 — the drive's done-condition is now "verifies clean," not "all markers filled."** When the drive's
+PENDING markers hit zero it now runs the threat-modeling skill's bundled phase-6 checks (`verify.py`,
+`lint_dfd.py`, `inventory.py --check`) against the completed run directory; on failure it feeds the failure
+text back with `verifyFixPrompt` for an in-place fix and re-runs, bounded to `maxVerifyRounds` (3). This is the
+autonomous analogue of SKILL.md §5's fix-and-re-run round — the duplicate threat ID, tier↔prerequisite
+mismatches and stale counts that shipped uncaught in the re-test were all flagged by `verify.py`, which
+nothing was running. Gated on the skill actually bundling a `verify.py` and a run directory existing, so other
+skills are unaffected (`ran=false` → the pre-P39.6 "markers cleared = done" path). New code in
+`internal/cli/chat_verify.go`; `pythonExe` probes `--version` so Windows' `python` App-execution-alias shim
+can't make every drive spuriously "fail verification." Tests: `TestVerifyFixPrompt`,
+`TestVerifySkillOutputsGate`, `TestLatestThreatModelRunDir`, `TestVerifySkillOutputsRuns`.
+
+**P39.8 — a proven-broken LLM summarizer is latched off for the rest of the run.** Compaction and
+`output_guard` route to `provider.small_model` when set (existing), but with only a weak main model the
+summarizer returns empty and the engine re-tried it two calls per compaction cycle forever (**42×** "summarizer
+returned empty output" in one run). `internal/engine/engine.go` now tracks cumulative LLM-summarizer failures
+per run and, past `summarizerGiveUpThreshold` (4), latches the LLM summarizer off and compacts deterministically
+(P36.2 fallback) for the rest of the run — the P28.4 two-consecutive-failure fallback still fires meanwhile, so
+context always keeps shrinking. Per-run state, never carried across runs. Test:
+`TestProactiveCompactionLatchesOffSummarizer` in `internal/engine/contextnotice_test.go`.
+
+**P39.9 (partial) — `/v1` compat drives now warn before overflowing; the native-adapter hang stays open.**
+The actionable half shipped: `aegis chat --skill` on the legacy OpenAI-compat (`/v1`) Ollama adapter — which
+cannot send `num_ctx`, so `context_window` is ignored and Ollama serves the modelfile default — now probes the
+served window up front and, when it's too small for a skill-driven prompt, prints a notice naming the fix
+(`warnCompatDriveWindow` / `compatDriveWindowNotice` in `internal/cli/chat.go`), including a runnable
+modelfile-derivative recipe (`providerfactory.LegacyOllamaModelfileRecipe`: `printf 'FROM <m>\nPARAMETER
+num_ctx <n>\n' | ollama create <m>-ctx<n> -f -`) for when the native adapter can't be used. Tests:
+`TestCompatDriveWindowNotice`, `TestLegacyOllamaModelfileRecipe`. The **native-Ollama-adapter half — no tool
+call / no run directory after 8+ minutes on the skill-preload turn — remains open**: it is investigation-gated
+(needs a focused repro: think-mode? oversized system prompt?) and was not touched, so P39.9 stays open for
+that half.
 
 **P38.6 — thinking-mode models fabricate a completed drive instead of executing it.** The P38.1 re-test
 found that `aegis chat --skill threat-modeling` with `provider.think: true` drove **zero** real tool calls:

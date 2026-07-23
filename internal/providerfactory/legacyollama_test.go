@@ -95,3 +95,20 @@ func TestLegacyOllamaCompatDetailHedgesWhenNotCertain(t *testing.T) {
 		t.Errorf("detail asserts Ollama for a base_url that may be another compat server: %q", maybe)
 	}
 }
+
+// LegacyOllamaModelfileRecipe (P39.9) yields a runnable ollama-create command
+// and a matching provider.model, and is empty for a blank model or window.
+func TestLegacyOllamaModelfileRecipe(t *testing.T) {
+	if r := LegacyOllamaModelfileRecipe("", 32768); r != "" {
+		t.Errorf("blank model should yield no recipe, got %q", r)
+	}
+	if r := LegacyOllamaModelfileRecipe("qwen3.6:35b-a3b-fast", 0); r != "" {
+		t.Errorf("non-positive window should yield no recipe, got %q", r)
+	}
+	r := LegacyOllamaModelfileRecipe("qwen3.6:35b-a3b-fast", 32768)
+	for _, want := range []string{"num_ctx 32768", "ollama create", "FROM qwen3.6:35b-a3b-fast", "qwen3.6-35b-a3b-fast-ctx32768"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("recipe missing %q in:\n%s", want, r)
+		}
+	}
+}

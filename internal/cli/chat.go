@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/commands"
 	"github.com/fiddler110/aegis/internal/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/logging"
 	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
@@ -202,13 +204,25 @@ func newChatCmd() *cobra.Command {
 			// round-trip that progressive disclosure relies on (P36.1); prepending
 			// the instructions verbatim removes that dependency for a scripted run.
 			driveToCompletion := false
+			skillDir := ""       // P39.6: where the preloaded skill's bundled verify scripts live
+			taskPrompt := prompt // P39.5: the raw task, kept so the first message can be rewritten without the SKILL.md body after the opening turn
 			if skillName != "" {
 				if sk, ok := skills.Load(cwd, cfg.DataDir, enabledBuiltins, skillName); ok && strings.TrimSpace(sk.Content) != "" {
 					prompt = skillPreamble(skillName, sk.Content) + prompt
 					driveToCompletion = true
+					skillDir = sk.Dir
 				} else {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n[warning: --skill %q not found or empty; running without preloaded skill body]\n", skillName)
 				}
+			}
+
+			// P39.9: a --skill drive on the legacy OpenAI-compat (/v1) Ollama
+			// adapter can't send num_ctx, so context_window is ignored and Ollama
+			// serves the model's modelfile default; a skill-driven prompt then
+			// overflows and is silently truncated from the front. Warn up front
+			// with the exact fix rather than letting the drive quietly degrade.
+			if driveToCompletion {
+				warnCompatDriveWindow(cmd.ErrOrStderr(), cfg)
 			}
 
 			conv := &engine.Conversation{System: buildChatSystem(cfg, cwd, enabledBuiltins, system, personaName)}
@@ -226,6 +240,7 @@ func newChatCmd() *cobra.Command {
 			var answer strings.Builder
 			toolCalls := 0
 			iterToolCalls := 0
+			iterMutations := 0
 			onEvent := func(ev engine.Event) {
 				// Counted for every format: both json and stream-json report
 				// this in their trailer, so counting it per-branch left
@@ -233,6 +248,13 @@ func newChatCmd() *cobra.Command {
 				if ev.Kind == engine.KindToolCall {
 					toolCalls++
 					iterToolCalls++
+					// P39.7: a suite file was actually mutated this turn (as
+					// opposed to a read/recon-only or narration-only turn). The
+					// no-progress guard below treats the absence of this as an
+					// "announce then yield" stall and nudges the model to act.
+					if mutatingTools[ev.ToolName] {
+						iterMutations++
+					}
 				}
 				switch format {
 				case outputStreamJSON:
@@ -279,9 +301,11 @@ func newChatCmd() *cobra.Command {
 			// skill, keep running while any file under .aegis/ still carries a
 			// PENDING marker: append a continuation turn and run again — reusing
 			// the SAME conversation so context threads (and pruning/compaction
-			// apply) across the whole drive. Bounded by --max-turns and a
-			// no-progress guard (three consecutive yields that call no tool at all
-			// means the model is only talking, so stop rather than burn tokens).
+			// apply) across the whole drive. Bounded by --max-turns and the
+			// P39.7 no-progress guard: a turn that mutates no suite file and
+			// leaves the PENDING set unchanged is an "announce then yield" stall,
+			// so re-prompt with an explicit "act now" nudge (bounded) rather than
+			// burning tokens on narration.
 			//
 			// The oracle is the stub-first pattern the skill uses (SKILL.md §4.1):
 			// a PENDING marker is unambiguous unfinished work. If a model instead
@@ -292,17 +316,62 @@ func newChatCmd() *cobra.Command {
 			// continuation.
 			pendingRoot := filepath.Join(cwd, ".aegis")
 			noProgress := 0
+			verifyRounds := 0
+			preambleCompacted := false
+			var prevPending []string
 			var runErr error
 			for iter := 0; ; iter++ {
 				iterToolCalls = 0
+				iterMutations = 0
 				runErr = eng.Run(ctx, conv, onEvent)
-				logger.Info("chat: run finished", "iter", iter, "err", errString(runErr), "tool_calls", toolCalls, "iter_tool_calls", iterToolCalls)
+				logger.Info("chat: run finished", "iter", iter, "err", errString(runErr), "tool_calls", toolCalls, "iter_tool_calls", iterToolCalls, "iter_mutations", iterMutations)
 				if runErr != nil || !driveToCompletion || ctx.Err() != nil {
 					break
 				}
+				// P39.5: after the opening turn the model has seen the full
+				// SKILL.md. Re-sending its ~9K-token body in the first user
+				// message every turn is the drive's context-bounding failure — on
+				// a 32K local window (prompt_bytes≈31534 at turn 0) the recon
+				// digest plus a few file reads then leave no room to edit_file (a
+				// scaffolded resume made 86 tool calls across 3 iterations and
+				// cleared 0 of 23 markers). Rewrite the first message once,
+				// swapping the skill body for a compact pointer the model can
+				// re-read on demand — the same disposable-skill-reference logic
+				// P36.2 applies to skill-reference reads. Guarded so it only
+				// touches the message while it still carries the preamble (engine
+				// compaction may have already rewritten it).
+				if !preambleCompacted {
+					preambleCompacted = true
+					if compactFirstSkillMessage(conv, skillName, taskPrompt, skillDir) {
+						logger.Info("chat: compacted SKILL.md preamble out of first message (P39.5)", "skill", skillName)
+					}
+				}
 				pending := scanPendingMarkers(pendingRoot)
 				if len(pending) == 0 {
-					break // no unfinished stubs remain — the run is complete
+					// P39.6: "all markers filled" is not the real done-condition —
+					// "verifies clean" is. Run the skill's bundled phase-6 checks
+					// (verify.py, lint_dfd.py, inventory.py --check); on failure,
+					// feed the failure text back for an in-place fix and re-run,
+					// bounded. When the skill ships no verifier / there's nothing to
+					// check, verifySkillOutputs reports ran=false and the drive ends
+					// as before. This is the autonomous analogue of SKILL.md §5's
+					// fix-and-re-run round.
+					failures, ran := verifySkillOutputs(skillName, skillDir, cwd)
+					if !ran || failures == "" {
+						break // nothing to verify, or the suite verified clean — done
+					}
+					if verifyRounds++; verifyRounds > maxVerifyRounds {
+						logger.Warn("chat: verification still failing after max rounds", "rounds", maxVerifyRounds)
+						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", maxVerifyRounds)
+						fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", failures)
+						break
+					}
+					logger.Info("chat: verification failed, feeding back for fix", "round", verifyRounds)
+					conv.Append(provider.Message{
+						Role:    provider.RoleUser,
+						Content: []provider.Block{provider.TextBlock{Text: verifyFixPrompt(failures)}},
+					})
+					continue
 				}
 				if iter+1 >= maxTurns {
 					msg := fmt.Sprintf("drive-to-completion hit --max-turns=%d with %d file(s) still PENDING: %s", maxTurns, len(pending), strings.Join(pending, ", "))
@@ -310,23 +379,35 @@ func newChatCmd() *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: %s — re-run to resume]\n", msg)
 					break
 				}
-				if iterToolCalls == 0 {
-					if noProgress++; noProgress >= 3 {
-						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: model yielded %d times without calling a tool; stopping]\n", noProgress)
+				// P39.7 no-progress guard. A weak local model sometimes ends a
+				// turn with a plan ("Now I'll write the file…") and no file
+				// mutation at all — the "announce then yield" stall (reproduced on
+				// gpt-oss:20b and qwen3.6:35b-a3b: markers present, 0 edit_file,
+				// yields repeatedly). Treat a turn that neither mutated a suite
+				// file nor changed the PENDING set (the model may narrate, read,
+				// or re-run recon without editing) as no progress. Direct evidence
+				// this is the right lever: adding an "act now" preamble to a
+				// stalled gpt-oss:20b run landed the first real edit_file (P38.1).
+				// Instead of silently yielding a partial suite, re-prompt with an
+				// explicit "act now — call edit_file, no narration" nudge, bounded
+				// to maxNoProgressTurns consecutive stalls before stopping.
+				// Extends P39.2's tool-execution coaching from the malformed-call
+				// case to the no-call case.
+				madeProgress := iterMutations > 0 || !sameStrings(pending, prevPending)
+				prevPending = pending
+				nudge := ""
+				if !madeProgress {
+					if noProgress++; noProgress >= maxNoProgressTurns {
+						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: model stalled %d turns without mutating a file while %d file(s) remain PENDING; stopping — re-run to resume]\n", noProgress, len(pending))
 						break
 					}
+					nudge = actNowNudge()
 				} else {
 					noProgress = 0
 				}
-				nudge := continuePrompt(pending)
-				if noProgress > 0 {
-					// P39.7: the plain continuation alone did not unstick a model
-					// that yielded with narration and no tool call; escalate.
-					nudge = actNowPrompt(pending)
-				}
 				conv.Append(provider.Message{
 					Role:    provider.RoleUser,
-					Content: []provider.Block{provider.TextBlock{Text: nudge}},
+					Content: []provider.Block{provider.TextBlock{Text: nudge + continuePrompt(pending)}},
 				})
 			}
 
@@ -646,6 +727,138 @@ func skillPreamble(name, body string) string {
 	return fmt.Sprintf("The %s skill has been loaded for you. Its full instructions are below — follow them for this task.\n\n<skill name=%q>\n%s\n</skill>\n\n", name, name, body)
 }
 
+// driveContextFloor is the served Ollama context window (tokens) below which a
+// --skill drive on the compat path is warned about (P39.9). It matches the
+// num_ctx the reference wrapper had to bake for the 35B MoE re-test: a
+// skill-driven prompt reached ~34774 tokens, overflowing the stock 16384
+// modelfile default.
+const driveContextFloor = 32768
+
+// warnCompatDriveWindow probes the served Ollama context window and, when a
+// --skill drive is about to run on the OpenAI-compat (/v1) adapter with a window
+// too small to hold a skill-driven prompt, prints a notice naming the fix
+// (P39.9). Best-effort: a probe failure yields a softer notice (the compat path
+// never honors context_window regardless), never an error.
+func warnCompatDriveWindow(w io.Writer, cfg *config.Config) {
+	if !providerfactory.IsLegacyOllamaCompat(cfg.Provider) {
+		return
+	}
+	dctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, ok := ollamainfo.Detect(dctx, ollamainfo.NativeBase(cfg.Provider.BaseURL), cfg.Provider.Model)
+	served := 0
+	want := driveContextFloor
+	if ok {
+		served = res.ContextWindow
+		if rec := ollamainfo.RecommendContextWindow(res.ModelMax); rec > want {
+			want = rec
+		}
+	}
+	if msg := compatDriveWindowNotice(cfg.Provider.Model, served, want); msg != "" {
+		fmt.Fprintf(w, "\n[notice: %s]\n", msg)
+	}
+}
+
+// compatDriveWindowNotice is the pure decision behind warnCompatDriveWindow: it
+// returns the notice text when the served window (served, 0 = undetectable) is
+// below want, or "" when the served window is already large enough. Split out so
+// the threshold and message are testable without a live Ollama server.
+func compatDriveWindowNotice(model string, served, want int) string {
+	if served >= want && served > 0 {
+		return "" // served window already holds a skill-driven prompt
+	}
+	servedDesc := "unknown (could not probe the Ollama server)"
+	if served > 0 {
+		servedDesc = fmt.Sprintf("%d tokens", served)
+	}
+	notice := fmt.Sprintf("this --skill drive is on the /v1 compat adapter, which cannot send num_ctx; the served context window is %s and a skill-driven prompt can exceed it (Ollama then silently truncates it from the front). Switch to provider.default: ollama so context_window is honored", servedDesc)
+	if recipe := providerfactory.LegacyOllamaModelfileRecipe(model, want); recipe != "" {
+		notice += " — or " + recipe
+	}
+	return notice
+}
+
+// compactFirstSkillMessage rewrites the drive's first user message in place,
+// replacing the full preloaded SKILL.md body with a compact pointer plus the
+// original task (P39.5). It reports whether it actually rewrote anything: it is
+// a no-op (returning false) unless the first message is still the user
+// preamble message skillPreamble produced — engine compaction may have already
+// rewritten it, in which case there is nothing to do. After a rewrite it calls
+// conv.Invalidate so the cached token estimate and persistence offset stay
+// correct.
+func compactFirstSkillMessage(conv *engine.Conversation, skillName, taskPrompt, skillDir string) bool {
+	if skillName == "" || len(conv.Messages) == 0 {
+		return false
+	}
+	first := conv.Messages[0]
+	if first.Role != provider.RoleUser || len(first.Content) == 0 {
+		return false
+	}
+	txt, ok := first.Content[0].(provider.TextBlock)
+	if !ok || !strings.Contains(txt.Text, "<skill name=") {
+		return false // not (or no longer) the full preamble message
+	}
+	conv.Messages[0].Content = []provider.Block{provider.TextBlock{Text: compactSkillPreamble(skillName, taskPrompt, skillDir)}}
+	conv.Invalidate()
+	return true
+}
+
+// compactSkillPreamble is the slimmed replacement for skillPreamble used after
+// the opening drive turn (P39.5): it reminds the model the skill's instructions
+// were already given and remain in force, names the on-disk file to re-read for
+// any specific rule, and re-states the task — without re-sending the ~9K-token
+// body every turn.
+func compactSkillPreamble(name, taskPrompt, skillDir string) string {
+	ref := "its bundled instructions"
+	if skillDir != "" {
+		ref = fmt.Sprintf("`%s` (and its `references/`)", filepath.ToSlash(filepath.Join(skillDir, "SKILL.md")))
+	}
+	return fmt.Sprintf("The %s skill's full instructions were provided at the start of this task and remain in effect — keep following them. They are not repeated here so the context stays small enough to work in; re-read %s if you need a specific rule.\n\n", name, ref) + taskPrompt
+}
+
+// mutatingTools are the built-in tools whose successful call mutates a suite
+// file on disk. The P39.7 no-progress guard uses a call to one of these (or a
+// change in the PENDING marker set) as the signal that a drive turn made real
+// progress, as opposed to only narrating, reading, or re-running recon. Kept
+// deliberately narrow to the file-writing tools: recon/scaffold create files
+// via `shell` (python), but those turns are still caught as progress because
+// they change the PENDING set.
+var mutatingTools = map[string]bool{
+	"write_file": true,
+	"edit_file":  true,
+	"multi_edit": true,
+}
+
+// maxNoProgressTurns bounds the P39.7 nudge loop: after this many consecutive
+// drive turns that mutate no file and leave the PENDING set unchanged, stop
+// rather than keep paying for a model that will only narrate. Two nudges then a
+// stop mirrors the previous "three consecutive yields" bound.
+const maxNoProgressTurns = 3
+
+// actNowNudge is the P39.7 stall-breaker prefix, prepended to the continuation
+// turn when the previous turn mutated no file while PENDING markers remain. It
+// is deliberately forceful and concrete — the corroborated lever (P38.1) was an
+// explicit "one section per turn, act now via edit_file" preamble, which
+// unstuck a gpt-oss:20b fill that had yielded three times with markers present.
+func actNowNudge() string {
+	return "STOP NARRATING — ACT NOW. The previous turn changed no file. Do not explain what you will do; do it this turn. Call `edit_file` now to fill the next single `<!-- PENDING: <section> -->` marker with real content — one section, one edit. No preamble, no plan, no questions before the tool call.\n\n"
+}
+
+// sameStrings reports whether two already-sorted slices hold the same elements
+// in the same order. scanPendingMarkers returns sorted results, so this is a
+// cheap way for the P39.7 guard to tell whether a turn changed the PENDING set.
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // continuePrompt is the drive-to-completion continuation turn (P38.2): it names
 // the files still carrying `<!-- PENDING -->` markers and tells the model to
 // resume in dependency order without pausing to ask, matching the resume
@@ -655,18 +868,6 @@ func continuePrompt(pending []string) string {
 	return "Continue — the task is not finished. These files still contain `<!-- PENDING: … -->` markers and must be completed:\n- " +
 		strings.Join(pending, "\n- ") +
 		"\n\nResume from the first unfinished file in dependency order and keep working until NO `<!-- PENDING` marker remains in any file. Each marker is section-keyed (`<!-- PENDING: <section> -->`): edit that exact marker one at a time — never a bare `<!-- PENDING -->` and never `replace_all` on a marker, which would overwrite every section at once. This is a non-interactive run: do not stop to ask whether to proceed, and do not return a partial result."
-}
-
-// actNowPrompt is the P39.7 no-progress nudge: a weak local model sometimes
-// ends a drive turn with narration ("Now I'll write the file…") and no tool
-// call at all, so the plain continuePrompt above just gets narrated at again.
-// Two independent local models (qwen3.6:35b-a3b, gpt-oss:20b) reproduced the
-// stall, and prefixing an explicit "act now" instruction is what broke it in
-// both cases (research/roadmap.md P39.7). Swapped in once an iteration has
-// made zero tool calls, bounded by the same noProgress counter that aborts
-// the drive after three consecutive occurrences.
-func actNowPrompt(pending []string) string {
-	return "ACT NOW: call `edit_file` in this turn. Do not describe or narrate what you are about to do — make the edit immediately, one PENDING marker at a time.\n\n" + continuePrompt(pending)
 }
 
 // scanPendingMarkers walks root (typically <cwd>/.aegis) and returns the
