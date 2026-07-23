@@ -43,6 +43,7 @@ type Config struct {
 	Swarm       SwarmConfig       `koanf:"swarm"`
 	Sandbox     SandboxConfig     `koanf:"sandbox"`
 	Security    SecurityConfig    `koanf:"security"`
+	Git         GitConfig         `koanf:"git"`
 	OutputGuard OutputGuardConfig `koanf:"output_guard"`
 	// DefaultPersona names the persona new sessions start with when the
 	// caller doesn't pass --persona. Set at the project level
@@ -665,6 +666,30 @@ type PermissionConfig struct {
 	AllowUnsandboxedAutoExec bool `koanf:"allow_unsandboxed_auto_exec"`
 }
 
+// GitConfig configures the git-facing built-in tools (currently just the
+// pre-commit test gate, P46.2).
+type GitConfig struct {
+	// PreCommitTestCommand, when set, is a shell command the git_commit tool
+	// runs in the workspace before every commit; a non-zero exit aborts the
+	// commit and the command's output is returned to the model instead. This
+	// makes "tests pass before every commit" a mechanical gate rather than
+	// unenforced persona/skill prose a model can drop under context pressure
+	// (P46.2). Empty (the default) is a no-op — git_commit stays a straight
+	// passthrough, so existing sessions with no test command declared are
+	// unaffected. It executes an arbitrary host command, so it is treated as a
+	// security-relevant setting frozen under the workspace-trust gate (P27.1):
+	// an untrusted project's .aegis/config.yaml cannot introduce or change it.
+	PreCommitTestCommand string `koanf:"pre_commit_test_command"`
+	// PreCommitTestTimeoutSec bounds how long PreCommitTestCommand may run
+	// before it is killed and the commit aborted. 0 falls back to
+	// DefaultPreCommitTestTimeoutSec.
+	PreCommitTestTimeoutSec int `koanf:"pre_commit_test_timeout_sec"`
+}
+
+// DefaultPreCommitTestTimeoutSec is the pre-commit test command's timeout when
+// GitConfig.PreCommitTestTimeoutSec is unset.
+const DefaultPreCommitTestTimeoutSec = 600
+
 // SecurityConfig configures contextual security policies.
 type SecurityConfig struct {
 	EgressThenWrite  bool     `koanf:"egress_then_write"` // require approval for writes after network egress
@@ -1219,6 +1244,13 @@ func securityRelevantDiff(full, base *Config) []string {
 	if !reflect.DeepEqual(full.Plugins, base.Plugins) {
 		diffs = append(diffs, fmt.Sprintf("plugins: %d configured -> %d configured", len(base.Plugins), len(full.Plugins)))
 	}
+	// git.pre_commit_test_command (P46.2): the git_commit tool shells this out
+	// on the host before every commit — structurally the same arbitrary-host-
+	// command execution vector as hooks/plugins above, so a project cannot set
+	// or change it until the workspace is trusted.
+	if full.Git.PreCommitTestCommand != base.Git.PreCommitTestCommand {
+		diffs = append(diffs, fmt.Sprintf("git.pre_commit_test_command: %q -> %q", base.Git.PreCommitTestCommand, full.Git.PreCommitTestCommand))
+	}
 	return diffs
 }
 
@@ -1261,6 +1293,7 @@ func applyWorkspaceTrust(cfg, baseline *Config) {
 	cfg.Notify.Webhook = baseline.Notify.Webhook
 	cfg.Hooks = baseline.Hooks
 	cfg.Plugins = baseline.Plugins
+	cfg.Git.PreCommitTestCommand = baseline.Git.PreCommitTestCommand
 	cfg.WorkspaceTrust.Frozen = true
 	cfg.WorkspaceTrust.Changes = diffs
 }

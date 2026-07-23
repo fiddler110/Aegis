@@ -175,6 +175,17 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 			})
 	}
 
+	// Per-task file-write scope (P46.1) is the outermost gate: an out-of-scope
+	// write must be refused even when a text allow-rule below would grant it,
+	// since the scope is a further restriction the model/skill opted into for
+	// one task, not a competing permission. A no-op until a `scope` tool call
+	// activates a scope on the run's context.
+	gate = permission.NewScopeGate(gate, func(d permission.ContextualDecision) {
+		if s.audit != nil {
+			s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
+		}
+	})
+
 	return gate, engineHooks
 }
 

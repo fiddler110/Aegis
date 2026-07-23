@@ -153,7 +153,7 @@ Each line is a JSON object, and the fields present depend on the record's `phase
 
 - **`pre`** — logged for every tool call before it runs: `time`, `phase`, `tool`, `input` (the raw tool input, replaced with a `"[N bytes, truncated]"` string if larger than 1024 bytes).
 - **`post`** — logged for every tool call after it runs: `time`, `phase`, `tool`, `is_error`.
-- **`policy_decision`** — logged when a contextual security policy (`egress_then_write`, `network_allowlist`), a text-based permission rule, or the persona-tool advisory gate makes a decision: `time`, `phase`, `tool`, `cap` (the tool's capability), `rule`, `decision`, `reason`.
+- **`policy_decision`** — logged when a contextual security policy (`egress_then_write`, `network_allowlist`), a text-based permission rule, the per-task file-write scope (`task_scope`), or the persona-tool advisory gate makes a decision: `time`, `phase`, `tool`, `cap` (the tool's capability), `rule`, `decision`, `reason`.
 - **`subagent_stop`** — logged when a spawned sub-agent finishes: `time`, `phase`, `agent_id`, `status`, `summary`, `is_error`.
 
 ```json
@@ -200,6 +200,10 @@ security:
 An empty list means unrestricted (the default).
 
 **Important scope note:** These policies apply to tool-capability network calls (`web_fetch`, `web_search`, MCP server connections). They do **not** restrict what the `shell` tool can do via `curl`, `wget`, etc. For enforced egress isolation, use the [container sandbox](security_scan.md#sandboxed-execution) with `network: false`.
+
+### Per-task file-write scope (`scope` tool)
+
+Beyond the session-wide rules above, the [`scope` tool](tools-reference.md#scope-deferred) (P46.1) lets a task declare a temporary allowlist of path globs its file writes must stay within — enforced as the outermost gate, so an out-of-scope `write_file`/`edit_file`/`multi_edit` is refused even when a standing `allow write(...)` rule would otherwise permit it. Unlike the text rules (parsed once at session load), a scope is set and cleared during a run, giving finer-grained blast-radius containment for one task at a time. It restricts writes only; reads are always unrestricted. A `task_scope` decision is written to the audit trail on a scope denial.
 
 ---
 

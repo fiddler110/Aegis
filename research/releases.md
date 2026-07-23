@@ -8,8 +8,11 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-23 — **P41.1 shipped** (compaction's flat chars/4 token estimate replaced with
-the engine's script-aware one via a new shared `internal/tokenest` package — see below). Previously,
+**Last updated:** 2026-07-23 — **P46.1, P46.2, and P46.3 shipped** (the codex-build workflow-discipline
+track: per-task file-write scope enforcement, a pre-commit test gate on `git_commit`, and a `structured-build`
+skill packaging both into a one-task-one-commit workflow — see below). Previously the same day: **P41.1 shipped**
+(compaction's flat chars/4 token estimate replaced with the engine's script-aware one via a new shared
+`internal/tokenest` package — see below). Previously,
 2026-07-22: **P43.1 shipped** (debate concession-detector negation blindness, found
 examining `internal/debate`/`internal/swarm` reliability — see below). Earlier the same day: **P42.1 and
 P42.2 shipped** (workspace-trust and capability-spoofing gaps in `internal/plugins`, found by a scoped
@@ -18,6 +21,51 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P46.1 — Per-task file-write scope is now mechanically enforced, not just advisory session-wide rules.**
+Surfaced comparing against `codex-build` (a Claude-orchestrates-Codex workflow whose `check_scope.py`
+mechanically verifies a task's writes stay within a declared per-task path allowlist). Aegis's write gating
+was all session-lifetime: the mode gate is path-blind, and text allow/deny rules (`internal/permission/rules.go`)
+are parsed once at load and apply for the whole session — nothing let a task say "I should only be touching
+these files" and have it enforced. Added a new `permission.TaskScope` (a mutable, mutex-guarded per-session
+allowlist of path globs) plus `permission.ScopeGate`, wired as the **outermost** gate in `server.buildGate`
+so an out-of-scope write is refused even when a standing `allow write(...)` rule would grant it (the scope is
+a further restriction the task opted into, not a competing permission). The scope rides on the run context —
+the engine passes one context into both `gate.Check` and `tool.Execute`, so a new deferred `scope` tool
+(`set`/`clear`/`show`, capability `read` so it's usable in plan mode too) mutates the same object the gate
+reads. Scope restricts writes only (`write_file`/`edit_file`/`multi_edit`, via `path`/`file_path`/`edits[].path`);
+reads are never restricted, and a path-less write-capability tool (git_commit, remember) is never scope-blocked.
+Paths and patterns go through the same normalization as `RuleGate`'s Read/Write matching so a `..`/case/separator
+trick can't dodge the scope. Per-session `TaskScope` stored on the server (`taskScopeFor`), injected into
+`runCtx`, and cleaned up on session delete. Tests: `internal/permission/scope_test.go` (gate enforcement,
+inactive-passthrough, pathless-write and read exemptions, traversal) and `internal/tool/builtin/scope_test.go`
+(tool set/show/clear, no-context error). Full `go test ./...` green.
+
+**P46.2 — `git_commit` now runs an optional pre-commit test gate before committing.** Same `codex-build`
+comparison: its loop refuses to commit unless the configured test command just passed. Aegis's
+`gitCommitTool.Execute` was a straight passthrough — no test-command config, no check that anything ran, only
+the ordinary `CapWrite` permission gate. Added `config.GitConfig.PreCommitTestCommand` (+
+`PreCommitTestTimeoutSec`, default 600s): when set, `git_commit` runs it in the workspace on the host (same
+place `runGit` runs git) via the platform shell *before* staging, and a non-zero exit aborts the commit and
+returns the command output instead, leaving the index untouched. Unset (the default) is a no-op, so existing
+sessions with no test command are unaffected. Because it executes an arbitrary host command, it is treated as
+a security-relevant setting **frozen from untrusted project config by the workspace-trust gate** (P27.1):
+added to `securityRelevantDiff` and the freeze list in `applyWorkspaceTrust`, so a cloned repo's
+`.aegis/config.yaml` cannot introduce or change it until `aegis trust`. Tests:
+`TestGitCommitPreCommitTestGate` (failing gate refuses + leaves index clean, passing gate commits, unset is a
+no-op) and `TestWorkspaceTrustFreezesGitPreCommitTestCommand` (frozen while untrusted, applies after trust).
+Full `go test ./...` green.
+
+**P46.3 — `structured-build` skill packages the P46.1/P46.2 mechanisms into a one-task-one-commit workflow.**
+The remaining `codex-build` property was workflow discipline layered on those two gates: one task → one commit,
+one plan → one PR. Sequenced deliberately after P46.1/P46.2 landed as real mechanisms, because a skill enforcing
+this only in prose would repeat the exact weakness the roadmap has flagged elsewhere (P44.1, P39.6) —
+instructions a model drops under context pressure are not a mechanical check. The new embedded built-in skill
+(`internal/skills/builtin/structured-build/SKILL.md`, dormant until enabled) drives, per task: write an explicit
+task list, `scope(set, ...)` the task's file footprint, edit + verify tests, `git_commit` (which re-runs the
+pre-commit gate as a hard check), `scope(clear)`, repeat — plus a stop-when-stuck rule (leave the diff intact
+and hand back rather than thrash). `TestBuiltinsListsEmbeddedSkills` updated; skill-list references in
+CLAUDE.md and docs refreshed. Full `go test ./...` green.
 
 **P41.1 — Compaction now shares the engine's script-aware token estimate instead of a flat chars/4 one.**
 A 2026-07-22 data-flow review found the proactive compaction gate could silently no-op a compaction the

@@ -11,43 +11,41 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 20 actionable (0 Tier 1, 11 Tier 2, 9 Tier 3) + 2 parked (Tier 4).
+**Open items:** 13 actionable (0 Tier 1, 8 Tier 2, 5 Tier 3) + 2 parked (Tier 4).
 
 **Recommended execution order (cross-tier, 2026-07-23).** A single do-next sequence across all tracks,
-ordered by tier-priority then dependency (not by tier number alone — the threat-model root cause P39.5 is
-filed Tier 3 by effort but is the load-bearing blocker for that whole track):
+ordered by tier-priority then dependency:
 
-1. **Threat-model track** in dependency order: **P39.5** (root cause — everything rides on it) →
-   **P39.6** (verify loop; only meaningful once P39.5 lets a build reach zero markers) → **P39.9**
-   (dead tool-call path blocks the drive) → **P39.8** (least urgent — degrades gracefully via P36.2).
-   Landing P39.5 + P39.6 is what closes the **P38.1** umbrella.
-2. **codex-build track**: **P46.1** + **P46.2** (independent of each other) → **P46.3** (prose-only would
-   repeat the flagged weakness, so it must follow the two mechanical gates).
-3. **Independent Tier 2 fill-in (parallelizable, no dependencies)** — pick up any time between heavier
-   blocker items: **P44.1** (skill-asset scanning), **P45.1** (worktree dirty-file replication), and the
-   cheap TUI batch **P40.1 / P40.6 / P40.2 / P40.5 / P40.8**.
+1. **Independent Tier 2 fill-in (parallelizable, no dependencies)** — **P44.1** (skill-asset scanning),
+   **P45.1** (worktree dirty-file replication), and the cheap TUI batch
+   **P40.1 / P40.6 / P40.2 / P40.5 / P40.8**.
 
-Note: with the only Tier 1 item (P41.1) shipped, **P39.5** is now both do-first and most impactful — it
-unlocks the most downstream work but is larger and interacts with the drive loop / P36.2 pruning.
+Note: the **codex-build workflow-discipline track is now landed.** P46.1 (per-task file-write scope
+enforcement), P46.2 (pre-commit test gate on `git_commit`), and P46.3 (the `structured-build` skill) all
+shipped 2026-07-23 — see [releases.md](releases.md).
 
-Threat-model fix priority order (do-first to least-urgent): **P39.7 (shipped) → P39.5 → P39.6 → P39.9 →
-P39.8**, with **P38.1** as the tracking umbrella that closes once the remaining three land. Rationale:
-P39.7 was cheapest and already corroborated on two independent local models — now shipped (see
-[releases.md](releases.md)); P39.5 is the actual root cause (SKILL.md re-injected every turn starves the
-fill of context) and everything else rides on it; P39.6 only has something to check once a build reaches
-zero markers; P39.9 and P39.8 are adapter/robustness polish, with P39.9 ranked first because a dead
-tool-call path blocks everything, whereas P39.8 already degrades gracefully via the P36.2 fallback.
+Note: the **threat-model harness track is now landed.** P39.5, P39.6, P39.7, P39.8 shipped and P39.9's
+actionable halves are resolved (see below and [releases.md](releases.md)); the only remaining threat-model
+item is the **P38.1** umbrella, which stays open purely to track a live verify-clean re-test — no code is
+blocked on it.
 
-- **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. **Environment gate lifted:**
-  the doctor-recommended `qwen3.6:35b-a3b` is now installed and the conformance re-test has been run
-  (2026-07-21, against FirewallRiskRater). The build **mechanism** re-confirms, but the autonomous
-  `--skill` drive still does **not** reach a verify-clean suite on the stronger model. The reasons are
-  now root-caused and split into **P39.5–P39.9** (P39.7 shipped 2026-07-22); an interim external wrapper
-  is parked as **P38.8**.
-- **P39.5, P39.6, P39.8, P39.9** (Tier 2/3) — the remaining harness-side fixes surfaced by the P38.1
-  re-test: bound the drive-loop context (P39.5), fold phase-6 verification into the drive (P39.6),
-  native-Ollama adapter reliability (P39.9), and robust compaction/guard on weak local models (P39.8).
-  **P39.7** (no-progress guard) shipped 2026-07-22 — see [releases.md](releases.md).
+Threat-model fix priority order — **all shipped**: **P39.7 → P39.5 → P39.6 → P39.8 → P39.9** are done (see
+[releases.md](releases.md)). P39.7 was cheapest and corroborated on two local models; P39.5 was the actual
+root cause (the ~9K-token SKILL.md re-injected every turn starved the fill of context — now compacted out of
+the first message after the opening turn); P39.6 folded the phase-6 verify-and-fix loop into the drive so its
+done-condition is "verifies clean," not "all markers filled"; P39.8 latches a proven-broken LLM summarizer
+off for the rest of a run; P39.9 warns before a `/v1` compat drive overflows (and its native-adapter half was
+investigated and exonerated). **P38.1** remains the tracking umbrella, now awaiting only a live re-test.
+
+- **P38.1** (Tier 2) — non-orchestrated, single-context threat-model build. **Environment gate lifted** and
+  all load-bearing harness fixes (**P39.5–P39.9**) shipped. The build **mechanism** re-confirms; the item
+  stays open **only** as the conformance umbrella, closeable once a live `--skill` drive is confirmed to reach
+  a verify-clean suite on a local model with the shipped fixes in place. An interim external wrapper is parked
+  as **P38.8**.
+- **P39.5, P39.6, P39.7, P39.8, P39.9** — **shipped** (harness-side fixes surfaced by the P38.1 re-test):
+  bound the drive-loop context (P39.5), fold phase-6 verification into the drive (P39.6), no-progress "act
+  now" nudge (P39.7), latch off a broken LLM summarizer on weak local models (P39.8), and warn a `/v1` compat
+  drive before it overflows (P39.9, native-adapter half exonerated). See [releases.md](releases.md).
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
@@ -62,12 +60,10 @@ tool-call path blocks everything, whereas P39.8 already degrades gracefully via 
   2026-07-23 from a `grok-build` (`xai-grok-markdown`) comparison, joins the P40.x TUI/UX track.
 - **P40.9** (Tier 3) — no inline mermaid diagram rendering in chat; `render_diagram` only produces file
   output. Filed 2026-07-23, same comparison, joins the P40.x TUI/UX track.
-- **P46.1** (Tier 2) — per-task file-write scope has no mechanical enforcement, only session-wide permission
-  rules. Filed 2026-07-23 from a `codex-build` (Claude-orchestrates-Codex) comparison.
-- **P46.2** (Tier 2) — `git_commit` has no pre-commit test gate; it's a straight passthrough regardless of
-  test state. Filed 2026-07-23, same comparison.
-- **P46.3** (Tier 3) — structured-build skill packaging declared scope + test-gated commit + one-task-one-
-  commit discipline. Filed 2026-07-23, same comparison; sequenced after P46.1/P46.2.
+- **P46.1, P46.2, P46.3** — **shipped 2026-07-23** (codex-build workflow-discipline track): per-task
+  file-write scope enforcement (`permission.ScopeGate` + the `scope` tool), the `git_commit` pre-commit test
+  gate (`git.pre_commit_test_command`), and the `structured-build` skill packaging both into a
+  one-task-one-commit workflow. See [releases.md](releases.md).
 
 A handful of unfiled **leads** (condensed under Tier 2/Tier 3 below) capture mechanical follow-ups worth
 their own item when a concrete need appears.
@@ -93,27 +89,16 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 2
 
-**Status:** 11 open. Threat-model track, in priority order — **P39.6** (fold phase-6 verification into the
-drive loop), **P38.1** (conformance umbrella; gate now lifted, closes once the fixes below land). TUI/UX
-track (independent, see Tier 2/3 note above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual
-footer), **P40.2** (consistent hjkl/g/G), **P40.5** (dark/light auto-detect), **P40.8** (LaTeX math
-rendering). Independent hardening — **P44.1** (skill-asset scanning), **P45.1** (worktree dirty-file
-replication), **P46.1** (per-task scope enforcement), **P46.2** (pre-commit test gate).
+**Status:** 8 open. Threat-model track — **P38.1** (conformance umbrella; gate lifted and all load-bearing
+fixes shipped, now awaiting only a live verify-clean re-test). TUI/UX track (independent, see Tier 2/3 note
+above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual footer), **P40.2** (consistent hjkl/g/G),
+**P40.5** (dark/light auto-detect), **P40.8** (LaTeX math rendering). Independent hardening — **P44.1**
+(skill-asset scanning), **P45.1** (worktree dirty-file replication). The codex-build track (**P46.1**,
+**P46.2**) shipped 2026-07-23 — see [releases.md](releases.md).
 
-### P39.6 — Fold phase-6 verification into the drive-to-completion loop
-
-The `--skill` drive stops when no `<!-- PENDING -->` marker remains, but it never runs the bundled P37 checks
-(`verify.py`, `lint_dfd.py`, `inventory.py --check`). In the 2026-07-21 P38.1 re-test the "complete" suite
-carried a duplicate threat ID (`T7` twice), tier↔prerequisite mismatches (Local-Process threats filed under
-Tier 2), and stale tier counts in `0-assessment.md` — every one flagged by `verify.py`, all shipped uncaught
-because nothing ran it. Fold the checks into the loop: when markers hit zero, run all three; if any fails,
-feed the failure text back to the model to fix in place and re-run, bounded to a few rounds. This is the
-autonomous analogue of SKILL.md §5's phase-6 round, and it is what the P38.8 wrapper already does as a
-proof-of-shape.
-
-Priority: Tier 2 — cheap, self-contained, no dependency. Turns the drive's done-condition from "all markers
-filled" into "verifies clean," which is the real done-condition for an autonomous run. Sequence after
-P39.5 lands — nothing meaningful to verify until a build actually reaches zero markers.
+> **P39.6 shipped** (2026-07-21) — the `--skill` drive now runs the bundled phase-6 checks (`verify.py`,
+> `lint_dfd.py`, `inventory.py --check`) when its PENDING markers hit zero and feeds any failure back for an
+> in-place fix, bounded to `maxVerifyRounds`. See [releases.md](releases.md).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -171,10 +156,10 @@ here and is **partially confirmed live** (a 33-call run held inside ~44K input t
 definitive confirmation rides on a scaffolded, verify-clean re-test measured through P38.3's per-turn usage
 telemetry.
 
-Priority: Tier 2 — the environment gate is **lifted** and the re-test is done; the verify-clean goal is still
-unmet autonomously, but the reasons are now root-caused and filed as **P39.5–P39.9**. This item stays open as
-the conformance **umbrella** — closeable once the built-in `--skill` drive reaches a verify-clean suite on a
-local model (which P39.5 + P39.6 are the load-bearing fixes for). Not Tier 1 because it is live-run
+Priority: Tier 2 — the environment gate is **lifted**, the re-test is done, and every load-bearing
+harness fix it root-caused (**P39.5–P39.9**) has now **shipped** (see [releases.md](releases.md)). This item
+stays open only as the conformance **umbrella** — closeable once a live built-in `--skill` drive is confirmed
+to reach a verify-clean suite on a local model with those fixes in place. Not Tier 1 because it is live-run
 verification tracking, not independent build work.
 
 **Lead (not yet filed):** the "accurate refusal, error-shaped" exit-code question for the SCA/secrets
@@ -302,110 +287,38 @@ tool result when dirty state exists and isn't copied.
 Priority: Tier 2 — a real correctness surprise (silent, not exploitable) with a small, self-contained fix
 (`git status --porcelain` + file copy); no dependency on other roadmap work.
 
-### P46.1 — Per-task file-write scope is never mechanically enforced, only advisory permission rules
+> **P46.1 shipped** (2026-07-23) — per-task file-write scope is now mechanically enforced: a new
+> `permission.TaskScope` + `permission.ScopeGate` (wired outermost in `server.buildGate`) refuses any
+> `write_file`/`edit_file`/`multi_edit` outside the active scope, and a deferred `scope` tool sets/clears it.
+> See [releases.md](releases.md).
 
-Surfaced 2026-07-23 comparing against `codex-build` (a Claude-orchestrates-Codex build workflow), whose
-`check_scope.py` mechanically checks that a task's file modifications stay within a declared per-task
-allowlist of exact paths, verified before and after code generation. Aegis's write-path gating has two
-mechanisms, both coarser and neither task-scoped: the mode gate (`internal/permission/permission.go:56-88`)
-decides per-capability (read/write/execute/network/spawn) with no path awareness at all, and the rule-based
-allow/deny gate (`internal/permission/rules.go`) matches glob patterns like `allow write_file(src/**)`
-against a file path (`ParseRule`, rules.go:69-92; `RuleGate.Check`, rules.go:321-341) — but these rules are
-parsed once at session/config load (`ParseRules`, rules.go:96-110) and apply for the whole session, not a
-single task. `ContextualGate` (`internal/permission/contextual.go`) is the closest existing shape — extra
-gate state layered on top of the base mode/rule check — but it tracks session-lifetime facts (e.g. "network
-was used this session"), not a per-task path allowlist. No built-in persona or skill even encodes "stay
-within a declared file scope" as prose (grepped `internal/persona/builtin/*.md` and
-`internal/skills/builtin/*/SKILL.md` — no hits). So a skill or subagent that should only be touching a
-handful of files for one task has no way to say so, and nothing would catch it if it strayed.
-
-Fix direction: add a gate layer with `ContextualGate`'s shape that a skill/tool call can push a declared path
-allowlist onto for the duration of a task (e.g. a dedicated `scope` tool call or skill front-matter field),
-checked the same way `RuleGate` matches glob patterns against every `write_file`/`edit_file` call, popped
-when the task/skill run ends.
-
-Priority: Tier 2 — additive new gate layer following an existing pattern (`ContextualGate`), self-contained,
-no dependency on other roadmap work. Not Tier 1: no currently-demonstrated exploit — this is blast-radius
-containment for agent-authored changes, not a response to an active gap.
-
-### P46.2 — No pre-commit test gate; `git_commit` always executes regardless of test state
-
-Same `codex-build` comparison (2026-07-23): its orchestration loop refuses to commit a task's changes unless
-the configured test command has just passed — "tests run before every commit, not usually, every one; red
-gate → no commit." Aegis's `gitCommitTool.Execute` (`internal/tool/builtin/git.go:192-247`) is a straight
-passthrough: validate message/paths → stage (`git add -A` or explicit paths) → `git commit -m` → return the
-hash and diffstat. There's no test-command config, no check that a test tool ran (let alone passed) since the
-last edit to a staged file, and no engine-level gate inspecting commit calls for a preceding test run — it's
-gated only by the ordinary `CapWrite` permission check, identical to any other write. The `developer` persona
-already tells the model in prose to "run the relevant build or test command to verify correctness" after
-edits (`internal/persona/builtin/developer.md:59-62`), but that's unenforced guidance disconnected from the
-commit call itself — a model can skip it, or lose it under context pressure, and commit broken code anyway.
-
-Fix direction: an optional config (e.g. `git.pre_commit_test_command`, or a skill/persona-declared test
-command) that `gitCommitTool` checks before running `git commit` — either require a matching test-tool
-invocation to have succeeded since the last staged edit, or shell out to the configured command itself and
-refuse the commit with the failure output on non-zero exit. Must default to a no-op when unconfigured so it
-doesn't retroactively break sessions with no test command declared.
-
-Priority: Tier 2 — self-contained change scoped to one tool, no dependency on other roadmap work.
+> **P46.2 shipped** (2026-07-23) — `git_commit` now runs an optional `git.pre_commit_test_command` before
+> staging and aborts the commit on a non-zero exit; the setting is frozen from untrusted project config by the
+> workspace-trust gate. See [releases.md](releases.md).
 
 ---
 
 ## Open Work — Tier 3
 
-**Status:** 9 filed. Threat-model track, in priority order — **P39.5** (bound the drive-loop context: root
-cause, do first), **P39.9** (native-Ollama adapter reliability: a dead tool-call path blocks everything
-downstream), **P39.8** (compaction/guard on weak local models: already mitigated by a fallback, least
-urgent) — plus open leads below. TUI/UX track (independent, see Tier 2/3 note above P40.1) — **P40.3**
-(transcript search, highest value of the batch), **P40.7** (unify bespoke dialogs), **P40.4** (real inline
-image protocols, riskiest), **P40.9** (inline mermaid rendering). Independent hardening — **P45.2**
-(hunk-level agent-vs-external attribution), **P46.3** (structured-build skill; sequenced after P46.1/P46.2).
+**Status:** 5 filed. Threat-model track — **all shipped** (P39.5/P39.8/P39.9 landed with the harness fixes
+above; see the shipped note below and [releases.md](releases.md)); only open leads remain. TUI/UX track
+(independent, see Tier 2/3 note above P40.1) — **P40.3** (transcript search, highest value of the batch),
+**P40.7** (unify bespoke dialogs), **P40.4** (real inline image protocols, riskiest), **P40.9** (inline
+mermaid rendering). Independent hardening — **P45.2** (hunk-level agent-vs-external attribution). The
+codex-build track's **P46.3** (structured-build skill) shipped 2026-07-23 — see [releases.md](releases.md).
 
-### P39.5 — Bound the skill drive-loop's peak context so local-model fills converge (P38.1 root cause)
+> **P39.5 shipped** (2026-07-21) — the drive stops re-sending the whole ~9K-token SKILL.md every turn:
+> `compactFirstSkillMessage` rewrites the first user message once after the opening turn, swapping the skill
+> body for a compact on-disk pointer the model can re-read on demand. **P39.8 shipped** (2026-07-21) — a
+> proven-broken LLM summarizer is latched off for the rest of a run past `summarizerGiveUpThreshold` (4)
+> cumulative failures, compacting deterministically (P36.2) thereafter. **P39.9 shipped/resolved** — the `/v1`
+> compat drive now warns before overflowing with a runnable num_ctx-modelfile recipe (`warnCompatDriveWindow`
+> / `LegacyOllamaModelfileRecipe`), and the native-adapter-hang half was investigated and **exonerated** (the
+> adapter's tool-calling is fine for the available models). See [releases.md](releases.md).
 
-The 2026-07-21 P38.1 re-test root-caused why the drive-to-completion fill doesn't reach a verify-clean suite
-on a stronger local model: `aegis chat --skill <name>` re-injects the full SKILL.md (~9K tokens;
-`prompt_bytes≈31534` at turn 0) into **every** turn, so on a 32K local window the architecture recon + a few
-file reads leave no room to `edit_file`. On a scaffolded resume, one run made **86 tool calls across 3 drive
-iterations and cleared 0 of 23 `PENDING` markers** — the model re-reads the partial suite each iteration and
-never converges. The fix is context discipline the harness enforces: after phase 1, load only the *current
-phase's* reference (not the whole SKILL.md), leaning on P36.2 pruning to drop spent reads. Proof this is the
-right lever: an external wrapper (P38.8) driving the same model one phase at a time **without** the preload
-completed all seven files. Sequence-dependent — pairs with P39.6 (verify loop) and rides P38.3 telemetry to
-confirm the window stays bounded.
-
-Priority: Tier 3 — the load-bearing blocker behind P38.1's unmet conformance, now root-caused; larger than a
-config tweak and interacts with the drive loop, per-phase reference loading, and P36.2.
-
-### P39.9 — Native-Ollama adapter emits no tool call on large skill-preload turns; `/v1` path ignores `context_window`
-
-Two adapter-level snags surfaced in the 2026-07-21 runs. (a) With `provider.default: ollama` (native adapter)
-the skill-preload turn produced **no tool call and no run directory after 8+ minutes on two runs** — the same
-prompt on the legacy openai-compat (`/v1`) adapter emitted tool calls immediately; needs a focused repro
-(think-mode? oversized system prompt?) before it's actionable. (b) The `/v1` compat path never sends `num_ctx`,
-so Ollama serves the model's modelfile default (16384 for stock `qwen3.6:35b-a3b-fast`), producing
-`request (34774 tokens) exceeds the available context size (16384)`; the user must bake a `num_ctx 32768`
-modelfile derivative. Either honor `provider.context_window` on the `/v1` path, or surface the modelfile
-requirement in `aegis doctor` / first-init. Relates to P35.2/P35.3 (context-window guidance) and
-P35.9/P39.3 (native-adapter work).
-
-Priority: Tier 3 — the `/v1`+`num_ctx` half is documented-workaround-able today; the native-adapter hang is
-investigation-gated (needs a repro) rather than a ready fix. Ranked ahead of P39.8: a silently-dead tool-call
-path blocks the whole drive, whereas P39.8 already degrades gracefully.
-
-### P39.8 — Compaction / output-guard secondary LLM calls are unreliable on weak local models
-
-Aegis's proactive context-compaction summarizer and the `output_guard` rubric check each make a secondary LLM
-call to the *same* local model, which returns empty output — the daemon log shows **42×
-`summarizer returned empty output`** across the 2026-07-21 runs. The existing deterministic fallback (P36.2)
-fires after two empty summaries so a run degrades rather than hard-fails, but the guard call and the degraded
-summaries still cost latency and quality on exactly the long runs that most need compaction. Options: a
-`provider.summarizer_model` that routes compaction/guard to a small dedicated model, or auto-skipping the LLM
-summarizer for models flagged weak (straight to the deterministic path). `output_guard.enabled: false` is the
-current manual workaround (set in the FirewallRiskRater `.aegis/config.yaml`).
-
-Priority: Tier 3 — a real robustness gap on local models, but partly mitigated by the existing fallback and
-larger than config since it needs a routing / opt-out mechanism. Least urgent of the three Tier 3 items.
+**Lead — P39.9 residual (repro-gated):** a prefill-latency observability gap remains on the native path — the
+only unresolved sliver of P39.9, tracked as a lead rather than a blocker because it needs a focused repro
+before it is actionable.
 
 **Lead — doc-inconsistency (surfaced building the P37 scripts):**
 (a) **threat-ID form** — `references/skeletons/skeleton-stride.md` writes threat IDs as bare sequential
@@ -500,31 +413,19 @@ Priority: Tier 3 — real value for `/rewind`-adjacent precision and diff UX, bu
 P45.1: needs actual hunk-diffing (not just mtime comparison) and touches `checkpoint`'s restore model, not a
 self-contained change.
 
-### P46.3 — Structured-build skill: declared scope + test-gated commit + one-task-one-commit discipline
+> **P46.3 shipped** (2026-07-23) — the `structured-build` embedded skill packages P46.1's `scope` tool and
+> P46.2's pre-commit test gate into a one-task-one-commit workflow (declare scope → edit → verify → commit →
+> clear, repeat), landing only after both mechanisms were real so the skill leans on enforced gates rather
+> than prose. See [releases.md](releases.md).
 
-`codex-build`'s remaining property (2026-07-23 comparison, alongside P46.1/P46.2) is workflow discipline
-layered on top of its scope and test-gate mechanisms: one task produces exactly one commit, one plan produces
-exactly one PR — eliminating mega-diffs and giving each commit a reviewable, single-purpose unit of change.
-Aegis has no equivalent packaged workflow: nothing steers a multi-task feature build toward one-commit-per-
-task, and the `git_commit` tool has no opinion on commit granularity today.
-
-Fix direction: once **P46.1** (per-task scope enforcement) and **P46.2** (test-gated commit) land as actual
-mechanisms rather than prose, package them into a skill (e.g. `structured-build`) that, for each task in a
-plan: declares the task's file scope, drives edits, requires the test gate to pass, and commits — one task,
-one commit. Sequenced after P46.1/P46.2 specifically because a skill enforcing this only in prose would repeat
-the same weakness the roadmap has already flagged elsewhere (e.g. **P44.1**, **P39.6**) — instructions a
-model can drop under context pressure are not a substitute for a mechanical check.
-
-**Related, not yet filed as its own item:** `codex-build` also halts entirely and presents the current diff
-to the user if a task fails 3 times, rather than continuing to retry or silently rewriting code. Aegis's
+**Lead — task-failure halt (surfaced filing P46.3, not yet its own item):** `codex-build` also halts entirely
+and presents the current diff if a task fails 3 times, rather than retrying or silently rewriting. Aegis's
 `loopDetector` (`internal/engine/loopdetect.go`) only catches literal repeated tool-call signatures
-(`engine.go:734-739`), and `BudgetUSD`/`MaxTokensPerRun` (`engine.go:470-476`, `741-751`) only catch
-session-wide cost/token exhaustion — neither tracks "this specific task has failed N times" as its own
-signal, and neither produces a diff/summary artifact on stopping (both just emit a `KindError` event). Worth
-its own item once a "task" boundary exists (e.g. via P46.3) to count failures against.
-
-Priority: Tier 3 — real value (reviewable history, bounded blast radius per task) but sequence-dependent on
-P46.1 and P46.2 landing as enforced mechanisms first; not self-contained today.
+(`engine.go:734-739`), and `BudgetUSD`/`MaxTokensPerRun` only catch session-wide cost/token exhaustion —
+neither tracks "this specific task has failed N times" nor produces a diff/summary artifact on stopping (both
+just emit a `KindError` event). The `structured-build` skill now encodes a stop-when-stuck rule in prose;
+turning that into a mechanical per-task failure counter would need a persisted "task" boundary to count
+against, and is worth its own item once that boundary exists.
 
 ---
 

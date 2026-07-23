@@ -304,6 +304,10 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)
 	runCtx = swarm.WithCostTracker(runCtx, tracker)
+	// Carry this session's per-task file-write scope (P46.1) so the `scope`
+	// tool and ScopeGate share one object across the turn's tool calls: a scope
+	// the model declares is enforced on every subsequent write this run.
+	runCtx = permission.WithTaskScope(runCtx, s.taskScopeFor(id))
 	if snap != nil {
 		runCtx = checkpoint.WithSnapshotter(runCtx, snap)
 	}

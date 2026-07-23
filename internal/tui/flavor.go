@@ -29,7 +29,7 @@ var toolCategory = map[string]humorCategory{
 	"ask_user": catRead, "skill": catRead, "tool_search": catRead,
 	"task_list": catRead, "task_get": catRead, "task_output": catRead,
 	"team_task_list": catRead, "team_inbox": catRead, "todo_list": catRead,
-	"git": catRead, "cron_list": catRead,
+	"git": catRead, "cron_list": catRead, "scope": catRead,
 
 	// Write / create
 	"write_file": catWrite, "edit_file": catWrite, "multi_edit": catWrite,

