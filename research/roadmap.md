@@ -11,14 +11,20 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 13 actionable (0 Tier 1, 8 Tier 2, 5 Tier 3) + 2 parked (Tier 4).
+**Open items:** 6 actionable (0 Tier 1, 1 Tier 2, 5 Tier 3) + 2 parked (Tier 4).
 
 **Recommended execution order (cross-tier, 2026-07-23).** A single do-next sequence across all tracks,
 ordered by tier-priority then dependency:
 
-1. **Independent Tier 2 fill-in (parallelizable, no dependencies)** — **P44.1** (skill-asset scanning),
-   **P45.1** (worktree dirty-file replication), and the cheap TUI batch
-   **P40.1 / P40.6 / P40.2 / P40.5 / P40.8**.
+1. ~~Independent Tier 2 fill-in — P44.1, P45.1, and the cheap TUI batch P40.1/P40.6/P40.2/P40.5/P40.8.~~
+   **Shipped 2026-07-23** (see [releases.md](releases.md)): P44.1 (skill-asset admission scanning), P45.1
+   (worktree dirty-file replication), and the five-item TUI/UX batch — P40.8 (LaTeX→Unicode math), P40.5
+   (auto dark/light detect), P40.2 (consistent hjkl/g/G), P40.1 (resizable panes), P40.6 (contextual footer).
+2. **Remaining Tier 2** — **P38.1** stays open only as the threat-model conformance umbrella (awaiting a live
+   verify-clean re-test; no code blocked on it).
+3. **Tier 3 TUI/UX** — **P40.3** (transcript search, highest value), **P40.9** (inline mermaid), **P40.4**
+   (real inline image protocols, riskiest), **P40.7** (unify bespoke dialogs); plus **P45.2** (hunk-level
+   attribution).
 
 Note: the **codex-build workflow-discipline track is now landed.** P46.1 (per-task file-write scope
 enforcement), P46.2 (pre-commit test gate on `git_commit`), and P46.3 (the `structured-build` skill) all
@@ -49,15 +55,15 @@ investigated and exonerated). **P38.1** remains the tracking umbrella, now await
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
-- **P44.1** (Tier 2) — bundled skill assets (scripts under a project/user `.aegis/skills/<name>/`) never go
-  through admission scanning before being surfaced to the model. Filed 2026-07-22 from a DefenseClaw
-  comparison.
-- **P45.1** (Tier 2) — `worktree.Manager.Add` never carries uncommitted/untracked files into a new worktree.
-  Filed 2026-07-23 from an xAI `grok-build` (`xai-fast-worktree`) comparison.
+- **P44.1, P45.1** — **shipped 2026-07-23**: bundled skill assets now go through admission scanning on
+  discovery (a `security.ScanBundleWarnings` seam folds HIGH/CRITICAL findings into the `<skill_assets>`
+  block), and `worktree.Manager.Add` now carries uncommitted/untracked (non-ignored) files into a new
+  worktree. See [releases.md](releases.md).
+- **P40.1, P40.2, P40.5, P40.6, P40.8** — **shipped 2026-07-23** (TUI/UX Tier 2 batch): resizable panes,
+  consistent hjkl/g/G navigation, auto dark/light detection, contextual per-pane footer, and LaTeX→Unicode
+  math rendering. See [releases.md](releases.md).
 - **P45.2** (Tier 3) — no hunk-level agent-vs-external attribution; `filetracker` only does whole-file mtime
   staleness. Filed 2026-07-23 from the same comparison (`xai-hunk-tracker`).
-- **P40.8** (Tier 2) — no LaTeX math rendering in the transcript; `$...$`/`$$...$$` show as raw text. Filed
-  2026-07-23 from a `grok-build` (`xai-grok-markdown`) comparison, joins the P40.x TUI/UX track.
 - **P40.9** (Tier 3) — no inline mermaid diagram rendering in chat; `render_diagram` only produces file
   output. Filed 2026-07-23, same comparison, joins the P40.x TUI/UX track.
 - **P46.1, P46.2, P46.3** — **shipped 2026-07-23** (codex-build workflow-discipline track): per-task
@@ -89,12 +95,10 @@ their own item when a concrete need appears.
 
 ## Open Work — Tier 2
 
-**Status:** 8 open. Threat-model track — **P38.1** (conformance umbrella; gate lifted and all load-bearing
-fixes shipped, now awaiting only a live verify-clean re-test). TUI/UX track (independent, see Tier 2/3 note
-above P40.1) — **P40.1** (resizable panes), **P40.6** (contextual footer), **P40.2** (consistent hjkl/g/G),
-**P40.5** (dark/light auto-detect), **P40.8** (LaTeX math rendering). Independent hardening — **P44.1**
-(skill-asset scanning), **P45.1** (worktree dirty-file replication). The codex-build track (**P46.1**,
-**P46.2**) shipped 2026-07-23 — see [releases.md](releases.md).
+**Status:** 1 open. Threat-model track — **P38.1** (conformance umbrella; gate lifted and all load-bearing
+fixes shipped, now awaiting only a live verify-clean re-test). The TUI/UX Tier 2 batch (**P40.1**, **P40.2**,
+**P40.5**, **P40.6**, **P40.8**), independent hardening (**P44.1**, **P45.1**), and the codex-build track
+(**P46.1**, **P46.2**) all **shipped 2026-07-23** — see [releases.md](releases.md).
 
 > **P39.6 shipped** (2026-07-21) — the `--skill` drive now runs the bundled phase-6 checks (`verify.py`,
 > `lint_dfd.py`, `inventory.py --check`) when its PENDING markers hit zero and feeds any failure back for an
@@ -168,124 +172,29 @@ exits that mean "nothing to do" rather than "I broke". No `### P<n>.<m>` heading
 
 **P40.1–P40.7** file TUI/UX gaps from a 2026-07-22 competitive review of `internal/tui` against best-in-class
 open source TUIs (lazygit, k9s, yazi, zellij, btop/bottom, lnav, glow/soft-serve). Independent track from the
-threat-model items above — no priority ordering implied between the two; within TUI/UX itself, **P40.1**
-(pane resize), **P40.6** (contextual footer), **P40.2** (consistent hjkl/g/G), and **P40.5** (dark/light
-auto-detect) are the cheap Tier 2 wins, while **P40.3** (transcript search) is the highest-value item overall
-but large enough to sit in Tier 3 alongside **P40.7** (unify bespoke dialogs) and **P40.4** (real inline image
-protocols, riskiest — needs a terminal-compat prototype).
+threat-model items above. The four cheap Tier 2 wins — **P40.1** (pane resize), **P40.6** (contextual
+footer), **P40.2** (consistent hjkl/g/G), **P40.5** (dark/light auto-detect) — plus **P40.8** (LaTeX→Unicode
+math) all **shipped 2026-07-23** (see [releases.md](releases.md)). Still open in Tier 3: **P40.3** (transcript
+search, highest-value), **P40.7** (unify bespoke dialogs), **P40.4** (real inline image protocols, riskiest),
+**P40.9** (inline mermaid).
 
-### P40.1 — Resizable panes (sidebar, terminal pane)
+> **P40.1, P40.2, P40.5, P40.6, P40.8 shipped** (2026-07-23) — the TUI/UX Tier 2 batch: resizable sidebar/
+> terminal panes (`ctrl+←`/`ctrl+→` on the focused pane), consistent `hjkl`/`g`/`G` scroll on the transcript
+> and tool-card views, `auto` as the default theme (terminal-background detection via
+> `tea.BackgroundColorMsg`), a focus-scoped status-bar hint footer, and a LaTeX-math → Unicode preprocessing
+> pass (`renderMathUnicode`) ahead of the glamour renderer. See [releases.md](releases.md).
 
-The optional left sidebar and right-docked terminal pane (`Ctrl+B`/`Ctrl+X`) are fixed-width constants
-(`sidebarInnerW`, `termPaneTotalW` in `tui.go`), toggled on/off but never resized; `layout()` (`tui.go:2587`)
-recomputes viewport width from whichever panes are open but always at the same constant width. Best-in-class
-multiplexer/dashboard TUIs (`zellij`, `tmux`, `k9s`) let a user grow/shrink a focused pane with a keybind
-without leaving the app. Add a resize keybind (e.g. a modifier + arrow while a pane has focus) that adjusts a
-stored width within min/max bounds and re-runs `layout()`.
+> **P44.1 shipped** (2026-07-23) — bundled, untrusted skill directories are now screened through the same
+> filesystem scan `aegis security scan` drives on discovery: a `skills.BundleScanner` seam (wired at
+> daemon/CLI startup to `security.ScanBundleWarnings`) folds any HIGH/CRITICAL finding into the
+> `<skill_assets>` block as a visible warning, cached by the existing directory signature, and degrades to a
+> silent no-op when no scanner is installed. See [releases.md](releases.md).
 
-Priority: Tier 2 — additive, no architecture change; turns an existing constant into a small piece of
-persisted state plus a keybinding.
-
-### P40.2 — Consistent hjkl/g/G navigation across every scrollable surface
-
-`j`/`k` currently work only in the completion popup (`tui.go:1426`) and transcript scroll
-(`transcript.go:746`); `bubbles/list`-backed dialogs get full hjkl for free but the transcript, tool-card
-view, and terminal pane are inconsistent with each other. Tools like `yazi`, `lazygit`, `k9s`, and `lnav`
-commit to hjkl plus `g`/`G` (top/bottom) on every scrollable surface, not just list widgets. Extend the same
-handling to the remaining panes.
-
-Priority: Tier 2 — small, self-contained; the pattern is already proven at two call sites, just needs
-replicating to the rest.
-
-### P40.5 — Auto-detect terminal light/dark background for the default theme
-
-Aegis always defaults to `darkScheme()` (`colorscheme.go:261`) and requires an explicit `/theme` command or
-config value to switch to light; tools built on the same lipgloss/termenv stack (`glow`, `soft-serve`) call
-`termenv.HasDarkBackground()` at startup to pick a sane default automatically.
-
-Priority: Tier 2 — small, no-dependency; a single startup check feeding into the same scheme-selection path
-that `/theme`/config already use.
-
-### P40.6 — Contextual per-pane keybinding footer
-
-`F1` (`renderHelpBox`, `tui.go:4505`) always renders the full static keymap regardless of what has focus
-(chat vs. sidebar vs. terminal pane vs. an open dialog). `lazygit`'s bottom bar instead shows only the hints
-relevant to whichever panel is currently focused. A one-line contextual footer would reduce how often users
-need the full overlay for common actions.
-
-Priority: Tier 2 — additive; `keyMap.helpEntries()` already exists as the single source of truth, this just
-needs a focus-scoped subset and a footer render path.
-
-### P40.8 — Render LaTeX math in the transcript instead of showing it raw
-
-`newGlamourRenderer` (`tui.go:4633`) wires up plain `glamour.NewTermRenderer` with no math extension, so a
-model response containing `$E=mc^2$` or a `$$...$$` block renders as literal dollar-sign text — goldmark
-(glamour's underlying parser) has no math awareness by default. xAI's `grok-build` (`xai-grok-markdown`)
-solves this the terminal-appropriate way: it doesn't attempt real TeX typesetting, it converts common LaTeX
-math markup to a Unicode approximation (`$E=mc^2$` → `E=mc²`) as a preprocessing pass before the existing
-renderer sees it — superscripts/subscripts/Greek letters/common operators via Unicode codepoints. Personas
-that discuss math (general math help, algorithm complexity, crypto primitives) currently degrade to raw
-markup with no visual distinction from prose.
-
-Priority: Tier 2 — small, self-contained preprocessing step ahead of the existing `newGlamourRenderer` call;
-no new rendering pipeline, no new dependency (a regex/parser pass over recognized delimiters).
-
-### P44.1 — Bundled skill assets (scripts, not just prose) never go through admission scanning
-
-Surfaced 2026-07-22 comparing Aegis against Cisco's DefenseClaw, whose CodeGuard admission gate statically
-scans a skill/MCP asset for secrets, dangerous exec, unsafe deserialization, and injection patterns *before*
-it's trusted. Aegis has no equivalent for the one place it has genuinely untrusted executable content on
-disk: a bundled skill directory (`.aegis/skills/<name>/SKILL.md` plus companion `scripts/`, `references/`)
-can ship arbitrary `.py`/`.sh` files. `appendFromDir` (`internal/skills/skills.go:214`) loads such a bundle
-and `withAssetManifest` (`skills.go:301`) lists every companion file in a `<skill_assets>` block telling the
-model to read them with its own file tools — and, if the skill's own instructions say so, run them via the
-shell tool. `wrapUntrustedSkill` (`skills.go:269`) only wraps the `SKILL.md` prose in a provenance marker
-(deliberately `scan=false` — skill prose about its own instructions makes the heuristic noisy, per that
-function's comment); it never touches the bundled scripts' actual content, and nothing else in the discovery
-path does either. A compromised contributor's commit (project `.aegis/skills/`) or a bad drop into a user's
-`~/.aegis/skills/` gets its scripts surfaced to the model, and potentially executed, with zero static
-scrutiny — the same class of supply-chain gap DefenseClaw's admission control targets, but for skills instead
-of MCP servers (Aegis doesn't fetch/build MCP server code itself — `cfg.MCP.servers` just points at an
-already-installed external command — so that half of DefenseClaw's model doesn't apply here today).
-
-Fix direction: reuse the filesystem-scan path `aegis security scan` already drives
-(`security.DefaultScanners`/`security.PlanScanners` against a directory, backed by the multiscanner container
-image — `internal/security/multiscanner.go`) rather than building a second static-analysis engine. On first
-discovery of a *bundled, untrusted* skill directory (the `!trusted` branch of `appendFromDir`, i.e. never the
-embedded built-ins), run it through the same scan and fold any HIGH/CRITICAL finding into the
-`<skill_assets>` block as a visible warning — same "frame it as data, never drop it" precedent
-`trust.Wrap`'s scan-hit path and `mcp.wrapUntrustedSkill`'s sibling `wrapUntrustedOutput` already set. Cache
-the verdict the same way `discoverCache`/`skillsDirSignature` (`skills.go:70-146`) already cache the parsed
-skill by directory signature, so re-scanning only happens when the bundle's files actually change. Must
-degrade to a silent no-op (not a hard failure) when the multiscanner image hasn't been built — mirror the
-existing `verifyMultiscannerImage`/`verifyMultiscannerCache` fallback pattern — since most sessions won't have
-run `aegis security build-image`.
-
-Priority: Tier 2 — self-contained hardening that reuses existing scanner and caching infrastructure end to
-end, no dependency on other open roadmap work. Not Tier 1: bundled skills are typically project-authored
-content at the same trust level as the rest of the repo already, so this is defense-in-depth against a
-supply-chain scenario rather than a currently-demonstrated exploit path.
-
-### P45.1 — `worktree.Manager.Add` doesn't carry uncommitted/untracked files into the new worktree
-
-`Add` (`internal/worktree/worktree.go:54`) is a thin wrapper over `git worktree add [-b branch] dest`, which
-only checks out the **committed** tree (HEAD or a new branch from it) — any staged, unstaged, or untracked
-files in the caller's working tree are invisible to the new worktree. Surfaced 2026-07-23 comparing against
-xAI's `grok-build`, whose `xai-fast-worktree` crate exists specifically to replicate dirty and (optionally)
-ignored files into a freshly created worktree — on top of CoW/BTRFS-snapshot cloning for speed, which Aegis
-doesn't need. The correctness half does apply here: today, spawning a subagent into an isolated worktree
-(the package's own doc comment frames this as "the 2026-standard mechanism for safe parallel agent
-execution") silently drops any in-progress uncommitted work in the source tree — the subagent operates on a
-clean HEAD checkout with no signal that it's missing the user's current edits, which can produce duplicate or
-conflicting work rather than an explicit error.
-
-Fix direction: after `git worktree add --no-checkout dest`, diff `git status --porcelain` against the source
-tree and copy modified/staged/untracked files (respecting `.gitignore` for untracked, mirroring
-`xai-fast-worktree`'s dirty/ignored split) into `dest` before returning, or surface a clear warning in the
-tool result when dirty state exists and isn't copied.
-
-Priority: Tier 2 — a real correctness surprise (silent, not exploitable) with a small, self-contained fix
-(`git status --porcelain` + file copy); no dependency on other roadmap work.
+> **P45.1 shipped** (2026-07-23) — `worktree.Manager.Add` now carries the source working tree's dirty state
+> (modified/staged/untracked non-ignored files, plus deletions/renames) into a freshly created worktree via a
+> copy-on-top pass over `git status --porcelain -z`, so spawning a subagent into an isolated worktree no
+> longer silently drops in-progress edits. A new `AddCarry` returns the carried paths for reporting. See
+> [releases.md](releases.md).
 
 > **P46.1 shipped** (2026-07-23) — per-task file-write scope is now mechanically enforced: a new
 > `permission.TaskScope` + `permission.ScopeGate` (wired outermost in `server.buildGate`) refuses any

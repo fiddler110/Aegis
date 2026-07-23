@@ -8,7 +8,11 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-23 — **P46.1, P46.2, and P46.3 shipped** (the codex-build workflow-discipline
+**Last updated:** 2026-07-23 — **P40.1, P40.2, P40.5, P40.6, P40.8, P44.1, and P45.1 shipped** (the
+parallelizable Tier-2 batch: the five-item TUI/UX set — resizable panes, consistent hjkl/g/G navigation, auto
+dark/light detection, a contextual per-pane footer, and LaTeX→Unicode math rendering — plus two independent
+hardening items: bundled-skill-asset admission scanning and worktree dirty-file replication — see below).
+Earlier the same day: **P46.1, P46.2, and P46.3 shipped** (the codex-build workflow-discipline
 track: per-task file-write scope enforcement, a pre-commit test gate on `git_commit`, and a `structured-build`
 skill packaging both into a one-task-one-commit workflow — see below). Previously the same day: **P41.1 shipped**
 (compaction's flat chars/4 token estimate replaced with the engine's script-aware one via a new shared
@@ -21,6 +25,79 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P40.8 — LaTeX math now renders as a Unicode approximation in the transcript instead of raw markup.**
+`newGlamourRenderer` wires up plain glamour with no math extension, so `$E=mc^2$` or a `$$...$$` block showed
+as literal dollar-sign text (goldmark has no math awareness). Following xAI `grok-build`'s terminal-appropriate
+approach — a Unicode approximation, not real TeX typesetting — a new `renderMathUnicode` preprocessing pass
+(`internal/tui/latex.go`) runs in `mdRender` ahead of glamour: it converts `$...$`/`$$...$$` spans to Unicode
+(super/subscripts, Greek letters, operators/relations, arrows, `\frac{a}{b}`→`(a)/(b)`). Two safety rules keep
+it from mangling prose: fenced code blocks and inline code spans pass through untouched (a shell `$HOME` is
+never rewritten), and a single-`$…$` span converts only when its content actually looks like math (a backslash
+command or `^`/`_`), so currency like "$5 and $10" is left alone. Non-representable exponents keep their
+literal `^{…}` form. Tests: `latex_test.go` (conversions, code preservation, currency, unbalanced/escaped `$`).
+
+**P40.5 — the default theme now auto-detects the terminal's light/dark background.** Aegis always defaulted to
+the dark scheme and required an explicit `/theme`/config value to switch to light. `tui.theme` now defaults to
+`"auto"`: `Run` binds a provisional dark scheme (lipgloss captures colors at style-creation time), `Init`
+issues bubbletea v2's `RequestBackgroundColor`, and `Update` applies the light or dark scheme from the
+`tea.BackgroundColorMsg.IsDark()` reply — rebuilding `m.th`/`m.renderer` the same way the live `/theme` switch
+does. `/theme auto` re-enables detection; any explicit `/theme <name>` clears the auto flag so a later
+background report can't override the user's choice. Tests: `TestIsAutoTheme` plus the existing theme-switch
+coverage.
+
+**P40.2 — hjkl/g/G scrolling is now consistent across every scrollable content surface.** `j`/`k` worked on
+the transcript and completion popup but the transcript pane and the tool-card (`transientPanel`) overlay had
+divergent scroll vocabularies. Both now share the full vi set: `j`/`k` (line), `u`/`d`+`ctrl` (half-page),
+`b`/`f`/`space`/`ctrl+f`/`ctrl+b` (page), and `g`/`G`+`home`/`end` (top/bottom). The terminal pane and
+completion popup are input surfaces where letters are typing, so they keep `pgup`/`pgdn` only, by design.
+Tests: extended `TestTranscriptHandleKeyMatchesViewportDefaults`.
+
+**P40.1 — the sidebar and terminal panes are now resizable.** Both were fixed-width constants
+(`sidebarInnerW`, `termPaneVpW`), toggled but never resized. The live widths are now per-model state
+(`m.sidebarW`, `m.term.width`), adjustable within min/max bounds with `ctrl+←`/`ctrl+→` on the focused pane
+(terminal when it has focus, else the sidebar) — `ctrl`+arrows are free, since the textarea uses `alt`+arrows
+for word navigation. A new `resizePane` method clamps and re-runs `layout()`; the terminal pane gained
+`setWidth`/`totalW` and re-wraps its buffer on resize. Tests: `paneresize_test.go` (grow/shrink, bound
+clamping, terminal-focused resize, no-focus no-op).
+
+**P40.6 — the status-bar hint footer is now scoped to the focused input surface.** The bottom bar always
+showed a static `ctrl+k · f1 · ctrl+e` hint regardless of focus. A new `contextualFooterHints` method
+(sourced from `m.keys`, so `tui.keybindings` overrides are reflected) shows chat-composer hints by default
+(palette / help / editor, plus a resize hint when the sidebar is open) and terminal-pane hints
+(`esc chat` / diagnose / resize) when the terminal has focus — lazygit's focus-scoped bottom-bar precedent.
+Tests: `footer_test.go`.
+
+**P44.1 — bundled skill assets now go through admission scanning before being surfaced to the model.**
+Surfaced comparing against Cisco's DefenseClaw, whose CodeGuard admission gate statically scans a skill asset
+before it's trusted. A bundled skill directory (`.aegis/skills/<name>/SKILL.md` + companion `scripts/`,
+`references/`) can ship arbitrary `.py`/`.sh` files that `withAssetManifest` lists for the model to read/run,
+but `wrapUntrustedSkill` only wrapped the SKILL.md *prose* — the scripts' content went unscrutinized. Added a
+`skills.BundleScanner` seam (a plain package var set once at startup, matching the security package's
+`inspectImageID`/`cacheFileExists` idiom; `skills` does not import `security`) wired at daemon (`server.New`)
+and CLI (`aegis chat`) startup to `security.ScanBundleWarnings`, which runs the same `DefaultScanners` over the
+directory that `aegis security scan` drives and returns one warning line per HIGH/CRITICAL finding. On
+discovery of a bundled *untrusted* directory (never the embedded built-ins), `appendFromDir` folds any warning
+into the top of the `<skill_assets>` block with do-not-run framing — the same "frame it as data, never drop
+it" posture `trust.Wrap`'s scan-hit path takes. The verdict is baked into the skill content already memoized by
+`discoverCache`'s directory signature, so re-scanning happens only when the bundle changes. Degrades to a
+silent no-op when the multiscanner image isn't built and no host scanner is installed (every scanner resolves
+to `MethodNone` → zero findings → nil), mirroring `verifyMultiscannerImage`. Tests:
+`internal/skills/bundlescan_test.go` (seam, fold-in, degradation, trusted-exclusion) and
+`internal/security/skillscan_test.go` (severity filter, formatting, degradation).
+
+**P45.1 — `worktree.Manager.Add` now carries uncommitted/untracked files into a new worktree.** `git worktree
+add` only checks out the committed tree, so staged/unstaged/untracked changes in the source working tree were
+invisible to a new worktree — spawning a subagent into an isolated worktree silently dropped the caller's
+in-progress edits. Surfaced comparing against xAI `grok-build`'s `xai-fast-worktree`. `Add` now runs a
+copy-on-top pass (`carryDirty`) after the standard `git worktree add` — leaving its committed-checkout and
+`-b` semantics untouched — that parses `git status --porcelain -z` (NUL-terminated, verbatim paths) and mirrors
+the source working tree's dirty state onto the fresh checkout: it copies modified/staged/untracked files
+(preserving mode and symlinks, creating parent dirs) and applies deletions and rename old-name removals so the
+worktree faithfully reflects the source. gitignored files are excluded automatically (porcelain omits them
+without `--ignored`). A new `AddCarry` additionally returns the carried paths; `aegis worktree add` prints
+`carried N uncommitted file(s)…` so the behavior is discoverable. Tests:
+`TestAddCarriesDirtyState`/`TestAddCarriesRename`/`TestAddCleanTreeCarriesNothing`.
 
 **P46.1 — Per-task file-write scope is now mechanically enforced, not just advisory session-wide rules.**
 Surfaced comparing against `codex-build` (a Claude-orchestrates-Codex workflow whose `check_scope.py`
