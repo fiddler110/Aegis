@@ -27,6 +27,14 @@ func testKeyMsg(s string) tea.KeyMsg {
 		return tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
 	case "ctrl+d":
 		return tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}
+	case "ctrl+f":
+		return tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl}
+	case "ctrl+b":
+		return tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}
+	case "home":
+		return tea.KeyPressMsg{Code: tea.KeyHome}
+	case "end":
+		return tea.KeyPressMsg{Code: tea.KeyEnd}
 	default:
 		r := []rune(s)[0]
 		return tea.KeyPressMsg{Code: r, Text: s}
@@ -393,13 +401,26 @@ func TestTranscriptHandleKeyMatchesViewportDefaults(t *testing.T) {
 		{"j", func(tr *transcriptPane) { tr.ScrollDown(1) }},
 		{"up", func(tr *transcriptPane) { tr.ScrollUp(1) }},
 		{"k", func(tr *transcriptPane) { tr.ScrollUp(1) }},
+		{"ctrl+f", func(tr *transcriptPane) { tr.PageDown() }},
+		{"ctrl+b", func(tr *transcriptPane) { tr.PageUp() }},
+		// P40.2: g/G and home/end jump to top/bottom.
+		{"g", func(tr *transcriptPane) { tr.GotoTop() }},
+		{"home", func(tr *transcriptPane) { tr.GotoTop() }},
+		{"G", func(tr *transcriptPane) { tr.GotoBottom() }},
+		{"end", func(tr *transcriptPane) { tr.GotoBottom() }},
 	}
+	// Start a few pages down so top/bottom jumps are observable, not no-ops from
+	// an already-top pane; both the key-driven and direct panes share it so
+	// relative-scroll cases still compare like-for-like.
+	prescroll := func(tr *transcriptPane) { tr.PageDown(); tr.PageDown() }
 	for _, c := range cases {
 		viaKey := newPane()
+		prescroll(viaKey)
 		if !viaKey.HandleKey(testKeyMsg(c.key)) {
 			t.Fatalf("HandleKey(%q) returned false, want true (consumed)", c.key)
 		}
 		viaDirect := newPane()
+		prescroll(viaDirect)
 		c.action(viaDirect)
 		if viaKey.offsetIdx != viaDirect.offsetIdx || viaKey.offsetLine != viaDirect.offsetLine {
 			t.Fatalf("key %q: offset (%d,%d), want (%d,%d) matching direct call",

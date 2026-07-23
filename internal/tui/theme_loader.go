@@ -238,8 +238,10 @@ func loadNamedScheme(name, workDir string) (colorScheme, bool) {
 // theme files, and the embedded builtins — used for /theme's error message
 // and tab completion.
 func availableThemeNames(workDir string) []string {
-	seen := map[string]bool{"dark": true, "light": true}
-	names := []string{"dark", "light"}
+	// "auto" (P40.5) detects the terminal background; it isn't a loadable
+	// scheme file but is a valid /theme argument, so include it up front.
+	seen := map[string]bool{"auto": true, "dark": true, "light": true}
+	names := []string{"auto", "dark", "light"}
 	for _, dir := range themeDirs(workDir) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {

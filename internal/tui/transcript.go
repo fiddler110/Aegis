@@ -735,9 +735,9 @@ func (p *transcriptPane) View() string {
 // forwards everything, so the vi-style keys work there.
 func (p *transcriptPane) HandleKey(msg tea.KeyMsg) bool {
 	switch msg.String() {
-	case "pgdown", "space", "f":
+	case "pgdown", "space", "f", "ctrl+f":
 		p.PageDown()
-	case "pgup", "b":
+	case "pgup", "b", "ctrl+b":
 		p.PageUp()
 	case "u", "ctrl+u":
 		p.HalfPageUp()
@@ -747,6 +747,13 @@ func (p *transcriptPane) HandleKey(msg tea.KeyMsg) bool {
 		p.ScrollDown(1)
 	case "up", "k":
 		p.ScrollUp(1)
+	// P40.2: g/G (top/bottom) complete the vi vocabulary shared with the
+	// transientPanel tool-card view, so every scrollable content surface
+	// navigates identically.
+	case "g", "home":
+		p.GotoTop()
+	case "G", "end":
+		p.GotoBottom()
 	default:
 		return false
 	}

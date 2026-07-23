@@ -60,14 +60,23 @@ type Config struct {
 // Run starts the TUI event loop and blocks until the user quits.
 func Run(cfg Config) error {
 	// Bind the configured color scheme before any styles are built — lipgloss
-	// styles capture colors at creation time (TQ10).
-	cfg.Theme = applyTheme(cfg.Theme, cfg.WorkDir)
+	// styles capture colors at creation time (TQ10). When the theme is "auto"
+	// (P40.5) we can't yet know the terminal background — that arrives async as
+	// a tea.BackgroundColorMsg after the program starts — so bind a provisional
+	// dark scheme now and correct it in Update once the terminal reports.
+	auto := isAutoTheme(cfg.Theme)
+	if auto {
+		cfg.Theme = applyTheme("dark", cfg.WorkDir)
+	} else {
+		cfg.Theme = applyTheme(cfg.Theme, cfg.WorkDir)
+	}
 	// Validate keybinding overrides up front so a typo in config fails fast
 	// with a clear error instead of silently doing nothing (P13.3.5).
 	if _, err := buildKeyMap(cfg.Keybindings); err != nil {
 		return err
 	}
 	m := newModel(cfg)
+	m.autoTheme = auto
 	p := tea.NewProgram(m)
 	_, err := p.Run()
 
@@ -85,11 +94,15 @@ func Run(cfg Config) error {
 }
 
 const (
-	// Sidebar geometry. sidebarInnerW is the content width passed to lipgloss
-	// Width(); the rendered block is sidebarInnerW+1 wide (right border char).
+	// Sidebar geometry. sidebarInnerW is the default content width passed to
+	// lipgloss Width(); the rendered block is sidebarInnerW+1 wide (right border
+	// char). P40.1 makes the live width per-model (m.sidebarW), adjustable with
+	// ctrl+left/ctrl+right; sidebarInnerW is only the starting value.
 	sidebarInnerW   = 21
 	sidebarTotalW   = 22 // sidebarInnerW + 1 border
 	sidebarMinTermW = 88 // terminal width below which sidebar collapses
+	sidebarMinW     = 14 // P40.1: min/max adjustable inner width
+	sidebarMaxW     = 40
 
 	maxToolHistory = 8
 )
@@ -141,6 +154,15 @@ type model struct {
 	wizard     *wizardModel
 	workDir    string
 	imageProto imageProtocol // inline image thumbnail capability (P16.9)
+	// autoTheme (P40.5) is true when the theme is "auto" (the default): the
+	// scheme starts at a provisional dark and is corrected to light/dark once
+	// the terminal reports its background color via tea.BackgroundColorMsg.
+	// Cleared the moment the user picks an explicit theme with /theme.
+	autoTheme bool
+	// sidebarW (P40.1) is the sidebar's live inner content width, adjustable
+	// with ctrl+left/ctrl+right when the sidebar has focus; starts at
+	// sidebarInnerW. The terminal pane's adjustable width lives on m.term.
+	sidebarW int
 
 	toolCompact  bool // when true, tool results are capped at toolMaxLinesCompact lines
 	tools        []toolEntry
@@ -646,6 +668,8 @@ func newModel(cfg Config) model {
 		histIdx:      -1,
 		focusedIdx:   -1,
 		workDir:      workDir,
+		sidebarW:     sidebarInnerW, // P40.1: adjustable at runtime
+
 		transcript:   newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
 		liveText:     &strings.Builder{},
 		live:         &liveBlock{},
@@ -671,7 +695,13 @@ func newModel(cfg Config) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.sp.Tick, m.fetchStatusInfo(), statusTickCmd())
+	cmds := []tea.Cmd{textarea.Blink, m.sp.Tick, m.fetchStatusInfo(), statusTickCmd()}
+	// P40.5: with an "auto" theme, ask the terminal for its background color so
+	// Update can pick light vs. dark; the reply arrives as tea.BackgroundColorMsg.
+	if m.autoTheme {
+		cmds = append(cmds, tea.RequestBackgroundColor)
+	}
+	return tea.Batch(cmds...)
 }
 
 // fetchStatusInfo pulls the daemon /status payload for the effective context
@@ -1359,11 +1389,12 @@ func (m *model) layout() {
 		// gets the full body width instead.
 	} else {
 		if m.sidebarOpen && m.width >= sidebarMinTermW {
-			// sidebar consumes sidebarTotalW; main panel gets the rest minus left pad
-			vpW = m.width - sidebarTotalW - 1
+			// sidebar consumes m.sidebarW + 1 border; main panel gets the rest
+			// minus left pad (P40.1: width is adjustable, was sidebarTotalW).
+			vpW = m.width - (m.sidebarW + 1) - 1
 		}
 		if m.termOpen {
-			vpW -= termPaneTotalW
+			vpW -= m.term.totalW()
 		}
 		vpW -= 1 // scrollbar column (P16.5), rendered to the right of the transcript
 	}
@@ -1384,6 +1415,34 @@ func (m *model) layout() {
 		m.rendererW = vpW
 		m.renderer = newGlamourRenderer(vpW)
 	}
+}
+
+// paneResizeStep is how many columns one ctrl+left/ctrl+right press moves a
+// pane edge (P40.1).
+const paneResizeStep = 2
+
+// resizePane grows (delta>0) or shrinks (delta<0) the focused pane by delta
+// columns and re-runs layout. The terminal pane wins when it has focus;
+// otherwise the sidebar resizes if it's open and wide enough to show. Returns
+// whether anything actually changed (so callers only redraw on a real resize).
+func (m *model) resizePane(delta int) bool {
+	switch {
+	case m.termFocused && m.termOpen:
+		if !m.term.setWidth(m.term.width + delta) {
+			return false
+		}
+	case m.sidebarOpen && m.width >= sidebarMinTermW:
+		w := max(sidebarMinW, min(m.sidebarW+delta, sidebarMaxW))
+		if w == m.sidebarW {
+			return false
+		}
+		m.sidebarW = w
+	default:
+		return false
+	}
+	m.layout()
+	m.refresh()
+	return true
 }
 
 // fixedH is the non-viewport vertical budget: title + textarea(+border) +
@@ -1749,6 +1808,7 @@ func (m *model) toggleThinking() {
 // either through glamour's output or the plain-wrap fallback.
 func (m *model) mdRender(s string) string {
 	s = stripControlSeqs(s)
+	s = renderMathUnicode(s) // P40.8: LaTeX math → Unicode before glamour sees it
 	if m.renderer != nil {
 		if rendered, err := m.renderer.Render(s); err == nil {
 			return strings.TrimRight(rendered, "\n") + "\n"
@@ -1817,6 +1877,16 @@ func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
 	// P13.3.1: diagnose the terminal pane's last failed command, if any.
 	if m.term.lastFailed && key.Matches(msg, m.keys.Diagnose) {
 		return m.diagnoseLastFailureCmd()
+	}
+
+	// P40.1: resize the terminal pane while it has focus.
+	if key.Matches(msg, m.keys.PaneNarrower) {
+		m.resizePane(-paneResizeStep)
+		return nil
+	}
+	if key.Matches(msg, m.keys.PaneWider) {
+		m.resizePane(paneResizeStep)
+		return nil
 	}
 
 	switch k {

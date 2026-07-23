@@ -274,6 +274,18 @@ func init() { applyScheme(darkScheme()) }
 // col* vars here is only half of a live switch — the caller must also
 // rebuild m.th (newTheme) and m.renderer (newGlamourRenderer), which capture
 // colors/style at creation time too.
+// isAutoTheme reports whether a configured theme name requests automatic
+// light/dark detection from the terminal background (P40.5). Empty and "auto"
+// both mean auto; any explicit scheme name opts out.
+func isAutoTheme(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "auto":
+		return true
+	default:
+		return false
+	}
+}
+
 func applyTheme(name, workDir string) string {
 	resolved := strings.ToLower(strings.TrimSpace(name))
 	if s, ok := loadNamedScheme(resolved, workDir); ok {

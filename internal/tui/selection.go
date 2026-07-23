@@ -54,7 +54,7 @@ func (s selection) normalized() (r1, c1, r2, c2 int) {
 func (m *model) paneOrigin() (col, row int) {
 	col, row = 1, 1
 	if m.sidebarOpen && m.width >= sidebarMinTermW {
-		col += sidebarTotalW
+		col += m.sidebarW + 1 // inner width + right border (P40.1)
 	}
 	return col, row
 }
