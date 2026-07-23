@@ -29,7 +29,6 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"grep", "grep -n foo file.txt", true},
 		{"which", "which python3", true},
 		{"whoami", "whoami", true},
-		{"env", "env", true},
 		{"ps", "ps aux", true},
 		{"du", "du -sh .", true},
 		{"df", "df -h", true},
@@ -71,6 +70,12 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"git unknown subcommand", "git push", false},
 		{"git no subcommand", "git", false},
 		{"curl", "curl https://example.com", false},
+		// P40.1: env/printenv dump the daemon's process environment (provider
+		// API keys) and must NOT downgrade to read-only — they fall back to the
+		// normal CapExecute approval instead of auto-approving under plan mode.
+		{"env", "env", false},
+		{"printenv", "printenv", false},
+		{"printenv single key", "printenv ANTHROPIC_API_KEY", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

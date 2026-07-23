@@ -6,6 +6,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 // scanPendingMarkers is the completion oracle for P38.2 drive-to-completion:
@@ -31,7 +34,7 @@ func TestScanPendingMarkers(t *testing.T) {
 	// the `<!-- PENDING` prefix, so a keyed marker must still count as unfinished.
 	write("security/threat-model/run/0-assessment.md", "# Assessment\n<!-- PENDING: key-components -->\n")
 	write("security/threat-model/run/inventory.yaml", "components: []\n") // resolved
-	write("security/threat-model/run/notes.bin", "<!-- PENDING -->")       // non-text ext, ignored
+	write("security/threat-model/run/notes.bin", "<!-- PENDING -->")      // non-text ext, ignored
 
 	got := scanPendingMarkers(root)
 	want := []string{
@@ -120,14 +123,49 @@ func TestContinuePrompt(t *testing.T) {
 	}
 }
 
-// actNowPrompt (P39.7) must still name every pending file (it wraps
-// continuePrompt) and additionally forbid narration, so a model that yielded
-// with no tool call is pushed to act instead of describing its plan again.
-func TestActNowPrompt(t *testing.T) {
-	p := actNowPrompt([]string{"a/1.md", "a/2.md"})
-	for _, want := range []string{"a/1.md", "a/2.md", "PENDING", "ACT NOW", "edit_file", "Do not describe or narrate"} {
-		if !strings.Contains(p, want) {
-			t.Errorf("actNowPrompt missing %q in:\n%s", want, p)
+// The P39.7 act-now nudge must be forceful and name edit_file so a stalled
+// local model breaks out of "announce then yield" and mutates a file.
+func TestActNowNudge(t *testing.T) {
+	n := actNowNudge()
+	for _, want := range []string{"ACT NOW", "edit_file", "PENDING", "one section"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("actNowNudge missing %q in:\n%s", want, n)
+		}
+	}
+}
+
+// sameStrings is the P39.7 progress oracle for the PENDING set: equal sorted
+// slices mean the turn changed nothing.
+func TestSameStrings(t *testing.T) {
+	cases := []struct {
+		a, b []string
+		want bool
+	}{
+		{nil, nil, true},
+		{[]string{"a"}, []string{"a"}, true},
+		{[]string{"a", "b"}, []string{"a", "b"}, true},
+		{nil, []string{"a"}, false},                // first fill after scaffold: 0 → some markers
+		{[]string{"a", "b"}, []string{"a"}, false}, // a marker resolved
+		{[]string{"a"}, []string{"b"}, false},      // same count, different set
+	}
+	for _, c := range cases {
+		if got := sameStrings(c.a, c.b); got != c.want {
+			t.Errorf("sameStrings(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// mutatingTools must classify exactly the file-writing tools as progress for
+// the P39.7 guard — a read or narration turn is not progress.
+func TestMutatingTools(t *testing.T) {
+	for _, name := range []string{"write_file", "edit_file", "multi_edit"} {
+		if !mutatingTools[name] {
+			t.Errorf("expected %q to count as a mutation", name)
+		}
+	}
+	for _, name := range []string{"read_file", "grep", "shell", "skill", "ls"} {
+		if mutatingTools[name] {
+			t.Errorf("%q must not count as a file mutation", name)
 		}
 	}
 }
@@ -140,5 +178,74 @@ func TestSkillPreamble(t *testing.T) {
 		if !strings.Contains(pre, want) {
 			t.Errorf("skillPreamble missing %q in:\n%s", want, pre)
 		}
+	}
+}
+
+// compactSkillPreamble (P39.5) must drop the skill body, keep the task, and
+// point at the on-disk SKILL.md to re-read.
+func TestCompactSkillPreamble(t *testing.T) {
+	p := compactSkillPreamble("threat-modeling", "Model the app under /repo.", "/data/builtin-skills/threat-modeling")
+	for _, want := range []string{"threat-modeling", "Model the app under /repo.", "SKILL.md", "remain in effect"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("compactSkillPreamble missing %q in:\n%s", want, p)
+		}
+	}
+	// Must NOT carry a full skill body / <skill> wrapper.
+	if strings.Contains(p, "<skill name=") {
+		t.Errorf("compact preamble must not re-embed the skill body:\n%s", p)
+	}
+}
+
+// compactFirstSkillMessage (P39.5) rewrites the first user message once, only
+// while it still carries the full preamble, and shrinks it.
+func TestCompactFirstSkillMessage(t *testing.T) {
+	full := skillPreamble("threat-modeling", strings.Repeat("INSTRUCTIONS ", 2000)) + "Do the task."
+	conv := &engine.Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: full}}})
+
+	if !compactFirstSkillMessage(conv, "threat-modeling", "Do the task.", "/skills/threat-modeling") {
+		t.Fatal("expected first-message compaction to fire")
+	}
+	got := conv.Messages[0].Content[0].(provider.TextBlock).Text
+	if strings.Contains(got, "<skill name=") {
+		t.Errorf("compaction left the skill body in place:\n%s", got[:200])
+	}
+	if !strings.Contains(got, "Do the task.") {
+		t.Error("compaction dropped the task text")
+	}
+	if len(got) >= len(full) {
+		t.Errorf("compaction did not shrink the message (%d >= %d)", len(got), len(full))
+	}
+
+	// Idempotent: a second call is a no-op because the body is gone.
+	if compactFirstSkillMessage(conv, "threat-modeling", "Do the task.", "/skills/threat-modeling") {
+		t.Error("second compaction should be a no-op")
+	}
+
+	// A non-skill message is never touched.
+	plain := &engine.Conversation{}
+	plain.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "just a normal prompt"}}})
+	if compactFirstSkillMessage(plain, "threat-modeling", "just a normal prompt", "") {
+		t.Error("a message without the preamble must not be rewritten")
+	}
+}
+
+// compatDriveWindowNotice (P39.9) warns only when the served window is too small
+// for a skill drive, and includes the modelfile recipe.
+func TestCompatDriveWindowNotice(t *testing.T) {
+	// Served window large enough: no notice.
+	if n := compatDriveWindowNotice("qwen3.6:35b-a3b-fast", 40000, 32768); n != "" {
+		t.Errorf("large served window should not warn, got:\n%s", n)
+	}
+	// Too small: warns, names num_ctx and the derived model recipe.
+	n := compatDriveWindowNotice("qwen3.6:35b-a3b-fast", 16384, 32768)
+	for _, want := range []string{"16384 tokens", "num_ctx", "ollama create", "provider.default: ollama"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("small-window notice missing %q in:\n%s", want, n)
+		}
+	}
+	// Undetectable served window (0): still warns, describes it as unknown.
+	if n := compatDriveWindowNotice("qwen3.6:35b-a3b-fast", 0, 32768); !strings.Contains(n, "unknown") {
+		t.Errorf("undetectable window should warn as unknown, got:\n%s", n)
 	}
 }

@@ -103,3 +103,31 @@ func LegacyOllamaCompatFix(p config.ProviderConfig, modelMax int) string {
 			"(qwen3, deepseek-r1) thinking",
 		ollamainfo.NativeBase(p.BaseURL), win, sizing)
 }
+
+// LegacyOllamaModelfileRecipe returns the exact commands to bake a num_ctx
+// derivative of model that serves want tokens — the fallback for a run that
+// must stay on the OpenAI-compat (/v1) adapter, which cannot send num_ctx, so
+// Ollama serves the model's modelfile default (16384 for stock
+// qwen3.6:35b-a3b-fast) and a skill-driven prompt overflows it
+// ("request (34774 tokens) exceeds the available context size (16384)", P39.9).
+// The switch-to-native path (LegacyOllamaCompatFix) is the primary fix; this is
+// for when the native adapter can't be used. Returns "" for a blank model or a
+// non-positive window.
+func LegacyOllamaModelfileRecipe(model string, want int) string {
+	if model == "" || want <= 0 {
+		return ""
+	}
+	derived := deriveCtxModelName(model, want)
+	return fmt.Sprintf(
+		"if you must stay on the /v1 compat adapter, bake a num_ctx derivative: "+
+			"`printf 'FROM %s\\nPARAMETER num_ctx %d\\n' | ollama create %s -f -`, then set provider.model: %s",
+		model, want, derived, derived)
+}
+
+// deriveCtxModelName builds a valid Ollama model name for a num_ctx derivative
+// of base serving want tokens (e.g. qwen3.6:35b-a3b-fast → qwen3.6-35b-a3b-fast-ctx32768).
+// The ':' tag separator is replaced with '-' so the derived name is a single
+// bare tag, matching the reference wrapper's convention.
+func deriveCtxModelName(base string, want int) string {
+	return fmt.Sprintf("%s-ctx%d", strings.ReplaceAll(base, ":", "-"), want)
+}
