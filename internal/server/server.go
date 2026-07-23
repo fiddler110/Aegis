@@ -232,6 +232,12 @@ type Server struct {
 	// that session's turns so a loaded tool stays loaded turn to turn.
 	sessionTools sync.Map // string → *tool.Registry
 
+	// taskScopes maps session ID → that session's *permission.TaskScope (P46.1),
+	// the per-task file-write allowlist the `scope` tool mutates and ScopeGate
+	// enforces. Lazily created per session and reused across its turns so a
+	// scope set during one turn stays in force until the model clears it.
+	taskScopes sync.Map // string → *permission.TaskScope
+
 	// sessionWorkdirs maps session ID → that session's own working directory
 	// (P25.1), resolved and validated once at creation time in
 	// handleCreateSession. Missing/empty means the session uses the
@@ -283,6 +289,14 @@ func (s *Server) sessionEnabledSkills(id string) []string {
 func (s *Server) sessionToolRegistry(id string) *tool.Registry {
 	v, _ := s.sessionTools.LoadOrStore(id, s.tools.Clone())
 	return v.(*tool.Registry)
+}
+
+// taskScopeFor returns the session's per-task file-write scope (P46.1),
+// creating an empty (inactive) one on first use so the `scope` tool and
+// ScopeGate share the same object across the session's turns.
+func (s *Server) taskScopeFor(id string) *permission.TaskScope {
+	v, _ := s.taskScopes.LoadOrStore(id, permission.NewTaskScope())
+	return v.(*permission.TaskScope)
 }
 
 // toolRegistryFor returns the session-scoped registry clone for sessionID, or
@@ -573,7 +587,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// actual tool-call time sees the fully constructed Server — same pattern
 	// as cronRun/s.cronPermCheck above.
 	knowledgeProvider := builtin.KnowledgeProviderFunc(func(root string) (*knowledge.Store, error) { return s.knowledgeStoreFor(root) })
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, KnowledgeProvider: knowledgeProvider, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile()}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, KnowledgeProvider: knowledgeProvider, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile(), GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand, GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second}); err != nil {
 		store.Close()
 		return nil, err
 	}

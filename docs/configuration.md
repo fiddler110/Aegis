@@ -653,6 +653,21 @@ security:
     triage: false           # security-audit skill: debate a borderline/disputed finding before suppressing it
 
 
+# ── Git tools ─────────────────────────────────────────────────────────────────
+git:
+  # Pre-commit test gate (P46.2). When set, the git_commit tool runs this
+  # command in the workspace before every commit; a non-zero exit aborts the
+  # commit and returns the command's output to the model. Makes "tests pass
+  # before every commit" a mechanical gate rather than unenforced prose.
+  # Empty (default) = git_commit stays a straight passthrough.
+  #
+  # It executes an arbitrary host command, so — like hooks and plugins — it is
+  # frozen from untrusted project config by the workspace-trust gate: a cloned
+  # repo's .aegis/config.yaml cannot introduce or change it until you run
+  # `aegis trust`.
+  pre_commit_test_command: ""    # e.g. "go test ./..." or "npm test"
+  pre_commit_test_timeout_sec: 0  # 0 = default (600s)
+
 # ── Output validation ─────────────────────────────────────────────────────────
 output_guard:
   # enabled: true means every final answer is checked before being shown.
@@ -695,7 +710,8 @@ personas:
 # ── Built-in skills ───────────────────────────────────────────────────────────
 # Skills embedded in the Aegis binary (content-review, html-report,
 # security-audit, architecture-diagram, debug-investigation,
-# redteam-engagement, threat-modeling, latex-report, deep-research — see
+# redteam-engagement, threat-modeling, latex-report, deep-research,
+# structured-build — see
 # `aegis skills list`). Empty by
 # default: they stay dormant (no system-prompt cost) until named here, via
 # `aegis skills enable <name>`, or

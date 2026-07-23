@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/filetracker"
@@ -93,6 +94,13 @@ type Options struct {
 	// that pay for every always-exposed schema in prompt-processing latency.
 	// False (the default profile) keeps today's behavior unchanged.
 	LocalProfile bool
+	// GitPreCommitTestCommand, when set, is a shell command the git_commit tool
+	// runs in the workspace before every commit; a non-zero exit aborts the
+	// commit (P46.2, config.GitConfig.PreCommitTestCommand). Empty = no gate.
+	GitPreCommitTestCommand string
+	// GitPreCommitTestTimeout bounds GitPreCommitTestCommand; 0 uses
+	// config.DefaultPreCommitTestTimeoutSec.
+	GitPreCommitTestTimeout time.Duration
 }
 
 // SearchOptions configures the web_search tool's provider.
@@ -134,7 +142,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&globTool{root: root},
 		&grepTool{root: root},
 		&gitTool{root: root},
-		&gitCommitTool{root: root},
+		&gitCommitTool{root: root, preCommitTest: opts.GitPreCommitTestCommand, preCommitTestTimeout: opts.GitPreCommitTestTimeout},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),
 		&modelsTool{},
 		NewSkillTool(root, opts.DataDir, opts.BuiltinSkills),
@@ -150,6 +158,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&dastScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
 		&reconScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
 		&adviseTool{root: opts.DataDir},
+		&scopeTool{},
 	}
 	// web_search/web_fetch/security_scan/git_pr are always-exposed in the
 	// default profile but move to deferred under LocalProfile (P25.6): they're

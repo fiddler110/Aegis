@@ -216,3 +216,61 @@ func TestGitCommitSpecificPaths(t *testing.T) {
 		t.Errorf("expected ignored.txt to remain uncommitted, status: %q", st.Content)
 	}
 }
+
+// TestGitCommitPreCommitTestGate exercises P46.2: a failing pre-commit test
+// command aborts the commit (and leaves the index untouched), a passing one
+// lets it through, and an unset command is a no-op.
+func TestGitCommitPreCommitTestGate(t *testing.T) {
+	gitAvailable(t)
+
+	t.Run("failing gate refuses commit and leaves index clean", func(t *testing.T) {
+		dir := initRepo(t)
+		os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1"), 0o644)
+
+		commit := &gitCommitTool{root: dir, preCommitTest: "exit 1"}
+		res, err := commit.Execute(context.Background(), gitInput(t, map[string]any{"message": "add a"}))
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if !res.IsError || !strings.Contains(res.Content, "pre-commit test command failed") {
+			t.Fatalf("expected refusal, got isErr=%v %q", res.IsError, res.Content)
+		}
+		// No commit should exist yet.
+		if out, err := runGit(context.Background(), dir, "rev-parse", "--verify", "HEAD"); err == nil {
+			t.Errorf("expected no HEAD after refused commit, got %q", out)
+		}
+		// The gate runs before staging, so a.txt stays untracked (not staged).
+		st, _ := runGit(context.Background(), dir, "status", "--short")
+		if !strings.Contains(st, "??") {
+			t.Errorf("expected a.txt to remain untracked, status: %q", st)
+		}
+	})
+
+	t.Run("passing gate allows commit", func(t *testing.T) {
+		dir := initRepo(t)
+		os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1"), 0o644)
+
+		commit := &gitCommitTool{root: dir, preCommitTest: "exit 0"}
+		res, err := commit.Execute(context.Background(), gitInput(t, map[string]any{"message": "add a"}))
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("expected commit to succeed, got %q", res.Content)
+		}
+	})
+
+	t.Run("unset gate is a no-op", func(t *testing.T) {
+		dir := initRepo(t)
+		os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1"), 0o644)
+
+		commit := &gitCommitTool{root: dir} // no preCommitTest
+		res, err := commit.Execute(context.Background(), gitInput(t, map[string]any{"message": "add a"}))
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("expected commit to succeed with no gate, got %q", res.Content)
+		}
+	})
+}

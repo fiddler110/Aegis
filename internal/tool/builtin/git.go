@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -176,7 +179,49 @@ func rejectMutatingReadArgs(sub string, args []string) string {
 
 // --- staging + commit ---
 
-type gitCommitTool struct{ root string }
+type gitCommitTool struct {
+	root string
+	// preCommitTest, when non-empty, is a shell command run in the workspace
+	// before every commit (P46.2); a non-zero exit aborts the commit. It is
+	// operator-configured (git.pre_commit_test_command) and frozen from
+	// untrusted project config by the workspace-trust gate, so running it on
+	// the host — the same place runGit runs git — is intentional.
+	preCommitTest        string
+	preCommitTestTimeout time.Duration
+}
+
+// runPreCommitTest runs the configured pre-commit test command on the host in
+// root via the platform shell, returning its combined output and whether it
+// passed (exit 0). A timeout or non-zero exit reports passed=false.
+func runPreCommitTest(ctx context.Context, root, command string, timeout time.Duration) (out string, passed bool) {
+	if timeout <= 0 {
+		timeout = time.Duration(config.DefaultPreCommitTestTimeoutSec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	name, args := preCommitShell(command)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = root
+	b, err := cmd.CombinedOutput()
+	text := string(b)
+	if len(text) > maxGitOutput {
+		text = text[:maxGitOutput] + "\n…(truncated)"
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return strings.TrimSpace(text) + fmt.Sprintf("\n(pre-commit test timed out after %s)", timeout), false
+	}
+	return strings.TrimSpace(text), err == nil
+}
+
+// preCommitShell returns the platform shell binary and argument vector for
+// running command, mirroring the sandbox package's own shell selection so the
+// pre-commit gate behaves the same as the shell tool on each OS.
+func preCommitShell(command string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return sandbox.WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", command}
+	}
+	return "/bin/sh", []string{"-c", command}
+}
 
 func (t *gitCommitTool) Name() string                { return "git_commit" }
 func (t *gitCommitTool) Capability() tool.Capability { return tool.CapWrite }
@@ -214,6 +259,18 @@ func (t *gitCommitTool) Execute(ctx context.Context, input json.RawMessage) (too
 		}
 	}
 	root := effectiveRoot(ctx, t.root)
+
+	// Pre-commit test gate (P46.2): a red test suite blocks the commit outright,
+	// so "tests pass before every commit" is mechanically enforced rather than
+	// left to prose a model can skip under context pressure. No-op when
+	// unconfigured. Run before staging so a failing gate leaves the index
+	// untouched.
+	if t.preCommitTest != "" {
+		out, passed := runPreCommitTest(ctx, root, t.preCommitTest, t.preCommitTestTimeout)
+		if !passed {
+			return tool.Result{Content: fmt.Sprintf("commit refused: pre-commit test command failed (%s)\n%s", t.preCommitTest, out), IsError: true}, nil
+		}
+	}
 
 	// Staging.
 	switch {

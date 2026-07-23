@@ -208,6 +208,8 @@ By default, stages all tracked modifications. Pass `paths` to stage specific fil
 
 Returns the new short commit hash and a diffstat. Reports "nothing to commit" cleanly rather than failing.
 
+**Pre-commit test gate (P46.2).** When `git.pre_commit_test_command` is configured, `git_commit` runs that command in the workspace *before* staging; a non-zero exit aborts the commit and returns the command's output instead, so "tests pass before every commit" is a mechanical gate rather than unenforced prose. Unset (the default) leaves `git_commit` a straight passthrough. Because it executes an arbitrary host command, the setting is frozen from untrusted project config by the workspace-trust gate (see [permissions.md](permissions.md)).
+
 ---
 
 ### `git_pr`
@@ -861,6 +863,23 @@ Security engagement assistant: a persistent, multi-day engagement notebook plus 
 ```
 
 `note` appends a timestamped, optionally-tagged note to the named engagement's notebook (stored under the daemon's per-user data directory, one JSONL file per engagement). `list`/`log` returns every note, oldest first. `cve_lookup` queries the NVD REST API (`https://services.nvd.nist.gov/rest/json/cves/2.0`); the unauthenticated public API is rate-limited to roughly 5 requests/30s — a 403/429 comes back as a clear error, not a hang or crash — set `NVD_API_KEY` in the environment for a higher limit. `suggest` returns plain-text next-step suggestions derived from simple, explainable rules over the notebook's own content (e.g. no recon logged yet, or findings referenced but never documented) — it never executes another tool or scan itself; a human or the calling model decides whether to act on a suggestion. `status` returns a short digest (note count, date range, and how many notes reference recon/dast/security_scan/findings/cve lookups) — a tool-action fallback for the P13.4 status-digest scope rather than a `/status` (`api.StatusInfo`) field, since that endpoint is daemon-global with no precedent for a per-entity key.
+
+---
+
+### `scope` (deferred)
+
+**Capability:** read
+
+Declare or clear a **per-task file-write scope** (P46.1): an allowlist of workspace-relative path globs that `write_file`/`edit_file`/`multi_edit` calls must stay within until it is cleared. Once set, a write to any file outside the scope is *refused by the permission gate*, not merely discouraged — so a task that should only touch a handful of files can say so and have it enforced.
+
+```json
+{
+  "action": "set",                       // "set", "clear", or "show"
+  "paths": ["internal/auth/**", "cmd/main.go"]  // required for "set"
+}
+```
+
+Globs use `*`/`?` wildcards where `*` spans path separators (so `src/**` and `src/*` both cover `src/a/b.go`); paths and patterns are normalized (separator/case/`..` cleanup) so a traversal or case trick can't dodge the scope. Reads are never restricted. The scope is per session and persists across turns until you `clear` it (or set a new one). Capability is **read** — setting a scope only tightens what writes are allowed, so it's usable even in plan mode. Used together with `git_commit`'s pre-commit test gate, the built-in `structured-build` skill drives a one-task-one-commit workflow on top of both.
 
 ---
 
