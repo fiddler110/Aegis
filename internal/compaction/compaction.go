@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/tokenest"
 )
 
 const (
@@ -97,22 +98,13 @@ func (s *Summarizer) shouldCompact(estimated int) bool {
 	return estimated > s.maxBudget
 }
 
-// EstimateTokens approximates token count using a 4-chars-per-token heuristic.
+// EstimateTokens approximates token count using the shared script-aware
+// heuristic (tokenest). It previously maintained a separate flat chars/4
+// estimate, which undercounted CJK/non-ASCII-heavy conversations and could
+// silently no-op a compaction the engine's own script-aware estimator had
+// already decided was needed (P41.1) — so both now share one implementation.
 func EstimateTokens(system string, msgs []provider.Message) int {
-	chars := len(system)
-	for _, m := range msgs {
-		for _, b := range m.Content {
-			switch v := b.(type) {
-			case provider.TextBlock:
-				chars += len(v.Text)
-			case provider.ToolUseBlock:
-				chars += len(v.Name) + len(v.Input)
-			case provider.ToolResultBlock:
-				chars += len(v.Content)
-			}
-		}
-	}
-	return chars / 4
+	return tokenest.Messages(system, msgs)
 }
 
 // Compact summarizes the older prefix of the conversation if it exceeds the
