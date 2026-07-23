@@ -417,6 +417,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// P40.3: transcript search is a modal input mode — while it is open it
+		// owns every keypress (navigation, query editing, close). Non-key
+		// messages (stream events, ticks, resize) still flow to the main switch,
+		// so the transcript keeps updating live behind the search bar.
+		if m.search != nil {
+			return m.handleSearchKey(msg)
+		}
+
 		// Terminal toggle: always available regardless of focus or streaming state.
 		if key.Matches(msg, m.keys.Terminal) {
 			m.toggleTerminal()
@@ -478,6 +486,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.resizePane(paneResizeStep) {
 				return m, nil
 			}
+		}
+
+		// P40.3: open the incremental transcript-search overlay. Handled here
+		// (not in the msg.String() switch) so a rebind takes effect, and only
+		// when it isn't already open — handleSearchKey above owns keys after
+		// that. Available while streaming too: it only reads the transcript.
+		if key.Matches(msg, m.keys.TranscriptSearch) {
+			m.openSearch()
+			return m, nil
 		}
 
 		switch msg.String() {

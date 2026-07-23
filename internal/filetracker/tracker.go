@@ -17,12 +17,16 @@ const maxTrackedFiles = 10000
 // Tracker records read timestamps for workspace files. Thread-safe.
 type Tracker struct {
 	mu    sync.Mutex
-	reads map[string]time.Time // abs path → mtime at last read
+	reads map[string]time.Time  // abs path → mtime at last read
+	hunks map[string]*fileHunks // abs path → agent-authored line ranges (P45.2)
 }
 
 // New creates a file tracker.
 func New() *Tracker {
-	return &Tracker{reads: make(map[string]time.Time)}
+	return &Tracker{
+		reads: make(map[string]time.Time),
+		hunks: make(map[string]*fileHunks),
+	}
 }
 
 // RecordRead stores the current mtime of path. Called after a successful
@@ -97,6 +101,7 @@ func (t *Tracker) RecordWrite(path string) {
 func (t *Tracker) Clear() {
 	t.mu.Lock()
 	t.reads = make(map[string]time.Time)
+	t.hunks = make(map[string]*fileHunks)
 	t.mu.Unlock()
 }
 

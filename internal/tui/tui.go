@@ -389,6 +389,11 @@ type model struct {
 	// in renderTranscriptContent — purely a visual affordance, gates nothing.
 	sel        selection
 	focusedIdx int
+
+	// search (P40.3) is non-nil while the incremental transcript-search overlay
+	// is active: it captures keyboard input, greps the transcript's rendered
+	// content, and drives match navigation. See search.go.
+	search *searchState
 }
 
 // approvalState holds the details of a pending tool-execution approval request
@@ -659,16 +664,16 @@ func newModel(cfg Config) model {
 
 	stashPath := filepath.Join(workDir, ".aegis", "stash.json")
 	m := model{
-		cfg:          cfg,
-		ta:           ta,
-		sp:           sp,
-		th:           th,
-		status:       "ready",
-		slash:        NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model, cfg.WorkDir),
-		histIdx:      -1,
-		focusedIdx:   -1,
-		workDir:      workDir,
-		sidebarW:     sidebarInnerW, // P40.1: adjustable at runtime
+		cfg:        cfg,
+		ta:         ta,
+		sp:         sp,
+		th:         th,
+		status:     "ready",
+		slash:      NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model, cfg.WorkDir),
+		histIdx:    -1,
+		focusedIdx: -1,
+		workDir:    workDir,
+		sidebarW:   sidebarInnerW, // P40.1: adjustable at runtime
 
 		transcript:   newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
 		liveText:     &strings.Builder{},
@@ -1808,7 +1813,8 @@ func (m *model) toggleThinking() {
 // either through glamour's output or the plain-wrap fallback.
 func (m *model) mdRender(s string) string {
 	s = stripControlSeqs(s)
-	s = renderMathUnicode(s) // P40.8: LaTeX math → Unicode before glamour sees it
+	s = renderMathUnicode(s)   // P40.8: LaTeX math → Unicode before glamour sees it
+	s = renderMermaidBlocks(s) // P40.9: ```mermaid fences → inline ASCII diagrams
 	if m.renderer != nil {
 		if rendered, err := m.renderer.Render(s); err == nil {
 			return strings.TrimRight(rendered, "\n") + "\n"

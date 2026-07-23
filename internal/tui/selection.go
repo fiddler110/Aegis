@@ -276,6 +276,17 @@ func (m model) renderTranscriptContent() string {
 		return ""
 	}
 
+	// P40.3: reverse-highlight the active search query wherever it appears in
+	// the visible window. Applied before the focused-item bar and selection
+	// overlays below, all of which preserve each line's cell width so the
+	// offsets they compute stay valid after this pass.
+	if m.search != nil && strings.TrimSpace(m.search.query) != "" {
+		hl := lipgloss.NewStyle().Foreground(colBrandFg).Background(colBrandBg).Bold(true)
+		for row := range lines {
+			lines[row] = highlightSearchMatches(lines[row], m.search.query, hl)
+		}
+	}
+
 	if m.focusedIdx >= 0 {
 		bar := lipgloss.NewStyle().Foreground(colAccent).Render("▎")
 		for row := range lines {

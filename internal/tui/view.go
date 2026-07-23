@@ -345,7 +345,12 @@ func (m model) renderSidebar(h int) string {
 func (m model) renderInputArea() string {
 	// Left side: streaming indicator with elapsed time, toast, or ready dot.
 	var statusLeft string
-	if m.approval != nil {
+	if m.search != nil {
+		// P40.3: the search bar replaces the status line while search mode is
+		// active; the composer above stays visible (blurred) so the layout
+		// height is unchanged.
+		statusLeft = m.renderSearchStatus()
+	} else if m.approval != nil {
 		// P25.4a: the composer is blurred while the dialog is open (no
 		// blinking cursor down here) — spell out where input goes instead of
 		// leaving that to be inferred from the missing cursor alone.

@@ -11,29 +11,30 @@ import (
 // keyMap holds all named key bindings for the TUI. Using key.Binding means
 // each binding carries its own help text, which the help overlay aggregates.
 type keyMap struct {
-	Send          key.Binding
-	Steer         key.Binding
-	Newline       key.Binding
-	Thinking      key.Binding
-	Complete      key.Binding
-	Help          key.Binding
-	Palette       key.Binding
-	Cancel        key.Binding
-	Interrupt     key.Binding
-	Clear         key.Binding
-	Editor        key.Binding
-	CycleMode     key.Binding
-	HistUp        key.Binding
-	HistDown      key.Binding
-	Teammates     key.Binding
-	Sessions      key.Binding
-	Terminal      key.Binding
-	SidebarToggle key.Binding
-	PasteImage    key.Binding
-	Diagnose      key.Binding
-	HistorySearch key.Binding
-	PaneNarrower  key.Binding
-	PaneWider     key.Binding
+	Send             key.Binding
+	Steer            key.Binding
+	Newline          key.Binding
+	Thinking         key.Binding
+	Complete         key.Binding
+	Help             key.Binding
+	Palette          key.Binding
+	Cancel           key.Binding
+	Interrupt        key.Binding
+	Clear            key.Binding
+	Editor           key.Binding
+	CycleMode        key.Binding
+	HistUp           key.Binding
+	HistDown         key.Binding
+	Teammates        key.Binding
+	Sessions         key.Binding
+	Terminal         key.Binding
+	SidebarToggle    key.Binding
+	PasteImage       key.Binding
+	Diagnose         key.Binding
+	HistorySearch    key.Binding
+	PaneNarrower     key.Binding
+	PaneWider        key.Binding
+	TranscriptSearch key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -68,6 +69,10 @@ func defaultKeyMap() keyMap {
 		// word navigation and ctrl+home/end for begin/end.
 		PaneNarrower: key.NewBinding(key.WithKeys("ctrl+left"), key.WithHelp("ctrl+←", "shrink focused pane")),
 		PaneWider:    key.NewBinding(key.WithKeys("ctrl+right"), key.WithHelp("ctrl+→", "grow focused pane")),
+		// P40.3: incremental full-text search over the open transcript. Ctrl+F is
+		// the universal "find" chord; it is intercepted at the model level ahead
+		// of the composer (which would otherwise treat it as forward-char).
+		TranscriptSearch: key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("ctrl+f", "search transcript")),
 	}
 }
 
@@ -76,29 +81,30 @@ func defaultKeyMap() keyMap {
 // generically instead of via a giant switch that must be kept in sync by hand.
 func (km *keyMap) bindingsByName() map[string]*key.Binding {
 	return map[string]*key.Binding{
-		"send":          &km.Send,
-		"steer":         &km.Steer,
-		"newline":       &km.Newline,
-		"thinking":      &km.Thinking,
-		"complete":      &km.Complete,
-		"help":          &km.Help,
-		"palette":       &km.Palette,
-		"cancel":        &km.Cancel,
-		"interrupt":     &km.Interrupt,
-		"clear":         &km.Clear,
-		"editor":        &km.Editor,
-		"cyclemode":     &km.CycleMode,
-		"histup":        &km.HistUp,
-		"histdown":      &km.HistDown,
-		"teammates":     &km.Teammates,
-		"sessions":      &km.Sessions,
-		"terminal":      &km.Terminal,
-		"sidebartoggle": &km.SidebarToggle,
-		"pasteimage":    &km.PasteImage,
-		"diagnose":      &km.Diagnose,
-		"historysearch": &km.HistorySearch,
-		"panenarrower":  &km.PaneNarrower,
-		"panewider":     &km.PaneWider,
+		"send":             &km.Send,
+		"steer":            &km.Steer,
+		"newline":          &km.Newline,
+		"thinking":         &km.Thinking,
+		"complete":         &km.Complete,
+		"help":             &km.Help,
+		"palette":          &km.Palette,
+		"cancel":           &km.Cancel,
+		"interrupt":        &km.Interrupt,
+		"clear":            &km.Clear,
+		"editor":           &km.Editor,
+		"cyclemode":        &km.CycleMode,
+		"histup":           &km.HistUp,
+		"histdown":         &km.HistDown,
+		"teammates":        &km.Teammates,
+		"sessions":         &km.Sessions,
+		"terminal":         &km.Terminal,
+		"sidebartoggle":    &km.SidebarToggle,
+		"pasteimage":       &km.PasteImage,
+		"diagnose":         &km.Diagnose,
+		"historysearch":    &km.HistorySearch,
+		"panenarrower":     &km.PaneNarrower,
+		"panewider":        &km.PaneWider,
+		"transcriptsearch": &km.TranscriptSearch,
 	}
 }
 
@@ -194,5 +200,6 @@ func (km keyMap) helpEntries() []keyHelpEntry {
 		{km.HistorySearch.Help().Key, km.HistorySearch.Help().Desc},
 		{km.PaneNarrower.Help().Key, km.PaneNarrower.Help().Desc},
 		{km.PaneWider.Help().Key, km.PaneWider.Help().Desc},
+		{km.TranscriptSearch.Help().Key, km.TranscriptSearch.Help().Desc},
 	}
 }

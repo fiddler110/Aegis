@@ -177,8 +177,11 @@ type TUIConfig struct {
 	// "bell", "desktop", or "both" (default).
 	Notifications string `koanf:"notifications"`
 	// ImageRendering controls the P16.9 inline thumbnail shown in the
-	// transcript when an image is attached: "auto" (default — rendered when
-	// the terminal's detected color profile supports it) or "off".
+	// transcript when an image is attached: "auto" (default — a truecolor
+	// half-block thumbnail, rendered when the terminal's detected color profile
+	// supports it), "off", or "kitty" (P40.4, EXPERIMENTAL — the real kitty
+	// graphics protocol; opt-in only, never auto-selected, and unverified
+	// against terminals in CI).
 	ImageRendering string `koanf:"image_rendering"`
 	// Keybindings remaps named TUI actions (P13.3.5). Keys are the binding
 	// names from internal/tui's keyMap (e.g. "terminal", "palette",
