@@ -73,6 +73,25 @@ func dialogFrame(content string) string {
 		Render(content)
 }
 
+// fixedPanelFrame wraps a fixed-width form overlay in the shared rounded
+// accent-bordered panel. It backs the two hand-built form overlays that are
+// NOT listDialogs — the setup wizard (wizard.go) and the security-scanner
+// config (securityconfig.go), both huh forms rather than pickers, so they can't
+// literally reuse the list widget. P40.7 folds their two byte-identical
+// hand-rolled frames into this one helper (living beside dialogFrame /
+// renderOverlay) so the panel chrome — border style, accent color, padding —
+// is defined once instead of per form; width stays a caller argument since the
+// wizard and scanner form size differently. The dimming/centering half of the
+// shared chrome the forms already get for free from renderOverlay (see View).
+func fixedPanelFrame(content string, width int) string {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colAccent).
+		Padding(1, 3).
+		Width(width).
+		Render(content)
+}
+
 // dialogKind tags which logical overlay a listDialog instance backs, so the
 // single routing block in the model's Update/View can dispatch the right
 // follow-up action on selection without needing four near-identical dialog

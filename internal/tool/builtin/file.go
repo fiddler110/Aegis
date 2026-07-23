@@ -160,9 +160,14 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if err != nil {
 		return tool.Result{}, err
 	}
+	var oldContent string
 	if t.tracker != nil {
 		if err := t.tracker.CheckWrite(abs); err != nil {
 			return tool.Result{Content: err.Error(), IsError: true}, nil
+		}
+		// Capture prior content (empty if the file is new) for hunk attribution.
+		if data, err := os.ReadFile(abs); err == nil {
+			oldContent = string(data)
 		}
 	}
 	// Capture pre-modification content for checkpoint/rewind, if a run is
@@ -176,6 +181,7 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	}
 	if t.tracker != nil {
 		t.tracker.RecordWrite(abs)
+		t.tracker.RecordAgentWrite(abs, oldContent, args.Content)
 	}
 	return tool.Result{Content: fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)}, nil
 }
@@ -243,6 +249,7 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	if t.tracker != nil {
 		t.tracker.RecordWrite(abs)
+		t.tracker.RecordAgentWrite(abs, content, updated)
 	}
 	return tool.Result{Content: fmt.Sprintf("edited %s (%d replacement(s))", args.Path, n)}, nil
 }

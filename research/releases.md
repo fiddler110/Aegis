@@ -8,7 +8,10 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-23 — **P40.1, P40.2, P40.5, P40.6, P40.8, P44.1, and P45.1 shipped** (the
+**Last updated:** 2026-07-23 — **the Tier 3 batch shipped: P40.3, P40.4, P40.7, P40.9, and P45.2** (full-text
+transcript search, an experimental opt-in kitty-graphics image tier, shared form-panel chrome extraction,
+inline mermaid-diagram ASCII rendering, and hunk-level agent-vs-external change attribution — see below).
+Earlier the same day: **P40.1, P40.2, P40.5, P40.6, P40.8, P44.1, and P45.1 shipped** (the
 parallelizable Tier-2 batch: the five-item TUI/UX set — resizable panes, consistent hjkl/g/G navigation, auto
 dark/light detection, a contextual per-pane footer, and LaTeX→Unicode math rendering — plus two independent
 hardening items: bundled-skill-asset admission scanning and worktree dirty-file replication — see below).
@@ -25,6 +28,61 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P40.3 — full-text search within a session's transcript.** Every picker fuzzy-filters lists of turns, but
+nothing grepped the actual message *content* of the open session, so "find the earlier message where I asked
+about X" had no answer short of manual scrolling. A new incremental search mode (`internal/tui/search.go`),
+opened with **ctrl+f** (rebindable `transcriptsearch`), captures keyboard input like lnav's `/`-search: typing
+edits the query live, ⏎/↓/ctrl+n and ↑/ctrl+p step between matches (wrapping), esc closes. `transcriptPane.Search`
+greps each item's ANSI-stripped raw text case-insensitively; the focused match is scrolled to the top and marked
+with the existing focused-item accent bar, and every visible occurrence is reverse-highlighted in place
+(`highlightSearchMatches`, width-preserving so the selection/focus overlays keep working). The search bar
+replaces the composer's status line while active, keeping the input-area height stable. Tests: `search_test.go`
+(pane grep, navigation/wrap, the full ctrl+f→type→esc Update flow, highlighter width-preservation).
+
+**P40.9 — inline mermaid diagrams now render as box-drawing ASCII in the transcript.** `render_diagram` only ever
+produced a *file*; a model that inlined a ` ```mermaid ` snippet just got an unstyled code block. A new
+dependency-free package `internal/mermaidascii` renders the common shapes — flowchart/graph (`TD/TB/BT/LR/RL`,
+node shapes `[]`/`()`/`{}`/`(())`, edge-label forms, dotted/thick links) and `sequenceDiagram` (participants,
+lifelines, solid/dotted arrows) — into box-drawing text, best-effort (`Render` returns `ok=false`, never an
+error, on unsupported/unparseable input) and output-size capped (60 nodes / 80 messages). Multi-child branches
+compose real T-/cross-junctions via a per-cell direction mask rather than the last edge clobbering the first. A
+`renderMermaidBlocks` preprocessing pass in `mdRender` (`internal/tui/mermaid.go`) swaps each *complete*
+` ```mermaid ` fence for the rendered ASCII in a plain code fence; unsupported diagrams and mid-stream
+unterminated fences are left byte-for-byte untouched (raw source still shows). Tests: `mermaidascii_test.go`
+(pinned canvases for a tiny graph + sequence, LR/shapes/labels/branch-junction/caps/CRLF), `mermaid_test.go`
+(fence substitution, untouched cases, transcript integration).
+
+**P45.2 — hunk-level agent-vs-external change attribution.** `internal/filetracker` only tracked whole-file
+mtimes, so there was no way to answer "which lines in this file did the agent author" (needed for scoped diff/
+revert UX). A new `hunks.go` records, per successful `write_file`/`edit_file`/`multiedit`, the changed line
+ranges attributed to the agent — computed with a dependency-free stdlib LCS line diff (bounded, degrading to
+whole-file attribution above the bound) — remapping and merging previously recorded hunks through each edit
+(`RecordAgentWrite`). `AgentHunks` reconciles the stored ranges against a fresh disk read: a hunk survives an
+external edit only if all its lines remain present and contiguous, so an out-of-band change drops just the
+overlapping hunks (survivors shift) rather than the whole file's state. The existing mtime-based `CheckWrite`
+read-before-write guard is untouched; all additions are additive. Tests: `hunks_test.go` (14 cases — recording,
+merge, external-edit drop/shift, pruning, diff primitives) plus the wired write/edit tools.
+
+**P40.7 — the two hand-built form overlays now share one panel-frame helper.** `securityConfigModel` and
+`wizardModel` are `huh` multi-step forms, not `listDialog` pickers, so they can't literally reuse the list
+widget — but both hand-rolled a byte-identical rounded accent-bordered frame in their `view()`. That frame is
+now a single `fixedPanelFrame(content, width)` helper in `dialog.go`, beside `dialogFrame`/`renderOverlay`, so
+the overlay chrome (border, accent, padding) is defined once; width stays per-form. The dimming/centering half
+of the shared chrome the two forms already got from `renderOverlay`. Behavior is unchanged (existing
+wizard/securityconfig tests stay green); this is the safe, real de-duplication the item targeted, in place of
+forcing form input into a list picker.
+
+**P40.4 — an experimental, opt-in kitty-graphics image tier (prototype).** The half-block thumbnail flows
+through the cell-grid renderer as ordinary SGR text; a true kitty/iTerm2 escape does not, and there is no such
+terminal in CI to verify placement against — the reason the tier was originally descoped. P40.4 lands the
+building blocks the roadmap asked for as tested, safe increments: `detectKittyGraphics` (env-based:
+kitty/Ghostty/WezTerm/Konsole) and a correct, chunked kitty graphics-protocol encoder (`kittyGraphicsSequence`,
+`f=100,a=T`, ≤4096-byte `m=1/m=0` chunks, scaled to a cell box). It is wired only behind an explicit
+`image_rendering: "kitty"` opt-in — **never** auto-selected; `"auto"` stays half-block — so the safe default is
+untouched. The render-loop placement remains the unverified step and is documented as such (in code and
+`docs/configuration.md`). Tests: `kitty_test.go` (detector, opt-in resolution, escape structure + chunking, the
+never-error thumbnail path).
 
 **P40.8 — LaTeX math now renders as a Unicode approximation in the transcript instead of raw markup.**
 `newGlamourRenderer` wires up plain glamour with no math extension, so `$E=mc^2$` or a `$$...$$` block showed

@@ -583,10 +583,5 @@ func (m *securityConfigModel) view() string {
 		}
 	}
 
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colAccent).
-		Padding(1, 3).
-		Width(securityConfigPanelW).
-		Render(header + body)
+	return fixedPanelFrame(header+body, securityConfigPanelW)
 }

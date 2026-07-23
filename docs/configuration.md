@@ -369,6 +369,10 @@ tui:
   # to the model. "auto" (default): rendered when the terminal's detected
   # color profile supports at least 256 colors, skipped otherwise (dumb
   # terminals, NO_COLOR). "off": never render, text-only notice as before.
+  # "kitty" (P40.4, EXPERIMENTAL): use the real kitty graphics protocol for a
+  # true-resolution inline image on kitty/Ghostty/WezTerm/Konsole. Opt-in only —
+  # "auto" never selects it — and its placement in the render loop is not yet
+  # verified against real terminals, so expect rough edges.
   image_rendering: auto
 
   # Keybinding remap (P13.3.5): override the key sequence(s) for a named

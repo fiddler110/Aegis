@@ -11,7 +11,9 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 6 actionable (0 Tier 1, 1 Tier 2, 5 Tier 3) + 2 parked (Tier 4).
+**Open items:** 1 actionable (1 Tier 2) + 2 parked (Tier 4). The full **Tier 3 batch shipped 2026-07-23**
+(P40.3, P40.4, P40.7, P40.9, P45.2 — see [releases.md](releases.md)); only the **P38.1** conformance umbrella
+(Tier 2, awaiting a live verify-clean re-test) remains actionable.
 
 **Recommended execution order (cross-tier, 2026-07-23).** A single do-next sequence across all tracks,
 ordered by tier-priority then dependency:
@@ -22,9 +24,14 @@ ordered by tier-priority then dependency:
    (auto dark/light detect), P40.2 (consistent hjkl/g/G), P40.1 (resizable panes), P40.6 (contextual footer).
 2. **Remaining Tier 2** — **P38.1** stays open only as the threat-model conformance umbrella (awaiting a live
    verify-clean re-test; no code blocked on it).
-3. **Tier 3 TUI/UX** — **P40.3** (transcript search, highest value), **P40.9** (inline mermaid), **P40.4**
-   (real inline image protocols, riskiest), **P40.7** (unify bespoke dialogs); plus **P45.2** (hunk-level
-   attribution).
+3. ~~**Tier 3 TUI/UX** — P40.3 (transcript search), P40.9 (inline mermaid), P40.4 (real inline image
+   protocols), P40.7 (unify bespoke dialogs); plus P45.2 (hunk-level attribution).~~ **All shipped
+   2026-07-23** (see [releases.md](releases.md)): P40.3 (ctrl+f incremental transcript search), P40.9 (inline
+   mermaid→ASCII via `internal/mermaidascii`), P45.2 (agent hunk attribution in `filetracker`), P40.7 (shared
+   `fixedPanelFrame` for the two huh-form overlays — a semantic-fit substitute for the literal listDialog
+   migration, since those forms aren't pickers), and P40.4 (an **experimental opt-in** kitty-graphics tier:
+   detector + encoder shipped and tested, `image_rendering: "kitty"` only, render-loop placement left
+   unverified against real terminals by design).
 
 Note: the **codex-build workflow-discipline track is now landed.** P46.1 (per-task file-write scope
 enforcement), P46.2 (pre-commit test gate on `git_commit`), and P46.3 (the `structured-build` skill) all
@@ -62,10 +69,10 @@ investigated and exonerated). **P38.1** remains the tracking umbrella, now await
 - **P40.1, P40.2, P40.5, P40.6, P40.8** — **shipped 2026-07-23** (TUI/UX Tier 2 batch): resizable panes,
   consistent hjkl/g/G navigation, auto dark/light detection, contextual per-pane footer, and LaTeX→Unicode
   math rendering. See [releases.md](releases.md).
-- **P45.2** (Tier 3) — no hunk-level agent-vs-external attribution; `filetracker` only does whole-file mtime
-  staleness. Filed 2026-07-23 from the same comparison (`xai-hunk-tracker`).
-- **P40.9** (Tier 3) — no inline mermaid diagram rendering in chat; `render_diagram` only produces file
-  output. Filed 2026-07-23, same comparison, joins the P40.x TUI/UX track.
+- **P40.3, P40.4, P40.7, P40.9, P45.2** — **shipped 2026-07-23** (Tier 3 batch): full-text transcript
+  search (ctrl+f), an experimental opt-in kitty-graphics image tier, shared form-panel chrome
+  (`fixedPanelFrame`), inline mermaid→ASCII rendering (`internal/mermaidascii`), and hunk-level
+  agent-vs-external change attribution in `filetracker`. See [releases.md](releases.md).
 - **P46.1, P46.2, P46.3** — **shipped 2026-07-23** (codex-build workflow-discipline track): per-task
   file-write scope enforcement (`permission.ScopeGate` + the `scope` tool), the `git_commit` pre-commit test
   gate (`git.pre_commit_test_command`), and the `structured-build` skill packaging both into a
@@ -209,12 +216,11 @@ search, highest-value), **P40.7** (unify bespoke dialogs), **P40.4** (real inlin
 
 ## Open Work — Tier 3
 
-**Status:** 5 filed. Threat-model track — **all shipped** (P39.5/P39.8/P39.9 landed with the harness fixes
-above; see the shipped note below and [releases.md](releases.md)); only open leads remain. TUI/UX track
-(independent, see Tier 2/3 note above P40.1) — **P40.3** (transcript search, highest value of the batch),
-**P40.7** (unify bespoke dialogs), **P40.4** (real inline image protocols, riskiest), **P40.9** (inline
-mermaid rendering). Independent hardening — **P45.2** (hunk-level agent-vs-external attribution). The
-codex-build track's **P46.3** (structured-build skill) shipped 2026-07-23 — see [releases.md](releases.md).
+**Status:** all filed items **shipped 2026-07-23** — the TUI/UX batch **P40.3** (transcript search), **P40.7**
+(shared form-panel chrome), **P40.4** (experimental opt-in kitty-graphics tier), **P40.9** (inline mermaid
+rendering), and independent hardening **P45.2** (hunk-level attribution); see [releases.md](releases.md). Only
+the leads below remain open. The threat-model track (P39.5/P39.8/P39.9) and the codex-build track's **P46.3**
+(structured-build skill) also shipped 2026-07-23.
 
 > **P39.5 shipped** (2026-07-21) — the drive stops re-sending the whole ~9K-token SKILL.md every turn:
 > `compactFirstSkillMessage` rewrites the first user message once after the opening turn, swapping the skill
@@ -250,77 +256,20 @@ over-flagging `internet-facing`);
 the commit from `0-assessment.md`) so a run directory kept outside the target repo still records the
 analyzed code's commit.
 
-### P40.3 — Full-text search within a session's transcript/history
-
-Every picker (session, persona, model, timeline, command palette) gets fuzzy filtering via the shared
-`listDialog` (`dialog.go`), but nothing greps the actual message content of the open session or across
-sessions — the timeline picker lists turns, not matches within them, and `/knowledge query` is a model-facing
-tool, not a UI widget. `lnav`'s incremental `/`-search-with-`n`/`N`-next-match (and plain `less`) is the
-standard here. Aegis sessions run long (agentic, multi-hour), so "find the earlier message where I asked
-about X" is a real, recurring need with no current answer short of manual scrolling.
-
-Priority: Tier 3 — highest end-user value of the TUI/UX batch (P40.1–P40.7), but needs a new
-incremental-search widget and match-navigation state rather than a keybinding, so it's larger than the Tier 2
-items in that batch.
-
-### P40.4 — Real inline image protocol support (kitty graphics / iTerm2 / sixel)
-
-`imagerender.go:17-33` explicitly descopes true inline-image protocols today because Bubbletea's cell-grid
-redraw model has no primitive for "opaque out-of-band terminal state" the way it does for OSC 8 hyperlinks —
-only a half-block SGR-text fallback ships. `yazi` and `superfile` solve the identical problem by writing image
-escapes directly to the terminal *outside* the Bubbletea render loop, tracking the pane's screen position, and
-redrawing only on scroll/resize/focus change. Worth a focused prototype against that specific technique before
-treating the gap as permanently closed — `imagerender.go`'s own comment already flags it as "a candidate
-follow-up once [richer protocols] can be verified against real terminals."
-
-Priority: Tier 3 — real value (currently a documented, deliberate gap) but risky: needs verification against
-real terminals before it's safe to ship, per the caveat already recorded in the code.
-
-### P40.9 — Inline mermaid diagram rendering in the transcript
-
-`render_diagram` (`internal/tool/builtin/diagram.go`) is the only path from mermaid/plantuml/graphviz source
-to a viewable diagram, and it always produces a **file** (SVG/PNG/draw.io) via Kroki or a local CLI fallback
-— there's no ASCII-art rendering of a ` ```mermaid ` fenced block inline in the chat transcript itself, the
-way `xai-grok-markdown`'s dedicated `mermaid` module renders diagrams directly into the terminal pager. Today
-a model that inlines a small mermaid snippet in its response (rather than calling `render_diagram`) just gets
-it shown as an unstyled code block; a user has to explicitly ask for the tool call and open the resulting
-file to see the shape of the diagram.
-
-Priority: Tier 3 — real value (diagrams are common in architecture/threat-model personas' prose, not just
-tool output) but needs an actual mermaid-to-ASCII/box-drawing layout engine (or shelling out to Kroki for a
-preview render), which is a materially bigger lift than P40.8's text substitution.
-
-### P40.7 — Migrate `securityConfigModel` and `wizardModel` onto the unified `listDialog` overlay system
-
-`dialog.go`'s `listDialog` unified four previously-separate picker types (palette/persona/session/timeline/
-model/history/threat-model/backtrack pickers), but `securityConfigModel` (`securityconfig.go`) and
-`wizardModel` (`wizard.go`) remain bespoke, hand-rolled overlays outside that system. Not user-visible as a
-bug today, but every future fix to shared dialog behavior (theming, dimming, resize, centering) has to be
-duplicated across three implementations instead of one.
-
-Priority: Tier 3 — real maintenance value but a larger refactor of two working, non-trivial forms (a 5-step
-wizard, a scanner-config form) rather than a small addition.
-
-### P45.2 — No hunk-level agent-vs-external change attribution
-
-`internal/filetracker` (`tracker.go`) only tracks whole-file mtimes: `RecordRead` stamps a file's mtime,
-`CheckWrite` rejects a write if the file changed since the last read (stale-read discipline), but it has no
-concept of *which lines* in a file are agent-authored versus user-authored. Surfaced 2026-07-23 comparing
-against xAI's `grok-build`, whose `xai-hunk-tracker` crate runs an actor that attributes each diff hunk to
-`Agent` or `External` (fed by both the agent's own edit tool and an fs-notify watch for out-of-band changes),
-giving the rest of the system a per-hunk source label rather than a per-file timestamp. Aegis's
-`internal/checkpoint` restores whole turns, and there's no way today to answer "which of the changes
-currently in this file did the agent make" (e.g. to revert only the agent's hunks after the user has since
-hand-edited the same file, or to render a diff view scoped to just the AI's contribution).
-
-Fix direction: extend `filetracker` (or a new package it composes with) to record, per successful `edit_file`/
-`write_file` call, the resulting hunk ranges attributed to the agent, and reconcile against external mtime
-changes the same way `CheckWrite` already detects staleness — so external edits invalidate only the
-overlapping agent-attributed hunks rather than the whole file's tracking state.
-
-Priority: Tier 3 — real value for `/rewind`-adjacent precision and diff UX, but a materially bigger lift than
-P45.1: needs actual hunk-diffing (not just mtime comparison) and touches `checkpoint`'s restore model, not a
-self-contained change.
+> **P40.3, P40.4, P40.7, P40.9, P45.2 — all shipped 2026-07-23** (the Tier 3 batch; full design notes in
+> [releases.md](releases.md)). **P40.3**: ctrl+f incremental transcript search (`internal/tui/search.go`) —
+> live query, ⏎/↑↓/ctrl+n·p match stepping, focused-match accent + reverse-highlight. **P40.9**: a
+> dependency-free `internal/mermaidascii` renders flowchart/sequence mermaid to box-drawing ASCII, wired into
+> `mdRender` so complete ` ```mermaid ` fences render inline (unsupported/mid-stream fences left raw).
+> **P45.2**: `internal/filetracker` now records per-write agent-authored hunk ranges (stdlib LCS diff) and
+> reconciles them against external edits (contiguity rule), dropping only overlapping hunks; the mtime
+> read-before-write guard is untouched. **P40.7**: the two huh-form overlays (`wizardModel`,
+> `securityConfigModel`) — which aren't `listDialog` pickers and so can't literally adopt the list widget —
+> now share one `fixedPanelFrame` helper for their identical hand-rolled frame, the safe de-duplication the
+> item targeted. **P40.4**: an *experimental, opt-in* kitty-graphics tier — `detectKittyGraphics` + a tested
+> chunked `kittyGraphicsSequence` encoder, reachable only via `image_rendering: "kitty"` (never auto), with
+> render-loop placement left unverified against real terminals by design (the safe half-block default is
+> untouched).
 
 > **P46.3 shipped** (2026-07-23) — the `structured-build` embedded skill packages P46.1's `scope` tool and
 > P46.2's pre-commit test gate into a one-task-one-commit workflow (declare scope → edit → verify → commit →

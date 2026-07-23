@@ -55,6 +55,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 	// Phase 1: validate all paths and load file contents.
 	type fileState struct {
 		abs     string
+		orig    string // content before any edits, for hunk attribution
 		content string
 	}
 	files := make(map[string]*fileState)
@@ -74,7 +75,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 			if err != nil {
 				return tool.Result{Content: fmt.Sprintf("edit %d: cannot read %s: %v", i+1, e.Path, err), IsError: true}, nil
 			}
-			files[abs] = &fileState{abs: abs, content: string(data)}
+			files[abs] = &fileState{abs: abs, orig: string(data), content: string(data)}
 		}
 	}
 
@@ -98,6 +99,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 		}
 		if t.tracker != nil {
 			t.tracker.RecordWrite(fs.abs)
+			t.tracker.RecordAgentWrite(fs.abs, fs.orig, fs.content)
 		}
 		results = append(results, fs.abs)
 	}
