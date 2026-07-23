@@ -39,11 +39,14 @@ func newWorktreeAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			path, err := m.Add(args[0], branch)
+			path, carried, err := m.AddCarry(args[0], branch)
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "created worktree %s\n  cd %s && aegis\n", args[0], path)
+			if len(carried) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "carried %d uncommitted file(s) from the source tree into the worktree\n", len(carried))
+			}
 			return nil
 		},
 	}
