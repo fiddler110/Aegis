@@ -107,10 +107,12 @@ func EstimateTokens(system string, msgs []provider.Message) int {
 	return tokenest.Messages(system, msgs)
 }
 
-// Compact summarizes the older prefix of the conversation if it exceeds the
-// budget, returning the rewritten message list. It chooses a boundary that
-// preserves tool_use/tool_result pairing by cutting only before an assistant
-// message.
+// Compact always runs the cheap deterministic prune pass (stale tool
+// results, already-committed write/edit payloads — see pruneStaleToolResults)
+// and additionally summarizes the older prefix of the conversation with an
+// LLM call if it still exceeds the budget after that pass, returning the
+// rewritten message list. It chooses a boundary that preserves
+// tool_use/tool_result pairing by cutting only before an assistant message.
 func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider.Message) ([]provider.Message, bool, error) {
 	return s.compact(ctx, system, msgs, false)
 }
@@ -125,29 +127,32 @@ func (s *Summarizer) ForceCompact(ctx context.Context, system string, msgs []pro
 }
 
 func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider.Message, force bool) ([]provider.Message, bool, error) {
-	if !force && !s.shouldCompact(EstimateTokens(system, msgs)) {
-		return msgs, false, nil
-	}
+	// Deterministic pre-pass — drop stale tool results (superseded file
+	// reads, old search dumps, already-committed write/edit payloads) on
+	// every call, independent of the budget gate below. It costs no LLM call
+	// and no I/O, only a scan over messages already in memory, so there is no
+	// reason to defer it until the conversation is already near the context
+	// window: a long tool-heavy run (many files written/edited in one
+	// session — e.g. a skill driving a multi-file build to completion) would
+	// otherwise keep resending every already-committed payload verbatim for
+	// however many turns it takes to first cross the threshold, which is
+	// exactly the peak-context pressure this pass exists to relieve.
+	msgs, prunedChars := pruneStaleToolResults(msgs, s.keepRecent)
+	changedByPrune := prunedChars > 0
 
-	// Deterministic pre-pass: drop stale tool results (superseded file reads,
-	// old search dumps) before paying for an LLM summarization call. Cheaper,
-	// and it preserves the exact wording of everything the model actually said.
-	if pruned, prunedChars := pruneStaleToolResults(msgs, s.keepRecent); prunedChars > 0 {
-		if !force && !s.shouldCompact(EstimateTokens(system, pruned)) {
-			return pruned, true, nil
-		}
-		msgs = pruned
+	if !force && !s.shouldCompact(EstimateTokens(system, msgs)) {
+		return msgs, changedByPrune, nil
 	}
 
 	boundary := s.boundary(msgs)
 	if boundary <= 0 {
-		return msgs, false, nil // nothing safe to compact
+		return msgs, changedByPrune, nil // nothing more safe to compact
 	}
 
 	prefix := msgs[:boundary]
 	summary, err := s.summarize(ctx, prefix)
 	if err != nil {
-		return msgs, false, err
+		return msgs, changedByPrune, err
 	}
 
 	out := make([]provider.Message, 0, len(msgs)-boundary+1)
