@@ -29,7 +29,7 @@ type wPreset struct {
 }
 
 var wPresets = []wPreset{
-	{"Ollama (local)", "openai", "http://localhost:11434/v1", 8192, "discover:ollama"},
+	{"Ollama (local)", "ollama", "http://localhost:11434", 8192, "discover:ollama"},
 	{"LM Studio (local)", "openai", "http://localhost:1234/v1", 4096, "discover:lmstudio"},
 	{"Anthropic (Claude)", "anthropic", "", 16384, "curated:anthropic"},
 	{"OpenAI", "openai", "", 16384, "curated:openai"},

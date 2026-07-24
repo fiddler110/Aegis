@@ -12,7 +12,7 @@ import (
 
 // ProviderPatch holds the provider fields to write into the global config file.
 type ProviderPatch struct {
-	Adapter    string // "anthropic" | "openai"
+	Adapter    string // "anthropic" | "openai" | "ollama"
 	BaseURL    string // empty = omit from YAML
 	Model      string
 	MaxTokens  int
