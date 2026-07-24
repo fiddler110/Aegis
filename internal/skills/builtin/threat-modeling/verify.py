@@ -78,6 +78,11 @@ TID_FULL_RE = re.compile(r"^T\d+(?:\.[A-Za-z0-9]+)?$")
 DF_RE = re.compile(r"DF\d+")
 FIND_HEADING_RE = re.compile(r"^###\s+(FIND-\d+)\b")
 
+# Coverage Ledger status: "Covered — <component>" or "Excluded — <reason>" —
+# the em-dash-or-hyphen separator plus a non-empty reason is mandatory (a bare
+# "Covered" or "Excluded" is a placeholder wearing the right word).
+COVERAGE_STATUS_RE = re.compile(r"^(covered|excluded)\b\s*[—-]\s*\S", re.I)
+
 # Leftover skeleton syntax — any hit is a placeholder never filled in. The
 # PENDING entry is a *prefix* (P38.7): scaffold.py now emits keyed markers
 # (`<!-- PENDING: deployment-classification -->`), so matching the bare
@@ -109,6 +114,9 @@ def split_row(line):
     return [c.strip() for c in s.split("|")]
 
 
+HTML_COMMENT_LINE_RE = re.compile(r"^<!--.*-->$")
+
+
 def is_separator_line(line):
     """True for a markdown header/body separator like `|---|:--:|`."""
     s = line.strip()
@@ -135,7 +143,11 @@ def parse_tables(lines):
     """Return every markdown table: {header:[...], rows:[(cells, lineno)]}.
 
     lineno is 1-based. A table is a `|...|` header line immediately followed
-    by a separator line, then contiguous `|...|` data rows.
+    by a separator line, then contiguous `|...|` data rows. A single-line HTML
+    comment (`<!-- ... -->`, e.g. scaffold.py's `table()` guidance line, which
+    the fill step leaves in place — only the `<!-- PENDING: <key> -->` marker
+    after it gets replaced) does not end the table; it is skipped so real rows
+    written after it still get parsed.
     """
     tables = []
     n = len(lines)
@@ -146,12 +158,19 @@ def parse_tables(lines):
             header = split_row(line)
             rows = []
             j = i + 2
-            while j < n and lines[j].strip().startswith("|"):
-                if is_separator_line(lines[j]):
+            while j < n:
+                s = lines[j].strip()
+                if s.startswith("|"):
+                    if is_separator_line(lines[j]):
+                        j += 1
+                        continue
+                    rows.append((split_row(lines[j]), j + 1))
                     j += 1
                     continue
-                rows.append((split_row(lines[j]), j + 1))
-                j += 1
+                if HTML_COMMENT_LINE_RE.match(s):
+                    j += 1
+                    continue
+                break
             tables.append({"header": header, "rows": rows, "line": i + 1})
             i = j
         else:
@@ -632,6 +651,38 @@ def check_deployment_classification_consistency(suite):
     return ("deployment-classification-consistency", True, [])
 
 
+def check_coverage_ledger(suite):
+    """11. Coverage Ledger exists, has rows, and every Status is a properly
+    reasoned Covered/Excluded entry — the two-ledger completeness accounting
+    from SKILL.md §2 step 6."""
+    fails = []
+    tbl = find_table(suite.tables("architecture"), "Directory", "Status")
+    if tbl is None:
+        fails.append(ev(suite.base("architecture"), 0,
+                        "Coverage Ledger table (Directory|Status) not found"))
+        return ("coverage-ledger-complete", False, fails)
+
+    dirs = col_values(tbl, "Directory")
+    if not dirs:
+        fails.append(ev(suite.base("architecture"), tbl["line"],
+                        "Coverage Ledger has no directory rows"))
+
+    seen = {}
+    for v, ln in dirs:
+        seen.setdefault(v, []).append(ln)
+    for name, lines_ in seen.items():
+        if len(lines_) > 1:
+            fails.append(ev(suite.base("architecture"), lines_[1],
+                            "directory %r appears more than once in the Coverage Ledger" % name))
+
+    for v, ln in col_values(tbl, "Status"):
+        if not COVERAGE_STATUS_RE.match(v):
+            fails.append(ev(suite.base("architecture"), ln,
+                            "Status %r is not \"Covered — <component>\" or "
+                            "\"Excluded — <reason>\" with a reason" % v))
+    return ("coverage-ledger-complete", not fails, fails)
+
+
 ALL_CHECKS = [
     check_no_skeleton_syntax,
     check_component_name_consistency,
@@ -643,6 +694,7 @@ ALL_CHECKS = [
     check_no_forbidden_statuses,
     check_external_av_consistency,
     check_deployment_classification_consistency,
+    check_coverage_ledger,
 ]
 
 

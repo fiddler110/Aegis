@@ -229,9 +229,16 @@ def build_architecture():
               "security-infrastructure",
               "one row per security-relevant component found (SKILL.md §3)"),
         "",
-        "## Repository Structure",
-        table(["Directory", "Purpose"], "repository-structure",
-              "one row per top-level directory"),
+        "## Coverage Ledger",
+        table(["Directory", "Status", "Notes"], "coverage-ledger",
+              "one row per top-level directory from recon.py's \"Top-level "
+              "directories\" section, including its auto-excluded ones -- "
+              "every directory must be accounted for. Status is either "
+              "\"Covered -- <component>\" (the Key Component whose Anchor "
+              "lives under it) or \"Excluded -- <reason>\" (vendored, "
+              "generated, build output, docs, tests, lockfiles, or genuinely "
+              "out of scope). A directory missing from this table is a "
+              "dropped scope, not a summary omission (SKILL.md §2 step 6)"),
         "",
     ])
 

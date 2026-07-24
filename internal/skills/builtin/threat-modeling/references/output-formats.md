@@ -105,9 +105,12 @@ and before any threat is enumerated.
 |-----------|----------------|----------------|-------|
 [REPEAT: one row per security-relevant component found — SKILL.md §3's "inventory the security infrastructure first" step lands here]
 
-## Repository Structure
-| Directory | Purpose |
-|-----------|---------|
+## Coverage Ledger
+| Directory | Status | Notes |
+|-----------|--------|-------|
+[REPEAT: one row per top-level directory from recon.py's "Top-level directories" section — including its auto-excluded ones]
+| [FILL: top-level directory] | [FILL: "Covered — <component>" or "Excluded — <reason>"] | [FILL: brief note, e.g. what the component does under this directory, or why it's out of scope] |
+[END-REPEAT]
 ```
 
 **Processing rules:**
@@ -129,12 +132,20 @@ and before any threat is enumerated.
 4. The first scenario's sequence diagram must name real participants (the
    components from the table above), not generic placeholders like
    "Client"/"Server" unless those really are the component names.
+5. **Every top-level directory recon.py's digest lists must appear exactly
+   once in the Coverage Ledger**, as `Covered — <component>` (naming the Key
+   Component whose Anchor lives under it) or `Excluded — <reason>` — a
+   directory recon.py auto-excluded (vendored/build/VCS/cache) still gets its
+   own row, not a silent drop. A component you chose not to model is a
+   judgment call a reader can review; a directory nobody ever considered is
+   a scope gap the report can't reveal on its own (SKILL.md §2 step 6).
 
 **Post-write checks:**
 - [ ] Every row in Key Components has a real anchor (file/class/manifest) — no `TBD`, no invented abstraction
 - [ ] Deployment Classification is one of the four fixed values, stated with evidence
 - [ ] Component Exposure Table has one row per Key Component, no gaps
 - [ ] First scenario has a Mermaid `sequenceDiagram` block
+- [ ] Coverage Ledger has one row per top-level directory from recon.py's digest, each `Covered — <component>` or `Excluded — <reason>`, none omitted
 
 ---
 

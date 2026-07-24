@@ -135,6 +135,10 @@ should already be clean if each file's own "Post-write checks" in
 - [ ] No stray skeleton syntax remains — grep every file for `[FILL`,
       `[REPEAT`, `[END-REPEAT` before reporting done; each hit is a
       placeholder that was never actually filled in.
+- [ ] Every top-level directory from recon.py's digest appears exactly once
+      in `0.1-architecture.md`'s Coverage Ledger, as `Covered — <component>`
+      or `Excluded — <reason>` — including recon's auto-excluded directories
+      (SKILL.md §2 step 6).
 
 **Cross-file (this is what the whole-suite review actually exists to
 catch — see SKILL.md §5):**
