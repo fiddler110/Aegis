@@ -27,11 +27,12 @@ func Execute() error {
 
 func newRootCmd() *cobra.Command {
 	var (
-		mode        string
-		resume      string
-		persona     string
-		firstInit   bool
-		initProject bool
+		mode          string
+		resume        string
+		persona       string
+		firstInit     bool
+		initProject   bool
+		initOverwrite bool
 	)
 
 	cmd := &cobra.Command{
@@ -64,10 +65,10 @@ Use "aegis <command> --help" for details on any command below.`,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if firstInit {
-				return runFirstInit()
+				return runFirstInit(initOverwrite)
 			}
 			if initProject {
-				return runProjectInit()
+				return runProjectInit(initOverwrite)
 			}
 
 			cfg, err := config.Load()
@@ -189,6 +190,7 @@ Use "aegis <command> --help" for details on any command below.`,
 	cmd.Flags().StringVar(&persona, "persona", "", "persona for new sessions (e.g. general, security, developer, security-architect, sre, cloud-architect; see README for full list). Falls back to config's default_persona, then general (see: aegis persona use)")
 	cmd.Flags().BoolVar(&firstInit, "first-init", false, "create the global config file with a full provider template (Ollama active by default)")
 	cmd.Flags().BoolVar(&initProject, "init", false, "create a project-level .aegis/config.yaml override in the current directory")
+	cmd.Flags().BoolVar(&initOverwrite, "overwrite", false, "with --init/--first-init, regenerate an existing config from the latest template (backs up the old file first) instead of aborting")
 
 	const (
 		groupRun     = "run"
