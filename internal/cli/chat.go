@@ -335,118 +335,137 @@ func newChatCmd() *cobra.Command {
 			// and a known limitation when it didn't, but never a wrong forced
 			// continuation.
 			pendingRoot := filepath.Join(cwd, ".aegis")
-			noProgress := 0
-			verifyRounds := 0
-			qualityReviewed := false // P38.1: run the final quality pass at most once
-			preambleCompacted := false
-			var prevPending []string
 			var runErr error
-			for iter := 0; ; iter++ {
-				iterToolCalls = 0
-				iterMutations = 0
-				runErr = eng.Run(ctx, conv, onEvent)
-				logger.Info("chat: run finished", "iter", iter, "err", errString(runErr), "tool_calls", toolCalls, "iter_tool_calls", iterToolCalls, "iter_mutations", iterMutations)
-				if runErr != nil || !driveToCompletion || ctx.Err() != nil {
-					break
-				}
-				// P39.5: after the opening turn the model has seen the full
-				// SKILL.md. Re-sending its ~9K-token body in the first user
-				// message every turn is the drive's context-bounding failure — on
-				// a 32K local window (prompt_bytes≈31534 at turn 0) the recon
-				// digest plus a few file reads then leave no room to edit_file (a
-				// scaffolded resume made 86 tool calls across 3 iterations and
-				// cleared 0 of 23 markers). Rewrite the first message once,
-				// swapping the skill body for a compact pointer the model can
-				// re-read on demand — the same disposable-skill-reference logic
-				// P36.2 applies to skill-reference reads. Guarded so it only
-				// touches the message while it still carries the preamble (engine
-				// compaction may have already rewritten it).
-				if !preambleCompacted {
-					preambleCompacted = true
-					if compactFirstSkillMessage(conv, skillName, taskPrompt, skillDir) {
-						logger.Info("chat: compacted SKILL.md preamble out of first message (P39.5)", "skill", skillName)
-					}
-				}
-				pending := scanPendingMarkers(pendingRoot)
-				if len(pending) == 0 {
-					// P39.6: "all markers filled" is not the real done-condition —
-					// "verifies clean" is. Run the skill's bundled phase-6 checks
-					// (verify.py, lint_dfd.py, inventory.py --check); on failure,
-					// feed the failure text back for an in-place fix and re-run,
-					// bounded. When the skill ships no verifier / there's nothing to
-					// check, verifySkillOutputs reports ran=false and the drive ends
-					// as before. This is the autonomous analogue of SKILL.md §5's
-					// fix-and-re-run round.
-					failures, ran := verifySkillOutputs(skillName, skillDir, cwd)
-					if !ran {
-						break // nothing to verify (skill has no verifier / no run dir) — done
-					}
-					if failures == "" {
-						// Mechanical checks are clean. P38.1: run one substantive
-						// quality-and-sanity pass the scripts can't do (groundedness,
-						// filler, internal coherence), then re-verify. Bounded to a
-						// single pass so it terminates; a regression it introduces is
-						// caught by the mechanical fix loop above on the next iteration.
-						if !qualityReviewed {
-							qualityReviewed = true
-							logger.Info("chat: mechanical checks clean, running final quality pass (P38.1)")
-							conv.Append(provider.Message{
-								Role:    provider.RoleUser,
-								Content: []provider.Block{provider.TextBlock{Text: qualityReviewPrompt()}},
-							})
-							continue
-						}
-						break // verified clean and quality-reviewed — done
-					}
-					if verifyRounds++; verifyRounds > maxVerifyRounds {
-						logger.Warn("chat: verification still failing after max rounds", "rounds", maxVerifyRounds)
-						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", maxVerifyRounds)
-						fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", failures)
+
+			// P38.8 in-harness: a skill with a phase plan (threat-modeling) is
+			// driven phase-by-phase in a fresh context each phase, which is what
+			// keeps peak context bounded on a local model — the single-context
+			// generic drive below is what stalled the P38.1 build. Any other
+			// PENDING-driven skill, or AEGIS_SKILL_DRIVE=linear, uses the generic
+			// drive. Both branches set runErr and leave the tail logic below
+			// (the P38.6 floor check, cost trailer) unchanged.
+			if phases := phasePlanFor(skillName); driveToCompletion && phases != nil && !linearDriveForced() {
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: driving %s in phased mode — one bounded fresh context per phase (%d content phases + verify), the in-harness form of P38.8]\n", skillName, len(phases))
+				logger.Info("chat: using phased skill drive (P38.8 in-harness)", "skill", skillName, "phases", len(phases))
+				runErr = runPhasedSkillDrive(ctx, &phasedDriveState{
+					eng: eng, system: conv.System, onEvent: onEvent, logger: logger,
+					errOut: cmd.ErrOrStderr(), cwd: cwd, skillName: skillName, skillDir: skillDir,
+					taskPrompt: taskPrompt, maxTurns: maxTurns,
+					iterToolCalls: &iterToolCalls, iterMutations: &iterMutations,
+				}, phases)
+			} else {
+				noProgress := 0
+				verifyRounds := 0
+				qualityReviewed := false // P38.1: run the final quality pass at most once
+				preambleCompacted := false
+				var prevPending []string
+				for iter := 0; ; iter++ {
+					iterToolCalls = 0
+					iterMutations = 0
+					runErr = eng.Run(ctx, conv, onEvent)
+					logger.Info("chat: run finished", "iter", iter, "err", errString(runErr), "tool_calls", toolCalls, "iter_tool_calls", iterToolCalls, "iter_mutations", iterMutations)
+					if runErr != nil || !driveToCompletion || ctx.Err() != nil {
 						break
 					}
-					logger.Info("chat: verification failed, feeding back for fix", "round", verifyRounds)
+					// P39.5: after the opening turn the model has seen the full
+					// SKILL.md. Re-sending its ~9K-token body in the first user
+					// message every turn is the drive's context-bounding failure — on
+					// a 32K local window (prompt_bytes≈31534 at turn 0) the recon
+					// digest plus a few file reads then leave no room to edit_file (a
+					// scaffolded resume made 86 tool calls across 3 iterations and
+					// cleared 0 of 23 markers). Rewrite the first message once,
+					// swapping the skill body for a compact pointer the model can
+					// re-read on demand — the same disposable-skill-reference logic
+					// P36.2 applies to skill-reference reads. Guarded so it only
+					// touches the message while it still carries the preamble (engine
+					// compaction may have already rewritten it).
+					if !preambleCompacted {
+						preambleCompacted = true
+						if compactFirstSkillMessage(conv, skillName, taskPrompt, skillDir) {
+							logger.Info("chat: compacted SKILL.md preamble out of first message (P39.5)", "skill", skillName)
+						}
+					}
+					pending := scanPendingMarkers(pendingRoot)
+					if len(pending) == 0 {
+						// P39.6: "all markers filled" is not the real done-condition —
+						// "verifies clean" is. Run the skill's bundled phase-6 checks
+						// (verify.py, lint_dfd.py, inventory.py --check); on failure,
+						// feed the failure text back for an in-place fix and re-run,
+						// bounded. When the skill ships no verifier / there's nothing to
+						// check, verifySkillOutputs reports ran=false and the drive ends
+						// as before. This is the autonomous analogue of SKILL.md §5's
+						// fix-and-re-run round.
+						failures, ran := verifySkillOutputs(skillName, skillDir, cwd)
+						if !ran {
+							break // nothing to verify (skill has no verifier / no run dir) — done
+						}
+						if failures == "" {
+							// Mechanical checks are clean. P38.1: run one substantive
+							// quality-and-sanity pass the scripts can't do (groundedness,
+							// filler, internal coherence), then re-verify. Bounded to a
+							// single pass so it terminates; a regression it introduces is
+							// caught by the mechanical fix loop above on the next iteration.
+							if !qualityReviewed {
+								qualityReviewed = true
+								logger.Info("chat: mechanical checks clean, running final quality pass (P38.1)")
+								conv.Append(provider.Message{
+									Role:    provider.RoleUser,
+									Content: []provider.Block{provider.TextBlock{Text: qualityReviewPrompt()}},
+								})
+								continue
+							}
+							break // verified clean and quality-reviewed — done
+						}
+						if verifyRounds++; verifyRounds > maxVerifyRounds {
+							logger.Warn("chat: verification still failing after max rounds", "rounds", maxVerifyRounds)
+							fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", maxVerifyRounds)
+							fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", failures)
+							break
+						}
+						logger.Info("chat: verification failed, feeding back for fix", "round", verifyRounds)
+						conv.Append(provider.Message{
+							Role:    provider.RoleUser,
+							Content: []provider.Block{provider.TextBlock{Text: verifyFixPrompt(failures)}},
+						})
+						continue
+					}
+					if iter+1 >= maxTurns {
+						msg := fmt.Sprintf("drive-to-completion hit --max-turns=%d with %d file(s) still PENDING: %s", maxTurns, len(pending), strings.Join(pending, ", "))
+						logger.Warn("chat: " + msg)
+						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: %s — re-run to resume]\n", msg)
+						break
+					}
+					// P39.7 no-progress guard. A weak local model sometimes ends a
+					// turn with a plan ("Now I'll write the file…") and no file
+					// mutation at all — the "announce then yield" stall (reproduced on
+					// gpt-oss:20b and qwen3.6:35b-a3b: markers present, 0 edit_file,
+					// yields repeatedly). Treat a turn that neither mutated a suite
+					// file nor changed the PENDING set (the model may narrate, read,
+					// or re-run recon without editing) as no progress. Direct evidence
+					// this is the right lever: adding an "act now" preamble to a
+					// stalled gpt-oss:20b run landed the first real edit_file (P38.1).
+					// Instead of silently yielding a partial suite, re-prompt with an
+					// explicit "act now — call edit_file, no narration" nudge, bounded
+					// to maxNoProgressTurns consecutive stalls before stopping.
+					// Extends P39.2's tool-execution coaching from the malformed-call
+					// case to the no-call case.
+					madeProgress := iterMutations > 0 || !sameStrings(pending, prevPending)
+					prevPending = pending
+					nudge := ""
+					if !madeProgress {
+						if noProgress++; noProgress >= maxNoProgressTurns {
+							fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: model stalled %d turns without mutating a file while %d file(s) remain PENDING; stopping — re-run to resume]\n", noProgress, len(pending))
+							break
+						}
+						nudge = actNowNudge()
+					} else {
+						noProgress = 0
+					}
 					conv.Append(provider.Message{
 						Role:    provider.RoleUser,
-						Content: []provider.Block{provider.TextBlock{Text: verifyFixPrompt(failures)}},
+						Content: []provider.Block{provider.TextBlock{Text: nudge + continuePrompt(pending)}},
 					})
-					continue
 				}
-				if iter+1 >= maxTurns {
-					msg := fmt.Sprintf("drive-to-completion hit --max-turns=%d with %d file(s) still PENDING: %s", maxTurns, len(pending), strings.Join(pending, ", "))
-					logger.Warn("chat: " + msg)
-					fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: %s — re-run to resume]\n", msg)
-					break
-				}
-				// P39.7 no-progress guard. A weak local model sometimes ends a
-				// turn with a plan ("Now I'll write the file…") and no file
-				// mutation at all — the "announce then yield" stall (reproduced on
-				// gpt-oss:20b and qwen3.6:35b-a3b: markers present, 0 edit_file,
-				// yields repeatedly). Treat a turn that neither mutated a suite
-				// file nor changed the PENDING set (the model may narrate, read,
-				// or re-run recon without editing) as no progress. Direct evidence
-				// this is the right lever: adding an "act now" preamble to a
-				// stalled gpt-oss:20b run landed the first real edit_file (P38.1).
-				// Instead of silently yielding a partial suite, re-prompt with an
-				// explicit "act now — call edit_file, no narration" nudge, bounded
-				// to maxNoProgressTurns consecutive stalls before stopping.
-				// Extends P39.2's tool-execution coaching from the malformed-call
-				// case to the no-call case.
-				madeProgress := iterMutations > 0 || !sameStrings(pending, prevPending)
-				prevPending = pending
-				nudge := ""
-				if !madeProgress {
-					if noProgress++; noProgress >= maxNoProgressTurns {
-						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: model stalled %d turns without mutating a file while %d file(s) remain PENDING; stopping — re-run to resume]\n", noProgress, len(pending))
-						break
-					}
-					nudge = actNowNudge()
-				} else {
-					noProgress = 0
-				}
-				conv.Append(provider.Message{
-					Role:    provider.RoleUser,
-					Content: []provider.Block{provider.TextBlock{Text: nudge + continuePrompt(pending)}},
-				})
 			}
 
 			// P38.6 floor check against fabricated completion. A drive that ends
