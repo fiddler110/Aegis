@@ -62,7 +62,7 @@ func TestLiveWorkflow(t *testing.T) {
 
 	baseURL := os.Getenv("AEGIS_EVAL_BASE_URL")
 	if baseURL == "" {
-		baseURL = "http://localhost:11434/v1"
+		baseURL = "http://localhost:11434"
 	}
 	model := os.Getenv("AEGIS_EVAL_MODEL")
 	if model == "" {
