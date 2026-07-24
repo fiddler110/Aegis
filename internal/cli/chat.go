@@ -158,6 +158,18 @@ func newChatCmd() *cobra.Command {
 				if err := skills.MaterializeBuiltins(cfg.DataDir); err != nil {
 					return fmt.Errorf("materialize built-in skills: %w", err)
 				}
+				// P39.10: the <dataDir>/builtin-skills copy above is outside the
+				// workspace root, so the sandboxed file tools (confined to cwd)
+				// reject reading a builtin skill's bundled scripts/skeletons —
+				// the model can't reach recon.py/scaffold.py and bails before the
+				// build even starts. Mirror the daemon (server.sessions) and also
+				// materialize the enabled builtins into <cwd>/.aegis/builtin-skills
+				// so the <skill_assets> manifest resolves to a workspace-relative
+				// path the file tools accept. skills.Load then prefers this project
+				// copy, so skillDir/verify-script paths point inside the workspace.
+				if err := skills.MaterializeBuiltinsToProject(cwd, enabledBuiltins); err != nil {
+					return fmt.Errorf("materialize built-in skills into workspace: %w", err)
+				}
 			}
 
 			// Screen untrusted bundled skill directories through the same scan
@@ -893,7 +905,19 @@ func scanPendingMarkers(root string) []string {
 	const maxFileSize = 1 << 20 // 1 MiB — generated report files are far smaller
 	var hits []string
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			// P39.11: the materialized builtin-skills assets (skeleton
+			// templates, SKILL.md/README) carry their own `<!-- PENDING`
+			// markers as examples; counting them would keep the drive's
+			// completion oracle permanently non-empty (it never converges,
+			// phase-6 verify never fires). Skip that subtree — it is skill
+			// source, not build output.
+			if d.Name() == pendingSkipDir {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		switch strings.ToLower(filepath.Ext(path)) {
@@ -929,7 +953,17 @@ func scanPendingMarkers(root string) []string {
 func suiteFileCount(root string) int {
 	n := 0
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			// P39.11: exclude the materialized builtin-skills source (see
+			// scanPendingMarkers) — otherwise its asset files count as "suite
+			// written", defeating the P38.6 fabricated-success floor check that
+			// distinguishes "finished" from "nothing was ever written".
+			if d.Name() == pendingSkipDir {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		switch strings.ToLower(filepath.Ext(path)) {
@@ -940,3 +974,11 @@ func suiteFileCount(root string) int {
 	})
 	return n
 }
+
+// pendingSkipDir is the subdirectory of <cwd>/.aegis holding builtin skill
+// source materialized into the workspace (P39.10) — skeleton templates and
+// SKILL.md bodies that carry their own `<!-- PENDING` example markers. Both
+// drive-completion scans skip it so skill source is never mistaken for build
+// output. Mirrors skills.builtinSkillsDirName (kept as a local literal to avoid
+// exporting an internal constant across the package boundary).
+const pendingSkipDir = "builtin-skills"
