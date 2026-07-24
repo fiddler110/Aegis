@@ -138,6 +138,27 @@ func pythonExe() string {
 	return ""
 }
 
+// qualityReviewPrompt is the P38.1 final quality pass. The mechanical phase-6
+// scripts (verify.py/lint_dfd.py/inventory.py) verify structure and counts but
+// cannot judge substance: whether every threat is grounded in real evidence,
+// whether the prose is filler, whether the analysis is internally coherent. A
+// content-rich local-model build reaches "scripts pass" with real quality gaps
+// (vague evidence, copy-paste rows, severities that don't match the threat), so
+// after the scripts are clean the drive runs exactly one substantive
+// self-review turn that reads the finished suite and fixes what it finds in
+// place. It is bounded to a single pass by the caller (a re-review every turn
+// would never terminate), and the mechanical checks re-run afterward, so a
+// review edit that breaks a script check is caught by the normal fix loop.
+func qualityReviewPrompt() string {
+	return "The suite is structurally complete and the mechanical checks pass. Now do ONE final quality-and-sanity review of the finished threat model, reading each file, and fix any problem you find IN PLACE with `edit_file` (do not re-scaffold, do not add `<!-- PENDING -->` markers). Check specifically:\n" +
+		"- Every threat and finding cites concrete evidence — a real `path:line` (or `path` + symbol) that exists in the codebase, not a vague reference like \"the code\" or \"various files\". Fix or remove any ungrounded claim.\n" +
+		"- No filler, placeholder, TODO, \"lorem\", or restated-boilerplate text; each row says something specific to THIS system.\n" +
+		"- Internal consistency: severities match the threat described; each finding's attack vector matches the component's real reachability (e.g. a background/internal-only component is not `AV:N` network-reachable); tiers match their prerequisites; summary-table counts match the actual rows.\n" +
+		"- The DFD components, the architecture Key Components table, and the analysis sections name the same components — no orphan or missing component.\n" +
+		"- No duplicate near-identical threats padding the counts.\n\n" +
+		"This is a non-interactive run: make every fix now with `edit_file` and do not ask whether to proceed. If — after actually reading the files — everything is already correct, say so in one line and stop without editing."
+}
+
 // verifyFixPrompt is the P39.6 continuation turn: the markers are all cleared
 // but the bundled checks still fail, so name the exact failures and tell the
 // model to fix them in place (not re-scaffold) so the next iteration re-runs the

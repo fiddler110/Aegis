@@ -19,6 +19,18 @@ func TestVerifyFixPrompt(t *testing.T) {
 	}
 }
 
+// qualityReviewPrompt (P38.1 final pass) must ask for a substantive review the
+// mechanical scripts can't do — groundedness, filler, internal consistency —
+// fixed in place via edit_file, non-interactively.
+func TestQualityReviewPrompt(t *testing.T) {
+	p := qualityReviewPrompt()
+	for _, want := range []string{"edit_file", "evidence", "consistency", "non-interactive", "PENDING"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("qualityReviewPrompt missing %q in:\n%s", want, p)
+		}
+	}
+}
+
 // verifySkillOutputs must report ran=false (drive falls back to markers-cleared
 // = done) when there is nothing to verify: no skill, no skill dir, or a skill
 // dir with no verify.py.

@@ -384,8 +384,8 @@ func TestLoadDotEnvMissingFileNoOp(t *testing.T) {
 // profile auto-detection: loopback/localhost base URLs (with or without a
 // port, http or https, IPv6 loopback) select the "local" profile; a remote
 // host does not; and an explicit prompt_profile always wins over detection.
-// TestProviderConfig_ResponseHeaderTimeout is the P35.5 regression: unset
-// (zero-value) config keeps the previously-hardcoded 5-minute default, and an
+// TestProviderConfig_ResponseHeaderTimeout is the P35.5/P38.1 regression: unset
+// (zero-value) config substitutes the default (30m as of P38.1), and an
 // explicit provider.response_header_timeout (seconds) is honored.
 func TestProviderConfig_ResponseHeaderTimeout(t *testing.T) {
 	tests := []struct {
@@ -393,8 +393,8 @@ func TestProviderConfig_ResponseHeaderTimeout(t *testing.T) {
 		sec  int
 		want time.Duration
 	}{
-		{"unset defaults to 5m", 0, 5 * time.Minute},
-		{"negative also defaults to 5m", -1, 5 * time.Minute},
+		{"unset defaults to 30m", 0, 30 * time.Minute},
+		{"negative also defaults to 30m", -1, 30 * time.Minute},
 		{"explicit override wins", 900, 15 * time.Minute},
 	}
 	for _, tt := range tests {
@@ -408,7 +408,7 @@ func TestProviderConfig_ResponseHeaderTimeout(t *testing.T) {
 }
 
 // TestLoadDefaults_ResponseHeaderTimeout confirms a fresh Load() with no
-// provider.response_header_timeout set produces the same 5-minute default,
+// provider.response_header_timeout set produces the 30-minute default (P38.1),
 // end to end through the config layers.
 func TestLoadDefaults_ResponseHeaderTimeout(t *testing.T) {
 	redirectConfigDir(t)
@@ -418,8 +418,8 @@ func TestLoadDefaults_ResponseHeaderTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := cfg.Provider.ResponseHeaderTimeout(); got != 5*time.Minute {
-		t.Errorf("default ResponseHeaderTimeout = %v, want 5m", got)
+	if got := cfg.Provider.ResponseHeaderTimeout(); got != 30*time.Minute {
+		t.Errorf("default ResponseHeaderTimeout = %v, want 30m", got)
 	}
 }
 
