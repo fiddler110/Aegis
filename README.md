@@ -51,21 +51,74 @@ The daemon starts automatically — no second terminal needed. Use `/help` insid
 
 ---
 
+## Common Workflows
+
+Everything below works from the TUI (slash commands) or as a scriptable one-shot `aegis chat` call. The TUI is the better starting point for anything you want to steer interactively; `aegis chat --skill ... --yes` is the better choice for CI or unattended runs.
+
+### Threat model a codebase
+
+Interactively, from inside the TUI:
+
+```
+/threat-model                        # picker dialog: choose a framework (STRIDE, LINDDUN, PASTA, Trike, VAST, NIST 800-154)
+/threat-model PASTA the auth service # skip the picker — name a framework and/or a specific system
+```
+
+This produces a suite of report files under `.aegis/` (architecture overview, DFD diagram, per-framework analysis, prioritized findings, executive summary) using the built-in `threat-modeling` skill. Non-interactively (e.g. in CI), drive the same skill to completion in one command:
+
+```bash
+aegis skills enable threat-modeling      # one-time; or --global to enable for every project
+aegis chat "threat model this repo" --skill threat-modeling --mode build --yes
+```
+
+The drive auto-continues across turns until every file is filled in and the skill's own consistency checks pass, bounded by `--max-turns`. Re-run the same command to resume a partial run. See [CLI Reference](docs/cli-reference.md#aegis-chat) and the skill's own docs for the update/re-baseline workflow (compare against a previous report, track new/resolved/still-present threats).
+
+### Run a security scan
+
+```bash
+aegis scan .                              # every enabled scanner (SAST, secrets, deps), auto-detected by language
+aegis scan --scanner secrets ./src        # just gitleaks + trufflehog
+aegis scan image alpine:3.20              # scan a container image
+aegis scan sbom .                         # generate a CycloneDX SBOM
+```
+
+Findings persist to `.aegis/security/scan.json`. Container-based scanners need a locally-built image first: `aegis security build-image` (add `--profile core` for static-only scanners, skip it for the full set including dynamic/network tools), then `aegis security update-db` to populate the vulnerability-DB cache. See [Security Features](docs/security_scan.md) for dynamic (DAST), network recon, and the persistent engagement notebook (`security_advise`).
+
+### Challenge a finding or decision
+
+```bash
+aegis debate "This SQL injection finding is a false positive" --file internal/db/query.go
+/debate the caching layer should be Redis, not in-process
+```
+
+A critic hunts for the weakest point grounded in cited evidence, the proposer rebuts, an arbiter issues UPHOLD/REVISE/REJECT. `--domain generic` swaps in non-security personas for reviewing a plan or paragraph instead of a security claim. See [Multi-Agent Debate](docs/debate.md).
+
+### Switch persona and mode
+
+```bash
+aegis persona use security          # set this project's default persona
+aegis chat "..." --persona sre --mode plan   # one-off override
+```
+
+`plan` is read-only exploration, `build` allows edits with per-tool approval, `auto` runs unattended. See [Personas](docs/personas.md) and [Permission System](docs/permissions.md).
+
+---
+
 ## Local LLM Backends
 
-Aegis works with any server exposing an OpenAI-compatible API (`/v1/chat/completions`).
+Aegis works with any server exposing an OpenAI-compatible API (`//chat/completions`).
 
-| Server | Default Base URL |
-|--------|-----------------|
-| [Ollama](https://ollama.com) | `http://localhost:11434/v1` |
-| [LM Studio](https://lmstudio.ai) | `http://localhost:1234/v1` |
-| [llama.cpp](https://github.com/ggerganov/llama.cpp) | `http://localhost:8080/v1` |
-| [vLLM](https://github.com/vllm-project/vllm) | `http://localhost:8000/v1` |
-| [LiteLLM](https://github.com/BerriAI/litellm) | `http://localhost:4000/v1` |
-| [LocalAI](https://github.com/mudler/LocalAI) | `http://localhost:8080/v1` |
-| [Jan](https://jan.ai) | `http://localhost:1337/v1` |
-| [KoboldCpp](https://github.com/LostRuins/koboldcpp) | `http://localhost:5001/v1` |
-| [text-generation-webui](https://github.com/oobabooga/text-generation-webui) | `http://localhost:5000/v1` |
+| Server                                                                      | Default Base URL          |
+| --------------------------------------------------------------------------- | ------------------------- |
+| [Ollama](https://ollama.com)                                                | `http://localhost:11434/` |
+| [LM Studio](https://lmstudio.ai)                                            | `http://localhost:1234/`  |
+| [llama.cpp](https://github.com/ggerganov/llama.cpp)                         | `http://localhost:8080/`  |
+| [vLLM](https://github.com/vllm-project/vllm)                                | `http://localhost:8000/`  |
+| [LiteLLM](https://github.com/BerriAI/litellm)                               | `http://localhost:4000/`  |
+| [LocalAI](https://github.com/mudler/LocalAI)                                | `http://localhost:8080/`  |
+| [Jan](https://jan.ai)                                                       | `http://localhost:1337/`  |
+| [KoboldCpp](https://github.com/LostRuins/koboldcpp)                         | `http://localhost:5001/`  |
+| [text-generation-webui](https://github.com/oobabooga/text-generation-webui) | `http://localhost:5000/`  |
 
 Aegis starts Ollama automatically if it's installed but not running. Set `model: "auto"` to pick the first available model without hardcoding a name.
 
@@ -98,25 +151,25 @@ Aegis starts Ollama automatically if it's installed but not running. Set `model:
 
 ## Documentation
 
-| Document | What it covers |
-|----------|----------------|
-| [Overview & Architecture](docs/overview.md) | Daemon/client model, agent loop, event system |
-| [Installation & First Run](docs/installation.md) | Build scripts, platform setup, first-time configuration |
-| [Configuration Reference](docs/configuration.md) | Every config key, environment variables, common recipes |
-| [CLI Reference](docs/cli-reference.md) | Every command and flag |
-| [TUI Guide](docs/tui-guide.md) | Layout, keyboard shortcuts, slash commands, `@` references |
-| [Tools Reference](docs/tools-reference.md) | All 50+ built-in tools with inputs, outputs, and examples |
-| [Personas](docs/personas.md) | All 22 built-in personas, custom persona files, per-persona model overrides |
-| [Permission System](docs/permissions.md) | Plan/Build/Auto modes, text-based rules, contextual security policies |
-| [Session Management](docs/sessions.md) | Checkpoints, rewind, export, archiving |
-| [Providers & Models](docs/providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
-| [Memory & Knowledge](docs/memory-and-knowledge.md) | Project/user memory, skills, knowledge base |
-| [Skills](docs/skills.md) | Authoring guide: minimal/bundled skills, companion scripts, frontmatter, precedence, built-ins |
-| [Extensibility](docs/extensibility.md) | Lifecycle hooks, MCP servers, custom commands, agents, process plugins, bundles |
-| [MCP Trust Boundary](docs/mcp-trust-boundary.md) | What Aegis assumes about external MCP server output, provenance marking, opt-in injection scanning |
-| [Multi-Agent & Background Tasks](docs/multi-agent.md) | Swarm, parallel sessions, background tasks, cron scheduling |
-| [Multi-Agent Debate](docs/debate.md) | Adversarial claim review: domains, file-grounding, persona overrides, all four entry points |
-| [Security Features](docs/security_scan.md) | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual policies, audit trail |
+| Document                                              | What it covers                                                                                                 |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| [Overview & Architecture](docs/overview.md)           | Daemon/client model, agent loop, event system                                                                  |
+| [Installation & First Run](docs/installation.md)      | Build scripts, platform setup, first-time configuration                                                        |
+| [Configuration Reference](docs/configuration.md)      | Every config key, environment variables, common recipes                                                        |
+| [CLI Reference](docs/cli-reference.md)                | Every command and flag                                                                                         |
+| [TUI Guide](docs/tui-guide.md)                        | Layout, keyboard shortcuts, slash commands, `@` references                                                     |
+| [Tools Reference](docs/tools-reference.md)            | All 50+ built-in tools with inputs, outputs, and examples                                                      |
+| [Personas](docs/personas.md)                          | All 22 built-in personas, custom persona files, per-persona model overrides                                    |
+| [Permission System](docs/permissions.md)              | Plan/Build/Auto modes, text-based rules, contextual security policies                                          |
+| [Session Management](docs/sessions.md)                | Checkpoints, rewind, export, archiving                                                                         |
+| [Providers & Models](docs/providers.md)               | Local LLMs, cloud providers, model selection, extended thinking                                                |
+| [Memory & Knowledge](docs/memory-and-knowledge.md)    | Project/user memory, skills, knowledge base                                                                    |
+| [Skills](docs/skills.md)                              | Authoring guide: minimal/bundled skills, companion scripts, frontmatter, precedence, built-ins                 |
+| [Extensibility](docs/extensibility.md)                | Lifecycle hooks, MCP servers, custom commands, agents, process plugins, bundles                                |
+| [MCP Trust Boundary](docs/mcp-trust-boundary.md)      | What Aegis assumes about external MCP server output, provenance marking, opt-in injection scanning             |
+| [Multi-Agent & Background Tasks](docs/multi-agent.md) | Swarm, parallel sessions, background tasks, cron scheduling                                                    |
+| [Multi-Agent Debate](docs/debate.md)                  | Adversarial claim review: domains, file-grounding, persona overrides, all four entry points                    |
+| [Security Features](docs/security_scan.md)            | Security scanning, dynamic testing, network reconnaissance, sandbox backends, contextual policies, audit trail |
 
 ---
 
