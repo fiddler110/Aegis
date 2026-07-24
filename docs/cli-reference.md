@@ -75,6 +75,9 @@ aegis chat                     # reads prompt from stdin
 | `--mode <plan\|build\|auto>` | Permission mode |
 | `--persona <name>` | Persona name |
 | `--yes` | Auto-approve all tool calls (unattended use) |
+| `--output-format <text\|json\|stream-json>` | `text` streams to stdout as-is (default); `json` emits one final result object; `stream-json` emits one JSON event per line plus a trailing result |
+| `--skill <name>` | Preload the named skill's full instructions into the prompt (a small local model never has to discover/fetch it via the `skill` tool) and drive the run to completion — after each turn, if any file under `.aegis/` still carries a `<!-- PENDING -->` marker, chat auto-continues instead of stopping at the model's first yield. This is what lets a long multi-phase skill (`threat-modeling`, `deep-research`) finish non-interactively |
+| `--max-turns <n>` | With `--skill`, the maximum number of drive-to-completion turns before stopping with a resumable partial result (default `40`) |
 
 **Examples:**
 
@@ -90,7 +93,12 @@ echo "what security issues exist in this repo?" | aegis chat --mode plan
 
 # Use with a specific persona
 aegis chat "review this PR" --persona security-architect --mode plan
+
+# Drive a full threat model to completion, non-interactively
+aegis chat "threat model this repo" --skill threat-modeling --mode build --yes
 ```
+
+**Headless skill drives (`--skill`):** built for multi-phase skills whose output is a set of files rather than a single chat reply — `threat-modeling` (scaffolds seven report files, fills them phase by phase, then runs the skill's own `verify.py`/`lint_dfd.py`/`inventory.py --check` checks and feeds any failure back for an in-place fix, bounded by `--max-turns`) and `deep-research` are the shipped examples. Requires `--mode build --yes` (or `auto`) since the drive writes files across many turns with nobody there to approve each one. If the run ends with no `<!-- PENDING -->` markers left but also no files under `.aegis/`, chat prints an explicit warning rather than reporting quiet success — a model can narrate a whole build in its reasoning trace without calling a single tool. Re-running the same command resumes an interrupted or partial drive (the PENDING markers show exactly where it left off).
 
 ---
 
