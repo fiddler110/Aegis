@@ -64,14 +64,13 @@ Interactively, from inside the TUI:
 /threat-model PASTA the auth service # skip the picker — name a framework and/or a specific system
 ```
 
-This produces a suite of report files under `.aegis/` (architecture overview, DFD diagram, per-framework analysis, prioritized findings, executive summary) using the built-in `threat-modeling` skill. Non-interactively (e.g. in CI), drive the same skill to completion in one command:
+This produces a suite of report files under `.aegis/security/threat-model/<slug>-<date>/` (architecture overview, DFD diagram, per-framework analysis, prioritized findings, executive summary) using the built-in `threat-modeling` skill. `/threat-model` activates the skill for you — no `aegis skills enable` needed first. Non-interactively (e.g. in CI), drive the same skill to completion in one command:
 
 ```bash
-aegis skills enable threat-modeling      # one-time; or --global to enable for every project
 aegis chat "threat model this repo" --skill threat-modeling --mode build --yes
 ```
 
-The drive auto-continues across turns until every file is filled in and the skill's own consistency checks pass, bounded by `--max-turns`. Re-run the same command to resume a partial run. See [CLI Reference](docs/cli-reference.md#aegis-chat) and the skill's own docs for the update/re-baseline workflow (compare against a previous report, track new/resolved/still-present threats).
+`--skill` likewise activates the skill for just this run — `aegis skills enable threat-modeling [--global]` is only needed if you want it discoverable by name in every session without naming it explicitly (e.g. so a model can decide on its own to load it via the `skill` tool). The drive runs one bounded phase at a time in a fresh context (architecture → DFD → STRIDE-A analysis → findings → executive summary → verify), auto-continuing until every file is filled in and the skill's own consistency checks (`verify.py`, `lint_dfd.py`, `inventory.py --check`) pass — bounded by `--max-turns` (default 40). Re-run the same command to resume a partial run; a capable model (the harness has been validated against cloud models and larger local models — small local models can still stall mid-build) is what determines how far a single run gets. See [CLI Reference](docs/cli-reference.md#aegis-chat) and the skill's own docs for the update/re-baseline workflow (compare against a previous report, track new/resolved/still-present threats).
 
 ### Run a security scan
 
