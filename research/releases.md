@@ -8,7 +8,11 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-23 — **the Tier 3 batch shipped: P40.3, P40.4, P40.7, P40.9, and P45.2** (full-text
+**Last updated:** 2026-07-24 — **P39.12, P39.13, P39.14, and P39.15 shipped** (threat-model drive robustness,
+from the P38.1 full-stack test vs FirewallRuleAnalyzer on qwen3.6:35b: a 30-minute default response-header
+timeout, a 1500-line default cap on `read_file`, a hard one-section-per-`edit_file` rule against monolithic
+writes, and a final quality-and-sanity pass after mechanical verify — see below). Previously,
+2026-07-23 — **the Tier 3 batch shipped: P40.3, P40.4, P40.7, P40.9, and P45.2** (full-text
 transcript search, an experimental opt-in kitty-graphics image tier, shared form-panel chrome extraction,
 inline mermaid-diagram ASCII rendering, and hunk-level agent-vs-external change attribution — see below).
 Earlier the same day: **P40.1, P40.2, P40.5, P40.6, P40.8, P44.1, and P45.1 shipped** (the
@@ -28,6 +32,39 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P39.12 / P39.13 / P39.14 / P39.15 — threat-model drive robustness (from the P38.1 full-stack test).**
+The 2026-07-24 full-stack test drove the built-in `aegis chat --skill threat-modeling` against a lean copy of
+FirewallRuleAnalyzer (FastAPI + MariaDB, ~8.7K LOC) on `qwen3.6:35b-a3b-fast` via the native ollama adapter.
+It cleared the harness and model-competence questions — the drive ran recon → scaffold → fill, held the
+run-dir path across every `edit_file` (the old gpt-oss:20b mangling did not recur), produced grounded
+file:line-cited threats, and its DFD passed `lint_dfd.py` 5/5 — but did not reach a verify-clean suite because
+of throughput and write robustness, not orchestration. Four fixes, all with regression tests:
+
+- **P39.12 — default `provider.response_header_timeout` 5m → 30m** (`internal/provider/sse/sse.go`). Run 1
+  aborted at turn 7: reading the 2845-line `fwweb/main.py` in one turn pushed the next prefill past the
+  5-minute header timeout at ~7 tok/s on a local 35B. Ollama withholds the response header until prefill
+  finishes, so a large-context threat-model turn legitimately needs longer; 5m was too tight for any
+  content-rich repo on modest hardware. Tests updated in `sse`, `config`, and `ollama`.
+- **P39.13 — `read_file` caps an unbounded read at 1500 lines** (`internal/tool/builtin/file.go`). One
+  whole-file read of a large source file is the per-turn context spike that both blew the timeout above and
+  drove cumulative session input to 3.47M tokens before truncating at the context limit. The tool already
+  took `offset`/`limit`; now an unbounded read returns the first 1500-line window plus a notice telling the
+  model to page with `offset` or grep for the part it needs. An explicit limit is still honored verbatim.
+  Regression test `TestReadDefaultLineCap`.
+- **P39.14 — one section per `edit_file`, no monolithic writes** (SKILL.md §4 + `chat.go` continuation/act-now
+  prompts). The model wrote the entire findings file in a single `edit_file` (~5,700 tokens, ~13 min at
+  7 tok/s), and on the final run that write truncated into a malformed tool call (`unexpected end of JSON`).
+  The skill's context-bounding levers and the drive prompts now hard-require filling exactly one
+  `<!-- PENDING: <section> -->` marker per `edit_file` call, and read source in ranges rather than whole.
+- **P39.15 — a final quality-and-sanity pass after mechanical verify** (`chat.go`, `chat_verify.go`). The
+  phase-6 scripts verify structure and counts but not substance; verify.py caught real model errors (a Tier-2
+  threat with a Tier-1 prerequisite, `AV:N` on the non-network `IngestWorker`) yet a build can pass the
+  scripts with vague evidence, filler, or incoherent severities. When the scripts verify clean the drive now
+  runs one bounded, once-only self-review turn (`qualityReviewPrompt`) checking groundedness, filler, and
+  internal consistency and fixing issues in place; the mechanical checks re-run afterward, so a review edit
+  that breaks a script check is caught by the existing fix loop. Test `TestQualityReviewPrompt`. The **P38.1**
+  umbrella stays open pending a verify-clean re-run with these fixes on a smaller target or faster model.
 
 **P40.3 — full-text search within a session's transcript.** Every picker fuzzy-filters lists of turns, but
 nothing grepped the actual message *content* of the open session, so "find the earlier message where I asked

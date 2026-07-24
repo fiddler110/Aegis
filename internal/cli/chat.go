@@ -337,6 +337,7 @@ func newChatCmd() *cobra.Command {
 			pendingRoot := filepath.Join(cwd, ".aegis")
 			noProgress := 0
 			verifyRounds := 0
+			qualityReviewed := false // P38.1: run the final quality pass at most once
 			preambleCompacted := false
 			var prevPending []string
 			var runErr error
@@ -377,8 +378,25 @@ func newChatCmd() *cobra.Command {
 					// as before. This is the autonomous analogue of SKILL.md §5's
 					// fix-and-re-run round.
 					failures, ran := verifySkillOutputs(skillName, skillDir, cwd)
-					if !ran || failures == "" {
-						break // nothing to verify, or the suite verified clean — done
+					if !ran {
+						break // nothing to verify (skill has no verifier / no run dir) — done
+					}
+					if failures == "" {
+						// Mechanical checks are clean. P38.1: run one substantive
+						// quality-and-sanity pass the scripts can't do (groundedness,
+						// filler, internal coherence), then re-verify. Bounded to a
+						// single pass so it terminates; a regression it introduces is
+						// caught by the mechanical fix loop above on the next iteration.
+						if !qualityReviewed {
+							qualityReviewed = true
+							logger.Info("chat: mechanical checks clean, running final quality pass (P38.1)")
+							conv.Append(provider.Message{
+								Role:    provider.RoleUser,
+								Content: []provider.Block{provider.TextBlock{Text: qualityReviewPrompt()}},
+							})
+							continue
+						}
+						break // verified clean and quality-reviewed — done
 					}
 					if verifyRounds++; verifyRounds > maxVerifyRounds {
 						logger.Warn("chat: verification still failing after max rounds", "rounds", maxVerifyRounds)
@@ -887,7 +905,7 @@ func sameStrings(a, b []string) bool {
 func continuePrompt(pending []string) string {
 	return "Continue — the task is not finished. These files still contain `<!-- PENDING: … -->` markers and must be completed:\n- " +
 		strings.Join(pending, "\n- ") +
-		"\n\nResume from the first unfinished file in dependency order and keep working until NO `<!-- PENDING` marker remains in any file. Each marker is section-keyed (`<!-- PENDING: <section> -->`): edit that exact marker one at a time — never a bare `<!-- PENDING -->` and never `replace_all` on a marker, which would overwrite every section at once. This is a non-interactive run: do not stop to ask whether to proceed, and do not return a partial result."
+		"\n\nResume from the first unfinished file in dependency order and keep working until NO `<!-- PENDING` marker remains in any file. Each marker is section-keyed (`<!-- PENDING: <section> -->`): edit that exact marker one at a time — never a bare `<!-- PENDING -->` and never `replace_all` on a marker, which would overwrite every section at once. Fill ONE section per `edit_file`; do not write a whole file or several sections in a single call — a monolithic write is slow and can truncate into a malformed edit. This is a non-interactive run: do not stop to ask whether to proceed, and do not return a partial result."
 }
 
 // scanPendingMarkers walks root (typically <cwd>/.aegis) and returns the

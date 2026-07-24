@@ -27,12 +27,17 @@ const (
 	// DefaultResponseHeaderTimeout bounds only the wait for the response
 	// headers, not the stream that follows. It is generous because a cold
 	// local backend (Ollama pulling a model into VRAM) can take minutes to
-	// reply at all. Callers that want a different bound (e.g. a configured
-	// provider.response_header_timeout, P35.5 — Ollama withholds the response
-	// header until prompt-eval/prefill finishes, so a large local context can
-	// legitimately need longer than this) pass it explicitly to
+	// reply at all, and — the load-bearing case — Ollama withholds the response
+	// header until prompt-eval/prefill finishes, so a large local context
+	// (a skill-driven threat-model turn that just read a multi-thousand-line
+	// file) can legitimately prefill for many minutes before the first byte.
+	// P38.1 raised this from 5m to 30m: the built-in threat-model drive aborted
+	// mid-build at the 5m ceiling reading a 2845-line file on a local 35B model
+	// (~7 tok/s), and 5m is too tight for any content-rich repo on modest local
+	// hardware. Callers that want a different bound (a configured
+	// provider.response_header_timeout, P35.5) pass it explicitly to
 	// NewStreamingClient instead of relying on this default.
-	DefaultResponseHeaderTimeout = 5 * time.Minute
+	DefaultResponseHeaderTimeout = 30 * time.Minute
 )
 
 // NewStreamingClient returns the http.Client an adapter uses for its streamed

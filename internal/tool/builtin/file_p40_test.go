@@ -113,6 +113,57 @@ func TestReadBoundedMatchesFullSplit(t *testing.T) {
 	}
 }
 
+// TestReadDefaultLineCap covers P38.1: an unbounded read of a file longer than
+// defaultReadLines returns only the first window plus a paging notice (so one
+// read cannot balloon a turn's context), while an explicit limit is honored
+// verbatim with no notice.
+func TestReadDefaultLineCap(t *testing.T) {
+	dir := t.TempDir()
+	var sb strings.Builder
+	total := defaultReadLines + 500
+	for i := 1; i <= total; i++ {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &readTool{root: dir}
+
+	// Unbounded read: capped to defaultReadLines, with a continue notice.
+	res, err := r.Execute(context.Background(), mustJSON(t, map[string]any{"path": "big.txt"}))
+	if err != nil || res.IsError {
+		t.Fatalf("read: %v %+v", err, res)
+	}
+	if strings.Contains(res.Content, fmt.Sprintf("%d\tline %d", defaultReadLines+1, defaultReadLines+1)) {
+		t.Errorf("unbounded read leaked past the %d-line cap", defaultReadLines)
+	}
+	if !strings.Contains(res.Content, fmt.Sprintf("%d\tline %d", defaultReadLines, defaultReadLines)) {
+		t.Errorf("unbounded read did not reach the %d-line cap", defaultReadLines)
+	}
+	if !strings.Contains(res.Content, "read_file: showing lines 1-") || !strings.Contains(res.Content, fmt.Sprintf("offset=%d", defaultReadLines+1)) {
+		t.Errorf("expected paging notice with next offset, got tail: %q", lastN(res.Content, 200))
+	}
+
+	// Explicit limit: honored verbatim, no notice injected.
+	res, err = r.Execute(context.Background(), mustJSON(t, map[string]any{"path": "big.txt", "limit": 3}))
+	if err != nil || res.IsError {
+		t.Fatalf("read limit: %v %+v", err, res)
+	}
+	if strings.Contains(res.Content, "read_file: showing lines") {
+		t.Errorf("explicit limit must not inject a paging notice, got: %q", res.Content)
+	}
+	if res.Content != "1\tline 1\n2\tline 2\n3\tline 3\n" {
+		t.Errorf("explicit limit output = %q", res.Content)
+	}
+}
+
+func lastN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
 // referenceRender reproduces the pre-P40.3 whole-file strings.Split rendering,
 // serving as the oracle the new scanner must match.
 func referenceRender(content string, offset, limit int) string {

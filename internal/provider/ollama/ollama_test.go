@@ -434,18 +434,18 @@ func TestStreamOmitsKeepAliveByDefault(t *testing.T) {
 	}
 }
 
-// TestWithResponseHeaderTimeout is the P35.5 adapter-level regression:
+// TestWithResponseHeaderTimeout is the P35.5/P38.1 adapter-level regression:
 // WithResponseHeaderTimeout must actually change the transport's configured
 // ResponseHeaderTimeout, and an adapter built with no such option keeps
-// sse.DefaultResponseHeaderTimeout (5m).
+// sse.DefaultResponseHeaderTimeout (30m as of P38.1).
 func TestWithResponseHeaderTimeout(t *testing.T) {
 	def := New()
 	tr, ok := def.client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("Transport type = %T, want *http.Transport", def.client.Transport)
 	}
-	if tr.ResponseHeaderTimeout != 5*time.Minute {
-		t.Errorf("default ResponseHeaderTimeout = %v, want 5m", tr.ResponseHeaderTimeout)
+	if tr.ResponseHeaderTimeout != 30*time.Minute {
+		t.Errorf("default ResponseHeaderTimeout = %v, want 30m", tr.ResponseHeaderTimeout)
 	}
 
 	custom := New(WithResponseHeaderTimeout(20 * time.Minute))

@@ -18,6 +18,16 @@ import (
 const (
 	maxReadBytes    = 50 << 20 // 50 MiB
 	maxWriteContent = 10 << 20 // 10 MiB
+	// defaultReadLines caps an unbounded read_file (no explicit limit) so a
+	// single read of a large source file cannot balloon a turn's context.
+	// P38.1: a local threat-model drive read a 2845-line file whole, and the
+	// next prefill blew past the response-header timeout and later truncated
+	// the session at the context limit. When the file is longer than this the
+	// tool returns the first window plus a notice telling the model to page
+	// with offset/limit (mirrors the read tool's own offset/limit contract).
+	// An explicit limit is always honored verbatim — this only bounds the
+	// "read the whole thing" default.
+	defaultReadLines = 1500
 	// newFileMode is the permission for files we create; parent dirs are made
 	// 0o750 (see os.MkdirAll calls). On overwrite we preserve the existing
 	// file's mode instead — see writePreservingMode.
@@ -46,7 +56,7 @@ type readTool struct {
 func (t *readTool) Name() string                { return "read_file" }
 func (t *readTool) Capability() tool.Capability { return tool.CapRead }
 func (t *readTool) Description() string {
-	return "Read a UTF-8 text file from the workspace. Returns the file contents with 1-based line numbers."
+	return "Read a UTF-8 text file from the workspace. Returns the file contents with 1-based line numbers. An unbounded read is capped at the first 1500 lines to bound context; pass offset/limit to page through a longer file or read a specific range."
 }
 func (t *readTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative file path"},"offset":{"type":"integer","description":"1-based start line (optional)"},"limit":{"type":"integer","description":"max lines to read (optional)"}},"required":["path"]}`)
@@ -79,6 +89,17 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if args.Offset > 0 {
 		start = args.Offset
 	}
+	// An explicit limit is honored verbatim; an unbounded read falls back to
+	// defaultReadLines so "read the whole file" cannot dump a huge source file
+	// into one turn's context (P38.1). capped records that the fallback applied
+	// so we only emit the paging notice for the default case, never when the
+	// caller asked for a specific window.
+	limit := args.Limit
+	capped := false
+	if limit <= 0 {
+		limit = defaultReadLines
+		capped = true
+	}
 	// Scan line-by-line and stop once we've emitted `limit` lines from `start`,
 	// so a bounded read of a large file allocates only what it returns rather
 	// than splitting the whole file up front. The scanner is capped at
@@ -91,12 +112,14 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	var b strings.Builder
 	lineNo := 0
 	count := 0
+	truncated := false
 	for sc.Scan() {
 		lineNo++
 		if lineNo < start {
 			continue
 		}
-		if args.Limit > 0 && count >= args.Limit {
+		if count >= limit {
+			truncated = true // at least one more line exists past the window
 			break
 		}
 		fmt.Fprintf(&b, "%d\t%s\n", lineNo, sc.Text())
@@ -104,6 +127,11 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	if err := sc.Err(); err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
+	}
+	if capped && truncated {
+		next := start + count
+		fmt.Fprintf(&b, "\n[read_file: showing lines %d-%d; the file continues past line %d. This default %d-line window bounds context — call read_file again with offset=%d (and a limit) to read more, or grep for the part you need.]\n",
+			start, start+count-1, start+count-1, defaultReadLines, next)
 	}
 	return tool.Result{Content: b.String()}, nil
 }
