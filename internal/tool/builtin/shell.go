@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -101,8 +102,19 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return tool.Result{Content: fmt.Sprintf("Started background shell job (task id %s). Poll with task_get; read output with task_output; cancel with task_stop.", tk.ID)}, nil
 	}
 
-	// Foreground execution.
-	text, err := t.exec(ctx, root, args.Command, timeout)
+	// Foreground execution. A command not classified read-only might write
+	// files directly (bypassing write_file/edit_file's own checkpoint
+	// capture), so bracket it with best-effort git-status-based capture —
+	// see shell_checkpoint.go — unless the command is already known safe.
+	var text string
+	var err error
+	if readOnlyShellCommand(root, args.Command) {
+		text, err = t.exec(ctx, root, args.Command, timeout)
+	} else {
+		text, err = captureShellWrites(ctx, checkpoint.SnapshotterFrom(ctx), root, func() (string, error) {
+			return t.exec(ctx, root, args.Command, timeout)
+		})
+	}
 	const maxOutput = 200 << 10 // 200 KiB — prevent context flooding on large outputs
 	if len(text) > maxOutput {
 		text = text[:maxOutput] + fmt.Sprintf("\n[...%d bytes truncated — use background:true and task_output for large commands]", len(text)-maxOutput)

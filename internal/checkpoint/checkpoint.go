@@ -292,16 +292,9 @@ type Snapshotter struct {
 // receiver, so callers can invoke it unconditionally. Best-effort: storage
 // errors are swallowed so a snapshot failure never blocks a tool.
 func (s *Snapshotter) Capture(absPath string) {
-	if s == nil {
+	if s == nil || !s.claim(absPath) {
 		return
 	}
-	s.mu.Lock()
-	if s.captured[absPath] {
-		s.mu.Unlock()
-		return
-	}
-	s.captured[absPath] = true
-	s.mu.Unlock()
 
 	info, err := os.Stat(absPath)
 	if err != nil {
@@ -319,6 +312,41 @@ func (s *Snapshotter) Capture(absPath string) {
 		return
 	}
 	_ = s.store.recordFile(s.checkpointID, absPath, true, data)
+}
+
+// CaptureBytes records explicit pre-turn content for absPath, the first time
+// it is called for that path within the turn (same "first call wins" rule as
+// Capture, and likewise a no-op on a nil receiver). Unlike Capture, which
+// reads absPath's *current* on-disk content, this takes the content directly
+// — for a caller that can no longer read the pre-mutation bytes off disk (the
+// mutation already happened by the time it runs) but recovered them from
+// elsewhere, e.g. `git show HEAD:<path>` for a file a shell subprocess
+// modified outside the write_file/edit_file tools that call Capture directly
+// (see internal/tool/builtin/shell_checkpoint.go). existed=false with a nil
+// data records the path as newly created, so rewind deletes it rather than
+// restoring content — the same outcome as Capture's own not-found branch.
+func (s *Snapshotter) CaptureBytes(absPath string, existed bool, data []byte) {
+	if s == nil || !s.claim(absPath) {
+		return
+	}
+	if len(data) > maxSnapshotBytes {
+		return
+	}
+	_ = s.store.recordFile(s.checkpointID, absPath, existed, data)
+}
+
+// claim reports whether this call is the first for absPath within the turn,
+// atomically marking it captured if so. Callers proceed only when claim
+// returns true, giving Capture/CaptureBytes their shared "first call wins"
+// semantics regardless of which one is called first for a given path.
+func (s *Snapshotter) claim(absPath string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.captured[absPath] {
+		return false
+	}
+	s.captured[absPath] = true
+	return true
 }
 
 type ctxKey struct{}
