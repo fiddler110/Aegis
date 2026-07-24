@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// TestNewStreamingClient_DefaultTimeout is the P35.5 regression: leaving the
-// header timeout unset (<= 0) must keep the previously-hardcoded 5-minute
-// value so behavior is unchanged for callers that don't opt in to a
-// configured provider.response_header_timeout.
+// TestNewStreamingClient_DefaultTimeout is the P35.5/P38.1 regression: leaving
+// the header timeout unset (<= 0) must substitute the default, which P38.1
+// raised to 30m so a slow-prefill local threat-model turn is not killed
+// mid-build (5m was too tight for a content-rich repo on modest hardware).
 func TestNewStreamingClient_DefaultTimeout(t *testing.T) {
 	c := NewStreamingClient(0)
 	tr, ok := c.Transport.(*http.Transport)
@@ -19,8 +19,8 @@ func TestNewStreamingClient_DefaultTimeout(t *testing.T) {
 	if tr.ResponseHeaderTimeout != DefaultResponseHeaderTimeout {
 		t.Errorf("ResponseHeaderTimeout = %v, want %v", tr.ResponseHeaderTimeout, DefaultResponseHeaderTimeout)
 	}
-	if DefaultResponseHeaderTimeout != 5*time.Minute {
-		t.Errorf("DefaultResponseHeaderTimeout = %v, want 5m", DefaultResponseHeaderTimeout)
+	if DefaultResponseHeaderTimeout != 30*time.Minute {
+		t.Errorf("DefaultResponseHeaderTimeout = %v, want 30m", DefaultResponseHeaderTimeout)
 	}
 }
 

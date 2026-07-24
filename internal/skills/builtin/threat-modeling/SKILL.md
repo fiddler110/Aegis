@@ -223,13 +223,23 @@ already built for exactly this keep a single-context build inside the window:
 - **`recon.py` replaces the megabyte architecture reads with an ~11KB digest**
   (§2 step 1), so the architecture phase never pulls the whole tree into
   context.
+- **Read source in ranges, never whole large files.** `read_file` caps an
+  unbounded read at 1500 lines and tells you to page; do not fight it. Grep for
+  the route/config/symbol you need, or read a bounded `offset`/`limit` window —
+  reading a 2000+ line file whole in one turn is the exact spike that blows the
+  prefill timeout on a local model. One big file per turn is already a lot.
 - **Context pruning drops spent payloads automatically.** Once a file is
   written, its `write_file`/`edit_file` payload — and one-time skill/reference
   reads — fall out of the running context, so a phase you have finished stops
   costing tokens on every later turn.
-- **Incremental writes keep the working set small.** `scaffold.py` writes the
-  structured stubs once (§4.1), then you `edit_file` one section at a time
-  (§4.2), so you never hold a whole file in context to produce it.
+- **Incremental writes keep the working set small — fill ONE section per
+  `edit_file`.** `scaffold.py` writes the structured stubs once (§4.1); you then
+  replace exactly one `<!-- PENDING: <section> -->` marker per `edit_file` call.
+  **Never generate a whole file (or several sections) in a single write.** A
+  monolithic write is a multi-thousand-token generation that is slow, risks
+  truncating at the token cap into a malformed tool call, and defeats pruning —
+  the opposite of what keeps the run inside the window. One marker, one edit,
+  then move on.
 - **The deterministic scripts do the bulk mechanical work outside your
   context.** `inventory.py`, `verify.py`, and `lint_dfd.py` mean you never
   have to hold the entire analysis in context to generate the sidecar or run

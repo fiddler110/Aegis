@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-23
+**Last updated:** 2026-07-24
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -22,11 +22,15 @@ ordered by tier-priority then dependency:
    **Shipped 2026-07-23** (see [releases.md](releases.md)): P44.1 (skill-asset admission scanning), P45.1
    (worktree dirty-file replication), and the five-item TUI/UX batch — P40.8 (LaTeX→Unicode math), P40.5
    (auto dark/light detect), P40.2 (consistent hjkl/g/G), P40.1 (resizable panes), P40.6 (contextual footer).
-2. **Remaining Tier 2** — **P38.1** stays open as the threat-model conformance umbrella. The 2026-07-23
-   gpt-oss:20b re-test found and fixed two more `chat --skill` harness bugs (**P39.10** asset access,
-   **P39.11** oracle poisoning — both verified live); conformance is **still unmet** on a model-side
-   run-dir-path-mangling wall. Next: releases.md entries + regression tests for P39.10/P39.11, then a
-   verify-clean re-run. See the P38.1 body for the full 2026-07-23 progress note and tomorrow's steps.
+2. **Remaining Tier 2** — **P38.1** stays open as the threat-model conformance umbrella. The 2026-07-24
+   full-stack test (qwen3.6:35b-a3b vs FirewallRuleAnalyzer) **cleared the harness and model-competence
+   questions** — the drive ran recon → scaffold → fill, held the run-dir path across every turn (the old
+   gpt-oss:20b mangling did not recur), and produced grounded, file:line-cited content with a lint-clean DFD.
+   The remaining wall is **throughput/robustness**, and four fixes for it shipped: **P39.12** (30-min
+   response-header timeout default), **P39.13** (read_file default 1500-line cap → read in ranges),
+   **P39.14** (one-section-per-`edit_file`, no monolithic writes), **P39.15** (a final quality/sanity pass
+   after mechanical verify). Next: a verify-clean re-run on a smaller target or faster model with these in
+   place. See the P38.1 body for the 2026-07-24 progress note.
 3. ~~**Tier 3 TUI/UX** — P40.3 (transcript search), P40.9 (inline mermaid), P40.4 (real inline image
    protocols), P40.7 (unify bespoke dialogs); plus P45.2 (hunk-level attribution).~~ **All shipped
    2026-07-23** (see [releases.md](releases.md)): P40.3 (ctrl+f incremental transcript search), P40.9 (inline
@@ -71,6 +75,17 @@ investigated and exonerated). **P38.1** remains the tracking umbrella, now await
   and the drive's PENDING-marker oracle skips the materialized `builtin-skills/` subtree so template markers
   don't jam completion (P39.11). These two stood *ahead* of model capability — the built-in drive could not
   reach `recon.py` at all before P39.10.
+- **P39.12, P39.13, P39.14, P39.15** — **shipped 2026-07-24** (from the P38.1 full-stack test vs
+  FirewallRuleAnalyzer on qwen3.6:35b — see the P38.1 body and [releases.md](releases.md)). The direction is
+  the user's: make local models take a **piecemeal approach to both reading and writing**, then **validate
+  quality** at the end. **P39.12** raises the default `provider.response_header_timeout` 5m→30m (a run aborted
+  mid-build when a 2845-line-file read pushed prefill past 5m at ~7 tok/s). **P39.13** makes `read_file` cap an
+  unbounded read at 1500 lines with a paging notice, so one whole-file read can't balloon a turn's context.
+  **P39.14** reinforces one-`<!-- PENDING -->`-marker-per-`edit_file` in SKILL.md §4 and the drive's
+  continuation/act-now prompts, against the observed "write the whole file at once" ~5,700-token generation
+  that truncated into a malformed tool call. **P39.15** adds a bounded, once-only final quality-and-sanity
+  pass after the mechanical phase-6 scripts verify clean (groundedness, filler, internal consistency — the
+  things verify.py/lint_dfd.py/inventory.py can't judge), with the mechanical checks re-running after it.
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
@@ -131,6 +146,38 @@ no sub-agents, no `agent`-tool orchestration. Context stays bounded by levers th
 writes, and the deterministic P37 scripts. `scaffold.py` (P38.4) pre-writes all seven files from the
 skeletons with real structure + a unique `<!-- PENDING: <section> -->` marker per fillable section, so the
 model fills sections instead of authoring structure.
+
+**2026-07-24 full-stack test (qwen3.6:35b-a3b-fast vs FirewallRuleAnalyzer, native ollama adapter) — harness
+and model-competence questions cleared; throughput/robustness is the remaining wall; four fixes shipped.**
+Drove the built-in `aegis chat --skill threat-modeling --mode build --yes` against a lean scratch copy of
+FirewallRuleAnalyzer (FastAPI + MariaDB, ~8.7K LOC). What worked, live: P39.10/P39.11 held (skill materialized
+into the workspace, oracle burned down the *real* suite); the drive ran recon.py → scaffold.py (stride-a) →
+incremental fills; `1-model.md`, `1.1-model.mmd`, and `2-stride-analysis.md` reached 0 PENDING; the model
+**held the run-dir path across every `edit_file`** (the old gpt-oss:20b path-mangling did **not** recur — it
+mangled only the recon *script* path once and self-corrected); content was **grounded with real file:line
+evidence** (e.g. unauthenticated `/import/reingest` = Critical EoP) and the DFD passed `lint_dfd.py` 5/5.
+
+What blocked closure was **throughput and write robustness, not orchestration or the harness**:
+1. **Response-header timeout too low.** Run 1 aborted at turn 7: reading the 2845-line `fwweb/main.py` in one
+   turn pushed the next prefill past the **5-minute** default at ~7 tok/s. → **P39.12**: default raised to
+   **30 min** (`sse.DefaultResponseHeaderTimeout`).
+2. **Unbounded reads balloon context.** One whole-file read is a huge per-turn spike; cumulative session input
+   reached **3.47M tokens** and the session eventually truncated at the context limit. → **P39.13**:
+   `read_file` caps an unbounded read at **1500 lines** with a paging notice (read in ranges / grep instead).
+3. **Monolithic writes.** The model wrote the entire findings file in one `edit_file` (~5,700 tokens, ~13 min
+   at 7 tok/s) and on the final run that write **truncated into a malformed tool call**. → **P39.14**:
+   SKILL.md §4 and the drive's continuation/act-now prompts now hard-require **one section per `edit_file`**.
+4. **Mechanical verify can't judge substance.** verify.py caught real model errors (a Tier-2 threat with a
+   Tier-1 prerequisite; `AV:N` on the non-network `IngestWorker`) — but only structural ones. → **P39.15**:
+   after the phase-6 scripts verify clean, the drive runs one bounded quality-and-sanity pass (groundedness,
+   filler, internal consistency), re-verifying mechanically afterward.
+
+**Direction (user, 2026-07-24):** the strongest lever is making local models **piecemeal both their reads and
+their writes**, then finishing with a **quality-validation pass**. P39.12–P39.15 implement exactly that. All
+four shipped 2026-07-24 with regression tests; the `go test ./...` suite is green except this machine's
+pre-existing `TestTrustRevoke` + `internal/sandbox` path failures. **Closure condition unchanged** (real
+suite PENDING → 0 and verify.py/lint_dfd.py/inventory.py --check pass): re-run the drive with these fixes on a
+smaller target or a faster model and confirm it reaches verify-clean.
 
 **2026-07-23 re-test (gpt-oss:20b vs AiGateway copy) — two new harness bugs found and fixed; conformance
 still unmet.** Ran the built-in `aegis chat --skill threat-modeling --mode build --yes` drive against a

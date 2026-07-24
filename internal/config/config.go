@@ -423,9 +423,9 @@ type ProviderConfig struct {
 	// prompt-eval (prefill) finishes, so a legitimately slow prefill on a
 	// large local context can trip the default and abort the whole turn as a
 	// transport error before any content streams. 0 (unset) keeps the
-	// existing default (sse.DefaultResponseHeaderTimeout, 5 minutes) so
-	// behavior is unchanged unless a user opts in to raising it. Read via
-	// ResponseHeaderTimeout(), never this field directly.
+	// default (sse.DefaultResponseHeaderTimeout, 30 minutes as of P38.1) so
+	// behavior is unchanged unless a user opts in to raising it further. Read
+	// via ResponseHeaderTimeout(), never this field directly.
 	ResponseHeaderTimeoutSec int `koanf:"response_header_timeout"`
 	// TaskRouting opts a session's user-facing turns into per-turn model
 	// routing (P9.4): a local heuristic classifies each turn as "simple" or
@@ -458,8 +458,8 @@ type ProviderConfig struct {
 
 // ResponseHeaderTimeout returns the configured
 // provider.response_header_timeout as a time.Duration, substituting
-// sse.DefaultResponseHeaderTimeout (5 minutes, the previously-hardcoded
-// value) when unset or non-positive (P35.5).
+// sse.DefaultResponseHeaderTimeout (30 minutes as of P38.1) when unset or
+// non-positive (P35.5).
 func (p ProviderConfig) ResponseHeaderTimeout() time.Duration {
 	if p.ResponseHeaderTimeoutSec <= 0 {
 		return sse.DefaultResponseHeaderTimeout
