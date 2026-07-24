@@ -22,8 +22,11 @@ ordered by tier-priority then dependency:
    **Shipped 2026-07-23** (see [releases.md](releases.md)): P44.1 (skill-asset admission scanning), P45.1
    (worktree dirty-file replication), and the five-item TUI/UX batch — P40.8 (LaTeX→Unicode math), P40.5
    (auto dark/light detect), P40.2 (consistent hjkl/g/G), P40.1 (resizable panes), P40.6 (contextual footer).
-2. **Remaining Tier 2** — **P38.1** stays open only as the threat-model conformance umbrella (awaiting a live
-   verify-clean re-test; no code blocked on it).
+2. **Remaining Tier 2** — **P38.1** stays open as the threat-model conformance umbrella. The 2026-07-23
+   gpt-oss:20b re-test found and fixed two more `chat --skill` harness bugs (**P39.10** asset access,
+   **P39.11** oracle poisoning — both verified live); conformance is **still unmet** on a model-side
+   run-dir-path-mangling wall. Next: releases.md entries + regression tests for P39.10/P39.11, then a
+   verify-clean re-run. See the P38.1 body for the full 2026-07-23 progress note and tomorrow's steps.
 3. ~~**Tier 3 TUI/UX** — P40.3 (transcript search), P40.9 (inline mermaid), P40.4 (real inline image
    protocols), P40.7 (unify bespoke dialogs); plus P45.2 (hunk-level attribution).~~ **All shipped
    2026-07-23** (see [releases.md](releases.md)): P40.3 (ctrl+f incremental transcript search), P40.9 (inline
@@ -37,10 +40,13 @@ Note: the **codex-build workflow-discipline track is now landed.** P46.1 (per-ta
 enforcement), P46.2 (pre-commit test gate on `git_commit`), and P46.3 (the `structured-build` skill) all
 shipped 2026-07-23 — see [releases.md](releases.md).
 
-Note: the **threat-model harness track is now landed.** P39.5, P39.6, P39.7, P39.8 shipped and P39.9's
-actionable halves are resolved (see below and [releases.md](releases.md)); the only remaining threat-model
-item is the **P38.1** umbrella, which stays open purely to track a live verify-clean re-test — no code is
-blocked on it.
+Note: the **threat-model harness track** landed P39.5–P39.9, but the 2026-07-23 gpt-oss:20b conformance
+re-test surfaced **two more harness bugs now fixed on `tier3-batch`** — **P39.10** (`chat --skill` never
+materialized bundled scripts into the workspace, so the sandboxed file tools couldn't reach `recon.py`) and
+**P39.11** (the drive's PENDING-marker oracle counted the materialized skeleton templates, so it could never
+detect completion). Both are verified live but still need releases.md entries + regression tests. The
+**P38.1** umbrella stays open: conformance is still unmet, now on a model-side run-dir-path-mangling wall, not
+a harness gap. See the P38.1 body.
 
 Threat-model fix priority order — **all shipped**: **P39.7 → P39.5 → P39.6 → P39.8 → P39.9** are done (see
 [releases.md](releases.md)). P39.7 was cheapest and corroborated on two local models; P39.5 was the actual
@@ -59,6 +65,12 @@ investigated and exonerated). **P38.1** remains the tracking umbrella, now await
   bound the drive-loop context (P39.5), fold phase-6 verification into the drive (P39.6), no-progress "act
   now" nudge (P39.7), latch off a broken LLM summarizer on weak local models (P39.8), and warn a `/v1` compat
   drive before it overflows (P39.9, native-adapter half exonerated). See [releases.md](releases.md).
+- **P39.10, P39.11** — **code fixed 2026-07-23 on `tier3-batch`, verified live, releases.md entry + regression
+  tests pending** (surfaced by the 2026-07-23 gpt-oss:20b re-test — see P38.1 below): `chat --skill` now
+  materializes bundled skill scripts *into the workspace* so the sandboxed file tools can reach them (P39.10),
+  and the drive's PENDING-marker oracle skips the materialized `builtin-skills/` subtree so template markers
+  don't jam completion (P39.11). These two stood *ahead* of model capability — the built-in drive could not
+  reach `recon.py` at all before P39.10.
 - **P38.8** (Tier 4) — external per-phase threat-model wrapper, parked as a recorded interim workaround.
 - **P25.9** (Tier 4) — per-session scoping of the remaining daemon-singleton services (`lsp.Manager`).
   Parked pending demand; do not build speculatively.
@@ -119,6 +131,59 @@ no sub-agents, no `agent`-tool orchestration. Context stays bounded by levers th
 writes, and the deterministic P37 scripts. `scaffold.py` (P38.4) pre-writes all seven files from the
 skeletons with real structure + a unique `<!-- PENDING: <section> -->` marker per fillable section, so the
 model fills sections instead of authoring structure.
+
+**2026-07-23 re-test (gpt-oss:20b vs AiGateway copy) — two new harness bugs found and fixed; conformance
+still unmet.** Ran the built-in `aegis chat --skill threat-modeling --mode build --yes` drive against a
+scratch copy of AiGateway on gpt-oss:20b (the model that passes `doctor --deep`, re-confirmed here). The
+drive died *before model capability was even tested*, exposing two `chat --skill`-CLI bugs that stand ahead
+of the shipped P39.5–P39.9 fixes — both now **fixed and verified end-to-end** (build + `go test
+./internal/cli/... ./internal/skills/...` green):
+
+- **P39.10 (asset access).** `chat --skill <builtin>` materialized the bundled scripts only to
+  `<dataDir>/builtin-skills/` (`internal/cli/chat.go`, `MaterializeBuiltins(cfg.DataDir)`), never into the
+  workspace. The `<skill_assets dir>` manifest then pointed at that absolute data-dir path *outside the
+  workspace root*, so the sandboxed file tools rejected every read of `recon.py`/`scaffold.py`/skeletons and
+  the model bailed to a manual-draft offer before recon. The daemon's session-create and activate-skill paths
+  already call `MaterializeBuiltinsToProject`; the CLI was the gap. **Fix:** `chat --skill` now also calls
+  `skills.MaterializeBuiltinsToProject(cwd, enabledBuiltins)`. **Verified:** on a fresh copy the six scripts
+  auto-appear under `<cwd>/.aegis/builtin-skills/threat-modeling/`, `recon.py` and `scaffold.py` both ran, and
+  the full seven-file suite scaffolded.
+- **P39.11 (drive-oracle poisoning, revealed by fixing P39.10).** The drive's completion oracle
+  `scanPendingMarkers(<cwd>/.aegis)` (and the `suiteFileCount` floor check) walked the whole `.aegis/` tree
+  matching `<!-- PENDING`, and the materialized skeleton templates + SKILL.md/README carry that exact marker
+  in 8 files — so once the skill lives under `.aegis/builtin-skills/`, the oracle can never reach zero (drive
+  runs to `--max-turns`, phase-6 verify never fires). **Fix:** both scans now `SkipDir` the `builtin-skills`
+  subtree (const `pendingSkipDir`). **Verified:** the fix run scaffolded the suite and the drive kept filling
+  against the *real* suite's markers rather than jamming on the template markers.
+
+**Model wall (gpt-oss:20b) — unchanged and still the blocker after the fixes.** With the scripts reachable,
+the run reached scaffold and started `edit_file`, but did not converge, from small-model *path/argument
+brittleness*, not orchestration: (a) it mangles the script path (`.\aegis\.builtin-skills\…`, dot misplaced;
+nested `powershell -Command` quoting) — one run repeated an identical bad `recon.py` invocation until the
+engine loop-detector aborted (working as designed); (b) it scaffolded the suite correctly to `./.aegis/…`
+but then `edit_file`d against a *typo* run-dir (`.aegit`, plus a spurious `scratchpad/AIGateway-fix2/`
+prefix), so its fills landed in a junk directory and the real suite's ~36 `<!-- PENDING -->` markers stayed
+untouched — it cannot hold a consistent run-dir path across turns; (c) recurring calls to a phantom `search`
+tool (not registered) and explore/announce stalls; (d) wrong `--framework stride` (should be `stride-a`).
+
+**Next steps for verification (tomorrow).**
+1. File **P39.10** and **P39.11** into releases.md (code is committed on `tier3-batch`; add the shipped-item
+   entries) and add regression tests: a `scanPendingMarkers`/`suiteFileCount` unit test asserting a
+   materialized-skill PENDING marker is ignored, and a `chat --skill` test asserting the workspace
+   materialization happens.
+2. Re-run the built-in drive on a fresh AiGateway copy with the fixed binary and let it run to `--max-turns`
+   (or completion). Success = the real suite's PENDING set reaches zero and `verify.py`/`lint_dfd.py`/
+   `inventory.py --check` pass — that is the P38.1 closure condition.
+3. If gpt-oss:20b keeps mangling the run-dir path, the lever is harness-side, not a bigger model: give the
+   model the canonical run-dir *once* (e.g. have `scaffold.py`/a helper echo the exact absolute run-dir and
+   instruct edits to use it verbatim), or have the drive pass the run-dir into the continuation prompt so the
+   model never re-types it. Consider filing the phantom-`search`-tool and path-mangling patterns as their own
+   sub-findings if they persist.
+
+Reproduce: fixed binary at repo HEAD; `AEGIS_PROVIDER_MODEL=gpt-oss:20b`; `cd <fresh target copy>`; run the
+drive prompt from the scratchpad (`prompt2.txt`). Do **not** run with cwd outside the target — the
+workspace-root sandbox then rejects all target reads (that clean-target split is the parked P38.8 wrapper,
+not the built-in path).
 
 **Mechanism: live-confirmed.** In the 2026-07-21 re-test (qwen3:14b vs AiGateway, `aegis chat --skill
 threat-modeling` drive-to-completion) the model ran `recon.py` → `scaffold.py` and wrote all seven files in
