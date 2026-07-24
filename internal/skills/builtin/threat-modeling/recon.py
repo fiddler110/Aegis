@@ -225,6 +225,27 @@ def is_excluded_path(rel):
     return False
 
 
+def top_level_entries(root):
+    """Immediate child directories of root, each flagged excluded or walked.
+
+    Feeds the digest's Coverage Ledger section (SKILL.md §2 step 6): every
+    name here must land in 0.1-architecture.md's Coverage Ledger as either
+    Covered or Excluded — including the auto-excluded ones (vendored/build/
+    VCS/cache), which still need their own Excluded row rather than being
+    silently dropped.
+    """
+    entries = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return entries
+    for name in names:
+        full = os.path.join(root, name)
+        if os.path.isdir(full):
+            entries.append((name, is_excluded_dir(name)))
+    return entries
+
+
 def read_text(path):
     """Read up to MAX_READ_BYTES of a file as text, tolerant of encoding."""
     try:
@@ -358,6 +379,8 @@ def scan(root, max_files):
         "file_count": 0,
         "source_count": 0,
         "truncated": False,
+        "top_level_dirs": top_level_entries(root),
+        "top_level_file_counts": defaultdict(int),
     }
 
     for dirpath, dirnames, filenames in os.walk(root):
@@ -380,6 +403,8 @@ def scan(root, max_files):
             if size > MAX_FILE_BYTES:
                 continue
             facts["file_count"] += 1
+            top = rel.split("/", 1)[0] if "/" in rel else "(root)"
+            facts["top_level_file_counts"][top] += 1
             ext = os.path.splitext(fname)[1].lower()
 
             _scan_manifest(root, fpath, fname, ext, facts)
@@ -583,6 +608,25 @@ def render(facts, full):
       "not a decision. Verify at the cited file before relying on it.")
     w("")
 
+    # Top-level directories -> Coverage Ledger
+    w("## Top-level directories -> Coverage Ledger")
+    w("Every directory below must land in 0.1-architecture.md's Coverage "
+      "Ledger as `Covered — <component>` or `Excluded — <reason>` (SKILL.md "
+      "§2 step 6) — including the auto-excluded ones, which still need their "
+      "own Excluded row rather than being silently dropped.")
+    tld = facts.get("top_level_dirs") or []
+    if tld:
+        counts = facts.get("top_level_file_counts", {})
+        for name, excluded in tld:
+            if excluded:
+                w("- `%s/` — auto-excluded pattern (vendored/build/VCS/cache) "
+                  "— not walked; still record as Excluded, don't drop it" % name)
+            else:
+                w("- `%s/` — %d file(s) scanned" % (name, counts.get(name, 0)))
+    else:
+        w("- (no top-level directories found)")
+    w("")
+
     # Git
     g = facts["git"]
     w("## Git")
@@ -736,6 +780,8 @@ def to_jsonable(facts):
     d["security_signals"] = {k: sorted(v) for k, v in facts["security_signals"].items()}
     d["egress_signals"] = {k: sorted(v) for k, v in facts["egress_signals"].items()}
     d["manifests"] = dict(facts["manifests"])
+    d["top_level_dirs"] = [{"name": n, "excluded": ex} for n, ex in facts.get("top_level_dirs", [])]
+    d["top_level_file_counts"] = dict(facts.get("top_level_file_counts", {}))
     d["suggested_deployment"] = dict(zip(("classification", "rationale"), suggest_deployment(facts)))
     return d
 
