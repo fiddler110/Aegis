@@ -30,6 +30,20 @@ aegis --first-init   # global config with full template
 aegis --init         # project config (.aegis/config.yaml)
 ```
 
+Both abort if the target file already exists. To regenerate an existing config
+from the latest template — e.g. after upgrading Aegis and picking up new
+template sections — add `--overwrite`; the old file is backed up first
+(`config.yaml.bak-<unix-timestamp>`) before being replaced:
+
+```bash
+aegis --first-init --overwrite
+aegis --init --overwrite
+```
+
+This fully replaces the file, discarding any customizations — use `aegis
+config update` instead if you want to merge in new fields while keeping your
+existing edits (see below).
+
 ---
 
 ## Environment Variables

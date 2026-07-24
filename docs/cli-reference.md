@@ -21,6 +21,7 @@ aegis [flags]
 | `--resume <session-id>` | — | Resume an existing session by ID |
 | `--first-init` | — | Create global config with full provider template and exit |
 | `--init` | — | Create `.aegis/config.yaml` project override and exit |
+| `--overwrite` | — | With `--init`/`--first-init`, regenerate an existing config from the latest template (backs up the old file first) instead of aborting |
 
 **Examples:**
 

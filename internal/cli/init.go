@@ -4,27 +4,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 )
 
 // runFirstInit writes the global config template to the user's OS config
-// directory. It aborts if the file already exists to avoid clobbering changes.
-func runFirstInit() error {
+// directory. It aborts if the file already exists to avoid clobbering changes,
+// unless overwrite is set, in which case the existing file is backed up first.
+func runFirstInit(overwrite bool) error {
 	path := config.GlobalConfigPath()
-	return writeConfigTemplate(path, globalConfigTemplate, "global")
+	return writeConfigTemplate(path, globalConfigTemplate, "global", overwrite)
 }
 
 // runProjectInit writes a project-level override template to .aegis/config.yaml
-// in the current working directory. It aborts if the file already exists.
-func runProjectInit() error {
+// in the current working directory. It aborts if the file already exists,
+// unless overwrite is set, in which case the existing file is backed up first.
+func runProjectInit(overwrite bool) error {
 	path := config.ProjectConfigPath()
-	return writeConfigTemplate(path, projectConfigTemplate, "project")
+	return writeConfigTemplate(path, projectConfigTemplate, "project", overwrite)
 }
 
-func writeConfigTemplate(path, template, label string) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s config already exists at %s\nEdit it directly or delete it and re-run to regenerate.", label, path)
+func writeConfigTemplate(path, template, label string, overwrite bool) error {
+	if existing, err := os.ReadFile(path); err == nil {
+		if !overwrite {
+			return fmt.Errorf("%s config already exists at %s\nEdit it directly, re-run with --overwrite to regenerate from the latest template (a backup is kept), or use `aegis config update` to merge in new fields without discarding customizations.", label, path)
+		}
+		backup := fmt.Sprintf("%s.bak-%d", path, time.Now().Unix())
+		if err := os.WriteFile(backup, existing, 0o600); err != nil {
+			return fmt.Errorf("write backup %s: %w", backup, err)
+		}
+		fmt.Printf("Backed up existing %s config to: %s\n", label, backup)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check existing config: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
