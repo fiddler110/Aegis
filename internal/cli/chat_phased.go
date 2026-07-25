@@ -213,6 +213,30 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 			*st.iterToolCalls = 0
 			*st.iterMutations = 0
 			if err := st.eng.Run(ctx, conv, st.onEvent); err != nil {
+				// P47.2: a context-overflow error is terminal to the engine but
+				// resumable at the phase level — the phase's `<!-- PENDING -->`
+				// files persist on disk, so a fresh, near-empty context re-reads
+				// them and continues (exactly why the 2026-07-24 manual re-runs
+				// worked). Reset the conversation — the same fresh-context reset
+				// the drive does at phase *boundaries*, applied within a phase —
+				// and retry instead of aborting the whole drive. Counts as a turn
+				// so the --max-turns guard still bounds it; any other engine error
+				// is still fatal.
+				if provider.IsContextOverflowError(err) {
+					runDir = latestThreatModelRunDir(st.cwd)
+					pending := ph.pending(runDir)
+					totalTurns++
+					if totalTurns >= st.maxTurns {
+						st.stopMaxTurns(ph, pending)
+						return nil
+					}
+					st.logger.Warn("phased drive: context overflowed, resetting phase context and retrying",
+						"phase", ph.name, "pending", len(pending), "err", err)
+					fmt.Fprintf(st.errOut, "\n[notice: context overflowed during the %s phase; resetting to a fresh context and resuming from disk (%d file(s) still PENDING)]\n",
+						ph.label(), len(pending))
+					conv = st.freshPhaseConv(ph, runDir, pending)
+					continue
+				}
 				return err
 			}
 			if ctx.Err() != nil {
@@ -226,10 +250,7 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 			totalTurns++
 			pending := ph.pending(runDir)
 			if totalTurns >= st.maxTurns {
-				msg := fmt.Sprintf("phased drive hit --max-turns=%d during the %s phase with %d file(s) still PENDING: %s",
-					st.maxTurns, ph.label(), len(pending), strings.Join(pending, ", "))
-				st.logger.Warn("chat: " + msg)
-				fmt.Fprintf(st.errOut, "\n[notice: %s — re-run to resume]\n", msg)
+				st.stopMaxTurns(ph, pending)
 				return nil
 			}
 			// P39.7 no-progress guard, per phase: a turn that mutated no suite file
@@ -254,6 +275,35 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 	// All content phases complete — phase 6: verify + quality, each in its own
 	// fresh focused context.
 	return runPhasedVerifyAndQuality(ctx, st)
+}
+
+// stopMaxTurns logs and prints the resumable --max-turns notice for a phase.
+// Shared by the normal per-turn cap and the P47.2 overflow-reset path so both
+// emit the identical "re-run to resume" message.
+func (st *phasedDriveState) stopMaxTurns(ph skillPhase, pending []string) {
+	msg := fmt.Sprintf("phased drive hit --max-turns=%d during the %s phase with %d file(s) still PENDING: %s",
+		st.maxTurns, ph.label(), len(pending), strings.Join(pending, ", "))
+	st.logger.Warn("chat: " + msg)
+	fmt.Fprintf(st.errOut, "\n[notice: %s — re-run to resume]\n", msg)
+}
+
+// freshPhaseConv builds the fresh conversation a phase retries with after a
+// context overflow (P47.2). If the phase has already scaffolded its files
+// (runDir set), it resumes from disk with the in-phase continuation prompt —
+// the model re-reads the persisted `<!-- PENDING -->` files. If the setup phase
+// overflowed before the run directory even exists (runDir == ""), there is
+// nothing on disk to resume from, so it restarts from the phase's full seed
+// prompt.
+func (st *phasedDriveState) freshPhaseConv(ph skillPhase, runDir string, pending []string) *engine.Conversation {
+	conv := &engine.Conversation{System: st.system}
+	if runDir == "" {
+		conv.Append(userMessage(ph.promptFn(phaseParams{
+			task: st.taskPrompt, skillDir: st.skillDir, cwd: st.cwd, runDir: runDir,
+		})))
+	} else {
+		conv.Append(userMessage(phaseContinuePrompt(ph, pending)))
+	}
+	return conv
 }
 
 // runPhasedVerifyAndQuality is phase 6 of a phased drive: run the bundled
@@ -322,12 +372,25 @@ func skillAsset(skillDir, rel string) string {
 	return filepath.ToSlash(filepath.Join(skillDir, rel))
 }
 
+// noSelfVerifyInstruction tells a content phase not to spend turns — and the
+// context they consume — re-auditing files it has already filled or recomputing
+// STRIDE/coverage arithmetic by hand to self-check (P47.3). On the 2026-07-24
+// FirewallRuleAnalyzer run both context overflows were driven by exactly this:
+// the model re-reading completed suite files and recomputing coverage counts
+// across dozens of in-phase turns — work the deterministic phase-6 verifier
+// (verify.py / inventory.py) already owns authoritatively. Cutting it shrinks
+// per-phase turn count and context growth regardless of whether compaction is
+// on, so it reduces how often the P47.1/P47.2 defenses have to act. Woven into
+// the content-phase seeds (analysis, findings) and the shared continuation
+// prompt; the DFD/assessment phases are short enough not to need it.
+const noSelfVerifyInstruction = "Do not re-read or re-audit files whose `<!-- PENDING -->` markers are already cleared, and do not recompute STRIDE/threat/coverage counts by hand to double-check your own work — the deterministic phase-6 verifier (`verify.py` / `inventory.py`) does all of that authoritatively later. Spend each turn filling the next `<!-- PENDING: <section> -->` marker and nothing else."
+
 // phaseContinuePrompt is the in-phase continuation turn: it names only THIS
 // phase's still-PENDING files and tells the model to fill the next marker,
 // without pulling other phases into scope.
 func phaseContinuePrompt(ph skillPhase, pending []string) string {
-	return fmt.Sprintf("Continue the %s phase — it is not finished. These file(s) still contain `<!-- PENDING: … -->` markers:\n- %s\n\nFill the next single `<!-- PENDING: <section> -->` marker with real content using `edit_file` — one section, one edit; never a bare `<!-- PENDING -->` and never `replace_all` on a marker. Keep going until NO `<!-- PENDING` marker remains in the file(s) above. This is a non-interactive run: do not stop to ask whether to proceed, and do not start other files.",
-		ph.label(), strings.Join(pending, "\n- "))
+	return fmt.Sprintf("Continue the %s phase — it is not finished. These file(s) still contain `<!-- PENDING: … -->` markers:\n- %s\n\nFill the next single `<!-- PENDING: <section> -->` marker with real content using `edit_file` — one section, one edit; never a bare `<!-- PENDING -->` and never `replace_all` on a marker. Keep going until NO `<!-- PENDING` marker remains in the file(s) above. %s This is a non-interactive run: do not stop to ask whether to proceed, and do not start other files.",
+		ph.label(), strings.Join(pending, "\n- "), noSelfVerifyInstruction)
 }
 
 // phase6Preamble orients a fresh phase-6 context: it has no memory of building
@@ -385,11 +448,14 @@ Read first:
 - `+"`%s`"+` — run its technology sweep.
 - from the run directory: `+"`0.1-architecture.md`"+` (components + exposure floors) and `+"`1-model.md`"+` (the `+"`DF##`"+` ids).
 
-Rules for every threat row: state a Prerequisite no lower than the component's Min Prerequisite in the exposure table; apply the three evidence lenses (reachability, impact, defenses) — a candidate you cannot evidence goes to `+"`0-assessment.md`"+`'s Needs Verification table later, not the threat table; never mark a threat "accepted risk" on your own authority. This phase owns only the analysis file.`,
+Rules for every threat row: state a Prerequisite no lower than the component's Min Prerequisite in the exposure table; apply the three evidence lenses (reachability, impact, defenses) — a candidate you cannot evidence goes to `+"`0-assessment.md`"+`'s Needs Verification table later, not the threat table; never mark a threat "accepted risk" on your own authority. This phase owns only the analysis file.
+
+%s`,
 		filepath.ToSlash(p.runDir),
 		skillAsset(p.skillDir, "references/skeletons/skeleton-<framework>.md"),
 		skillAsset(p.skillDir, "references/<framework>.md"),
-		skillAsset(p.skillDir, "references/companion-techniques.md"))
+		skillAsset(p.skillDir, "references/companion-techniques.md"),
+		noSelfVerifyInstruction)
 }
 
 func phasePromptFindings(p phaseParams) string {
@@ -397,9 +463,12 @@ func phasePromptFindings(p phaseParams) string {
 
 Read `+"`%s`"+` (the findings-section templates and mandatory fields) and, from the run directory, `+"`2-<framework>-analysis.md`"+` and `+"`0.1-architecture.md`"+`'s Component Exposure Table.
 
-Fill `+"`3-findings.md`"+`, replacing its `+"`<!-- PENDING -->`"+` markers one edit at a time: one `+"`FIND-##`"+` entry per real finding with its CVSS 4.0 vector, CWE, OWASP category, and tier, plus the Threat Coverage Verification table where every threat id from the analysis file appears exactly once. Keep the CVSS `+"`AV`"+`/`+"`PR`"+` values consistent with each threat's prerequisite (a Local Process prerequisite cannot carry `+"`AV:N`"+`). This phase owns only `+"`3-findings.md`"+`.`,
+Fill `+"`3-findings.md`"+`, replacing its `+"`<!-- PENDING -->`"+` markers one edit at a time: one `+"`FIND-##`"+` entry per real finding with its CVSS 4.0 vector, CWE, OWASP category, and tier, plus the Threat Coverage Verification table where every threat id from the analysis file appears exactly once. Keep the CVSS `+"`AV`"+`/`+"`PR`"+` values consistent with each threat's prerequisite (a Local Process prerequisite cannot carry `+"`AV:N`"+`). This phase owns only `+"`3-findings.md`"+`.
+
+Reading the prior-phase analysis file to source the findings and the coverage table is expected — that is authoring, not self-checking. %s`,
 		filepath.ToSlash(p.runDir),
-		skillAsset(p.skillDir, "references/output-formats.md"))
+		skillAsset(p.skillDir, "references/output-formats.md"),
+		noSelfVerifyInstruction)
 }
 
 func phasePromptAssessment(p phaseParams) string {

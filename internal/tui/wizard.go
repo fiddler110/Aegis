@@ -16,6 +16,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/discover"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 )
 
 // ─── Provider presets ─────────────────────────────────────────────────────────
@@ -490,6 +491,20 @@ func (w *wizardModel) saveCmd() tea.Cmd {
 		Think:      think,
 	}
 	return func() tea.Msg {
+		// For Ollama, emit an explicit context_window sized from the model's
+		// training-context max so a skill-driven run's large prompt isn't
+		// truncated at Ollama's small Modelfile default (P35.3). Detection is a
+		// best-effort network call; if the model isn't pulled yet it falls back
+		// to the baseline recommendation (RecommendContextWindow(0)).
+		if adapter == "ollama" {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			modelMax := 0
+			if res, ok := ollamainfo.Detect(ctx, ollamainfo.NativeBase(p.BaseURL), p.Model); ok {
+				modelMax = res.ModelMax
+			}
+			cancel()
+			p.ContextWindow = ollamainfo.RecommendContextWindow(modelMax)
+		}
 		return wizardSavedMsg{err: config.PatchGlobalProvider(p)}
 	}
 }

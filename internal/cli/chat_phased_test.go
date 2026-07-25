@@ -59,8 +59,8 @@ func TestFileHasPendingMarker(t *testing.T) {
 // files. Covers the glob-matched analysis phase and the setup phase's empty-runDir
 // case (never complete, so it always runs).
 func TestPhaseCompletionAndPending(t *testing.T) {
-	arch := threatModelPhases[0]  // setup, owns 0.1-architecture.md
-	dfd := threatModelPhases[1]   // 1.1-model.mmd, 1-model.md
+	arch := threatModelPhases[0]     // setup, owns 0.1-architecture.md
+	dfd := threatModelPhases[1]      // 1.1-model.mmd, 1-model.md
 	analysis := threatModelPhases[2] // 2-*-analysis.md (glob)
 
 	// An empty run dir (nothing scaffolded) is never complete, so setup runs.
@@ -187,5 +187,38 @@ func TestPhasePromptsAreWired(t *testing.T) {
 	}
 	if !strings.Contains(phase6Preamble(runDir, skillDir), runDir) {
 		t.Error("phase-6 preamble must name the run directory")
+	}
+}
+
+// TestContentPromptsSuppressSelfVerification (P47.3) guards the anti-self-verify
+// instruction against silent drift. On the 2026-07-24 run both context overflows
+// were driven by the model re-auditing already-filled files and recomputing
+// coverage arithmetic across dozens of in-phase turns — work the deterministic
+// phase-6 verifier owns. The two large content-phase seeds (analysis, findings)
+// and the shared in-phase continuation prompt must all carry the instruction;
+// the short DFD/assessment seeds deliberately do not.
+func TestContentPromptsSuppressSelfVerification(t *testing.T) {
+	p := phaseParams{
+		task:     "threat model this repo",
+		skillDir: "/ws/.aegis/builtin-skills/threat-modeling",
+		cwd:      "/ws",
+		runDir:   "/ws/.aegis/security/threat-model/stride-app-2026-07-24-1200",
+	}
+	carriers := map[string]string{
+		"analysis": phasePromptAnalysis(p),
+		"findings": phasePromptFindings(p),
+		"continue": phaseContinuePrompt(threatModelPhases[2], []string{"2-stride-analysis.md"}),
+	}
+	for name, prompt := range carriers {
+		if !strings.Contains(prompt, noSelfVerifyInstruction) {
+			t.Errorf("%s prompt must carry the no-self-verify instruction (P47.3)", name)
+		}
+	}
+	// The instruction must point at the mechanical verifier as the authority so
+	// the model knows what it is deferring to, not just that it should stop.
+	for _, want := range []string{"verify.py", "phase-6"} {
+		if !strings.Contains(noSelfVerifyInstruction, want) {
+			t.Errorf("no-self-verify instruction should reference %q", want)
+		}
 	}
 }

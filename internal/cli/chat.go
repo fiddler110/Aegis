@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/commands"
+	"github.com/fiddler110/aegis/internal/compaction"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/engine"
@@ -196,15 +197,32 @@ func newChatCmd() *cobra.Command {
 			gate := permission.New(permission.ParseMode(resolvedMode), approver)
 
 			tracker := cost.NewTracker()
+
+			// P47.1: wire proactive per-turn compaction into the CLI drive
+			// engine, mirroring the daemon (internal/server/engine_build.go).
+			// The engine's 85%-fill compaction is gated on
+			// ContextWindowTokens > 0 AND a non-nil Compactor; the CLI path set
+			// neither, so a multi-turn --skill drive grew context every turn
+			// with no defense — until Ollama hard-rejected the request (173,816
+			// vs a 131,072 window on the 2026-07-24 FirewallRuleAnalyzer run)
+			// and the drive aborted with a terminal context-truncation error.
+			// Resolve the effective window the same way the server does (config
+			// or Ollama-detected) and build a Summarizer over it. Factored into
+			// driveCompaction so a regression test can assert the CLI path keeps
+			// compaction enabled and can't silently diverge from the daemon.
+			compactor, ctxWin := driveCompaction(context.Background(), cfg, adapter, logger)
+
 			eng, err := engine.New(engine.Options{
-				Adapter:   adapter,
-				Tools:     reg,
-				Gate:      gate,
-				Cost:      tracker,
-				BudgetUSD: cfg.Cost.BudgetUSD,
-				Model:     cfg.Provider.Model,
-				MaxTokens: cfg.Provider.MaxTokens,
-				Logger:    logger,
+				Adapter:             adapter,
+				Tools:               reg,
+				Gate:                gate,
+				Compactor:           compactor,
+				Cost:                tracker,
+				BudgetUSD:           cfg.Cost.BudgetUSD,
+				Model:               cfg.Provider.Model,
+				MaxTokens:           cfg.Provider.MaxTokens,
+				ContextWindowTokens: ctxWin,
+				Logger:              logger,
 			})
 			if err != nil {
 				return err
@@ -548,6 +566,74 @@ func installSignalCancel(parent context.Context, logger *slog.Logger) (context.C
 	return ctx, func() {
 		signal.Stop(sigCh)
 		cancel()
+	}
+}
+
+// driveCompaction builds the proactive-compaction wiring for the CLI drive
+// engine: the effective context window and a Summarizer over it. Split out of
+// the command closure (P47.1) so a regression test can assert the CLI path
+// enables compaction (non-zero window + non-nil compactor) — guarding against
+// the divergence where the CLI engine.New set neither ContextWindowTokens nor
+// Compactor, so a multi-turn --skill drive grew context every turn with no
+// defense until the model server hard-rejected the request. Mirrors the
+// daemon's build (internal/server/server.go / engine_build.go): prefer a fast
+// small model for the summary calls, and skip auto-compaction (rather than
+// defaulting to the 120k cloud budget) when a local window is still unknown.
+func driveCompaction(ctx context.Context, cfg *config.Config, adapter provider.Adapter, logger *slog.Logger) (engine.Compactor, int) {
+	ctxWin := resolveDriveContextWindow(ctx, cfg, logger)
+	compModel := cfg.Provider.Model
+	if cfg.Provider.SmallModel != "" {
+		compModel = cfg.Provider.SmallModel // prefer a fast small model for compaction
+	}
+	compOpts := compaction.Options{
+		Adapter:       adapter,
+		Model:         compModel,
+		ContextWindow: ctxWin,
+	}
+	// A local provider whose window is still unknown: skip auto-compaction
+	// rather than defaulting to the 120k cloud budget, which on a 4k-32k local
+	// server would never fire before the server front-truncates the prompt.
+	if ctxWin == 0 && cfg.Provider.Default == "ollama" {
+		compOpts.MaxBudget = 0 // explicit skip
+	}
+	return compaction.New(compOpts), ctxWin
+}
+
+// resolveDriveContextWindow returns the context window the model server will
+// actually honor, for the one-shot CLI path. It mirrors the daemon's
+// initContextWindow (internal/server/contextwindow.go): the configured
+// provider.context_window, reconciled downward when a *loaded* Ollama model is
+// found to be serving less (Ollama silently front-truncates an oversized prompt
+// otherwise). Returns 0 ("unknown") only when neither config nor detection
+// yields a value — the compaction fallback handles that case. Unlike the
+// daemon there is no long-lived retry state to maintain: a single `aegis chat`
+// invocation resolves the window once, up front.
+func resolveDriveContextWindow(ctx context.Context, cfg *config.Config, logger *slog.Logger) int {
+	cfgWin := cfg.Provider.ContextWindow
+	p := cfg.Provider
+	// Only probe when the target could plausibly be Ollama: the explicit
+	// "ollama" provider, or an "openai" provider re-pointed at a custom base
+	// URL (the documented way to run against a local OpenAI-compat endpoint).
+	if p.Default != "ollama" && (p.Default != "openai" || p.BaseURL == "") {
+		return cfgWin
+	}
+	res, ok := ollamainfo.Detect(ctx, ollamainfo.NativeBase(p.BaseURL), p.Model)
+	if !ok {
+		return cfgWin
+	}
+	switch {
+	case cfgWin > 0 && res.Authoritative() && res.ContextWindow < cfgWin:
+		// Config promises more than Ollama is actually serving — trusting the
+		// config here is exactly the silent-truncation failure. Serve reality.
+		logger.Warn("configured context_window exceeds what Ollama is serving; using the served value",
+			"configured", cfgWin, "served", res.ContextWindow,
+			"hint", "raise OLLAMA_CONTEXT_LENGTH on the Ollama server or pin num_ctx in a modelfile")
+		return res.ContextWindow
+	case cfgWin > 0:
+		return cfgWin
+	default:
+		logger.Info("auto-detected Ollama context window for drive engine", "window", res.Describe(), "model_max", res.ModelMax)
+		return res.ContextWindow
 	}
 }
 

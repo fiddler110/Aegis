@@ -8,7 +8,20 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-24 — **P39.12, P39.13, P39.14, and P39.15 shipped** (threat-model drive robustness,
+**Last updated:** 2026-07-24 — **P47.3 shipped** (the two large content-phase seeds and the shared
+in-phase continuation prompt of the phased threat-model drive now explicitly tell the model not to
+re-audit already-filled files or recompute STRIDE/coverage counts by hand to self-check — the exact
+in-phase token-burn that drove both context overflows on the 2026-07-24 FirewallRuleAnalyzer run,
+work the deterministic phase-6 verifier already owns — the third P47.x phased-drive stability item,
+cutting how often P47.1/P47.2 must act — see below). Previously, 2026-07-24 — **P47.2 shipped** (a
+context-overflow error mid-phase now resets the phased threat-model drive to a fresh context and
+retries the phase from disk instead of aborting the whole drive — the second P47.x phased-drive
+stability item, the residual-recovery complement to P47.1's compaction — see below). Previously,
+2026-07-24 — **P47.1 shipped** (proactive per-turn
+compaction wired into the CLI `chat --skill` drive engine — the head of the P47.x phased-drive
+stability batch, which alone would have prevented both context-overflow aborts on the 2026-07-24
+FirewallRuleAnalyzer run — see below). Previously,
+2026-07-24 — **P39.12, P39.13, P39.14, and P39.15 shipped** (threat-model drive robustness,
 from the P38.1 full-stack test vs FirewallRuleAnalyzer on qwen3.6:35b: a 30-minute default response-header
 timeout, a 1500-line default cap on `read_file`, a hard one-section-per-`edit_file` rule against monolithic
 writes, and a final quality-and-sanity pass after mechanical verify — see below). Previously,
@@ -32,6 +45,63 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P47.3 — stop content phases burning context on manual self-verification.** On the 2026-07-24
+FirewallRuleAnalyzer run both context overflows were driven by the same behavior: the model re-reading
+already-filled suite files and recomputing STRIDE coverage arithmetic across dozens of in-phase turns —
+work the deterministic phase-6 `verify.py` / `inventory.py` already own authoritatively. The content-phase
+seeds (`phasePromptAnalysis`, `phasePromptFindings`) and the shared `phaseContinuePrompt` in
+`internal/cli/chat_phased.go` never told the model to stop. The fix adds one shared instruction
+(`noSelfVerifyInstruction`): do not re-read or re-audit files whose `<!-- PENDING -->` markers are already
+cleared, and do not recompute STRIDE/threat/coverage counts by hand to double-check your own work — the
+phase-6 verifier does that later — spend each turn filling the next marker and nothing else. It is woven
+into the two large content-phase seeds and the in-phase continuation prompt; the short DFD/assessment seeds
+are left as-is. The findings seed additionally clarifies that reading the prior-phase analysis file to
+source the coverage table is expected authoring, not self-checking, so the instruction doesn't suppress a
+legitimate read. This is a pure prompt change — no code-path risk — that attacks the token-burn at its
+source, cutting per-phase turn count and context growth regardless of whether compaction is on, so it
+reduces how often the P47.1/P47.2 defenses have to act. Regression-tested (`chat_phased_test.go`:
+`TestContentPromptsSuppressSelfVerification`) that all three carriers hold the instruction and that it names
+the mechanical verifier as the authority. Third item of the P47.x phased-drive stability batch.
+
+**P47.2 — a context-overflow error resets the phase instead of aborting the drive.** Even with P47.1's
+compaction wired, a residual overflow can still happen (a single oversized turn, an undetectable local
+window). When it did, `runPhasedSkillDrive`'s inner loop returned the engine error verbatim, so a
+terminal `NewContextTruncationError` (or an Ollama hard-reject envelope) aborted the **whole** phased
+drive — even though the failure is *resumable at the phase level*: the phase's `<!-- PENDING -->` files
+persist on disk, and a fresh, near-empty context re-reads them and continues (exactly why the 2026-07-24
+manual re-runs worked). The fix detects that specific error class inside the loop and, instead of
+`return err`, resets `conv` to a fresh conversation and retries the phase — the same fresh-context reset
+the drive already does at phase *boundaries*, now applied within a phase on overflow. A new
+`provider.IsContextOverflowError` classifies only the size-caused terminal errors a smaller context can
+recover from (the P35.2 truncation error plus context-size stream envelopes), deliberately excluding
+size-independent terminal failures (model-not-found, malformed) and response-header timeouts where a
+reset would only loop. The reset counts as a turn so the existing `--max-turns` guard still bounds it,
+and a new `freshPhaseConv` helper chooses the reseed prompt: the in-phase continuation prompt when files
+exist on disk, or the full phase seed prompt when the setup phase overflowed before the run directory
+was even created. Regression tests cover the classifier's include/exclude boundaries
+(`internal/provider/errors_test.go`) and the reseed choice (`chat_phased_reset_test.go`). Second item of
+the P47.x phased-drive stability batch; the residual-recovery complement to P47.1 (compaction prevents
+most overflows, this recovers from the rest).
+
+**P47.1 — proactive compaction wired into the CLI `chat --skill` drive engine.** The daemon builds its
+engine with both a resolved context window and a `Compactor`, so engine.Run's proactive per-turn compaction
+(fires at 85% fill, gated on `contextWindowTokens > 0` **and** a non-nil compactor) runs on the server path.
+The CLI `engine.New` in `internal/cli/chat.go` set **neither**, so the phased threat-model drive — which runs
+entirely on the CLI engine and grows context every turn — had no defense against its own growth: on the
+2026-07-24 FirewallRuleAnalyzer run, context climbed until Ollama hard-rejected the request (173,816 vs a
+131,072 window) and the drive aborted with a terminal `NewContextTruncationError`, three separate times,
+each needing a manual re-invocation. The fix mirrors the server (~a few lines already proven in
+`internal/server/engine_build.go`): a new `driveCompaction` helper resolves the effective window the same way
+the daemon does — configured `provider.context_window`, reconciled downward when a *loaded* Ollama model is
+actually serving less (via `ollamainfo.Detect`, the silent-front-truncation guard) — builds a
+`compaction.Summarizer` over it (preferring `provider.small_model` for the summary calls, skipping
+auto-compaction rather than defaulting to the 120k cloud budget when a local window is still unknown), and
+passes `ContextWindowTokens` + `Compactor` into the CLI `engine.New`. Both the single-context linear drive and
+the P38.8 phased drive reuse that one engine, so both gain the defense. Extracted into `driveCompaction` so a
+regression test (`chat_compaction_test.go`) can assert the CLI path keeps compaction enabled (non-zero window
++ non-nil compactor) and can't silently diverge from the daemon again. Head of the P47.x phased-drive
+stability batch; on its own it would have prevented both aborts on the 2026-07-24 run.
 
 **P39.12 / P39.13 / P39.14 / P39.15 — threat-model drive robustness (from the P38.1 full-stack test).**
 The 2026-07-24 full-stack test drove the built-in `aegis chat --skill threat-modeling` against a lean copy of
