@@ -11,21 +11,29 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** 1 actionable (Tier 2: **P38.1**) + 2 parked (Tier 4: **P38.8**, **P25.9**).
-Everything else filed since the last cleanup — the P39.10-P39.15 threat-model harness fixes, the
-P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, and the P46.x codex-build track — has **shipped**;
-see [releases.md](releases.md) for what each one did.
+**Open items:** **P38.1** (Tier 2 umbrella) + the remaining **P47.x phased-drive stability batch**
+(P47.5 Tier 2 · P47.4 Tier 3 · P47.6 Tier 4) + 2 parked
+(Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
+threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
+codex-build track, and the batch items **P47.1** and **P47.2** — has **shipped**; see
+[releases.md](releases.md) for what each one did.
 
-**Next steps on P38.1:**
-1. Re-run the built-in `--skill` drive — now the **in-harness phased drive** (2026-07-24,
-   `internal/cli/chat_phased.go`; P38.8's per-phase context reset brought inside the built-in
-   path) — on a real target with a local model and confirm it reaches a verify-clean suite. That
-   is the closure condition. Compare against `AEGIS_SKILL_DRIVE=linear` (the old single-context
-   drive) if a regression is suspected.
-2. Housekeeping debt from the 2026-07-23 gpt-oss:20b re-test: **P39.10**/**P39.11** are coded,
-   shipped, and verified live, but still need a releases.md entry and regression tests
-   (`scanPendingMarkers`/`suiteFileCount` ignoring a materialized-skill PENDING marker; `chat
-   --skill` workspace materialization). See the P38.1 body for detail.
+**Next batch — P47.x phased-drive stability (filed 2026-07-24):** the 2026-07-24
+FirewallRuleAnalyzer run reached a **verify-clean suite** on `qwen3.6:35b-a3b-fast` (all
+`verify.py`/`lint_dfd.py`/`inventory.py --check` passing) — P38.1's mechanism/conformance closure
+condition — but only after **three manual re-invocations**: the CLI `chat --skill` drive engine has
+no proactive compaction wired in, so each phase's context grew until Ollama hard-rejected the
+request (observed 173,816 vs a 131,072 window) and the drive aborted. P47.1-P47.6 make that same
+run succeed in **one unattended invocation**; tackle in number order. Batch head **P47.1** (wire
+proactive compaction into the CLI drive engine), **P47.2** (treat a mid-phase context overflow as a
+resumable phase reset, not a fatal abort), and **P47.3** (stop content phases burning context on
+manual self-verification) have **shipped**; the remaining items are in their tier sections below.
+
+**Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body)
+and the 2026-07-23 gpt-oss:20b housekeeping — **P39.10**/**P39.11** are coded, shipped, and
+verified live, but still need a releases.md entry and regression tests
+(`scanPendingMarkers`/`suiteFileCount` ignoring a materialized-skill PENDING marker; `chat
+--skill` workspace materialization).
 
 ---
 
@@ -40,13 +48,15 @@ see [releases.md](releases.md) for what each one did.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open — all filed Tier 1 items have shipped. See [releases.md](releases.md).
+**Status:** none open — batch head **P47.1** (wire proactive compaction into the CLI `chat --skill`
+drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
 
 ---
 
 ## Open Work — Tier 2
 
-**Status:** 1 open — **P38.1**, the threat-model conformance umbrella.
+**Status:** 2 open — **P38.1** (threat-model conformance umbrella) plus the **P47.5**
+phased-drive stability item (batch items **P47.1**, **P47.2**, and **P47.3** shipped — see [releases.md](releases.md)).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -112,15 +122,42 @@ implement exactly that.
   forces the old path for comparison. Unit-tested for phase sequencing/completion/prompt wiring;
   **live convergence against a local model is the remaining validation** (see next steps).
 
+- **2026-07-24, qwen3.6:35b-a3b-fast vs FirewallRuleAnalyzer (phased drive, stability):** the
+  phased drive **reached a verify-clean suite** — 23 threats / 22 findings across 9 components, all
+  `verify.py`/`lint_dfd.py`/`inventory.py --check` passing, content grounded in real file:line
+  evidence and its own quality pass catching genuine inaccuracies — i.e. the mechanism/conformance
+  closure condition below was **met**. But it took **three manual re-invocations**: the CLI
+  `chat --skill` drive engine wires no proactive compaction (`internal/cli/chat.go:199` sets neither
+  `ContextWindowTokens` nor `Compactor`, unlike the daemon at `internal/server/engine_build.go:279,288`),
+  so each phase's context grew — the model re-reading files and recomputing STRIDE counts by hand —
+  until Ollama hard-rejected the request and the drive aborted on a terminal
+  `NewContextTruncationError` rather than a resumable stop. Root-caused into the **P47.x phased-drive
+  stability batch** (P47.1-P47.6): single-invocation stability is now the bar, distinct from the
+  mechanism closure already demonstrated here.
+
 Reproduce: `cd <fresh target copy>` (must be inside the target — the sandbox rejects reads
 outside the workspace root); run `aegis chat --skill threat-modeling --mode build --yes` — it now
 prints a `phased mode` notice and resets context each phase. Closure condition: the real suite's
-PENDING markers reach zero and `verify.py`/`lint_dfd.py`/`inventory.py --check` all pass.
+PENDING markers reach zero and `verify.py`/`lint_dfd.py`/`inventory.py --check` all pass (met
+2026-07-24 on FirewallRuleAnalyzer; **unattended single-invocation** stability tracked by P47.x).
 
 Priority: Tier 2 — every load-bearing harness fix the re-tests have root-caused (P39.5-P39.15) has
 shipped. This item stays open only as the conformance **umbrella**, closeable once a live
 built-in `--skill` drive is confirmed to reach a verify-clean suite on a local model. Not Tier 1
 because it is live-run verification tracking, not independent build work.
+
+### P47.5 — Right-size and auto-escalate the per-phase context window
+
+The default `provider.context_window: 65536` was too small for the FirewallRuleAnalyzer repo +
+`qwen3.6:35b-a3b-fast`; closure needed a manual `AEGIS_PROVIDER_CONTEXT_WINDOW=196608`. Two cheap
+levers: (a) have the phased drive pick a higher default window via the existing
+`RecommendContextWindow` helper (`internal/cli/chat.go:810`) sized to the model's max, rather than
+inheriting the generic config default; and (b) on a context-truncation error, auto-retry the phase
+once at a larger `num_ctx` (up to the model max) before surfacing the terminal error. (a) gives
+P47.1's compaction room to work; (b) pairs with P47.2's recovery.
+
+Priority: Tier 2 — small, no-dependency sizing win that removes the manual-escalation step; most
+effective alongside P47.1.
 
 **Lead (not yet filed):** the "accurate refusal, error-shaped" exit-code question for the
 SCA/secrets scanners. P34.6 checked the *language*-targeted tools; nothing has swept the
@@ -131,8 +168,23 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status:** 0 filed items open — all Tier 3 work has shipped (see [releases.md](releases.md)).
-The leads below are mechanical follow-ups worth their own item once a concrete need appears.
+**Status:** 1 filed item open — **P47.4** (phased-drive stateless continuations). The leads below
+are mechanical follow-ups worth their own item once a concrete need appears.
+
+### P47.4 — Make in-phase continuations (near-)stateless to cap peak context
+
+Each in-phase continuation appends to a growing `conv` (`internal/cli/chat_phased.go:251`), so every
+re-read of a large file (the ~400-line findings file, the ~210-line analysis) is retained for the
+rest of the phase; peak context is cumulative, not per-turn. Since the `<!-- PENDING -->` files on
+disk are the source of truth, a phase could reset `conv` to just `[system +
+phaseContinuePrompt(pending)]` each turn (the model re-reads only what it needs), capping peak
+context at roughly one phase's reads. This is a stronger, always-on form of P47.2's on-overflow
+reset. Sequence-dependent: only worth building **after** P47.1/P47.2 land and are measured — if
+compaction + on-overflow reset already hold context flat in practice this is redundant; if not,
+it's the structural cap. Measure first.
+
+Priority: Tier 3 — real value but a larger behavioral change that overlaps P47.1/P47.2; build only
+if the cheaper batch items don't hold context flat on a live run.
 
 **Lead — P39.9 residual (repro-gated):** a prefill-latency observability gap remains on the
 native path — the only unresolved sliver of P39.9, tracked as a lead rather than a blocker
@@ -172,6 +224,18 @@ is worth its own item once that boundary exists.
 ---
 
 ## Open Work — Tier 4
+
+### P47.6 — Drive model-selection guidance (mitigation, not a code fix)
+
+The proximate cause of the self-verification looping on the 2026-07-24 run is the `a3b` 3B-active
+"fast" MoE model, which loops more than a steadier/larger model; the `-deep` variant or a larger
+model converges with less token burn. This is a mitigation the P47.1-P47.5 code fixes make
+unnecessary, but it is worth a short note in the threat-model / drive docs (and possibly a startup
+hint when a small MoE is the configured drive model) so users understand the throughput/looping
+tradeoff. No code change required for the core drive.
+
+Priority: Tier 4 — low urgency, doc/guidance only; the code fixes above address the mechanism
+regardless of model. Do **not** gate the P47.x batch on this.
 
 ### P38.8 — External per-phase threat-model wrapper as interim autonomous-build workaround (parked)
 

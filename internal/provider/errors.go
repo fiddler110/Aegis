@@ -229,6 +229,52 @@ var terminalStreamSignals = []string{
 	"malformed",
 }
 
+// contextOverflowSignals mark a terminal error whose cause is the prompt
+// exceeding the model's context window — the class of terminal failure a
+// fresh, smaller context can recover from (P47.2). It is a deliberate subset
+// of terminalStreamSignals: it excludes the size-independent terminal failures
+// (model-not-found, malformed, unsupported, generic invalid-request) that a
+// context reset cannot fix, and adds the P35.2 context-truncation error's own
+// message marker so both the truncated-tool-call and the hard-reject shapes of
+// an overflow are recognized.
+var contextOverflowSignals = []string{
+	"context length",
+	"context window",
+	"context size",
+	"exceeds context",
+	"exceed the context",
+	"exceeded the context",
+	"maximum context",
+	"too many tokens",
+	"prompt is too long",
+	"input is too large",
+	"response truncated at the context limit", // NewContextTruncationError's marker
+}
+
+// IsContextOverflowError reports whether err is a terminal provider error whose
+// cause is the prompt exceeding the model's context window — either the P35.2
+// context-truncation error (NewContextTruncationError) or a mid-stream
+// {"error":...} envelope carrying a context-size signal (NewStreamError). This
+// is the subset of terminal errors a fresh, smaller context can recover from,
+// which is what lets the phased skill drive treat an overflow as a resumable
+// phase reset rather than a fatal abort (P47.2) — as distinct from
+// size-independent terminal failures like model-not-found or a malformed
+// request, where resetting and retrying would only loop. Response-header
+// timeouts (P35.6) are deliberately excluded: their fix is a different lever.
+func IsContextOverflowError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	m := strings.ToLower(apiErr.Message)
+	for _, s := range contextOverflowSignals {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // retryableStreamSignals are substrings marking a transient/infrastructural
 // mid-stream failure that could plausibly succeed on retry.
 var retryableStreamSignals = []string{

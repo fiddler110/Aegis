@@ -18,6 +18,11 @@ type ProviderPatch struct {
 	MaxTokens  int
 	MaxRetries int   // 0 falls back to 4
 	Think      *bool // nil = "~" (provider default)
+	// ContextWindow is the serving context window in tokens. For the ollama
+	// adapter it is sent as num_ctx, overriding the model's Modelfile pin so a
+	// skill-driven run's ~35k-token prompt is not truncated at Ollama's small
+	// default (P35.3). 0 = omit the line (auto-detect at daemon start).
+	ContextWindow int
 }
 
 // PatchGlobalProvider replaces the provider: block in the global config file
@@ -55,6 +60,12 @@ func buildProviderBlock(p ProviderPatch) string {
 		fmt.Fprintf(&b, "  base_url: %q\n", p.BaseURL)
 	}
 	fmt.Fprintf(&b, "  model: %q\n", p.Model)
+	if p.ContextWindow > 0 {
+		b.WriteString("  # Serving context window in tokens (sent to Ollama as num_ctx,\n")
+		b.WriteString("  # overriding the model's Modelfile pin). Sized from the model's\n")
+		b.WriteString("  # detected max; raise for more headroom, lower to reclaim VRAM.\n")
+		fmt.Fprintf(&b, "  context_window: %d\n", p.ContextWindow)
+	}
 	fmt.Fprintf(&b, "  max_tokens: %d\n", p.MaxTokens)
 	fmt.Fprintf(&b, "  max_retries: %d\n", p.MaxRetries)
 	think := "~"
