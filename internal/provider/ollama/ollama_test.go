@@ -370,6 +370,50 @@ func TestWithBaseURLStripsV1Suffix(t *testing.T) {
 	}
 }
 
+// TestRaiseContextWindow is the P47.5(b) guard for the Ollama adapter's runtime
+// num_ctx escalation: RaiseContextWindow raises num_ctx only when the target
+// exceeds the current value (monotonic — never shrinks), and the raised value is
+// what the next Stream sends. This is what lets the phased drive claim more
+// serving-context headroom after an overflow without rebuilding the adapter.
+func TestRaiseContextWindow(t *testing.T) {
+	a := New(WithNumCtx(65536))
+	if a.RaiseContextWindow(32768) {
+		t.Error("raising to a smaller window must be a no-op reporting false")
+	}
+	if a.numCtx != 65536 {
+		t.Errorf("num_ctx must not shrink; got %d", a.numCtx)
+	}
+	if !a.RaiseContextWindow(131072) {
+		t.Error("raising to a larger window must report true")
+	}
+	if a.numCtx != 131072 {
+		t.Errorf("num_ctx = %d, want raised to 131072", a.numCtx)
+	}
+
+	// The raised value is what the next request actually sends.
+	var gotBody wireRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+	a2 := New(WithBaseURL(srv.URL), WithNumCtx(8192))
+	a2.RaiseContextWindow(196608)
+	stream, err := a2.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+	if gotBody.Options == nil || gotBody.Options.NumCtx != 196608 {
+		t.Errorf("escalated num_ctx not sent; got %+v", gotBody.Options)
+	}
+}
+
 func TestStreamSendsOptions(t *testing.T) {
 	var gotBody wireRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -153,7 +153,7 @@ func pythonExe() string {
 // would never terminate), and the mechanical checks re-run afterward, so a
 // review edit that breaks a script check is caught by the normal fix loop.
 func qualityReviewPrompt() string {
-	return "The suite is structurally complete and the mechanical checks pass. Now do ONE final quality-and-sanity review of the finished threat model, reading each file, and fix any problem you find IN PLACE with `edit_file` (do not re-scaffold, do not add `<!-- PENDING -->` markers). Check specifically:\n" +
+	return "The suite is structurally complete and the mechanical checks pass. Now do ONE final quality-and-sanity review of the finished threat model, reading each file, and fix any problem you find IN PLACE with `edit_file` (do not re-scaffold, do not add `<!-- PENDING -->` markers). " + phase6IncrementalEditRule + " Check specifically:\n" +
 		"- Every threat and finding cites concrete evidence — a real `path:line` (or `path` + symbol) that exists in the codebase, not a vague reference like \"the code\" or \"various files\". Fix or remove any ungrounded claim.\n" +
 		"- No filler, placeholder, TODO, \"lorem\", or restated-boilerplate text; each row says something specific to THIS system.\n" +
 		"- Internal consistency: severities match the threat described; each finding's attack vector matches the component's real reachability (e.g. a background/internal-only component is not `AV:N` network-reachable); tiers match their prerequisites; summary-table counts match the actual rows.\n" +
@@ -279,5 +279,18 @@ func shouldSkipQualityPass(runDir string) bool {
 func verifyFixPrompt(failures string) string {
 	return "The suite has no `<!-- PENDING -->` markers left, but the bundled phase-6 verification scripts still FAIL. Fix the exact problems below by editing the affected files in place — do not re-scaffold and do not add new `<!-- PENDING -->` markers — then stop; the run re-verifies automatically:\n\n" +
 		failures +
-		"\n\nEdit the named files with `edit_file` to resolve every failing check now. This is a non-interactive run: make the fixes and do not ask whether to proceed."
+		"\n\nEdit the named files with `edit_file` to resolve every failing check now. " + phase6IncrementalEditRule + " This is a non-interactive run: make the fixes and do not ask whether to proceed."
 }
+
+// phase6IncrementalEditRule carries the P39.14 anti-monolithic-write guardrail
+// (the content-phase prompts' "one section, one edit … a monolithic write is
+// slow and truncates" lesson) into the phase-6 verify-fix and quality prompts
+// (P47.8). Without it the drive model, told only to "resolve every failing
+// check", chose a single whole-file `write_file` of the ~400-line 3-findings.md
+// to fill 15 empty finding bodies at once (2026-07-27, FirewallRiskRater) — the
+// tool-call JSON truncated and overflowed the context. Fixing many sections is
+// exactly when a monolithic rewrite is most tempting and most likely to
+// truncate, so the phase-6 loop needs the same discipline the content phases
+// carry. Pairs with the P47.7 overflow-reset: this reduces how often the
+// overflow fires, P47.7 recovers when it still does.
+const phase6IncrementalEditRule = "Make each fix as a small, targeted `edit_file` — one section or one row per edit; never regenerate a whole file in one call and never `write_file` a suite file (a monolithic write is slow and truncates into a malformed tool call)."

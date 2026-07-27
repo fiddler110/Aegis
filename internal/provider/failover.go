@@ -44,6 +44,13 @@ func WithFailover(primary Adapter, primaryModel string, fallbacks []FallbackTarg
 // switch-over names the specific fallback used.
 func (f *failoverAdapter) Name() string { return f.targets[0].Adapter.Name() }
 
+// Unwrap exposes the primary adapter so capability probes (e.g.
+// provider.RaiseContextWindow) reach the base adapter through this decorator.
+// Escalating only the primary's window is the intended scope: the phased drive
+// runs against the primary, and a fallback target (typically a cloud model with
+// a fixed window) has no runtime-tunable num_ctx anyway.
+func (f *failoverAdapter) Unwrap() Adapter { return f.targets[0].Adapter }
+
 // Stream implements Adapter, trying each target in order until one succeeds.
 func (f *failoverAdapter) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	var lastErr error

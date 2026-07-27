@@ -171,18 +171,23 @@ func fileHasPendingMarker(path string) bool {
 // them before each turn and read iterMutations after, exactly as the generic
 // drive does).
 type phasedDriveState struct {
-	eng           *engine.Engine
-	system        string
-	onEvent       engine.EmitFunc
-	logger        *slog.Logger
-	errOut        io.Writer
-	cwd           string
-	skillName     string
-	skillDir      string
-	taskPrompt    string
-	maxTurns      int
-	iterToolCalls *int
-	iterMutations *int
+	eng        *engine.Engine
+	system     string
+	onEvent    engine.EmitFunc
+	logger     *slog.Logger
+	errOut     io.Writer
+	cwd        string
+	skillName  string
+	skillDir   string
+	taskPrompt string
+	maxTurns   int
+	// escalateWindow raises the serving context window (num_ctx) toward the
+	// model max on a context overflow and reports the new window and whether it
+	// grew (P47.5b). Nil when the provider can't escalate; the overflow paths
+	// then rely on the fresh-context reset alone.
+	escalateWindow func() (int, bool)
+	iterToolCalls  *int
+	iterMutations  *int
 }
 
 // runPhasedSkillDrive drives a phased skill (currently threat-modeling) to
@@ -230,6 +235,10 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 						st.stopMaxTurns(ph, pending)
 						return nil
 					}
+					// P47.5(b): give Ollama more physical headroom before the
+					// reset — best-effort, additive to the reset (the overflowed
+					// prompt is discarded either way).
+					st.tryEscalateWindow(ph.label())
 					st.logger.Warn("phased drive: context overflowed, resetting phase context and retrying",
 						"phase", ph.name, "pending", len(pending), "err", err)
 					fmt.Fprintf(st.errOut, "\n[notice: context overflowed during the %s phase; resetting to a fresh context and resuming from disk (%d file(s) still PENDING)]\n",
@@ -287,6 +296,21 @@ func (st *phasedDriveState) stopMaxTurns(ph skillPhase, pending []string) {
 	fmt.Fprintf(st.errOut, "\n[notice: %s — re-run to resume]\n", msg)
 }
 
+// tryEscalateWindow raises the serving context window toward the model max
+// after a context overflow (P47.5b), logging and printing a notice when it
+// actually grows. A no-op when the drive can't escalate (non-Ollama provider,
+// or num_ctx already at the model max) — the caller's fresh-context reset is the
+// recovery in that case. `where` names the phase or phase-6 step for the notice.
+func (st *phasedDriveState) tryEscalateWindow(where string) {
+	if st.escalateWindow == nil {
+		return
+	}
+	if newWin, raised := st.escalateWindow(); raised {
+		st.logger.Warn("phased drive: escalating serving context window after overflow", "where", where, "num_ctx", newWin)
+		fmt.Fprintf(st.errOut, "\n[notice: raising the serving context window to %d tokens (toward the model max) after a context overflow during %s (P47.5)]\n", newWin, where)
+	}
+}
+
 // freshPhaseConv builds the fresh conversation a phase retries with after a
 // context overflow (P47.2). If the phase has already scaffolded its files
 // (runDir set), it resumes from disk with the in-phase continuation prompt —
@@ -315,6 +339,7 @@ func (st *phasedDriveState) freshPhaseConv(ph skillPhase, runDir string, pending
 // single quality pass, so it always terminates.
 func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error {
 	verifyRounds := 0
+	overflowResets := 0
 	qualityReviewed := false
 	for {
 		failures, ran := verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
@@ -347,11 +372,22 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 				st.logger.Info("phased drive: quality pass already satisfied for unchanged suite, skipping (stamp)", "run_dir", runDir)
 				return nil
 			}
-			qualityReviewed = true
 			st.logger.Info("phased drive: mechanical checks clean, running final quality pass (P38.1)")
 			if err := st.runPhase6Turn(ctx, runDir, qualityReviewPrompt()); err != nil {
-				return err
+				switch st.recoverPhase6Overflow(err, "phase-6 quality pass", &overflowResets) {
+				case overflowRetry:
+					continue // reset to a fresh context and re-run the quality pass
+				case overflowStop:
+					return nil // resumable stop already announced — end the drive cleanly
+				default:
+					return err // a non-overflow engine error is still terminal
+				}
 			}
+			// Mark reviewed only after the pass actually completed — a turn that
+			// overflowed (handled above) did not finish the review, so it must not
+			// be treated as done (P47.7). Otherwise the next clean re-verify would
+			// stamp a suite whose quality pass never ran.
+			qualityReviewed = true
 			continue
 		}
 		if verifyRounds++; verifyRounds > maxVerifyRounds {
@@ -362,9 +398,70 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 		}
 		st.logger.Info("phased drive: verification failed, feeding back for fix", "round", verifyRounds)
 		if err := st.runPhase6Turn(ctx, runDir, verifyFixPrompt(failures)); err != nil {
-			return err
+			switch st.recoverPhase6Overflow(err, "phase-6 verify fix", &overflowResets) {
+			case overflowRetry:
+				verifyRounds-- // an overflow is not a spent fix attempt — don't burn the round on it
+				continue       // reset to a fresh context and re-run verify + fix from disk
+			case overflowStop:
+				return nil // resumable stop already announced — end the drive cleanly
+			default:
+				return err
+			}
 		}
 	}
+}
+
+// maxPhase6OverflowResets bounds the P47.7 phase-6 overflow-reset loop: a
+// context overflow during a verify-fix or quality turn is resumable (the on-disk
+// suite is the source of truth, so a fresh context re-reads it), but only this
+// many times before stopping, so a model that overflows every attempt still
+// terminates rather than looping forever. Sized like maxVerifyRounds — a few
+// resets is generous; more means the phase-6 fill is too large for this
+// model/window even after the P47.5b escalation.
+const maxPhase6OverflowResets = 3
+
+// phase6OverflowAction is recoverPhase6Overflow's verdict for a failed phase-6
+// turn: whether to retry it, stop the drive cleanly, or surface the error.
+type phase6OverflowAction int
+
+const (
+	// overflowNotHandled: the error is not a context overflow — the caller
+	// surfaces it as a terminal engine error.
+	overflowNotHandled phase6OverflowAction = iota
+	// overflowRetry: a recoverable overflow within budget — the caller resets to
+	// a fresh context (implicit in runPhase6Turn) and loops again.
+	overflowRetry
+	// overflowStop: the reset budget is exhausted — a resumable stop notice was
+	// printed and the caller ends the drive cleanly (returns nil).
+	overflowStop
+)
+
+// recoverPhase6Overflow classifies a phase-6 turn error (P47.7). A context
+// overflow during a verify-fix or quality turn is resumable — the on-disk suite
+// is the source of truth, so a fresh context re-reads it — so on an overflow it
+// escalates the window (P47.5b), counts the reset against
+// maxPhase6OverflowResets, and returns overflowRetry (the next loop iteration
+// re-runs the mechanical checks and re-issues the turn; runPhase6Turn always
+// builds a fresh conversation, so the reset is implicit). Once the reset budget
+// is exhausted it prints a resumable stop notice and returns overflowStop. A
+// non-overflow error returns overflowNotHandled so the caller surfaces it. This
+// is the phase-6 parity for the content phases' P47.2 overflow-reset: without it
+// a phase-6 overflow died on the raw `ollama: response truncated at the context
+// limit` with no reset, no verify rounds 2/3, and no quality stamp (2026-07-27,
+// FirewallRiskRater). `where` names the step for the notices.
+func (st *phasedDriveState) recoverPhase6Overflow(err error, where string, resets *int) phase6OverflowAction {
+	if !provider.IsContextOverflowError(err) {
+		return overflowNotHandled
+	}
+	if *resets++; *resets > maxPhase6OverflowResets {
+		st.logger.Warn("phased drive: phase-6 context overflow persists after max resets", "where", where, "resets", maxPhase6OverflowResets)
+		fmt.Fprintf(st.errOut, "\n[notice: %s kept overflowing the context after %d reset(s); stopping with an unverified suite — re-run to resume, or reduce the remaining fill]\n", where, maxPhase6OverflowResets)
+		return overflowStop
+	}
+	st.tryEscalateWindow(where)
+	st.logger.Warn("phased drive: phase-6 context overflowed, resetting to a fresh context and retrying", "where", where, "reset", *resets, "err", err)
+	fmt.Fprintf(st.errOut, "\n[notice: context overflowed during %s; resetting to a fresh context and re-reading the suite from disk (reset %d/%d)]\n", where, *resets, maxPhase6OverflowResets)
+	return overflowRetry
 }
 
 // runPhase6Turn runs one phase-6 turn (a verify fix or the quality pass) in its

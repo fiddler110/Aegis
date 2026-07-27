@@ -94,6 +94,29 @@ func newChatCmd() *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: --skill drives the run to completion via tool calls; disabling provider.think for this run so the model executes the phases instead of simulating them in its reasoning trace (P38.6)]\n")
 			}
 
+			// P47.5(a): a phased --skill drive (threat-modeling) builds a large
+			// per-phase context; the generic configured window is often too
+			// small for it — the 2026-07-24 FirewallRuleAnalyzer run only
+			// converged after a manual AEGIS_PROVIDER_CONTEXT_WINDOW=196608
+			// bump. When the drive is phased and the provider is Ollama-backed,
+			// size the serving window up front to RecommendContextWindow(model
+			// max) if that beats the configured value, so both the num_ctx sent
+			// to Ollama (WithNumCtx below) and the compaction budget get the room
+			// the phased build needs without the manual step. driveModelMax is
+			// kept as the P47.5(b) escalation ceiling for the on-overflow retry.
+			// Done before Build so the sized window flows into the adapter.
+			phasedDrive := skillName != "" && phasePlanFor(skillName) != nil && !linearDriveForced()
+			driveModelMax := 0
+			if phasedDrive {
+				if win, modelMax, ok := recommendPhasedDriveWindow(context.Background(), cfg); ok {
+					driveModelMax = modelMax
+					if win > cfg.Provider.ContextWindow {
+						fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: sizing the serving context window to %d tokens for the phased %s drive (model max %d) — overrides the configured %d so the build has room without a manual AEGIS_PROVIDER_CONTEXT_WINDOW bump (P47.5)]\n", win, skillName, modelMax, cfg.Provider.ContextWindow)
+						cfg.Provider.ContextWindow = win
+					}
+				}
+			}
+
 			adapter, err := providerfactory.Build(cfg, nil)
 			if err != nil {
 				return err
@@ -392,10 +415,34 @@ func newChatCmd() *cobra.Command {
 			if phases := phasePlanFor(skillName); driveToCompletion && phases != nil && !linearDriveForced() {
 				fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: driving %s in phased mode — one bounded fresh context per phase (%d content phases + verify), the in-harness form of P38.8]\n", skillName, len(phases))
 				logger.Info("chat: using phased skill drive (P38.8 in-harness)", "skill", skillName, "phases", len(phases))
+				// P47.5(b): let a phase escalate the serving window toward the
+				// model max on a context overflow. Each call doubles num_ctx
+				// (bounded by the model max) by mutating the live Ollama adapter,
+				// which the next Stream picks up — no engine rebuild. Nil/no-op
+				// when the provider can't escalate (non-Ollama, or already at the
+				// ceiling); the drive then falls back to the P47.2/P47.7
+				// fresh-context reset alone. The compaction budget stays at the
+				// sized window (deliberately conservative — a larger num_ctx only
+				// buys physical headroom against a transient overshoot).
+				var escalateWindow func() (int, bool)
+				if driveModelMax > 0 {
+					curWin := cfg.Provider.ContextWindow
+					escalateWindow = func() (int, bool) {
+						next, grew := nextDriveWindow(curWin, driveModelMax)
+						if !grew {
+							return curWin, false
+						}
+						if provider.RaiseContextWindow(adapter, next) {
+							curWin = next
+							return next, true
+						}
+						return curWin, false
+					}
+				}
 				runErr = runPhasedSkillDrive(ctx, &phasedDriveState{
 					eng: eng, system: conv.System, onEvent: onEvent, logger: logger,
 					errOut: cmd.ErrOrStderr(), cwd: cwd, skillName: skillName, skillDir: skillDir,
-					taskPrompt: taskPrompt, maxTurns: maxTurns,
+					taskPrompt: taskPrompt, maxTurns: maxTurns, escalateWindow: escalateWindow,
 					iterToolCalls: &iterToolCalls, iterMutations: &iterMutations,
 				}, phases)
 			} else {
@@ -624,6 +671,46 @@ func driveCompaction(ctx context.Context, cfg *config.Config, adapter provider.A
 		compOpts.MaxBudget = 0 // explicit skip
 	}
 	return compaction.New(compOpts), ctxWin
+}
+
+// nextDriveWindow returns the next serving-window (num_ctx) size when a phased
+// drive escalates from cur toward the model max on a context overflow (P47.5b):
+// a doubling step, clamped to max, with a jump straight to max once doubling
+// would overshoot. It reports grew=false — cur unchanged — once cur is already
+// at or above the ceiling (or max is unknown), which is what bounds the
+// escalation to a finite number of steps ending at max. A doubling step (rather
+// than a single jump to max) is gentler on GPU memory: it only claims as much
+// KV-cache headroom as each successive overflow proves is needed.
+func nextDriveWindow(cur, max int) (next int, grew bool) {
+	if max <= 0 || cur >= max {
+		return cur, false
+	}
+	next = cur * 2
+	if next > max || next <= 0 {
+		next = max
+	}
+	return next, true
+}
+
+// recommendPhasedDriveWindow resolves, for a phased --skill drive on an
+// Ollama-backed provider, the serving context window to size the run to (P47.5a)
+// and the model's training-context max (the P47.5b escalation ceiling). It
+// recommends ollamainfo.RecommendContextWindow(model max) — half the model max,
+// memory-capped — so the phased build gets the room it needs without the manual
+// AEGIS_PROVIDER_CONTEXT_WINDOW bump the 2026-07-24 run required. ok is false
+// when the provider isn't plausibly Ollama-backed or the server can't be
+// probed, in which case the caller leaves the configured window untouched.
+// Mirrors resolveDriveContextWindow's Ollama-target gate.
+func recommendPhasedDriveWindow(ctx context.Context, cfg *config.Config) (win, modelMax int, ok bool) {
+	p := cfg.Provider
+	if p.Default != "ollama" && (p.Default != "openai" || p.BaseURL == "") {
+		return 0, 0, false
+	}
+	res, detected := ollamainfo.Detect(ctx, ollamainfo.NativeBase(p.BaseURL), p.Model)
+	if !detected {
+		return 0, 0, false
+	}
+	return ollamainfo.RecommendContextWindow(res.ModelMax), res.ModelMax, true
 }
 
 // resolveDriveContextWindow returns the context window the model server will

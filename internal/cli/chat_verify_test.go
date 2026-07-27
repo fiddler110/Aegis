@@ -31,6 +31,29 @@ func TestQualityReviewPrompt(t *testing.T) {
 	}
 }
 
+// TestPhase6PromptsCarryIncrementalEditRule (P47.8) guards that both phase-6
+// prompts carry the anti-monolithic-write guardrail. Without it the drive chose
+// a single whole-file write_file of 3-findings.md to fill 15 empty bodies at
+// once (2026-07-27), which truncated and overflowed the context. Both the
+// verify-fix and quality prompts must forbid a whole-file rewrite / write_file
+// of a suite file, matching the content phases' P39.14 discipline.
+func TestPhase6PromptsCarryIncrementalEditRule(t *testing.T) {
+	prompts := map[string]string{
+		"verifyFix": verifyFixPrompt("$ verify.py <run-dir>\nFAIL x 3-findings.md:1"),
+		"quality":   qualityReviewPrompt(),
+	}
+	for name, p := range prompts {
+		if !strings.Contains(p, phase6IncrementalEditRule) {
+			t.Errorf("%s prompt must carry the P47.8 incremental-edit rule", name)
+		}
+	}
+	for _, want := range []string{"write_file", "whole file", "truncat"} {
+		if !strings.Contains(phase6IncrementalEditRule, want) {
+			t.Errorf("incremental-edit rule should mention %q so the model knows what to avoid", want)
+		}
+	}
+}
+
 // verifySkillOutputs must report ran=false (drive falls back to markers-cleared
 // = done) when there is nothing to verify: no skill, no skill dir, or a skill
 // dir with no verify.py.

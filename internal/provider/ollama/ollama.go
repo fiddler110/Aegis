@@ -79,6 +79,20 @@ func WithNumCtx(n int) Option {
 	}
 }
 
+// RaiseContextWindow raises the per-request num_ctx to n when n exceeds the
+// current value, returning true when it actually grew. It implements
+// provider.ContextWindowRaiser so a driven build can escalate the serving window
+// toward the model's max on a context overflow (P47.5b) instead of aborting.
+// Not safe for concurrent use with Stream — the phased drive only calls it
+// between turns, after a Stream error has returned and before the next Run.
+func (a *Adapter) RaiseContextWindow(n int) bool {
+	if n > a.numCtx {
+		a.numCtx = n
+		return true
+	}
+	return false
+}
+
 // WithKeepAlive sets how long Ollama keeps the model loaded after this
 // request (e.g. "10m", "-1" to pin forever, "0" to unload immediately).
 // Empty (the default) omits the field, leaving Ollama's own default (5m) in
