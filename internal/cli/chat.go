@@ -144,6 +144,33 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
+			// Self-heal stale built-in skills on every run. Both the per-user
+			// <dataDir>/builtin-skills copy and a project's
+			// <cwd>/.aegis/builtin-skills copy are extracted snapshots of the
+			// embedded skills; after a binary upgrade those on-disk copies can
+			// lag what this binary ships (e.g. a fixed verify.py), and nothing
+			// refreshed a skill unless that exact skill was invoked — so a
+			// project that materialized threat-modeling under an older binary
+			// kept running the stale bundled scripts. Reconcile whatever is
+			// already materialized against the embedded content regardless of
+			// which skill (if any) this run uses: overwrite-on-diff, only files
+			// that drifted, only shipped builtins (a user's own bundled skill is
+			// untouched), never creating skills that aren't already present.
+			refreshBuiltins := func(where string, changed []string, rerr error) {
+				if rerr != nil {
+					logger.Warn("chat: refreshing stale built-in skills failed", "where", where, "err", rerr)
+					return
+				}
+				if len(changed) > 0 {
+					logger.Info("chat: refreshed stale built-in skill files to match this binary", "where", where, "count", len(changed), "files", changed)
+					fmt.Fprintf(cmd.ErrOrStderr(), "[notice: refreshed %d stale built-in skill file(s) in the %s to match this binary's embedded copies]\n", len(changed), where)
+				}
+			}
+			dc, de := skills.RefreshDataDirBuiltins(cfg.DataDir)
+			refreshBuiltins("data dir", dc, de)
+			pc, pe := skills.RefreshProjectBuiltins(cwd)
+			refreshBuiltins("project", pc, pe)
+
 			// P38.2: --skill preloads a specific skill for this run. Enable it on
 			// top of config's builtin list (so the `skill` tool and the
 			// <skills_available> index both see it) and materialize the embedded
