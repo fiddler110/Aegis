@@ -8,7 +8,17 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-24 — **P47.3 shipped** (the two large content-phase seeds and the shared
+**Last updated:** 2026-07-27 — **P47.5, P47.7, and P47.8 shipped** (the next three P47.x
+phased-drive stability items: the phased threat-model drive now auto-sizes the Ollama serving window
+to the model's recommended max up front and escalates `num_ctx` toward the model max on a context
+overflow — removing the manual `AEGIS_PROVIDER_CONTEXT_WINDOW` bump the 2026-07-24 run needed
+(**P47.5**); a context overflow during the phase-6 verify/quality remediation loop now resets to a
+fresh context and retries instead of aborting the whole drive on the raw error (**P47.7**, the
+phase-6 parity for the shipped P47.2 content-phase reset); and both phase-6 prompts now carry the
+P39.14 anti-monolithic-write guardrail so the drive stops trying to fill many empty sections with one
+truncating whole-file `write_file` (**P47.8**) — all three from the 2026-07-27 FirewallRiskRater run
+that validated the ec0127c hollow-report checks — see below). Previously, 2026-07-24 —
+**P47.3 shipped** (the two large content-phase seeds and the shared
 in-phase continuation prompt of the phased threat-model drive now explicitly tell the model not to
 re-audit already-filled files or recompute STRIDE/coverage counts by hand to self-check — the exact
 in-phase token-burn that drove both context overflows on the 2026-07-24 FirewallRuleAnalyzer run,
@@ -45,6 +55,49 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P47.5 — right-size the per-phase context window up front and auto-escalate on overflow.** The
+2026-07-24 FirewallRuleAnalyzer run only converged after a manual `AEGIS_PROVIDER_CONTEXT_WINDOW=196608`
+because the generic configured window was too small for the phased build, and a mid-phase overflow was
+terminal. Two levers close that. (a) Up-front sizing: for a phased `--skill` drive on an Ollama-backed
+provider, `recommendPhasedDriveWindow` (`internal/cli/chat.go`) probes the model's training-context max
+and, when `ollamainfo.RecommendContextWindow(modelMax)` beats the configured window, raises
+`cfg.Provider.ContextWindow` *before* the adapter is built — so both the `num_ctx` sent to Ollama and the
+P47.1 compaction budget get the room the phased build needs, with a notice, and no manual step. (b)
+On-overflow escalation: a new optional adapter capability `provider.ContextWindowRaiser`
+(`RaiseContextWindow`, implemented by the native Ollama adapter and reached through the retry/failover
+decorators via `provider.RaiseContextWindow`'s `Unwrap` walk) lets a phase double `num_ctx` toward the
+model max on a context overflow (`nextDriveWindow` — a doubling step, gentler on GPU memory than a jump to
+max), additive to the P47.2/P47.7 fresh-context reset. The compaction budget stays at the sized window
+deliberately — a larger `num_ctx` only buys physical headroom against a transient overshoot. Regression
+tests: `TestNextDriveWindow`, `TestRaiseContextWindow` (ollama, monotonic + actually-sent),
+`TestRaiseContextWindow_UnwrapsDecorators` (provider, unwrap chain), and the non-Ollama sizing gate.
+
+**P47.7 — a phase-6 context overflow resets instead of aborting the drive.** P47.2 made a mid-phase
+overflow a resumable fresh-context reset, but only in the content-phase loop; the phase-6 verify/quality
+loop (`runPhasedVerifyAndQuality`, `internal/cli/chat_verify.go`/`chat_phased.go`) returned the engine
+error straight up, so an overflow during a verify-fix or quality turn aborted the *whole* drive on the raw
+`ollama: response truncated at the context limit … unexpected end of JSON input` — with no reset, no verify
+rounds 2/3, and no `.quality-stamp.json` (observed 2026-07-27, FirewallRiskRater). The fix adds
+`recoverPhase6Overflow`: a context overflow during a phase-6 turn escalates the window (P47.5b), counts the
+reset against a bounded `maxPhase6OverflowResets`, and loops again — the next iteration re-runs the
+mechanical checks and re-issues the turn from a fresh, run-dir-oriented context (`runPhase6Turn` already
+builds a fresh conversation, so the reset is implicit). A non-overflow error is still surfaced as terminal;
+once the reset budget is exhausted it prints a resumable stop notice and ends the drive cleanly. A subtle
+correctness fix rides along: `qualityReviewed` is now set only *after* the quality turn completes, so a
+turn that overflowed mid-review is not mistaken for a finished pass and stamped. Regression-tested by
+`TestRecoverPhase6Overflow` (three-way classification, escalation-per-retry, budget-exhaustion stop) and
+`TestTryEscalateWindow_NilSafe`.
+
+**P47.8 — carry the anti-monolithic-write guardrail into the phase-6 prompts.** The content-phase prompts
+forbid whole-file rewrites (the P39.14 "one section, one edit … a monolithic write truncates" lesson), but
+`verifyFixPrompt` and `qualityReviewPrompt` only said to "resolve every failing check" — so, told to fill 15
+empty finding bodies, the drive chose a single whole-file `write_file` of the ~400-line `3-findings.md`,
+whose tool-call JSON truncated and triggered the P47.7 overflow (2026-07-27). Both phase-6 prompts now carry
+a shared `phase6IncrementalEditRule`: make each fix a small targeted `edit_file` — one section/row per edit,
+never regenerate a whole file, never `write_file` a suite file. Cheap, reusing the existing P39.14 rule; it
+reduces how often the overflow fires while P47.7 recovers when it still does. Regression-tested by
+`TestPhase6PromptsCarryIncrementalEditRule`.
 
 **P47.3 — stop content phases burning context on manual self-verification.** On the 2026-07-24
 FirewallRuleAnalyzer run both context overflows were driven by the same behavior: the model re-reading

@@ -53,6 +53,11 @@ func WithRetry(inner Adapter, policy RetryPolicy, logger *slog.Logger) Adapter {
 // Name implements Adapter.
 func (r *retryAdapter) Name() string { return r.inner.Name() }
 
+// Unwrap exposes the wrapped adapter so capability probes (e.g.
+// provider.RaiseContextWindow) can reach the base adapter through this
+// decorator.
+func (r *retryAdapter) Unwrap() Adapter { return r.inner }
+
 // Stream implements Adapter, retrying transient errors.
 func (r *retryAdapter) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	for attempt := 0; ; attempt++ {

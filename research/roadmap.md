@@ -12,11 +12,11 @@ keep it when adding items.
 ## Status
 
 **Open items:** **P38.1** (Tier 2 umbrella) + the remaining **P47.x phased-drive stability batch**
-(P47.5 · **P47.7** · **P47.8** Tier 2 · P47.4 · **P47.9** Tier 3 · P47.6 · **P47.10** Tier 4) + 2 parked
+(P47.4 · **P47.9** Tier 3 · P47.6 · **P47.10** Tier 4) + 2 parked
 (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
-codex-build track, and the batch items **P47.1** and **P47.2** — has **shipped**; see
-[releases.md](releases.md) for what each one did.
+codex-build track, and the batch items **P47.1**, **P47.2**, **P47.3**, **P47.5**, **P47.7**, and
+**P47.8** — has **shipped**; see [releases.md](releases.md) for what each one did.
 
 **Next batch — P47.x phased-drive stability (filed 2026-07-24):** the 2026-07-24
 FirewallRuleAnalyzer run reached a **verify-clean suite** on `qwen3.6:35b-a3b-fast` (all
@@ -26,19 +26,21 @@ no proactive compaction wired in, so each phase's context grew until Ollama hard
 request (observed 173,816 vs a 131,072 window) and the drive aborted. P47.1-P47.6 make that same
 run succeed in **one unattended invocation**; tackle in number order. Batch head **P47.1** (wire
 proactive compaction into the CLI drive engine), **P47.2** (treat a mid-phase context overflow as a
-resumable phase reset, not a fatal abort), and **P47.3** (stop content phases burning context on
-manual self-verification) have **shipped**; the remaining items are in their tier sections below.
+resumable phase reset, not a fatal abort), **P47.3** (stop content phases burning context on
+manual self-verification), and **P47.5** (auto-size + auto-escalate the per-phase context window)
+have **shipped**; the remaining items are in their tier sections below.
 
 **Batch extension — phase-6 remediation resilience (filed 2026-07-27):** the first live run of the
 ec0127c hollow-report checks + afd6764 self-heal (FirewallRiskRater, `qwen3.6:35b-a3b-fast`)
 confirmed both shipped fixes work — self-heal auto-deployed the new `verify.py` and the checks
 turned a false-passing hollow suite into `12 passed, 2 failed` with file:line. But with the checks
 now correctly failing, the phase-6 verify/quality remediation loop exposed the same class of gaps
-P47.1-P47.3 fixed for content phases, one tier down: it has none of them. **P47.7** (extend the
+P47.1-P47.3 fixed for content phases, one tier down: it had none of them. **P47.7** (extend the
 P47.2 overflow-reset to the phase-6 loop) and **P47.8** (carry the P39.14 anti-monolithic-write
-guardrail into the phase-6 prompts) are the cheap Tier-2 unblock; **P47.9** (route hollow-body
-failures back through the owning content phase) is the Tier-3 structural follow-up; **P47.10**
-records the CLI-only drive-to-completion / TUI `/threat-model` parity question (Tier 4).
+guardrail into the phase-6 prompts) — the cheap Tier-2 unblock — have **shipped** (see
+[releases.md](releases.md)); **P47.9** (route hollow-body failures back through the owning content
+phase) is the Tier-3 structural follow-up; **P47.10** records the CLI-only drive-to-completion / TUI
+`/threat-model` parity question (Tier 4).
 
 **Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body)
 and the 2026-07-23 gpt-oss:20b housekeeping — **P39.10**/**P39.11** are coded, shipped, and
@@ -66,8 +68,9 @@ drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
 
 ## Open Work — Tier 2
 
-**Status:** 4 open — **P38.1** (threat-model conformance umbrella) plus the **P47.5**, **P47.7**,
-and **P47.8** phased-drive stability items (batch items **P47.1**, **P47.2**, and **P47.3** shipped — see [releases.md](releases.md)).
+**Status:** 1 open — **P38.1** (threat-model conformance umbrella). The phased-drive stability
+batch items **P47.1**, **P47.2**, **P47.3**, **P47.5**, **P47.7**, and **P47.8** have all shipped —
+see [releases.md](releases.md).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -159,9 +162,10 @@ implement exactly that.
   attempt (a whole-file `write_file` of the ~400-line `3-findings.md` to fill 15 empty bodies)
   truncated into a malformed tool call → context overflow → drive aborted **uncaught** (raw `ollama:
   response truncated at the context limit` with no `[notice: … resetting]`, no `.quality-stamp.json`,
-  verify rounds 2/3 + the quality pass never ran). Filed as **P47.7** (overflow-reset in phase 6),
-  **P47.8** (guardrail in the phase-6 prompts), **P47.9** (route hollow-body failures to the owning
-  content phase); the CLI-only drive vs TUI `/threat-model` parity noted as **P47.10**.
+  verify rounds 2/3 + the quality pass never ran). Fixed by **P47.7** (overflow-reset in phase 6,
+  **shipped**) and **P47.8** (guardrail in the phase-6 prompts, **shipped**); **P47.9** (route
+  hollow-body failures to the owning content phase) remains the Tier-3 follow-up, and the CLI-only
+  drive vs TUI `/threat-model` parity is noted as **P47.10**.
 
 Reproduce: `cd <fresh target copy>` (must be inside the target — the sandbox rejects reads
 outside the workspace root); run `aegis chat --skill threat-modeling --mode build --yes` — it now
@@ -173,52 +177,6 @@ Priority: Tier 2 — every load-bearing harness fix the re-tests have root-cause
 shipped. This item stays open only as the conformance **umbrella**, closeable once a live
 built-in `--skill` drive is confirmed to reach a verify-clean suite on a local model. Not Tier 1
 because it is live-run verification tracking, not independent build work.
-
-### P47.5 — Right-size and auto-escalate the per-phase context window
-
-The default `provider.context_window: 65536` was too small for the FirewallRuleAnalyzer repo +
-`qwen3.6:35b-a3b-fast`; closure needed a manual `AEGIS_PROVIDER_CONTEXT_WINDOW=196608`. Two cheap
-levers: (a) have the phased drive pick a higher default window via the existing
-`RecommendContextWindow` helper (`internal/cli/chat.go:810`) sized to the model's max, rather than
-inheriting the generic config default; and (b) on a context-truncation error, auto-retry the phase
-once at a larger `num_ctx` (up to the model max) before surfacing the terminal error. (a) gives
-P47.1's compaction room to work; (b) pairs with P47.2's recovery.
-
-Priority: Tier 2 — small, no-dependency sizing win that removes the manual-escalation step; most
-effective alongside P47.1.
-
-### P47.7 — Extend the P47.2 overflow-reset to the phase-6 verify/quality loop
-
-P47.2 made a mid-phase context overflow a resumable fresh-context reset — but only in the
-content-phase loop (`runPhasedSkillDrive`, `internal/cli/chat_phased.go:225`, guarded by
-`provider.IsContextOverflowError`). The phase-6 verify/quality loop has no such guard:
-`runPhasedVerifyAndQuality`/`runPhase6Turn` (`internal/cli/chat_verify.go`) return an engine error
-straight up, so a context overflow during a verify-fix or quality turn aborts the **whole** drive.
-Observed 2026-07-27 (FirewallRiskRater, `qwen3.6:35b-a3b-fast`): a phase-6 fill of the empty
-findings overflowed and the drive died on a raw `ollama: response truncated at the context limit …
-unexpected end of JSON input` with no `[notice: … resetting to a fresh context]`, no reset, no
-verify rounds 2/3, and no `.quality-stamp.json` — whereas the identical overflow in a content phase
-would have reset and resumed from disk. Fix: wrap the `runPhase6Turn` calls in
-`runPhasedVerifyAndQuality` with the same bounded `IsContextOverflowError` handling (fresh context
-re-reads the on-disk suite and re-runs the mechanical checks), counting each retry against a turn
-cap so it still terminates.
-
-Priority: Tier 2 — small mechanical parity fix mirroring shipped P47.2; directly unblocks the
-remediation loop that the shipped hollow-report checks (ec0127c) now correctly trigger.
-
-### P47.8 — Carry the anti-monolithic-write guardrail into the phase-6 fix/quality prompts
-
-The content-phase prompts forbid whole-file rewrites ("one section, one edit … a monolithic write
-is slow and truncates" — the P39.14 lesson), but the phase-6 prompts do not: `verifyFixPrompt`
-(`internal/cli/chat_verify.go:282`) and `qualityReviewPrompt` (`:156`) only say to "edit_file to
-resolve every failing check." With that latitude the drive model chose a single whole-file
-`write_file` of the ~400-line `3-findings.md` to fill 15 empty finding bodies at once (2026-07-27)
-→ truncated tool-call JSON → the P47.7 overflow. Fix: add the incremental-edit guardrail to both
-phase-6 prompts — one section per `edit_file`, never regenerate the whole file, never `write_file`
-a suite file. Cheap, and it pairs with P47.7 (P47.8 reduces how often the overflow fires; P47.7
-recovers when it still does).
-
-Priority: Tier 2 — one-line prompt hardening reusing the existing P39.14 rule; no dependency.
 
 **Lead (not yet filed):** the "accurate refusal, error-shaped" exit-code question for the
 SCA/secrets scanners. P34.6 checked the *language*-targeted tools; nothing has swept the

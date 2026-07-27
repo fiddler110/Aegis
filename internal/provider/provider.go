@@ -198,3 +198,34 @@ type Adapter interface {
 	// the stream.
 	Stream(ctx context.Context, req Request) (<-chan Event, error)
 }
+
+// ContextWindowRaiser is an optional Adapter capability: raise the per-request
+// serving context window (Ollama's num_ctx) at runtime. The native Ollama
+// adapter implements it so a driven build can escalate the window toward the
+// model's max on a context overflow (P47.5b) rather than aborting. Adapters
+// whose window is fixed by the remote model (the cloud providers) do not
+// implement it. Reach it through RaiseContextWindow, which unwraps the retry /
+// failover decorators.
+type ContextWindowRaiser interface {
+	RaiseContextWindow(n int) bool
+}
+
+// RaiseContextWindow raises a's serving context window to n when a — or a base
+// adapter it wraps — supports it and n exceeds the current value, returning true
+// only when the window actually grew. The retry and failover decorators are
+// unwrapped (via Unwrap() Adapter) to reach the base adapter, so a wrapped
+// Ollama adapter still escalates. Returns false for any adapter that can't
+// raise its window, so the caller falls back to its non-escalating path.
+func RaiseContextWindow(a Adapter, n int) bool {
+	for a != nil {
+		if r, ok := a.(ContextWindowRaiser); ok {
+			return r.RaiseContextWindow(n)
+		}
+		u, ok := a.(interface{ Unwrap() Adapter })
+		if !ok {
+			return false
+		}
+		a = u.Unwrap()
+	}
+	return false
+}
