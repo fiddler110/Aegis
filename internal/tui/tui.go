@@ -1365,7 +1365,16 @@ func isStreamLifecycleMsg(msg tea.Msg) bool {
 	return false
 }
 
-func (m model) cycleModeCmd() tea.Cmd {
+// cycleModeCmd advances the permission mode plan→build→auto→plan on shift+tab.
+// It updates m.slash.mode optimistically and synchronously (the pointer
+// receiver mutates the shared dispatcher), then returns the command that
+// persists the change server-side. Advancing locally first is what actually
+// makes shift+tab feel like a cycle: the mode badge reflects the new mode on
+// the very next render instead of waiting on the /mode UpdateSession round-trip,
+// and two quick presses advance two steps rather than both re-reading a mode the
+// in-flight RPC hasn't written back yet. cmdMode re-sets the same value on RPC
+// success (idempotent) and surfaces an error toast on failure.
+func (m *model) cycleModeCmd() tea.Cmd {
 	var next string
 	switch m.slash.mode {
 	case "plan":
@@ -1375,6 +1384,7 @@ func (m model) cycleModeCmd() tea.Cmd {
 	default:
 		next = "plan"
 	}
+	m.slash.mode = next
 	parsed := &commands.ParsedCommand{Name: "mode", Args: []string{next}, Raw: "/mode " + next}
 	return m.handleSlashCommand(parsed)
 }
