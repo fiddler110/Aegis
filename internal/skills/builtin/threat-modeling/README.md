@@ -53,6 +53,31 @@ The skill is embedded via `//go:embed builtin` (recursive; skips `_`-prefixed
 dirs like `__pycache__`, which are never committed). Run scripts from a scratch
 dir or clean up `__pycache__` before committing.
 
+## Driving the build on a local model
+
+The unattended drive is `aegis chat --skill threat-modeling --mode build --yes`;
+for threat-modeling it runs **phased** (each phase in its own fresh context —
+`internal/cli/chat_phased.go`) so peak context stays bounded to one phase. The
+P47.1–P47.5/P47.7/P47.8 stability fixes make the drive converge regardless of
+model, so **no model choice is required for correctness**. But there is a real
+**throughput/looping tradeoff** in *which* local model you point it at:
+
+- A small **active-parameter MoE** run in a "fast" mode (e.g. `a3b`, ~3B active)
+  **loops more** — it spends turns re-auditing files it already filled and
+  recomputing STRIDE/coverage counts by hand — so it burns more tokens and wall
+  time to reach the same verify-clean suite. On the 2026-07-24
+  FirewallRuleAnalyzer run this self-verification looping was the proximate cause
+  of the context growth the stability batch then made resumable.
+- A **steadier or larger** model — the `-deep` variant of the same MoE, or a
+  larger dense model — **converges with less token burn and fewer loops**. The
+  `noSelfVerifyInstruction` woven into the content-phase prompts (P47.3) cuts the
+  looping for every model, but a steadier model needs the guardrail less.
+
+So for the fastest unattended convergence, prefer a `-deep`/larger drive model
+over a small "fast" MoE; the fast MoE still finishes (the code fixes make it
+resumable), it just costs more turns. This is guidance only — there is no code
+gate on the drive model.
+
 ## Next steps / future work
 
 The suite-scripting batch (**P37.1–P37.5**) shipped 2026-07-19; a live dogfood
