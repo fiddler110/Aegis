@@ -31,8 +31,9 @@ const builtinSkillsDirName = "builtin-skills"
 // activation path on every invocation, and a blind overwrite would bump
 // every file's mtime each time, defeating skillsDirSignature's mtime-based
 // Discover cache (P32.7) on every subsequent call in a session.
-func materializeTo(dest string, filter map[string]bool) error {
-	return fs.WalkDir(builtinFS, "builtin", func(path string, d fs.DirEntry, err error) error {
+func materializeTo(dest string, filter map[string]bool) ([]string, error) {
+	var written []string
+	err := fs.WalkDir(builtinFS, "builtin", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -63,8 +64,13 @@ func materializeTo(dest string, filter map[string]bool) error {
 		if existing, err := os.ReadFile(target); err == nil && bytes.Equal(existing, data) {
 			return nil
 		}
-		return os.WriteFile(target, data, 0o644)
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			return err
+		}
+		written = append(written, filepath.ToSlash(rel))
+		return nil
 	})
+	return written, err
 }
 
 // MaterializeBuiltins extracts the embedded built-in skills to
@@ -77,7 +83,8 @@ func MaterializeBuiltins(dataDir string) error {
 	if dataDir == "" {
 		return nil
 	}
-	return materializeTo(filepath.Join(dataDir, builtinSkillsDirName), nil)
+	_, err := materializeTo(filepath.Join(dataDir, builtinSkillsDirName), nil)
+	return err
 }
 
 // MaterializeBuiltinsToProject extracts only the named embedded builtin
@@ -92,7 +99,73 @@ func MaterializeBuiltinsToProject(workDir string, names []string) error {
 	if workDir == "" || len(names) == 0 {
 		return nil
 	}
-	return materializeTo(filepath.Join(workDir, ".aegis", builtinSkillsDirName), enabledSet(names))
+	_, err := materializeTo(filepath.Join(workDir, ".aegis", builtinSkillsDirName), enabledSet(names))
+	return err
+}
+
+// embeddedBuiltinDirNames is the set of top-level directory names under the
+// embedded builtin tree (lowercased) — the canonical roster of shipped
+// built-in skills, keyed exactly the way materializeTo's filter is.
+func embeddedBuiltinDirNames() map[string]bool {
+	out := map[string]bool{}
+	entries, err := builtinFS.ReadDir("builtin")
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			out[strings.ToLower(e.Name())] = true
+		}
+	}
+	return out
+}
+
+// refreshMaterialized reconciles builtin-skill copies ALREADY present under dir
+// against the embedded (compiled-in) content, overwriting any file that has
+// drifted from what this binary ships — a stale copy left by an older binary.
+// Unlike materializeTo with an explicit name filter it neither creates skills
+// that aren't already on disk nor touches a subdirectory that doesn't
+// correspond to a shipped builtin (a user's own bundled skill is left alone).
+// It returns the slash rel-paths it rewrote so the caller can report exactly
+// what was stale. A missing or unreadable dir is a no-op.
+func refreshMaterialized(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil // nothing materialized here yet — nothing to refresh
+	}
+	embedded := embeddedBuiltinDirNames()
+	present := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() && embedded[strings.ToLower(e.Name())] {
+			present[strings.ToLower(e.Name())] = true
+		}
+	}
+	if len(present) == 0 {
+		return nil, nil
+	}
+	return materializeTo(dir, present)
+}
+
+// RefreshDataDirBuiltins refreshes any stale built-in skill already extracted
+// under <dataDir>/builtin-skills against this binary's embedded content. See
+// refreshMaterialized. A blank dataDir is a no-op.
+func RefreshDataDirBuiltins(dataDir string) ([]string, error) {
+	if dataDir == "" {
+		return nil, nil
+	}
+	return refreshMaterialized(filepath.Join(dataDir, builtinSkillsDirName))
+}
+
+// RefreshProjectBuiltins refreshes any stale built-in skill already extracted
+// under <workDir>/.aegis/builtin-skills against this binary's embedded content,
+// so an upgraded binary's fixes (e.g. a corrected verify.py) reach a project on
+// the very next run even when that run doesn't invoke the changed skill. See
+// refreshMaterialized. A blank workDir is a no-op.
+func RefreshProjectBuiltins(workDir string) ([]string, error) {
+	if workDir == "" {
+		return nil, nil
+	}
+	return refreshMaterialized(filepath.Join(workDir, ".aegis", builtinSkillsDirName))
 }
 
 // BuiltinSkill describes one embedded built-in skill for listing purposes

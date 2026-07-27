@@ -103,6 +103,113 @@ func TestMaterializeBuiltinsToProjectPicksUpUpgrade(t *testing.T) {
 	}
 }
 
+// RefreshProjectBuiltins must repair a stale already-materialized skill even
+// though it's given no skill names — the "skill was materialized by an older
+// binary and this run doesn't invoke it" case. It also must REPORT what it
+// rewrote so the caller can surface a notice.
+func TestRefreshProjectBuiltinsRepairsStalePresentSkill(t *testing.T) {
+	workDir := t.TempDir()
+	if err := MaterializeBuiltinsToProject(workDir, []string{"threat-modeling"}); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(workDir, ".aegis", "builtin-skills", "threat-modeling", "verify.py")
+	fresh, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-time.Hour)
+	if err := os.WriteFile(target, []byte("stale verify.py from an old binary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(target, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := RefreshProjectBuiltins(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(fresh) {
+		t.Errorf("stale verify.py should have been restored to the embedded content")
+	}
+	found := false
+	for _, c := range changed {
+		if c == "threat-modeling/verify.py" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected refreshed file list to include threat-modeling/verify.py, got %v", changed)
+	}
+}
+
+// RefreshProjectBuiltins must NOT create a skill that was never materialized —
+// it only reconciles what's already on disk, so an unrelated run doesn't
+// suddenly extract every builtin into the project.
+func TestRefreshProjectBuiltinsDoesNotCreateAbsentSkills(t *testing.T) {
+	workDir := t.TempDir()
+	if err := MaterializeBuiltinsToProject(workDir, []string{"security-audit"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshProjectBuiltins(workDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".aegis", "builtin-skills", "threat-modeling")); !os.IsNotExist(err) {
+		t.Errorf("threat-modeling should NOT be created by a refresh, stat err = %v", err)
+	}
+}
+
+// A no-op refresh of an unchanged suite reports zero rewrites and leaves mtimes
+// stable (so the Discover cache isn't invalidated), and a project with no
+// materialized skills at all is a clean no-op.
+func TestRefreshProjectBuiltinsNoopWhenNothingStale(t *testing.T) {
+	empty := t.TempDir()
+	if changed, err := RefreshProjectBuiltins(empty); err != nil || len(changed) != 0 {
+		t.Errorf("expected clean no-op on a project with no materialized skills, got changed=%v err=%v", changed, err)
+	}
+
+	workDir := t.TempDir()
+	if err := MaterializeBuiltinsToProject(workDir, []string{"security-audit"}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := RefreshProjectBuiltins(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 0 {
+		t.Errorf("expected no rewrites for an up-to-date skill, got %v", changed)
+	}
+}
+
+// A user's own bundled skill sitting under .aegis/builtin-skills (not a shipped
+// builtin) must be left completely untouched by the refresh.
+func TestRefreshProjectBuiltinsLeavesUserContentAlone(t *testing.T) {
+	workDir := t.TempDir()
+	custom := filepath.Join(workDir, ".aegis", "builtin-skills", "my-custom-skill")
+	if err := os.MkdirAll(custom, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("my own skill, hands off\n")
+	if err := os.WriteFile(filepath.Join(custom, "SKILL.md"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := RefreshProjectBuiltins(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 0 {
+		t.Errorf("a non-builtin skill dir should not be refreshed, got %v", changed)
+	}
+	got, err := os.ReadFile(filepath.Join(custom, "SKILL.md"))
+	if err != nil || string(got) != string(body) {
+		t.Errorf("user skill content changed: got %q err %v", string(got), err)
+	}
+}
+
 func TestMaterializeBuiltinsToProjectNoopOnEmptyWorkdirOrNames(t *testing.T) {
 	if err := MaterializeBuiltinsToProject("", []string{"security-audit"}); err != nil {
 		t.Errorf("expected no-op (nil error) on empty workDir, got %v", err)
