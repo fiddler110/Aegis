@@ -42,11 +42,12 @@ guardrail into the phase-6 prompts) — the cheap Tier-2 unblock — have **ship
 phase) is the Tier-3 structural follow-up; **P47.10** records the CLI-only drive-to-completion / TUI
 `/threat-model` parity question (Tier 4).
 
-**Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body)
-and the 2026-07-23 gpt-oss:20b housekeeping — **P39.10**/**P39.11** are coded, shipped, and
-verified live, but still need a releases.md entry and regression tests
-(`scanPendingMarkers`/`suiteFileCount` ignoring a materialized-skill PENDING marker; `chat
---skill` workspace materialization).
+**Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body). The
+2026-07-23 gpt-oss:20b housekeeping is now **closed** — **P39.10**/**P39.11** were already coded,
+shipped, and verified live; as of 2026-07-27 they also have their releases.md entry and regression
+tests (`TestDriveOraclesSkipBuiltinSkillsSubtree` + `TestDriveOraclesSkipRealMaterializedBuiltins`
+cover the oracle skip of a materialized-skill PENDING marker; `chat --skill` workspace materialization
+is covered by `internal/skills/embedded_test.go`).
 
 ---
 
@@ -100,8 +101,9 @@ throughput:
   only under the data dir, outside the sandboxed workspace root, so the model couldn't reach
   `recon.py` (**P39.10**); and the drive's PENDING-marker oracle walked the materialized skeleton
   templates themselves, so it could never reach zero (**P39.11**). Both are coded, shipped on
-  `tier3-batch`, and verified live end-to-end — but still need a releases.md entry and regression
-  tests (see Status above). With the scripts reachable, gpt-oss:20b itself then failed to
+  `tier3-batch`, verified live end-to-end, and — as of 2026-07-27 — documented in releases.md with
+  regression tests (see Status above); this housekeeping is closed. With the scripts reachable,
+  gpt-oss:20b itself then failed to
   converge from small-model path/argument brittleness: mangled script paths, drifting to a typo'd
   run-dir (`.aegit`) mid-build so its fills landed outside the real suite, calls to a
   non-existent `search` tool, and the wrong `--framework` flag.

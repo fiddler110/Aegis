@@ -8,8 +8,13 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-27 — **P47.5, P47.7, and P47.8 shipped** (the next three P47.x
-phased-drive stability items: the phased threat-model drive now auto-sizes the Ollama serving window
+**Last updated:** 2026-07-27 — **P39.10 and P39.11 documented + regression-tested** (backfilling the
+remaining P38.1 debt: the two 2026-07-23 `chat --skill`-CLI fixes that shipped on `tier3-batch` but never
+got a release note or tests — builtin skills now materialize into `<cwd>/.aegis/builtin-skills` so the
+sandboxed file tools can reach `recon.py`/`scaffold.py` (**P39.10**), and the drive-completion oracle
+skips that materialized skill source so its example `<!-- PENDING -->` markers no longer keep the drive
+from ever converging (**P39.11**) — see below). Previously, 2026-07-27 — **P47.5, P47.7, and P47.8
+shipped** (the next three P47.x phased-drive stability items: the phased threat-model drive now auto-sizes the Ollama serving window
 to the model's recommended max up front and escalates `num_ctx` toward the model max on a context
 overflow — removing the manual `AEGIS_PROVIDER_CONTEXT_WINDOW` bump the 2026-07-24 run needed
 (**P47.5**); a context overflow during the phase-6 verify/quality remediation loop now resets to a
@@ -155,6 +160,35 @@ the P38.8 phased drive reuse that one engine, so both gain the defense. Extracte
 regression test (`chat_compaction_test.go`) can assert the CLI path keeps compaction enabled (non-zero window
 + non-nil compactor) and can't silently diverge from the daemon again. Head of the P47.x phased-drive
 stability batch; on its own it would have prevented both aborts on the 2026-07-24 run.
+
+**P39.10 / P39.11 — `chat --skill` workspace materialization + drive-oracle skip (from the P38.1
+gpt-oss:20b re-test).** The 2026-07-23 gpt-oss:20b run died *before* model capability was tested, on
+two `chat --skill`-CLI bugs that both shipped on `tier3-batch` and were verified live end-to-end; this
+entry backfills the release note and the regression tests that were the remaining P38.1 debt.
+
+- **P39.10 — materialize enabled builtin skills into the workspace, not just the data dir**
+  (`internal/cli/chat.go`, `skills.MaterializeBuiltinsToProject`). `aegis chat` runs in-process and only
+  extracted the embedded builtin skills to `<dataDir>/builtin-skills`, which is *outside* the sandboxed
+  workspace root — so the file tools (confined to `cwd`) rejected reading a skill's bundled scripts, and
+  the model couldn't reach `recon.py`/`scaffold.py` to start the build. The CLI now mirrors the daemon and
+  also materializes the enabled builtins into `<cwd>/.aegis/builtin-skills`, so the `<skill_assets>`
+  manifest resolves to a workspace-relative path the file tools accept and `skills.Load` prefers the
+  project copy. Covered by `internal/skills/embedded_test.go`
+  (`TestMaterializeBuiltinsToProjectPlacesAssetsReachableByReadFile` and siblings).
+- **P39.11 — the drive-completion oracle skips the materialized skill source**
+  (`internal/cli/chat.go`, `scanPendingMarkers`/`suiteFileCount`). With P39.10 placing the skill's own
+  skeleton/reference assets under `<cwd>/.aegis/builtin-skills`, those files carry the skill's *example*
+  `<!-- PENDING: … -->` markers — so the PENDING-marker completion oracle walked the skeleton templates
+  and could never reach zero (the drive never converged, phase-6 verify never fired), and the P38.6
+  fabricated-success floor check counted skill source as build output. Both walks now `SkipDir` the
+  `builtin-skills` subtree (`pendingSkipDir`, mirroring `skills.builtinSkillsDirName`). Regression tests
+  `TestDriveOraclesSkipBuiltinSkillsSubtree` (synthetic) and `TestDriveOraclesSkipRealMaterializedBuiltins`
+  (drives the real `MaterializeBuiltinsToProject` output, so a dir rename or a skeleton change that
+  reintroduced live markers fails the test) in `internal/cli/chat_drive_test.go`.
+
+With the scripts reachable, gpt-oss:20b itself then failed to converge from small-model
+path/argument brittleness (mangled script paths, a typo'd run-dir, a non-existent `search` tool, the
+wrong `--framework` flag) — a model-competence limit, not a harness bug, and separate from these two fixes.
 
 **P39.12 / P39.13 / P39.14 / P39.15 — threat-model drive robustness (from the P38.1 full-stack test).**
 The 2026-07-24 full-stack test drove the built-in `aegis chat --skill threat-modeling` against a lean copy of

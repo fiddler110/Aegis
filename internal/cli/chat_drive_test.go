@@ -9,6 +9,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/skills"
 )
 
 // scanPendingMarkers is the completion oracle for P38.2 drive-to-completion:
@@ -93,6 +94,81 @@ func TestSuiteFileCount(t *testing.T) {
 	write("security/threat-model/run/scratch.bin", "ignored") // non-suite ext
 	if n := suiteFileCount(root); n != 3 {
 		t.Fatalf("populated tree: got %d, want 3", n)
+	}
+}
+
+// P39.11: a project that ran `chat --skill` has the builtin skill materialized
+// under <cwd>/.aegis/builtin-skills (P39.10), and its skeleton/reference assets
+// carry the skill's own example `<!-- PENDING -->` markers. Both drive oracles
+// must skip that subtree: otherwise scanPendingMarkers never empties (the drive
+// never converges and the phase-6 verify never fires) and suiteFileCount counts
+// skill source as build output, defeating the P38.6 fabricated-success floor.
+func TestDriveOraclesSkipBuiltinSkillsSubtree(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The real build output — an unresolved section the drive must still see.
+	write("security/threat-model/run/3-findings.md", "# Findings\n<!-- PENDING: finding-1 -->\n")
+	// Materialized skill source — carries example markers that are NOT work.
+	write("builtin-skills/threat-modeling/references/skeletons/skeleton-stride.md", "# Skeleton\n<!-- PENDING: components -->\n")
+	write("builtin-skills/threat-modeling/SKILL.md", "skill body\n<!-- PENDING: example -->\n")
+
+	got := scanPendingMarkers(root)
+	want := []string{"security/threat-model/run/3-findings.md"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("scanPendingMarkers must skip builtin-skills:\n got  %v\n want %v", got, want)
+	}
+	if n := suiteFileCount(root); n != 1 {
+		t.Fatalf("suiteFileCount must skip builtin-skills: got %d, want 1 (the findings file only)", n)
+	}
+}
+
+// P39.10 + P39.11 end-to-end against the *real* embedded skill: `chat --skill`
+// materializes the builtin into <cwd>/.aegis/builtin-skills (P39.10) so the
+// sandboxed file tools can reach recon.py/scaffold.py, and those materialized
+// skeletons ship live `<!-- PENDING -->` example markers that the oracles must
+// skip (P39.11). Driving the actual skills.MaterializeBuiltinsToProject output
+// couples both fixes: renaming the builtin-skills dir (drifting pendingSkipDir
+// from skills.builtinSkillsDirName) or reintroducing markers the oracle can see
+// would fail here.
+func TestDriveOraclesSkipRealMaterializedBuiltins(t *testing.T) {
+	work := t.TempDir()
+	if err := skills.MaterializeBuiltinsToProject(work, []string{"threat-modeling"}); err != nil {
+		t.Fatalf("materialize builtin into project: %v", err)
+	}
+	aegisDir := filepath.Join(work, ".aegis")
+
+	// Guard the guard: the materialization must actually have written a
+	// marker-bearing file, or the skip below proves nothing.
+	sawMarker := false
+	_ = filepath.WalkDir(aegisDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if data, err := os.ReadFile(p); err == nil && strings.Contains(string(data), "<!-- PENDING") {
+			sawMarker = true
+		}
+		return nil
+	})
+	if !sawMarker {
+		t.Fatal("expected the materialized builtin skill to carry example <!-- PENDING --> markers; test can't confirm the skip")
+	}
+
+	// The only thing under .aegis is skipped skill source, so both oracles read
+	// it as an empty (not-yet-started) suite.
+	if h := scanPendingMarkers(aegisDir); len(h) != 0 {
+		t.Fatalf("materialized builtin markers leaked into the drive completion oracle: %v", h)
+	}
+	if n := suiteFileCount(aegisDir); n != 0 {
+		t.Fatalf("materialized builtin files counted as suite output: got %d, want 0", n)
 	}
 }
 
