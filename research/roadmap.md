@@ -12,12 +12,12 @@ keep it when adding items.
 ## Status
 
 **Open items:** **P38.1** (Tier 2 umbrella) + the
-remaining **P47.x phased-drive stability batch** (P47.4 · **P47.9** Tier 3 · P47.6 · **P47.10**
-Tier 4) + 2 parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
+remaining **P47.x phased-drive stability batch** (P47.4 · **P47.9** Tier 3 · **P47.10** Tier 4) + 2
+parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
-codex-build track, **P48.1** (config-test hermeticity), and the batch items **P47.1**, **P47.2**,
-**P47.3**, **P47.5**, **P47.7**, and **P47.8** — has **shipped**; see [releases.md](releases.md) for
-what each one did.
+codex-build track, **P48.1** (config-test hermeticity), **P47.6** (drive model-selection guidance,
+doc-only), and the batch items **P47.1**, **P47.2**, **P47.3**, **P47.5**, **P47.7**, and **P47.8** —
+has **shipped**; see [releases.md](releases.md) for what each one did.
 
 **Next batch — P47.x phased-drive stability (filed 2026-07-24):** the 2026-07-24
 FirewallRuleAnalyzer run reached a **verify-clean suite** on `qwen3.6:35b-a3b-fast` (all
@@ -267,17 +267,21 @@ is worth its own item once that boundary exists.
 
 ## Open Work — Tier 4
 
-### P47.6 — Drive model-selection guidance (mitigation, not a code fix)
+### P47.6 — Drive model-selection guidance (mitigation, not a code fix) — SHIPPED 2026-07-27 (doc note)
 
 The proximate cause of the self-verification looping on the 2026-07-24 run is the `a3b` 3B-active
 "fast" MoE model, which loops more than a steadier/larger model; the `-deep` variant or a larger
-model converges with less token burn. This is a mitigation the P47.1-P47.5 code fixes make
-unnecessary, but it is worth a short note in the threat-model / drive docs (and possibly a startup
-hint when a small MoE is the configured drive model) so users understand the throughput/looping
-tradeoff. No code change required for the core drive.
+model converges with less token burn. **Doc note shipped 2026-07-27:** a "Driving the build on a
+local model" section in `internal/skills/builtin/threat-modeling/README.md` documents the
+throughput/looping tradeoff (prefer a `-deep`/larger drive model over a small "fast" MoE for
+fastest unattended convergence; the fast MoE still finishes — the P47.1-P47.8 code fixes make it
+resumable — it just costs more turns). **Optional residual (not built):** a startup hint when a small
+MoE is the configured drive model — deferred as speculative until a user actually hits the tradeoff,
+since the doc note is the primary deliverable and the code fixes address the mechanism regardless.
 
 Priority: Tier 4 — low urgency, doc/guidance only; the code fixes above address the mechanism
-regardless of model. Do **not** gate the P47.x batch on this.
+regardless of model. The doc note is done; the optional startup hint stays a lead. Did **not** gate
+the P47.x batch.
 
 ### P47.10 — CLI/TUI drive-to-completion parity for `/threat-model`
 

@@ -8,7 +8,12 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-27 — **P48.1 shipped** (config-test hermeticity: four `Load()`-based tests in
+**Last updated:** 2026-07-27 — **P47.6 shipped** (drive model-selection guidance, doc-only: a new
+"Driving the build on a local model" section in `internal/skills/builtin/threat-modeling/README.md`
+documents the throughput/looping tradeoff — a small "fast" active-parameter MoE like `a3b` loops more
+on self-verification and costs more turns than a steadier `-deep`/larger model, though both now finish
+since the P47.1-P47.8 code fixes made the drive resumable regardless of model; the optional startup-hint
+half of the item is deferred as speculative — see below). Previously, 2026-07-27 — **P48.1 shipped** (config-test hermeticity: four `Load()`-based tests in
 `internal/config/config_test.go` now call `redirectConfigDir(t)` so they assert built-in defaults / env
 overrides against an empty temp config dir instead of the developer's real `~/.config/aegis/config.yaml` —
 fixing a standing local failure of `TestOutputGuardDefaults` on a machine that disables the output guard,
@@ -65,6 +70,22 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P47.6 — drive model-selection guidance (doc-only).** The self-verification looping that drove the
+context growth on the 2026-07-24 FirewallRuleAnalyzer run traced proximately to the drive model: a
+small "fast" active-parameter MoE (`a3b`, ~3B active) loops more — re-auditing already-filled files
+and recomputing STRIDE/coverage counts by hand — than a steadier `-deep` variant or a larger dense
+model, so it burns more turns and wall time to reach the same verify-clean suite. The P47.1-P47.8 code
+fixes make the drive converge *regardless* of model (proactive compaction, on-overflow phase reset,
+window auto-escalation, the `noSelfVerifyInstruction` guardrail, phase-6 overflow recovery), so this is
+a throughput/looping mitigation, not a correctness gate. Shipped as a "Driving the build on a local
+model" section in `internal/skills/builtin/threat-modeling/README.md` — the natural home because it is
+guidance for the *user* choosing which model to point the drive at (the driving model can't reselect
+itself), not skill instructions the model reads. The optional second half of the item — a startup hint
+when a small MoE is the configured drive model — is deferred as speculative until a user actually hits
+the tradeoff; the doc note is the primary deliverable, and the code fixes address the mechanism for
+every model. No product code; README lives under the recursive `//go:embed builtin` pattern, so
+`go test ./internal/skills/...` still passes.
 
 **P48.1 — isolate config tests from the developer's real `~/.config/aegis/config.yaml`.**
 `TestOutputGuardDefaults` called `config.Load()` without the `redirectConfigDir(t)` isolation its sibling
