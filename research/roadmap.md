@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-24
+**Last updated:** 2026-07-27
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -12,7 +12,7 @@ keep it when adding items.
 ## Status
 
 **Open items:** **P38.1** (Tier 2 umbrella) + the remaining **P47.x phased-drive stability batch**
-(P47.5 Tier 2 · P47.4 Tier 3 · P47.6 Tier 4) + 2 parked
+(P47.5 · **P47.7** · **P47.8** Tier 2 · P47.4 · **P47.9** Tier 3 · P47.6 · **P47.10** Tier 4) + 2 parked
 (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
 codex-build track, and the batch items **P47.1** and **P47.2** — has **shipped**; see
@@ -28,6 +28,17 @@ run succeed in **one unattended invocation**; tackle in number order. Batch head
 proactive compaction into the CLI drive engine), **P47.2** (treat a mid-phase context overflow as a
 resumable phase reset, not a fatal abort), and **P47.3** (stop content phases burning context on
 manual self-verification) have **shipped**; the remaining items are in their tier sections below.
+
+**Batch extension — phase-6 remediation resilience (filed 2026-07-27):** the first live run of the
+ec0127c hollow-report checks + afd6764 self-heal (FirewallRiskRater, `qwen3.6:35b-a3b-fast`)
+confirmed both shipped fixes work — self-heal auto-deployed the new `verify.py` and the checks
+turned a false-passing hollow suite into `12 passed, 2 failed` with file:line. But with the checks
+now correctly failing, the phase-6 verify/quality remediation loop exposed the same class of gaps
+P47.1-P47.3 fixed for content phases, one tier down: it has none of them. **P47.7** (extend the
+P47.2 overflow-reset to the phase-6 loop) and **P47.8** (carry the P39.14 anti-monolithic-write
+guardrail into the phase-6 prompts) are the cheap Tier-2 unblock; **P47.9** (route hollow-body
+failures back through the owning content phase) is the Tier-3 structural follow-up; **P47.10**
+records the CLI-only drive-to-completion / TUI `/threat-model` parity question (Tier 4).
 
 **Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body)
 and the 2026-07-23 gpt-oss:20b housekeeping — **P39.10**/**P39.11** are coded, shipped, and
@@ -55,8 +66,8 @@ drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
 
 ## Open Work — Tier 2
 
-**Status:** 2 open — **P38.1** (threat-model conformance umbrella) plus the **P47.5**
-phased-drive stability item (batch items **P47.1**, **P47.2**, and **P47.3** shipped — see [releases.md](releases.md)).
+**Status:** 4 open — **P38.1** (threat-model conformance umbrella) plus the **P47.5**, **P47.7**,
+and **P47.8** phased-drive stability items (batch items **P47.1**, **P47.2**, and **P47.3** shipped — see [releases.md](releases.md)).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -135,6 +146,23 @@ implement exactly that.
   stability batch** (P47.1-P47.6): single-invocation stability is now the bar, distinct from the
   mechanism closure already demonstrated here.
 
+- **2026-07-27, qwen3.6:35b-a3b-fast vs FirewallRiskRater (hollow-report checks + self-heal,
+  validated; phase-6 gap found):** first live run of the ec0127c hollow-report checks + afd6764
+  self-heal, against a resumed suite whose `<!-- PENDING -->` markers were already deleted but whose
+  finding bodies were empty. **Confirmed working:** self-heal auto-refreshed the stale project
+  `verify.py` on launch (two `refreshed 1 stale built-in skill file(s)` notices — data dir +
+  project), the three new checks turned the previously false-passing hollow suite (`11 passed, 0
+  failed` on the old verifier) into `12 passed, 2 failed` with exact file:line, and the drive fixed
+  the `no-duplicate-header-rows` failure live. **New gap:** with the checks now correctly failing,
+  the phase-6 verify/quality remediation loop had to fix them — and it lacks the P47.2 overflow-reset
+  and the P39.14 anti-monolithic-write guardrail the content phases carry, so the first big fill
+  attempt (a whole-file `write_file` of the ~400-line `3-findings.md` to fill 15 empty bodies)
+  truncated into a malformed tool call → context overflow → drive aborted **uncaught** (raw `ollama:
+  response truncated at the context limit` with no `[notice: … resetting]`, no `.quality-stamp.json`,
+  verify rounds 2/3 + the quality pass never ran). Filed as **P47.7** (overflow-reset in phase 6),
+  **P47.8** (guardrail in the phase-6 prompts), **P47.9** (route hollow-body failures to the owning
+  content phase); the CLI-only drive vs TUI `/threat-model` parity noted as **P47.10**.
+
 Reproduce: `cd <fresh target copy>` (must be inside the target — the sandbox rejects reads
 outside the workspace root); run `aegis chat --skill threat-modeling --mode build --yes` — it now
 prints a `phased mode` notice and resets context each phase. Closure condition: the real suite's
@@ -159,6 +187,39 @@ P47.1's compaction room to work; (b) pairs with P47.2's recovery.
 Priority: Tier 2 — small, no-dependency sizing win that removes the manual-escalation step; most
 effective alongside P47.1.
 
+### P47.7 — Extend the P47.2 overflow-reset to the phase-6 verify/quality loop
+
+P47.2 made a mid-phase context overflow a resumable fresh-context reset — but only in the
+content-phase loop (`runPhasedSkillDrive`, `internal/cli/chat_phased.go:225`, guarded by
+`provider.IsContextOverflowError`). The phase-6 verify/quality loop has no such guard:
+`runPhasedVerifyAndQuality`/`runPhase6Turn` (`internal/cli/chat_verify.go`) return an engine error
+straight up, so a context overflow during a verify-fix or quality turn aborts the **whole** drive.
+Observed 2026-07-27 (FirewallRiskRater, `qwen3.6:35b-a3b-fast`): a phase-6 fill of the empty
+findings overflowed and the drive died on a raw `ollama: response truncated at the context limit …
+unexpected end of JSON input` with no `[notice: … resetting to a fresh context]`, no reset, no
+verify rounds 2/3, and no `.quality-stamp.json` — whereas the identical overflow in a content phase
+would have reset and resumed from disk. Fix: wrap the `runPhase6Turn` calls in
+`runPhasedVerifyAndQuality` with the same bounded `IsContextOverflowError` handling (fresh context
+re-reads the on-disk suite and re-runs the mechanical checks), counting each retry against a turn
+cap so it still terminates.
+
+Priority: Tier 2 — small mechanical parity fix mirroring shipped P47.2; directly unblocks the
+remediation loop that the shipped hollow-report checks (ec0127c) now correctly trigger.
+
+### P47.8 — Carry the anti-monolithic-write guardrail into the phase-6 fix/quality prompts
+
+The content-phase prompts forbid whole-file rewrites ("one section, one edit … a monolithic write
+is slow and truncates" — the P39.14 lesson), but the phase-6 prompts do not: `verifyFixPrompt`
+(`internal/cli/chat_verify.go:282`) and `qualityReviewPrompt` (`:156`) only say to "edit_file to
+resolve every failing check." With that latitude the drive model chose a single whole-file
+`write_file` of the ~400-line `3-findings.md` to fill 15 empty finding bodies at once (2026-07-27)
+→ truncated tool-call JSON → the P47.7 overflow. Fix: add the incremental-edit guardrail to both
+phase-6 prompts — one section per `edit_file`, never regenerate the whole file, never `write_file`
+a suite file. Cheap, and it pairs with P47.7 (P47.8 reduces how often the overflow fires; P47.7
+recovers when it still does).
+
+Priority: Tier 2 — one-line prompt hardening reusing the existing P39.14 rule; no dependency.
+
 **Lead (not yet filed):** the "accurate refusal, error-shaped" exit-code question for the
 SCA/secrets scanners. P34.6 checked the *language*-targeted tools; nothing has swept the
 SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I broke". No
@@ -168,8 +229,9 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status:** 1 filed item open — **P47.4** (phased-drive stateless continuations). The leads below
-are mechanical follow-ups worth their own item once a concrete need appears.
+**Status:** 2 filed items open — **P47.4** (phased-drive stateless continuations) and **P47.9**
+(route hollow-body failures back through the owning content phase). The leads below are mechanical
+follow-ups worth their own item once a concrete need appears.
 
 ### P47.4 — Make in-phase continuations (near-)stateless to cap peak context
 
@@ -185,6 +247,24 @@ it's the structural cap. Measure first.
 
 Priority: Tier 3 — real value but a larger behavioral change that overlaps P47.1/P47.2; build only
 if the cheaper batch items don't hold context flat on a live run.
+
+### P47.9 — Route hollow-body failures back through the owning content phase
+
+When a run resumes a suite whose `<!-- PENDING -->` markers were deleted but whose prose bodies are
+empty — the exact case the shipped `finding-bodies-nonempty` check (ec0127c) now catches — the
+phased drive marks every content phase "complete" by the marker oracle (`skillPhase.complete`) and
+jumps straight to phase 6, so **all** remediation lands on the bounded phase-6 fresh-context rounds:
+filling ~60 empty sections across 15 findings plus reconciling the coverage table. That is too much
+substantive authoring for one bounded loop on a slow local model (observed 2026-07-27: it never
+converged, and the single large fill attempt triggered the P47.7/P47.8 overflow). A content-substance
+verify failure (`finding-bodies-nonempty`, and by extension the coverage-consistency check) should
+re-open the phase that **owns** the failing file — findings — whose per-phase prompt already frames
+the authoring task correctly and carries the incremental-edit guardrail, rather than being patched
+in the generic verify-fix turn. Sequence-dependent: measure whether P47.7 + P47.8 alone let phase 6
+converge on a hollow resume before building the re-entry routing.
+
+Priority: Tier 3 — larger behavioral change (couples a verify failure to phase re-entry, not just a
+fix prompt); build only if P47.7 + P47.8 don't let the phase-6 loop converge on a hollow resume.
 
 **Lead — P39.9 residual (repro-gated):** a prefill-latency observability gap remains on the
 native path — the only unresolved sliver of P39.9, tracked as a lead rather than a blocker
@@ -236,6 +316,23 @@ tradeoff. No code change required for the core drive.
 
 Priority: Tier 4 — low urgency, doc/guidance only; the code fixes above address the mechanism
 regardless of model. Do **not** gate the P47.x batch on this.
+
+### P47.10 — CLI/TUI drive-to-completion parity for `/threat-model`
+
+The phased drive-to-completion lives only in the CLI: `runPhasedSkillDrive` (`internal/cli`) auto-
+continues while `<!-- PENDING -->` markers remain, resets context per phase, and runs the phase-6
+verify/quality pass. The TUI `/threat-model` (`cmdThreatModel`, `internal/tui/slash.go:990`) instead
+injects a single `skillTaskMessage` (skill body + task) into the normal interactive loop and stops
+at the model's first yield — no PENDING oracle, no phased reset, no auto verify/quality. So the two
+surfaces diverge: `aegis chat --skill threat-modeling` finishes unattended, while `/threat-model`
+needs the user to keep nudging. This may be intentional (an interactive user is present to steer),
+so the item is to **decide**, not assume: either (a) wire the phased drive behind `/threat-model`
+(likely opt-in, e.g. `/threat-model --auto`, since a TUI user may want to review between phases), or
+(b) document the difference in `/help` and the skill docs so users know `chat --skill` is the
+unattended path. No code until the design call is made.
+
+Priority: Tier 4 — parity/UX question, not a robustness bug, and possibly intentional; record and
+decide before building. Do not gate the P47.x code batch on it.
 
 ### P38.8 — External per-phase threat-model wrapper as interim autonomous-build workaround (parked)
 
