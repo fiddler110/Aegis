@@ -186,6 +186,7 @@ mcp:
 // the daemon resource-ceiling keys must be settable via AEGIS_SERVER_* env
 // vars the same way server.addr already is.
 func TestEnvOverrideServerLimits(t *testing.T) {
+	redirectConfigDir(t) // hermetic: don't let the dev's real config leak into the asserted keys
 	t.Setenv("AEGIS_SERVER_MAX_CONCURRENT_RUNS", "4")
 	t.Setenv("AEGIS_SERVER_MAX_RUN_DURATION_SEC", "600")
 	t.Setenv("AEGIS_SERVER_SSE_BUFFER_SIZE", "64")
@@ -227,6 +228,7 @@ func TestEnvOverrideServerTLS(t *testing.T) {
 }
 
 func TestEnvOverride(t *testing.T) {
+	redirectConfigDir(t) // hermetic: assert the env override, not a leaked ~/.config value
 	t.Setenv("AEGIS_PROVIDER_MODEL", "claude-sonnet-4-6")
 	t.Setenv("AEGIS_PERMISSION_MODE", "build")
 
@@ -243,6 +245,7 @@ func TestEnvOverride(t *testing.T) {
 }
 
 func TestEnvBaseURL(t *testing.T) {
+	redirectConfigDir(t) // hermetic: assert the env override, not a leaked ~/.config value
 	t.Setenv("AEGIS_PROVIDER_DEFAULT", "openai")
 	t.Setenv("AEGIS_PROVIDER_BASE_URL", "http://localhost:11434/v1")
 	t.Setenv("OPENAI_API_KEY", "test-key")
@@ -287,6 +290,7 @@ func TestDefaultDataDir(t *testing.T) {
 }
 
 func TestOutputGuardDefaults(t *testing.T) {
+	redirectConfigDir(t) // assert the built-in default, not the dev's ~/.config/aegis/config.yaml
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
