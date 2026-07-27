@@ -11,12 +11,13 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** **P38.1** (Tier 2 umbrella) + **P48.1** (Tier 2, config-test hermeticity) + the
+**Open items:** **P38.1** (Tier 2 umbrella) + the
 remaining **P47.x phased-drive stability batch** (P47.4 · **P47.9** Tier 3 · P47.6 · **P47.10**
 Tier 4) + 2 parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
-codex-build track, and the batch items **P47.1**, **P47.2**, **P47.3**, **P47.5**, **P47.7**, and
-**P47.8** — has **shipped**; see [releases.md](releases.md) for what each one did.
+codex-build track, **P48.1** (config-test hermeticity), and the batch items **P47.1**, **P47.2**,
+**P47.3**, **P47.5**, **P47.7**, and **P47.8** — has **shipped**; see [releases.md](releases.md) for
+what each one did.
 
 **Next batch — P47.x phased-drive stability (filed 2026-07-24):** the 2026-07-24
 FirewallRuleAnalyzer run reached a **verify-clean suite** on `qwen3.6:35b-a3b-fast` (all
@@ -69,28 +70,10 @@ drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
 
 ## Open Work — Tier 2
 
-**Status:** 2 open — **P38.1** (threat-model conformance umbrella) and **P48.1** (config-test
-hermeticity). The phased-drive stability batch items **P47.1**, **P47.2**, **P47.3**, **P47.5**,
-**P47.7**, and **P47.8** have all shipped — see [releases.md](releases.md).
-
-### P48.1 — Isolate config tests from the developer's real `~/.config/aegis/config.yaml`
-
-`TestOutputGuardDefaults` (`internal/config/config_test.go`) calls `config.Load()` **without** the
-`redirectConfigDir(t)` isolation its sibling tests use, so it reads the developer's real
-`~/.config/aegis/config.yaml`. On a machine whose config disables the output guard
-(`output_guard.enabled: false`, the common local setting) the test fails its "defaults to true"
-assertion — `Load()` correctly applied the user layer, but the test meant to check the *built-in
-default*. It passes in CI only because CI has no user config. Same latent gap in three sibling
-`Load()`-callers that happen to pass today because an env override dominates the leaked user value:
-`TestEnvOverride`, `TestEnvBaseURL`, `TestEnvOverrideServerLimits`. Fix: add `redirectConfigDir(t)`
-(which already redirects `HOME`/`XDG_CONFIG_HOME`/`APPDATA` to an empty temp dir) as the first line
-of each, so every `Load()`-based config test is hermetic regardless of the developer's environment.
-One-line-per-test change; no product code. First surfaced 2026-07-27 as a standing local failure
-alongside the now-fixed `TestTrustRevoke`.
-
-Priority: Tier 2 — cheap, self-contained test-hygiene hardening, no dependency. Low urgency (green
-in CI), but it makes `go test ./...` reliable on a customized dev machine and removes a latent trap
-for the three tests that only pass by env-override luck.
+**Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
+tracking rather than independent build work. The self-contained batch items **P47.1**, **P47.2**,
+**P47.3**, **P47.5**, **P47.7**, **P47.8**, and **P48.1** (config-test hermeticity) have all shipped —
+see [releases.md](releases.md).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 

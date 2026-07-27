@@ -8,7 +8,12 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-27 — **P39.10 and P39.11 documented + regression-tested** (backfilling the
+**Last updated:** 2026-07-27 — **P48.1 shipped** (config-test hermeticity: four `Load()`-based tests in
+`internal/config/config_test.go` now call `redirectConfigDir(t)` so they assert built-in defaults / env
+overrides against an empty temp config dir instead of the developer's real `~/.config/aegis/config.yaml` —
+fixing a standing local failure of `TestOutputGuardDefaults` on a machine that disables the output guard,
+and closing the latent same-class trap in `TestEnvOverride`/`TestEnvBaseURL`/`TestEnvOverrideServerLimits`
+that passed only by env-override luck — see below). Previously, 2026-07-27 — **P39.10 and P39.11 documented + regression-tested** (backfilling the
 remaining P38.1 debt: the two 2026-07-23 `chat --skill`-CLI fixes that shipped on `tier3-batch` but never
 got a release note or tests — builtin skills now materialize into `<cwd>/.aegis/builtin-skills` so the
 sandboxed file tools can reach `recon.py`/`scaffold.py` (**P39.10**), and the drive-completion oracle
@@ -60,6 +65,18 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P48.1 — isolate config tests from the developer's real `~/.config/aegis/config.yaml`.**
+`TestOutputGuardDefaults` called `config.Load()` without the `redirectConfigDir(t)` isolation its sibling
+tests use, so it read the developer's real user config; on a machine whose config sets
+`output_guard.enabled: false` (the common local setting) it failed its "defaults to true" assertion —
+`Load()` had correctly applied the user layer, but the test meant to check the *built-in default*. It passed
+in CI only because CI has no user config. Three sibling `Load()`-callers had the same latent gap, passing
+today only because an env override dominated the leaked user value: `TestEnvOverride`, `TestEnvBaseURL`,
+`TestEnvOverrideServerLimits`. Fix: `redirectConfigDir(t)` (which redirects `HOME`/`XDG_CONFIG_HOME`/`APPDATA`
+to an empty temp dir) is now the first line of each, making every `Load()`-based config test hermetic
+regardless of the developer's environment. Test-only change, no product code; `go test ./internal/config/...`
+now passes on a customized dev machine, not just in CI.
 
 **P47.5 — right-size the per-phase context window up front and auto-escalate on overflow.** The
 2026-07-24 FirewallRuleAnalyzer run only converged after a manual `AEGIS_PROVIDER_CONTEXT_WINDOW=196608`
