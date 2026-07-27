@@ -342,13 +342,20 @@ def analysis_threats(lines):
 
 
 def parse_findings(lines):
-    """Finding blocks: [{id, lineno, component, cvss}] from `### FIND-##` sections."""
+    """Finding blocks: [{id, lineno, component, cvss, related}] from `### FIND-##`.
+
+    `related` is the set of threat-ID tokens (T##) linked in the finding's
+    "Related Threats" attribute row, or None when that row is absent — mirroring
+    the component/cvss capture below. The existing keys are unchanged so the
+    other checks that read them keep working.
+    """
     out = []
     cur = None
     for i, line in enumerate(lines):
         m = FIND_HEADING_RE.match(line.strip())
         if m:
-            cur = {"id": m.group(1), "lineno": i + 1, "component": None, "cvss": None}
+            cur = {"id": m.group(1), "lineno": i + 1, "component": None,
+                   "cvss": None, "related": None}
             out.append(cur)
             continue
         if cur is not None and line.strip().startswith("|"):
@@ -360,6 +367,8 @@ def parse_findings(lines):
                     cur["component"] = val
                 elif key.startswith("cvss") and cur["cvss"] is None:
                     cur["cvss"] = val
+                elif key == "related threats" and cur["related"] is None:
+                    cur["related"] = set(TID_RE.findall(val))
     return out
 
 
@@ -683,6 +692,135 @@ def check_coverage_ledger(suite):
     return ("coverage-ledger-complete", not fails, fails)
 
 
+def check_finding_bodies_nonempty(suite):
+    """12. Every `#### <Section>` inside a `### FIND-##` block has real prose.
+
+    Each finding carries `#### Description`, `#### Evidence`, `#### Remediation`,
+    `#### Verification` subsections. A weak model can delete the `<!-- PENDING -->`
+    marker without writing anything in its place, leaving a heading over empty
+    space — structurally intact but substantively blank, which no other check
+    notices. A subsection is empty when it has no body line before the next
+    heading (`###`/`####`), a horizontal rule (`---`), or EOF that carries
+    non-whitespace prose: a blank line, a lone HTML comment, a `---` rule, or a
+    stray table/separator artifact does not count as content. A subsection that
+    still holds a `<!-- PENDING` marker is left to check 1 (no-leftover-skeleton-
+    syntax) so the two never double-report the same site.
+    """
+    fails = []
+    lines = suite.lines("findings")
+    n = len(lines)
+    base = suite.base("findings")
+    cur_find = None
+    i = 0
+    while i < n:
+        s = lines[i].strip()
+        mf = FIND_HEADING_RE.match(s)
+        if mf:
+            cur_find = mf.group(1)
+            i += 1
+            continue
+        ms = re.match(r"^####\s+(.+)$", s)
+        if cur_find and ms:
+            section = clean_cell(ms.group(1))
+            head_line = i + 1
+            has_content = False
+            pending = False
+            j = i + 1
+            while j < n:
+                t = lines[j].strip()
+                if t.startswith("###") or t == "---":  # `####` starts with `###`
+                    break
+                if not t:
+                    j += 1
+                    continue
+                if "<!-- PENDING" in t:
+                    pending = True      # check 1 owns the unfilled-marker case
+                    j += 1
+                    continue
+                if HTML_COMMENT_LINE_RE.match(t) or t.startswith("|"):
+                    j += 1              # comment / table artifact is not prose
+                    continue
+                has_content = True
+                j += 1
+            if not pending and not has_content:
+                fails.append(ev(base, head_line,
+                                '%s "%s" section is empty' % (cur_find, section)))
+            i = j
+            continue
+        i += 1
+    return ("finding-bodies-nonempty", not fails, sorted(fails))
+
+
+def check_coverage_matches_related_threats(suite):
+    """13. Every coverage-table mapping Tx -> FIND-n agrees with FIND-n's own
+    "Related Threats" attribute row.
+
+    The plain bijection check (check 4) only counts threat ids across the
+    coverage table; it never reads the per-finding Related-Threats attribute, so
+    a coverage row that files a threat under the WRONG finding still balances. In
+    the fixture T8 (a Frontend Proxy threat) is mapped to FIND-01 (the Database
+    finding, whose Related Threats are T22-T26) — a real contradiction this
+    cross-reference catches. A pairing whose finding has no Related-Threats row,
+    or a missing coverage/finding table, degrades to a skip rather than a crash
+    (mirroring the None-guards in the checks above); check 4 already reports a
+    wholly absent coverage table, so its absence is not double-reported here.
+    """
+    fails = []
+    cov_tbl = find_table(suite.tables("findings"), "Threat ID", "Finding ID", "Status")
+    if cov_tbl is None:
+        return ("coverage-matches-related-threats", True, [])
+
+    related = {f["id"]: f["related"]
+               for f in parse_findings(suite.lines("findings"))
+               if f["related"] is not None}
+
+    ti = col_index(cov_tbl["header"], "Threat ID")
+    fi = col_index(cov_tbl["header"], "Finding ID")
+    if ti is None or fi is None:
+        return ("coverage-matches-related-threats", True, [])
+    for cells, ln in cov_tbl["rows"]:
+        if is_placeholder(cells) or ti >= len(cells) or fi >= len(cells):
+            continue
+        tm = TID_RE.search(clean_cell(cells[ti]))
+        fm = re.search(r"FIND-\d+", clean_cell(cells[fi]))
+        if not tm or not fm:
+            continue
+        tid, fid = tm.group(0), fm.group(0)
+        if fid not in related:          # no Related Threats row to corroborate
+            continue
+        if tid not in related[fid]:
+            fails.append(ev(suite.base("findings"), ln,
+                            "%s mapped to %s in coverage table but not in %s "
+                            "Related Threats" % (tid, fid, fid)))
+    return ("coverage-matches-related-threats", not fails, sorted(fails))
+
+
+def check_no_duplicate_header_rows(suite):
+    """14. No table carries a data row that is a verbatim copy of its own header.
+
+    scaffold.py's table() writes each header + separator exactly ONCE, then an
+    optional guidance HTML comment and a single `<!-- PENDING: key -->` marker
+    (a full-line comment parse_tables skips) — so a freshly-scaffolded suite has
+    no data rows and never trips this. The duplicate is the model's: filling a
+    table it re-emitted the `| File | Description |` header + separator a second
+    time below the guidance comment, so parse_tables reads that echoed header as
+    a data row. Comparing every data row's cleaned cells to the cleaned header
+    catches it across all five files; the intentional guidance comments are not
+    table rows and are never flagged.
+    """
+    fails = []
+    for name in ("assessment", "architecture", "model", "analysis", "findings"):
+        base = suite.base(name)
+        for t in suite.tables(name):
+            head = [clean_cell(c) for c in t["header"]]
+            for cells, ln in t["rows"]:
+                if [clean_cell(c) for c in cells] == head:
+                    fails.append(ev(base, ln,
+                                    "data row duplicates the table header %r"
+                                    % " | ".join(head)))
+    return ("no-duplicate-header-rows", not fails, sorted(fails))
+
+
 ALL_CHECKS = [
     check_no_skeleton_syntax,
     check_component_name_consistency,
@@ -695,6 +833,9 @@ ALL_CHECKS = [
     check_external_av_consistency,
     check_deployment_classification_consistency,
     check_coverage_ledger,
+    check_finding_bodies_nonempty,
+    check_coverage_matches_related_threats,
+    check_no_duplicate_header_rows,
 ]
 
 
