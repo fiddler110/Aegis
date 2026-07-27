@@ -46,14 +46,24 @@ func Open(path string) *Store {
 
 // normalize resolves dir to an absolute, cleaned path so the same directory
 // is recognized regardless of how it was spelled (relative vs. absolute,
-// trailing separator, ".."), and case-folds on Windows where the filesystem
-// itself is case-insensitive.
+// trailing separator, "..", or reached through a symlink), and case-folds on
+// Windows where the filesystem itself is case-insensitive. Symlink resolution
+// matters because callers record and look up trust for the current working
+// directory via os.Getwd, which already returns the fully-resolved real path
+// (on macOS a temp/home dir is commonly a symlink, e.g. /var → /private/var);
+// without EvalSymlinks here a store seeded with the symlink spelling would not
+// match the getwd-resolved spelling and a revoke could silently miss.
 func normalize(dir string) string {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		abs = dir
 	}
 	abs = filepath.Clean(abs)
+	// EvalSymlinks only works on paths that exist; a revoke of an already-
+	// deleted directory (or any non-existent spelling) keeps the cleaned form.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
 	if runtime.GOOS == "windows" {
 		abs = strings.ToLower(abs)
 	}

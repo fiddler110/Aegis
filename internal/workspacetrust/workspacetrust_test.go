@@ -1,6 +1,7 @@
 package workspacetrust
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -47,6 +48,35 @@ func TestMissingStoreFileStartsEmpty(t *testing.T) {
 	s := Open(path)
 	if s.IsTrusted(t.TempDir()) {
 		t.Fatal("missing store file should not trust anything")
+	}
+}
+
+// A directory trusted through one path spelling must stay trusted (and be
+// revocable) through a symlinked spelling of the same directory. This is the
+// exact mismatch that broke `aegis trust --revoke` on macOS, where os.Getwd
+// returns the fully symlink-resolved real path (e.g. /var → /private/var) while
+// a caller may hand normalize the symlink spelling.
+func TestNormalizeResolvesSymlinks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace_trust.json")
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	s := Open(path)
+	// Trust via the real path, look up / revoke via the symlink spelling.
+	if err := s.Trust(real); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+	if !s.IsTrusted(link) {
+		t.Fatal("symlink spelling of a trusted directory should also be trusted")
+	}
+	if err := s.Revoke(link); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if s.IsTrusted(real) {
+		t.Error("revoking via the symlink spelling must revoke the real directory too")
 	}
 }
 
