@@ -324,7 +324,28 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 		runDir := latestThreatModelRunDir(st.cwd)
 		if failures == "" {
 			if qualityReviewed {
+				// The quality pass ran this session and the re-verify is clean.
+				// Stamp the FINAL on-disk suite (computed now, after any
+				// quality-pass edits) so a future unchanged re-run skips the
+				// expensive pass. Best-effort: a stamp-write failure must not
+				// fail an otherwise-clean drive.
+				if fp, err := suiteFingerprint(runDir); err != nil {
+					st.logger.Warn("phased drive: could not fingerprint suite for quality stamp", "err", err)
+				} else if err := writeQualityStamp(runDir, fp); err != nil {
+					st.logger.Warn("phased drive: could not write quality stamp", "err", err)
+				} else {
+					st.logger.Info("phased drive: quality pass clean, wrote completion stamp", "run_dir", runDir)
+				}
 				return nil // verified clean and quality-reviewed — done
+			}
+			// Completion-stamp short-circuit: if a prior run already quality-reviewed
+			// this exact suite (a valid .quality-stamp.json whose fingerprint matches
+			// the current on-disk suite), skip the ~25-30 min LLM quality pass. The
+			// mechanical verifySkillOutputs above still ran and is clean, so
+			// correctness is still gated; only the expensive substantive pass is skipped.
+			if shouldSkipQualityPass(runDir) {
+				st.logger.Info("phased drive: quality pass already satisfied for unchanged suite, skipping (stamp)", "run_dir", runDir)
+				return nil
 			}
 			qualityReviewed = true
 			st.logger.Info("phased drive: mechanical checks clean, running final quality pass (P38.1)")

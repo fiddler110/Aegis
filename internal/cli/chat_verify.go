@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -157,6 +160,115 @@ func qualityReviewPrompt() string {
 		"- The DFD components, the architecture Key Components table, and the analysis sections name the same components — no orphan or missing component.\n" +
 		"- No duplicate near-identical threats padding the counts.\n\n" +
 		"This is a non-interactive run: make every fix now with `edit_file` and do not ask whether to proceed. If — after actually reading the files — everything is already correct, say so in one line and stop without editing."
+}
+
+// qualityStampFile is the completion stamp the phased drive writes inside a run
+// directory once the suite has passed the expensive LLM quality pass and
+// re-verified clean. It records a fingerprint of the exact on-disk suite so a
+// re-run of an unchanged, already-reviewed suite can skip the ~25-30 minute
+// quality pass instead of redoing it. It is deliberately invisible to every
+// existing suite scanner: the `.json` extension is excluded from
+// scanPendingMarkers / suiteFileCount / verify.py (which only read
+// {.md,.mmd,.yaml,.yml,.txt}) and from suiteFingerprint below, and the leading
+// dot is extra safety. Its contents never contain the literal `<!-- PENDING`,
+// so scanPendingMarkers can never trip on it either.
+const qualityStampFile = ".quality-stamp.json"
+
+// qualityStamp is the JSON body of qualityStampFile: the suite fingerprint at
+// the moment the quality pass last verified clean, and when that happened.
+type qualityStamp struct {
+	Fingerprint string `json:"fingerprint"`
+	ReviewedAt  string `json:"reviewed_at"`
+}
+
+// suiteFingerprint returns a deterministic sha256 over the run directory's suite
+// report files (its top-level `.md`, `.mmd`, and `.yaml` files). Each file
+// contributes its name plus a sha256 of its contents, folded in sorted-name
+// order so the result is stable across calls and independent of directory
+// iteration order. Any edit to any suite file changes the fingerprint, so a
+// stamp taken before the edit no longer matches and the quality pass re-fires.
+// The `.quality-stamp.json` stamp itself is excluded (its `.json` ext is not in
+// the set), so writing the stamp cannot change the fingerprint it records.
+func suiteFingerprint(runDir string) (string, error) {
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return "", err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".md", ".mmd", ".yaml":
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(runDir, name))
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(data)
+		fmt.Fprintf(h, "%s\n%x\n", filepath.ToSlash(name), sum)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// readQualityStamp reads and parses the run directory's completion stamp. ok is
+// false when the stamp is absent, unreadable, malformed, or carries an empty
+// fingerprint — in every such case the caller treats the suite as un-reviewed.
+func readQualityStamp(runDir string) (stamp qualityStamp, ok bool) {
+	data, err := os.ReadFile(filepath.Join(runDir, qualityStampFile))
+	if err != nil {
+		return qualityStamp{}, false
+	}
+	if err := json.Unmarshal(data, &stamp); err != nil {
+		return qualityStamp{}, false
+	}
+	if stamp.Fingerprint == "" {
+		return qualityStamp{}, false
+	}
+	return stamp, true
+}
+
+// writeQualityStamp records the given fingerprint as the run directory's
+// completion stamp. Callers compute the fingerprint from the FINAL on-disk suite
+// (after any quality-pass edits) immediately before writing so the stamp
+// reflects exactly what was reviewed.
+func writeQualityStamp(runDir, fingerprint string) error {
+	data, err := json.Marshal(qualityStamp{
+		Fingerprint: fingerprint,
+		ReviewedAt:  time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(runDir, qualityStampFile), data, 0o644)
+}
+
+// shouldSkipQualityPass reports whether the run directory already carries a valid
+// completion stamp whose fingerprint matches the current on-disk suite — i.e.
+// the suite has already been quality-reviewed and nothing has changed since, so
+// the expensive LLM quality pass can be skipped. It is the decision helper the
+// phased drive's phase-6 loop gates the quality pass on (see
+// runPhasedVerifyAndQuality). A missing/mismatched/unreadable stamp or an
+// unreadable run dir returns false so the pass runs as it does today.
+func shouldSkipQualityPass(runDir string) bool {
+	if runDir == "" {
+		return false
+	}
+	stamp, ok := readQualityStamp(runDir)
+	if !ok {
+		return false
+	}
+	fp, err := suiteFingerprint(runDir)
+	if err != nil {
+		return false
+	}
+	return stamp.Fingerprint == fp
 }
 
 // verifyFixPrompt is the P39.6 continuation turn: the markers are all cleared
