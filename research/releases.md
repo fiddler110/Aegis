@@ -8,7 +8,11 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-27 — **P47.6 shipped** (drive model-selection guidance, doc-only: a new
+**Last updated:** 2026-07-27 — **P47.10 resolved** (CLI/TUI `/threat-model` parity — decided as
+documentation, option b: the divergence is intentional since an interactive TUI user is present to steer,
+so `/threat-model`'s help and the threat-modeling README now state it is interactive-by-design and point
+to `aegis chat --skill threat-modeling --mode build --yes` for the unattended phased drive; no
+`/threat-model --auto` was built — see below). Previously, 2026-07-27 — **P47.6 shipped** (drive model-selection guidance, doc-only: a new
 "Driving the build on a local model" section in `internal/skills/builtin/threat-modeling/README.md`
 documents the throughput/looping tradeoff — a small "fast" active-parameter MoE like `a3b` loops more
 on self-verification and costs more turns than a steadier `-deep`/larger model, though both now finish
@@ -70,6 +74,19 @@ drive loop — see below). Previously, 2026-07-21: **P38.6 and P38.7 shipped** (
 findings split out of the P38.1 conformance re-test — see below). Earlier the same day: **P39.1, P39.2, and
 P39.4 shipped; P39.3 spiked and closed NO-GO** (all from a local-14b-model harness-improvement research pass
 — see [roadmap.md](roadmap.md)).
+
+**P47.10 — CLI/TUI drive-to-completion parity for `/threat-model` (resolved as documentation).** The
+unattended phased drive-to-completion (fresh context per phase, PENDING oracle, auto verify + quality
+pass) lives only in the CLI `runPhasedSkillDrive`; the TUI `/threat-model` seeds the skill into the
+normal chat loop and stops at the model's first yield, so the two surfaces diverge. Filed as a
+decide-not-assume item. **Decision (user, 2026-07-27): option (b) — document the difference; the
+divergence is intentional** (an interactive TUI user is present to steer, and reviewing between phases
+is the point of the interactive surface). Shipped as docs only, no behavior change: `/threat-model`'s
+`detailedHelp` (`internal/tui/commands.go`) now says it is interactive-by-design and points to
+`aegis chat --skill threat-modeling --mode build --yes` for the hands-off build, and the threat-modeling
+README's "Driving the build on a local model" section documents the CLI-unattended vs TUI-interactive
+split. Option (a) — wiring the phased drive behind a `/threat-model --auto` flag — was explicitly **not**
+built. `go build ./...` + `go test ./internal/tui/... ./internal/skills/...` green.
 
 **P47.6 — drive model-selection guidance (doc-only).** The self-verification looping that drove the
 context growth on the 2026-07-24 FirewallRuleAnalyzer run traced proximately to the drive model: a
