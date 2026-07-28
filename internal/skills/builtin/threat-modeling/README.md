@@ -58,6 +58,12 @@ dir or clean up `__pycache__` before committing.
 The unattended drive is `aegis chat --skill threat-modeling --mode build --yes`;
 for threat-modeling it runs **phased** (each phase in its own fresh context —
 `internal/cli/chat_phased.go`) so peak context stays bounded to one phase. The
+TUI's `/threat-model` command is the **interactive** counterpart — it seeds the
+skill into the normal chat loop and stops at the model's first yield so a present
+user reviews and nudges between phases; it does **not** run the phased
+drive-to-completion, the PENDING oracle, or the auto verify/quality pass. Use
+`chat --skill` for the hands-off build and `/threat-model` when you want to steer.
+The
 P47.1–P47.5/P47.7/P47.8 stability fixes make the drive converge regardless of
 model, so **no model choice is required for correctness**. But there is a real
 **throughput/looping tradeoff** in *which* local model you point it at:

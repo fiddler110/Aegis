@@ -12,12 +12,13 @@ keep it when adding items.
 ## Status
 
 **Open items:** **P38.1** (Tier 2 umbrella) + the
-remaining **P47.x phased-drive stability batch** (P47.4 · **P47.9** Tier 3 · **P47.10** Tier 4) + 2
-parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
+remaining **P47.x phased-drive stability batch** (P47.4 · **P47.9**, both Tier 3, both measure-first) +
+2 parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
 codex-build track, **P48.1** (config-test hermeticity), **P47.6** (drive model-selection guidance,
-doc-only), and the batch items **P47.1**, **P47.2**, **P47.3**, **P47.5**, **P47.7**, and **P47.8** —
-has **shipped**; see [releases.md](releases.md) for what each one did.
+doc-only), **P47.10** (CLI/TUI parity, resolved as documentation), and the batch items **P47.1**,
+**P47.2**, **P47.3**, **P47.5**, **P47.7**, and **P47.8** — has **shipped**; see
+[releases.md](releases.md) for what each one did.
 
 **Next batch — P47.x phased-drive stability (filed 2026-07-24):** the 2026-07-24
 FirewallRuleAnalyzer run reached a **verify-clean suite** on `qwen3.6:35b-a3b-fast` (all
@@ -40,8 +41,8 @@ P47.1-P47.3 fixed for content phases, one tier down: it had none of them. **P47.
 P47.2 overflow-reset to the phase-6 loop) and **P47.8** (carry the P39.14 anti-monolithic-write
 guardrail into the phase-6 prompts) — the cheap Tier-2 unblock — have **shipped** (see
 [releases.md](releases.md)); **P47.9** (route hollow-body failures back through the owning content
-phase) is the Tier-3 structural follow-up; **P47.10** records the CLI-only drive-to-completion / TUI
-`/threat-model` parity question (Tier 4).
+phase) is the Tier-3 structural follow-up; **P47.10** (the CLI-only drive-to-completion / TUI
+`/threat-model` parity question) was **resolved 2026-07-27 as documentation** — see [releases.md](releases.md).
 
 **Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body). The
 2026-07-23 gpt-oss:20b housekeeping is now **closed** — **P39.10**/**P39.11** were already coded,
@@ -283,7 +284,7 @@ Priority: Tier 4 — low urgency, doc/guidance only; the code fixes above addres
 regardless of model. The doc note is done; the optional startup hint stays a lead. Did **not** gate
 the P47.x batch.
 
-### P47.10 — CLI/TUI drive-to-completion parity for `/threat-model`
+### P47.10 — CLI/TUI drive-to-completion parity for `/threat-model` — RESOLVED 2026-07-27 (documented, option b)
 
 The phased drive-to-completion lives only in the CLI: `runPhasedSkillDrive` (`internal/cli`) auto-
 continues while `<!-- PENDING -->` markers remain, resets context per phase, and runs the phase-6
@@ -291,14 +292,16 @@ verify/quality pass. The TUI `/threat-model` (`cmdThreatModel`, `internal/tui/sl
 injects a single `skillTaskMessage` (skill body + task) into the normal interactive loop and stops
 at the model's first yield — no PENDING oracle, no phased reset, no auto verify/quality. So the two
 surfaces diverge: `aegis chat --skill threat-modeling` finishes unattended, while `/threat-model`
-needs the user to keep nudging. This may be intentional (an interactive user is present to steer),
-so the item is to **decide**, not assume: either (a) wire the phased drive behind `/threat-model`
-(likely opt-in, e.g. `/threat-model --auto`, since a TUI user may want to review between phases), or
-(b) document the difference in `/help` and the skill docs so users know `chat --skill` is the
-unattended path. No code until the design call is made.
+needs the user to keep nudging.
 
-Priority: Tier 4 — parity/UX question, not a robustness bug, and possibly intentional; record and
-decide before building. Do not gate the P47.x code batch on it.
+**Decision (user, 2026-07-27): option (b) — document the difference; the divergence is intentional**
+(an interactive TUI user is present to steer, and reviewing between phases is the point). Shipped: the
+`/threat-model` `detailedHelp` (`internal/tui/commands.go`) now states it is interactive-by-design and
+points to `aegis chat --skill threat-modeling --mode build --yes` for the unattended build; the
+threat-modeling README's "Driving the build on a local model" section documents the same CLI-unattended
+vs TUI-interactive split. No behavior change — option (a) (`/threat-model --auto`) was **not** built.
+
+Priority: Tier 4 — parity/UX question, resolved as documentation. Did not gate the P47.x code batch.
 
 ### P38.8 — External per-phase threat-model wrapper as interim autonomous-build workaround (parked)
 
