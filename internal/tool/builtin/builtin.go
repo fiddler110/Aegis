@@ -153,6 +153,7 @@ func Register(reg *tool.Registry, opts Options) error {
 	// (P4.6). This keeps per-turn schema tokens low.
 	deferred := []tool.Tool{
 		&diagramTool{root: root, krokiURL: opts.KrokiURL},
+		&repomapTool{root: root},
 		&latexBuildTool{root: root},
 		&latexNewDocumentTool{root: root},
 		&dastScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},

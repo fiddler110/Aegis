@@ -8,7 +8,18 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-27 — **P47.10 resolved** (CLI/TUI `/threat-model` parity — decided as
+**Last updated:** 2026-07-29 — **P49.1 and P49.2 shipped** (the buildable head of the P49.x repo-map /
+index enrichment batch: the repository map now carries **import/dependency edges** — `internal/repomap`
+extracts per-file imports for Go/Python/JS-TS/Rust/Ruby from the same read `Build` already does, resolving
+module-local and `./`/`../` specifiers to repo-relative paths (stdlib/third-party stay bare tokens), rendering
+a compact `→ a, b` line *after* symbols so a tight byte budget drops edges before symbols, and bumping the
+cache-schema to v2 so edge-less v1 caches rebuild (**P49.1**); and a new **deferred `repomap` builtin tool**
+lets the model pull that structure on demand — `action:"map"` (whole map at a large budget, optional path
+glob), `action:"skeleton"` (one file's symbols+imports without a `read`), `action:"importers"` (reverse
+blast-radius query over the edges) — costing nothing until invoked (**P49.2**). The remaining P49.x items —
+**P49.3** (LSP-backed symbol precision) and **P49.4** (LLM concept nodes) — stay Tier-4 measure-first and were
+deliberately **not** built: they unlock only if the structural tier fails to close the discovery gap on a live
+run. See below. Previously, 2026-07-27 — **P47.10 resolved** (CLI/TUI `/threat-model` parity — decided as
 documentation, option b: the divergence is intentional since an interactive TUI user is present to steer,
 so `/threat-model`'s help and the threat-modeling README now state it is interactive-by-design and point
 to `aegis chat --skill threat-modeling --mode build --yes` for the unattended phased drive; no
@@ -978,6 +989,78 @@ sources" refusal, which turned out to need two-way disambiguation rather than th
 its own filing proposed. Earlier the same day: **P34.9** and **P34.10**, clearing the rest of Tier
 2 — njsscan's Windows traceback (a libsast bug, not the semgrep gap the item diagnosed) and
 trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the previous Tier 2 batch.
+
+---
+
+### P49.1 — Import/dependency edges in the repository map (repo-map batch head)
+
+**Shipped 2026-07-29.** `internal/repomap` produced a flat file→symbol list with **no edges** — an
+agent asking "who uses this?" still had to grep. The map now carries per-file import edges, extracted
+from the same file bytes `Build` already reads (regex-cheap, inside the no-CGo single-binary
+constraint):
+
+- `FileEntry` gained `Imports []string`. New per-language extractors sit beside `langPatterns`: Go
+  (single `import "x"` **and** block `import ( … )`), Python (`import a.b`, `from a.b import`,
+  dotted-relative `from .pkg` / `from ..pkg`), JS/TS (`import … from "x"`, bare `import "x"`,
+  `export … from "x"`, `require("x")` / dynamic `import("x")`), Rust (`use`), Ruby
+  (`require`/`require_relative`). Module-local Go imports resolve to the repo-relative **package
+  directory** (module prefix stripped from `go.mod`); `./`/`../` and `require_relative` specifiers
+  resolve against the importing file's directory; anything escaping the repo root or naming a
+  third-party/stdlib package stays a bare token (still useful signal, cheap to filter). Edges are
+  deduped and capped at 40 per file so a generated file can't dominate the budget.
+- `Render` emits a compact `→ a, b, c` line **after** each file's symbols, and a tight byte budget
+  drops the edge line first — symbols are never dropped while a file's entry is kept.
+- A new `schemaVersion` constant (v2) is mixed into the fingerprint in both `Build` and the
+  stat-only `fingerprint` freshness check, so an edge-less v1 `.aegis/repomap.json` is reported
+  stale and rebuilds rather than loading without edges. No new command surface — `aegis index`,
+  `POST /repomap/index`, and the `/index` TUI refresh flow through `Build`/`Render` unchanged.
+- Added `LoadOrBuild(root, cachePath, opts) (*Map, error)` — the parsed-`Map` analog of `Load`
+  (which returns only rendered text), reusing the fresh on-disk cache or rebuilding+refreshing it.
+  It backs the P49.2 tool so map/skeleton/importers read the same cache the injector writes.
+
+*Tested:* `internal/repomap/repomap_test.go` adds Go-module-local + blank-underscore edge resolution,
+relative JS/Python resolution (including an escaping `..` import kept raw), schema-version cache
+invalidation, the drop-edges-before-symbols budget rule, and `LoadOrBuild` cache-reuse/rebuild.
+Verified live: `aegis index` on this repo resolves `internal/cli`/`internal/api` to repo-relative
+dirs while keeping `fmt`/`net/http` bare.
+
+---
+
+### P49.2 — On-demand `repomap` query tool (skeleton / importers / map)
+
+**Shipped 2026-07-29.** The repo map was a single always-injected `<repo_map>` block, hard-capped at
+4000 bytes under a local-prompt profile — so on a large repo the model got a *truncated* map with no
+way to ask for more. Following Aegis's existing progressive-disclosure pattern (skills, `tool_search`),
+a new read-capability builtin tool `repomap` is registered **deferred** (name+description only,
+alongside `diagram`/`latex`) so it costs ~nothing until the model pulls it via `tool_search`:
+
+- `action:"map"` — the whole cached map at a large budget (200KB, vs the 4000-byte injected slice),
+  optionally filtered by a `path.Match` glob.
+- `action:"skeleton", path:<file>` — one file's symbols and P49.1 import edges without a `read` on the
+  file body; a clean non-error message when the path isn't an indexed source file.
+- `action:"importers", path:<file>` — the reverse "who uses this / blast radius" query over P49.1's
+  edges. Because P49.1 resolves Go imports to the package *directory* and JS/TS/Python relative
+  imports to extension-less paths, `edgeRefersTo` matches an edge against the target's exact path,
+  its extension-stripped path, **or** its containing directory — so querying importers of any file in
+  a Go package returns everything importing that package.
+
+`Capability() → CapRead` (runs concurrently in `engine.runTools`), backed by `repomap.LoadOrBuild`
+against the same `.aegis/repomap.json` the injector uses — no new daemon state, HTTP surface, or
+config. Path normalization deliberately avoids `ValidatePath`'s `EvalSymlinks` (which would diverge
+from the un-resolved keys `Build` produces, e.g. macOS `/var`→`/private/var`) while still rejecting
+`../` escapes.
+
+*Tested:* `internal/tool/builtin/repomap_test.go` covers all three actions across a Go+TS fixture —
+map, glob-filter (+empty), skeleton (+non-source +missing-path), importers (Go package-dir case, JS
+extension-less case, +none), and unknown/empty action. Verified live against this repo: `importers` of
+`internal/repomap/repomap.go` correctly returns every file importing the `internal/repomap` package.
+
+**Not built — P49.3 / P49.4 (Tier 4, measure-first).** P49.3 (LSP-backed symbol precision via
+`internal/lsp` `documentSymbol`/`references`) and P49.4 (an opt-in `aegis index --semantic` LLM
+concept-node pass) remain open and were deliberately left unbuilt: both are Tier-4 measure-first with
+no live-run trigger, and the roadmap gates them on the structural tier (P49.1/P49.2) demonstrably
+failing to close the discovery gap first — P49.4 additionally being unsettled on whether concept nodes
+belong in a new store or extend `knowledge`/`memory`.
 
 ---
 

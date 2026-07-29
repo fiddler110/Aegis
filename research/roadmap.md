@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-07-29
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -13,10 +13,14 @@ keep it when adding items.
 
 **Open items:** **P38.1** (Tier 2 umbrella) + the
 remaining **P47.x phased-drive stability batch** (P47.4 · **P47.9**, both Tier 3, both measure-first) +
+the remaining **P49.x repo-map / index enrichment batch** (**P49.3**/**P49.4** Tier 4, both
+measure-first — the structural head **P49.1** and the on-demand query tool **P49.2** have **shipped**
+2026-07-29; see [releases.md](releases.md)) +
 2 parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
 codex-build track, **P48.1** (config-test hermeticity), **P47.6** (drive model-selection guidance,
-doc-only), **P47.10** (CLI/TUI parity, resolved as documentation), and the batch items **P47.1**,
+doc-only), **P47.10** (CLI/TUI parity, resolved as documentation), **P49.1**/**P49.2** (repo-map
+import edges + on-demand `repomap` query tool), and the batch items **P47.1**,
 **P47.2**, **P47.3**, **P47.5**, **P47.7**, and **P47.8** — has **shipped**; see
 [releases.md](releases.md) for what each one did.
 
@@ -43,6 +47,19 @@ guardrail into the phase-6 prompts) — the cheap Tier-2 unblock — have **ship
 [releases.md](releases.md)); **P47.9** (route hollow-body failures back through the owning content
 phase) is the Tier-3 structural follow-up; **P47.10** (the CLI-only drive-to-completion / TUI
 `/threat-model` parity question) was **resolved 2026-07-27 as documentation** — see [releases.md](releases.md).
+
+**New batch — P49.x repo-map / index enrichment (filed 2026-07-29):** the `index` functionality
+(`internal/repomap`) today gives the model a flat, regex-extracted file→symbol list injected as
+`<repo_map>`. Prompted by a review of nanonets/graft (tree-sitter structural pass + LLM concept
+nodes + on-demand query tools), this batch evolves the same capability *inside the single-Go-binary,
+no-external-runtime constraint* rather than vendoring graft's Node package. Sequence head **P49.1**
+(import/dependency edges in the map, Tier 2, cheap + self-contained) and **P49.2** (an on-demand
+`repomap` query tool — skeleton/importers/map — Tier 3) **shipped 2026-07-29** (see
+[releases.md](releases.md)); the structural tier now exists. The remaining two follow *only if it
+doesn't close the discovery gap*: **P49.3** (LSP-backed symbol precision, Tier 4, measure-first) and
+**P49.4** (LLM-summarized concept nodes, Tier 4, speculative). Both are measure-first — neither has a
+live-run trigger yet, so do not build them speculatively; build only once P49.1/P49.2 have
+demonstrably fallen short on a live run.
 
 **Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body). The
 2026-07-23 gpt-oss:20b housekeeping is now **closed** — **P39.10**/**P39.11** were already coded,
@@ -73,8 +90,8 @@ drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
 
 **Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
 tracking rather than independent build work. The self-contained batch items **P47.1**, **P47.2**,
-**P47.3**, **P47.5**, **P47.7**, **P47.8**, and **P48.1** (config-test hermeticity) have all shipped —
-see [releases.md](releases.md).
+**P47.3**, **P47.5**, **P47.7**, **P47.8**, **P48.1** (config-test hermeticity), and **P49.1**
+(repo-map import edges, the P49.x batch head) have all shipped — see [releases.md](releases.md).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -193,7 +210,8 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 ## Open Work — Tier 3
 
 **Status:** 2 filed items open — **P47.4** (phased-drive stateless continuations) and **P47.9**
-(route hollow-body failures back through the owning content phase). The leads below are mechanical
+(route hollow-body failures back through the owning content phase). **P49.2** (on-demand repo-map
+query tool) **shipped 2026-07-29** — see [releases.md](releases.md). The leads below are mechanical
 follow-ups worth their own item once a concrete need appears.
 
 ### P47.4 — Make in-phase continuations (near-)stateless to cap peak context
@@ -267,6 +285,38 @@ is worth its own item once that boundary exists.
 ---
 
 ## Open Work — Tier 4
+
+### P49.3 — LSP-backed symbol extraction for the repo map (precision without tree-sitter)
+
+`repomap`'s regex extraction is deliberately "breadth and robustness over perfect parsing"
+(`repomap.go:5`) — it catches top-level declarations only, misses nested/inner symbols, and can't
+produce true call/reference edges (P49.1 gives *import* edges, not call edges). graft's foundation
+is tree-sitter, but bundling tree-sitter grammars into Aegis means CGo + per-language grammar blobs
+— the exact single-static-binary / no-toolchain property CLAUDE.md protects (the same reason `gosec`
+is excluded from the multiscanner). Aegis already ships an alternative: `internal/lsp`. When a
+language server is available for a file's language, use `textDocument/documentSymbol` (real nested
+symbols) and `textDocument/references` (true call/reference edges) to build the map, falling back to
+the regex extractor when no server is present — so precision is opportunistic and the no-runtime
+default is untouched.
+
+Priority: Tier 4 — larger, and **measure-first**: only worth building once P49.1/P49.2 have shown
+the structural tier matters *and* that regex extraction (not edge coverage) is the limiting factor.
+LSP adds per-language server availability as a dependency and startup cost; don't pay it
+speculatively. The regex path stays the floor regardless.
+
+### P49.4 — LLM-summarized concept nodes (graft pass-2 analog)
+
+graft's second pass has an LLM summarize files into ~20–50 plain-English "concept nodes" with typed
+links — the part that gives an agent *what a subsystem does*, not just its symbols. The analog here
+would be an opt-in `aegis index --semantic` pass that groups files into concept summaries cached by
+content hash. Two reasons this is last and speculative: (1) it costs an LLM pass per file (real
+latency/token cost, cache-invalidation surface), unlike every other P49 item which is deterministic
+and free; (2) it overlaps `internal/knowledge` and `internal/memory`, which already carry
+project-level prose context — a semantic index might belong *there* rather than as a third store.
+
+Priority: Tier 4 — speculative, **do not build until measured**: only if the deterministic
+structural tiers (P49.1–P49.3) demonstrably fail to close the re-discovery gap, and only after
+deciding whether the summaries live in a new store or extend `knowledge`/`memory`. No trigger yet.
 
 ### P47.6 — Drive model-selection guidance (mitigation, not a code fix) — SHIPPED 2026-07-27 (doc note)
 
