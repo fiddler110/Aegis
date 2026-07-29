@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -25,6 +26,13 @@ import (
 
 // DefaultMaxBytes caps the rendered map at roughly 2000 tokens (~4 chars/token).
 const DefaultMaxBytes = 8000
+
+// schemaVersion is mixed into the repository fingerprint so a change to what
+// Build extracts or how Render formats it invalidates on-disk caches from an
+// older binary. Bump it whenever the cached shape changes. v2 (P49.1) adds
+// per-file import edges — a v1 cache has none, so it must rebuild rather than
+// load edge-less.
+const schemaVersion = 2
 
 // Map is a structural overview of a repository.
 type Map struct {
@@ -37,8 +45,9 @@ type Map struct {
 
 // FileEntry is one source file and the symbols extracted from it.
 type FileEntry struct {
-	Path    string   `json:"path"`    // repo-relative, slash-separated
-	Symbols []string `json:"symbols"` // top-level declaration signatures
+	Path    string   `json:"path"`              // repo-relative, slash-separated
+	Symbols []string `json:"symbols"`           // top-level declaration signatures
+	Imports []string `json:"imports,omitempty"` // dependency edges: repo-relative paths where resolvable, else the raw import token (P49.1)
 }
 
 // Options configures a build.
@@ -94,6 +103,245 @@ var jsPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^export\s+(const|let|var|interface|type|enum)\s`),
 }
 
+// maxImportsPerFile caps the edges recorded for one file so a machine-generated
+// file with hundreds of imports can't dominate the rendered map's byte budget.
+const maxImportsPerFile = 40
+
+// Import-extraction regexps. These pull the specifier (module path / package)
+// out of an import statement; resolution to a repo-relative path (or leaving it
+// as a bare token) happens in the per-language helpers below.
+var (
+	goImportSingleRe = regexp.MustCompile(`^import\s+(?:[\w.]+\s+|\.\s+|_\s+)?"([^"]+)"`)
+	goImportSpecRe   = regexp.MustCompile(`^(?:[\w.]+\s+|\.\s+|_\s+)?"([^"]+)"`)
+	pyImportRe       = regexp.MustCompile(`^import\s+([\w.]+)`)
+	pyFromRe         = regexp.MustCompile(`^from\s+(\.*[\w.]*)\s+import\s`)
+	jsFromRe         = regexp.MustCompile(`(?:^|\s)(?:import|export)\b[^;]*?\bfrom\s+["']([^"']+)["']`)
+	jsBareImportRe   = regexp.MustCompile(`^import\s+["']([^"']+)["']`)
+	jsRequireRe      = regexp.MustCompile(`(?:require|import)\s*\(\s*["']([^"']+)["']\s*\)`)
+	rustUseRe        = regexp.MustCompile(`^\s*(?:pub\s+)?use\s+([^;{]+)`)
+	rubyRequireRe    = regexp.MustCompile(`^\s*(require|require_relative)\s+["']([^"']+)["']`)
+)
+
+// extractImports returns the dependency edges for one file: repo-relative paths
+// where a specifier resolves inside the repo (relative imports, Go module-local
+// packages, require_relative), else the raw specifier token (third-party /
+// stdlib — still useful signal and cheap to filter). Order follows source order
+// with duplicates removed; the list is capped at maxImportsPerFile.
+func extractImports(src, ext, rel, goModule string) []string {
+	var raw []func() []string
+	switch ext {
+	case ".go":
+		raw = []func() []string{func() []string { return goImports(src, goModule) }}
+	case ".py":
+		raw = []func() []string{func() []string { return pyImports(src, rel) }}
+	case ".js", ".jsx", ".ts", ".tsx", ".mjs":
+		raw = []func() []string{func() []string { return jsImports(src, rel) }}
+	case ".rs":
+		raw = []func() []string{func() []string { return rustImports(src) }}
+	case ".rb":
+		raw = []func() []string{func() []string { return rubyImports(src, rel) }}
+	default:
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, fn := range raw {
+		for _, imp := range fn() {
+			if imp == "" || seen[imp] {
+				continue
+			}
+			seen[imp] = true
+			out = append(out, imp)
+			if len(out) >= maxImportsPerFile {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// goImports handles both single-line `import "x"` and block `import ( ... )`
+// forms. A path under the repo's own module resolves to its repo-relative
+// package directory; everything else (stdlib, third-party) stays a bare token.
+func goImports(src, goModule string) []string {
+	var out []string
+	inBlock := false
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if inBlock {
+			if trimmed == ")" || strings.HasPrefix(trimmed, ")") {
+				inBlock = false
+				continue
+			}
+			if m := goImportSpecRe.FindStringSubmatch(trimmed); m != nil {
+				out = append(out, resolveGoImport(m[1], goModule))
+			}
+			continue
+		}
+		if trimmed == "import (" || (strings.HasPrefix(trimmed, "import (") && !strings.Contains(trimmed, `"`)) {
+			inBlock = true
+			continue
+		}
+		if m := goImportSingleRe.FindStringSubmatch(trimmed); m != nil {
+			out = append(out, resolveGoImport(m[1], goModule))
+		}
+	}
+	return out
+}
+
+// resolveGoImport maps a module-local import path to its repo-relative package
+// directory (dropping the module prefix); anything else is returned unchanged.
+func resolveGoImport(imp, goModule string) string {
+	if goModule == "" {
+		return imp
+	}
+	if imp == goModule {
+		return "."
+	}
+	if sub := strings.TrimPrefix(imp, goModule+"/"); sub != imp {
+		return sub
+	}
+	return imp
+}
+
+// pyImports handles `import a.b`, `from a.b import c`, and relative
+// (`from . import x`, `from ..pkg import y`) forms. Relative specifiers resolve
+// against the importing file's package directory; absolute ones stay bare
+// dotted tokens.
+func pyImports(src, rel string) []string {
+	var out []string
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if m := pyFromRe.FindStringSubmatch(trimmed); m != nil {
+			spec := m[1]
+			if strings.HasPrefix(spec, ".") {
+				out = append(out, resolvePyRelative(rel, spec))
+			} else if spec != "" {
+				out = append(out, spec)
+			}
+			continue
+		}
+		if m := pyImportRe.FindStringSubmatch(trimmed); m != nil {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// resolvePyRelative resolves a dotted relative import (leading dots select the
+// starting package: one = current, each extra = one level up) to a
+// repo-relative path, or leaves it as the raw token if it escapes the repo root.
+func resolvePyRelative(rel, spec string) string {
+	dots := 0
+	for dots < len(spec) && spec[dots] == '.' {
+		dots++
+	}
+	// The first dot selects the file's own package directory; each extra dot
+	// climbs one level. Build the path with explicit ".." segments so that
+	// climbing above the repo root surfaces as a leading "../" after cleaning.
+	segments := []string{path.Dir(rel)}
+	for i := 1; i < dots; i++ {
+		segments = append(segments, "..")
+	}
+	if remainder := spec[dots:]; remainder != "" {
+		segments = append(segments, strings.ReplaceAll(remainder, ".", "/"))
+	}
+	joined := path.Clean(path.Join(segments...))
+	if joined == "." || joined == ".." || strings.HasPrefix(joined, "../") {
+		return spec // escapes repo root; keep the raw token
+	}
+	return joined
+}
+
+// jsImports handles `import … from "x"`, bare `import "x"`, `export … from "x"`,
+// and `require("x")` / dynamic `import("x")`. Relative specifiers resolve
+// against the importing file's directory; bare package names stay tokens.
+func jsImports(src, rel string) []string {
+	var out []string
+	add := func(spec string) {
+		if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") {
+			out = append(out, resolveRelPath(rel, spec))
+		} else {
+			out = append(out, spec)
+		}
+	}
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if m := jsFromRe.FindStringSubmatch(trimmed); m != nil {
+			add(m[1])
+			continue
+		}
+		if m := jsBareImportRe.FindStringSubmatch(trimmed); m != nil {
+			add(m[1])
+			continue
+		}
+		if m := jsRequireRe.FindStringSubmatch(trimmed); m != nil {
+			add(m[1])
+		}
+	}
+	return out
+}
+
+// rustImports records `use` paths verbatim (trimmed of any brace group). Rust's
+// module system doesn't map cleanly to files without full resolution, so these
+// stay as tokens — still useful "what does this pull in" signal.
+func rustImports(src string) []string {
+	var out []string
+	for _, line := range strings.Split(src, "\n") {
+		if m := rustUseRe.FindStringSubmatch(line); m != nil {
+			spec := strings.TrimSpace(m[1])
+			if i := strings.IndexByte(spec, '{'); i >= 0 {
+				spec = strings.TrimSpace(strings.TrimRight(spec[:i], ": "))
+			}
+			if spec != "" {
+				out = append(out, spec)
+			}
+		}
+	}
+	return out
+}
+
+// rubyImports resolves `require_relative "x"` against the file's directory and
+// keeps `require "x"` (gems / stdlib) as bare tokens.
+func rubyImports(src, rel string) []string {
+	var out []string
+	for _, line := range strings.Split(src, "\n") {
+		if m := rubyRequireRe.FindStringSubmatch(line); m != nil {
+			if m[1] == "require_relative" {
+				out = append(out, resolveRelPath(rel, m[2]))
+			} else {
+				out = append(out, m[2])
+			}
+		}
+	}
+	return out
+}
+
+// resolveRelPath joins a `./`- or `../`-relative specifier against the importing
+// file's directory and cleans it to a repo-relative path, or returns the raw
+// specifier when it escapes the repo root.
+func resolveRelPath(rel, spec string) string {
+	joined := path.Clean(path.Join(path.Dir(rel), spec))
+	if joined == "." || joined == ".." || strings.HasPrefix(joined, "../") {
+		return spec
+	}
+	return joined
+}
+
+// goModulePath reads the module path from root/go.mod, or "" if absent.
+func goModulePath(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+		}
+	}
+	return ""
+}
+
 // Build walks root, extracts symbols from recognized source files, and returns a
 // Map. Files in ignored directories are skipped. Symbol order follows source
 // order; file order is sorted for deterministic output and fingerprinting.
@@ -103,8 +351,9 @@ func Build(root string, opts Options) (*Map, error) {
 	for _, d := range opts.Ignore {
 		extraIgnore[d] = true
 	}
+	goModule := goModulePath(root)
 
-	var fpLines []string
+	fpLines := []string{fmt.Sprintf("schema:%d", schemaVersion)}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries rather than aborting the walk
@@ -137,7 +386,8 @@ func Build(root string, opts Options) (*Map, error) {
 		}
 		symbols := extractSymbols(string(data), patterns)
 		if len(symbols) > 0 {
-			m.Files = append(m.Files, FileEntry{Path: rel, Symbols: symbols})
+			imports := extractImports(string(data), strings.ToLower(filepath.Ext(name)), rel, goModule)
+			m.Files = append(m.Files, FileEntry{Path: rel, Symbols: symbols, Imports: imports})
 		}
 		return nil
 	})
@@ -193,6 +443,9 @@ func (m *Map) Render() string {
 	b.WriteString("# Repository map\n")
 	truncated := false
 	for _, f := range m.Files {
+		// Symbols are the load-bearing content and must never be dropped while
+		// this file's entry is kept; render them first and let the whole entry
+		// truncate at the file boundary if they don't fit.
 		var fb strings.Builder
 		fb.WriteString(f.Path)
 		fb.WriteString("\n")
@@ -206,11 +459,26 @@ func (m *Map) Render() string {
 			break
 		}
 		b.WriteString(fb.String())
+		// Edges render after symbols so a tight budget drops them first: the
+		// import line is only written when it still fits, otherwise skipped
+		// without truncating the map.
+		if edges := renderEdges(f.Imports); edges != "" && b.Len()+len(edges) <= budget {
+			b.WriteString(edges)
+		}
 	}
 	if truncated {
 		b.WriteString("… [repo map truncated to fit context budget]\n")
 	}
 	return b.String()
+}
+
+// renderEdges formats a file's import edges as a single compact "  → a, b, c"
+// line (trailing newline), or "" when the file has no imports.
+func renderEdges(imports []string) string {
+	if len(imports) == 0 {
+		return ""
+	}
+	return "  → " + strings.Join(imports, ", ") + "\n"
 }
 
 // Save writes the map to a JSON cache file, creating parent directories.
@@ -264,6 +532,31 @@ func Load(root, path string, opts Options) (rendered string, fresh bool, err err
 	return cached.Rendered, current == cached.Fingerprint, nil
 }
 
+// LoadOrBuild returns the parsed repository map for root. It reuses the on-disk
+// cache at cachePath when the cache is present and its fingerprint still matches
+// the repository; otherwise it rebuilds via Build and best-effort refreshes the
+// cache (a save failure is ignored so a read-only workspace still yields a map).
+// This is the parsed-Map analog of Load — which returns only the rendered text
+// used for prompt injection — and backs the on-demand `repomap` query tool
+// (P49.2), so map/skeleton/importers read the same cache the injector does.
+func LoadOrBuild(root, cachePath string, opts Options) (*Map, error) {
+	if data, readErr := os.ReadFile(cachePath); readErr == nil {
+		var cached Map
+		if json.Unmarshal(data, &cached) == nil && cached.Fingerprint != "" {
+			if current, fpErr := fingerprint(root, opts); fpErr == nil && current == cached.Fingerprint {
+				cached.maxBytes = opts.maxBytes()
+				return &cached, nil
+			}
+		}
+	}
+	m, err := Build(root, opts)
+	if err != nil {
+		return nil, err
+	}
+	_ = m.Save(cachePath) // best-effort refresh; a read-only workspace still returns the map
+	return m, nil
+}
+
 // fingerprint computes the repository fingerprint via a stat-only walk, matching
 // the scheme used during Build.
 func fingerprint(root string, opts Options) (string, error) {
@@ -271,14 +564,14 @@ func fingerprint(root string, opts Options) (string, error) {
 	for _, d := range opts.Ignore {
 		extraIgnore[d] = true
 	}
-	var lines []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	lines := []string{fmt.Sprintf("schema:%d", schemaVersion)}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if path != root && (ignoredDirs[name] || extraIgnore[name] || strings.HasPrefix(name, ".")) {
+			if p != root && (ignoredDirs[name] || extraIgnore[name] || strings.HasPrefix(name, ".")) {
 				return fs.SkipDir
 			}
 			return nil
@@ -286,9 +579,9 @@ func fingerprint(root string, opts Options) (string, error) {
 		if _, ok := langPatterns[strings.ToLower(filepath.Ext(name))]; !ok {
 			return nil
 		}
-		rel, relErr := filepath.Rel(root, path)
+		rel, relErr := filepath.Rel(root, p)
 		if relErr != nil {
-			rel = path
+			rel = p
 		}
 		if info, infoErr := d.Info(); infoErr == nil {
 			lines = append(lines, fmt.Sprintf("%s:%d:%d", filepath.ToSlash(rel), info.Size(), info.ModTime().UnixNano()))
