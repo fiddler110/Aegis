@@ -614,3 +614,64 @@ func TestStreamDoesNotRetryOtherBadRequests(t *testing.T) {
 		t.Errorf("expected exactly 1 request (no think-rejection retry), got %d", calls)
 	}
 }
+
+// TestHealthy is the P50.1 liveness-probe guard: a reachable server answering
+// /api/version with 200 is healthy; a non-200, a wrong path, and an unreachable
+// server are all "not healthy". It also confirms the probe uses GET /api/version
+// and never a model-loading request, so it cannot itself perturb the backend.
+func TestHealthy(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		if r.URL.Path == "/api/version" {
+			_, _ = w.Write([]byte(`{"version":"0.30.10"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	a := New(WithBaseURL(srv.URL))
+	if !a.Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server answering /api/version")
+	}
+	if gotMethod != http.MethodGet || gotPath != "/api/version" {
+		t.Errorf("probe hit %s %s, want GET /api/version", gotMethod, gotPath)
+	}
+
+	// A server that 500s the version endpoint is not healthy.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	if New(WithBaseURL(bad.URL)).Healthy(context.Background()) {
+		t.Error("Healthy() = true against a server returning 500")
+	}
+
+	// An unreachable server (closed listener) is not healthy.
+	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	downURL := down.URL
+	down.Close()
+	if New(WithBaseURL(downURL)).Healthy(context.Background()) {
+		t.Error("Healthy() = true against an unreachable server")
+	}
+}
+
+// TestHealthyImplementsCapability confirms the native adapter satisfies
+// provider.HealthChecker and is reachable through the unwrapping helper, so the
+// drive's CheckBackendHealth finds it through the retry decorator.
+func TestHealthyImplementsCapability(t *testing.T) {
+	var _ provider.HealthChecker = New()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"x"}`))
+	}))
+	defer srv.Close()
+	wrapped := provider.WithRetry(New(WithBaseURL(srv.URL)), provider.DefaultRetryPolicy(), nil)
+	healthy, supported := provider.CheckBackendHealth(context.Background(), wrapped)
+	if !supported {
+		t.Fatal("CheckBackendHealth could not reach the Ollama adapter through the retry decorator")
+	}
+	if !healthy {
+		t.Error("CheckBackendHealth = unhealthy against a live server")
+	}
+}

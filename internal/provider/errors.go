@@ -288,6 +288,68 @@ func IsContextOverflowError(err error) bool {
 	return IsTruncatedToolCallError(apiErr.Message)
 }
 
+// IsBackendUnavailableError reports whether err means the model server itself
+// is unreachable or has died — as distinct from a context overflow (a prompt
+// problem) or a rate limit (a quota problem). Two shapes qualify: a
+// transport-level failure with no HTTP status (connection refused/reset, EOF —
+// the shape of `ollama serve` not listening or being killed), and a mid-stream
+// {"error":...} envelope carrying one of the infrastructural signals
+// (`model runner has unexpectedly stopped`, `connection reset`, a load/OOM
+// crash). This is the class the phased drive (P50.1) recovers from by WAITING
+// for the backend to come back and then resetting the phase to a fresh context
+// that re-reads the on-disk suite — the same resumable treatment
+// IsContextOverflowError gets, but gated on a liveness probe first. A
+// context-cancelled transport error is excluded: that is the user aborting, not
+// the backend dying.
+func IsBackendUnavailableError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if errors.Is(apiErr.Err, context.Canceled) || errors.Is(apiErr.Err, context.DeadlineExceeded) {
+		return false
+	}
+	// Transport-level failure (no HTTP status): connection refused/reset, DNS,
+	// EOF — the server is not answering. A response-header timeout is excluded:
+	// its cause is slow prefill on a live server, not a dead one (P35.6).
+	if !apiErr.stream && apiErr.StatusCode == 0 && apiErr.Err != nil {
+		return !IsResponseHeaderTimeoutError(apiErr.Err)
+	}
+	// Mid-stream infrastructural failure: the model runner crashed/was killed
+	// while streaming. Reuse the retryable-infra signal set, but exclude the
+	// pure rate/timeout ones that don't mean "server gone".
+	m := strings.ToLower(apiErr.Message)
+	for _, s := range backendDeadStreamSignals {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// backendDeadStreamSignals are the subset of retryableStreamSignals that
+// specifically mean the model server/runner is gone or crashed — the ones a
+// liveness-gated wait-and-resume (P50.1) is the right recovery for. It excludes
+// the plain "timed out" / "i/o timeout" signals, which can fire on a live but
+// briefly-slow server and are already handled by the retry decorator.
+var backendDeadStreamSignals = []string{
+	"unexpectedly stopped",
+	"has terminated",
+	"crash",
+	"failed to load model",
+	"error loading model",
+	"unable to load model",
+	"out of memory",
+	"cudamalloc",
+	"failed to allocate",
+	"cannot allocate",
+	"connection reset",
+	"connection refused",
+	"broken pipe",
+	"unexpected eof",
+	"unknown error was encountered while running the model",
+}
+
 // retryableStreamSignals are substrings marking a transient/infrastructural
 // mid-stream failure that could plausibly succeed on retry.
 var retryableStreamSignals = []string{

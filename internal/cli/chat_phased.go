@@ -196,8 +196,16 @@ type phasedDriveState struct {
 	// grew (P47.5b). Nil when the provider can't escalate; the overflow paths
 	// then rely on the fresh-context reset alone.
 	escalateWindow func() (int, bool)
-	iterToolCalls  *int
-	iterMutations  *int
+	// checkBackend probes the model backend's liveness (P50.1), returning
+	// (healthy, supported). supported is false when the adapter has no liveness
+	// probe (a cloud adapter) — the drive then does not wait on it. Nil when the
+	// hook wasn't wired; treated as unsupported.
+	checkBackend func(context.Context) (bool, bool)
+	// progress carries the live per-phase progress the P50.4 heartbeat ticker
+	// reads and each turn updates. Nil disables the heartbeat.
+	progress      *phaseProgress
+	iterToolCalls *int
+	iterMutations *int
 }
 
 // runPhasedSkillDrive drives a phased skill (currently threat-modeling) to
@@ -208,6 +216,8 @@ type phasedDriveState struct {
 // ctx cancel) — matching the generic drive's contract so the caller's tail logic
 // (the P38.6 floor check, cost trailer) is unchanged.
 func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []skillPhase) error {
+	stopHeartbeat := st.startHeartbeat() // P50.4: periodic sign-of-life during long turns
+	defer stopHeartbeat()
 	totalTurns := 0
 	for pi := range phases {
 		ph := phases[pi]
@@ -215,6 +225,9 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 		if ph.complete(runDir) {
 			st.logger.Info("phased drive: phase already complete, skipping", "phase", ph.name)
 			continue
+		}
+		if st.progress != nil {
+			st.progress.enter(ph.name)
 		}
 		conv := &engine.Conversation{System: st.system}
 		conv.Append(userMessage(ph.promptFn(phaseParams{
@@ -227,7 +240,28 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 		for {
 			*st.iterToolCalls = 0
 			*st.iterMutations = 0
+			st.logTurn(ph.name, len(ph.pending(runDir))) // P50.4: per-turn progress line
 			if err := st.eng.Run(ctx, conv, st.onEvent); err != nil {
+				// P50.1: a dead/unreachable backend is resumable — the phase's
+				// `<!-- PENDING -->` files persist on disk. Wait for the server
+				// to return, then reset to a fresh context and resume, exactly as
+				// the overflow path does. Checked before the overflow branch
+				// because the two are distinct classifications.
+				switch st.recoverBackendDown(ctx, err, ph.label()+" phase") {
+				case backendRecovered:
+					runDir = latestThreatModelRunDir(st.cwd)
+					pending := ph.pending(runDir)
+					totalTurns++
+					if totalTurns >= st.maxTurns {
+						st.stopMaxTurns(ph, pending)
+						return nil
+					}
+					conv = st.freshPhaseConv(ph, runDir, pending, "")
+					continue
+				case backendGaveUp:
+					st.stopBackendUnavailable(ph, ph.pending(latestThreatModelRunDir(st.cwd)))
+					return nil
+				}
 				// P47.2: a context-overflow error is terminal to the engine but
 				// resumable at the phase level — the phase's `<!-- PENDING -->`
 				// files persist on disk, so a fresh, near-empty context re-reads
@@ -371,7 +405,24 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 	overflowResets := 0
 	qualityReviewed := false
 	reopened := map[string]bool{} // P47.9: content phases already re-opened this session
+	// preQuality holds a snapshot of the suite taken at the moment the mechanical
+	// checks first pass, immediately before the quality pass runs (P50.3). It is
+	// a known-clean state; if the quality pass edits the suite into something the
+	// bounded fix rounds can't re-clean, the drive rolls back to it rather than
+	// shipping a regression. Nil until the quality pass is about to run.
+	var preQuality map[string][]byte
 	for {
+		// P50.2: canonicalize threat/finding IDs deterministically before every
+		// verify, so invented `T#.<suffix>` forms and any duplicate/gapped
+		// `FIND-##` are auto-fixed by a script instead of costing a model round
+		// (or letting a quality-pass hand-renumber regress the suite). Idempotent,
+		// so a canonical suite is untouched; best-effort — a normalizer error is
+		// logged and verify.py still gates correctness.
+		if ran, err := normalizeSkillIDs(st.skillName, st.skillDir, st.cwd); err != nil {
+			st.logger.Warn("phased drive: ID normalizer reported an error (continuing; verify.py still gates)", "err", err)
+		} else if ran {
+			st.logger.Debug("phased drive: ran deterministic ID normalizer (P50.2)")
+		}
 		failures, ran := verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
 		if !ran {
 			return nil // nothing to verify (no verifier / no run dir / no python) — done
@@ -402,9 +453,19 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 				st.logger.Info("phased drive: quality pass already satisfied for unchanged suite, skipping (stamp)", "run_dir", runDir)
 				return nil
 			}
+			// P50.3: snapshot the known-clean suite before the quality pass, so a
+			// pass that regresses it can be rolled back rather than shipped. Taken
+			// here (mechanical checks clean, quality pass about to run) so it is
+			// clean by construction. A snapshot failure is non-fatal — the guard
+			// just isn't available (preQuality stays nil), matching pre-P50.3.
+			if snap, err := suiteSnapshot(runDir); err != nil {
+				st.logger.Warn("phased drive: could not snapshot suite before quality pass (rollback guard disabled)", "err", err)
+			} else {
+				preQuality = snap
+			}
 			st.logger.Info("phased drive: mechanical checks clean, running final quality pass (P38.1)")
 			if err := st.runPhase6Turn(ctx, runDir, qualityReviewPrompt()); err != nil {
-				switch st.recoverPhase6Overflow(err, "phase-6 quality pass", &overflowResets) {
+				switch st.recoverPhase6Error(ctx, err, "phase-6 quality pass", &overflowResets) {
 				case overflowRetry:
 					continue // reset to a fresh context and re-run the quality pass
 				case overflowStop:
@@ -442,6 +503,29 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 			continue // re-verify: cleared checks fall through, residue hits the generic loop
 		}
 		if verifyRounds++; verifyRounds > maxVerifyRounds {
+			// P50.3: if the quality pass had a known-clean snapshot and the fix
+			// rounds since could not re-clean the suite, the failures were
+			// introduced by the quality pass — roll back to that clean state and
+			// stamp it, rather than shipping a suite that verifies worse than the
+			// one the quality pass was handed. The snapshot passed the same
+			// mechanical checks by construction, so the restored suite is clean;
+			// we stamp its fingerprint directly.
+			if preQuality != nil {
+				st.logger.Warn("phased drive: quality pass regressed the suite and fix rounds could not heal it; rolling back to the pre-quality clean snapshot (P50.3)", "rounds", maxVerifyRounds)
+				fmt.Fprintf(st.errOut, "\n[notice: the final quality pass left the suite failing a mechanical check the fix rounds couldn't resolve; rolling back to the verified-clean state from just before the quality pass (P50.3)]\n")
+				if err := restoreSuiteSnapshot(runDir, preQuality); err != nil {
+					st.logger.Warn("phased drive: rollback to pre-quality snapshot failed; stopping with the unverified suite", "err", err)
+				} else if fp, err := suiteFingerprint(runDir); err != nil {
+					st.logger.Warn("phased drive: rolled back but could not fingerprint for the stamp", "err", err)
+					return nil
+				} else if err := writeQualityStamp(runDir, fp); err != nil {
+					st.logger.Warn("phased drive: rolled back but could not write the completion stamp", "err", err)
+					return nil
+				} else {
+					st.logger.Info("phased drive: rolled back to the clean pre-quality suite and stamped it", "run_dir", runDir)
+					return nil
+				}
+			}
 			st.logger.Warn("chat: verification still failing after max rounds", "rounds", maxVerifyRounds)
 			fmt.Fprintf(st.errOut, "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", maxVerifyRounds)
 			fmt.Fprintf(st.errOut, "%s\n", failures)
@@ -449,9 +533,9 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 		}
 		st.logger.Info("phased drive: verification failed, feeding back for fix", "round", verifyRounds)
 		if err := st.runPhase6Turn(ctx, runDir, verifyFixPrompt(failures)); err != nil {
-			switch st.recoverPhase6Overflow(err, "phase-6 verify fix", &overflowResets) {
+			switch st.recoverPhase6Error(ctx, err, "phase-6 verify fix", &overflowResets) {
 			case overflowRetry:
-				verifyRounds-- // an overflow is not a spent fix attempt — don't burn the round on it
+				verifyRounds-- // an overflow/backend-reset is not a spent fix attempt — don't burn the round on it
 				continue       // reset to a fresh context and re-run verify + fix from disk
 			case overflowStop:
 				return nil // resumable stop already announced — end the drive cleanly
@@ -670,6 +754,17 @@ func (st *phasedDriveState) runReopenedContentPhase(ctx context.Context, ph skil
 		*st.iterToolCalls = 0
 		*st.iterMutations = 0
 		if err := st.eng.Run(ctx, conv, st.onEvent); err != nil {
+			// P50.1: a dead backend during a re-entry is resumable too — wait,
+			// then re-read the suite from disk into a fresh context.
+			switch st.recoverBackendDown(ctx, err, ph.label()+" re-entry") {
+			case backendRecovered:
+				runDir = latestThreatModelRunDir(st.cwd)
+				failures, _ = verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
+				conv = st.hollowReentryConv(ph, runDir, failures, "")
+				continue
+			case backendGaveUp:
+				return nil
+			}
 			if provider.IsContextOverflowError(err) {
 				if overflowResets++; overflowResets > maxPhase6OverflowResets {
 					st.logger.Warn("phased drive: hollow-body re-entry overflow persists after max resets", "phase", ph.name)

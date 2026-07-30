@@ -1,10 +1,55 @@
 package provider
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 )
+
+// TestIsBackendUnavailableError is the P50.1 classifier guard: the phased drive
+// waits out and resumes from a dead/unreachable model server, but only for that
+// class — not for a context overflow (a prompt problem) or a user cancel. A
+// transport failure with no HTTP status (connection refused/reset) and a
+// mid-stream runner-crash envelope both qualify; a header timeout (slow prefill
+// on a LIVE server), a context-overflow, a rate limit, and a cancelled request
+// must not.
+func TestIsBackendUnavailableError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"connection refused (transport)", NewTransportError("ollama", errors.New("dial tcp 127.0.0.1:11434: connect: connection refused")), true},
+		{"mid-stream runner crash", NewStreamError("ollama", "model runner has unexpectedly stopped"), true},
+		{"mid-stream connection reset", NewStreamError("ollama", "connection reset by peer"), true},
+		{"mid-stream OOM crash", NewStreamError("ollama", "failed to allocate: out of memory"), true},
+		{"header timeout is a live-but-slow server, not down", NewResponseHeaderTimeoutError("ollama", errors.New("net/http: timeout awaiting response headers")), false},
+		{"context overflow is not backend-down", NewContextTruncationError("ollama", ""), false},
+		{"stream context reject is not backend-down", NewStreamError("ollama", "input exceeds context length"), false},
+		{"rate limit is not backend-down", NewHTTPError("anthropic", 429, "", "rate limited"), false},
+		{"cancelled transport is user abort, not down", NewTransportError("ollama", context.Canceled), false},
+		{"deadline exceeded is not down", NewTransportError("ollama", context.DeadlineExceeded), false},
+		{"non-provider error", errors.New("something else"), false},
+		{"nil error", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsBackendUnavailableError(tc.err); got != tc.want {
+				t.Errorf("IsBackendUnavailableError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsBackendUnavailableError_Wrapped confirms the classifier looks through a
+// wrapping error, matching how engine.Run surfaces provider errors.
+func TestIsBackendUnavailableError_Wrapped(t *testing.T) {
+	inner := NewTransportError("ollama", errors.New("connection refused"))
+	if !IsBackendUnavailableError(fmt.Errorf("engine run failed: %w", inner)) {
+		t.Error("IsBackendUnavailableError must see through a wrapped APIError")
+	}
+}
 
 // TestIsContextOverflowError is the P47.2 classifier guard: the phased skill
 // drive resets and retries a phase only for terminal errors whose cause is the

@@ -439,10 +439,19 @@ func newChatCmd() *cobra.Command {
 						return curWin, false
 					}
 				}
+				// P50.1: a liveness probe so the drive can wait out a
+				// crashed/restarting local model server and resume from disk
+				// instead of aborting. Unwraps the retry/failover decorators to
+				// the base adapter; returns supported==false for a backend with
+				// no probe (a cloud adapter), and the drive then never waits on it.
+				checkBackend := func(hctx context.Context) (bool, bool) {
+					return provider.CheckBackendHealth(hctx, adapter)
+				}
 				runErr = runPhasedSkillDrive(ctx, &phasedDriveState{
 					eng: eng, system: conv.System, onEvent: onEvent, logger: logger,
 					errOut: cmd.ErrOrStderr(), cwd: cwd, skillName: skillName, skillDir: skillDir,
 					taskPrompt: taskPrompt, maxTurns: maxTurns, escalateWindow: escalateWindow,
+					checkBackend: checkBackend, progress: &phaseProgress{},
 					iterToolCalls: &iterToolCalls, iterMutations: &iterMutations,
 				}, phases)
 			} else {

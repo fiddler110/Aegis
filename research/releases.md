@@ -8,7 +8,40 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-30 — **P47.4 and P47.9 shipped**, closing the P47.x phased-drive stability
+**Last updated:** 2026-07-30 — **P50.1-P50.4 shipped**, the phased-drive determinism & resilience
+batch prompted by the 2026-07-30 FirewallRiskRater run (which *did* reach a verify-clean,
+quality-stamped suite unattended, but surfaced three concrete weaknesses). **P50.1 — backend liveness +
+resumable reset:** the run's real stall was Ollama dying mid-phase, which the retry decorator can't
+recover (it only covers a *synchronous* Stream failure before tokens flow), so the drive died with a
+half-built phase. A dead/unreachable backend is now classified (`provider.IsBackendUnavailableError`:
+transport refused/reset + the runner-crash stream signals, excluding overflow/rate-limit/cancel) and
+treated like a context overflow — *resumable* — but gated on a new adapter liveness probe
+(`provider.HealthChecker`, a GET /api/version on Ollama, reached via the unwrapping
+`provider.CheckBackendHealth`): the drive **waits** for the server to return (bounded, default 10 min,
+opt-in `AEGIS_OLLAMA_AUTOSTART=1` best-effort `ollama serve`), then resets to a fresh context and
+resumes from the on-disk `<!-- PENDING -->` files. Wired into the content-phase loop, the phase-6
+verify/quality loop, and the P47.9 re-entry. **P50.2 — deterministic ID canonicalizer:** a new bundled
+`normalize_ids.py` (sibling to `inventory.py`) strips invented `T<n>.<suffix>` threat IDs back to the
+bare `T<n>` the analysis defines and renumbers `FIND-##` to a gapless sequence, rewriting the coverage
+table and every `Related Threats` reference in lockstep — the root cause of both the invented-ID verify
+bounce and the quality-pass hand-renumber regression. It is idempotent and runs as a deterministic
+pre-verify pass every phase-6 round, so ID drift is auto-fixed by a script instead of a model turn.
+Validated end-to-end on the real FirewallRiskRater suite: injecting the two live-run defects failed 3
+checks, and one normalize pass restored 14/14 clean and was idempotent. **P50.3 — quality-pass
+regression guard:** the P38.1 quality pass could edit a mechanically-clean suite into a broken one
+(the duplicate `FIND-07`). The drive now snapshots the suite at the moment the mechanical checks first
+pass (a known-clean state) immediately before the quality pass; if the pass regresses it and the
+bounded fix rounds can't heal it, the drive **rolls back to that snapshot** and stamps it rather than
+shipping a regression — so the quality pass can only improve or no-op. The quality prompt is also told
+not to hand-renumber IDs (P50.2 owns that). **P50.4 — live progress heartbeat:** a background ticker
+logs the current phase/turn/elapsed/pending every 30s during a long turn, and each turn boundary logs a
+structured progress line, so a hung phase (or a dead backend, before P50.1's wait kicks in) is
+observable instead of invisible until the run ends. **P50.5** (wire the phased drive into the TUI
+`/threat-model`) stays a Tier-3 lead — it revisits the P47.10 documented deferral and awaits a concrete
+interactive-user need. Full `go test ./internal/cli/... ./internal/provider/...` green; new tests cover
+the classifier, the Ollama probe + capability unwrap, the backend-recovery verdicts (recover/give-up/
+not-handled/cancel), the snapshot round-trip, and the heartbeat tracker. See below. Previously,
+2026-07-30 — **P47.4 and P47.9 shipped**, closing the P47.x phased-drive stability
 batch. **P47.4** makes the phased threat-model drive's in-phase continuations **near-stateless**: instead
 of appending each continuation to an ever-growing conversation (where every re-read of the ~400-line
 findings file is retained for the rest of the phase and peak context climbs cumulatively), each turn now
