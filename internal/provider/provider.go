@@ -229,3 +229,40 @@ func RaiseContextWindow(a Adapter, n int) bool {
 	}
 	return false
 }
+
+// HealthChecker is an optional Adapter capability: a cheap liveness probe
+// against the backing model server, independent of a full Stream request. The
+// native Ollama adapter implements it (a GET /api/version) so a driven build
+// can wait for a crashed/restarting local server to come back before resuming a
+// phase from disk (P50.1) instead of aborting the whole run. Adapters whose
+// backend is a managed remote service (the cloud providers) need not implement
+// it — a transient outage there is already covered by the retry decorator.
+// Reach it through CheckBackendHealth, which unwraps the retry / failover
+// decorators.
+type HealthChecker interface {
+	// Healthy reports whether the backend answered a liveness probe within the
+	// deadline carried by ctx. It must be side-effect-free and must not load or
+	// unload a model — it only answers "is the server reachable right now?".
+	Healthy(ctx context.Context) bool
+}
+
+// CheckBackendHealth probes a's backend liveness when a — or a base adapter it
+// wraps — supports it, unwrapping the retry / failover decorators to reach the
+// base adapter exactly as RaiseContextWindow does. The bool result is the
+// probe's verdict; supported reports whether any adapter in the chain could
+// answer at all. A caller uses supported==false to mean "this backend has no
+// liveness probe — don't wait on it" (e.g. a cloud adapter), distinct from
+// supported==true, healthy==false ("the local server is down right now").
+func CheckBackendHealth(ctx context.Context, a Adapter) (healthy, supported bool) {
+	for a != nil {
+		if h, ok := a.(HealthChecker); ok {
+			return h.Healthy(ctx), true
+		}
+		u, ok := a.(interface{ Unwrap() Adapter })
+		if !ok {
+			return false, false
+		}
+		a = u.Unwrap()
+	}
+	return false, false
+}

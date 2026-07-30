@@ -93,6 +93,36 @@ func (a *Adapter) RaiseContextWindow(n int) bool {
 	return false
 }
 
+// Healthy implements provider.HealthChecker: a cheap GET /api/version against
+// the Ollama server, used by the phased drive (P50.1) to wait for a
+// crashed/restarting local server to come back before resuming a phase from
+// disk. It is side-effect-free — /api/version neither loads nor unloads a model
+// — so it answers only "is the server reachable right now?". Any transport
+// error or non-2xx status is treated as "not healthy". It uses a short-timeout
+// client independent of the streaming client so a probe can't block on the long
+// prefill budget the streaming client allows.
+func (a *Adapter) Healthy(ctx context.Context) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/api/version", nil)
+	if err != nil {
+		return false
+	}
+	for k, v := range a.headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := healthClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+	return resp.StatusCode == http.StatusOK
+}
+
+// healthClient is a short-timeout HTTP client for the liveness probe, separate
+// from the streaming client (which withholds any timeout so a long prefill
+// isn't cut off). A probe must fail fast when the server is down, not hang.
+var healthClient = &http.Client{Timeout: 3 * time.Second}
+
 // WithKeepAlive sets how long Ollama keeps the model loaded after this
 // request (e.g. "10m", "-1" to pin forever, "0" to unload immediately).
 // Empty (the default) omits the field, leaving Ollama's own default (5m) in

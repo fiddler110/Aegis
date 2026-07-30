@@ -61,6 +61,29 @@ doesn't close the discovery gap*: **P49.3** (LSP-backed symbol precision, Tier 4
 live-run trigger yet, so do not build them speculatively; build only once P49.1/P49.2 have
 demonstrably fallen short on a live run.
 
+**New batch — P50.x phased-drive determinism & resilience (filed 2026-07-30):** the 2026-07-30
+FirewallRiskRater run *did* reach a verify-clean, quality-stamped suite in one unattended
+invocation (P38.1's closure condition), but the drive to get there surfaced three concrete
+weaknesses worth hardening before the mechanism is called done. (1) **No backend liveness** — the
+run's real stall was Ollama dying silently mid-phase with the `aegis` process left with nothing to
+retry against (the retry layer only covers *synchronous* Stream errors and gives up after ~4
+backoffs; a mid-stream `model runner has unexpectedly stopped` or a longer outage kills the drive
+with no resume). (2) **The model invents non-canonical IDs** (`T1.S`, `T2.T` …) that don't match the
+plain `T1..Tn` in the analysis file, so `coverage-matches-related-threats` bounces for an extra
+verify round before it self-heals — the exact doc-drift the Tier-3 "threat-ID form" lead already
+names. (3) **The P38.1 quality pass can regress a clean suite** — asked to re-tier a finding it
+hand-renumbered `FIND-##`, duplicated `FIND-07`, and hit the inner 40-round step limit mid-edit;
+only the round-2 mechanical recheck caught it. Sequence: **P50.1** (backend liveness + resumable
+reset + heartbeat, Tier 1), **P50.2** (deterministic `normalize_ids.py` canonicalizer so ID
+renumbering is scripted, not LLM-authored — closes weakness 2 *and* the root cause of 3, Tier 2),
+**P50.3** (snapshot-and-rollback guard so the quality pass can never ship a suite that verifies worse
+than the mechanically-clean state it started from, Tier 2), **P50.4** (a live per-turn progress
+heartbeat so a hung/dead phase is observable — the precondition for any external supervision, Tier
+2). **P50.5** (wire the phased drive into the TUI `/threat-model`) revisits the P47.10 decision and
+stays a Tier-3 lead, not this batch's work. **P50.1-P50.4 all shipped 2026-07-30** (code + tests
+green, P50.2 validated end-to-end on the real FirewallRiskRater suite) — see [releases.md](releases.md);
+their live-run confirmation folds into the P38.1 umbrella.
+
 **Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body). The
 2026-07-23 gpt-oss:20b housekeeping is now **closed** — **P39.10**/**P39.11** were already coded,
 shipped, and verified live; as of 2026-07-27 they also have their releases.md entry and regression
@@ -81,8 +104,34 @@ is covered by `internal/skills/embedded_test.go`).
 
 ## Open Work — Tier 1
 
-**Status:** none open — batch head **P47.1** (wire proactive compaction into the CLI `chat --skill`
-drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
+**Status:** none open — **P50.1** (backend liveness + resumable reset), the P50.x batch head,
+**shipped 2026-07-30** (see [releases.md](releases.md)); batch head **P47.1** (wire proactive
+compaction into the CLI `chat --skill` drive engine) **shipped** 2026-07-24.
+
+### P50.1 — Backend liveness + resumable reset (a dead model server must not silently kill the drive) — SHIPPED 2026-07-30
+
+The 2026-07-30 FirewallRiskRater run's real stall was **Ollama dying mid-phase** — not a logic bug.
+The drive had nothing to fall back on: `provider.WithRetry` only retries a **synchronous** `Stream`
+failure before any tokens stream (`retry.go`), so a mid-stream `{"error":"model runner has
+unexpectedly stopped"}` (classified retryable by `classifyStreamError`, but surfaced as an
+`EventError`, past the retry seam) or a connection-refused outage that outlasts the ~4 capped
+backoffs ends the engine `Run` with a terminal error, and `runPhasedSkillDrive` returns it as fatal
+— the whole `aegis chat` process exits with a half-built phase and no resume. The phased drive
+*already* has the recovery primitive for this: the P47.2 / P47.7 fresh-context reset, which resumes
+any phase from its on-disk `<!-- PENDING -->` files. This item classifies a **backend-unreachable /
+runner-died** error the same way it classifies a context overflow — resumable — and adds a bounded
+**wait-for-recovery** step: poll a new adapter liveness probe (`/api/version` on Ollama) with
+backoff until the server answers again (or a total budget expires), print a clear "backend
+unreachable — waiting to resume from disk" notice, then reset the phase context and continue.
+Best-effort auto-restart of `ollama serve` is gated behind an opt-in (`AEGIS_OLLAMA_AUTOSTART=1`);
+the default is wait-and-resume, which is safe and reversible. Mechanism: a new optional adapter
+capability `provider.HealthChecker` (mirrors `ContextWindowRaiser` — reached via an unwrapping
+`provider.CheckBackendHealth` helper), a `provider.IsBackendUnavailableError` classifier (transport
+refused/reset + the `retryableStreamSignals` infra class), and a `waitForBackend` loop the content
+phases and phase-6 share, alongside the existing overflow handling.
+
+**Priority:** Tier 1 — a real robustness gap that silently discards hours of work; small, contained
+to the drive + the Ollama adapter, no dependency.
 
 ---
 
@@ -91,8 +140,61 @@ drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
 **Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
 tracking rather than independent build work. The self-contained batch items **P47.1**, **P47.2**,
 **P47.3**, **P47.4**, **P47.5**, **P47.7**, **P47.8**, **P47.9** (the full P47.x phased-drive
-stability batch), **P48.1** (config-test hermeticity), and **P49.1** (repo-map import edges, the
-P49.x batch head) have all shipped — see [releases.md](releases.md).
+stability batch), **P48.1** (config-test hermeticity), **P49.1** (repo-map import edges, the
+P49.x batch head), and **P50.2**/**P50.3**/**P50.4** (the P50.x phased-drive determinism batch —
+deterministic ID canonicalizer, quality-pass rollback guard, live heartbeat) have all shipped — see
+[releases.md](releases.md).
+
+### P50.2 — Deterministic ID canonicalizer (`normalize_ids.py`) — scripted renumber, not LLM-authored — SHIPPED 2026-07-30
+
+Both the invented-`T#.<cat>`-suffix verify bounce and the quality-pass duplicate-`FIND-07`
+regression share one root cause: the **LLM authoring and renumbering identifiers by hand**. The P37
+scripts *check* IDs (`verify.py`'s `check_threat_coverage_bijection`, `check_finding_ids_sequential`,
+`check_coverage_matches_related_threats`) but nothing *canonicalizes* them, so every fix is a
+model turn that can drift or truncate. This item adds a bundled `normalize_ids.py` (sibling to
+`inventory.py`) that mechanically rewrites the suite into canonical form: strip any invented
+`T<n>.<suffix>` back to the bare `T<n>` the analysis file defines, renumber `FIND-##` to a gapless
+`FIND-01..FIND-NN` sequence in document order, and rewrite **every** cross-reference in lockstep —
+the coverage table's Threat-ID/Finding-ID columns and each finding's `Related Threats` line — so the
+two symmetric locations can never disagree. It is idempotent (a canonical suite is a no-op) and
+diff-only unless it finds something to fix. Wired as a deterministic pre-verify pass in the phase-6
+loop (run before `verify.py`, so a drift is normalized away instead of bounced back to the model)
+and named in the findings-phase + quality prompts as the tool to use for any renumber instead of
+hand-editing. Also settles the Tier-3 "threat-ID form" doc lead by making the bare `T<n>` form
+canonical in code.
+
+**Priority:** Tier 2 — cheap, self-contained Python + a small Go wiring hook; removes an entire
+class of verify bounces and the quality-pass regression's root cause. Depends on nothing; P50.3
+builds on it.
+
+### P50.3 — Quality-pass regression guard (snapshot + rollback; never ship worse than clean) — SHIPPED 2026-07-30
+
+The P38.1 quality pass edited a **mechanically-clean** suite into a broken one (duplicate `FIND-07`)
+and was saved only by luck of the round-2 recheck ordering. The pass must not be able to regress the
+suite it was handed. This item snapshots the suite fingerprint **and file contents** at the moment
+the mechanical checks first go clean (immediately before the quality pass), then after the pass
+re-runs `normalize_ids.py` (P50.2) + the mechanical checks: if the suite still verifies clean, stamp
+and finish as today; if it does not and the bounded fix rounds can't heal it, **roll back to the
+pre-pass snapshot** — which is known-clean — and stamp that, rather than shipping a regressed suite
+or stopping with a broken one. Pairs with constraining the quality prompt away from bulk renumber
+(defer that to P50.2's script) and treating a step-limit-truncated quality turn as a resumable reset
+(the same P47.7 machinery), so a large re-tier can't be left half-applied.
+
+**Priority:** Tier 2 — small, contained to `runPhasedVerifyAndQuality` + a snapshot helper; converts
+the quality pass from "can regress" to "can only improve or no-op". Depends on P50.2.
+
+### P50.4 — Live per-turn progress heartbeat (make a hung/dead phase observable) — SHIPPED 2026-07-30
+
+`audit.jsonl` is not flushed live and the phased drive logs only at phase boundaries, so a phase
+that hangs (or a backend that died — see P50.1) is invisible until the whole run ends: the only
+live signal today is watching Ollama's token counter. This item emits a structured per-turn
+heartbeat — phase name, turn index within the phase, elapsed, and remaining PENDING count — at each
+in-phase iteration and on a periodic timer during a long single turn, and flushes the audit sink so
+an external supervisor (or a human tail) can detect a stall. It is the observability precondition
+that makes P50.1's wait-for-recovery and any future supervisor actionable.
+
+**Priority:** Tier 2 — small logging/plumbing change, no behavior risk; multiplies the value of
+P50.1.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -220,6 +322,19 @@ escape hatch — `AEGIS_PHASE_CONV=growing` restores the pre-P47.4 growing conve
 re-entry falls back to the generic verify-fix loop — so a live run can still measure whether they
 earn their keep. The leads below are mechanical follow-ups worth their own item once a concrete need
 appears.
+
+### P50.5 — Wire the phased drive into the TUI `/threat-model` (CLI/TUI drive parity)
+
+The phased drive-to-completion (`runPhasedSkillDrive`) is reachable only from `aegis chat --skill
+threat-modeling`; the interactive TUI `/threat-model` command has no drive-to-completion, which
+**P47.10 resolved as documentation** (CLI-unattended vs TUI-interactive) rather than code. This item
+revisits that decision to actually give TUI users the same drive. It is deliberately kept a Tier-3
+lead, not part of the P50.x determinism batch: it is a larger surface (session/SSE seam, not the
+drive internals) and the P47.10 call to defer still stands until a concrete interactive-user need
+appears. Build only once P50.1-P50.4 land and a real request for TUI parity materializes.
+
+**Priority:** Tier 3 — real value but larger and sequence-dependent; explicitly deferred by P47.10
+until demand appears. Do not build speculatively.
 
 **Lead — P39.9 residual (repro-gated):** a prefill-latency observability gap remains on the
 native path — the only unresolved sliver of P39.9, tracked as a lead rather than a blocker

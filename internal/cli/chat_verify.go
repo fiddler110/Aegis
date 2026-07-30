@@ -89,6 +89,89 @@ func verifySkillOutputs(skillName, skillDir, cwd string) (failures string, ran b
 	return failures, ran
 }
 
+// normalizeSkillIDs runs the bundled deterministic ID canonicalizer
+// (normalize_ids.py, P50.2) against the run directory in write mode, best
+// effort. It strips invented `T<n>.<suffix>` threat-ID forms back to the bare
+// `T<n>` the analysis defines and renumbers `FIND-##` to a gapless sequence,
+// rewriting every cross-reference in lockstep — the two defects that otherwise
+// cost extra verify rounds (invented IDs) and let the quality pass regress a
+// clean suite (hand-renumber). Running it before verify.py turns that drift into
+// a deterministic auto-fix instead of a model round. It is idempotent (a
+// canonical suite is a no-op). ran reports whether the normalizer actually
+// executed; err carries a non-zero exit (a usage/IO error — a canonicalization
+// no-op exits 0) for the caller to log, never to fail the drive on. The whole
+// thing degrades to a no-op when the script isn't bundled (older skill build)
+// or python is absent, so it is safe to call unconditionally.
+func normalizeSkillIDs(skillName, skillDir, cwd string) (ran bool, err error) {
+	if skillName == "" || skillDir == "" {
+		return false, nil
+	}
+	script := filepath.Join(skillDir, "normalize_ids.py")
+	if _, e := os.Stat(script); e != nil {
+		return false, nil // not bundled in this skill build
+	}
+	runDir := latestThreatModelRunDir(cwd)
+	if runDir == "" {
+		return false, nil
+	}
+	py := pythonExe()
+	if py == "" {
+		return false, nil
+	}
+	if out, e := exec.Command(py, script, runDir).CombinedOutput(); e != nil {
+		return true, fmt.Errorf("normalize_ids.py: %v: %s", e, strings.TrimSpace(string(out)))
+	}
+	return true, nil
+}
+
+// suiteSnapshot captures the current contents of a run directory's suite report
+// files (its top-level .md/.mmd/.yaml files — the same set suiteFingerprint
+// folds), keyed by basename. It backs the P50.3 quality-pass regression guard:
+// the snapshot is taken at the moment the mechanical checks first pass (a
+// known-clean state) so the drive can roll back to it if the quality pass edits
+// the suite into a state the bounded fix rounds cannot re-clean. The
+// `.quality-stamp.json` is excluded (its .json ext is not in the set), so a
+// rollback never resurrects a stale stamp.
+func suiteSnapshot(runDir string) (map[string][]byte, error) {
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return nil, err
+	}
+	snap := make(map[string][]byte)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".md", ".mmd", ".yaml":
+			data, err := os.ReadFile(filepath.Join(runDir, e.Name()))
+			if err != nil {
+				return nil, err
+			}
+			snap[e.Name()] = data
+		}
+	}
+	return snap, nil
+}
+
+// restoreSuiteSnapshot writes a previously captured suite snapshot back over the
+// run directory, undoing any edits made since it was taken. Used by the P50.3
+// guard to roll the suite back to the known-clean pre-quality-pass state rather
+// than ship a suite the quality pass regressed. It only rewrites files whose
+// contents changed, so a rollback that changes nothing touches no mtimes.
+func restoreSuiteSnapshot(runDir string, snap map[string][]byte) error {
+	for name, want := range snap {
+		path := filepath.Join(runDir, name)
+		if cur, err := os.ReadFile(path); err == nil && string(cur) == string(want) {
+			continue
+		}
+		if err := os.WriteFile(path, want, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // latestThreatModelRunDir returns the most-recently-modified threat-model run
 // directory under <cwd>/.aegis (the one the just-completed drive wrote), or ""
 // if none exists. A run directory is identified by containing 0-assessment.md,
@@ -159,6 +242,7 @@ func qualityReviewPrompt() string {
 		"- Internal consistency: severities match the threat described; each finding's attack vector matches the component's real reachability (e.g. a background/internal-only component is not `AV:N` network-reachable); tiers match their prerequisites; summary-table counts match the actual rows.\n" +
 		"- The DFD components, the architecture Key Components table, and the analysis sections name the same components — no orphan or missing component.\n" +
 		"- No duplicate near-identical threats padding the counts.\n\n" +
+		"Do NOT renumber `FIND-##` or `T#` identifiers or rewrite coverage/Related-Threats ID references by hand — a deterministic script (`normalize_ids.py`) canonicalizes all IDs automatically after this pass, and a manual renumber only risks a duplicate or a mismatched cross-reference. If a finding is mis-tiered, fix its Tier/CVSS content in place and leave its `FIND-##` heading alone. " +
 		"This is a non-interactive run: make every fix now with `edit_file` and do not ask whether to proceed. If — after actually reading the files — everything is already correct, say so in one line and stop without editing."
 }
 
