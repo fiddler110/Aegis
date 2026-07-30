@@ -160,6 +160,37 @@ The knowledge base is populated by `aegis knowledge index` (not `aegis index`, w
 
 ---
 
+### `repomap` (deferred)
+
+**Capability:** read
+
+Query the repository's structural map — files, top-level symbols, and import/dependency edges — on demand, without spending a `read_file` or a repo-wide `grep`. It reads the same map Aegis injects as `<repo_map>` at session start (built by `internal/repomap`, cached at `.aegis/repomap.json`), but at a much larger render budget so it can expose structure the always-on block truncates. Three actions:
+
+```json
+{
+  "action": "map",                 // whole map; optionally filter with a path glob
+  "glob": "internal/tool/*"        // optional (map only)
+}
+```
+
+```json
+{
+  "action": "skeleton",            // one file's top-level symbols + imports
+  "path": "internal/engine/engine.go"
+}
+```
+
+```json
+{
+  "action": "importers",           // which files import the target (its blast radius)
+  "path": "internal/provider/provider.go"
+}
+```
+
+Deferred (loaded via `tool_search`), so it costs nothing until invoked. Symbols come from the same breadth-first regex extraction as the injected map — top-level declarations, not nested symbols or true call edges (see the roadmap's P49.3/P49.4 for the LSP-backed precision follow-ups).
+
+---
+
 ## Git
 
 ### `git`

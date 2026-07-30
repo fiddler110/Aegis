@@ -178,15 +178,19 @@ growing history) — the same posture `.aegis/sbom.cdx.json` already uses for SB
 scan's findings survive past whatever ephemeral output captured them (terminal scrollback, a
 model turn) and are diffable/greppable/scriptable afterward.
 
-Threat models produced by the `threat-modeling` skill (`/threat-model`) live in the same family:
-the skill always writes its report to
-`.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>.md` — the target slug (scoped
+Threat models produced by the `threat-modeling` skill (`/threat-model`, or the unattended
+`aegis chat "…" --skill threat-modeling --mode build --yes`) live in the same family: the skill
+writes each run to its own **directory**,
+`.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>/` — the target slug (scoped
 feature name, or the repo name for a whole-project model) and timestamp are both mandatory, so the
-directory listing alone says what each file modeled and when, and two same-day runs never collide —
-plus a `.inventory.yaml` sidecar with stable component/threat IDs. Unlike the scan JSONs these are
-*not* overwritten — each update is a new dated file diffed against the previous one (the sidecar is
-what makes the "what changed since the last threat model?" re-run cheap), so the directory is the
-model's history, not just its latest state.
+directory listing alone says what each run modeled and when, and two same-day runs never collide.
+The directory holds the seven-file report suite `scaffold.py` lays down and the phased drive fills:
+`0-assessment.md` (executive summary), `0.1-architecture.md`, `1.1-model.mmd` + `1-model.md` (the
+DFD), `2-<framework>-analysis.md`, `3-findings.md`, and an `inventory.yaml` sidecar with stable
+component/threat IDs. Unlike the scan JSONs these are *not* overwritten — each update is a new dated
+directory diffed against the previous one (the sidecar is what makes the "what changed since the last
+threat model?" re-run cheap, via `diff_inventory.py`), so the parent directory is the model's
+history, not just its latest state.
 
 ### Scanners
 

@@ -50,7 +50,7 @@ func TestFreshPhaseConv_ReseedChoice(t *testing.T) {
 	// seed prompt (recon → scaffold → fill), not the "fill the next marker"
 	// continuation, because no files exist to resume from.
 	setup := threatModelPhases[0]
-	conv := st.freshPhaseConv(setup, "", setup.pending(""))
+	conv := st.freshPhaseConv(setup, "", setup.pending(""), "")
 	seed := convSeedText(t, conv)
 	if !strings.Contains(seed, "recon.py") || !strings.Contains(seed, "ARCHITECTURE phase") {
 		t.Errorf("setup-phase reset with no run dir must reseed from the full phase prompt; got:\n%s", seed)
@@ -63,7 +63,7 @@ func TestFreshPhaseConv_ReseedChoice(t *testing.T) {
 	// continuation prompt naming the still-PENDING files.
 	analysis := threatModelPhases[2]
 	pending := []string{"2-stride-analysis.md"}
-	conv = st.freshPhaseConv(analysis, "/ws/.aegis/security/threat-model/run", pending)
+	conv = st.freshPhaseConv(analysis, "/ws/.aegis/security/threat-model/run", pending, "")
 	seed = convSeedText(t, conv)
 	if !strings.Contains(seed, "still contain") || !strings.Contains(seed, "2-stride-analysis.md") {
 		t.Errorf("content-phase reset must resume from disk via the continuation prompt naming pending files; got:\n%s", seed)

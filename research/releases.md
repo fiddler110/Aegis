@@ -8,7 +8,21 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-29 — **P49.1 and P49.2 shipped** (the buildable head of the P49.x repo-map /
+**Last updated:** 2026-07-30 — **P47.4 and P47.9 shipped**, closing the P47.x phased-drive stability
+batch. **P47.4** makes the phased threat-model drive's in-phase continuations **near-stateless**: instead
+of appending each continuation to an ever-growing conversation (where every re-read of the ~400-line
+findings file is retained for the rest of the phase and peak context climbs cumulatively), each turn now
+resets to a fresh `[system + continuation]` context and re-reads only what it needs from disk — the
+always-on form of the P47.2 on-overflow reset, capping a phase's peak context at ~one turn's reads.
+`AEGIS_PHASE_CONV=growing` restores the old behaviour for comparison. **P47.9** routes a content-substance
+verify failure — empty finding bodies (`finding-bodies-nonempty`) or a mis-filed coverage row
+(`coverage-matches-related-threats`) on a hollow resume — back through the content phase that **owns** the
+file (findings), re-driving it in its own bounded near-stateless loop with the phase's own authoring frame
+and turn budget, instead of dumping all that authoring on the bounded phase-6 verify-fix loop where one
+large fill overflowed (2026-07-27, FirewallRiskRater). Both were built ahead of their measure-first
+triggers and ship with escape hatches (the env var above; P47.9 falls back to the generic fix loop if
+re-entry can't clear the check), so a live run can still measure whether they earn their keep. See below.
+Previously, 2026-07-29 — **P49.1 and P49.2 shipped** (the buildable head of the P49.x repo-map /
 index enrichment batch: the repository map now carries **import/dependency edges** — `internal/repomap`
 extracts per-file imports for Go/Python/JS-TS/Rust/Ruby from the same read `Build` already does, resolving
 module-local and `./`/`../` specifiers to repo-relative paths (stdlib/third-party stay bare tokens), rendering
@@ -143,6 +157,51 @@ max), additive to the P47.2/P47.7 fresh-context reset. The compaction budget sta
 deliberately — a larger `num_ctx` only buys physical headroom against a transient overshoot. Regression
 tests: `TestNextDriveWindow`, `TestRaiseContextWindow` (ollama, monotonic + actually-sent),
 `TestRaiseContextWindow_UnwrapsDecorators` (provider, unwrap chain), and the non-Ollama sizing gate.
+
+**P47.4 — near-stateless in-phase continuations cap peak context.** Each in-phase continuation of the
+phased threat-model drive appended to a growing `conv` in `runPhasedSkillDrive`
+(`internal/cli/chat_phased.go`), so within a phase every re-read of a large file (the ~400-line
+`3-findings.md`, the ~210-line analysis) was retained for the rest of the phase and peak context grew
+cumulatively, not per-turn — the structural growth the compaction (P47.1) and on-overflow reset (P47.2)
+before it could only chase. Since the `<!-- PENDING -->` files on disk are the source of truth, the fix
+resets the conversation to just `[system + phaseContinuePrompt(pending)]` (plus any P39.7 nudge) every
+continuation turn — the model re-reads only what it needs — so a phase's peak context is capped at roughly
+one turn's reads. This is the always-on form of P47.2's on-overflow reset: it reuses the same
+`freshPhaseConv` helper (now taking a `nudge` prefix so the stall-breaker survives the reset), fires every
+turn rather than only after an overflow, and therefore makes overflows rarer. The no-progress guard is
+unaffected — it tracks `iterMutations` and the pending set, both outside `conv`. `AEGIS_PHASE_CONV=growing`
+restores the pre-P47.4 accumulate-then-reset behaviour so the two can be measured side by side (P47.4 was a
+measure-first item, built ahead of its live-run trigger). Regression-tested by `TestGrowingPhaseConvForced`
+(the escape-hatch gate) and `TestFreshPhaseConv_NudgePrefix` (the nudge survives the reset); the existing
+`TestFreshPhaseConv_ReseedChoice` still guards the reseed-prompt choice. Last item but one of the P47.x
+phased-drive stability batch.
+
+**P47.9 — route hollow-body failures back through the owning content phase.** When a run resumes a suite
+whose `<!-- PENDING -->` markers were deleted but whose prose bodies are empty — the case the
+`finding-bodies-nonempty` check (ec0127c) catches — the marker oracle (`skillPhase.complete`) marks every
+content phase "complete" and the phased drive jumps straight to phase 6, so **all** the remaining authoring
+(filling ~60 empty sections across 15 findings, reconciling the coverage table) lands on the bounded phase-6
+verify-fix loop. That is too much substantive authoring for one bounded loop on a slow local model: observed
+2026-07-27 (FirewallRiskRater) it never converged, and the single large fill attempt triggered the
+P47.7/P47.8 overflow. The fix couples a content-substance verify failure to phase re-entry rather than a
+generic fix prompt. `runPhasedVerifyAndQuality` (`internal/cli/chat_phased.go`) now checks each failure set
+for a content-substance check (`finding-bodies-nonempty`, and by extension
+`coverage-matches-related-threats` — both owned by the findings phase) *before* consuming a verify round; on
+a match it calls `runReopenedContentPhase`, which re-drives the owning phase in its own bounded,
+near-stateless fresh-context loop (P47.4-style) whose completion oracle is the verify check clearing — the
+PENDING-marker oracle can't be used, a hollow resume has none. The re-entry prompt (`hollowBodyReentryPrompt`)
+orients the fresh context (run dir + SKILL.md), names the exact empty sections extracted from the verifier
+evidence (`extractCheckFailures` pulls just the owned check's `FAIL` block, so unrelated mechanical failures
+don't leak in), and carries the one-section-one-edit guardrail — deliberately *not* reusing
+`noSelfVerifyInstruction`, whose wording is built around markers the hollow case lacks. It reuses the P47.7
+overflow-reset and the P39.7 no-progress guard, and is routed at most once per phase (a `reopened` set): if
+the re-entry can't fully clear the check it falls through to the bounded generic verify-fix loop, so there is
+no infinite re-entry. Regression-tested by `chat_phased_reentry_test.go` — routing
+(`TestOwnerPhaseForContentFailure`: content failures route, mechanical ones don't, gated to a plan with the
+owning phase), the completion oracle (`TestPhaseHasContentFailure`), evidence extraction
+(`TestExtractCheckFailures`, `TestFailuresContainCheck`), and the prompt (`TestHollowBodyReentryPrompt`:
+names the sections, carries the guardrail, never mentions PENDING). Final item of the P47.x phased-drive
+stability batch.
 
 **P47.7 — a phase-6 context overflow resets instead of aborting the drive.** P47.2 made a mid-phase
 overflow a resumable fresh-context reset, but only in the content-phase loop; the phase-6 verify/quality
