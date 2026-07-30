@@ -253,14 +253,16 @@ var contextOverflowSignals = []string{
 
 // IsContextOverflowError reports whether err is a terminal provider error whose
 // cause is the prompt exceeding the model's context window — either the P35.2
-// context-truncation error (NewContextTruncationError) or a mid-stream
-// {"error":...} envelope carrying a context-size signal (NewStreamError). This
-// is the subset of terminal errors a fresh, smaller context can recover from,
-// which is what lets the phased skill drive treat an overflow as a resumable
-// phase reset rather than a fatal abort (P47.2) — as distinct from
-// size-independent terminal failures like model-not-found or a malformed
-// request, where resetting and retrying would only loop. Response-header
-// timeouts (P35.6) are deliberately excluded: their fix is a different lever.
+// context-truncation error (NewContextTruncationError), a mid-stream
+// {"error":...} envelope carrying a context-size signal (NewStreamError), or a
+// truncated tool call that reached here with its RAW server text intact rather
+// than an adapter's rewritten message. This is the subset of terminal errors a
+// fresh, smaller context can recover from, which is what lets the phased skill
+// drive treat an overflow as a resumable phase reset rather than a fatal abort
+// (P47.2) — as distinct from size-independent terminal failures like
+// model-not-found or a malformed request, where resetting and retrying would
+// only loop. Response-header timeouts (P35.6) are deliberately excluded: their
+// fix is a different lever.
 func IsContextOverflowError(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -272,7 +274,18 @@ func IsContextOverflowError(err error) bool {
 			return true
 		}
 	}
-	return false
+	// Also catch a truncated tool call whose RAW server text — "invalid tool
+	// call arguments … unexpected end of JSON input" — surfaced un-rewritten,
+	// rather than an adapter's NewContextTruncationError message (whose marker
+	// contextOverflowSignals already covers). Both adapters normally convert it
+	// (ollama.go / openai.go), but any path that surfaces the raw signature
+	// describes the same context-ceiling overflow, and a fresh, smaller context
+	// recovers from it identically — so a whole-file write_file that truncated
+	// resets and resumes instead of killing the drive. IsTruncatedToolCallError
+	// keys on the premature-end-of-input signature (AND of both markers), so a
+	// genuinely malformed call — a syntax error, not a truncation — is still not
+	// misread as an overflow. (P47.x)
+	return IsTruncatedToolCallError(apiErr.Message)
 }
 
 // retryableStreamSignals are substrings marking a transient/infrastructural

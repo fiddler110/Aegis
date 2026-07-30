@@ -12,17 +12,16 @@ keep it when adding items.
 ## Status
 
 **Open items:** **P38.1** (Tier 2 umbrella) + the
-remaining **P47.x phased-drive stability batch** (P47.4 · **P47.9**, both Tier 3, both measure-first) +
-the remaining **P49.x repo-map / index enrichment batch** (**P49.3**/**P49.4** Tier 4, both
+remaining **P49.x repo-map / index enrichment batch** (**P49.3**/**P49.4** Tier 4, both
 measure-first — the structural head **P49.1** and the on-demand query tool **P49.2** have **shipped**
 2026-07-29; see [releases.md](releases.md)) +
 2 parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
 codex-build track, **P48.1** (config-test hermeticity), **P47.6** (drive model-selection guidance,
 doc-only), **P47.10** (CLI/TUI parity, resolved as documentation), **P49.1**/**P49.2** (repo-map
-import edges + on-demand `repomap` query tool), and the batch items **P47.1**,
-**P47.2**, **P47.3**, **P47.5**, **P47.7**, and **P47.8** — has **shipped**; see
-[releases.md](releases.md) for what each one did.
+import edges + on-demand `repomap` query tool), and the entire **P47.x phased-drive stability batch**
+(**P47.1**, **P47.2**, **P47.3**, **P47.4**, **P47.5**, **P47.7**, **P47.8**, **P47.9**) — has
+**shipped**; see [releases.md](releases.md) for what each one did.
 
 **Next batch — P47.x phased-drive stability (filed 2026-07-24):** the 2026-07-24
 FirewallRuleAnalyzer run reached a **verify-clean suite** on `qwen3.6:35b-a3b-fast` (all
@@ -30,11 +29,12 @@ FirewallRuleAnalyzer run reached a **verify-clean suite** on `qwen3.6:35b-a3b-fa
 condition — but only after **three manual re-invocations**: the CLI `chat --skill` drive engine has
 no proactive compaction wired in, so each phase's context grew until Ollama hard-rejected the
 request (observed 173,816 vs a 131,072 window) and the drive aborted. P47.1-P47.6 make that same
-run succeed in **one unattended invocation**; tackle in number order. Batch head **P47.1** (wire
-proactive compaction into the CLI drive engine), **P47.2** (treat a mid-phase context overflow as a
-resumable phase reset, not a fatal abort), **P47.3** (stop content phases burning context on
-manual self-verification), and **P47.5** (auto-size + auto-escalate the per-phase context window)
-have **shipped**; the remaining items are in their tier sections below.
+run succeed in **one unattended invocation**; tackle in number order. The whole batch has now
+**shipped**: **P47.1** (wire proactive compaction into the CLI drive engine), **P47.2** (treat a
+mid-phase context overflow as a resumable phase reset, not a fatal abort), **P47.3** (stop content
+phases burning context on manual self-verification), **P47.4** (make in-phase continuations
+near-stateless to cap peak context), and **P47.5** (auto-size + auto-escalate the per-phase context
+window) — see [releases.md](releases.md).
 
 **Batch extension — phase-6 remediation resilience (filed 2026-07-27):** the first live run of the
 ec0127c hollow-report checks + afd6764 self-heal (FirewallRiskRater, `qwen3.6:35b-a3b-fast`)
@@ -42,11 +42,11 @@ confirmed both shipped fixes work — self-heal auto-deployed the new `verify.py
 turned a false-passing hollow suite into `12 passed, 2 failed` with file:line. But with the checks
 now correctly failing, the phase-6 verify/quality remediation loop exposed the same class of gaps
 P47.1-P47.3 fixed for content phases, one tier down: it had none of them. **P47.7** (extend the
-P47.2 overflow-reset to the phase-6 loop) and **P47.8** (carry the P39.14 anti-monolithic-write
-guardrail into the phase-6 prompts) — the cheap Tier-2 unblock — have **shipped** (see
-[releases.md](releases.md)); **P47.9** (route hollow-body failures back through the owning content
-phase) is the Tier-3 structural follow-up; **P47.10** (the CLI-only drive-to-completion / TUI
-`/threat-model` parity question) was **resolved 2026-07-27 as documentation** — see [releases.md](releases.md).
+P47.2 overflow-reset to the phase-6 loop), **P47.8** (carry the P39.14 anti-monolithic-write
+guardrail into the phase-6 prompts), and **P47.9** (route hollow-body failures back through the
+owning content phase) have all **shipped** (see [releases.md](releases.md)); **P47.10** (the
+CLI-only drive-to-completion / TUI `/threat-model` parity question) was **resolved 2026-07-27 as
+documentation** — see [releases.md](releases.md).
 
 **New batch — P49.x repo-map / index enrichment (filed 2026-07-29):** the `index` functionality
 (`internal/repomap`) today gives the model a flat, regex-extracted file→symbol list injected as
@@ -90,8 +90,9 @@ drive engine) **shipped** 2026-07-24; see [releases.md](releases.md).
 
 **Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
 tracking rather than independent build work. The self-contained batch items **P47.1**, **P47.2**,
-**P47.3**, **P47.5**, **P47.7**, **P47.8**, **P48.1** (config-test hermeticity), and **P49.1**
-(repo-map import edges, the P49.x batch head) have all shipped — see [releases.md](releases.md).
+**P47.3**, **P47.4**, **P47.5**, **P47.7**, **P47.8**, **P47.9** (the full P47.x phased-drive
+stability batch), **P48.1** (config-test hermeticity), and **P49.1** (repo-map import edges, the
+P49.x batch head) have all shipped — see [releases.md](releases.md).
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -186,11 +187,12 @@ implement exactly that.
   response truncated at the context limit` with no `[notice: … resetting]`, no `.quality-stamp.json`,
   verify rounds 2/3 + the quality pass never ran). Fixed by **P47.7** (overflow-reset in phase 6,
   **shipped**) and **P47.8** (guardrail in the phase-6 prompts, **shipped**); **P47.9** (route
-  hollow-body failures to the owning content phase) remains the Tier-3 follow-up, and the CLI-only
-  drive vs TUI `/threat-model` parity is noted as **P47.10**.
+  hollow-body failures to the owning content phase) is the Tier-3 follow-up, **shipped 2026-07-30**,
+  and the CLI-only drive vs TUI `/threat-model` parity is noted as **P47.10**.
 
 Reproduce: `cd <fresh target copy>` (must be inside the target — the sandbox rejects reads
-outside the workspace root); run `aegis chat --skill threat-modeling --mode build --yes` — it now
+outside the workspace root); run `aegis chat "threat model this repo" --skill threat-modeling --mode build --yes`
+(the prompt is required — `aegis chat` errors with "no prompt provided" without one) — it now
 prints a `phased mode` notice and resets context each phase. Closure condition: the real suite's
 PENDING markers reach zero and `verify.py`/`lint_dfd.py`/`inventory.py --check` all pass (met
 2026-07-24 on FirewallRuleAnalyzer; **unattended single-invocation** stability tracked by P47.x).
@@ -209,43 +211,15 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status:** 2 filed items open — **P47.4** (phased-drive stateless continuations) and **P47.9**
-(route hollow-body failures back through the owning content phase). **P49.2** (on-demand repo-map
-query tool) **shipped 2026-07-29** — see [releases.md](releases.md). The leads below are mechanical
-follow-ups worth their own item once a concrete need appears.
-
-### P47.4 — Make in-phase continuations (near-)stateless to cap peak context
-
-Each in-phase continuation appends to a growing `conv` (`internal/cli/chat_phased.go:251`), so every
-re-read of a large file (the ~400-line findings file, the ~210-line analysis) is retained for the
-rest of the phase; peak context is cumulative, not per-turn. Since the `<!-- PENDING -->` files on
-disk are the source of truth, a phase could reset `conv` to just `[system +
-phaseContinuePrompt(pending)]` each turn (the model re-reads only what it needs), capping peak
-context at roughly one phase's reads. This is a stronger, always-on form of P47.2's on-overflow
-reset. Sequence-dependent: only worth building **after** P47.1/P47.2 land and are measured — if
-compaction + on-overflow reset already hold context flat in practice this is redundant; if not,
-it's the structural cap. Measure first.
-
-Priority: Tier 3 — real value but a larger behavioral change that overlaps P47.1/P47.2; build only
-if the cheaper batch items don't hold context flat on a live run.
-
-### P47.9 — Route hollow-body failures back through the owning content phase
-
-When a run resumes a suite whose `<!-- PENDING -->` markers were deleted but whose prose bodies are
-empty — the exact case the shipped `finding-bodies-nonempty` check (ec0127c) now catches — the
-phased drive marks every content phase "complete" by the marker oracle (`skillPhase.complete`) and
-jumps straight to phase 6, so **all** remediation lands on the bounded phase-6 fresh-context rounds:
-filling ~60 empty sections across 15 findings plus reconciling the coverage table. That is too much
-substantive authoring for one bounded loop on a slow local model (observed 2026-07-27: it never
-converged, and the single large fill attempt triggered the P47.7/P47.8 overflow). A content-substance
-verify failure (`finding-bodies-nonempty`, and by extension the coverage-consistency check) should
-re-open the phase that **owns** the failing file — findings — whose per-phase prompt already frames
-the authoring task correctly and carries the incremental-edit guardrail, rather than being patched
-in the generic verify-fix turn. Sequence-dependent: measure whether P47.7 + P47.8 alone let phase 6
-converge on a hollow resume before building the re-entry routing.
-
-Priority: Tier 3 — larger behavioral change (couples a verify failure to phase re-entry, not just a
-fix prompt); build only if P47.7 + P47.8 don't let the phase-6 loop converge on a hollow resume.
+**Status:** none of the filed items open — **P47.4** (phased-drive near-stateless continuations) and
+**P47.9** (route hollow-body failures back through the owning content phase), the last two P47.x
+batch items, **shipped 2026-07-30**; **P49.2** (on-demand repo-map query tool) **shipped 2026-07-29**
+— see [releases.md](releases.md). Both P47.4 and P47.9 were built ahead of their measure-first
+triggers (the roadmap called them build-only-if-the-cheaper-items-don't-hold) and each ships with an
+escape hatch — `AEGIS_PHASE_CONV=growing` restores the pre-P47.4 growing conversation, and P47.9's
+re-entry falls back to the generic verify-fix loop — so a live run can still measure whether they
+earn their keep. The leads below are mechanical follow-ups worth their own item once a concrete need
+appears.
 
 **Lead — P39.9 residual (repro-gated):** a prefill-latency observability gap remains on the
 native path — the only unresolved sliver of P39.9, tracked as a lead rather than a blocker

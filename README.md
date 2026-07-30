@@ -53,7 +53,7 @@ The daemon starts automatically — no second terminal needed. Use `/help` insid
 
 ## Common Workflows
 
-Everything below works from the TUI (slash commands) or as a scriptable one-shot `aegis chat` call. The TUI is the better starting point for anything you want to steer interactively; `aegis chat --skill ... --yes` is the better choice for CI or unattended runs.
+Everything below works from the TUI (slash commands) or as a scriptable one-shot `aegis chat` call. The TUI is the better starting point for anything you want to steer interactively; `aegis chat "<task>" --skill <name> --yes` is the better choice for CI or unattended runs.
 
 ### Threat model a codebase
 
@@ -70,7 +70,7 @@ This produces a suite of report files under `.aegis/security/threat-model/<slug>
 aegis chat "threat model this repo" --skill threat-modeling --mode build --yes
 ```
 
-`--skill` likewise activates the skill for just this run — `aegis skills enable threat-modeling [--global]` is only needed if you want it discoverable by name in every session without naming it explicitly (e.g. so a model can decide on its own to load it via the `skill` tool). The drive runs one bounded phase at a time in a fresh context (architecture → DFD → STRIDE-A analysis → findings → executive summary → verify), auto-continuing until every file is filled in and the skill's own consistency checks (`verify.py`, `lint_dfd.py`, `inventory.py --check`) pass — bounded by `--max-turns` (default 40). Re-run the same command to resume a partial run; a capable model (the harness has been validated against cloud models and larger local models — small local models can still stall mid-build) is what determines how far a single run gets. See [CLI Reference](docs/cli-reference.md#aegis-chat) and the skill's own docs for the update/re-baseline workflow (compare against a previous report, track new/resolved/still-present threats).
+`--skill` likewise activates the skill for just this run — `aegis skills enable threat-modeling [--global]` is only needed if you want it discoverable by name in every session without naming it explicitly (e.g. so a model can decide on its own to load it via the `skill` tool). The drive runs one bounded phase at a time in a fresh context (architecture → DFD → framework analysis → findings → executive summary → verify), auto-continuing until every file is filled in and the skill's own consistency checks (`verify.py`, `lint_dfd.py`, `inventory.py --check`) pass — bounded by `--max-turns` (default 40). Re-run the same command to resume a partial run; a capable model (the harness has been validated against cloud models and larger local models — small local models can still stall mid-build) is what determines how far a single run gets. See [CLI Reference](docs/cli-reference.md#aegis-chat) and the skill's own docs for the update/re-baseline workflow (compare against a previous report, track new/resolved/still-present threats).
 
 ### Run a security scan
 

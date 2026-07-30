@@ -21,6 +21,7 @@ func TestIsContextOverflowError(t *testing.T) {
 	}{
 		{"context-truncation error", NewContextTruncationError("ollama", "invalid tool call arguments: unexpected end of JSON input"), true},
 		{"truncation error, no underlying", NewContextTruncationError("openai", ""), true},
+		{"raw truncated tool-call, un-converted", NewStreamError("ollama", `llama-server returned invalid tool call arguments for "write_file": unexpected end of JSON input`), true},
 		{"stream context-length reject", NewStreamError("ollama", "input length exceeds context length of 131072"), true},
 		{"stream maximum-context reject", NewStreamError("openai", "This model's maximum context length is 8192 tokens"), true},
 		{"stream prompt-too-long", NewStreamError("anthropic", "prompt is too long"), true},

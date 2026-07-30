@@ -20,7 +20,7 @@ without any host-side wiring.
 | `scaffold.py` | Setup (§4.1 step 2), before any filling | Pre-writes all seven report files **from the skeletons** — real structure (headings, table header rows + separators, fixed-value lists, the DFD's `flowchart LR` + three `classDef`s) with a `<!-- PENDING -->` marker per fillable section — so a weak model **fills sections** instead of authoring structure it gets wrong. A freshly-scaffolded suite already passes `lint_dfd.py` and parses cleanly under `verify.py` (only the PENDING markers and empty-content checks fail). Never clobbers a file whose PENDING markers are gone. | `python scaffold.py <run-dir> --framework <name> [--target SLUG] [--date DATE] [--force]` |
 | `recon.py` | Phase 1 (Architecture), first action | One deterministic filesystem pass → compact repo digest (git metadata, language histogram, parsed dependency manifests, bind/listen sites, entry points, config/env keys, security-infra signals, external-egress signals, per-file symbols ranked security-relevant-first, and an **evidence-based suggested deployment class**). Replaces reading source raw — ~11KB digest vs megabytes for a ~540-file repo. | `python recon.py [ROOT] [--json PATH] [--full] [--max-files N]` |
 | `inventory.py` | Phase 5 (generate), Phase 6 (`--check`) | Parses the finished `2-<framework>-analysis.md` + `3-findings.md` + `0.1-architecture.md` and emits `inventory.yaml` deterministically, **deriving each threat's tier from its prerequisite** so the sidecar can't disagree with the analysis. `--check` regenerates in-memory and diffs vs the on-disk file, exit non-zero on drift. | `python inventory.py <run-dir>` / `python inventory.py <run-dir> --check` |
-| `verify.py` | Phase 6 (review round) | Ten mechanical cross-file assertions: no leftover skeleton syntax, component-name consistency, dataflow refs defined, threat↔coverage bijection, finding-id sequence, tier/prerequisite consistency, count agreement, no forbidden coverage statuses, external-AV consistency, and architecture↔analysis deployment-classification agreement. Built on a generic markdown-table parser (survives column reordering). Prints PASS/FAIL per check. | `python verify.py <run-dir> [--quiet]` |
+| `verify.py` | Phase 6 (review round) | Fourteen mechanical cross-file assertions: no leftover skeleton syntax, component-name consistency, dataflow refs defined, threat↔coverage bijection, finding-id sequence, tier/prerequisite consistency, count agreement, no forbidden coverage statuses, external-AV consistency, architecture↔analysis deployment-classification agreement, coverage-ledger completeness, **finding-bodies non-empty** (a heading whose prose body was left blank — the hollow-report case), coverage-table↔per-finding Related-Threats agreement, and no data row duplicating its own table header. Built on a generic markdown-table parser (survives column reordering). Prints PASS/FAIL per check. | `python verify.py <run-dir> [--quiet]` |
 | `lint_dfd.py` | Phase 6 (when the DFD changed) | Six Mermaid-DFD checks: `flowchart LR` direction, three-palette `classDef`s, no stray fence/keyword, balanced `subgraph`/`end`, labeled edges, and `.mmd`↔`.md` equality. Tolerant of `%%` comments and the `%%{init}%%` block. | `python lint_dfd.py <file.mmd \| 1-model.md \| run-dir>` |
 | `diff_inventory.py` | Update workflow (§6) | Diffs two `inventory.yaml` sidecars for the Changes Since Baseline section: classifies each threat new/resolved/still-present/changed via id-match then a fingerprint fallback (component + category + title-ish), with per-threat category and tier deltas. Parses both block-style and the one-line flow-mapping YAML `inventory.py` emits. | `python diff_inventory.py <baseline-inventory.yaml> <current-inventory.yaml>` |
 
@@ -55,18 +55,33 @@ dir or clean up `__pycache__` before committing.
 
 ## Driving the build on a local model
 
-The unattended drive is `aegis chat --skill threat-modeling --mode build --yes`;
-for threat-modeling it runs **phased** (each phase in its own fresh context —
-`internal/cli/chat_phased.go`) so peak context stays bounded to one phase. The
-TUI's `/threat-model` command is the **interactive** counterpart — it seeds the
-skill into the normal chat loop and stops at the model's first yield so a present
-user reviews and nudges between phases; it does **not** run the phased
-drive-to-completion, the PENDING oracle, or the auto verify/quality pass. Use
-`chat --skill` for the hands-off build and `/threat-model` when you want to steer.
-The
-P47.1–P47.5/P47.7/P47.8 stability fixes make the drive converge regardless of
-model, so **no model choice is required for correctness**. But there is a real
-**throughput/looping tradeoff** in *which* local model you point it at:
+The unattended drive is
+`aegis chat "threat model this repo" --skill threat-modeling --mode build --yes`
+(the prompt is required — `aegis chat` reads it from args or stdin; run it from
+**inside** the target codebase, since the sandbox rejects reads outside the
+workspace root). For threat-modeling it runs **phased** (each phase in its own
+fresh context — `internal/cli/chat_phased.go`) so peak context stays bounded to
+one phase, and each in-phase turn resets to a near-stateless context that
+re-reads only what it needs from disk (P47.4). It auto-continues until every
+`<!-- PENDING -->` marker is filled and `verify.py`/`lint_dfd.py`/`inventory.py
+--check` all pass, bounded by `--max-turns` (default 40); re-run the same command
+to resume a partial run. The TUI's `/threat-model` command is the **interactive**
+counterpart — it seeds the skill into the normal chat loop and stops at the
+model's first yield so a present user reviews and nudges between phases; it does
+**not** run the phased drive-to-completion, the PENDING oracle, or the auto
+verify/quality pass. Use `chat --skill` for the hands-off build and
+`/threat-model` when you want to steer.
+
+The whole **P47.x phased-drive stability batch** (P47.1–P47.9) makes the drive
+converge and resume regardless of model — proactive compaction, on-overflow
+phase reset, near-stateless continuations, auto-sized/escalating context window,
+and phase-6 resilience including routing a hollow-body (empty-section) failure
+back through the content phase that owns the file — so **no model choice is
+required for correctness**. Two escape hatches exist for tuning/comparison:
+`AEGIS_PHASE_CONV=growing` restores the pre-P47.4 growing conversation, and
+`AEGIS_SKILL_DRIVE=linear` forces the old single-context drive instead of the
+phased one. But there is a real **throughput/looping tradeoff** in *which* local
+model you point it at:
 
 - A small **active-parameter MoE** run in a "fast" mode (e.g. `a3b`, ~3B active)
   **loops more** — it spends turns re-auditing files it already filled and

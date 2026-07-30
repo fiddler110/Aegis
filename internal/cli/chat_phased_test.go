@@ -222,3 +222,42 @@ func TestContentPromptsSuppressSelfVerification(t *testing.T) {
 		}
 	}
 }
+
+// TestContentPromptsForbidMonolithicWrites guards the anti-monolithic-write
+// instruction against silent drift. On the 2026-07-30 FirewallRiskRater run the
+// findings phase died because the model wrote the entire 3-findings.md in one
+// `write_file` call, whose arguments truncated at the context ceiling into a
+// malformed tool call. Every content-phase seed that authors a large file
+// (findings, assessment) and the shared in-phase continuation prompt must tell
+// the model to edit incrementally and never `write_file` a whole suite file; the
+// analysis seed carries its own inline copy of the same rule.
+func TestContentPromptsForbidMonolithicWrites(t *testing.T) {
+	p := phaseParams{
+		task:     "threat model this repo",
+		skillDir: "/ws/.aegis/builtin-skills/threat-modeling",
+		cwd:      "/ws",
+		runDir:   "/ws/.aegis/security/threat-model/stride-app-2026-07-24-1200",
+	}
+	carriers := map[string]string{
+		"findings":   phasePromptFindings(p),
+		"assessment": phasePromptAssessment(p),
+		"continue":   phaseContinuePrompt(threatModelPhases[3], []string{"3-findings.md"}),
+		"analysis":   phasePromptAnalysis(p),
+	}
+	for name, prompt := range carriers {
+		low := strings.ToLower(prompt)
+		if !strings.Contains(low, "write_file") {
+			t.Errorf("%s prompt must forbid a monolithic `write_file` of a suite file", name)
+		}
+		if !strings.Contains(low, "truncat") {
+			t.Errorf("%s prompt must explain that a monolithic write truncates on a small context window", name)
+		}
+	}
+	// The shared constant is what findings/assessment/continue carry; keep it
+	// pointed at the concrete failure so its intent survives edits.
+	for _, want := range []string{"write_file", "edit_file", "truncat"} {
+		if !strings.Contains(strings.ToLower(monolithicWriteGuardrail), want) {
+			t.Errorf("monolithicWriteGuardrail should reference %q", want)
+		}
+	}
+}
