@@ -55,11 +55,19 @@ Usage:
   --force         overwrite existing files even if filling has started
   --quiet         print only the summary line
 
+Besides the seven report files this also writes a hidden sidecar,
+`.scaffold-manifest.json` (P52.7): the list of every section it left a
+`<!-- PENDING: <key> -->` marker in, keyed by the enclosing heading. `verify.py`
+reads it to assert *"every site that had a marker now has substance"* rather
+than only *"no marker remains"* — see `derive_manifest` below.
+
 Exit code: 0 on success, 2 on a usage/IO error.
 """
 
 import argparse
+import json
 import os
+import re
 import sys
 
 # P38.7: every fillable section gets a *unique, self-describing* marker
@@ -710,6 +718,164 @@ def build_all(short, display, stride_a, target, date):
     return {name: content.rstrip("\n") + "\n" for name, content in files.items()}
 
 
+# --------------------------------------------------------------------------- #
+# The section manifest (P52.7) — what verify.py asserts substance against
+# --------------------------------------------------------------------------- #
+#
+# check 1 (no-leftover-skeleton-syntax) proves only that no `<!-- PENDING -->`
+# marker survived. A weak model can satisfy it by *deleting* the marker and
+# writing nothing, leaving a heading over empty space — structurally intact,
+# substantively blank. P47.9's `finding-bodies-nonempty` caught that for
+# `3-findings.md`'s per-finding subsections; every other file was unguarded.
+#
+# This script is the only thing that knows every site it left a marker in, so it
+# records them. The manifest is *derived from the built content* rather than
+# collected inside `table()`/`prose()` on purpose: the builders stay pure string
+# assembly, and any future section added to any builder shows up in the manifest
+# automatically with no second place to keep in sync.
+#
+# It is written to a hidden `.json` sidecar in the run directory, mirroring the
+# established `.quality-stamp.json` convention (internal/cli/chat_verify.go):
+# `.json` is outside the {.md,.mmd,.yaml,.yml,.txt} extension set that
+# verify.py's check 1, the drive's PENDING scanner, the suite file count and the
+# suite fingerprint all read, and it never contains the literal marker text — so
+# no existing scanner can trip on it. It lives in the *run* directory, not the
+# skill directory, so the built-in-skill self-heal path (which only reconciles
+# `.aegis/builtin-skills/<skill>/` against the embedded copy) cannot disturb it,
+# and an upgraded binary refreshing scaffold.py/verify.py mid-run leaves every
+# already-written manifest exactly as it was.
+#
+# The entry shape is deliberately a superset of what the hollowness check needs,
+# so the substance floor (P52.8) can reuse it without a second manifest: `kind`
+# + `columns` locate a scaffolded table and name its columns (so a rule can say
+# "the Evidence column must carry a line number, symbol, or config key", or cap
+# the fraction of `None identified` cells per table), and the `kind: "prose"`
+# entries are exactly the narrative sections a minimum-prose-length rule applies
+# to. Adding a field is backward compatible in both directions: verify.py
+# validates each field independently and ignores what it doesn't know.
+
+MANIFEST_FILE = ".scaffold-manifest.json"
+MANIFEST_VERSION = 1
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+# A marker that is a line to itself — the body of a fillable section. An
+# *inline* marker (`# Title — <!-- PENDING: target -->`, `> Date: …`) is a
+# fill-in-the-blank inside a line, not a section body, and is not a manifest
+# entry: check 1 already owns it and there is no body region to measure.
+_PENDING_LINE_RE = re.compile(r"^<!--\s*PENDING:\s*([^\s>]+)\s*-->$")
+_GUIDANCE_LINE_RE = re.compile(r"^<!--.*-->$")
+_SEP_CELL_RE = re.compile(r":?-{2,}:?$")
+
+
+def _row_cells(line):
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _is_separator_line(line):
+    """True for a markdown header/body separator like `|---|:--:|`."""
+    s = line.strip()
+    if not s.startswith("|"):
+        return False
+    cells = [c for c in _row_cells(line) if c]
+    return bool(cells) and all(_SEP_CELL_RE.match(c) for c in cells)
+
+
+def derive_manifest(files, framework=""):
+    """Derive the section manifest from the freshly-built file contents.
+
+    Returns the manifest dict written to `.scaffold-manifest.json`. One entry
+    per standalone `<!-- PENDING: <key> -->` marker in a `.md` file:
+
+      file          the file the section lives in
+      key           the marker key (unique within the file)
+      heading       the enclosing heading's text — verify.py's anchor, since the
+                    marker itself is gone by the time verification runs
+      level         that heading's `#` depth
+      kind          "table" (the marker sits under a header+separator pair) or
+                    "prose"
+      columns       for a table, its scaffolded column names (null for prose)
+      to_eof        the body region runs to end-of-file rather than stopping at
+                    the next same-or-higher heading — true only for a *prose*
+                    marker with no scaffolded heading after it, i.e. one whose
+                    fill is a run of new sibling sections (STRIDE/LINDDUN's
+                    per-component sections, Trike's per-asset risk analysis,
+                    VAST's backlog items). A table is always measured over the
+                    tight region so a hollow summary table can't be excused by
+                    the component sections written below it.
+      scaffold_line the marker's line number as scaffolded (informational; the
+                    file is rewritten by the fill, so verify.py re-locates by
+                    heading and never trusts this)
+
+    `.mmd`/`.yaml` files are excluded: they carry no markdown headings and their
+    content is owned by `lint_dfd.py` / `inventory.py`.
+
+    Deterministic: same inputs -> byte-identical manifest.
+    """
+    sections = []
+    for name in sorted(files):
+        if not name.lower().endswith(".md"):
+            continue
+        lines = files[name].split("\n")
+        headings = []           # (line_no_1based, level)
+        entries = []
+        cur = None              # (level, text, line_no) of the enclosing heading
+        for i, raw in enumerate(lines):
+            hm = _HEADING_RE.match(raw)
+            if hm:
+                cur = (len(hm.group(1)), hm.group(2).strip(), i + 1)
+                headings.append((i + 1, len(hm.group(1))))
+                continue
+            pm = _PENDING_LINE_RE.match(raw.strip())
+            if not pm or cur is None:
+                continue
+            # Look back past any guidance comment(s) for a table header +
+            # separator pair; that is what `table()` writes above its marker.
+            kind, columns = "prose", None
+            j = i - 1
+            while j >= 0 and _GUIDANCE_LINE_RE.match(lines[j].strip()):
+                j -= 1
+            if j >= 1 and _is_separator_line(lines[j]) and lines[j - 1].strip().startswith("|"):
+                kind = "table"
+                columns = _row_cells(lines[j - 1])
+            entries.append({
+                "file": name,
+                "key": pm.group(1),
+                "heading": cur[1],
+                "level": cur[0],
+                "kind": kind,
+                "columns": columns,
+                "to_eof": False,
+                "scaffold_line": i + 1,
+            })
+        for e in entries:
+            if e["kind"] != "prose":
+                continue
+            e["to_eof"] = not any(
+                ln > e["scaffold_line"] and lvl <= e["level"] for ln, lvl in headings)
+        sections.extend(entries)
+
+    return {
+        "manifest_version": MANIFEST_VERSION,
+        "generator": "scaffold.py",
+        "framework": framework,
+        "sections": sections,
+    }
+
+
+def write_manifest(run_dir, manifest):
+    """Write the manifest sidecar. Deterministic bytes; one trailing newline."""
+    path = os.path.join(run_dir, MANIFEST_FILE)
+    body = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(body + "\n")
+    return path
+
+
 def should_write(path, force):
     """True if the file may be (over)written without destroying started work.
 
@@ -792,6 +958,26 @@ def main(argv=None):
             skipped += 1
             out.append("KEPT  %s (already has filled content — use --force to "
                        "overwrite)" % name)
+
+    # The section manifest (P52.7). Refreshed whenever this run actually wrote
+    # structure, and backfilled when it is missing — an in-progress suite from a
+    # pre-manifest scaffold.py gains one on the next scaffold call, which can
+    # only add checks (verify.py skips any manifest heading the file doesn't
+    # have). Left alone when every file was kept and a manifest already exists,
+    # so a re-run can never replace a filled suite's manifest with a different
+    # framework's sections.
+    manifest_path = os.path.join(args.run_dir, MANIFEST_FILE)
+    if written or args.force or not os.path.exists(manifest_path):
+        try:
+            write_manifest(args.run_dir,
+                           derive_manifest(files, framework=short))
+        except OSError as exc:
+            sys.stderr.write("scaffold.py: cannot write %s: %s\n"
+                             % (manifest_path, exc))
+            return 2
+        out.append("WROTE %s (verify.py section manifest)" % MANIFEST_FILE)
+    else:
+        out.append("KEPT  %s" % MANIFEST_FILE)
 
     if not args.quiet:
         sys.stdout.write("\n".join(out) + "\n")

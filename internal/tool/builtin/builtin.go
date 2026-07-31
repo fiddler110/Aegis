@@ -160,6 +160,7 @@ func Register(reg *tool.Registry, opts Options) error {
 		&reconScanTool{root: root, opts: opts.SecurityScan, allowedTargets: opts.DASTAllowedTargets, allowActive: opts.DASTAllowActive},
 		&adviseTool{root: opts.DataDir},
 		&scopeTool{},
+		&yamlValidateTool{root: root},
 	}
 	// web_search/web_fetch/security_scan/git_pr are always-exposed in the
 	// default profile but move to deferred under LocalProfile (P25.6): they're

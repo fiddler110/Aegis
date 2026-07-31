@@ -42,6 +42,7 @@ Exit code: 0 iff every check passed, 1 otherwise (2 on a usage/IO error).
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
@@ -91,7 +92,16 @@ COVERAGE_STATUS_RE = re.compile(r"^(covered|excluded)\b\s*[—-]\s*\S", re.I)
 SKELETON_MARKERS = ("[FILL", "[REPEAT", "[END-REPEAT", "<!-- PENDING")
 
 # Files scanned for leftover skeleton syntax (check 1). The whole suite.
+# NOTE: `.json` is deliberately absent — the run directory's hidden sidecars
+# (`.scaffold-manifest.json` here, `.quality-stamp.json` from the phased drive)
+# are metadata about the suite, not suite content.
 TEXT_EXTS = (".md", ".mmd", ".yaml", ".yml", ".txt")
+
+# The section manifest scaffold.py writes (P52.7): every site it left a
+# `<!-- PENDING: <key> -->` marker in, keyed by its enclosing heading. See
+# check_section_bodies_nonempty. A suite scaffolded before this existed simply
+# has no manifest, and that check degrades to a pass.
+MANIFEST_FILE = ".scaffold-manifest.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -220,6 +230,7 @@ class Suite:
         self.errors = []            # hard load errors (missing files etc.)
         self._lines = {}            # basename -> lines
         self.paths = {}             # logical name -> path
+        self._manifest = False      # False = not loaded yet; None = absent
 
         def locate(name, pattern):
             matches = sorted(glob.glob(os.path.join(run_dir, pattern)))
@@ -254,6 +265,60 @@ class Suite:
 
     def tables(self, name):
         return parse_tables(self.lines(name))
+
+    def logical(self, basename):
+        """Logical suite name for a real filename, or None if not a suite file.
+
+        The manifest names files as scaffold.py wrote them; the analysis file's
+        name embeds the framework, so a manifest from a different framework (or
+        a renamed file) simply resolves to nothing and its entries are skipped.
+        """
+        for name, path in self.paths.items():
+            if os.path.basename(path) == basename:
+                return name
+        return None
+
+    def manifest(self):
+        """The parsed section manifest, or None when absent/unreadable/invalid.
+
+        None is the *backward-compatible* answer, not an error: suites
+        scaffolded before P52.7 (and resumed ones, which exist in the wild) have
+        no sidecar, and a run must still verify. Every field is validated here
+        so a truncated or hand-edited manifest degrades to None rather than
+        crashing a check or inventing failures.
+        """
+        if self._manifest is not False:
+            return self._manifest
+        self._manifest = None
+        try:
+            with open(os.path.join(self.run_dir, MANIFEST_FILE),
+                      encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:       # missing, unreadable, or not JSON
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("sections"), list):
+            return None
+        out = []
+        for s in data["sections"]:
+            if not isinstance(s, dict):
+                continue
+            f, h, k = s.get("file"), s.get("heading"), s.get("key")
+            lvl = s.get("level")
+            if not (isinstance(f, str) and isinstance(h, str) and isinstance(k, str)):
+                continue
+            if not isinstance(lvl, int) or not 1 <= lvl <= 6:
+                continue
+            out.append({
+                "file": f,
+                "key": k,
+                "heading": h,
+                "level": lvl,
+                "kind": s.get("kind") if s.get("kind") in ("table", "prose") else "prose",
+                "columns": s.get("columns") if isinstance(s.get("columns"), list) else None,
+                "to_eof": bool(s.get("to_eof")),
+            })
+        self._manifest = out or None
+        return self._manifest
 
 
 def ev(base, lineno, text):
@@ -705,6 +770,14 @@ def check_finding_bodies_nonempty(suite):
     stray table/separator artifact does not count as content. A subsection that
     still holds a `<!-- PENDING` marker is left to check 1 (no-leftover-skeleton-
     syntax) so the two never double-report the same site.
+
+    Scope: the `####` subsections *inside* a finding — structure the model
+    authors, so scaffold.py never marked it and it cannot be in the section
+    manifest. The scaffolded headings across the whole suite (including this
+    file's `## Tier N` and `## Threat Coverage Verification`) are check 15's,
+    which reads that manifest; the two never look at the same site. This check
+    keeps its own name because the phased drive routes its failures back through
+    the findings phase by that exact string.
     """
     fails = []
     lines = suite.lines("findings")
@@ -749,6 +822,154 @@ def check_finding_bodies_nonempty(suite):
             continue
         i += 1
     return ("finding-bodies-nonempty", not fails, sorted(fails))
+
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+HRULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
+FENCE_RE = re.compile(r"^(?:```|~~~)")
+
+
+def _heading_at(line):
+    """(level, cleaned text) for a markdown heading line, else None."""
+    m = HEADING_RE.match(line.strip())
+    if not m:
+        return None
+    return len(m.group(1)), clean_cell(m.group(2))
+
+
+def find_heading(lines, text, level):
+    """1-based line of the first `#*level` heading whose text equals `text`."""
+    want = clean_cell(text).lower()
+    for i, line in enumerate(lines):
+        h = _heading_at(line)
+        if h and h[0] == level and h[1].lower() == want:
+            return i + 1
+    return None
+
+
+def section_region(lines, head_line, level, to_eof):
+    """0-based [start, end) body region of the section headed at `head_line`.
+
+    Normally the region ends at the next heading of the same or higher rank —
+    a deeper heading the model wrote (a `### FIND-01` under `## Tier 1`) is part
+    of the body, not a boundary. `to_eof` (set by scaffold.py for a marker whose
+    fill is a run of *sibling* sections, e.g. STRIDE's per-component `##`
+    sections written below `## Summary`) runs to end-of-file instead.
+    """
+    start = head_line          # head_line is 1-based, so this is the next line
+    if to_eof:
+        return start, len(lines)
+    for i in range(start, len(lines)):
+        h = _heading_at(lines[i])
+        if h and h[0] <= level:
+            return start, i
+    return start, len(lines)
+
+
+def region_substance(lines, start, end):
+    """(has_content, has_pending) for a body region.
+
+    Content is anything a reader would call substance. Deliberately NOT content
+    (same exclusions the P47.9 finding-body check established): a blank line, a
+    lone HTML comment (scaffold.py's `<!-- guidance: … -->` survives the fill by
+    design), a `---` rule, and a bare table header or separator. A table *data*
+    row is content, as is any model-authored heading and anything inside a
+    fenced code block (a Mermaid diagram is a filled section). A region still
+    holding a `<!-- PENDING` marker reports has_pending so the caller can leave
+    it to check 1 and never double-report the same site.
+    """
+    region = lines[start:end]
+    data_rows = set()
+    for t in parse_tables(region):
+        for _, ln in t["rows"]:
+            data_rows.add(ln)               # 1-based within the region
+    has_content = False
+    has_pending = False
+    in_fence = False
+    for idx, raw in enumerate(region, 1):
+        s = raw.strip()
+        if FENCE_RE.match(s):
+            in_fence = not in_fence
+            has_content = True              # a code/diagram fence is substance
+            continue
+        if not s:
+            continue
+        if "<!-- PENDING" in s:
+            has_pending = True
+            continue
+        if in_fence:
+            has_content = True
+            continue
+        if HTML_COMMENT_LINE_RE.match(s) or HRULE_RE.match(s):
+            continue
+        if s.startswith("|"):
+            if idx in data_rows:
+                has_content = True
+            continue                        # bare header/separator is structure
+        has_content = True                  # prose, list, or a model heading
+    return has_content, has_pending
+
+
+def check_section_bodies_nonempty(suite):
+    """15. Every section scaffold.py left a PENDING marker in has substance.
+
+    Check 1 only proves no `<!-- PENDING -->` marker survived; a weak model
+    satisfies it by deleting the marker and writing nothing, leaving a heading
+    over empty space. P47.9's check 12 caught that inside `3-findings.md`'s
+    per-finding subsections — but an empty Deployment Classification, an empty
+    Security Infrastructure Inventory, an empty PASTA stage or an empty
+    Executive Summary all passed clean. This generalizes the same property to
+    the whole suite by asserting against `.scaffold-manifest.json`, the record
+    scaffold.py writes of every site it marked (P52.7): *every site that had a
+    marker now has substance*, not merely *no marker remains*.
+
+    Deliberately conservative, since a false failure costs a verify bounce and
+    erodes trust in the whole suite of checks:
+      * no manifest (a pre-P52.7 or resumed suite) -> pass, today's behavior;
+      * a manifest heading the file no longer has -> skipped (structure is other
+        checks' business, and a renamed heading is not a hollow one);
+      * a section whose marker is still there -> skipped, check 1 owns it;
+      * a `to_eof` section that shares its heading with a scaffolded table
+        (STRIDE/LINDDUN's per-component sections, which the skeleton hangs off
+        `## Summary`) only fires when that table is empty too — filled summary
+        rows count as substance in the shared region. A summary whose rows have
+        no component sections beneath them is already reported, loudly and by
+        the right check, as a component-name, bijection and count failure.
+    """
+    manifest = suite.manifest()
+    if manifest is None:
+        return ("section-bodies-nonempty", True, [])
+
+    fails = []
+    for entry in manifest:
+        base = entry["file"]
+        logical = suite.logical(base)
+        if logical is None:
+            continue                        # not a file this run has
+        lines = suite.lines(logical)
+        if not lines:
+            continue
+        # The unfilled-marker case belongs to check 1, wherever in the file the
+        # marker ended up — match on the key, not just the region, so a marker
+        # the model moved is still not double-reported.
+        marker = "<!-- PENDING: %s -->" % entry["key"]
+        if any(marker in ln for ln in lines):
+            continue
+        head_line = find_heading(lines, entry["heading"], entry["level"])
+        if head_line is None:
+            continue
+        start, end = section_region(lines, head_line, entry["level"],
+                                    entry["to_eof"])
+        has_content, has_pending = region_substance(lines, start, end)
+        if has_pending or has_content:
+            continue
+        what = "table" if entry["kind"] == "table" else "section"
+        fails.append(ev(base, head_line,
+                        '%s "%s" %s is empty (marker `%s` removed, nothing '
+                        'written in its place)'
+                        % ("#" * entry["level"], entry["heading"], what,
+                           entry["key"])))
+    return ("section-bodies-nonempty", not fails, sorted(fails))
 
 
 def check_coverage_matches_related_threats(suite):
@@ -836,6 +1057,12 @@ ALL_CHECKS = [
     check_finding_bodies_nonempty,
     check_coverage_matches_related_threats,
     check_no_duplicate_header_rows,
+    # P52.7. Appended rather than folded into check 12 so the existing check
+    # names stay stable: the phased drive routes a `finding-bodies-nonempty`
+    # failure back through the findings phase by name
+    # (internal/cli/chat_phased.go's contentSubstanceChecks), and renaming it
+    # would silently drop that routing.
+    check_section_bodies_nonempty,
 ]
 
 

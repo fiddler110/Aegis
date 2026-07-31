@@ -58,7 +58,7 @@ improvise one from a process description alone.
 | `recon.py` (bundled script, not a reference doc) | **Start of the architecture phase, before any manual exploration (§2 step 1)** | Deterministic one-pass repo digest — run it, read its stdout; replaces reading source files raw. Includes a "Top-level directories" section (every immediate child directory, flagged excluded or scanned) that drives the Coverage Ledger (§2 step 6) |
 | `inventory.py` (bundled script) | **Phase 5**, to generate `inventory.yaml` from the finished markdown; **phase 6**, with `--check`, to verify it still agrees | `python inventory.py <run-dir>` writes the sidecar (IDs, derived tiers) deterministically; `--check` regenerates in-memory and diffs vs disk, exit non-zero on drift |
 | `normalize_ids.py` (bundled script) | **Phase 6**, before `verify.py` (the phased drive runs it automatically each round) | `python normalize_ids.py <run-dir>` — deterministically canonicalizes identifiers so you never renumber by hand: strips any invented `T<n>.<suffix>` threat ID back to the bare `T<n>` the analysis defines, renumbers `FIND-##` to a gapless sequence, and rewrites the coverage table + every `Related Threats` reference in lockstep. Idempotent; `--check` reports drift without writing. Use it (not a hand edit) whenever IDs need fixing |
-| `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis, Coverage Ledger completeness) |
+| `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis, Coverage Ledger completeness, and that **no scaffolded section was emptied**: deleting a `<!-- PENDING -->` marker without writing anything in its place fails `section-bodies-nonempty`, in any of the five files) |
 | `lint_dfd.py` (bundled script) | **Phase 6** review round, whenever the DFD changed | `python lint_dfd.py <run-dir>` — Mermaid DFD linter (LR flowchart, three-palette classDefs, no stray fences/keywords, subgraph balance, labeled edges, `.mmd`↔`.md` equality) |
 | `diff_inventory.py` (bundled script) | **Update workflow (§6)**, when refreshing a baseline model | `python diff_inventory.py <baseline-inventory.yaml> <current-inventory.yaml>` — classifies threats new/resolved/still-present/changed for the Changes Since Baseline section |
 | `references/stride.md` / `linddun.md` / `pasta.md` / `trike.md` / `vast.md` / `nist-800-154.md` | Framework chosen, before exploring the workspace | That framework's process/stages and category definitions |
@@ -355,6 +355,13 @@ on a PENDING marker: the markers used to be identical across a file, and a
 `replace_all` blanket-overwrote every section with one string — a whole-file nuke
 (the P38.7 footgun). One keyed marker per edit keeps every other section intact.
 
+**Replacing a marker with nothing is not "done".** `scaffold.py` records every
+section it marked in `.scaffold-manifest.json`, and `verify.py`'s
+`section-bodies-nonempty` check re-reads that list at phase 6: a heading left
+standing over blank space (or a table left as a bare header + separator) fails by
+`file:line` even though no marker remains. Fill the section, don't delete the
+marker to make the PENDING scan go quiet.
+
 **Resume, don't restart.** If the target directory already exists and any file
 still contains a `<!-- PENDING` marker (in any keyed form), a previous run was
 interrupted. Resume from the **first unfinished phase in dependency order**:
@@ -418,9 +425,11 @@ the manual read confirms rather than hunts:
 - `python verify.py <run-dir>` — cross-file consistency (leftover skeleton
   syntax, component-name consistency, dataflow refs defined, threat↔coverage
   bijection, finding-id sequence, tier/prerequisite consistency, count
-  agreement, forbidden coverage statuses, external-AV consistency, and that
+  agreement, forbidden coverage statuses, external-AV consistency, that
   `0.1-architecture.md` and the analysis file agree on the deployment
-  classification — a divergence silently skews every derived tier).
+  classification — a divergence silently skews every derived tier — and that no
+  scaffolded section was left hollow: a heading whose body is blank, or a table
+  reduced to a bare header + separator, fails `section-bodies-nonempty`).
 - `python lint_dfd.py <run-dir>` — the DFD's Mermaid conventions and
   `.mmd`↔`.md` equality.
 - `python inventory.py <run-dir> --check` — that `inventory.yaml` still

@@ -1,13 +1,16 @@
 package ollama
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -586,6 +589,149 @@ func TestStreamRetriesWhenModelRejectsThink(t *testing.T) {
 	}
 	if len(thinkFields) != 2 || !thinkFields[0] || thinkFields[1] {
 		t.Fatalf("expected [think-present, think-absent] requests, got %v", thinkFields)
+	}
+}
+
+// TestStreamLatchesThinkRejectionPerModel is the P52.5 regression: the P38.5
+// retry was correct but stateless, so every subsequent turn re-sent `think`,
+// re-took the 400, and re-warned — a wasted round trip and a duplicated log
+// line on every turn of a session. After one proven retry the adapter must send
+// no `think` at all for that model, and warn exactly once. The latch is keyed
+// by model, not held per-adapter: a daemon adapter serves a mix of models, and
+// one model's rejection must not strip `think` from a sibling that supports it.
+func TestStreamLatchesThinkRejectionPerModel(t *testing.T) {
+	type sent struct {
+		model     string
+		withThink bool
+	}
+	var mu sync.Mutex
+	var reqs []sent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw struct {
+			Model string          `json:"model"`
+			Think json.RawMessage `json:"think"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &raw)
+		hasThink := len(raw.Think) > 0
+		mu.Lock()
+		reqs = append(reqs, sent{model: raw.Model, withThink: hasThink})
+		mu.Unlock()
+		// Only "rejector" refuses the parameter; "supporter" accepts it.
+		if hasThink && raw.Model == "rejector" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"\"rejector\" does not support thinking"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	var logBuf bytes.Buffer
+	falseVal := false
+	a := New(WithBaseURL(srv.URL), WithThink(&falseVal),
+		WithLogger(slog.New(slog.NewTextHandler(&logBuf, nil))))
+
+	run := func(model string) {
+		t.Helper()
+		stream, err := a.Stream(context.Background(), provider.Request{
+			Model:    model,
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+		})
+		if err != nil {
+			t.Fatalf("Stream(%s): %v", model, err)
+		}
+		var got string
+		for ev := range stream {
+			if ev.Type == provider.EventTextDelta {
+				got += ev.Text
+			}
+		}
+		if got != "hi" {
+			t.Fatalf("Stream(%s) text = %q, want %q", model, got, "hi")
+		}
+	}
+
+	run("rejector") // 400 with think, then the successful retry without it
+	run("rejector") // must skip the doomed first attempt entirely
+
+	mu.Lock()
+	after := append([]sent(nil), reqs...)
+	mu.Unlock()
+	want := []sent{{"rejector", true}, {"rejector", false}, {"rejector", false}}
+	if len(after) != len(want) {
+		t.Fatalf("got %d requests %v, want %d %v (second turn must not re-send think)", len(after), after, len(want), want)
+	}
+	for i := range want {
+		if after[i] != want[i] {
+			t.Fatalf("request %d = %+v, want %+v (full sequence %v)", i, after[i], want[i], after)
+		}
+	}
+
+	if n := strings.Count(logBuf.String(), "rejected the think parameter"); n != 1 {
+		t.Errorf("think-rejection warning fired %d times, want exactly 1; log:\n%s", n, logBuf.String())
+	}
+
+	// The latch is per-model: a second model must still get `think`.
+	run("supporter")
+	mu.Lock()
+	last := reqs[len(reqs)-1]
+	mu.Unlock()
+	if last.model != "supporter" || !last.withThink {
+		t.Errorf("second model's request = %+v, want think sent (the latch must not leak across models)", last)
+	}
+}
+
+// TestRaiseContextWindowConcurrentWithStream is the P52.6 regression, and is
+// meaningful only under `go test -race`: RaiseContextWindow's write to numCtx
+// and doChat's read of it must be synchronized. Before the fix this was an
+// unguarded read/write pair, safe only because the sole caller was a
+// single-session CLI process — an invariant that dies the moment the phased
+// drive runs inside the daemon, where one adapter is shared by every concurrent
+// session. Escalation stays monotonic, so whatever value a request observes is
+// always a real (never-shrinking) window.
+func TestRaiseContextWindowConcurrentWithStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got wireRequest
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		if got.Options != nil && got.Options.NumCtx < 4096 {
+			t.Errorf("observed a shrunken num_ctx %d; escalation must be monotonic", got.Options.NumCtx)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	a := New(WithBaseURL(srv.URL), WithNumCtx(4096))
+
+	const n = 32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) { // writers: concurrent context-window escalations
+			defer wg.Done()
+			a.RaiseContextWindow(4096 + i*1024)
+		}(i)
+		wg.Add(1)
+		go func() { // readers: concurrent Streams reading numCtx in doChat
+			defer wg.Done()
+			stream, err := a.Stream(context.Background(), provider.Request{
+				Model:    "llama3.2",
+				Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+			})
+			if err != nil {
+				t.Errorf("Stream: %v", err)
+				return
+			}
+			for range stream {
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := a.contextWindow(); got != 4096+(n-1)*1024 {
+		t.Errorf("final num_ctx = %d, want %d (highest escalation wins)", got, 4096+(n-1)*1024)
 	}
 }
 

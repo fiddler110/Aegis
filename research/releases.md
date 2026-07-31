@@ -8,7 +8,123 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-30 — **P51.1 shipped**: the macOS OS-sandbox backend (`sandbox: os`,
+**Last updated:** 2026-07-30 — **P52.2, P52.5, P52.6, P52.7, P52.9 shipped** (plus **P52.11**, the
+`documentation-as-code` skill, committed here), the first parallel batch off the P52.x full-stack
+review. Five file-disjoint items built concurrently, then reconciled.
+
+**P52.2 — `latex_build` no longer hands the host filesystem to the TeX compiler.** A `.tex` file the
+model itself authored could `\input{~/.ssh/id_rsa}` and have the contents typeset into the output
+PDF: the compiler was invoked with no `-no-shell-escape` and an unset `cmd.Env`, inheriting a host
+TeX config where `openin_any = a`. Every other file-touching builtin routes through
+`sandbox.ValidatePath`; this one validated the `.tex` path and then gave a subprocess the whole disk.
+**The fix the roadmap prescribed turned out to be a no-op, and that is the main finding here.** The
+roadmap asserted `openin_any=p` is "honoured by TeX itself, so the hardening holds regardless of the
+host's `texmf.cnf`". As of TeX Live 2026 that is false: `texmf-dist/web2c/texmf.cnf` documents
+`openin_any` as having **no effect** — `kpse_in_name_ok` and friends always return true — because
+"there were obscure ways to inject arbitrary input from the supposedly-forbidden areas, so it gave a
+false sense of security" ([tex-live thread, Dec 2025](https://tug.org/pipermail/tex-live/2025-December/051965.html)).
+Confirmed empirically: with `openin_any=p openout_any=p shell_escape=f` and `-no-shell-escape`, an
+`\input` of an absolute out-of-workspace path is still opened (the run log records it) and its text
+still lands in the PDF's content stream. So the three-line fix alone would have shipped as security
+theatre and failed its own regression test. The invocation is hardened anyway (`-no-shell-escape`
+first so it cannot be swallowed as a filename, `openin_any`/`openout_any=p`, `shell_escape=f`,
+inherited values *stripped* rather than shadowed, applied on every pass) — that is still effective on
+TeX Live ≤2025 and MiKTeX — **and** the source is now scanned before the compiler runs for file
+references resolving outside the workspace root: `\input` (braced and TeX's brace-less form),
+`\include`, `\InputIfFileExists`, `\openin`, `\lstinputlisting`, `\verbatiminput`, `\includegraphics`,
+`\includepdf`, `\addbibresource`, `\bibliography`, `\import`/`\subimport`, `\graphicspath` roots, and
+local `.sty`/`.cls`, with `~` expanded and includes followed transitively so a one-hop bypass through
+a chapter file is caught (capped at 128 files / 4 MiB each). TeX comments and
+`verbatim`/`lstlisting`/`minted`/`alltt` blocks are stripped first, so a security report that *quotes*
+`\input{/etc/passwd}` still builds. A latent bug surfaced while testing: `sandbox.ValidatePath`'s fast
+pre-check compares against the **unresolved** root, so on macOS — where any `/tmp` or `/var` workspace
+is reached through a symlink — validating an already-resolved `/private/...` path flagged the
+document's own chapters as escapes; the scan now resolves both sides through `EvalSymlinks` first.
+Verified against a real compiler both ways: the escaping document is refused and leaks nothing, and an
+ordinary multi-file build — the full `latex_new_document` template, `output_dir` and all — still
+compiles clean. **Residual, deliberately not closed:** the scan is a heuristic on a hardened process,
+not a sandbox. Filenames a document builds from macros at run time (`\input{\somemacro}`) cannot be
+resolved statically and are allowed by design; the durable fix is running the compiler under
+`internal/sandbox`, filed as a Tier-3 lead rather than taken as a drive-by change, since P51.1 had
+just finished proving the seatbelt profile was executing nothing at all on macOS 26.
+
+**P52.5 — latch the `think`-rejection verdict.** The P38.5 retry for models that 400 the instant
+`think` is sent ("does not support thinking") was correct but stateless: `a.think` was never updated,
+so the adapter re-sent `think` on the very next request, took the same 400, warned again, and retried
+again — for every turn of the session. A 40-iteration local run paid 40 pointless 400s and buried real
+signal under 40 identical warnings. `Stream` now consults a latch before the first attempt and skips it
+once a model has proven it rejects the parameter; the latch is written only after the think-omitted
+retry has actually *succeeded*, and the warning is gated on the same `LoadOrStore` so it fires exactly
+once per model even when `Stream` is entered concurrently by several sessions against the shared daemon
+adapter. It is keyed by `req.Model`, not held per-adapter: one daemon adapter serves a mix of models,
+and latching adapter-wide on one model's rejection would silently strip `think` from a sibling that
+supports it. One behaviour change beyond the spec: the warning now fires only on a *successful* retry,
+so a retry that also fails surfaces the raw error rather than a misleading "retried without it".
+
+**P52.6 — synchronize `RaiseContextWindow`.** It mutated `numCtx` with no synchronization while
+`doChat` read it on every request. The doc comment was honest that this was safe only because the sole
+caller was `internal/cli/chat.go`, a single-session CLI process — an invariant that dies the moment
+**P52.12** lifts the phased drive into the daemon, where `s.adapter` is shared across every concurrent
+session and one session's context escalation becomes an unguarded write racing every other session's
+`Stream`. `go test -race` could not have caught it: no existing test drove the daemon and the
+escalation path together. `numCtx` is now behind an `RWMutex` taken by both `RaiseContextWindow` and a
+new `contextWindow()` helper that `doChat` reads through, and the stale caveat is replaced by the
+actual guarantee — escalation stays monotonic, so a concurrent raise can only ever be observed as a
+larger window, never a shrink. Landed ahead of P52.12 so the structural change need not also carry a
+concurrency fix. The new `-race` test (32 concurrent escalations against 32 concurrent `Stream` calls)
+reports the race verbatim against pre-fix code — write at `RaiseContextWindow` against read in
+`doChat` — and is clean after.
+
+**P52.7 — suite-wide hollow-body check.** P47.9's `finding-bodies-nonempty` proved the failure real (a
+weak model deletes a `<!-- PENDING -->` marker and writes nothing, leaving a heading over blank space —
+structurally intact, substantively blank), but it only looked inside `### FIND-##` blocks: an empty
+Deployment Classification, Security Infrastructure Inventory, PASTA stage or Executive Summary all
+passed `verify.py` clean. `scaffold.py` now records every site it marked — file, enclosing heading,
+heading level, table columns — into a hidden `.scaffold-manifest.json` in the run directory, derived
+from the *built content* rather than by instrumenting the builders, so any future skeleton section is
+covered with no second place to keep in sync. A new check, `section-bodies-nonempty`, asserts against
+it, converting the shipped property *"no PENDING marker remains"* into the one actually wanted:
+*"every site that had a marker now has substance"*, with `file:line` per failure. A 5-section hollow
+suite that scored `14 passed, 0 failed` before now reports 5 failures across 4 files. Existing
+behaviour is preserved throughout: the guidance-comment / `---` rule / bare-table-separator exclusions
+are unchanged, an unfilled marker is still reported once (by check 1, never twice), and a suite
+scaffolded before this — or one with a corrupt manifest — degrades to the old behaviour rather than
+failing, since resumed runs exist in the wild. **Deviation from the roadmap, deliberate:** the item
+said to *generalize check 12*; instead check 12 keeps its name and check 15 is new, because
+`chat_phased.go`'s `contentSubstanceChecks` routes on the literal string `finding-bodies-nonempty` to
+send hollow findings back through the findings phase (P47.9) — renaming would have silently dropped
+that routing. The two never overlap: check 12 owns model-authored `####` subsections inside finding
+blocks (never scaffolded, so never in the manifest), check 15 owns scaffolded headings suite-wide. The
+sidecar lives in the run directory and uses the `.json` convention `.quality-stamp.json` established,
+so no suite scanner sees it and the built-in-skill self-heal path (which only refreshes
+`.aegis/builtin-skills/`) cannot disturb it. The manifest is deliberately a superset of what this check
+needs so **P52.8**'s substance floor can consume it directly — `kind`/`columns` locate every scaffolded
+table by real column name, `kind: "prose"` entries are exactly the narrative sections a length floor
+applies to, and `manifest_version` allows a schema bump.
+
+**P52.9 — `yaml_validate`.** Aegis had no YAML tooling at all, yet YAML is a first-class deliverable in
+two shipped flows: `inventory.yaml` in the threat-model suite, and the `documentation-as-code` skill's
+`slides` family, whose entire output is a `.yaml` file. Both were edited as opaque text via `edit_file`,
+so a broken indent stayed invisible until a downstream consumer (`inventory.py --check`, a deck
+renderer) failed with an error far from the cause — several turns of localization on a slow local
+model, which is exactly the budget P47.x/P50.x exist to protect. The new tool (`CapRead`, deferred,
+`internal/tool/builtin/yaml.go`) parses through the existing `go.yaml.in/yaml/v3` dependency — **no new
+dependency** — and returns either the parse error with its line and a `>`-marked ±2-line excerpt, or a
+compact outline of top-level keys with each value's kind and line number. The outline is the point: it
+makes the tool a cheap structural probe usable *before* an edit, not just a post-hoc check. It decodes
+document-by-document rather than via `yaml.Unmarshal`, which silently ignores everything after the
+first `---` and would call a file with a broken second document valid. Paths route through the same
+`sandbox.ValidatePath`/`effectiveRoot` confinement as every other file builtin. One limitation is
+deliberate and visible in the output: `go.yaml.in/yaml/v3` never exposes the problem mark's column
+(`parser.fail` emits only `line N`), so the tool says so plainly and leans on the excerpt rather than
+inventing a column that would misdirect on exactly the indentation bugs it exists to catch. Registered
+deferred — the two workflows that need it are skill-driven and can name it, so `tool_search` covers
+discovery without every unrelated turn paying the schema cost.
+
+**P52.11 — `documentation-as-code` skill** shipped 2026-07-30 and is committed here (see the roadmap
+entry for its design and its confidentiality boundary).
+
+Previously, 2026-07-30 — **P51.1 shipped**: the macOS OS-sandbox backend (`sandbox: os`,
 seatbelt) ran **no commands at all** on macOS 26 — `/bin/sh` took SIGABRT during exec with no
 diagnostic beyond the signal, surfacing as two failing `internal/sandbox` tests that looked like
 host noise. The cause was the P27.18 read confinement: `(deny file-read*)` also denies reading the

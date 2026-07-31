@@ -135,6 +135,11 @@ should already be clean if each file's own "Post-write checks" in
 - [ ] No stray skeleton syntax remains — grep every file for `[FILL`,
       `[REPEAT`, `[END-REPEAT` before reporting done; each hit is a
       placeholder that was never actually filled in.
+- [ ] No section was *emptied* instead of filled — a heading standing over
+      blank space, or a table reduced to its header + separator, is a
+      placeholder too even though the `<!-- PENDING -->` marker is gone.
+      `verify.py`'s `section-bodies-nonempty` check reports these by
+      `file:line` from `scaffold.py`'s `.scaffold-manifest.json`.
 - [ ] Every top-level directory from recon.py's digest appears exactly once
       in `0.1-architecture.md`'s Coverage Ledger, as `Covered — <component>`
       or `Excluded — <reason>` — including recon's auto-excluded directories
