@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-29
+**Last updated:** 2026-07-30
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,12 +11,17 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** **P38.1** (Tier 2 umbrella) + **P51.1** (Tier 1, macOS seatbelt profile — **shipped**
+**Open items:** the **P52.x full-stack review batch** (filed 2026-07-30, **11 open** of 17 —
+**P52.1** Tier 1, **P52.3**/**P52.4**/**P52.8**/**P52.10** Tier 2, **P52.12**/**P52.13** Tier 3,
+**P52.14**-**P52.17** Tier 4 measure-first; **P52.2**, **P52.5**, **P52.6**, **P52.7**, **P52.9** and
+**P52.11** shipped 2026-07-30) — see the batch summary and its
+build-order table below, which is the authoritative sequence for future sessions. Plus **P38.1**
+(Tier 2 umbrella) + **P51.1** (Tier 1, macOS seatbelt profile — **shipped**
 2026-07-30) + the
 remaining **P49.x repo-map / index enrichment batch** (**P49.3**/**P49.4** Tier 4, both
 measure-first — the structural head **P49.1** and the on-demand query tool **P49.2** have **shipped**
 2026-07-29; see [releases.md](releases.md)) +
-2 parked (Tier 4: **P38.8**, **P25.9**). Everything else filed since the last cleanup — the P39.10-P39.15
+2 parked (Tier 4: **P38.8**, **P25.9**). **P50.5** is **superseded by P52.12**. Everything else filed since the last cleanup — the P39.10-P39.15
 threat-model harness fixes, the P40.x TUI/UX batch, P41.1, P44.1, P45.1, P45.2, the P46.x
 codex-build track, **P48.1** (config-test hermeticity), **P47.6** (drive model-selection guidance,
 doc-only), **P47.10** (CLI/TUI parity, resolved as documentation), **P49.1**/**P49.2** (repo-map
@@ -85,6 +90,58 @@ stays a Tier-3 lead, not this batch's work. **P50.1-P50.4 all shipped 2026-07-30
 green, P50.2 validated end-to-end on the real FirewallRiskRater suite) — see [releases.md](releases.md);
 their live-run confirmation folds into the P38.1 umbrella.
 
+**New batch — P52.x full-stack review (filed 2026-07-30):** a comprehensive review of the whole
+application — TUI, web UI, daemon/engine, the Ollama seam, the threat-model skill, and the
+document-authoring surface — filed 17 items. Three themes came out of it. (1) **The local-model
+reliability work is CLI-only**: everything P47.x/P50.x built (fresh context per phase, hollow
+re-entry, backend liveness, context escalation, no-progress guard) lives in
+`internal/cli/chat_phased.go` and is unreachable from the TUI and web UI, which still run the
+single-context drive the phased drive exists *because* it fails — **P52.12** generalizes the earlier
+**P50.5** lead from "wire it into the TUI" to "lift it into the daemon so every client gets it".
+(2) **Context-window detection is keyed to the wrong model**: `contextwindow.go` resolves one
+server-wide window for `cfg.Provider.Model`, but `resolveModel`/`turnModel` route individual turns to
+a persona-pinned or `small_model` target, so the engine can be handed the wrong window and let Ollama
+silently truncate the system prompt — the exact failure `ollamainfo` exists to prevent, reintroduced
+through the per-session model path (**P52.1**/**P52.4**). (3) **`latex_build` is the one tool that
+escapes workspace confinement** — it shells out to a TeX compiler with no `-no-shell-escape` and
+inherits `openin_any=a`, so a model-authored `.tex` can read any file on the host (**P52.2**). The
+review also confirmed the parts that are *clean* and need no work: daemon auth (constant-time compare,
+lockout backoff, page-token exchange), the web UI (strict CSP, zero `innerHTML`, one runtime dep), and
+`sandbox.ValidatePath`'s symlink-aware confinement.
+
+**P52.x build order.** Tier order is the priority; within a tier, build in the sequence below —
+it front-loads the two correctness/security items, then the cheap self-contained wins, and defers
+the two larger structural items until their dependencies exist. Items marked *measure-first* must
+not be built speculatively.
+
+| Order | Item | Tier | Why here |
+|---|---|---|---|
+| 1 | **P52.1** per-model context window | 1 | Silent prompt truncation; correctness, contained — **next up** |
+| 2 | **P52.2** `latex_build` confinement | 1 | **SHIPPED 2026-07-30** |
+| 3 | **P52.3** tool-failure circuit breaker | 2 | Biggest remaining local-model stall; no dependency |
+| 4 | **P52.4** per-request `num_ctx` | 2 | Adapter half of P52.1 — build immediately after it |
+| 5 | **P52.5** `think`-rejection latch | 2 | **SHIPPED 2026-07-30** |
+| 6 | **P52.6** `RaiseContextWindow` mutex | 2 | **SHIPPED 2026-07-30** — P52.12 is now unblocked on this axis |
+| 7 | **P52.7** suite-wide hollowness check | 2 | **SHIPPED 2026-07-30** |
+| 8 | **P52.8** threat-model substance floor | 2 | Builds on P52.7's marker manifest — **manifest now exists** |
+| 9 | **P52.9** `yaml_validate` tool | 2 | **SHIPPED 2026-07-30** |
+| 10 | **P52.10** `latex_build` bib pass | 2 | Makes the shipped biblatex preamble actually work |
+| 11 | **P52.11** documentation-as-code skill | 2 | **SHIPPED 2026-07-30** |
+| 12 | **P52.13** `workspace.additional_roots` | 3 | Unblocks cross-repo research→document |
+| 13 | **P52.12** lift phased drive into daemon | 3 | Largest surface; P52.6 has now landed |
+| 14 | **P52.14** session-scoped loop detector | 4 | *measure-first* |
+| 15 | **P52.15** wall-clock run budget | 4 | *measure-first* |
+| 16 | **P52.16** native tool-result disambiguation | 4 | *measure-first* — needs a live A/B |
+| 17 | **P52.17** auto tool-calling probe on model switch | 4 | Polish; no trigger yet |
+
+**Batch 1 shipped 2026-07-30 (parallel).** P52.2, P52.5+P52.6, P52.7 and P52.9 were built
+concurrently as four file-disjoint lanes and reconciled in one pass — see [releases.md](releases.md).
+Two findings from that batch change later work: **(a)** P52.2's prescribed `openin_any=p` fix is a
+**no-op on TeX Live 2026** (upstream made the setting inert), so the confinement is carried by a
+static source scan instead — which matters for **P52.10**, whose `biber`/`bibtex` subprocesses the
+scan does not cover; **(b)** P52.7 added check 15 rather than renaming check 12, because
+`chat_phased.go` routes on the literal check name.
+
 **Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body). The
 2026-07-23 gpt-oss:20b housekeeping is now **closed** — **P39.10**/**P39.11** were already coded,
 shipped, and verified live; as of 2026-07-27 they also have their releases.md entry and regression
@@ -105,10 +162,107 @@ is covered by `internal/skills/embedded_test.go`).
 
 ## Open Work — Tier 1
 
-**Status:** none open — **P51.1** (macOS seatbelt profile runs no commands) **shipped 2026-07-30**;
+**Status:** 1 open — **P52.1** (per-model context window), filed 2026-07-30 by the P52.x full-stack
+review and now the batch's next item. **P52.2** (`latex_build` workspace confinement) **shipped
+2026-07-30**. **P51.1** (macOS seatbelt profile runs no commands) **shipped 2026-07-30**;
 **P50.1** (backend liveness + resumable reset), the P50.x batch head, **shipped 2026-07-30** (see
 [releases.md](releases.md)); batch head **P47.1** (wire proactive compaction into the CLI
 `chat --skill` drive engine) **shipped** 2026-07-24.
+
+### P52.1 — Context window is detected for the global model, not the model the turn actually runs on
+
+`internal/server/contextwindow.go` resolves **one server-wide** effective context window, detected
+against `s.cfg.Provider.Model` (`initContextWindow` at `:52`, `maybeRefreshContextWindow` at `:117`),
+and `newEngine` hands that single number to every run: `ctxWin, _ := s.effectiveContextWindow()` →
+`ContextWindowTokens: ctxWin` (`engine_build.go:274`, `:288`). But the model a turn actually runs on
+is resolved **per turn**: `resolveModel` (`engine_build.go:54`) layers session `/model` override >
+persona config override > the persona file's own `model:` > global, and `turnModel` can additionally
+route a turn to `provider.small_model`. So the window the engine enforces and the model that has to
+live inside it can be two different models.
+
+Both directions are wrong, and one is the failure this whole subsystem was written to prevent:
+
+- **Persona pins a larger-context model** → the engine compacts at 85% of a window smaller than the
+  real one, burning summarizer calls (and on a local model, minutes) on a conversation that had room.
+- **Persona pins — or task routing selects — a smaller-context model** → the engine believes it has
+  headroom, never compacts, and Ollama silently drops the oldest tokens **including the system
+  prompt**. That is precisely the silent-truncation failure `ollamainfo` exists to catch
+  (`ollamainfo.go:1-8`), reintroduced through the per-session model path that postdates it.
+
+Fix: key detection by model rather than by server. A small `map[string]ollamainfo.Result` cache
+behind `ctxWinMu` (each entry carrying its own `Authoritative()`/`ctxWinFinal` state, since a model
+not yet loaded still needs the re-detect-after-first-run path), resolved in `newEngine` *after*
+`turnModel` has picked the model, with the existing config-vs-served reconciliation in
+`applyDetectedWindow` applied per entry. `maybeRefreshContextWindow` then refreshes the entry for the
+model the finished run used, not `cfg.Provider.Model`. Pairs with **P52.4**, which fixes the adapter
+half (the `num_ctx` actually requested); do them together — fixing only one leaves the request and
+the enforcement disagreeing in the other direction.
+
+**Priority:** Tier 1 — a live correctness gap that silently degrades any session using a
+persona-pinned model or small-model routing, with no diagnostic (the model just quietly forgets its
+instructions). Contained to `contextwindow.go` + one call site; no dependency.
+
+### P52.2 — `latex_build` escapes workspace confinement (arbitrary host file read into a PDF) — SHIPPED 2026-07-30
+
+**Correction, found while building this (2026-07-30).** The fix prescribed below is a **no-op on
+TeX Live 2026**. This item asserted that `openin_any=p` is "honoured by TeX itself, so this holds
+regardless of the host's `texmf.cnf`". That is no longer true: TL2026's
+`texmf-dist/web2c/texmf.cnf` documents `openin_any` as having **no effect** — `kpse_in_name_ok` and
+related functions always return true — because "there were obscure ways to inject arbitrary input
+from the supposedly-forbidden areas, so it gave a false sense of security"
+([tex-live thread, Dec 2025](https://tug.org/pipermail/tex-live/2025-December/051965.html)). So the
+host's `openin_any = a` is upstream's new default with the semantics deleted, not a
+misconfiguration. Verified empirically: with `openin_any=p openout_any=p shell_escape=f` and
+`-no-shell-escape`, an `\input` of an absolute out-of-workspace path is still opened and its text
+still reaches the PDF content stream. The three-line fix alone would have shipped as security
+theatre and failed its own regression test.
+
+**What shipped instead:** the process hardening below (still effective on TeX Live ≤2025 and
+MiKTeX, and `-no-shell-escape`/`openout_any` are real everywhere) **plus** a pre-compile static scan
+of the `.tex` and its transitive in-workspace includes for file references resolving outside the
+root, validated through `sandbox.ValidatePath`. See [releases.md](releases.md) for the covered
+directives and the exclusion handling. **Residual gap, deliberately left open:** the scan is a
+heuristic on a hardened process, not a sandbox — filenames constructed from macros at run time
+(`\input{\somemacro}`) cannot be resolved statically and are allowed. The durable fix is running the
+compiler under `internal/sandbox`; filed as the Tier-3 lead below rather than taken as a drive-by
+change, since P51.1 had just finished proving the seatbelt profile executed nothing at all on macOS
+26. The original analysis follows.
+
+`internal/tool/builtin/latex.go:100-108` builds the compiler invocation as:
+
+```go
+flags := []string{"-interaction=nonstopmode", "-halt-on-error", "-output-directory=" + outDir}
+```
+
+No `-no-shell-escape`, and no environment hardening. Verified against the live TeX config on the dev
+host (`kpsewhich --var-value=...`): `shell_escape = p` (restricted — a whitelist of `\write18`
+commands is permitted) and, critically, **`openin_any = a` — TeX may read any file on the host.**
+
+So a `.tex` file *the model itself authors* can `\input{~/.ssh/id_rsa}` or `\InputIfFileExists` any
+path on the machine and embed the contents in the output PDF. Every other file-touching builtin
+routes through `sandbox.ValidatePath` (`builtin.go:224`), which is symlink-aware and correct;
+`latex_build` resolves only the **`.tex` path itself** through it and then hands the whole filesystem
+to a subprocess. The tool is `CapExecute` so it is permission-gated, but the confinement asymmetry is
+real — and it matters more now that document authoring is a first-class workflow (see **P52.10**,
+**P52.11**), where the source material (third-party `.sty` files, templates, research artifacts) is
+not necessarily the user's own.
+
+Fix, cheap and with no functional downside:
+
+```go
+flags = append([]string{"-no-shell-escape"}, flags...)
+cmd.Env = append(os.Environ(), "openin_any=p", "openout_any=p")
+```
+
+`openin_any=p` (paranoid) restricts reads to the current tree and TEXMF — exactly what a
+workspace-confined build wants — and `-no-shell-escape` closes the restricted-`\write18` whitelist.
+Add a regression test that a `.tex` containing `\input` of an absolute out-of-workspace path fails to
+embed it. ~~Note the env vars are honoured by TeX itself, so this holds regardless of the host's
+`texmf.cnf`.~~ **← false as of TeX Live 2026; see the correction at the top of this item.**
+
+**Priority:** Tier 1 — a currently-exploitable confinement escape in shipped code, and the fix is
+three lines plus a test. No dependency. *(Shipped 2026-07-30 — the fix was not three lines; see the
+correction above.)*
 
 ### P51.1 — The macOS seatbelt profile runs no commands at all — SHIPPED 2026-07-30
 
@@ -165,13 +319,310 @@ to the drive + the Ollama adapter, no dependency.
 
 ## Open Work — Tier 2
 
-**Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
-tracking rather than independent build work. The self-contained batch items **P47.1**, **P47.2**,
+**Status:** 5 open — **P38.1** (threat-model conformance umbrella, live-run verification tracking
+rather than independent build work) plus the remainder of the P52.x full-stack review's Tier-2 batch:
+**P52.3** (tool-failure circuit breaker), **P52.4** (per-request `num_ctx`), **P52.8** (threat-model
+substance floor — **P52.7**'s manifest now exists, so it is unblocked), **P52.10** (`latex_build`
+bibliography pass). **P52.5** (`think`-rejection latch), **P52.6** (`RaiseContextWindow`
+synchronization), **P52.7** (suite-wide hollowness check), **P52.9** (`yaml_validate` tool) and
+**P52.11** (documentation-as-code skill) all **shipped 2026-07-30** — see
+[releases.md](releases.md). Build in the order given in the Status section's P52.x table. The self-contained batch items **P47.1**, **P47.2**,
 **P47.3**, **P47.4**, **P47.5**, **P47.7**, **P47.8**, **P47.9** (the full P47.x phased-drive
 stability batch), **P48.1** (config-test hermeticity), **P49.1** (repo-map import edges, the
 P49.x batch head), and **P50.2**/**P50.3**/**P50.4** (the P50.x phased-drive determinism batch —
 deterministic ID canonicalizer, quality-pass rollback guard, live heartbeat) have all shipped — see
 [releases.md](releases.md).
+
+### P52.3 — Consecutive-tool-failure circuit breaker (the loop the loop detector cannot see)
+
+`IsError` is computed for every tool result and emitted on the event stream (`engine.go:1276-1278`,
+`:1327`, `:1332`) and then **never aggregated into anything** — no counter, no threshold, no nudge,
+no abort. The engine has a rich set of stall guards (P28.3 zero-tool, P34.1 empty-answer, P34.2
+tool-call-as-text, P2.6 step-limit summary, the P39.8 summarizer latch) and none of them fire on
+repeated *failing* tool calls.
+
+The gap is structural, not incidental. `loopDetector` matches a repeating **signature** of tool
+name + canonicalized input (`loopdetect.go:39-72`), with period 1..4. `canonicalizeToolInput`
+correctly neutralizes nonces and timestamps so an incidental varying byte can't defeat it. But the
+common small-model failure is a model whose arguments *legitimately differ every turn*: call
+`edit_file`, get `old_string not found`, retry with a slightly different `old_string`, fail again,
+repeat. Every signature is genuinely distinct, so the detector never fires, and the run burns all the
+way to `maxIterations` (default 40) producing nothing. On a ~7 tok/s local model that is potentially
+hours. None of the three existing budgets catch it either: `BudgetUSD` is an explicit no-op for
+unpriced local usage (`engine.go:541-550`), `MaxTokensPerRun` defaults to 0, and `maxIterations` is
+the thing being burned.
+
+Fix: track, per `Run`, the number of **consecutive tool rounds in which every tool result was an
+error** (and, secondarily, the count of consecutive identical *error strings* regardless of input,
+which catches the same-error-different-args shape directly). At threshold 3, inject a corrective
+nudge in the existing `nudgeState` idiom — quoting the actual error text and instructing the model to
+re-read the file/re-inspect state before retrying, rather than re-guessing arguments. At threshold 6,
+abort with a message naming the repeated error. The nudge must be registered in `nudgeState` so
+`retractAll` strips it from the durable transcript like every other corrective (`engine.go:785-795`).
+
+This **promotes the existing Tier-3 "task-failure halt" lead** (filed with P46.3), which identified
+the same gap from the `codex-build` angle — that lead noted it would need "a persisted task boundary
+to count against". It does not: the per-`Run` tool round is a perfectly good boundary for the failure
+shape that actually occurs, and a persisted task boundary can layer on later if `structured-build`
+ever needs it. Treat that lead as closed by this item.
+
+**Priority:** Tier 2 — ~30 lines in an established idiom, no dependency, and it closes the single
+most common local-model stall the current guard set misses. Highest-value Tier-2 item in the batch.
+
+### P52.4 — Per-request `num_ctx` (stop a small-model turn allocating the primary model's KV cache)
+
+`s.adapter` is a **single shared adapter** built once at daemon start and used by every run
+(`engine_build.go:276`). The native Ollama adapter carries `num_ctx` as **adapter state**
+(`ollama/ollama.go:36`, set via `WithNumCtx`) and stamps it onto every request
+(`doChat`, `:342-345`). The model, by contrast, is per-request (`provider.Request.Model`).
+
+So when `turnModel` routes a turn to `provider.small_model`, Ollama is asked to serve that small
+model with the **primary** model's `num_ctx`. On VRAM-constrained hardware that either forces an
+oversized KV allocation for a model that doesn't need it, or evicts the primary model to make room —
+producing exactly the cold-reload churn between turns that `load_duration` telemetry was added to
+make visible (`ollama.go:554`). The same applies to a persona-pinned model.
+
+Fix: move `num_ctx` from adapter state to a per-`Request` field. `wireOptions.NumCtx` is already
+populated per request, so the wire path needs no change — only the *source* of the value moves from
+`a.numCtx` to `req.NumCtx`, with the adapter's value kept as the fallback when the request doesn't
+specify one (preserving today's behavior for every non-Ollama caller). `newEngine` then sets it from
+the same per-model resolution **P52.1** introduces, so the window requested and the window enforced
+come from one place and cannot disagree.
+
+Build immediately after **P52.1** — they are two halves of one correctness story, and shipping either
+alone leaves the request and the enforcement inconsistent in the opposite direction. Note this also
+removes the mutability that makes **P52.6** necessary on the `Stream` path, though `RaiseContextWindow`
+still needs its own treatment for the escalation path.
+
+**Priority:** Tier 2 — contained to the Ollama adapter + `provider.Request` + one call site; no
+dependency beyond P52.1, which it should ship alongside.
+
+### P52.5 — Latch the `think`-rejection verdict (a wasted 400 round trip on every single turn) — SHIPPED 2026-07-30
+
+Shipped as specified, with the `sync.Map` keyed on `req.Model` the item called "the honest shape".
+One behaviour change beyond the spec: the warning now fires only after a *successful* think-omitted
+retry, so a retry that also fails surfaces the raw error instead of a misleading "retried without
+it". See [releases.md](releases.md).
+
+`ollama.go:291-309` handles the P38.5 case where a model 400s the instant `think` is sent at all
+("does not support thinking") by retrying once with the field omitted. The retry is correct and the
+warning is right. But `a.think` is **never updated**, so the adapter re-sends `think` on the next
+request, 400s again, warns again, and retries again — **for every turn of the entire session.**
+
+On a cloud provider that is a wasted round trip. On a local server it is worse: the failed request
+still reaches Ollama, and the warning fires on every turn, burying real signal in the log. A
+40-iteration run pays 40 pointless 400s.
+
+Fix: after a *successful* retry with `think` omitted, latch the adapter's `think` to nil so
+subsequent requests skip the doomed first attempt, and emit the warning only on the first occurrence.
+Because `Stream` can be entered concurrently by multiple sessions against the shared daemon adapter,
+the latch needs synchronization — an `atomic.Bool` alongside the existing `*bool` is enough (read it
+in `doChat`, set it once in the retry path), and it composes with **P52.6** rather than duplicating
+it. Keep the latch per-adapter, not per-model: a daemon serving two models where only one rejects
+`think` would mis-latch, so gate the latch on `req.Model` — a small `sync.Map[string]bool` keyed by
+model is the honest shape.
+
+**Priority:** Tier 2 — small and self-contained, removes a per-turn cost and a per-turn log line on
+exactly the models most likely to be used locally.
+
+### P52.6 — Synchronize `RaiseContextWindow` before the daemon can call it — SHIPPED 2026-07-30
+
+Shipped ahead of **P52.12** as the sequencing note below required. `numCtx` is now behind an
+`RWMutex`; a new `-race` test (32 concurrent escalations against 32 concurrent `Stream` calls)
+reproduces the race verbatim against pre-fix code and is clean after. See
+[releases.md](releases.md).
+
+`ollama.go:82-94` mutates `a.numCtx` with no synchronization. Its doc comment is honest about this —
+*"Not safe for concurrent use with Stream — the phased drive only calls it between turns, after a
+Stream error has returned and before the next Run"* — and that invariant holds **today**, because the
+only caller is `internal/cli/chat.go:435`, a single-session CLI process.
+
+It stops holding the moment **P52.12** lifts the phased drive into the daemon, where `s.adapter` is
+shared across every concurrent session (`engine_build.go:276`). At that point one session escalating
+its context window is an unsynchronized write racing every other session's `Stream` read of the same
+field — a genuine data race, and one that `go test -race` will not catch because no existing test
+drives the daemon and the escalation path together.
+
+Fix: guard `numCtx` with a mutex (or make it atomic), in both `RaiseContextWindow` and the `doChat`
+read. Land this **before** P52.12 rather than as part of it, so the structural change doesn't have to
+carry a concurrency fix as well. If **P52.4** ships first, the field largely stops being read on the
+hot path — but the escalation path still writes it, so this item stands either way.
+
+**Priority:** Tier 2 — a few lines, no behavior change today, and it removes a latent race that
+P52.12 would otherwise introduce silently. Sequence it before P52.12.
+
+### P52.7 — Extend the hollow-body check to all seven suite files (not just `3-findings.md`) — SHIPPED 2026-07-30
+
+**Deviation from the spec below, deliberate:** this item said to *generalize check 12* into a
+suite-wide check. Instead check 12 keeps its name and a new check 15 (`section-bodies-nonempty`) was
+added, because `internal/cli/chat_phased.go`'s `contentSubstanceChecks` routes on the **literal
+string** `finding-bodies-nonempty` to send hollow findings back through the findings phase (P47.9) —
+renaming it would have silently dropped that routing. The two never overlap: check 12 owns
+model-authored `####` subsections inside `### FIND-##` blocks (never scaffolded, so never in the
+manifest); check 15 owns scaffolded headings suite-wide. The manifest ships as
+`.scaffold-manifest.json` in the run directory. **Follow-up worth filing:** extend
+`contentSubstanceChecks` so a `section-bodies-nonempty` failure routes to the phase owning the named
+file, rather than falling through to the generic verify-fix turn. See [releases.md](releases.md).
+
+`verify.py`'s `check_finding_bodies_nonempty` (`:695`) states the failure mode precisely in its own
+docstring: *"A weak model can delete the `<!-- PENDING -->` marker without writing anything in its
+place, leaving a heading over empty space — structurally intact but substantively blank, which no
+other check notices."* That check shipped with P47.9 and its live value is proven — it is what turned
+a false-passing hollow suite into `12 passed, 2 failed` on the 2026-07-27 FirewallRiskRater run.
+
+**It is scoped to `3-findings.md` alone.** The same failure is equally available in
+`0.1-architecture.md`, `1-model.md`, `2-<framework>-analysis.md`, and `0-assessment.md`, and none of
+them are checked. An empty Deployment Classification, an empty Security Infrastructure Inventory, an
+empty PASTA stage, or an empty Executive Summary all pass `verify.py` clean today. Some are caught
+indirectly by the count/bijection checks; the **prose** sections are not caught at all — and the
+architecture file's prose is what every later phase's tiering depends on.
+
+Fix: generalize check 12 into a suite-wide `check_section_bodies_nonempty`. The clean way is to have
+`scaffold.py` — which already knows every marker key it wrote — emit a small manifest (a sidecar, or
+a deterministic re-derivation from the skeletons) that `verify.py` asserts against. That converts the
+current property, *"no PENDING marker remains"*, into the property actually wanted: *"every site that
+had a PENDING marker now has substance."* Keep the existing exclusions (a lone HTML comment, a `---`
+rule, a bare table separator are not content) and keep the division of labour with check 1 so an
+unfilled marker is reported once, not twice.
+
+**Priority:** Tier 2 — mechanical Python in an existing idiom, and it closes a proven-real check gap
+across five files. Prerequisite for **P52.8**, which reuses the same manifest.
+
+### P52.8 — Mechanical substance floor for threat-model content (anti-`TBD`)
+
+Nothing in the 14 `verify.py` checks rejects vacuous content. A suite in which every threat's Evidence
+cell reads `see code`, every Mitigation reads `TBD`, and every category is `None identified` passes
+all 14 checks and gets stamped. The P38.1 quality pass is the intended backstop — but it is an LLM
+call and, per **P52.12**, it is CLI-only, so the TUI path has **no substance gate whatsoever**.
+
+A mechanical floor catches the worst of it for near-zero cost and, unlike the quality pass, cannot
+itself regress the suite (the problem P50.3 had to solve):
+
+- reject an Evidence cell that is a bare filename with no line number, symbol, or config key — the
+  skill's §3 already *requires* the citation, nothing checks it;
+- reject placeholder tokens (`TBD`, `TODO`, `N/A`, `See above`, `see code`) in cells the skeleton
+  marks as required-substantive;
+- cap the fraction of `None identified` cells per framework table — one or two is a legitimate,
+  complete entry (the skill explicitly says so); twelve out of twelve means the pass never happened;
+- require a minimum prose length for the narrative sections **P52.7**'s manifest identifies.
+
+Every threshold must be tunable and each failure must name file:line like the existing checks. Bias
+toward under-flagging: a false failure costs a verify bounce and erodes trust in the whole check
+suite, which is worth more than catching every marginal cell.
+
+**Priority:** Tier 2 — Python only, no Go changes, and it is the only substance gate the TUI path
+would have. Depends on **P52.7** for the section manifest — **shipped 2026-07-30, so this is now
+unblocked.** The manifest (`.scaffold-manifest.json`, run directory) is deliberately a superset of
+what check 15 needs: `kind: "table"` + `columns` locate every scaffolded table by its real column
+names (enough to require a line number/symbol/config key in an Evidence cell, reject `TBD`/`N/A`/`see
+code` per named column, and cap the `None identified` fraction per table), `kind: "prose"` entries
+are exactly the narrative sections a minimum-length floor applies to, and `heading`/`level`/`to_eof`
+give the exact region. `find_heading` / `section_region` / `region_substance` in `verify.py` are
+reusable as-is. `manifest_version` is present for a schema bump and `Suite.manifest()` ignores
+unknown keys, so adding fields is backward compatible in both directions.
+
+### P52.9 — A `yaml_validate` tool (YAML is a deliverable and nothing checks it) — SHIPPED 2026-07-30
+
+Shipped as specified, registered **deferred**. One documented limitation: `go.yaml.in/yaml/v3` never
+exposes the problem mark's column for a parse failure (`parser.fail` emits only `line N`), so the
+tool reports the true line plus a `>`-marked source excerpt and says plainly that no column is
+available, rather than inventing one that would misdirect on indentation bugs. See
+[releases.md](releases.md).
+
+Aegis has **no YAML tooling at all** — `internal/tool/builtin/security.go` is the only builtin that
+even mentions yaml. Yet YAML is a first-class output in two shipped workflows: `inventory.yaml` is one
+of the threat-model suite's seven files, and the documentation-as-code skill (**P52.11**) drives a
+`slides` template family whose entire deliverable is a `.yaml` file.
+
+Today the model edits both as opaque text with `edit_file`. A broken indent is invisible until a
+downstream consumer fails — `inventory.py --check` for the sidecar, a deck renderer for slides — and
+the resulting error usually names a symptom far from the cause. On a slow local model, localizing
+that costs several turns, which is exactly the budget the P47.x/P50.x work exists to protect.
+
+Fix: a `yaml_validate` tool, `CapRead`, that parses the file and returns either the parse error with
+line/column or a compact key outline on success. **`go.yaml.in/yaml/v3` is already a direct
+dependency** (`go.mod:25`), so this adds no new dependency and no new failure mode. Roughly 60 lines
+in the shape of the existing small builtins. Worth also emitting the top-level key list on success —
+that turns the tool into a cheap structural probe the model can use *before* editing, not only after.
+
+**Priority:** Tier 2 — small, zero new deps, and it pays into both the threat-model flow and the
+document-authoring flow. Sequence before or alongside P52.11's first real use.
+
+### P52.10 — `latex_build` can never resolve citations (the biblatex preamble is decorative)
+
+`latex_new_document` scaffolds a `biblatex`/`biber` block into every generated preamble
+(`latex.go:476-478`, and again in the body at `:568-569`, both commented out for the user to enable).
+But `latex_build` only ever runs the LaTeX compiler in a plain multi-pass loop (`:112-125`) — there is
+**no `biber`/`bibtex` invocation anywhere in the tool**. So a user who uncomments the biblatex block,
+adds `references.bib`, and builds gets a PDF with unresolved `[?]` citation marks and no indication
+why. For security research writing, which is citation-heavy, that makes the bibliography support
+purely decorative.
+
+Fix, in order of preference:
+
+1. **Prefer `latexmk` when it is on PATH.** It solves the compile/bib/index fixpoint correctly —
+   including the case where a citation added on pass 2 needs a third pass — and would replace the
+   hand-rolled `runs` loop entirely. Keep the existing loop as the fallback.
+2. **Otherwise, run `biber` (or `bibtex`) between passes** when the source contains
+   `\addbibresource`/`\bibliography`, then force at least two subsequent LaTeX passes. Auto-detecting
+   from the source is better than a flag the model has to remember, but expose a `bib` boolean too so
+   it can be forced or suppressed.
+
+Two smaller defects in the same function worth folding in: the multi-pass loop keeps `runErr` from a
+failed pass 1+ while `lastLog` reflects only the final pass, so a mid-sequence failure can be reported
+against the wrong log; and `parseLatexLog`'s warning cap (`:176`, `:197-202`) compares
+`len(s.warnings) == 15` after the `… and N more` line may already have been appended, which is fragile
+if the cap is ever changed. Both are minor but cheap to fix while the function is open.
+
+Must be built **after P52.2** — adding external tool invocations to this path while it still runs
+unconfined widens the same hole. **P52.2 shipped 2026-07-30, but read its correction before starting
+this:** the confinement it delivered is a *static scan of the LaTeX source*, not process
+confinement (`openin_any` is inert on TeX Live 2026). The scan checks `\addbibresource` /
+`\bibliography` **arguments** — the source-level half — but `biber` resolves resources declared in
+the generated `.bcf`, and neither `biber` nor `bibtex` is covered by it at all. So this item adds
+**two subprocesses outside the current confinement**. Either extend the scan to the `.bcf`/`.aux`
+resource lists before invoking them, or treat it as a reason to prefer the sandbox lead below.
+
+**Priority:** Tier 2 — contained to one tool, and it converts a shipped-but-nonfunctional feature into
+a working one. Depends on P52.2 for ordering (now shipped, with the caveat above).
+
+### P52.11 — `documentation-as-code` built-in skill — SHIPPED 2026-07-30
+
+Aegis had no awareness of a Documentation-as-Code toolchain: nothing in `internal/` or `docs/`
+referenced `docforge.py`, the `_templates/` families, or `md2report.py`. The gap mattered because the
+generic `latex_new_document` preamble, good as it is, cannot know an organization's house style,
+metadata defaults, or build wiring — so a model asked for a formal document either hand-authored a
+LaTeX preamble that looked wrong next to every other document the organization publishes, or
+approximated the house style from whatever it happened to see.
+
+Shipped as a dormant built-in skill (`internal/skills/builtin/documentation-as-code/SKILL.md`,
+enabled via `aegis skills enable documentation-as-code`), covering: locating the toolchain and reading
+`.docforge_config.json` for defaults rather than re-specifying them; the four `--type` families
+(`report`/`process`/`runbook`/`slides`) and when each applies; the two routes in — `--from-md`
+(preferred: Aegis drafts Markdown, the toolchain converts, so no LaTeX is ever hand-authored, and it
+is `report`-only) versus scaffold-then-fill-one-section-per-`edit_file`; a mandatory `--dry-run`
+first, with the two failure modes it prevents (hard failure on an existing `<dest>/<name>`, and a
+wrong `--dest`) called out so a collision doesn't turn into a retry loop; the `Makefile` target set
+(`all`/`diagrams`/`pdf`/`quick`/`clean`/`distclean`) preferred over a raw compiler call; the 17 slide
+`type:` values with an explicit "do not invent a type" rule and the leading-space bullet-nesting trap;
+and diagram authoring via `assets/*.mmd`.
+
+**Confidentiality boundary (§0 of the skill), the design constraint that shaped it:** a DaC repository
+is organization-owned and its templates carry branding — logos, image assets, colour palettes,
+reference documents, classification banners, team names, and example documents about real internal
+systems. The skill therefore describes **mechanism only** and never reproduces template content. It
+explicitly forbids copying branding into anything the model authors, hard-coding metadata defaults
+(they are read from `.docforge_config.json` at run time), treating the repo's `education/`/`examples/`
+/`research/` directories as content sources rather than structural references, and relocating branded
+documents out of the repository. When no DaC repo is in play it routes to `latex-report` instead,
+because an unbranded document is the correct output there. The shipped file was scanned to confirm
+zero employer-identifying content; `TestBuiltinsListsEmbeddedSkills` was extended to cover it.
+
+**Follow-ups, not blockers:** a `/docs` or `/report dac` TUI entry point (mirroring how `/report latex`
+reaches `latex-report` at `tui/slash.go:1022`) once the skill has real use; and bundling an
+`analyze_sources.py`-style structural pre-pass if source assembly turns out to be the slow step.
+
+**Priority:** Tier 2 — shipped; no Go changes were required beyond the embed and the test.
 
 ### P50.2 — Deterministic ID canonicalizer (`normalize_ids.py`) — scripted renumber, not LLM-authored — SHIPPED 2026-07-30
 
@@ -341,7 +792,10 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status:** none of the filed items open — **P47.4** (phased-drive near-stateless continuations) and
+**Status:** 2 open — **P52.12** (lift the phased drive into the daemon, which **supersedes P50.5**)
+and **P52.13** (`workspace.additional_roots`), both filed 2026-07-30 by the P52.x full-stack review.
+Build **P52.13** first: it is smaller, independent, and unblocks the cross-repo document workflow.
+P52.12's prerequisite **P52.6** **shipped 2026-07-30**, so that blocker is cleared. Of the earlier items — **P47.4** (phased-drive near-stateless continuations) and
 **P47.9** (route hollow-body failures back through the owning content phase), the last two P47.x
 batch items, **shipped 2026-07-30**; **P49.2** (on-demand repo-map query tool) **shipped 2026-07-29**
 — see [releases.md](releases.md). Both P47.4 and P47.9 were built ahead of their measure-first
@@ -351,18 +805,96 @@ re-entry falls back to the generic verify-fix loop — so a live run can still m
 earn their keep. The leads below are mechanical follow-ups worth their own item once a concrete need
 appears.
 
-### P50.5 — Wire the phased drive into the TUI `/threat-model` (CLI/TUI drive parity)
+### P52.13 — `workspace.additional_roots` (unblock the cross-repo research→document workflow)
 
-The phased drive-to-completion (`runPhasedSkillDrive`) is reachable only from `aegis chat --skill
-threat-modeling`; the interactive TUI `/threat-model` command has no drive-to-completion, which
-**P47.10 resolved as documentation** (CLI-unattended vs TUI-interactive) rather than code. This item
-revisits that decision to actually give TUI users the same drive. It is deliberately kept a Tier-3
-lead, not part of the P50.x determinism batch: it is a larger surface (session/SSE seam, not the
-drive internals) and the P47.10 call to defer still stands until a concrete interactive-user need
-appears. Build only once P50.1-P50.4 land and a real request for TUI parity materializes.
+There is **no multi-root support** — confirmed by search: no `AdditionalRoots`/`allowed_roots`
+concept exists anywhere in `internal/`. Every workspace-confined tool resolves through
+`effectiveRoot` (`builtin.go:234`) → `sandbox.ValidatePath` (`pathvalidator.go:18`) against exactly
+one session workdir.
 
-**Priority:** Tier 3 — real value but larger and sequence-dependent; explicitly deferred by P47.10
-until demand appears. Do not build speculatively.
+That makes the natural document-authoring shape inexpressible: *read research artifacts from repo A,
+write a formal document into repo B*. Today the only workarounds are to run Aegis from a common
+parent directory — which works but inflates the repo map (the Aegis map alone is already 436KB) and
+widens confinement far past what the task needs — or to shuttle files by hand.
+
+Fix: a `workspace.additional_roots` config list (project- and user-level, following the existing
+config layering). `ValidatePath` gains a variant that accepts a root **set**: a path validates if it
+resolves, symlinks and all, inside *any* configured root, and the existing single-root behavior is the
+degenerate case. The symlink-escape check must run per candidate root, not once against a merged
+prefix, or a symlink from root A into root B's parent would validate incorrectly.
+
+Two design points to settle when building: whether additional roots are read-only by default (likely
+yes — the common case is "read research from A, write to B", and making A read-only is a cheap,
+meaningful restriction), and how they interact with `workspacetrust` (an additional root should
+require its own trust decision, not inherit the primary root's).
+
+**Priority:** Tier 3 — larger than a Tier-2 item because it touches path validation, config, and
+trust, but self-contained and unblocking. Build before **P52.12**; the two are independent.
+
+### P52.12 — Lift the phased drive into the daemon (every client gets the local-model machinery) — supersedes P50.5
+
+**This supersedes P50.5**, which framed the problem as "wire the phased drive into the TUI
+`/threat-model`". The full-stack review showed the scope is wider and the framing should change: the
+issue is not TUI parity, it is that **every reliability mechanism built for local models is
+unreachable from every client except one CLI subcommand.**
+
+Everything in `internal/cli/chat_phased.go` (984 lines) — fresh context per phase, the P47.9
+hollow-body re-entry router (`:813`), P50.1 backend liveness + resume-from-disk
+(`chat_phased_health.go`), P47.5b context escalation (`:198`), and the P39.7 no-progress guard
+(`chat.go:553`) — is reachable only through `aegis chat --skill`. `phasePlanFor` (`chat_phased.go:76`)
+hard-codes a single skill name and is called only from `chat.go:108` and `:415`. The TUI's own help
+text states the split outright (`tui/commands.go:194`): `/threat-model` is "interactive by design",
+and unattended builds require dropping to the CLI. **The web UI has no equivalent at all** — it is a
+chat surface over the daemon, with no drive of any kind.
+
+So TUI and web users run the single-context drive that the phased drive exists *because* it fails —
+the P38.1 wall. That is the wrong default for the clients most people actually use, and it is
+especially wrong for the web UI, which is where a multi-hour build most wants to live (it survives
+terminal closure, which `aegis chat` does not).
+
+Shape of the work:
+
+1. Move `skillPhase`/`phaseParams`/`phasePlanFor` out of `internal/cli` into a neutral package
+   (`internal/drive`, or `internal/skills` if the phase plan becomes skill metadata). Nothing in the
+   phase machinery is CLI-specific — it is orchestration *above* `engine.Run`, and the engine, gate,
+   tool registry, and event plumbing are already shared.
+2. **Generalize `phasePlanFor` to read the phase plan from the skill's own frontmatter** rather than
+   hard-coding `"threat-modeling"`. That lets `deep-research`, `latex-report`, `structured-build`, and
+   the new `documentation-as-code` (**P52.11**) opt in without a code change, and it removes the
+   awkwardness of a general mechanism keyed to one skill name.
+3. Expose it as a daemon endpoint (`POST /sessions/{id}/drive {skill, task}`) streaming over the
+   existing SSE seam, so no new transport is needed. The P50.4 heartbeat is already the right progress
+   signal for a UI to render.
+4. Give the TUI `/threat-model` an explicit unattended mode, and the web UI a drive control. Keep
+   interactive-by-default for `/threat-model` — P47.10's reasoning that interactive review between
+   phases is *valuable* still stands; it is the *absence of a choice* that is the defect.
+
+**~~Land P52.6 first.~~ Done — P52.6 shipped 2026-07-30.** `s.adapter` is shared across concurrent
+sessions (`engine_build.go:276`) and the drive calls `RaiseContextWindow`, which *was*
+unsynchronized; this item would have turned that latent race live. `numCtx` is now mutex-guarded, so
+this item no longer has to carry a concurrency fix.
+
+**Priority:** Tier 3 — the highest-value item in the batch by impact, and the largest by surface
+(session/SSE seam, config, two clients). Not speculative: the trigger already exists in every P38.1
+live run that had to be driven from the CLI. Sequence after **P52.6**, and after **P52.13** if both
+are in flight.
+
+**Superseded — P50.5 (2026-07-30):** "Wire the phased drive into the TUI `/threat-model`". Folded
+into P52.12 above, which covers the same work plus the web UI and the skill-frontmatter
+generalization. P47.10's original defer-as-documentation decision is thereby revisited and overturned:
+the review supplies the concrete need it was waiting on.
+
+**Lead — run the LaTeX compiler under `internal/sandbox` (surfaced shipping P52.2, 2026-07-30):**
+P52.2 closed the arbitrary-host-read escape with a static scan of the LaTeX source, because the
+environment hardening the item prescribed turned out to be inert on TeX Live 2026. A scan cannot be
+complete: TeX can build a filename from macros at run time (`\input{\somemacro}`), and that is
+unresolvable statically and allowed by design. The durable fix is executing the compiler through
+`internal/sandbox` like any other subprocess, which also covers **P52.10**'s `biber`/`bibtex` passes
+for free. Not filed as an item yet because the sandbox backends need a look first — P51.1 found the
+macOS seatbelt profile was executing *nothing at all*, so "just run it in the sandbox" is not the
+cheap change it sounds like, and the residual it closes is awkward to exploit (the attacker must
+already control the `.tex` the model authors). File it properly when someone touches the sandbox
+backends or P52.10 comes up.
 
 **Lead — P39.9 residual (repro-gated):** a prefill-latency observability gap remains on the
 native path — the only unresolved sliver of P39.9, tracked as a lead rather than a blocker
@@ -389,19 +921,103 @@ rather than over-flagging `internet-facing`);
 (or read the commit from `0-assessment.md`) so a run directory kept outside the target repo still
 records the analyzed code's commit.
 
-**Lead — task-failure halt (surfaced filing P46.3, not yet its own item):** `codex-build` also
-halts entirely and presents the current diff if a task fails 3 times, rather than retrying or
+**Lead — task-failure halt (surfaced filing P46.3) — PROMOTED to P52.3 (2026-07-30):** `codex-build`
+also halts entirely and presents the current diff if a task fails 3 times, rather than retrying or
 silently rewriting. Aegis's `loopDetector` (`internal/engine/loopdetect.go`) only catches literal
-repeated tool-call signatures (`engine.go:734-739`), and `BudgetUSD`/`MaxTokensPerRun` only catch
-session-wide cost/token exhaustion — neither tracks "this specific task has failed N times" nor
-produces a diff/summary artifact on stopping (both just emit a `KindError` event). The
-`structured-build` skill now encodes a stop-when-stuck rule in prose; turning that into a
-mechanical per-task failure counter would need a persisted "task" boundary to count against, and
-is worth its own item once that boundary exists.
+repeated tool-call signatures, and `BudgetUSD`/`MaxTokensPerRun` only catch session-wide cost/token
+exhaustion — neither tracks "this specific task has failed N times". This lead deferred the work
+pending "a persisted task boundary to count against"; the P52.x review concluded that boundary is not
+required — the per-`Run` tool round is a sufficient counting unit for the failure shape that actually
+occurs on local models. **Now filed as Tier-2 `P52.3`**; treat this lead as closed. The diff/summary
+artifact-on-stop half of the original idea is *not* carried into P52.3 and remains unclaimed — file it
+separately if `structured-build` ever needs it.
 
 ---
 
 ## Open Work — Tier 4
+
+**Status:** the four P52.x items below join the existing P49.3/P49.4/P38.8/P25.9 set. All four are
+**measure-first or trigger-less** — they came out of the 2026-07-30 full-stack review as real
+observations, but none has a live-run failure attached yet. Do not build them speculatively; each
+names the signal that should promote it.
+
+### P52.14 — Session-scoped loop detector (cross-`Run` loops are invisible)
+
+`newLoopDetector` is constructed **inside** `Run` (`engine.go:355-358`), so its window resets on every
+call. In the TUI and web UI, each user turn is a separate `Run` — so a model that loops *across* user
+turns (re-reading the same file every time the user nudges it, re-running the same failing command
+after each correction) is never detected, no matter how many turns it repeats.
+
+Fix would be to hoist the detector to session scope, plumbed through `engine.Options` as an optional
+caller-owned detector so the daemon can hold one per session while the CLI keeps today's per-`Run`
+behavior. The complication worth thinking through before building: a user *legitimately* asking for
+the same tool call twice in two turns is not a loop, so a session-scoped detector likely needs a
+higher threshold than the per-`Run` one, or needs to reset on any user message that isn't a bare
+retry — which is a fuzzier judgment than the current mechanism makes.
+
+**Promote when:** a live run shows a cross-turn loop that per-`Run` detection missed.
+
+**Priority:** Tier 4 — real but unproven, and the false-positive risk is higher than the current
+detector's.
+
+### P52.15 — Wall-clock run budget (the dimension that actually hurts on local hardware)
+
+Three budgets exist and none of them bound *time*: `BudgetUSD` is an explicit no-op for unpriced local
+usage (`engine.go:541-550`), `MaxTokensPerRun` defaults to 0, and `MaxIterations` defaults to 40. On a
+model measured at ~7 tok/s (the P38.1 note), 40 iterations is potentially hours before any safety
+valve trips — and the user's actual constraint is almost always "don't spend more than N minutes on
+this", which nothing expresses.
+
+Fix would be a `MaxWallClockPerRun` option checked at the same points as the existing budget gates
+(before each turn, and again before a tool round), aborting with a message that distinguishes "ran out
+of time" from "ran out of iterations". It should interact sensibly with the phased drive, where the
+meaningful unit is the *phase*, not the run — likely a per-phase budget rather than a global one, or
+it will guillotine a long build mid-phase, which is worse than letting it finish.
+
+**Promote when:** someone actually wants to bound a local run by time, or a phased build needs a
+per-phase timeout. **Priority:** Tier 4 — cheap to build, but **P52.3** addresses the concrete stall
+that motivates it, so build P52.3 first and see whether this is still wanted.
+
+### P52.16 — Native Ollama tool-result disambiguation for same-tool parallel calls (measure-first)
+
+Ollama's native API correlates tool results **by name, with no ID** — native tool calls carry no
+identifier at all (`ollama.go:167-186`), so `translate` emits `role:"tool"` messages keyed only on
+`ToolName` (`:266`). The ID→name walk is correct and its ordering rationale (`:213-224`) is sound.
+
+But it does not resolve the case where one turn issues **several calls to the same tool** — three
+parallel `read_file`s, which the engine explicitly permits since read-capability tools run
+concurrently in `runTools`. All three results become `role:"tool"` messages that are identical in
+their correlation metadata, leaving position as the only signal. This is a protocol limitation rather
+than an Aegis bug, but it is a plausible and untested contributor to the small-model confusion seen on
+multi-read turns.
+
+Cheap mitigation to trial: on the native path only, prefix each tool-result content with a compact
+echo of the originating call (`[read_file path=internal/engine/engine.go]`), so the association is
+carried in content where the protocol can't carry it in metadata. That costs a few tokens per result
+and could plausibly *hurt* by adding noise — which is exactly why this is measure-first.
+
+**Promote when:** a live A/B on a multi-read turn shows the model conflating results. Do not ship the
+mitigation without that measurement. **Priority:** Tier 4 — speculative; the hypothesis is plausible
+but unverified.
+
+### P52.17 — Run the tool-calling probe automatically on first use of a newly selected model
+
+`internal/toolcallprobe` and `aegis doctor` exist precisely because a model's Ollama manifest can
+claim tool support while the model cannot actually speak the protocol (the qwen2.5-coder:1.5b
+signature). The engine's P34.2 notice (`engine.go:627-632`) correctly detects the symptom after the
+fact and points at `aegis doctor` — but only *after* a user has already spent a turn on a model that
+was never going to work, and only when no tool call has succeeded all run.
+
+Fix would be to run the smoke probe automatically the first time a session uses a model not seen
+before (on `/model`, on a persona switch that pins a different model, and at first-run for the
+configured default), caching the verdict per model. A failing probe would surface a clear up-front
+warning rather than a mid-run diagnosis. The cost is one small model call per new model, and the
+design question is where to cache the verdict so it survives a daemon restart without going stale
+when a model is re-pulled.
+
+**Promote when:** a new user hits the manifest-lies failure, or model switching becomes common enough
+that the up-front cost is clearly worth it. **Priority:** Tier 4 — polish on a path that already
+degrades gracefully and already names the fix.
 
 ### P49.3 — LSP-backed symbol extraction for the repo map (precision without tree-sitter)
 

@@ -2,7 +2,7 @@
 
 Aegis has 50+ built-in tools across 14 categories. Tools are exposed to the model as callable functions; the model decides when and how to use them. All tool calls go through the permission gate before execution.
 
-Niche tools (LaTeX, diagram, cron, LSP, long-term memory, agent teams) are registered as **deferred**: the model sees only their names in a compact index and loads full schemas on demand via `tool_search`. This keeps per-turn context lean — especially important for local models.
+Niche tools (LaTeX, YAML, diagram, cron, LSP, long-term memory, agent teams) are registered as **deferred**: the model sees only their names in a compact index and loads full schemas on demand via `tool_search`. This keeps per-turn context lean — especially important for local models.
 
 **Capability tags** control which permission modes allow a tool:
 
@@ -122,6 +122,24 @@ List directory contents as an indented tree. Automatically skips `.git`, `node_m
   "path": "internal/engine"
 }
 ```
+
+---
+
+### `yaml_validate` (deferred)
+
+**Capability:** read
+
+Parse a YAML file and report either the parse error or a compact outline of its top-level keys. YAML is a first-class deliverable in two shipped workflows — `inventory.yaml` in the threat-model suite, and the `documentation-as-code` skill's `slides` family, whose entire output is a `.yaml` file — and a broken indent is otherwise invisible until a downstream consumer fails with an error far from the cause.
+
+```json
+{
+  "path": "deck.yaml"
+}
+```
+
+On success, returns the top-level keys with each value's kind (`scalar` / `empty` / `list[N]` / `map{N}` / `alias`) and line number — so it doubles as a cheap structural probe to run *before* editing, not only after. On failure, returns the parse error with its line and a `>`-marked source excerpt.
+
+Note: `go.yaml.in/yaml/v3` reports only a line for parse failures, never a column, so the tool says so explicitly rather than inventing one. Files are decoded document-by-document, so a broken second document after a `---` is caught (a plain `yaml.Unmarshal` would ignore it).
 
 ---
 
@@ -733,7 +751,7 @@ Returns matching tool schemas and registers them for immediate use. The model sh
 
 ---
 
-## Multi-Agent
+## Documents
 
 ### `latex_build`
 
@@ -751,6 +769,10 @@ Compile a `.tex` file to PDF. Runs 1–3 passes to resolve cross-references and 
 ```
 
 Returns: errors with context lines, deduplicated warnings, page count, output PDF path.
+
+**Workspace confinement (P52.2).** The compiler is invoked with `-no-shell-escape` and with `openin_any`/`openout_any` pinned to `p` and `shell_escape=f`, and the source is scanned *before* compilation for file references that resolve outside the workspace root — `\input`, `\include`, `\openin`, `\lstinputlisting`, `\includegraphics`, `\addbibresource`, `\import`, `\graphicspath`, and local `.sty`/`.cls`, in both braced and brace-less forms, followed transitively through includes. Comments and `verbatim`/`lstlisting`/`minted` blocks are skipped, so a report that *quotes* a path still builds.
+
+The scan is load-bearing rather than defence-in-depth: **as of TeX Live 2026 `openin_any` is a documented no-op upstream** (`kpse_in_name_ok` always returns true), so the environment hardening alone no longer stops a read on a current distribution — it is retained for TeX Live 2025 and earlier and for MiKTeX. The scan is a heuristic on a hardened process, not a sandbox: filenames a document constructs from macros at run time cannot be resolved statically and are allowed.
 
 ---
 

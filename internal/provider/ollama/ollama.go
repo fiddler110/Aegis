@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
@@ -33,9 +34,24 @@ type Adapter struct {
 	client    *http.Client
 	headers   map[string]string
 	think     *bool  // nil = omit; false = disable extended thinking
-	numCtx    int    // 0 = omit, let Ollama use its own default
 	keepAlive string // "" = omit, let Ollama use its own default (5m)
 	logger    *slog.Logger
+
+	// numCtx (0 = omit, let Ollama use its own default) is mutable at runtime
+	// via RaiseContextWindow, so every read and write goes through numCtxMu
+	// (P52.6). A single daemon adapter is shared across concurrent sessions,
+	// which makes an unguarded escalation a real data race, not a theoretical
+	// one.
+	numCtxMu sync.RWMutex
+	numCtx   int
+
+	// thinkRejected latches, per model, the P52.5 verdict "this model 400s the
+	// instant `think` is sent". Keyed by model rather than held per-adapter
+	// because one daemon adapter serves every model in a session mix: latching
+	// adapter-wide on one model's rejection would silently strip `think` from
+	// a sibling model that supports it. Values are always true; presence is
+	// the signal.
+	thinkRejected sync.Map // model name -> bool
 }
 
 // Option configures the adapter.
@@ -83,14 +99,29 @@ func WithNumCtx(n int) Option {
 // current value, returning true when it actually grew. It implements
 // provider.ContextWindowRaiser so a driven build can escalate the serving window
 // toward the model's max on a context overflow (P47.5b) instead of aborting.
-// Not safe for concurrent use with Stream — the phased drive only calls it
-// between turns, after a Stream error has returned and before the next Run.
+//
+// Safe for concurrent use with Stream (P52.6): the escalation write and the
+// doChat read both take numCtxMu. It previously relied on the caller being a
+// single-session CLI process, an invariant that dies as soon as the phased
+// drive runs inside the daemon, where one adapter is shared across every
+// concurrent session. The escalation stays monotonic, so a concurrent raise
+// can only ever be observed as a larger window, never a shrink.
 func (a *Adapter) RaiseContextWindow(n int) bool {
+	a.numCtxMu.Lock()
+	defer a.numCtxMu.Unlock()
 	if n > a.numCtx {
 		a.numCtx = n
 		return true
 	}
 	return false
+}
+
+// contextWindow reads the current per-request num_ctx under the lock that
+// RaiseContextWindow writes it under (P52.6).
+func (a *Adapter) contextWindow() int {
+	a.numCtxMu.RLock()
+	defer a.numCtxMu.RUnlock()
+	return a.numCtx
 }
 
 // Healthy implements provider.HealthChecker: a cheap GET /api/version against
@@ -289,7 +320,18 @@ func translateTools(tools []provider.ToolSchema) []wireTool {
 
 // Stream implements provider.Adapter.
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
-	resp, err := a.doChat(ctx, req, a.think)
+	// P52.5: once a model has proven it rejects `think`, skip the doomed first
+	// attempt for every later request naming that model. Without the latch the
+	// adapter re-sent `think`, took another 400, and warned again on every turn
+	// of the session.
+	think := a.think
+	if think != nil {
+		if _, latched := a.thinkRejected.Load(req.Model); latched {
+			think = nil
+		}
+	}
+
+	resp, err := a.doChat(ctx, req, think)
 	if err != nil {
 		// P38.5: some models (e.g. mythos-sec:24b) 400 the instant `think` is
 		// sent at all — "does not support thinking" — rather than accepting
@@ -298,10 +340,20 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		// `think` omitted entirely and warn, rather than surfacing the raw
 		// 400 — only when we actually sent a non-nil think value, so this
 		// never masks an unrelated 400 or loops on a second failure.
-		if a.think != nil && isThinkRejected(err) {
-			a.logger.Warn("ollama: model rejected the think parameter; retrying without it",
-				"model", req.Model, "error", err)
-			resp, err = a.doChat(ctx, req, nil)
+		if think != nil && isThinkRejected(err) {
+			rejection := err
+			var retried *http.Response
+			retried, err = a.doChat(ctx, req, nil)
+			if err == nil {
+				resp = retried
+				// Latch only once the retry has *proven* think-omitted works
+				// for this model, and warn exactly once per model — the log
+				// line is a one-time capability finding, not a per-turn event.
+				if _, already := a.thinkRejected.LoadOrStore(req.Model, true); !already {
+					a.logger.Warn("ollama: model rejected the think parameter; retried without it and will omit it for this model from now on",
+						"model", req.Model, "error", rejection)
+				}
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -339,8 +391,8 @@ func (a *Adapter) doChat(ctx context.Context, req provider.Request, think *bool)
 	}
 	var opts wireOptions
 	var hasOpts bool
-	if a.numCtx > 0 {
-		opts.NumCtx = a.numCtx
+	if n := a.contextWindow(); n > 0 {
+		opts.NumCtx = n
 		hasOpts = true
 	}
 	if req.MaxTokens > 0 {
