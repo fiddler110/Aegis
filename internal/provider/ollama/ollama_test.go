@@ -675,3 +675,53 @@ func TestHealthyImplementsCapability(t *testing.T) {
 		t.Error("CheckBackendHealth = unhealthy against a live server")
 	}
 }
+
+// TestStreamMidStreamConnectionDropIsBackendUnavailable is the P50.1 guard for
+// the case that motivated the fix: the model server going away *while a response
+// is streaming* (an `ollama serve` kill/crash mid-turn) produces a mid-stream
+// read failure — connection reset / unexpected EOF. That must surface as a
+// transport APIError so provider.IsBackendUnavailableError classifies it and the
+// phased drive waits + resumes, rather than a bare unclassifiable error that
+// aborts the drive. The server hijacks the connection, writes a partial chunked
+// body, then closes uncleanly so the client read errors mid-stream.
+func TestStreamMidStreamConnectionDropIsBackendUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("test server does not support hijacking")
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		// Valid 200 header + one *partial* chunk (declares 26 bytes, sends fewer),
+		// then abrupt close → the client's chunked reader fails with unexpected EOF.
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n")
+		_, _ = buf.WriteString("1a\r\n{\"message\":{\"content\":\"hel")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	stream, err := New(WithBaseURL(srv.URL)).Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var gotErr error
+	for ev := range stream {
+		if ev.Type == provider.EventError {
+			gotErr = ev.Err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected a mid-stream error event")
+	}
+	if !provider.IsBackendUnavailableError(gotErr) {
+		t.Errorf("mid-stream connection drop = %v, want it classified backend-unavailable (P50.1)", gotErr)
+	}
+}

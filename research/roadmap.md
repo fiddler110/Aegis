@@ -128,7 +128,10 @@ the default is wait-and-resume, which is safe and reversible. Mechanism: a new o
 capability `provider.HealthChecker` (mirrors `ContextWindowRaiser` — reached via an unwrapping
 `provider.CheckBackendHealth` helper), a `provider.IsBackendUnavailableError` classifier (transport
 refused/reset + the `retryableStreamSignals` infra class), and a `waitForBackend` loop the content
-phases and phase-6 share, alongside the existing overflow handling.
+phases and phase-6 share, alongside the existing overflow handling. Follow-up: the Ollama adapter's
+*mid-stream transport read failure* (connection reset / unexpected EOF — the server dying while tokens
+stream, the common case on a long per-turn stream) was still emitted as a bare error the classifier
+could not see; it is now wrapped as a transport `APIError` like the synchronous `doChat` path.
 
 **Priority:** Tier 1 — a real robustness gap that silently discards hours of work; small, contained
 to the drive + the Ollama adapter, no dependency.
