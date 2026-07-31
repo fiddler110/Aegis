@@ -11,7 +11,8 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** **P38.1** (Tier 2 umbrella) + the
+**Open items:** **P38.1** (Tier 2 umbrella) + **P51.1** (Tier 1, macOS seatbelt profile — **shipped**
+2026-07-30) + the
 remaining **P49.x repo-map / index enrichment batch** (**P49.3**/**P49.4** Tier 4, both
 measure-first — the structural head **P49.1** and the on-demand query tool **P49.2** have **shipped**
 2026-07-29; see [releases.md](releases.md)) +
@@ -104,9 +105,33 @@ is covered by `internal/skills/embedded_test.go`).
 
 ## Open Work — Tier 1
 
-**Status:** none open — **P50.1** (backend liveness + resumable reset), the P50.x batch head,
-**shipped 2026-07-30** (see [releases.md](releases.md)); batch head **P47.1** (wire proactive
-compaction into the CLI `chat --skill` drive engine) **shipped** 2026-07-24.
+**Status:** none open — **P51.1** (macOS seatbelt profile runs no commands) **shipped 2026-07-30**;
+**P50.1** (backend liveness + resumable reset), the P50.x batch head, **shipped 2026-07-30** (see
+[releases.md](releases.md)); batch head **P47.1** (wire proactive compaction into the CLI
+`chat --skill` drive engine) **shipped** 2026-07-24.
+
+### P51.1 — The macOS seatbelt profile runs no commands at all — SHIPPED 2026-07-30
+
+Found 2026-07-30 while running the full suite: `TestOSBackendConfinesWrites` and
+`TestOSBackendConfinesWritesToSessionWorkdir` fail on macOS 26.5.2 with `signal: abort trap` on a
+write *inside* the workspace. Reproducing the generated profile by hand showed this is not a test
+artifact — **`sandbox: os` runs nothing on macOS 26**: `/bin/sh` takes SIGABRT during exec, with no
+diagnostic beyond the signal. The cause is the P27.18 read confinement in `seatbeltProfile`:
+`(deny file-read*)` also denies a read of the **root directory itself**, and resolving any absolute
+path walks `/`, so exec of `/bin/sh` dies before the shell starts. Two adjacent gaps came out of the
+same bisect: `/tmp`, `/etc` and `/var` are symlinks into `/private/*` and seatbelt checks the read
+against the **symlink** before following it, so allow-listing only the `/private/*` target leaves
+`cat /etc/hosts` and `> /tmp/x` failing with EPERM; and `/bin/sh` reads `/private/var/select/sh` to
+pick its shell personality, printing an `Error opening ...` line on every command. Fix: five
+built-in read allowances in `seatbeltProfile` — `(literal "/")`, the three symlink aliases as
+**literals** (a `(subpath "/")` would hand back the whole filesystem), and
+`(subpath "/private/var/select")`. They are deliberately not routed through `defaultOSReadPaths`,
+which is shared with bwrap and renders every entry as a `(subpath ...)`. Confinement is unchanged
+and re-verified: `$HOME`, `~/.ssh`, `/private/var/db` and writes through `/etc` all stay denied;
+`(literal "/")` discloses the root directory's entry names only.
+
+**Priority:** Tier 1 — a shipped sandbox backend that executes nothing, and the failure is silent
+(SIGABRT, no message). Contained to one function; no dependency.
 
 ### P50.1 — Backend liveness + resumable reset (a dead model server must not silently kill the drive) — SHIPPED 2026-07-30
 
