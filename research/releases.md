@@ -20,7 +20,13 @@ treated like a context overflow — *resumable* — but gated on a new adapter l
 `provider.CheckBackendHealth`): the drive **waits** for the server to return (bounded, default 10 min,
 opt-in `AEGIS_OLLAMA_AUTOSTART=1` best-effort `ollama serve`), then resets to a fresh context and
 resumes from the on-disk `<!-- PENDING -->` files. Wired into the content-phase loop, the phase-6
-verify/quality loop, and the P47.9 re-entry. **P50.2 — deterministic ID canonicalizer:** a new bundled
+verify/quality loop, and the P47.9 re-entry. A follow-up closes the classifier's remaining hole: the
+Ollama adapter emitted a *mid-stream transport read failure* — connection reset / unexpected EOF, the
+signature of `ollama serve` being killed or crashing **while tokens are streaming** — as a bare error
+that `IsBackendUnavailableError` could not classify, so the drive aborted instead of waiting. That
+path now wraps the failure as a `provider.NewTransportError` like the synchronous `doChat` counterpart
+does, and it is the more common of the two on a slow local model whose per-turn stream is long.
+**P50.2 — deterministic ID canonicalizer:** a new bundled
 `normalize_ids.py` (sibling to `inventory.py`) strips invented `T<n>.<suffix>` threat IDs back to the
 bare `T<n>` the analysis defines and renumbers `FIND-##` to a gapless sequence, rewriting the coverage
 table and every `Related Threats` reference in lockstep — the root cause of both the invented-ID verify
@@ -40,7 +46,9 @@ observable instead of invisible until the run ends. **P50.5** (wire the phased d
 `/threat-model`) stays a Tier-3 lead — it revisits the P47.10 documented deferral and awaits a concrete
 interactive-user need. Full `go test ./internal/cli/... ./internal/provider/...` green; new tests cover
 the classifier, the Ollama probe + capability unwrap, the backend-recovery verdicts (recover/give-up/
-not-handled/cancel), the snapshot round-trip, and the heartbeat tracker. See below. Previously,
+not-handled/cancel), the mid-stream connection drop (a hijacked connection writes a truncated chunk
+then closes uncleanly, and the resulting event must classify as backend-unavailable), the snapshot
+round-trip, and the heartbeat tracker. See below. Previously,
 2026-07-30 — **P47.4 and P47.9 shipped**, closing the P47.x phased-drive stability
 batch. **P47.4** makes the phased threat-model drive's in-phase continuations **near-stateless**: instead
 of appending each continuation to an ever-growing conversation (where every re-read of the ~400-line

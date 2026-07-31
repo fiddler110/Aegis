@@ -570,7 +570,16 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 					"(most likely a tool-call argument payload the model emitted is too large): %w", err)})
 			return
 		}
-		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("ollama: read stream: %w", err)})
+		// P50.1: a mid-stream read failure — connection reset / unexpected EOF —
+		// is the signature of the server going away *while streaming*, exactly
+		// what happens when `ollama serve` is killed or crashes mid-response. Wrap
+		// it as a transport APIError (not a bare error) so IsBackendUnavailableError
+		// classifies it and the phased drive waits for the backend to return and
+		// resumes from disk, rather than aborting on an unclassifiable error. A
+		// synchronous connection failure (doChat) is already a NewTransportError;
+		// this closes the mid-stream counterpart, which is the more common one on a
+		// slow local model whose per-turn stream is long.
+		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("ollama", fmt.Errorf("read stream: %w", err))})
 		return
 	}
 
