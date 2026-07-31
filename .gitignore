@@ -22,3 +22,8 @@ internal/server/webui/frontend/node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# Python bytecode from the bundled threat-modeling scripts (never embedded:
+# //go:embed builtin skips `_`-prefixed dirs, so these are pure local noise)
+__pycache__/
+*.pyc
