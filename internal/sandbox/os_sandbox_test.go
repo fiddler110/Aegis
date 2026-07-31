@@ -50,6 +50,69 @@ func TestSeatbeltProfileExtraRoot(t *testing.T) {
 	}
 }
 
+// TestSeatbeltProfileAllowsPathResolution is the P51.1 regression. Denying
+// file-read* without these five allowances does not merely over-confine the
+// sandbox — it makes every command abort before running (root read) or fail on
+// the /private/* symlink aliases, which is how the OS backend came to run
+// nothing at all on macOS 26. They must be literals: a (subpath "/") would
+// hand back read of the entire filesystem and void the confinement.
+func TestSeatbeltProfileAllowsPathResolution(t *testing.T) {
+	p := seatbeltProfile("/Users/x/proj", "", false, nil)
+	for _, want := range []string{
+		`(literal "/")`,
+		`(literal "/tmp")`,
+		`(literal "/etc")`,
+		`(literal "/var")`,
+		`(subpath "/private/var/select")`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("profile missing %s — commands will fail to resolve paths:\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, `(subpath "/")`) {
+		t.Errorf("profile allows (subpath \"/\") — that reads the whole filesystem:\n%s", p)
+	}
+}
+
+// TestOSBackendRunsCommandsAndResolvesSymlinkedPaths is the end-to-end half of
+// the P51.1 regression: a trivial command must actually run under the profile
+// (the failure mode was SIGABRT during exec, with no diagnostic), and a read
+// through /etc — a symlink to the allow-listed /private/etc — must resolve,
+// while a write through it stays blocked.
+func TestOSBackendRunsCommandsAndResolvesSymlinkedPaths(t *testing.T) {
+	if _, _, ok := detectOSSandbox(); !ok {
+		t.Skip("no OS sandbox mechanism on this host")
+	}
+	if runtime.GOOS != "darwin" {
+		t.Skip("symlinked /etc and the root-read requirement are macOS seatbelt specifics")
+	}
+	ws := t.TempDir()
+	be, err := NewOSBackend(ws, false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	out, err := be.Exec(ctx, "echo alive", ExecOpts{Dir: ws})
+	if err != nil {
+		t.Fatalf("a trivial command did not run under the OS sandbox: %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "alive") {
+		t.Errorf("echo produced %q, want it to contain \"alive\"", out)
+	}
+	// /etc/hosts exists on every macOS host and is read-only system config.
+	if _, err := be.Exec(ctx, "cat /etc/hosts", ExecOpts{Dir: ws}); err != nil {
+		t.Errorf("read through the /etc symlink was blocked: %v", err)
+	}
+	// The alias is readable; it must not become writable.
+	be.Exec(ctx, "echo nope > /etc/.aegis-sandbox-should-not-exist-xyz", ExecOpts{Dir: ws})
+	if _, err := os.Stat("/etc/.aegis-sandbox-should-not-exist-xyz"); err == nil {
+		os.Remove("/etc/.aegis-sandbox-should-not-exist-xyz")
+		t.Error("write through the /etc symlink was NOT blocked")
+	}
+}
+
 func TestBwrapArgs(t *testing.T) {
 	args := bwrapArgs("/home/x/proj", "", "/home/x/proj/sub", true, []string{"/usr", "/lib"})
 	joined := strings.Join(args, " ")

@@ -8,7 +8,24 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-30 — **P50.1-P50.4 shipped**, the phased-drive determinism & resilience
+**Last updated:** 2026-07-30 — **P51.1 shipped**: the macOS OS-sandbox backend (`sandbox: os`,
+seatbelt) ran **no commands at all** on macOS 26 — `/bin/sh` took SIGABRT during exec with no
+diagnostic beyond the signal, surfacing as two failing `internal/sandbox` tests that looked like
+host noise. The cause was the P27.18 read confinement: `(deny file-read*)` also denies reading the
+**root directory itself**, and resolving any absolute path walks `/`, so the shell died before it
+started. The same bisect turned up two adjacent gaps — `/tmp`, `/etc`, `/var` are symlinks into
+`/private/*` and seatbelt checks the read against the *symlink* before following it, so allow-listing
+only the `/private/*` target left `cat /etc/hosts` and `> /tmp/x` failing with EPERM; and `/bin/sh`
+reads `/private/var/select/sh` for its shell personality, printing an `Error opening` line on every
+command. `seatbeltProfile` now carries five built-in read allowances: `(literal "/")`, the three
+symlink aliases as **literals** — a `(subpath "/")` would grant read of the entire filesystem — and
+`(subpath "/private/var/select")`. They are kept out of `defaultOSReadPaths`, which is shared with
+bwrap (where `/etc` and `/var` are real directories) and renders every entry as a `(subpath ...)`.
+Confinement is unchanged and re-verified by hand: `$HOME`, `~/.ssh`, `/private/var/db` and writes
+through `/etc` all stay denied, and `(literal "/")` discloses the root directory's entry names only.
+New tests pin the five allowances and reject `(subpath "/")`, plus an integration test asserting a
+trivial command actually runs and that `/etc` is readable but not writable. Previously,
+2026-07-30 — **P50.1-P50.4 shipped**, the phased-drive determinism & resilience
 batch prompted by the 2026-07-30 FirewallRiskRater run (which *did* reach a verify-clean,
 quality-stamped suite unattended, but surfaced three concrete weaknesses). **P50.1 — backend liveness +
 resumable reset:** the run's real stall was Ollama dying mid-phase, which the retry decorator can't

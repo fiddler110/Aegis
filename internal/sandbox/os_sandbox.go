@@ -199,6 +199,27 @@ func OSSandboxInfo() (mechanism string, available bool, detail string) {
 // alongside workspace (P25.9): a session running under a Workdir outside
 // the daemon's own workspace needs write/read access to its own directory
 // too, not just the daemon's.
+//
+// The read allow-list carries four entries that look redundant but are load
+// bearing on macOS (P51.1) — without them the profile does not merely
+// over-confine, it kills every command before it runs:
+//
+//   - (literal "/") — resolving any absolute path walks the root directory, so
+//     denying a read on "/" itself makes exec of /bin/sh abort (SIGABRT) with
+//     no diagnostic. This grants the root directory's entry names only; the
+//     directories it lists stay denied unless separately allowed.
+//   - /tmp, /etc, /var — symlinks into /private/*. Seatbelt checks the read
+//     against the symlink itself before following it, so allowing the
+//     /private/* target alone leaves `cat /etc/hosts` and `> /tmp/x` failing
+//     with EPERM. Only the link is allowed, not a subpath under it.
+//   - /private/var/select — /bin/sh reads /private/var/select/sh to pick the
+//     shell personality; denying it prints an "Error opening" line on every
+//     single command.
+//
+// These are deliberately built in here rather than added to
+// defaultOSReadPaths: that list is shared with bwrap (where /etc and /var are
+// real directories, not links) and every entry there is rendered as a
+// (subpath ...) — "/" as a subpath would allow reading the entire filesystem.
 func seatbeltProfile(workspace, extraRoot string, denyNet bool, readPaths []string) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
@@ -223,6 +244,13 @@ func seatbeltProfile(workspace, extraRoot string, denyNet bool, readPaths []stri
 	b.WriteString("  (subpath \"/private/var/folders\")\n")
 	b.WriteString("  (subpath \"/dev\")\n")
 	b.WriteString("  (literal \"/dev/null\")\n")
+	// See the doc comment: path resolution, the /private/* symlink aliases,
+	// and /bin/sh's shell selector. Literals, not subpaths.
+	b.WriteString("  (literal \"/\")\n")
+	b.WriteString("  (literal \"/tmp\")\n")
+	b.WriteString("  (literal \"/etc\")\n")
+	b.WriteString("  (literal \"/var\")\n")
+	b.WriteString("  (subpath \"/private/var/select\")\n")
 	for _, p := range readPaths {
 		fmt.Fprintf(&b, "  (subpath %q)\n", p)
 	}
