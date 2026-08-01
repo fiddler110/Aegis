@@ -200,6 +200,19 @@ func (t *teamInboxTool) Capability() tool.Capability { return tool.CapRead }
 func (t *teamInboxTool) Description() string {
 	return "Read messages sent to a teammate's inbox. Provide the agent name and team. Returns messages in chronological order and marks them read."
 }
+
+// PollExempt marks team_inbox as a poll (P53.2). A swarm teammate blocked on a
+// reply has no callback to wait on — the mailbox is file-based and the only way
+// to learn a message arrived is to look again — so repeatedly reading the same
+// inbox while the sender is still working is the intended coordination pattern,
+// not a stuck agent. Only team_inbox is exempted, not the rest of the team_*
+// family: team_task_list/team_task_claim also observe shared state, but they
+// mutate or drive work, and a claim loop that never completes anything is a
+// genuine stall the detector should still catch.
+func (t *teamInboxTool) PollExempt(json.RawMessage) bool { return true }
+
+var _ tool.PollExempter = (*teamInboxTool)(nil)
+
 func (t *teamInboxTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"agent":{"type":"string","description":"the agent whose inbox to read (your name)"},"team":{"type":"string","description":"team name (default: \"default\")"},"unread_only":{"type":"boolean","description":"only return unread messages (default true)"}},"required":["agent"]}`)
 }

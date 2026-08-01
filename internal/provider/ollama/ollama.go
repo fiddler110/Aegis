@@ -196,8 +196,14 @@ var healthClient = &http.Client{Timeout: 3 * time.Second}
 
 // WithKeepAlive sets how long Ollama keeps the model loaded after this
 // request (e.g. "10m", "-1" to pin forever, "0" to unload immediately).
-// Empty (the default) omits the field, leaving Ollama's own default (5m) in
-// effect. Not yet driven by config — see roadmap P33.10.
+// Empty (this adapter's own default) omits the field, leaving Ollama's own
+// default (5m) in effect. In practice callers never get that: config
+// (provider.keep_alive) is threaded through providerfactory.buildOne, which
+// substitutes a bounded resident default of 30m
+// (providerfactory.defaultOllamaKeepAlive) when the key is unset, and passes
+// any explicit value — including "-1" or "0" — through unchanged. The policy
+// deliberately lives in providerfactory, not here, so the adapter stays a
+// faithful transport for whatever it is handed.
 func WithKeepAlive(v string) Option {
 	return func(a *Adapter) { a.keepAlive = v }
 }

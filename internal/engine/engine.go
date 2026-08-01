@@ -434,6 +434,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// it can all be retracted before Run returns — see nudgeState.retractAll
 	// (P40.6).
 	var nudges nudgeState
+	// loopNudgePending carries the P53.2 recoverable-loop corrective from the
+	// loop gate (which fires before a tool round) to just after that round, so
+	// it is never appended between an assistant's tool_use blocks and their
+	// results.
+	loopNudgePending := false
 	// toolFailures is the P52.3 circuit breaker: it aggregates the per-round
 	// IsError signal (previously emitted and then dropped on the floor) so a run
 	// whose every tool call fails gets a corrective nudge and, if it keeps
@@ -782,10 +787,41 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		// Loop guard: stop if the model keeps requesting the same tool calls.
-		if loop != nil && loop.record(turnSignature(toolUses)) {
-			err := fmt.Errorf("engine: aborting suspected loop: identical tool calls repeated %d turns", e.loopThreshold)
-			emit(Event{Kind: KindError, Err: err})
-			return err
+		//
+		// P53.2(a): calls a tool declares poll-exempt are dropped from the
+		// signature, and a turn made up entirely of polls is not recorded at all
+		// — an agent waiting on a background job or a teammate's reply is
+		// indistinguishable from a stuck one otherwise, and canonicalizeToolInput
+		// erases the very fields that would tell them apart.
+		//
+		// P53.2(b): the outcome decides the ending. A cycle whose rounds errored
+		// is fatal, exactly as before. A cycle that keeps *succeeding* earns one
+		// corrective nudge and a window reset; only a second trigger in the same
+		// run ends it. The nudge is injected after this turn's tool round rather
+		// than here, so the assistant's tool_use blocks are never left without
+		// matching tool_result blocks.
+		loopRecorded := false
+		if loop != nil {
+			sig, shouldRecord := turnSignatureExcludingPolls(toolUses, e.pollExempt)
+			if shouldRecord && loop.record(sig) {
+				recoverable := !loop.cycleHadError() && nudges.loopNudges == 0
+				if !recoverable {
+					err := fmt.Errorf("engine: aborting suspected loop: identical tool calls repeated %d turns", e.loopThreshold)
+					if nudges.loopNudges > 0 {
+						err = fmt.Errorf("%w — the corrective prompt did not break the cycle", err)
+					}
+					emit(Event{Kind: KindError, Err: err})
+					return err
+				}
+				nudges.loopNudges++
+				loopNudgePending = true
+				loop.reset()
+				emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
+					"model repeated the same succeeding tool calls %d turns running — asking it to change approach or answer",
+					e.loopThreshold)})
+			} else if shouldRecord {
+				loopRecorded = true
+			}
 		}
 
 		// Budget gate: stop before launching another (paid) tool round.
@@ -817,6 +853,23 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		tr.ToolCalls = toolTraces
 		tr.WallMS = time.Since(turnStart).Milliseconds()
 		emit(Event{Kind: KindTrace, Trace: &tr})
+
+		// P53.2(b): the loop gate records a turn *before* its tools run, so the
+		// outcome that classifies a cycle as recoverable or fatal is only knowable
+		// here. Skipped when the turn was not recorded (all calls poll-exempt, or
+		// the window was just reset), so an outcome is never misattributed.
+		if loop != nil && loopRecorded {
+			loop.noteOutcome(resultsHadError(results))
+		}
+		// Inject the recoverable-loop corrective now that the round's tool_result
+		// blocks are in place, keeping the transcript well-formed — the same
+		// injection point the P52.3 nudge below uses.
+		if loopNudgePending {
+			loopNudgePending = false
+			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+				provider.TextBlock{Text: loopNudgeText(e.loopThreshold)},
+			}})
+		}
 
 		// P52.3: consecutive-tool-failure circuit breaker. loopDetector cannot
 		// see this stall — it matches on tool name + canonicalized input, and the
@@ -891,6 +944,10 @@ type nudgeState struct {
 	// to one per run: a model that ignores it is handled by the abort threshold,
 	// not by nagging it every subsequent failing round.
 	toolFailureNudges int
+	// loopNudges counts the P53.2 recoverable-loop nudge, also bounded to one per
+	// run: a second trigger means the corrective didn't work, and the run is
+	// aborted instead of nudged again.
+	loopNudges int
 }
 
 // retractAll strips every corrective/nudge prompt this run injected from conv,
@@ -908,6 +965,9 @@ func (n *nudgeState) retractAll(conv *Conversation) {
 	}
 	if n.toolFailureNudges > 0 {
 		retractNudges(conv, toolFailureNudgePrefix)
+	}
+	if n.loopNudges > 0 {
+		retractNudges(conv, loopNudgePrefix)
 	}
 }
 
@@ -1120,6 +1180,34 @@ func (e *Engine) exposedToolNames() map[string]struct{} {
 		names[s.Name] = struct{}{}
 	}
 	return names
+}
+
+// pollExempt reports whether a single tool call is a legitimate poll and so
+// should be left out of the loop signature (P53.2a). Unknown tools and a nil
+// registry answer false, which is the pre-P53.2 behavior.
+func (e *Engine) pollExempt(tu provider.ToolUseBlock) bool {
+	if e.tools == nil {
+		return false
+	}
+	t, ok := e.tools.Get(tu.Name)
+	if !ok {
+		return false
+	}
+	return tool.IsPollExempt(t, tu.Input)
+}
+
+// resultsHadError reports whether any tool result in a completed round was an
+// error — the signal that classifies a detected cycle as an error loop (fatal)
+// rather than a succeeding one (nudgeable). Deliberately "any", not "all": a
+// cycle that fails even part of the time is not one a nudge about repeating
+// successful work should be describing.
+func resultsHadError(results []provider.Block) bool {
+	for _, b := range results {
+		if res, ok := b.(provider.ToolResultBlock); ok && res.IsError {
+			return true
+		}
+	}
+	return false
 }
 
 // lastUserText returns the text content of the most recent user message in

@@ -465,7 +465,7 @@ type ProviderConfig struct {
 	// native "ollama" adapter honors it; the OpenAI-compat path cannot send it.
 	// Accepts a Go duration ("30m") or an integer number of seconds; "-1" pins
 	// the model in memory forever, "0" unloads it immediately. "" (unset) is
-	// NOT passed through as Ollama's 5m default: the native adapter substitutes
+	// NOT passed through as Ollama's 5m default: providerfactory substitutes
 	// a bounded resident default (providerfactory.defaultOllamaKeepAlive, 30m)
 	// so a multi-turn agentic run reuses its KV cache across turns instead of
 	// reprocessing the whole conversation each turn (P35.4). It is still never

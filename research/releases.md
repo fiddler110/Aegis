@@ -2378,6 +2378,87 @@ separately if `structured-build` ever needs it.
 ---
 
 
+### P53.2 — Loop detector: polling exemption + differentiated outcomes — SHIPPED 2026-08-01
+
+Two defects in one mechanism, found by cross-checking against OpenHands' Stuck Detector. **(a)** An
+agent legitimately polling a long-running process was indistinguishable from a stuck one, with
+`canonicalizeToolInput` as an accelerant — it rewrites timestamp/UUID/long-digit/hex leaves to
+`‹volatile›`, which is correct for its own purpose but erases the one field that would *distinguish*
+successive polls. OpenHands ships this same false positive (#5355) *without* the canonicalization
+accelerant. **(b)** Every trigger was a fatal `KindError` ending the run, though a model repeating a
+*succeeding* call is confused and recoverable with one nudge while a model repeating a *failing* call
+has exhausted its own recovery.
+
+**Shipped (a).** `tool.PollExempter` is a new optional Tool extension (`PollExempt(input) bool`) with
+an `IsPollExempt` helper, following the established `OutputSchemer`/`CapabilityOverrider` idiom.
+`turnSignatureExcludingPolls` drops exempt calls from the turn signature, and a turn made up
+*entirely* of polls is not recorded at all — recording it as an empty signature would be actively
+harmful, since empty equals empty and a few poll-only turns would form a perfect period-1 cycle,
+tripping the very detector the exemption exists to quiet. Three builtins qualified: `task_get` and
+`task_output` (background-job status/output — the textbook wait loop; the answer changes on the job's
+timeline, and there is no non-polling way to call either) and `team_inbox` (the file-based swarm
+mailbox has no callback, so re-reading until a teammate replies is the intended coordination
+pattern). Deliberately **not** exempted: shell/bash (the most-looped tool — blanket-exempting it
+would gut the detector), `task_list`/`team_task_list` (discovery listings, not tied to a specific
+awaited thing), `team_task_claim` (wait-shaped, but it mutates and drives work — a claim loop that
+completes nothing is a real stall), and `cron_list`/`cron_history` (cron's cadence is minutes, far
+longer than a run's turn cadence, so in-run repetition is not waiting).
+
+**Shipped (b).** The detector now carries a per-turn outcome (`loopOutcome`, index-aligned with the
+signature window) plus `noteOutcome`/`cycleHadError`/`reset`. An error cycle aborts with today's
+byte-identical message. A succeeding cycle earns one corrective nudge, a window reset, and a
+`KindNotice`; a second trigger in the same run aborts with `— the corrective prompt did not break the
+cycle` appended. The nudge is bounded to one per run via `nudgeState.loopNudges` and retracted through
+the existing `retractNudges` path.
+
+**Three decisions worth keeping.** (1) **Argument inference was rejected** for the poll signal: the
+obvious tell — successive calls differing only in a timestamp or cursor — is exactly what
+`canonicalizeToolInput` normalizes away, so re-deriving it would mean either weakening that
+normalization or bolting a contradictory second heuristic onto it. Worse, a false positive silently
+disables one of the few guards bounding a runaway unattended drive. An explicit opt-out keeps the
+exemption set small, reviewable, and greppable. (2) **The `Approver` seam was not used** for the
+recoverable case, deviating from this item's original filing: under the non-interactive approver an
+unattended drive uses, an approval-style check warns and allows, making the detector toothless in
+precisely the scenario it exists for. Nudge-once-then-abort behaves identically attended or
+unattended. (3) **The nudge is injected after the triggering turn's tool round**, not at the gate —
+appending a user message at the gate would leave the assistant's `tool_use` blocks without matching
+`tool_result` blocks, an invalid transcript. This is the same injection point the P52.3 nudge uses;
+the fatal paths still return at the gate, before the round, so they add no side effects.
+
+`cycleHadError` votes only on turns with a known outcome — the triggering turn's tools have not run
+yet — and is "any errored round in the window", not "all", since a cycle that fails part of the time
+is not one a nudge about repeating *successful* work should be describing. One eval assertion moved
+with the behavior: `TestAdversarial_LoopDetectionNotEvadedByNonce` used a succeeding tool, so it now
+aborts on call 6 (nudge at 3, reset, abort at 6) rather than 3; its `ExpectErrorContains("loop")`
+claim is unchanged. Seven new engine tests cover both halves plus unchanged period-1..4 detection.
+
+---
+
+### P53.1 — Stale P33.10 comment on `WithKeepAlive` (doc-only correctness) — SHIPPED 2026-08-01
+
+`internal/provider/ollama/ollama.go` documented `WithKeepAlive` as "Not yet driven by config — see
+roadmap P33.10". That was false: P33.10 was closed by P35.4, and `cfg.Provider.KeepAlive` is threaded
+end to end through `providerfactory.Build` → `buildOne` → `ollama.WithKeepAlive`, with a bounded
+`defaultOllamaKeepAlive = "30m"` substituted when unset and an explicit `"-1"`/`"0"` allowed to win.
+Filed rather than fixed silently because the comment had already produced a measurable error: a
+2026-08-01 audit of the Ollama subsystem read it and reported a config-wiring gap that does not
+exist, which then propagated into a recommendation.
+
+**Shipped.** The comment now states the providerfactory default and explains why the policy lives
+there rather than in the adapter (whose own default genuinely is still "omit", so it stays a faithful
+transport). One adjacent misattribution was caught in the same pass and fixed: `ProviderConfig.KeepAlive`'s
+doc in `internal/config/config.go` credited the *native adapter* with substituting the bounded
+resident default — the same wrong claim that seeded the bad audit — now corrected to providerfactory.
+
+**The sweep found nothing else.** All `roadmap P<n>.<m>` / `see P<n>.<m>` / `TODO(P…)` references,
+every `TODO`/`FIXME`/`XXX`/`HACK`, and every `P<n>.<m>` token co-located with future-tense or
+incomplete language were checked repo-wide (2312 tokens across 430 files, `research/` excluded).
+Nearly all are pure provenance citations for shipped work, which are correct history and were left
+alone; the outstanding-work references that remain (`docs/tools-reference.md` on P49.3/P49.4) point at
+genuinely open items. Doc-only, no behavior change, no test; `go build ./...` and `go vet ./...` clean.
+
+---
+
 ### P52.15 — Wall-clock run budget (the dimension that actually hurts on local hardware) — SHIPPED 2026-08-01
 
 Three budgets existed and none of them bound *time*: `BudgetUSD` is an explicit no-op for unpriced

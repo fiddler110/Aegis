@@ -11,7 +11,18 @@ keep it when adding items.
 
 ## Status
 
-**Open items (6).** Tier 2: **P38.1** — the threat-model conformance umbrella. Mechanism
+**Open items (10).** Tier 2: the **P53.x local-LLM comparative-review batch** — **P53.3** (compaction
+reserves no headroom for its own summarization call), **P53.4** (`toolcallprobe` reports a boolean,
+not a conformance rate) — plus **P38.1**. Tier 3: **P53.5** (persist per-model capability records
+instead of re-discovering them each restart) and **P53.6** (no fallback for models that fail the
+tool-calling probe — the batch's confirmed capability gap and highest-value item). Suggested build
+order is document order: P53.3 → P53.4 → P53.5 → P53.6, with the last three sequenced by a real
+dependency chain (P53.4's conformance rate is the value P53.5 persists and the signal P53.6 engages
+on). The batch's first two items — **P53.1** (stale `WithKeepAlive` comment) and **P53.2** (loop
+detector: polling exemption + differentiated outcomes) — shipped 2026-08-01; see
+[releases.md](releases.md).
+
+Tier 2 also: **P38.1** — the threat-model conformance umbrella. Mechanism
 (recon → scaffold → incremental fill, no orchestration mis-route) is live-confirmed repeatedly;
 conformance (a live unattended run reaching a verify-clean suite) is still unmet. Stays open as
 live-run verification tracking, not independent build work — see its body below for the full
@@ -59,10 +70,83 @@ P51.1, P50.1, and the P47.x batch head).
 
 ## Open Work — Tier 2
 
-**Status:** 1 open — **P38.1** alone (threat-model conformance umbrella, live-run verification
-tracking rather than independent build work). The rest of the batch — P52.3, P52.4, P52.5, P52.6,
-P52.7, P52.8, P52.9, P52.10, P52.11, the full P47.x self-contained batch, P48.1, P49.1, and
-P50.2/P50.3/P50.4 — has shipped; see [releases.md](releases.md).
+**Status:** 3 open — the **P53.x local-LLM comparative-review batch** (**P53.3**-**P53.4**, filed
+2026-08-01; **P53.1**/**P53.2** shipped 2026-08-01) plus **P38.1** (threat-model conformance
+umbrella). The
+P53.x items are listed first deliberately: P38.1 is live-run verification tracking, not independent
+build work, so leaving it at the head of the tier made `roadmap-status.sh` suggest a non-buildable
+item indefinitely. The rest of the earlier batch — P52.3, P52.4, P52.5, P52.6, P52.7, P52.8, P52.9,
+P52.10, P52.11, the full P47.x self-contained batch, P48.1, P49.1, and P50.2/P50.3/P50.4 — has
+shipped; see [releases.md](releases.md).
+
+**P53.x batch origin.** A comparative review (2026-08-01) of how six frontier harnesses — opencode,
+crush, pi, aider, OpenHands, goose — drive local models, cross-checked line-by-line against Aegis.
+The review's headline is that Aegis is **ahead** on the four things that dominate local-model bug
+trackers elsewhere: native `/api/chat` transport (opencode/crush/pi are all on OpenAI-compat `/v1`,
+which structurally cannot carry `num_ctx` — the root cause of crush's flagship "local models won't
+call tools" discussion #1828), `/api/show`-based proactive context detection (`internal/ollamainfo`,
+vs goose's blind 128k default for unknown models), a bounded resident `keep_alive` default
+(`providerfactory/factory.go:31`), and P25.6's `LocalProfile` tool-schema deferral (goose #6883
+reports Qwen3-coder silently degrading to XML-in-content past ~5 tools). Five candidate gaps from a
+first-pass review were **refuted by direct code reading** and are recorded here so they are not
+re-filed: proactive `num_ctx` (`ollamainfo.go:135-162`), config-driven `keep_alive`
+(`factory.go:44,215`), ID-based tool-result correlation (`ollama.go:605` — the wire-level name-only
+limitation is separately tracked as **P52.16**), `<think>`-before-tool-parse ordering (structurally
+impossible to break on the native path — reasoning and tool calls arrive in separate NDJSON fields,
+`ollama.go:590-600`), and tool-set shrinking for weak models (P25.6, `builtin.go:170-180`). What
+follows is what survived verification.
+
+### P53.3 — Compaction reserves no headroom for its own summarization call
+
+`summarize` sends the **entire** prefix transcript in one unbounded request
+(`compaction.go:254-264`) — no chunking, no size cap, and no check that the resulting request fits
+the window it is trying to stay inside. The failure shape is therefore structurally present, and it
+is one goose has hit repeatedly and unrecoverably (block/goose#8642, #4635: compaction fires too
+late, the summarization call itself exceeds the limit, the session is dead).
+
+Aegis is meaningfully better protected than goose, which is why this is Tier 2 hardening and not a
+Tier 1 bug. Three things blunt it: the trigger leaves real slack (20% of the window free, or an
+absolute 20k above a 200k window — `compaction.go:19-25`); the deterministic
+`pruneStaleToolResults` pass runs first and unconditionally (`compaction.go:149`); and, decisively,
+a failed compaction is **not** session-fatal — `Compact`'s error is logged as "context compaction
+failed" and the run continues with uncompacted messages (`engine.go:412-414`), falling through to
+the reactive `RaiseContextWindow` path.
+
+Residual risk is real but bounded: `tokenest` is a heuristic, so a single very large tool result
+landing between two checks can push the prefix past the window with no reserve to catch it. Fix
+would be a fit check before the summarization request with a fallback that drops or truncates the
+oldest prefix entries until it fits, rather than issuing a request already known to be too large.
+
+**Priority:** Tier 2, Effort S — a bounded, self-contained check at one call site with an existing
+non-fatal failure path to fall back to.
+
+### P53.4 — `toolcallprobe` reports a boolean verdict, not a conformance rate
+
+The probe runs one smoke prompt (`probe.go:26-41`) and reports `ToolCalls`/`Truncated`
+(`probe.go:56-66`). That answers "can this model ever emit a tool call" but not "how often does it",
+and the second question is the one that decides whether an unattended drive survives. A model that
+complies 60% of the time passes the probe cleanly and then fails a long run in a way that looks like
+a harness bug — precisely the class of confusion the P39.x re-test history is full of.
+
+aider's polyglot leaderboard is the pattern worth copying: it publishes **two** numbers per model,
+percent-correct and percent-using-the-correct-edit-format. That second column *is* a capability
+probe, and it is how an aider user learns a model cannot hold the output contract before committing
+to a session. goose publishes the analogous gradient informally (block/goose discussion #1403: vs
+Sonnet 3.5, 32B ≈ −30%, 14B ≈ −50%, 8B unreliable) but ships no probe at all.
+
+Change: run the probe N times (N configurable, default small — 5 matches the sample the
+`SmokeMaxTokens` calibration itself used, per `probe.go:48-53`) and report a rate plus the existing
+per-run truncation detail. The existing "`ToolCalls == 0 && Truncated` is *no verdict*, never
+failure" contract (`probe.go:60-65`) must be preserved per-trial and excluded from the denominator,
+not counted as a miss — that contract is what P34.2 was filed to establish and it is easy to
+accidentally regress when aggregating. Surface the rate in `aegis doctor` and in the daemon's
+model-switch notice.
+
+Feeds **P53.5** (the rate is the value worth persisting) and **P53.6** (the rate is the natural
+trigger for engaging a fallback). Build it before either.
+
+**Priority:** Tier 2, Effort S/M — mostly a loop plus aggregation around an existing probe; the care
+is in the no-verdict accounting and in not making `doctor` N× slower without saying so.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -175,9 +259,82 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status: none open.** Both former Tier-3 items — **P52.12** (lift the phased drive into the
-daemon) and **P52.13** (`workspace.additional_roots`) — shipped 2026-08-01; see
+**Status:** 2 open — **P53.5** and **P53.6**, the larger half of the P53.x local-LLM
+comparative-review batch (see the Tier 2 header for the batch's origin and for the five candidate
+gaps that were refuted by code reading). Both former Tier-3 items — **P52.12** (lift the phased
+drive into the daemon) and **P52.13** (`workspace.additional_roots`) — shipped 2026-08-01; see
 [releases.md](releases.md).
+
+### P53.5 — Per-model capability records are discovered at runtime and lost at exit
+
+Aegis learns model quirks the hard way and then forgets them. The `think`-parameter rejection latch
+is the clearest case: `thinkRejected sync.Map` (`ollama.go:55-61`, `:366-397`) discovers that a model
+400s on any `think` value by *sending one and getting rejected*, then caches that in memory for the
+process lifetime. Every daemon restart re-pays the failed request. The same is true of anything
+`toolcallprobe` learns.
+
+pi (badlogic/pi-mono) has the pattern worth adopting: a declarative per-model `compat` block in
+`models.json` recording `supportsDeveloperRole`, `supportsReasoningEffort`,
+`supportsUsageInStreaming` (which gates `stream_options.include_usage`), `supportsStrictTools`, and
+a `thinkingLevelMap` mapping pi's thinking levels onto provider values or `null` where unsupported.
+Capability there is *recorded*, not probed — which is the complement of what Aegis does, not a
+replacement for it. The synthesis is better than either: probe once, persist the result, let the
+user pre-declare a quirk for a model the probe has not met, and let an explicit user declaration
+outrank a discovered value.
+
+Scope: a small on-disk store under the data dir, keyed by model name, holding at minimum the
+`think`-rejection flag, the P53.4 tool-calling conformance rate, and native-tool-calling support.
+Precedence must be user-declared > persisted-discovered > default, and the store must be treated as
+a cache that is safe to delete — never a source of truth that can wedge a model into a wrong
+capability permanently. Note pi's maintainer position that core should not auto-probe local
+providers (pi-mono#3151); Aegis has already decided the other way with `toolcallprobe`, and this
+item is where that decision starts paying off rather than being re-paid each restart.
+
+**Priority:** Tier 3, Effort M — new persistent store, precedence rules, and staleness/invalidation
+semantics (a re-pulled model under the same name may have different capabilities). Sequence after
+**P53.4**, whose conformance rate is the most valuable field it would hold.
+
+### P53.6 — No fallback for models that fail the tool-calling probe (warn-only today)
+
+The confirmed capability gap, and the only one of the first-pass review's candidates that survived
+code verification. Aegis **detects** the exact condition a fallback would handle and then discards
+the signal. `engine.go:701-713` spots a model writing a tool call into its prose, and the comment is
+explicit that this is by design: *"Name it once; never block."* The daemon's model-switch gate
+likewise emits a notice and proceeds (`messages.go:379-381`), and `aegis doctor` is diagnostic. A
+repo-wide search finds no toolshim, no XML/prompt-based tool-call parsing, and no JSON repair.
+
+Warn-only was the right first move — a prose-only session with such a model is still legitimate, and
+blocking would have been worse than nothing. But two harnesses have since shown the detection is
+worth acting on. goose's `GOOSE_TOOLSHIM` puts tool schemas in the system prompt and uses a *second*
+model (mistral-nemo 12-14b in its published benchmarks; `GOOSE_TOOLSHIM_OLLAMA_MODEL` overrides) to
+interpret the reply back into structured calls — reported to bring phi4-14b and gemma3-27b to
+roughly llama3.3-70b-native parity, which is a large capability gain on exactly the 14-27B class
+this repo's P39.x history keeps fighting. OpenHands' `NonNativeToolCallingMixin` is the lighter
+variant: serialize schemas into the prompt, parse with regex, and pick native-vs-non-native per model
+from a `model_features.py` registry overridable by env. Notably, opencode, crush, and pi ship
+**nothing** here, so this is net-new capability rather than catching up.
+
+Design constraints specific to Aegis: the fallback must be **opt-in and explicit** (a
+`provider.tool_call_shim` config key), not silently auto-engaged — a shim that quietly starts parsing
+prose into executable tool calls is a real safety surface, and every parsed call must pass through
+the same permission gate, capability check, and workspace confinement as a native one, with no
+shortcut path. Goose documents its own parse failures (markdown emitted where JSON was requested,
+malformed JSON, inconsistent formats — block/goose#6688 requests JSON repair), so a strict parser
+that declines cleanly and falls back to warn-only is better than a lenient one that fabricates a
+call. Ship behind explicit config first; auto-engagement on a low P53.4 conformance rate is a
+follow-up worth taking only once the rate is trustworthy.
+
+Adjacent and deliberately **not** folded in: grammar-constrained/schema-constrained decoding (Ollama
+structured outputs, llama.cpp GBNF) attacks the same problem from the other end by making malformed
+tool-call JSON mechanically impossible rather than parsed-and-repaired. None of the six reviewed
+harnesses does it. It is the stronger long-term answer for models that *do* speak the tool protocol
+but truncate or malform arguments (the P35.2 failure class), whereas this item targets models that
+cannot speak the protocol at all. File separately if pursued — the two do not share an
+implementation.
+
+**Priority:** Tier 3, Effort M/L — the largest item in the batch and the highest-value one.
+Sequence last: it consumes P53.4's conformance rate as its engagement signal and P53.5's store as
+the place to record "this model needs the shim", and both are far cheaper to build first.
 
 ## Open Work — Tier 4
 
@@ -198,6 +355,12 @@ higher threshold than the per-`Run` one, or needs to reset on any user message t
 retry — which is a fuzzier judgment than the current mechanism makes.
 
 **Promote when:** a live run shows a cross-turn loop that per-`Run` detection missed.
+
+**Precondition now met (2026-08-01).** P53.2 deliberately landed first: widening the scope of a
+detector that mis-fired on polling and always aborted fatally would have multiplied both defects.
+With the poll exemption and the nudge-once-then-abort outcome split shipped, a session-scoped
+detector would now inherit a sounder mechanism — but the promotion trigger above is still the
+observed cross-turn false negative, which has not happened.
 
 **Priority:** Tier 4 — real but unproven, and the false-positive risk is higher than the current
 detector's.
