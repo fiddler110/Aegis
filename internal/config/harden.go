@@ -66,13 +66,17 @@ func ComputeHardenPlan(cfg *Config) HardenPlan {
 	securityChanged := !cfg.Security.EgressThenWrite
 
 	costPatch := CostPatch{
-		BudgetUSD:       cfg.Cost.BudgetUSD,
-		MaxTokensPerRun: cfg.Cost.MaxTokensPerRun,
-		SessionCapUSD:   cfg.Cost.SessionCapUSD,
-		DailyCapUSD:     cfg.Cost.DailyCapUSD,
-		SessionTokenCap: cfg.Cost.SessionTokenCap,
-		DailyTokenCap:   cfg.Cost.DailyTokenCap,
-		AlertThreshold:  cfg.Cost.AlertThreshold,
+		BudgetUSD: cfg.Cost.BudgetUSD,
+		// Passed through unchanged: harden sets no wall-clock bound (it is an
+		// operator preference, not a security control), but rewriting the cost
+		// block would drop a user's setting if it weren't carried here.
+		MaxWallClockPerRunSec: cfg.Cost.MaxWallClockPerRunSec,
+		MaxTokensPerRun:       cfg.Cost.MaxTokensPerRun,
+		SessionCapUSD:         cfg.Cost.SessionCapUSD,
+		DailyCapUSD:           cfg.Cost.DailyCapUSD,
+		SessionTokenCap:       cfg.Cost.SessionTokenCap,
+		DailyTokenCap:         cfg.Cost.DailyTokenCap,
+		AlertThreshold:        cfg.Cost.AlertThreshold,
 	}
 	var costChanges []string
 	if costPatch.SessionCapUSD <= 0 {

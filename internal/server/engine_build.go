@@ -311,6 +311,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		Cost:                    tracker,
 		BudgetUSD:               s.cfg.Cost.BudgetUSD,
 		MaxTokensPerRun:         s.cfg.Cost.MaxTokensPerRun,
+		MaxWallClockPerRun:      s.cfg.Cost.MaxWallClockPerRun(),
 		Model:                   model,
 		MaxTokens:               s.cfg.Provider.MaxTokens,
 		MaxIterations:           s.cfg.Provider.MaxIterations,

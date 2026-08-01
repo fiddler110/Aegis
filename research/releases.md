@@ -8,7 +8,73 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-01 — **P52.12 and P52.13 shipped**, closing the P52.x review's Tier-3 work:
+**Last updated:** 2026-08-01 — **P52.15 shipped and P52.17 closed as already-implemented**, taking
+the P52.x full-stack review batch to **2 open of 17** (P52.14 and P52.16, both correctly parked
+measure-first). Full suite green, race detector clean on every touched package.
+
+**P52.15 — wall-clock run budget.** Three budgets existed and none bounded *time*: `BudgetUSD` is an
+explicit no-op for unpriced local usage, `MaxTokensPerRun` defaults to 0, and `MaxIterations` is a
+step count defaulting to 40 — which on a model measured at ~7 tok/s (the P38.1 note) is potentially
+hours before any safety valve trips. The constraint users actually have — "don't spend more than N
+minutes on this" — had no expression at all. `engine.Options.MaxWallClockPerRun` now aborts at the
+same two gates as the cost/token budgets: before each model turn (the P9 dead-zone placement — a
+guard corrective retry or a max-token continuation burns just as much wall clock as a tool round) and
+again before each tool round, so a spent budget stops the run before side effects rather than one
+iteration late. Aborts wrap an exported `engine.ErrWallClockLimit`, the `ErrToolFailureLimit` idiom,
+so a caller can classify "ran out of time" apart from "ran out of iterations"; the message names the
+knob that raises it. Configured as `cost.max_wall_clock_per_run` (seconds, via
+`CostConfig.MaxWallClockPerRun()`) and wired into the daemon engine build, the CLI chat engine, and
+both swarm backends.
+
+**Four decisions, the first load-bearing.** (1) **Off by default.** A wall-clock cap cannot
+distinguish a stalled run from a slow one making real progress, so any non-zero default would
+eventually guillotine legitimate long work — the same regression shape the P52.3 reconcile caught
+when the tool-failure breaker met the phased drive. Opt-in only. (2) **Per-`Run`, not global.** The
+roadmap item worried a global cap would kill a long phased build mid-phase and suggested a per-phase
+budget instead; per-`Run` scoping gives that for free, since the drive already runs each phase as its
+own `Run`. (3) **Fatal to the drive**, unlike a context overflow (P47.2/P47.7) or a tool-failure
+stall (P52.3), both of which reset to a fresh context and resume. Those are conditions a fresh
+context genuinely clears; a wall-clock limit is an operator saying "stop after N minutes", and
+resuming past it would defeat setting it. Pinned by a test asserting both `recoverPhase6Overflow` and
+`recoverToolFailureStall` decline `ErrWallClockLimit` *and* consume no reset budget doing so.
+(4) **Sub-agents inherit the bound whole** rather than a divided share the way the FIND-14 cost/token
+floors work — spend is additive across siblings, elapsed time is not, and teammates run concurrently,
+so "N minutes" means the same N minutes for each.
+
+**The motivating surface was swarm, not cron.** The review that filed P52.15 implied unattended runs
+were unbounded generally. Cron is not: it fires *shell commands* through `cronShellRunner`, which has
+carried a `cronJobTimeout = 10 * time.Minute` all along — the timeout lives in
+`internal/server/helpers.go`, outside `internal/cron/`, which is what made it easy to miss. Spawned
+swarm teammates (`swarm/inprocess.go`, `cli/worker.go`) were the genuinely unbounded engine surface:
+they get guaranteed floor shares of the USD and token budgets and nothing bounding duration, with no
+human present to interrupt.
+
+**One incidental fix found while wiring config.** `patchCost` splices in a freshly built `cost:`
+block, so any key `buildCostBlock` doesn't write is *erased* from the user's file. Adding a cost key
+without threading it through `CostPatch` would have made `aegis harden` silently delete a wall-clock
+bound the user had set. Carried through with a regression test; `harden` still sets no wall-clock
+value of its own, since it's an operator preference rather than a security control.
+
+**P52.17 — closed as already-implemented; the item's premise was a review error.** It was filed on
+the observation that the engine's P34.2 notice only detects a tool-incapable model *after* a turn is
+spent. That is true of that notice — but it is lever (2) of two, and **lever (1) already does exactly
+what the item proposed.** `Server.toolCallingWarning` (`internal/server/toolcalling.go`) runs the
+smoke probe at **run start** against the resolved model and warns up front
+(`internal/server/messages.go`), backed by `toolcallprobe.Gate`: a singleflight per-model verdict
+cache that probes once per model per daemon and deliberately declines to cache an inconclusive
+verdict. Warnings are bounded to once per session per model and re-fire on a model switch. All of it
+shipped in `e1b55f1` with P34.2 itself. Its placement is also *better* than what the item asked for —
+the item named three model-selection sites (daemon start, `PATCH /sessions/{id}`, the TUI picker);
+run start is the single choke point downstream of all three, the only place the model is known after
+the persona pin, the per-session override, and P30 routing have resolved, and the moment the model
+loads anyway so the probe shares that cold load. The two residuals the item raised (verdict cache not
+surviving a daemon restart; CLI `chat` excluded) were both explicit P34.2 decisions with recorded
+rationale, and neither was reopened. Lesson recorded in the roadmap: an item asserting "X is not
+done" needs the *absence* verified, not just the presence of a weaker mechanism nearby.
+
+---
+
+**Previously, same day:** **P52.12 and P52.13 shipped**, closing the P52.x review's Tier-3 work:
 the phased drive now lives in the daemon where every client can run it, and a session can reach more
 than one repository. Full suite green (61 packages, **including the three `internal/sandbox`
 `/private/var` symlink failures previously carried as known-broken** — they were never a validator

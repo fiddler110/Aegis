@@ -11,11 +11,13 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** the **P52.x full-stack review batch** (filed 2026-07-30, **4 open** of 17 — all of
-them **P52.14**-**P52.17**, Tier 4 measure-first. **Every Tier-1, Tier-2 and Tier-3 item in the batch
-has shipped:** **P52.2**, **P52.5**, **P52.6**, **P52.7**, **P52.9**, **P52.11** on 2026-07-30,
+**Open items:** the **P52.x full-stack review batch** (filed 2026-07-30, **2 open** of 17 —
+**P52.14** and **P52.16**, both Tier 4 measure-first. **Every Tier-1, Tier-2 and Tier-3 item in the
+batch has shipped:** **P52.2**, **P52.5**, **P52.6**, **P52.7**, **P52.9**, **P52.11** on 2026-07-30,
 **P52.1**, **P52.3**, **P52.4**, **P52.8**, **P52.10** on 2026-07-31, and the two Tier-3 items
-**P52.12** (the batch's largest) and **P52.13** on 2026-08-01)
+**P52.12** (the batch's largest) and **P52.13** on 2026-08-01. Of the four Tier-4 items,
+**P52.15** (wall-clock run budget) **shipped 2026-08-01** on review and **P52.17** was **closed
+2026-08-01 as already-implemented** — the item's premise was a review error; see both below)
 — see the batch summary and its
 build-order table below, which is the authoritative sequence for future sessions. Plus **P38.1**
 (Tier 2 umbrella) + **P51.1** (Tier 1, macOS seatbelt profile — **shipped**
@@ -132,9 +134,9 @@ not be built speculatively.
 | 12 | **P52.13** `workspace.additional_roots` | 3 | **SHIPPED 2026-08-01** |
 | 13 | **P52.12** lift phased drive into daemon | 3 | **SHIPPED 2026-08-01** |
 | 14 | **P52.14** session-scoped loop detector | 4 | *measure-first* |
-| 15 | **P52.15** wall-clock run budget | 4 | *measure-first* |
+| 15 | **P52.15** wall-clock run budget | 4 | **SHIPPED 2026-08-01** — gate resolved once P52.3 shipped |
 | 16 | **P52.16** native tool-result disambiguation | 4 | *measure-first* — needs a live A/B |
-| 17 | **P52.17** auto tool-calling probe on model switch | 4 | Polish; no trigger yet |
+| 17 | **P52.17** auto tool-calling probe on model switch | 4 | **CLOSED 2026-08-01** — already shipped with P34.2 (lever 1) |
 
 **Batch 1 shipped 2026-07-30 (parallel).** P52.2, P52.5+P52.6, P52.7 and P52.9 were built
 concurrently as four file-disjoint lanes and reconciled in one pass — see [releases.md](releases.md).
@@ -1090,10 +1092,19 @@ separately if `structured-build` ever needs it.
 
 ## Open Work — Tier 4
 
-**Status:** the four P52.x items below join the existing P49.3/P49.4/P38.8/P25.9 set. All four are
-**measure-first or trigger-less** — they came out of the 2026-07-30 full-stack review as real
-observations, but none has a live-run failure attached yet. Do not build them speculatively; each
-names the signal that should promote it.
+**Status:** the P52.x items below join the existing P49.3/P49.4/P38.8/P25.9 set. They came out of the
+2026-07-30 full-stack review as real observations, but none had a live-run failure attached. Do not
+build the remaining ones speculatively; each names the signal that should promote it.
+
+**Reviewed 2026-08-01.** All four P52.x Tier-4 items were re-read against the code. Two moved:
+**P52.15 shipped** (its stated gate — "build P52.3 first and see whether this is still wanted" — was
+resolved: P52.3 shipped and does not cover this), and **P52.17 was closed as already-implemented**
+(its premise was a review error). **P52.14** and **P52.16** stay parked, both re-confirmed as
+correctly filed. One correction to the review that produced them, recorded so it isn't re-derived:
+the P52.15 write-up implied cron was an unbounded surface — it is not. Cron fires *shell commands*
+via `cronShellRunner`, which has carried a `cronJobTimeout = 10 * time.Minute` all along
+(`internal/server/helpers.go`); the timeout lives outside `internal/cron/`, which is what made it easy
+to miss. Spawned swarm teammates were the genuinely unbounded engine surface.
 
 ### P52.14 — Session-scoped loop detector (cross-`Run` loops are invisible)
 
@@ -1114,23 +1125,48 @@ retry — which is a fuzzier judgment than the current mechanism makes.
 **Priority:** Tier 4 — real but unproven, and the false-positive risk is higher than the current
 detector's.
 
-### P52.15 — Wall-clock run budget (the dimension that actually hurts on local hardware)
+### P52.15 — Wall-clock run budget (the dimension that actually hurts on local hardware) — SHIPPED 2026-08-01
 
-Three budgets exist and none of them bound *time*: `BudgetUSD` is an explicit no-op for unpriced local
-usage (`engine.go:541-550`), `MaxTokensPerRun` defaults to 0, and `MaxIterations` defaults to 40. On a
-model measured at ~7 tok/s (the P38.1 note), 40 iterations is potentially hours before any safety
-valve trips — and the user's actual constraint is almost always "don't spend more than N minutes on
-this", which nothing expresses.
+Three budgets existed and none of them bound *time*: `BudgetUSD` is an explicit no-op for unpriced
+local usage, `MaxTokensPerRun` defaults to 0, and `MaxIterations` defaults to 40. On a model measured
+at ~7 tok/s (the P38.1 note), 40 iterations is potentially hours before any safety valve trips — and
+the user's actual constraint is almost always "don't spend more than N minutes on this", which
+nothing expressed.
 
-Fix would be a `MaxWallClockPerRun` option checked at the same points as the existing budget gates
-(before each turn, and again before a tool round), aborting with a message that distinguishes "ran out
-of time" from "ran out of iterations". It should interact sensibly with the phased drive, where the
-meaningful unit is the *phase*, not the run — likely a per-phase budget rather than a global one, or
-it will guillotine a long build mid-phase, which is worse than letting it finish.
+**Shipped.** `engine.Options.MaxWallClockPerRun` is checked at both existing budget gates (before
+each model turn — the P9 dead-zone placement, since a guard corrective retry or a max-token
+continuation is just as much elapsed time as a tool round — and again before each tool round, so a
+run stops before side effects rather than one iteration late). Aborts wrap an exported
+`engine.ErrWallClockLimit` so a caller can classify "ran out of time" apart from "ran out of
+iterations", the same idiom as `ErrToolFailureLimit`; the message names
+`cost.max_wall_clock_per_run`. Configured as `cost.max_wall_clock_per_run` (seconds, read via
+`CostConfig.MaxWallClockPerRun()`), wired into the daemon engine build, the CLI chat engine, and both
+swarm backends.
 
-**Promote when:** someone actually wants to bound a local run by time, or a phased build needs a
-per-phase timeout. **Priority:** Tier 4 — cheap to build, but **P52.3** addresses the concrete stall
-that motivates it, so build P52.3 first and see whether this is still wanted.
+**Four decisions worth keeping.** (1) **Off by default**, and this is the load-bearing one: a
+wall-clock cap cannot distinguish a stalled run from a slow one making real progress, so any non-zero
+default would eventually guillotine legitimate long work — the same regression shape the P52.3
+reconcile caught. Opt-in only. (2) **Per-`Run`, not global**, which in the phased drive makes it
+per phase turn — the roadmap item worried a global cap would kill a long build mid-phase, and
+per-`Run` scoping resolves that for free. (3) **Fatal to the drive**, unlike a context overflow
+(P47.2/P47.7) or a tool-failure stall (P52.3), which reset and resume. Those are conditions a fresh
+context genuinely clears; a wall-clock limit is an operator saying "stop after N minutes", and
+resetting past it would defeat setting it. Pinned by a test asserting both classifiers decline
+`ErrWallClockLimit` and consume no reset budget. (4) **Sub-agents inherit the bound whole** rather
+than getting a divided share the way the cost/token floors do — spend is additive across siblings,
+elapsed time is not; teammates run concurrently, so "N minutes" means the same N minutes for each.
+
+**One incidental fix.** `patchCost` splices in a freshly built `cost:` block, so any key
+`buildCostBlock` doesn't write is erased from the user's file. Adding a new cost key without
+threading it through `CostPatch` would have made `aegis harden` silently delete a wall-clock bound
+the user had set. Carried through with a regression test; `harden` itself still sets no wall-clock
+value (it's an operator preference, not a security control).
+
+**Its stated gate is now resolved.** The item said "build P52.3 first and see whether this is still
+wanted" — P52.3 shipped, and it does not cover this: the breaker fires on *failing* tool calls, not
+on a run that is progressing slowly or wandering productively. The surface that motivated shipping is
+spawned swarm teammates (`inprocess.go` / `worker.go`), which had budget floors for USD and tokens
+but nothing bounding duration, and no human present to interrupt.
 
 ### P52.16 — Native Ollama tool-result disambiguation for same-tool parallel calls (measure-first)
 
@@ -1154,24 +1190,33 @@ and could plausibly *hurt* by adding noise — which is exactly why this is meas
 mitigation without that measurement. **Priority:** Tier 4 — speculative; the hypothesis is plausible
 but unverified.
 
-### P52.17 — Run the tool-calling probe automatically on first use of a newly selected model
+### P52.17 — Run the tool-calling probe automatically on first use of a newly selected model — CLOSED 2026-08-01 (already implemented)
 
-`internal/toolcallprobe` and `aegis doctor` exist precisely because a model's Ollama manifest can
-claim tool support while the model cannot actually speak the protocol (the qwen2.5-coder:1.5b
-signature). The engine's P34.2 notice (`engine.go:627-632`) correctly detects the symptom after the
-fact and points at `aegis doctor` — but only *after* a user has already spent a turn on a model that
-was never going to work, and only when no tool call has succeeded all run.
+**The item's premise was a review error; it describes work that shipped with P34.2 itself.** Filed on
+the observation that the engine's P34.2 notice detects a tool-incapable model only *after* a turn is
+spent — true of that notice (lever 2), but it is not the only mechanism. **Lever (1) already does
+exactly what this item proposes:** `Server.toolCallingWarning` (`internal/server/toolcalling.go`) runs
+the smoke probe at **run start** against the *resolved* model and emits an up-front warning
+(`internal/server/messages.go`), backed by `toolcallprobe.Gate` — a singleflight per-model verdict
+cache that probes once per model per daemon and deliberately declines to cache an inconclusive
+verdict. Warning is bounded to once per session per model, re-firing on a model switch. Shipped in
+commit `e1b55f1`, months before the review that filed this.
 
-Fix would be to run the smoke probe automatically the first time a session uses a model not seen
-before (on `/model`, on a persona switch that pins a different model, and at first-run for the
-configured default), caching the verdict per model. A failing probe would surface a clear up-front
-warning rather than a mid-run diagnosis. The cost is one small model call per new model, and the
-design question is where to cache the verdict so it survives a daemon restart without going stale
-when a model is re-pulled.
+The review found lever (2) and stopped. The lesson worth carrying: a roadmap item asserting "X is not
+done" needs the *absence* verified, not just the presence of a worse mechanism nearby.
 
-**Promote when:** a new user hits the manifest-lies failure, or model switching becomes common enough
-that the up-front cost is clearly worth it. **Priority:** Tier 4 — polish on a path that already
-degrades gracefully and already names the fix.
+**Placement is already better than what the item asked for.** It names three model-selection sites
+(daemon start, `PATCH /sessions/{id}`, the TUI picker); run start is the one choke point downstream
+of all three, and the only place the model is known after the persona pin, the per-session `/model`
+override, and P30 routing have resolved. It is also the moment the model gets loaded anyway, so the
+probe shares that cold load instead of adding one. That rationale is recorded in
+`internal/server/toolcalling.go`'s doc comment.
+
+**Two residuals, both already decided against in the P34.2 notes** (see releases.md) and neither
+reopened: the verdict cache is in-memory so it doesn't survive a daemon restart (the item's own
+"design question"), and the CLI `chat` path is excluded on purpose — probing in a one-shot process
+doubles the model calls of every scripted `aegis chat` and never repays the cache, and lever (2)
+covers that surface at zero cost.
 
 ### P49.3 — LSP-backed symbol extraction for the repo map (precision without tree-sitter)
 

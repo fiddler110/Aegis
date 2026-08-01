@@ -270,6 +270,7 @@ func newChatCmd() *cobra.Command {
 				Compactor:           compactor,
 				Cost:                tracker,
 				BudgetUSD:           cfg.Cost.BudgetUSD,
+				MaxWallClockPerRun:  cfg.Cost.MaxWallClockPerRun(),
 				Model:               cfg.Provider.Model,
 				MaxTokens:           cfg.Provider.MaxTokens,
 				ContextWindowTokens: ctxWin,

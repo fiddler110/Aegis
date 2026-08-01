@@ -327,6 +327,18 @@ type CostConfig struct {
 	// BudgetUSD silently never fires (estimated usage carries no dollar cost).
 	MaxTokensPerRun int `koanf:"max_tokens_per_run"`
 
+	// MaxWallClockPerRunSec aborts a run that has been going longer than this
+	// many seconds; 0 = unlimited (P52.15). The time dimension the other two
+	// budgets miss entirely: BudgetUSD is a no-op for unpriced local usage and
+	// MaxTokensPerRun defaults to 0, so on a slow local model a run's only real
+	// bound is provider.max_iterations (40), which at ~7 tok/s can be hours.
+	//
+	// Off by default and deliberately so — a wall-clock cap cannot distinguish a
+	// stalled run from a slow one making real progress, so any non-zero default
+	// would eventually kill legitimate long work. Read via
+	// MaxWallClockPerRun(), never this field directly.
+	MaxWallClockPerRunSec int `koanf:"max_wall_clock_per_run"`
+
 	// SessionCapUSD refuses to start a new turn once a session's cumulative
 	// (persisted) cost reaches this amount; 0 = unlimited (P9.5).
 	SessionCapUSD float64 `koanf:"session_cap_usd"`
@@ -345,6 +357,16 @@ type CostConfig struct {
 	// the client instead of a hard stop. Only takes effect for whichever cap
 	// is non-zero. Default 0.8 (P9.5).
 	AlertThreshold float64 `koanf:"alert_threshold"`
+}
+
+// MaxWallClockPerRun returns the configured cost.max_wall_clock_per_run as a
+// time.Duration, or 0 when unset or non-positive — which the engine reads as
+// "no wall-clock bound" (P52.15).
+func (c CostConfig) MaxWallClockPerRun() time.Duration {
+	if c.MaxWallClockPerRunSec <= 0 {
+		return 0
+	}
+	return time.Duration(c.MaxWallClockPerRunSec) * time.Second
 }
 
 // LSPServerConfig configures one LSP language server.
