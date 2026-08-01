@@ -121,6 +121,17 @@ func (t *taskGetTool) Description() string {
 	return "Get a background job's status and a tail of its output by task id. " +
 		"Use task_output for the full output."
 }
+
+// PollExempt marks every task_get call as a legitimate poll (P53.2). Asking a
+// background job for its state is the textbook wait loop: the answer changes on
+// the job's timeline, not the agent's, so "same id, same arguments, N turns
+// running" is exactly what correct waiting looks like. The exemption is
+// unconditional because there is no non-polling way to call this tool — its
+// entire contract is "observe external state".
+func (t *taskGetTool) PollExempt(json.RawMessage) bool { return true }
+
+var _ tool.PollExempter = (*taskGetTool)(nil)
+
 func (t *taskGetTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"id":{"type":"string","description":"the task id"}},"required":["id"]}`)
 }
@@ -152,6 +163,17 @@ func (t *taskOutputTool) Capability() tool.Capability { return tool.CapRead }
 func (t *taskOutputTool) Description() string {
 	return "Return the full accumulated output of a background job by task id."
 }
+
+// PollExempt marks task_output as a poll for the same reason as task_get: a
+// running job's output grows over time, and re-reading it until the job
+// produces what the agent is waiting for is correct behavior, not a stall. Note
+// the returned content genuinely differs between calls while the job runs — but
+// loop detection keys on the *input*, so the identical `{"id":…}` argument is
+// all it ever sees.
+func (t *taskOutputTool) PollExempt(json.RawMessage) bool { return true }
+
+var _ tool.PollExempter = (*taskOutputTool)(nil)
+
 func (t *taskOutputTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"id":{"type":"string","description":"the task id"}},"required":["id"]}`)
 }

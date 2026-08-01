@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,12 +17,40 @@ import (
 // signatures are all equal" matching never fires on that pattern.
 const maxLoopPeriod = 4
 
+// loopOutcome records what happened when a recorded turn's tools actually ran.
+// The loop gate calls record *before* the round executes, so the turn that
+// trips the detector has no outcome yet — hence the third state.
+type loopOutcome uint8
+
+const (
+	loopOutcomeUnknown loopOutcome = iota // recorded, tools not finished (or never ran)
+	loopOutcomeOK                         // every tool result in the round succeeded
+	loopOutcomeError                      // at least one tool result in the round errored
+)
+
 // loopDetector spots a stuck agent that issues the same tool calls turn after
 // turn — either the exact same call every time, or a short cycle of a few
 // distinct calls repeating (period 1 through maxLoopPeriod).
+//
+// P53.2: it also carries the *outcome* of each recorded turn, because the two
+// stuck shapes deserve different endings. A model repeating a call that keeps
+// failing has exhausted its own recovery and the run is ended (this overlaps
+// the P52.3 tool-failure breaker, which catches the same-error/different-args
+// variant loopdetect structurally cannot see; the two are complementary, not
+// duplicated). A model repeating a call that keeps *succeeding* is merely
+// confused about what to do with the answer, which one corrective nudge often
+// fixes — so the engine nudges once, resets the window, and only aborts if the
+// cycle comes straight back.
 type loopDetector struct {
 	threshold int
 	recent    []string
+	// outcomes is index-aligned with recent: outcomes[i] is what the tool round
+	// for recent[i] produced, or loopOutcomeUnknown if it has not run yet.
+	outcomes []loopOutcome
+	// detectedSpan is the length of the window that tripped the most recent
+	// detection, so cycleHadError classifies exactly the repeating block rather
+	// than the whole retained history.
+	detectedSpan int
 }
 
 func newLoopDetector(threshold int) *loopDetector {
@@ -38,11 +67,14 @@ func newLoopDetector(threshold int) *loopDetector {
 // varied work.
 func (d *loopDetector) record(sig string) bool {
 	d.recent = append(d.recent, sig)
+	d.outcomes = append(d.outcomes, loopOutcomeUnknown)
 	maxWindow := d.threshold * maxLoopPeriod
 	if len(d.recent) > maxWindow {
 		d.recent = d.recent[len(d.recent)-maxWindow:]
+		d.outcomes = d.outcomes[len(d.outcomes)-maxWindow:]
 	}
 
+	d.detectedSpan = 0
 	for period := 1; period <= maxLoopPeriod; period++ {
 		repeats := d.threshold / period
 		if repeats < 2 {
@@ -53,10 +85,53 @@ func (d *loopDetector) record(sig string) bool {
 			continue
 		}
 		if isRepeatingCycle(d.recent[len(d.recent)-span:], period) {
+			d.detectedSpan = span
 			return true
 		}
 	}
 	return false
+}
+
+// noteOutcome attaches the result of a completed tool round to the turn most
+// recently passed to record. It is a no-op when nothing is recorded — either
+// the turn was skipped (every call poll-exempt) or the window was just reset
+// after a nudge — so an outcome is never misattributed to an earlier turn.
+func (d *loopDetector) noteOutcome(hadError bool) {
+	if len(d.outcomes) == 0 {
+		return
+	}
+	o := loopOutcomeOK
+	if hadError {
+		o = loopOutcomeError
+	}
+	d.outcomes[len(d.outcomes)-1] = o
+}
+
+// cycleHadError classifies the most recently detected cycle: true if any turn
+// in the detected window that has a known outcome errored. The triggering turn
+// itself is always unknown (its tools have not run yet) and turns still marked
+// unknown simply do not vote; a window in which nothing is known to have failed
+// is treated as a succeeding loop, which is the recoverable case.
+func (d *loopDetector) cycleHadError() bool {
+	span := d.detectedSpan
+	if span <= 0 || span > len(d.outcomes) {
+		span = len(d.outcomes)
+	}
+	for _, o := range d.outcomes[len(d.outcomes)-span:] {
+		if o == loopOutcomeError {
+			return true
+		}
+	}
+	return false
+}
+
+// reset clears the detection window after a recoverable trigger has been
+// nudged, so the model is judged on what it does *next* rather than re-tripping
+// on the same history the instant it repeats itself once more.
+func (d *loopDetector) reset() {
+	d.recent = nil
+	d.outcomes = nil
+	d.detectedSpan = 0
 }
 
 // isRepeatingCycle reports whether window consists entirely of a repeating
@@ -75,14 +150,53 @@ func isRepeatingCycle(window []string, period int) bool {
 // canonicalized inputs, in request order). Two turns with the same signature
 // requested the exact same work — the hallmark of a loop.
 func turnSignature(toolUses []provider.ToolUseBlock) string {
+	sig, _ := turnSignatureExcludingPolls(toolUses, nil)
+	return sig
+}
+
+// turnSignatureExcludingPolls builds the loop signature for a turn, dropping
+// every call that pollExempt reports as a legitimate poll (P53.2), and reports
+// whether the turn should be recorded at all.
+//
+// record is false when nothing survives the filter — a turn made up entirely of
+// polls. Recording it as an empty signature would be actively harmful: empty
+// equals empty, so a handful of poll-only turns would form a perfect period-1
+// cycle and trip the very detector the exemption exists to keep quiet.
+// pollExempt may be nil, which reproduces the pre-P53.2 signature exactly.
+func turnSignatureExcludingPolls(toolUses []provider.ToolUseBlock, pollExempt func(provider.ToolUseBlock) bool) (string, bool) {
 	var b strings.Builder
+	kept := 0
 	for _, tu := range toolUses {
+		if pollExempt != nil && pollExempt(tu) {
+			continue
+		}
+		kept++
 		b.WriteString(tu.Name)
 		b.WriteByte('\x00')
 		b.Write(canonicalizeToolInput(tu.Input))
 		b.WriteByte('\n')
 	}
-	return b.String()
+	return b.String(), kept > 0
+}
+
+// loopNudgePrefix opens the P53.2 recoverable-loop prompt and, like
+// zeroToolNudgePrefix / emptyAnswerNudgePrefix / toolFailureNudgePrefix,
+// doubles as the marker its retraction keys on — so the text after it can name
+// the actual turn count without breaking retractNudges.
+const loopNudgePrefix = "[You have issued the same tool call(s)"
+
+// loopNudgeText is the one-shot corrective for a *succeeding* loop. It is
+// deliberately not routed through the Approver seam: under the non-interactive
+// approver an unattended drive uses, an approval-style check warns and allows,
+// which would make the detector toothless in precisely the scenario it exists
+// for. Nudge-once-then-abort behaves identically attended or unattended.
+func loopNudgeText(turns int) string {
+	return fmt.Sprintf(loopNudgePrefix+
+		" %d turns running, and they keep succeeding with the same result — you are repeating"+
+		" work you have already done instead of making progress. Do not issue those same calls"+
+		" again. Either take a different next step that builds on the result you already have,"+
+		" or, if you have enough to answer, stop calling tools and give your final answer now.]",
+		turns)
 }
 
 // looksVolatile reports whether a JSON scalar's string form looks like a

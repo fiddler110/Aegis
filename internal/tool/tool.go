@@ -78,6 +78,45 @@ func EffectiveCapability(t Tool, input json.RawMessage) Capability {
 	return t.Capability()
 }
 
+// PollExempter is an optional Tool extension for a tool whose repeated calls
+// are legitimately expected while waiting on external state (P53.2). The
+// engine's loop detector flags a model that issues the same tool calls turn
+// after turn; an agent polling a background job until it finishes, or checking
+// a mailbox until a teammate replies, produces exactly that shape while doing
+// nothing wrong. A tool that reports true for a call has that call dropped from
+// the turn's loop signature entirely.
+//
+// Inferring poll-shape from the arguments was considered and rejected. The
+// obvious signal — successive calls differing only in a timestamp, cursor, or
+// request id — is precisely what canonicalizeToolInput normalizes away, and it
+// does so for a good reason: an incidental nonce must not be allowed to defeat
+// loop detection for every other tool. Re-deriving the poll signal from the
+// same bytes would mean either weakening that normalization or bolting a second,
+// contradictory heuristic onto it. Worse, the heuristic has no ceiling on its
+// blast radius: a false positive silently disables loop detection for whatever
+// call it matched, and the loop detector is one of the few guards that bounds a
+// runaway unattended drive. An explicit per-tool opt-out keeps the exemption set
+// small, reviewable, and greppable.
+//
+// It takes the raw input rather than being a static per-tool flag because some
+// tools are only poll-shaped for certain arguments, and exempting a tool
+// disables loop detection for it wholesale — so the narrowest honest answer
+// belongs at the call, not at the type.
+type PollExempter interface {
+	PollExempt(input json.RawMessage) bool
+}
+
+// IsPollExempt reports whether a specific call is a legitimate poll: false
+// unless t implements PollExempter and claims this input. Mirrors
+// EffectiveCapability — the per-call question is asked of the tool, with a safe
+// default for the overwhelming majority that do not answer it.
+func IsPollExempt(t Tool, input json.RawMessage) bool {
+	if p, ok := t.(PollExempter); ok {
+		return p.PollExempt(input)
+	}
+	return false
+}
+
 // Registry holds registered tools and tracks which are exposed.
 type Registry struct {
 	mu          sync.RWMutex

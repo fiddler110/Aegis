@@ -207,8 +207,12 @@ func TestAdversarial_LoopDetectionNotEvadedByNonce(t *testing.T) {
 		Turns:   []string{"go"},
 	}
 	RunAndCheck(t, context.Background(), s, ExpectErrorContains("loop"))
-	if adapter.calls != 3 {
-		t.Errorf("expected the engine to abort on the 3rd call once the loop threshold hit, made %d calls", adapter.calls)
+	// echo succeeds, so P53.2 classifies this as a recoverable loop: the 3rd
+	// call trips the detector, earns one corrective nudge and a window reset,
+	// and the 6th call — the same cycle resumed — is what actually ends the run.
+	// The point of this scenario is unchanged: the nonce never evades detection.
+	if adapter.calls != 6 {
+		t.Errorf("expected the engine to abort on the 6th call (nudge at 3, abort at 6), made %d calls", adapter.calls)
 	}
 }
 
