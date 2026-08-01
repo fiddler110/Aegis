@@ -144,19 +144,26 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/permission` | Three modes: `plan` (read-only), `build` (read+write, execute gated), `auto` (all allowed); text-based allow/deny rules; `PersonaToolGate` advisory (never-enforcing) check on a persona's declared `Tools` |
 | `internal/persona` | 22 built-in named system prompts (general, security, developer, SRE, red-team, security-critic/security-arbiter and generic critic/arbiter debate roles, etc.); custom personas are `.md` files with YAML frontmatter, hot-reloaded via a signature-cached `Refresh` |
 | `internal/skills` | Progressive-disclosure skills: project/user `.md`/bundled-directory skill files, plus skills embedded in the binary (`go:embed`) that stay dormant until named in config/CLI/TUI |
+| `internal/drive` | The phased skill drive: runs a multi-phase skill build (e.g. threat-modeling) as a sequence of fresh, context-reset `engine.Run`s instead of one ever-growing conversation, so local-model context limits don't stall a long unattended build. Lifted out of the CLI (`internal/cli/chat_phased.go`) into its own package so the daemon, TUI, and web UI all reach it, not just `aegis chat --skill` |
 | `internal/swarm` | Multi-agent coordination: spawns sub-agents as goroutines (`in_process`) or subprocesses; file-based mailbox for inter-agent messaging |
 | `internal/debate` | Multi-agent-debate (MAD) primitive (P12): propose/critique/rebut/arbitrate over a claim via a caller-supplied `RunFunc`, decoupled from swarm/engine the same way swarm is decoupled from engine; evidence-citation check (P12.3) and shared-tracker budget bound (P12.6) live here; `Config.Domain` (`security`/`generic`) selects the default persona trio and `WithFiles` grounds the claim in specific files, so the same primitive covers security findings and non-security document/plan review (see [docs/debate.md](docs/debate.md)) |
 | `internal/compaction` | Context compaction — summarizes old turns when the conversation approaches the model's context window |
 | `internal/checkpoint` | Per-turn restore points for `/rewind` |
 | `internal/memory` | Project-level and user-level persistent memory; relevance scoring for context injection |
+| `internal/knowledge` | Project-level knowledge base (distinct from `internal/memory`'s relevance-scored recall) surfaced to personas/skills as grounding context |
+| `internal/repomap` | Builds a compact structural overview of the repo — files, top-level symbols, import edges — injected as `<repo_map>`; regex-based extraction (no tree-sitter/CGo), capped to a byte budget, mtime-cached |
+| `internal/lsp` | Minimal LSP client managing language-server subprocesses over stdio JSON-RPC, for diagnostics and reference resolution (`LSP` tool, `aegis doctor`) |
+| `internal/cost` | Tracks token spend per run/session and converts it to an estimated USD cost; backs the budget knobs (`cost.*` config: USD, token, wall-clock, iteration limits) enforced in `internal/engine` |
 | `internal/tui` | Bubbletea TUI: timeline, streaming, dialog, persona/session pickers, slash commands, cost display |
 | `internal/config` | Layered config (defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` → `AEGIS_*` env vars) |
 | `internal/mcp` | MCP client (stdio + HTTP/SSE) — Aegis calling *out* to external MCP servers; registered tools appear alongside builtins |
 | `internal/mcpserver` | MCP server (`aegis mcp-serve`) — the reverse direction: exposes Aegis sessions as MCP tools (`aegis_prompt`, `aegis_new_session`, `aegis_list_sessions`) to other MCP-speaking harnesses |
 | `internal/acp` | ACP JSON-RPC server for editor integrations (Zed, Neovim) |
 | `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers |
-| `internal/cron` | Cron scheduler for background tasks |
+| `internal/workspacetrust` | Per-directory trust decisions (`aegis trust --dir`) gating which roots a session may touch — including `workspace.additional_roots` entries, which need their own trust grant even when frozen from project config |
+| `internal/cron` | Cron scheduler for background tasks; shelled commands run under a fixed `cronJobTimeout` (10 min, `internal/server/helpers.go`) |
 | `internal/guard` | Output validation — calls a second model pass against a rubric or JSON schema |
+| `internal/toolcallprobe` | Tool-calling smoke probe shared by `aegis doctor` and the daemon's model-switch warning — checks a model can actually emit tool calls before a session relies on it |
 | `internal/eval` | Scenario-based agent-behavior regression harness: scripted multi-turn conversations run against a real engine (deterministic adapter, no live model) with tool-call/text/error assertions and golden transcripts |
 
 ### Provider model
@@ -173,9 +180,13 @@ All message types (TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock) are 
 
 Every tool declares a `Capability` (`read`, `write`, `execute`, `network`, `spawn`). The permission gate consults this before execution. In `engine.runTools`, read/network tools run concurrently while write/execute tools are serialized via `sync.RWMutex`.
 
+### Run budgets
+
+`engine.Options` carries four independent stop conditions, all checked at the same two gates (before each model turn and before each tool round): `BudgetUSD` (a no-op for unpriced local usage), `MaxTokensPerRun` (0 = unbounded), `MaxIterations` (defaults to 40 steps), and `MaxWallClockPerRun` (`cost.max_wall_clock_per_run`, seconds — **off by default**, since a wall-clock cap can't tell a stalled run from a slow one making real progress). A wall-clock abort is fatal to the drive rather than resumable, unlike a context-overflow or tool-failure-breaker reset; sub-agents inherit the parent's bound whole rather than a divided share, since elapsed time isn't additive across concurrent teammates the way spend is.
+
 ### Configuration layers
 
-Precedence (lowest → highest): built-in defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` (project-level) → `AEGIS_*` env vars. Secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) come only from the environment. `.aegis/.env` is supported for local secrets without environment pollution.
+Precedence (lowest → highest): built-in defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` (project-level) → `AEGIS_*` env vars. Secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) come only from the environment. `.aegis/.env` is supported for local secrets without environment pollution. `workspace.additional_roots` widens sandbox confinement beyond the primary workspace root for cross-repo workflows; it's frozen from untrusted project config (only `~/.config`-level or env can set it) and each root still needs its own `aegis trust --dir` grant.
 
 ### Persona system
 
