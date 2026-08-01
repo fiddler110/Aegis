@@ -248,6 +248,27 @@ cost:
   # the model is unpriced, unlike budget_usd.
   max_tokens_per_run: 0
 
+  # 0 = unlimited (the default). Seconds of wall-clock time a single run may
+  # take before it aborts, checked before each model turn and before each tool
+  # round. This is the only budget that bounds *time*: budget_usd is a no-op
+  # for local models, max_tokens_per_run defaults to 0, and
+  # provider.max_iterations (40) is a step count — on a model running at
+  # ~7 tok/s that is potentially hours before anything trips.
+  #
+  # Off by default on purpose: a wall-clock cap cannot tell a stalled run from
+  # a slow one that is making real progress, so a default would eventually kill
+  # legitimate long work. Set it when you actually want "spend at most N
+  # minutes on this" — most useful for unattended runs (spawned sub-agents,
+  # scripted `aegis chat`) where nobody is watching to interrupt.
+  #
+  # The bound is per *run*, not per session or per task. In the phased
+  # threat-model drive that means per phase turn, so it will not guillotine a
+  # long build partway through — but note that a run aborted this way is fatal
+  # to the drive, unlike a context overflow or a tool-failure stall, which
+  # reset and resume. That is deliberate: resuming past a time bound you set
+  # would defeat setting it.
+  max_wall_clock_per_run: 0
+
   # 0 = unlimited. Refuses to start a new turn once a session's cumulative
   # (persisted) cost reaches this amount.
   session_cap_usd: 0.0
@@ -1052,6 +1073,24 @@ cost:
   session_token_cap: 1000000   # refuse new turns once a session hits 1M tokens
   daily_token_cap: 5000000     # refuse new turns once all sessions hit 5M tokens in a UTC day
 ```
+
+### Bound a run by time (unattended runs on slow local hardware)
+
+Token caps bound volume, not duration — a run can sit well under a token cap
+and still take hours on a model generating a handful of tokens per second. When
+the real constraint is "don't spend more than N minutes on this", set a
+wall-clock bound:
+
+```yaml
+cost:
+  max_wall_clock_per_run: 900   # abort a run that has been going 15 minutes
+```
+
+Leave it at 0 for interactive work, where you can interrupt a run yourself and
+where a slow-but-progressing turn is not a failure. It earns its keep on
+unattended surfaces — spawned sub-agents and scripted `aegis chat` — which have
+no human watching and, unlike cron jobs (bounded separately at 10 minutes),
+nothing else bounding their duration.
 
 ### Route threat-model entries or borderline scan findings through a debate round (P12.5)
 

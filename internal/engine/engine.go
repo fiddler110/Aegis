@@ -213,13 +213,30 @@ type Options struct {
 	ZeroToolNudgeMaxRetries int
 	BudgetUSD               float64 // optional; >0 aborts the run past this cost
 	MaxTokensPerRun         int     // optional; >0 aborts the run past this cumulative token count (P10.5) — always enforceable, unlike BudgetUSD which is a no-op for unpriced/estimated usage
-	Model                   string
-	MaxTokens               int
-	Temperature             *float64
-	MaxIterations           int           // safety cap on tool-call rounds; 0 -> default
-	LoopThreshold           int           // identical tool-call turns before aborting; 0 -> default, <0 disables
-	ContextWindowTokens     int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
-	SteerChan               <-chan string // optional; steering messages injected between tool rounds
+	// MaxWallClockPerRun (P52.15) aborts a run that has been going longer than
+	// this, checked at the same two gates as the cost/token budgets. 0 (the
+	// default) disables it.
+	//
+	// It exists because none of the other three budgets bound *time*, which is
+	// the dimension that actually hurts on local hardware: BudgetUSD is a no-op
+	// for unpriced local usage, MaxTokensPerRun defaults to 0, and MaxIterations
+	// defaults to 40 — which on a model measured at ~7 tok/s is potentially
+	// hours before any safety valve trips. "Don't spend more than N minutes on
+	// this" is the constraint users actually have, and nothing else expresses it.
+	//
+	// Deliberately off by default. A wall-clock cap cannot tell a stalled run
+	// from a slow one that is making real progress, so a non-zero default would
+	// guillotine legitimate long work — the same regression shape the P52.3
+	// reconcile caught when the tool-failure breaker met the phased drive.
+	// Opt-in only, via cost.max_wall_clock_per_run.
+	MaxWallClockPerRun  time.Duration
+	Model               string
+	MaxTokens           int
+	Temperature         *float64
+	MaxIterations       int           // safety cap on tool-call rounds; 0 -> default
+	LoopThreshold       int           // identical tool-call turns before aborting; 0 -> default, <0 disables
+	ContextWindowTokens int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
+	SteerChan           <-chan string // optional; steering messages injected between tool rounds
 	// RedactSecrets opts in to running a read-capability tool's output through
 	// gitleaks-backed secret detection (security.RedactText) before it's
 	// appended to the conversation sent to the model provider (P24.12 /
@@ -260,6 +277,7 @@ type Engine struct {
 	zeroToolNudgeMax    int
 	budgetUSD           float64
 	maxTokensPerRun     int
+	maxWallClock        time.Duration
 	model               string
 	maxTokens           int
 	temperature         *float64
@@ -283,6 +301,35 @@ type Engine struct {
 
 // ErrInterrupted is returned when the run is cancelled via context.
 var ErrInterrupted = errors.New("engine: interrupted")
+
+// ErrWallClockLimit is wrapped by the P52.15 abort so a caller can distinguish
+// "ran out of time" from "ran out of iterations" (which returns a plain error)
+// or from a cost/token budget, rather than pattern-matching a message — the
+// same reason ErrToolFailureLimit exists.
+//
+// Unlike ErrToolFailureLimit, the phased drive does *not* treat this as a
+// resumable phase reset. A tool-failure stall is a model reasoning from a
+// context full of its own failures, which a fresh context genuinely clears; a
+// wall-clock limit says the operator asked for a hard time bound, and silently
+// resetting and continuing past it would defeat the point of setting one.
+var ErrWallClockLimit = errors.New("engine: wall-clock budget reached")
+
+// wallClockExceeded reports whether this run has outlived maxWallClock, and
+// returns the abort error if so. start is the run's own start time, so the
+// bound is per-Run — which in the phased drive means per phase turn, the unit
+// the drive actually resets around, rather than one global cap that would
+// guillotine a long build mid-phase.
+func (e *Engine) wallClockExceeded(start time.Time) error {
+	if e.maxWallClock <= 0 {
+		return nil
+	}
+	elapsed := time.Since(start)
+	if elapsed < e.maxWallClock {
+		return nil
+	}
+	return fmt.Errorf("%w: ran %s of a %s limit — raise cost.max_wall_clock_per_run for longer tasks",
+		ErrWallClockLimit, elapsed.Round(time.Second), e.maxWallClock)
+}
 
 // New constructs an Engine.
 func New(opts Options) (*Engine, error) {
@@ -325,6 +372,7 @@ func New(opts Options) (*Engine, error) {
 		zeroToolNudgeMax:    zeroToolNudgeMax,
 		budgetUSD:           opts.BudgetUSD,
 		maxTokensPerRun:     opts.MaxTokensPerRun,
+		maxWallClock:        opts.MaxWallClockPerRun,
 		model:               opts.Model,
 		maxTokens:           maxTok,
 		temperature:         opts.Temperature,
@@ -346,6 +394,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	if emit == nil {
 		emit = func(Event) {}
 	}
+
+	// P52.15 wall-clock budget baseline. Taken before compaction rather than at
+	// the loop, since a compaction pass is a model call that can itself take
+	// real time on a local backend — time the operator's bound should cover.
+	runStart := time.Now()
 
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the
@@ -448,6 +501,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 		if e.maxTokensPerRun > 0 && e.cost != nil && e.cost.TotalTokens() >= e.maxTokensPerRun {
 			err := fmt.Errorf("engine: token budget reached: used %d of %d token limit", e.cost.TotalTokens(), e.maxTokensPerRun)
+			emit(Event{Kind: KindError, Err: err})
+			return err
+		}
+		// P52.15: same gate, the time dimension. Placed with the other two for
+		// the same P9 dead-zone reason — a guard corrective retry or a
+		// max-token continuation is just as much elapsed time as a tool round.
+		if err := e.wallClockExceeded(runStart); err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -736,6 +796,12 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 		if e.maxTokensPerRun > 0 && e.cost != nil && e.cost.TotalTokens() >= e.maxTokensPerRun {
 			err := fmt.Errorf("engine: token budget reached: used %d of %d token limit", e.cost.TotalTokens(), e.maxTokensPerRun)
+			emit(Event{Kind: KindError, Err: err})
+			return err
+		}
+		// P52.15: stop before launching a tool round (and its side effects) once
+		// the time bound is spent, not one iteration later.
+		if err := e.wallClockExceeded(runStart); err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}

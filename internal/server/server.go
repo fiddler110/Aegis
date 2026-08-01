@@ -1056,9 +1056,15 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			Cost:                tracker,
 			BudgetUSD:           budgetUSD,
 			MaxTokensPerRun:     maxTokensPerRun,
-			Model:               model,
-			MaxTokens:           s.cfg.Provider.MaxTokens,
-			Logger:              s.logger,
+			// A spawned teammate inherits the operator's time bound rather than
+			// getting its own share of it, unlike the cost/token floors above:
+			// those are divisible (spend is additive across siblings), elapsed
+			// time is not — teammates run concurrently, so "N minutes" means the
+			// same N minutes for each of them.
+			MaxWallClockPerRun: s.cfg.Cost.MaxWallClockPerRun(),
+			Model:              model,
+			MaxTokens:          s.cfg.Provider.MaxTokens,
+			Logger:             s.logger,
 			// Set explicitly from cfg.Workdir (P25.8) rather than relying on
 			// the parent session's tool.WithWorkdir ctx value leaking through
 			// the spawn's context chain — that accidental inheritance only
