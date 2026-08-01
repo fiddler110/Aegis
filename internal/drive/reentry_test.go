@@ -1,11 +1,11 @@
-package cli
+package drive
 
 import (
 	"strings"
 	"testing"
 )
 
-// sampleVerifyReport is a verify.py report shaped exactly as verifySkillOutputs
+// sampleVerifyReport is a verify.py report shaped exactly as VerifySkillOutputs
 // passes it back: the `$ …` command header, PASS/FAIL lines at column 0, indented
 // `- …` evidence under each FAIL, and the trailing summary line. It carries one
 // content-substance failure (finding-bodies-nonempty) the P47.9 router owns and
@@ -47,19 +47,19 @@ func TestGrowingPhaseConvForced(t *testing.T) {
 // continuation carries the P39.7 "act now" nudge onto the fresh context — the
 // stall-breaker must survive the per-turn reset, not just the growing-conv path.
 func TestFreshPhaseConv_NudgePrefix(t *testing.T) {
-	st := &phasedDriveState{system: "SYSTEM PROMPT", taskPrompt: "tm this", skillDir: "/ws/.aegis/builtin-skills/threat-modeling", cwd: "/ws"}
-	analysis := threatModelPhases[2]
+	st := &State{System: "SYSTEM PROMPT", TaskPrompt: "tm this", SkillDir: "/ws/.aegis/builtin-skills/threat-modeling", Cwd: "/ws"}
+	analysis := ThreatModelPhases[2]
 	pending := []string{"2-stride-analysis.md"}
 
-	withNudge := convSeedText(t, st.freshPhaseConv(analysis, "/ws/run", pending, actNowNudge()))
-	if !strings.Contains(withNudge, actNowNudge()) {
+	withNudge := convSeedText(t, st.freshPhaseConv(analysis, "/ws/run", pending, ActNowNudge()))
+	if !strings.Contains(withNudge, ActNowNudge()) {
 		t.Error("a nudged continuation must carry the act-now nudge onto the reset context")
 	}
 	if !strings.Contains(withNudge, "still contain") {
 		t.Error("a content-phase continuation must still carry the continuation prompt after the nudge")
 	}
 	noNudge := convSeedText(t, st.freshPhaseConv(analysis, "/ws/run", pending, ""))
-	if strings.Contains(noNudge, actNowNudge()) {
+	if strings.Contains(noNudge, ActNowNudge()) {
 		t.Error("an empty nudge must not inject the act-now text")
 	}
 }
@@ -89,7 +89,7 @@ func TestFailuresContainCheck(t *testing.T) {
 // a purely mechanical failure does not route, and the check names are gated to a
 // plan that actually has the owning phase.
 func TestOwnerPhaseForContentFailure(t *testing.T) {
-	ph, ok := ownerPhaseForContentFailure(threatModelPhases, sampleVerifyReport)
+	ph, ok := ownerPhaseForContentFailure(ThreatModelPhases, sampleVerifyReport)
 	if !ok {
 		t.Fatal("finding-bodies-nonempty must route to a content phase")
 	}
@@ -99,19 +99,19 @@ func TestOwnerPhaseForContentFailure(t *testing.T) {
 
 	// Coverage-consistency also routes to findings (the "by extension" check).
 	covReport := "FAIL coverage-matches-related-threats\n       - 3-findings.md:9 T8 mapped to FIND-01 but not in FIND-01 Related Threats\n\n0 passed, 1 failed"
-	if ph, ok := ownerPhaseForContentFailure(threatModelPhases, covReport); !ok || ph.name != "findings" {
+	if ph, ok := ownerPhaseForContentFailure(ThreatModelPhases, covReport); !ok || ph.name != "findings" {
 		t.Errorf("coverage-matches-related-threats must route to findings; got %q ok=%v", ph.name, ok)
 	}
 
 	// A purely mechanical failure must NOT route — the generic verify-fix turn
 	// handles it in place.
 	mechReport := "FAIL no-duplicate-header-rows\n       - 3-findings.md:12 dup\n\n0 passed, 1 failed"
-	if _, ok := ownerPhaseForContentFailure(threatModelPhases, mechReport); ok {
+	if _, ok := ownerPhaseForContentFailure(ThreatModelPhases, mechReport); ok {
 		t.Error("a purely mechanical failure must not route to a content phase")
 	}
 
 	// A plan without the owning phase never routes, even with the check present.
-	stub := []skillPhase{{name: "architecture"}}
+	stub := []Phase{{name: "architecture"}}
 	if _, ok := ownerPhaseForContentFailure(stub, sampleVerifyReport); ok {
 		t.Error("a plan lacking the owning phase must not route")
 	}
@@ -121,8 +121,8 @@ func TestOwnerPhaseForContentFailure(t *testing.T) {
 // a check the phase owns still fails and false once every one clears (the
 // re-entry cannot use the PENDING-marker oracle — a hollow resume has none).
 func TestPhaseHasContentFailure(t *testing.T) {
-	findings, _ := phaseByName(threatModelPhases, "findings")
-	arch, _ := phaseByName(threatModelPhases, "architecture")
+	findings, _ := phaseByName(ThreatModelPhases, "findings")
+	arch, _ := phaseByName(ThreatModelPhases, "architecture")
 
 	if !phaseHasContentFailure(findings, sampleVerifyReport) {
 		t.Error("findings phase must report an outstanding content failure while finding-bodies-nonempty fails")
@@ -143,7 +143,7 @@ func TestPhaseHasContentFailure(t *testing.T) {
 // out of a mixed report, so the re-entry prompt names the empty sections without
 // dumping unrelated mechanical failures at the model.
 func TestExtractCheckFailures(t *testing.T) {
-	got := extractCheckFailures(sampleVerifyReport, []string{"finding-bodies-nonempty"})
+	got := extractCheckFailures(sampleVerifyReport, []string{"finding-bodies-nonempty"}, nil)
 	if !strings.Contains(got, "FAIL finding-bodies-nonempty") {
 		t.Errorf("extract must keep the owned FAIL header; got:\n%s", got)
 	}
@@ -159,7 +159,7 @@ func TestExtractCheckFailures(t *testing.T) {
 		}
 	}
 	// Nothing matched → empty, so the caller falls back to the full report.
-	if got := extractCheckFailures(sampleVerifyReport, []string{"nonexistent-check"}); got != "" {
+	if got := extractCheckFailures(sampleVerifyReport, []string{"nonexistent-check"}, nil); got != "" {
 		t.Errorf("no matching check must yield empty, got:\n%s", got)
 	}
 }
@@ -169,7 +169,7 @@ func TestExtractCheckFailures(t *testing.T) {
 // sections from the verifier evidence, carry the incremental-edit guardrail, and
 // crucially NOT reference `<!-- PENDING -->` markers (a hollow resume has none).
 func TestHollowBodyReentryPrompt(t *testing.T) {
-	findings, _ := phaseByName(threatModelPhases, "findings")
+	findings, _ := phaseByName(ThreatModelPhases, "findings")
 	runDir := "/ws/.aegis/security/threat-model/stride-app-2026-07-27-1200"
 	prompt := hollowBodyReentryPrompt(findings, runDir, "/ws/.aegis/builtin-skills/threat-modeling", sampleVerifyReport)
 
@@ -189,10 +189,10 @@ func TestHollowBodyReentryPrompt(t *testing.T) {
 
 // TestPhaseByName covers the small lookup both routers depend on.
 func TestPhaseByName(t *testing.T) {
-	if ph, ok := phaseByName(threatModelPhases, "findings"); !ok || ph.name != "findings" {
+	if ph, ok := phaseByName(ThreatModelPhases, "findings"); !ok || ph.name != "findings" {
 		t.Errorf("phaseByName(findings) = %q ok=%v", ph.name, ok)
 	}
-	if _, ok := phaseByName(threatModelPhases, "nope"); ok {
+	if _, ok := phaseByName(ThreatModelPhases, "nope"); ok {
 		t.Error("phaseByName must report ok=false for an unknown phase")
 	}
 }

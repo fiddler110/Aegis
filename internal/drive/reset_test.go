@@ -1,4 +1,4 @@
-package cli
+package drive
 
 import (
 	"io"
@@ -36,20 +36,20 @@ func convSeedText(t *testing.T, conv *engine.Conversation) string {
 // run dir exists (runDir == "") has nothing to resume from, so it restarts from
 // the phase's own full seed prompt.
 func TestFreshPhaseConv_ReseedChoice(t *testing.T) {
-	st := &phasedDriveState{
-		eng:        nil,
-		system:     "SYSTEM PROMPT",
-		errOut:     io.Discard,
-		cwd:        "/ws",
-		skillDir:   "/ws/.aegis/builtin-skills/threat-modeling",
-		taskPrompt: "threat model this repo",
-		maxTurns:   50,
+	st := &State{
+		Engine:     nil,
+		System:     "SYSTEM PROMPT",
+		ErrOut:     io.Discard,
+		Cwd:        "/ws",
+		SkillDir:   "/ws/.aegis/builtin-skills/threat-modeling",
+		TaskPrompt: "threat model this repo",
+		MaxTurns:   50,
 	}
 
 	// Setup phase, nothing scaffolded yet: restart from the full architecture
 	// seed prompt (recon → scaffold → fill), not the "fill the next marker"
 	// continuation, because no files exist to resume from.
-	setup := threatModelPhases[0]
+	setup := ThreatModelPhases[0]
 	conv := st.freshPhaseConv(setup, "", setup.pending(""), "")
 	seed := convSeedText(t, conv)
 	if !strings.Contains(seed, "recon.py") || !strings.Contains(seed, "ARCHITECTURE phase") {
@@ -61,7 +61,7 @@ func TestFreshPhaseConv_ReseedChoice(t *testing.T) {
 
 	// A content phase mid-build (run dir exists): resume from disk with the
 	// continuation prompt naming the still-PENDING files.
-	analysis := threatModelPhases[2]
+	analysis := ThreatModelPhases[2]
 	pending := []string{"2-stride-analysis.md"}
 	conv = st.freshPhaseConv(analysis, "/ws/.aegis/security/threat-model/run", pending, "")
 	seed = convSeedText(t, conv)

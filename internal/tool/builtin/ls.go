@@ -44,7 +44,7 @@ func (t *lsTool) Execute(ctx context.Context, input json.RawMessage) (tool.Resul
 		args.Depth = 5
 	}
 
-	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
+	abs, err := resolveRead(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("invalid path: %v", err), IsError: true}, nil
 	}

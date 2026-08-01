@@ -19,6 +19,7 @@ import (
 	"github.com/fiddler110/aegis/internal/compaction"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
+	"github.com/fiddler110/aegis/internal/drive"
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/logging"
 	"github.com/fiddler110/aegis/internal/memory"
@@ -105,7 +106,7 @@ func newChatCmd() *cobra.Command {
 			// the phased build needs without the manual step. driveModelMax is
 			// kept as the P47.5(b) escalation ceiling for the on-overflow retry.
 			// Done before Build so the sized window flows into the adapter.
-			phasedDrive := skillName != "" && phasePlanFor(skillName) != nil && !linearDriveForced()
+			phasedDrive := skillName != "" && drive.PlanFor(skillName, skillPhaseSpecs(cfg, skillName)) != nil && !drive.LinearForced()
 			driveModelMax := 0
 			if phasedDrive {
 				if win, modelMax, ok := recommendPhasedDriveWindow(context.Background(), cfg); ok {
@@ -273,6 +274,11 @@ func newChatCmd() *cobra.Command {
 				MaxTokens:           cfg.Provider.MaxTokens,
 				ContextWindowTokens: ctxWin,
 				Logger:              logger,
+				// The CLI drive runs in cwd, so its registry is already rooted
+				// there; additional roots are the only thing it can't derive
+				// on its own (P52.13). This is the surface the cross-repo
+				// research->document workflow actually runs on today.
+				ExtraRoots: driveExtraRoots(cwd, cfg, logger),
 			})
 			if err != nil {
 				return err
@@ -292,13 +298,17 @@ func newChatCmd() *cobra.Command {
 			// round-trip that progressive disclosure relies on (P36.1); prepending
 			// the instructions verbatim removes that dependency for a scripted run.
 			driveToCompletion := false
-			skillDir := ""       // P39.6: where the preloaded skill's bundled verify scripts live
-			taskPrompt := prompt // P39.5: the raw task, kept so the first message can be rewritten without the SKILL.md body after the opening turn
+			skillDir := ""                     // P39.6: where the preloaded skill's bundled verify scripts live
+			var skillPhases []skills.PhaseSpec // P52.12: the skill's own declared phase plan, if it has one
+			skillRunDir := ""                  // P52.12: the skill's declared `run_dir:`, if any — where its phase globs live
+			taskPrompt := prompt               // P39.5: the raw task, kept so the first message can be rewritten without the SKILL.md body after the opening turn
 			if skillName != "" {
 				if sk, ok := skills.Load(cwd, cfg.DataDir, enabledBuiltins, skillName); ok && strings.TrimSpace(sk.Content) != "" {
 					prompt = skillPreamble(skillName, sk.Content) + prompt
 					driveToCompletion = true
 					skillDir = sk.Dir
+					skillPhases = sk.Phases
+					skillRunDir = sk.RunDir
 				} else {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n[warning: --skill %q not found or empty; running without preloaded skill body]\n", skillName)
 				}
@@ -412,7 +422,7 @@ func newChatCmd() *cobra.Command {
 			// PENDING-driven skill, or AEGIS_SKILL_DRIVE=linear, uses the generic
 			// drive. Both branches set runErr and leave the tail logic below
 			// (the P38.6 floor check, cost trailer) unchanged.
-			if phases := phasePlanFor(skillName); driveToCompletion && phases != nil && !linearDriveForced() {
+			if phases := drive.PlanFor(skillName, skillPhases); driveToCompletion && phases != nil && !drive.LinearForced() {
 				fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: driving %s in phased mode — one bounded fresh context per phase (%d content phases + verify), the in-harness form of P38.8]\n", skillName, len(phases))
 				logger.Info("chat: using phased skill drive (P38.8 in-harness)", "skill", skillName, "phases", len(phases))
 				// P47.5(b): let a phase escalate the serving window toward the
@@ -428,7 +438,7 @@ func newChatCmd() *cobra.Command {
 				if driveModelMax > 0 {
 					curWin := cfg.Provider.ContextWindow
 					escalateWindow = func() (int, bool) {
-						next, grew := nextDriveWindow(curWin, driveModelMax)
+						next, grew := drive.NextWindow(curWin, driveModelMax)
 						if !grew {
 							return curWin, false
 						}
@@ -447,12 +457,13 @@ func newChatCmd() *cobra.Command {
 				checkBackend := func(hctx context.Context) (bool, bool) {
 					return provider.CheckBackendHealth(hctx, adapter)
 				}
-				runErr = runPhasedSkillDrive(ctx, &phasedDriveState{
-					eng: eng, system: conv.System, onEvent: onEvent, logger: logger,
-					errOut: cmd.ErrOrStderr(), cwd: cwd, skillName: skillName, skillDir: skillDir,
-					taskPrompt: taskPrompt, maxTurns: maxTurns, escalateWindow: escalateWindow,
-					checkBackend: checkBackend, progress: &phaseProgress{},
-					iterToolCalls: &iterToolCalls, iterMutations: &iterMutations,
+				runErr = drive.Run(ctx, &drive.State{
+					Engine: eng, System: conv.System, OnEvent: onEvent, Logger: logger,
+					ErrOut: cmd.ErrOrStderr(), Cwd: cwd, SkillName: skillName, SkillDir: skillDir,
+					TaskPrompt: taskPrompt, MaxTurns: maxTurns, EscalateWindow: escalateWindow,
+					RunDir:       drive.RunDirResolver(skillName, skillRunDir),
+					CheckBackend: checkBackend, Progress: &drive.Progress{},
+					IterToolCalls: &iterToolCalls, IterMutations: &iterMutations,
 				}, phases)
 			} else {
 				noProgress := 0
@@ -496,7 +507,7 @@ func newChatCmd() *cobra.Command {
 						// check, verifySkillOutputs reports ran=false and the drive ends
 						// as before. This is the autonomous analogue of SKILL.md §5's
 						// fix-and-re-run round.
-						failures, ran := verifySkillOutputs(skillName, skillDir, cwd)
+						failures, ran := drive.VerifySkillOutputs(skillName, skillDir, cwd)
 						if !ran {
 							break // nothing to verify (skill has no verifier / no run dir) — done
 						}
@@ -511,22 +522,22 @@ func newChatCmd() *cobra.Command {
 								logger.Info("chat: mechanical checks clean, running final quality pass (P38.1)")
 								conv.Append(provider.Message{
 									Role:    provider.RoleUser,
-									Content: []provider.Block{provider.TextBlock{Text: qualityReviewPrompt()}},
+									Content: []provider.Block{provider.TextBlock{Text: drive.QualityReviewPrompt()}},
 								})
 								continue
 							}
 							break // verified clean and quality-reviewed — done
 						}
-						if verifyRounds++; verifyRounds > maxVerifyRounds {
-							logger.Warn("chat: verification still failing after max rounds", "rounds", maxVerifyRounds)
-							fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", maxVerifyRounds)
+						if verifyRounds++; verifyRounds > drive.MaxVerifyRounds {
+							logger.Warn("chat: verification still failing after max rounds", "rounds", drive.MaxVerifyRounds)
+							fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", drive.MaxVerifyRounds)
 							fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", failures)
 							break
 						}
 						logger.Info("chat: verification failed, feeding back for fix", "round", verifyRounds)
 						conv.Append(provider.Message{
 							Role:    provider.RoleUser,
-							Content: []provider.Block{provider.TextBlock{Text: verifyFixPrompt(failures)}},
+							Content: []provider.Block{provider.TextBlock{Text: drive.VerifyFixPrompt(failures)}},
 						})
 						continue
 					}
@@ -547,18 +558,18 @@ func newChatCmd() *cobra.Command {
 					// stalled gpt-oss:20b run landed the first real edit_file (P38.1).
 					// Instead of silently yielding a partial suite, re-prompt with an
 					// explicit "act now — call edit_file, no narration" nudge, bounded
-					// to maxNoProgressTurns consecutive stalls before stopping.
+					// to drive.MaxNoProgressTurns consecutive stalls before stopping.
 					// Extends P39.2's tool-execution coaching from the malformed-call
 					// case to the no-call case.
-					madeProgress := iterMutations > 0 || !sameStrings(pending, prevPending)
+					madeProgress := iterMutations > 0 || !drive.SameStrings(pending, prevPending)
 					prevPending = pending
 					nudge := ""
 					if !madeProgress {
-						if noProgress++; noProgress >= maxNoProgressTurns {
+						if noProgress++; noProgress >= drive.MaxNoProgressTurns {
 							fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: model stalled %d turns without mutating a file while %d file(s) remain PENDING; stopping — re-run to resume]\n", noProgress, len(pending))
 							break
 						}
-						nudge = actNowNudge()
+						nudge = drive.ActNowNudge()
 					} else {
 						noProgress = 0
 					}
@@ -680,25 +691,6 @@ func driveCompaction(ctx context.Context, cfg *config.Config, adapter provider.A
 		compOpts.MaxBudget = 0 // explicit skip
 	}
 	return compaction.New(compOpts), ctxWin
-}
-
-// nextDriveWindow returns the next serving-window (num_ctx) size when a phased
-// drive escalates from cur toward the model max on a context overflow (P47.5b):
-// a doubling step, clamped to max, with a jump straight to max once doubling
-// would overshoot. It reports grew=false — cur unchanged — once cur is already
-// at or above the ceiling (or max is unknown), which is what bounds the
-// escalation to a finite number of steps ending at max. A doubling step (rather
-// than a single jump to max) is gentler on GPU memory: it only claims as much
-// KV-cache headroom as each successive overflow proves is needed.
-func nextDriveWindow(cur, max int) (next int, grew bool) {
-	if max <= 0 || cur >= max {
-		return cur, false
-	}
-	next = cur * 2
-	if next > max || next <= 0 {
-		next = max
-	}
-	return next, true
 }
 
 // recommendPhasedDriveWindow resolves, for a phased --skill drive on an
@@ -1095,36 +1087,6 @@ var mutatingTools = map[string]bool{
 	"multi_edit": true,
 }
 
-// maxNoProgressTurns bounds the P39.7 nudge loop: after this many consecutive
-// drive turns that mutate no file and leave the PENDING set unchanged, stop
-// rather than keep paying for a model that will only narrate. Two nudges then a
-// stop mirrors the previous "three consecutive yields" bound.
-const maxNoProgressTurns = 3
-
-// actNowNudge is the P39.7 stall-breaker prefix, prepended to the continuation
-// turn when the previous turn mutated no file while PENDING markers remain. It
-// is deliberately forceful and concrete — the corroborated lever (P38.1) was an
-// explicit "one section per turn, act now via edit_file" preamble, which
-// unstuck a gpt-oss:20b fill that had yielded three times with markers present.
-func actNowNudge() string {
-	return "STOP NARRATING — ACT NOW. The previous turn changed no file. Do not explain what you will do; do it this turn. Call `edit_file` now to fill the next single `<!-- PENDING: <section> -->` marker with real content — one section, one edit. No preamble, no plan, no questions before the tool call.\n\n"
-}
-
-// sameStrings reports whether two already-sorted slices hold the same elements
-// in the same order. scanPendingMarkers returns sorted results, so this is a
-// cheap way for the P39.7 guard to tell whether a turn changed the PENDING set.
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // continuePrompt is the drive-to-completion continuation turn (P38.2): it names
 // the files still carrying `<!-- PENDING -->` markers and tells the model to
 // resume in dependency order without pausing to ask, matching the resume
@@ -1228,3 +1190,25 @@ func suiteFileCount(root string) int {
 // output. Mirrors skills.builtinSkillsDirName (kept as a local literal to avoid
 // exporting an internal constant across the package boundary).
 const pendingSkipDir = "builtin-skills"
+
+// skillPhaseSpecs returns the named skill's declared `phases:` plan (P52.12),
+// or nil when the skill has none, cannot be found, or none was named.
+//
+// Read here — before the workspace is otherwise set up — only so the P47.5(a)
+// up-front window sizing knows whether the run will be phased. skills.Discover
+// memoizes its walk, so this costs nothing beyond the first call; the drive
+// itself uses the specs carried on the Skill it loads later.
+func skillPhaseSpecs(cfg *config.Config, skillName string) []skills.PhaseSpec {
+	if skillName == "" {
+		return nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	sk, ok := skills.Load(cwd, cfg.DataDir, appendUnique(cfg.Skills.BuiltinEnabled, skillName), skillName)
+	if !ok {
+		return nil
+	}
+	return sk.Phases
+}

@@ -167,3 +167,107 @@ func TestSubAgentRunnerUsesSpawnConfigWorkdir(t *testing.T) {
 		t.Errorf("sub-agent output = %q, must not read the daemon's default workspace", out)
 	}
 }
+
+// countingAdapter answers every turn with a short final message and records how
+// many times it was called, so a test can tell a compaction (summarizer) call
+// apart from the sub-agent's own turn by giving each its own adapter.
+type countingAdapter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (a *countingAdapter) Name() string { return "counting" }
+
+func (a *countingAdapter) Stream(_ context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: "done"}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{}}
+	close(ch)
+	return ch, nil
+}
+
+func (a *countingAdapter) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
+}
+
+// probeCompactor counts how many times the engine consulted it. The count is
+// what matters, not merely "was it called": engine.Run calls Compact once
+// unconditionally at entry, regardless of ContextWindowTokens, so a spawn was
+// never left with *no* compaction. The per-turn proactive check is the part that
+// needs a window, and it is an additional call on top of the entry one — so
+// "more than once" is the signal that the window reached the engine.
+type probeCompactor struct {
+	mu     sync.Mutex
+	called int
+}
+
+func (c *probeCompactor) Compact(_ context.Context, _ string, msgs []provider.Message) ([]provider.Message, bool, error) {
+	c.mu.Lock()
+	c.called++
+	c.mu.Unlock()
+	return msgs, false, nil
+}
+
+func (c *probeCompactor) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.called
+}
+
+// TestSubAgentRunnerEnablesProactiveCompaction: a spawn was handed a Compactor
+// but no window to measure against — engine.Options.ContextWindowTokens was left
+// at 0, the engine's "proactive compaction disabled" value — so the per-turn
+// 85%-fill check (and the explicit notice it emits when nothing can be
+// compacted) never ran for a sub-agent, however long it grew. It was not
+// entirely unprotected: Run's entry-point Compact still fired, gated by the
+// summarizer's own budget, which is tuned to the *global* model rather than the
+// spawn's. The window is resolved per model for the spawn anyway (P52.4); this
+// asserts it also reaches the engine, by giving it a tiny window and a prompt
+// well past the 85% trigger and requiring a compaction beyond the entry one.
+func TestSubAgentRunnerEnablesProactiveCompaction(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.Open(filepath.Join(root, "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		// Small enough that one oversized prompt clears the 85% trigger.
+		Provider:   config.ProviderConfig{Default: "anthropic", Model: "test", MaxTokens: 100, ContextWindow: 1000},
+		Permission: config.PermissionConfig{Mode: "build"},
+	}
+	runAdapter := &countingAdapter{}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, runAdapter, reg)
+	srv.initContextWindow(context.Background())
+	probe := &probeCompactor{}
+	srv.compactor = probe
+
+	// ~4 chars/token, so this lands far above 85% of a 1000-token window.
+	bigPrompt := strings.Repeat("context filler text. ", 400)
+	if _, err := srv.subAgentRunner()(context.Background(), swarm.SpawnConfig{
+		Name:   "teammate",
+		Prompt: bigPrompt,
+		Mode:   "build",
+	}); err != nil {
+		t.Fatalf("subAgentRunner returned error: %v", err)
+	}
+
+	if runAdapter.count() == 0 {
+		t.Fatal("sub-agent never ran")
+	}
+	// 1 == the unconditional entry-point Compact only, i.e. the per-turn
+	// proactive check never ran.
+	if got := probe.count(); got < 2 {
+		t.Errorf("compactor consulted %d time(s), want >1: the spawn's engine got no ContextWindowTokens, so the per-turn proactive check could not fire", got)
+	}
+}

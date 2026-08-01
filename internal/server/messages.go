@@ -38,6 +38,24 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "text or images required")
 		return
 	}
+	s.streamRun(w, r, id, req, nil)
+}
+
+// streamRun is the shared body behind both POST /sessions/{id}/messages and
+// POST /sessions/{id}/drive (P52.12).
+//
+// Everything a run needs around the model call — the per-session and daemon-wide
+// concurrency semaphores, spend caps, SSE writer and heartbeat, the approval
+// channel, steering, checkpoints, message persistence, usage accounting,
+// context-window refresh, detached-run buffering — is identical whether the run
+// is one engine.Run or a whole phased build. Only the *execution* differs, and
+// that is the single branch at the eng.Run call below. Splitting the two
+// handlers instead would have meant maintaining two copies of ~300 lines of
+// lifecycle, which is exactly how a daemon grows a drive that silently misses
+// the cost caps.
+//
+// dr is nil for an ordinary turn and non-nil for a phased drive.
+func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, req api.PostMessageRequest, dr *driveSpec) {
 	// resumable (P28.5): this run should survive an SSE connection drop, like
 	// an explicitly-backgrounded session already does. Both cases need the
 	// same daemon-rooted context + event buffering, so they share one flag
@@ -216,7 +234,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if loaded := preloadPersonaTools(sessionTools, p); len(loaded) > 0 {
 		s.logger.Debug("preloaded persona's deferred tools", "persona", p.Name, "tools", loaded)
 	}
-	eng, err := s.newEngine(sess.Mode, runApprover, steers.ch, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
+	eng, runModel, err := s.newEngine(sess.Mode, runApprover, steers.ch, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return
@@ -362,7 +380,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		send(api.Event{Kind: api.KindNotice, Text: warn})
 	}
 
-	runErr := eng.Run(runCtx, conv, func(ev engine.Event) {
+	// Per-turn tool-call / mutation counters the phased drive's P39.7
+	// no-progress guard reads. Incremented in the emit callback below because
+	// that is the only place the daemon sees a tool result; the drive zeroes
+	// them before each phase turn.
+	var iterToolCalls, iterMutations int
+	emit := func(ev engine.Event) {
 		// Trace events are server-internal observability records — collect them
 		// for persistence but never forward them to the SSE client.
 		if ev.Kind == engine.KindTrace {
@@ -371,6 +394,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			}
 			flushMessages()
 			return
+		}
+		if ev.Kind == engine.KindToolResult {
+			iterToolCalls++
+			if mutatingDriveTools[ev.ToolName] {
+				iterMutations++
+			}
 		}
 		apiEv := toAPIEvent(ev)
 		send(apiEv)
@@ -390,7 +419,17 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-	})
+	}
+
+	var runErr error
+	if dr != nil {
+		runErr = s.runDrive(runCtx, dr, driveRuntime{
+			eng: eng, system: conv.System, workdir: workdir, emit: emit, send: send,
+			iterToolCalls: &iterToolCalls, iterMutations: &iterMutations,
+		})
+	} else {
+		runErr = eng.Run(runCtx, conv, emit)
+	}
 
 	// The engine drains the steer channel only between tool rounds, so a steer
 	// posted while the model was writing its final answer — or during a
@@ -427,8 +466,21 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	// The run just loaded the model into Ollama (if that's the backend), so
 	// /api/ps can now report the real serving context; re-detect while the
-	// current value is non-authoritative. No-op for cloud providers.
-	go s.maybeRefreshContextWindow(context.Background())
+	// current value is non-authoritative. Keyed on the model this run actually
+	// used (P52.1) — a turn routed to the small model or pinned by a persona
+	// says nothing about the global model's allocation. No-op for cloud
+	// providers.
+	go s.maybeRefreshContextWindowFor(context.Background(), runModel)
+	// The compaction model needs the same treatment and does not get it from the
+	// line above: compaction runs inside the engine, not through newEngine, so it
+	// never reports a run model of its own. Without this its entry would be
+	// resolved once at startup — possibly from a not-yet-loaded modelfile guess —
+	// and never corrected, leaving the summarizer tuned to a window Ollama isn't
+	// serving. Skipped when it is the run model (already refreshed) or the global
+	// model with no separate small model configured.
+	if cm := s.compModel; cm != "" && cm != runModel {
+		go s.maybeRefreshContextWindowFor(context.Background(), cm)
+	}
 	if sess.Title == "" {
 		go s.generateTitle(id, req.Text)
 	}

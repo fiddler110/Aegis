@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/fiddler110/aegis/internal/cost"
@@ -231,16 +232,35 @@ func preloadPersonaTools(reg *tool.Registry, p persona.Persona) []string {
 	return loaded
 }
 
-// newEngine builds an engine for one turn. modelOverride, when non-empty, is
-// a per-session model pin (P14.7 /model) that takes precedence over the
+// modelAdapter returns the daemon's shared adapter with the serving context
+// window this turn's model should be given attached to every request (P52.4).
+//
+// The adapter is built once at daemon start while the model is resolved per
+// turn, so an unadorned s.adapter asks Ollama to serve a routed/pinned model
+// with whatever num_ctx the *primary* model was configured with — on
+// VRAM-constrained hardware that either over-allocates a KV cache the small
+// model doesn't need or evicts the primary model to make room, which is the
+// cold-reload churn between turns that load_duration telemetry exists to make
+// visible. Wrapping per run keeps the window a property of the request (where
+// the model already lives) instead of mutable adapter state. ctxWin <= 0
+// returns the adapter untouched, so nothing changes for a caller with no
+// detected window, and non-Ollama adapters ignore Request.NumCtx entirely.
+func (s *Server) modelAdapter(ctxWin int) provider.Adapter {
+	return provider.WithNumCtx(s.adapter, ctxWin)
+}
+
+// newEngine builds an engine for one turn, returning it alongside the model the
+// turn resolved to (which the caller feeds back to maybeRefreshContextWindowFor
+// once the run has loaded that model — P52.1). modelOverride, when non-empty,
+// is a per-session model pin (P14.7 /model) that takes precedence over the
 // persona's own Model and the global provider.model — same precedence a
 // persona-level override already has over the global default. userText and
 // priorMessages (the session's history *before* this turn's message is
 // appended) feed P9.4 task routing — see turnModel/routeModel in routing.go
 // — and are ignored entirely unless routing is opted into.
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir, userText string, priorMessages []provider.Message) (*engine.Engine, error) {
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir, userText string, priorMessages []provider.Message) (*engine.Engine, string, error) {
 	if s.adapter == nil {
-		return nil, s.providerUnconfiguredErr()
+		return nil, "", s.providerUnconfiguredErr()
 	}
 	if tools == nil {
 		tools = s.tools
@@ -259,21 +279,31 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		}
 	}
 
+	// Effective window (config or Ollama-detected, see contextwindow.go)
+	// rather than raw config, so proactive compaction fires before a local
+	// server silently truncates the prompt — resolved for *this turn's* model
+	// (P52.1), after turnModel has picked it, since a persona pin or a routed
+	// small model can have a very different window from the global default.
+	ctxWin, _ := s.effectiveContextWindowFor(context.Background(), model)
+
 	var guardFn guard.Func
 	var guardRetries int
 	if guardEnabled {
-		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.adapter, s.guardModel(model))
+		// The guard verdict runs on its own model (usually provider.small_model),
+		// so it gets that model's window too rather than the run model's (P52.4).
+		gm := s.guardModel(model)
+		guardWin := ctxWin
+		if gm != model {
+			guardWin, _ = s.effectiveContextWindowFor(context.Background(), gm)
+		}
+		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.modelAdapter(guardWin), gm)
 	}
 
 	if tracker == nil {
 		tracker = cost.NewTracker()
 	}
-	// Effective window (config or Ollama-detected, see contextwindow.go)
-	// rather than raw config, so proactive compaction fires before a local
-	// server silently truncates the prompt.
-	ctxWin, _ := s.effectiveContextWindow()
-	return engine.New(engine.Options{
-		Adapter:                 s.adapter,
+	eng, err := engine.New(engine.Options{
+		Adapter:                 s.modelAdapter(ctxWin),
 		Tools:                   tools,
 		Gate:                    gate,
 		Compactor:               s.compactor,
@@ -293,5 +323,10 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		RedactSecrets:           s.cfg.Security.RedactSecrets,
 		Logger:                  s.logger,
 		Workdir:                 workdir,
+		ExtraRoots:              s.workspaceRootsFor(workdir),
 	})
+	if err != nil {
+		return nil, "", err
+	}
+	return eng, model, nil
 }

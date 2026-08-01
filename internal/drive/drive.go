@@ -1,17 +1,20 @@
-package cli
+package drive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/skills"
 )
 
 // A phased skill drive is the in-harness form of the parked P38.8 per-phase
@@ -30,37 +33,43 @@ import (
 // boundary. Prior phases' outputs are grounded from disk, not from conversation
 // history, so the reset loses nothing the model needs.
 
-// skillPhase is one bounded work unit of a phased drive: a set of run-dir-relative
+// Phase is one bounded work unit of a phased drive: a set of run-dir-relative
 // file globs it must clear of `<!-- PENDING` markers, and a compact prompt that
 // seeds its fresh context. setup marks the first phase, which runs before the run
 // directory exists (it does recon, creates the directory, and scaffolds).
-type skillPhase struct {
+type Phase struct {
 	name     string   // notice/log label, e.g. "architecture"
 	globs    []string // run-dir-relative file globs this phase must clear of PENDING
 	setup    bool     // true only for the first phase: the run dir does not exist when it starts
-	promptFn func(p phaseParams) string
+	promptFn func(p PhaseParams) string
 }
 
-// phaseParams carries everything a per-phase prompt needs to orient a fresh
+// PhaseParams carries everything a per-phase prompt needs to orient a fresh
 // context: the raw task, where the skill's on-disk assets live, the workspace
 // root, and (once scaffolded) the run directory. runDir is "" for the setup phase.
-type phaseParams struct {
+type PhaseParams struct {
 	task     string
 	skillDir string
 	cwd      string
 	runDir   string
 }
 
-func (ph skillPhase) label() string { return strings.ReplaceAll(ph.name, "-", " ") }
+func (ph Phase) label() string { return strings.ReplaceAll(ph.name, "-", " ") }
 
-// threatModelPhases is the dependency-ordered phase plan for the threat-modeling
+// threatModelSkill is the one skill with a built-in, hand-tuned plan (and a
+// built-in verifier and run-dir layout to match). Every other skill declares
+// its plan in frontmatter — see PlanFor and RunDirResolver, the two places this
+// name is allowed to appear.
+const threatModelSkill = "threat-modeling"
+
+// ThreatModelPhases is the dependency-ordered phase plan for the threat-modeling
 // skill (SKILL.md §4.2), mirroring the external P38.8 wrapper's sequence:
 // architecture → DFD → framework analysis → findings → assessment, each in its
 // own bounded context, then the phase-6 verify+quality round (run separately,
 // see runPhasedVerifyAndQuality). The globs match what scaffold.py writes; the
 // analysis file is `2-<framework>-analysis.md`, matched by glob because the
 // framework short-name is the model's choice at setup, not known here.
-var threatModelPhases = []skillPhase{
+var ThreatModelPhases = []Phase{
 	{name: "architecture", setup: true, globs: []string{"0.1-architecture.md"}, promptFn: phasePromptArchitecture},
 	{name: "data-flow-diagram", globs: []string{"1.1-model.mmd", "1-model.md"}, promptFn: phasePromptDFD},
 	{name: "framework-analysis", globs: []string{"2-*-analysis.md"}, promptFn: phasePromptAnalysis},
@@ -68,22 +77,90 @@ var threatModelPhases = []skillPhase{
 	{name: "assessment", globs: []string{"0-assessment.md", "inventory.yaml"}, promptFn: phasePromptAssessment},
 }
 
-// phasePlanFor returns the phased drive plan for a skill, or nil when the skill
-// has no plan (the caller then uses the generic single-context drive). Only
-// threat-modeling is phased today — it is the multi-phase, file-per-phase skill
-// whose single-context build hit the P38.1 wall; deep-research and other
-// PENDING-driven skills keep the generic drive until shown to need this too.
-func phasePlanFor(skillName string) []skillPhase {
-	if skillName == "threat-modeling" {
-		return threatModelPhases
+// Name returns the phase's log/notice label, for hosts that render progress.
+func (ph Phase) Name() string { return ph.name }
+
+// PlanFor returns the phased drive plan for a skill, or nil when the skill has
+// no plan (the caller then uses the generic single-context drive).
+//
+// specs is the skill's own `phases:` frontmatter (skills.Skill.Phases), which
+// is how any skill opts in without a code change (P52.12) — deep-research,
+// latex-report, structured-build and documentation-as-code are all
+// multi-phase, file-per-phase builds with the same single-context problem
+// threat-modeling has. Pass nil when the skill has not been loaded yet; the
+// built-in plan below still resolves, which is enough for a caller that only
+// needs to know *whether* a run will be phased.
+//
+// The built-in threat-modeling plan wins over frontmatter for that one name.
+// Its per-phase prompts are hand-tuned Go functions carrying guardrails a
+// frontmatter string cannot express (the P47.3 no-self-verify instruction, the
+// P39.14 anti-monolithic-write rule, framework-specific scaffolding), and every
+// P38.1/P47.x live run was tuned against them — letting an edited SKILL.md
+// silently replace them with a plain prompt would be a regression wearing the
+// clothes of a generalization.
+func PlanFor(skillName string, specs []skills.PhaseSpec) []Phase {
+	if skillName == threatModelSkill {
+		return ThreatModelPhases
 	}
-	return nil
+	return planFromSpecs(specs)
 }
 
-// linearDriveForced lets AEGIS_SKILL_DRIVE=linear force the generic
+// planFromSpecs converts declared phase specs into runnable phases.
+func planFromSpecs(specs []skills.PhaseSpec) []Phase {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]Phase, 0, len(specs))
+	for i, s := range specs {
+		spec := s
+		// Only the first phase may be the setup phase: a later phase running
+		// before the run dir exists would have nothing to scaffold into, and
+		// the drive's completion oracle assumes one pre-scaffold step.
+		setup := spec.Setup && i == 0
+		out = append(out, Phase{
+			name:  spec.Name,
+			globs: spec.Files,
+			setup: setup,
+			promptFn: func(p PhaseParams) string {
+				return declaredPhasePrompt(spec, p)
+			},
+		})
+	}
+	return out
+}
+
+// declaredPhasePrompt renders a frontmatter-declared phase prompt, substituting
+// the run-time placeholders and appending the guardrails every phase needs
+// regardless of what its author wrote — the incremental-edit rule (P39.14) and
+// the non-interactive instruction. A phase that declares no prompt at all still
+// gets a usable one built from its name and files, so `phases:` entries can be
+// as terse as a name plus globs.
+func declaredPhasePrompt(spec skills.PhaseSpec, p PhaseParams) string {
+	body := spec.Prompt
+	if body == "" {
+		body = fmt.Sprintf("Complete the %s phase: fill every `<!-- PENDING: … -->` marker in {files} under `{run_dir}` with real, evidence-grounded content.", strings.ReplaceAll(spec.Name, "-", " "))
+	}
+	runDir := p.runDir
+	if runDir == "" {
+		runDir = p.cwd
+	}
+	r := strings.NewReplacer(
+		"{task}", p.task,
+		"{run_dir}", filepath.ToSlash(runDir),
+		"{skill_dir}", filepath.ToSlash(p.skillDir),
+		"{cwd}", filepath.ToSlash(p.cwd),
+		"{phase}", spec.Name,
+		"{files}", strings.Join(spec.Files, ", "),
+	)
+	return r.Replace(body) + "\n\n" + phase6IncrementalEditRule +
+		" Work one marker at a time and keep going until this phase's files carry no `<!-- PENDING` markers. " +
+		"This is a non-interactive run: do not stop to ask whether to proceed, and edit only the file(s) this phase owns."
+}
+
+// LinearForced lets AEGIS_SKILL_DRIVE=linear force the generic
 // single-context drive even for a phased skill — an escape hatch for comparing
 // the two approaches or working around a phased-drive issue. Off by default.
-func linearDriveForced() bool {
+func LinearForced() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("AEGIS_SKILL_DRIVE")), "linear")
 }
 
@@ -100,7 +177,7 @@ func growingPhaseConvForced() bool {
 // resolveFiles returns the existing (non-directory) files under runDir that match
 // this phase's globs. An empty result means the phase's files have not been
 // scaffolded yet. runDir must be non-empty.
-func (ph skillPhase) resolveFiles(runDir string) []string {
+func (ph Phase) resolveFiles(runDir string) []string {
 	var out []string
 	for _, g := range ph.globs {
 		matches, _ := filepath.Glob(filepath.Join(runDir, g))
@@ -117,7 +194,7 @@ func (ph skillPhase) resolveFiles(runDir string) []string {
 // marker, as run-dir-relative slash paths. Before anything is scaffolded (runDir
 // == "" or no file matches a glob), it returns the globs themselves as
 // placeholders so the drive treats the phase as unfinished.
-func (ph skillPhase) pending(runDir string) []string {
+func (ph Phase) pending(runDir string) []string {
 	if runDir == "" {
 		return append([]string(nil), ph.globs...)
 	}
@@ -142,7 +219,7 @@ func (ph skillPhase) pending(runDir string) []string {
 // complete reports whether every file this phase owns exists and is free of
 // PENDING markers. It is false while nothing is scaffolded (runDir == "" or no
 // glob matches yet), so the setup phase always runs at least once.
-func (ph skillPhase) complete(runDir string) bool {
+func (ph Phase) complete(runDir string) bool {
 	if runDir == "" {
 		return false
 	}
@@ -175,73 +252,116 @@ func fileHasPendingMarker(path string) bool {
 	return strings.Contains(string(data), "<!-- PENDING")
 }
 
-// phasedDriveState bundles the deps runPhasedSkillDrive shares with the RunE
+// State bundles the deps Run shares with the RunE
 // closure: the engine, the assembled system prompt, the event sink, and the two
 // per-turn counters onEvent maintains (passed by pointer so a phase can reset
 // them before each turn and read iterMutations after, exactly as the generic
 // drive does).
-type phasedDriveState struct {
-	eng        *engine.Engine
-	system     string
-	onEvent    engine.EmitFunc
-	logger     *slog.Logger
-	errOut     io.Writer
-	cwd        string
-	skillName  string
-	skillDir   string
-	taskPrompt string
-	maxTurns   int
-	// escalateWindow raises the serving context window (num_ctx) toward the
+type State struct {
+	// Engine runs each turn. The drive is orchestration *above* engine.Run —
+	// it owns no model, gate, or tool wiring of its own, which is what lets the
+	// same state machine serve the CLI, the TUI and the daemon (P52.12).
+	Engine  *engine.Engine
+	System  string
+	OnEvent engine.EmitFunc
+	Logger  *slog.Logger
+	// ErrOut receives the drive's operator-facing `[notice: …]` lines. The CLI
+	// passes stderr; a daemon-hosted drive passes a writer that turns each line
+	// into an SSE notice, so a UI sees the narration a terminal does.
+	ErrOut     io.Writer
+	Cwd        string
+	SkillName  string
+	SkillDir   string
+	TaskPrompt string
+	MaxTurns   int
+	// EscalateWindow raises the serving context window (num_ctx) toward the
 	// model max on a context overflow and reports the new window and whether it
 	// grew (P47.5b). Nil when the provider can't escalate; the overflow paths
 	// then rely on the fresh-context reset alone.
-	escalateWindow func() (int, bool)
-	// checkBackend probes the model backend's liveness (P50.1), returning
+	EscalateWindow func() (int, bool)
+	// CheckBackend probes the model backend's liveness (P50.1), returning
 	// (healthy, supported). supported is false when the adapter has no liveness
 	// probe (a cloud adapter) — the drive then does not wait on it. Nil when the
 	// hook wasn't wired; treated as unsupported.
-	checkBackend func(context.Context) (bool, bool)
-	// progress carries the live per-phase progress the P50.4 heartbeat ticker
+	CheckBackend func(context.Context) (bool, bool)
+	// Progress carries the live per-phase progress the P50.4 heartbeat ticker
 	// reads and each turn updates. Nil disables the heartbeat.
-	progress      *phaseProgress
-	iterToolCalls *int
-	iterMutations *int
+	Progress *Progress
+	// IterToolCalls and IterMutations are the caller's per-turn counters: the
+	// drive zeroes them before each engine.Run and reads them after to apply
+	// the P39.7 no-progress guard. Pointers because the caller's own event
+	// handler is what increments them.
+	IterToolCalls *int
+	IterMutations *int
+
+	// RunDir resolves the directory this plan's file globs are relative to,
+	// re-resolved on every use because the setup phase creates it mid-turn.
+	// Build it with RunDirResolver; nil keeps the built-in threat-model layout,
+	// which is what every caller predating the frontmatter-declared plans meant.
+	RunDir func(cwd string) string
+
+	// plan is the phase list Run was given, kept so the phase-6 loop can route
+	// a content-substance failure back to its owning phase. Resolved once by
+	// Run rather than re-derived from SkillName: with frontmatter-declared
+	// plans (P52.12) the name alone no longer determines the plan.
+	plan []Phase
 }
 
-// runPhasedSkillDrive drives a phased skill (currently threat-modeling) to
+// runDir resolves the current run directory for this drive's plan. Every phase
+// file lookup goes through here rather than calling LatestRunDir directly, so
+// a frontmatter-declared plan is not silently judged against the threat-model
+// layout — under which none of its files exist and no phase ever completes.
+func (st *State) runDir() string {
+	if st.RunDir == nil {
+		return LatestRunDir(st.Cwd)
+	}
+	return st.RunDir(st.Cwd)
+}
+
+// Run drives a phased skill (currently threat-modeling) to
 // completion, running each phase in its own fresh conversation so peak context
 // stays bounded to one phase. It reuses the generic drive's guards but resets the
 // conversation at every phase boundary. It returns the engine error if a turn
 // fails, and nil otherwise — including resumable stops (--max-turns, a stall, or
 // ctx cancel) — matching the generic drive's contract so the caller's tail logic
 // (the P38.6 floor check, cost trailer) is unchanged.
-func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []skillPhase) error {
+func Run(ctx context.Context, st *State, phases []Phase) error {
+	st.plan = phases
 	stopHeartbeat := st.startHeartbeat() // P50.4: periodic sign-of-life during long turns
 	defer stopHeartbeat()
 	totalTurns := 0
 	for pi := range phases {
 		ph := phases[pi]
-		runDir := latestThreatModelRunDir(st.cwd)
+		runDir := st.runDir()
 		if ph.complete(runDir) {
-			st.logger.Info("phased drive: phase already complete, skipping", "phase", ph.name)
+			st.Logger.Info("phased drive: phase already complete, skipping", "phase", ph.name)
+			fmt.Fprintf(st.ErrOut, "\n[notice: phase %d/%d (%s) already complete on disk — skipping]\n", pi+1, len(phases), ph.label())
 			continue
 		}
-		if st.progress != nil {
-			st.progress.enter(ph.name)
+		if st.Progress != nil {
+			st.Progress.enter(ph.name)
 		}
-		conv := &engine.Conversation{System: st.system}
-		conv.Append(userMessage(ph.promptFn(phaseParams{
-			task: st.taskPrompt, skillDir: st.skillDir, cwd: st.cwd, runDir: runDir,
+		// Phase boundaries are the drive's coarse progress signal, and until
+		// P52.12 they existed only in the daemon's log — a client watching a
+		// multi-hour build saw tool calls and prose with no way to tell which
+		// phase they belonged to, or that a phase had ended at all. The
+		// heartbeat's per-turn detail stays in the log; the boundaries go to the
+		// operator stream both hosts already render.
+		fmt.Fprintf(st.ErrOut, "\n[notice: phase %d/%d — %s]\n", pi+1, len(phases), ph.label())
+		conv := &engine.Conversation{System: st.System}
+		conv.Append(userMessage(ph.promptFn(PhaseParams{
+			task: st.TaskPrompt, skillDir: st.SkillDir, cwd: st.Cwd, runDir: runDir,
 		})))
-		st.logger.Info("phased drive: starting phase", "phase", ph.name, "run_dir", runDir)
+		st.Logger.Info("phased drive: starting phase", "phase", ph.name, "run_dir", runDir)
 
 		noProgress := 0
+		toolFailResets := 0
 		var prevPending []string
 		for {
-			*st.iterToolCalls = 0
-			*st.iterMutations = 0
+			*st.IterToolCalls = 0
+			*st.IterMutations = 0
 			st.logTurn(ph.name, len(ph.pending(runDir))) // P50.4: per-turn progress line
-			if err := st.eng.Run(ctx, conv, st.onEvent); err != nil {
+			if err := st.Engine.Run(ctx, conv, st.OnEvent); err != nil {
 				// P50.1: a dead/unreachable backend is resumable — the phase's
 				// `<!-- PENDING -->` files persist on disk. Wait for the server
 				// to return, then reset to a fresh context and resume, exactly as
@@ -249,17 +369,17 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 				// because the two are distinct classifications.
 				switch st.recoverBackendDown(ctx, err, ph.label()+" phase") {
 				case backendRecovered:
-					runDir = latestThreatModelRunDir(st.cwd)
+					runDir = st.runDir()
 					pending := ph.pending(runDir)
 					totalTurns++
-					if totalTurns >= st.maxTurns {
+					if totalTurns >= st.MaxTurns {
 						st.stopMaxTurns(ph, pending)
 						return nil
 					}
 					conv = st.freshPhaseConv(ph, runDir, pending, "")
 					continue
 				case backendGaveUp:
-					st.stopBackendUnavailable(ph, ph.pending(latestThreatModelRunDir(st.cwd)))
+					st.stopBackendUnavailable(ph, ph.pending(st.runDir()))
 					return nil
 				}
 				// P47.2: a context-overflow error is terminal to the engine but
@@ -272,10 +392,10 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 				// so the --max-turns guard still bounds it; any other engine error
 				// is still fatal.
 				if provider.IsContextOverflowError(err) {
-					runDir = latestThreatModelRunDir(st.cwd)
+					runDir = st.runDir()
 					pending := ph.pending(runDir)
 					totalTurns++
-					if totalTurns >= st.maxTurns {
+					if totalTurns >= st.MaxTurns {
 						st.stopMaxTurns(ph, pending)
 						return nil
 					}
@@ -283,42 +403,60 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 					// reset — best-effort, additive to the reset (the overflowed
 					// prompt is discarded either way).
 					st.tryEscalateWindow(ph.label())
-					st.logger.Warn("phased drive: context overflowed, resetting phase context and retrying",
+					st.Logger.Warn("phased drive: context overflowed, resetting phase context and retrying",
 						"phase", ph.name, "pending", len(pending), "err", err)
-					fmt.Fprintf(st.errOut, "\n[notice: context overflowed during the %s phase; resetting to a fresh context and resuming from disk (%d file(s) still PENDING)]\n",
+					fmt.Fprintf(st.ErrOut, "\n[notice: context overflowed during the %s phase; resetting to a fresh context and resuming from disk (%d file(s) still PENDING)]\n",
 						ph.label(), len(pending))
 					conv = st.freshPhaseConv(ph, runDir, pending, "")
 					continue
+				}
+				// P52.3 + P47.2: a consecutive-tool-failure abort is resumable the
+				// same way an overflow is — reset to a fresh context re-read from
+				// disk rather than killing the whole drive.
+				switch st.recoverToolFailureStall(err, ph.label()+" phase", &toolFailResets) {
+				case overflowRetry:
+					runDir = st.runDir()
+					pending := ph.pending(runDir)
+					totalTurns++
+					if totalTurns >= st.MaxTurns {
+						st.stopMaxTurns(ph, pending)
+						return nil
+					}
+					conv = st.freshPhaseConv(ph, runDir, pending, "")
+					continue
+				case overflowStop:
+					return nil
 				}
 				return err
 			}
 			if ctx.Err() != nil {
 				return nil
 			}
-			runDir = latestThreatModelRunDir(st.cwd) // the setup phase creates it mid-turn
+			runDir = st.runDir() // the setup phase creates it mid-turn
 			if ph.complete(runDir) {
-				st.logger.Info("phased drive: phase complete", "phase", ph.name)
+				st.Logger.Info("phased drive: phase complete", "phase", ph.name)
+				fmt.Fprintf(st.ErrOut, "\n[notice: phase %d/%d (%s) complete]\n", pi+1, len(phases), ph.label())
 				break
 			}
 			totalTurns++
 			pending := ph.pending(runDir)
-			if totalTurns >= st.maxTurns {
+			if totalTurns >= st.MaxTurns {
 				st.stopMaxTurns(ph, pending)
 				return nil
 			}
 			// P39.7 no-progress guard, per phase: a turn that mutated no suite file
 			// and left the PENDING set unchanged is an "announce then yield" stall,
 			// so re-prompt with the "act now" nudge, bounded before stopping.
-			madeProgress := *st.iterMutations > 0 || !sameStrings(pending, prevPending)
+			madeProgress := *st.IterMutations > 0 || !SameStrings(pending, prevPending)
 			prevPending = pending
 			nudge := ""
 			if !madeProgress {
-				if noProgress++; noProgress >= maxNoProgressTurns {
-					fmt.Fprintf(st.errOut, "\n[notice: model stalled %d turns without mutating a file during the %s phase while %d file(s) remain PENDING; stopping — re-run to resume]\n",
+				if noProgress++; noProgress >= MaxNoProgressTurns {
+					fmt.Fprintf(st.ErrOut, "\n[notice: model stalled %d turns without mutating a file during the %s phase while %d file(s) remain PENDING; stopping — re-run to resume]\n",
 						noProgress, ph.label(), len(pending))
 					return nil
 				}
-				nudge = actNowNudge()
+				nudge = ActNowNudge()
 			} else {
 				noProgress = 0
 			}
@@ -349,11 +487,11 @@ func runPhasedSkillDrive(ctx context.Context, st *phasedDriveState, phases []ski
 // stopMaxTurns logs and prints the resumable --max-turns notice for a phase.
 // Shared by the normal per-turn cap and the P47.2 overflow-reset path so both
 // emit the identical "re-run to resume" message.
-func (st *phasedDriveState) stopMaxTurns(ph skillPhase, pending []string) {
+func (st *State) stopMaxTurns(ph Phase, pending []string) {
 	msg := fmt.Sprintf("phased drive hit --max-turns=%d during the %s phase with %d file(s) still PENDING: %s",
-		st.maxTurns, ph.label(), len(pending), strings.Join(pending, ", "))
-	st.logger.Warn("chat: " + msg)
-	fmt.Fprintf(st.errOut, "\n[notice: %s — re-run to resume]\n", msg)
+		st.MaxTurns, ph.label(), len(pending), strings.Join(pending, ", "))
+	st.Logger.Warn("chat: " + msg)
+	fmt.Fprintf(st.ErrOut, "\n[notice: %s — re-run to resume]\n", msg)
 }
 
 // tryEscalateWindow raises the serving context window toward the model max
@@ -361,31 +499,31 @@ func (st *phasedDriveState) stopMaxTurns(ph skillPhase, pending []string) {
 // actually grows. A no-op when the drive can't escalate (non-Ollama provider,
 // or num_ctx already at the model max) — the caller's fresh-context reset is the
 // recovery in that case. `where` names the phase or phase-6 step for the notice.
-func (st *phasedDriveState) tryEscalateWindow(where string) {
-	if st.escalateWindow == nil {
+func (st *State) tryEscalateWindow(where string) {
+	if st.EscalateWindow == nil {
 		return
 	}
-	if newWin, raised := st.escalateWindow(); raised {
-		st.logger.Warn("phased drive: escalating serving context window after overflow", "where", where, "num_ctx", newWin)
-		fmt.Fprintf(st.errOut, "\n[notice: raising the serving context window to %d tokens (toward the model max) after a context overflow during %s (P47.5)]\n", newWin, where)
+	if newWin, raised := st.EscalateWindow(); raised {
+		st.Logger.Warn("phased drive: escalating serving context window after overflow", "where", where, "num_ctx", newWin)
+		fmt.Fprintf(st.ErrOut, "\n[notice: raising the serving context window to %d tokens (toward the model max) after a context overflow during %s (P47.5)]\n", newWin, where)
 	}
 }
 
 // freshPhaseConv builds a fresh, near-empty conversation for a phase: system
 // prompt + one seed message and nothing else. It is used both by the P47.2
 // on-overflow reset (nudge == "") and, as the P47.4 always-on continuation, by
-// every in-phase turn (see runPhasedSkillDrive). If the phase has already
+// every in-phase turn (see Run). If the phase has already
 // scaffolded its files (runDir set), it resumes from disk with the in-phase
 // continuation prompt — the model re-reads the persisted `<!-- PENDING -->`
 // files. If the setup phase overflowed/continued before the run directory even
 // exists (runDir == ""), there is nothing on disk to resume from, so it restarts
 // from the phase's full seed prompt. nudge (the P39.7 "act now" prefix, or "")
 // is prepended to whichever prompt is chosen.
-func (st *phasedDriveState) freshPhaseConv(ph skillPhase, runDir string, pending []string, nudge string) *engine.Conversation {
-	conv := &engine.Conversation{System: st.system}
+func (st *State) freshPhaseConv(ph Phase, runDir string, pending []string, nudge string) *engine.Conversation {
+	conv := &engine.Conversation{System: st.System}
 	if runDir == "" {
-		conv.Append(userMessage(nudge + ph.promptFn(phaseParams{
-			task: st.taskPrompt, skillDir: st.skillDir, cwd: st.cwd, runDir: runDir,
+		conv.Append(userMessage(nudge + ph.promptFn(PhaseParams{
+			task: st.TaskPrompt, skillDir: st.SkillDir, cwd: st.Cwd, runDir: runDir,
 		})))
 	} else {
 		conv.Append(userMessage(nudge + phaseContinuePrompt(ph, pending)))
@@ -398,11 +536,12 @@ func (st *phasedDriveState) freshPhaseConv(ph skillPhase, runDir string, pending
 // each as its own fresh, run-dir-oriented turn (the P38.8 "run the checks, then
 // loop failures back to the model" round, done in-harness). Mirrors the generic
 // drive's verify/quality logic but with a fresh context per turn instead of
-// appending to the whole-build conversation. Bounded by maxVerifyRounds and the
+// appending to the whole-build conversation. Bounded by MaxVerifyRounds and the
 // single quality pass, so it always terminates.
-func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error {
+func runPhasedVerifyAndQuality(ctx context.Context, st *State) error {
 	verifyRounds := 0
 	overflowResets := 0
+	toolFailResets := 0 // P52.3 breaker's own budget, separate from overflowResets
 	qualityReviewed := false
 	reopened := map[string]bool{} // P47.9: content phases already re-opened this session
 	// preQuality holds a snapshot of the suite taken at the moment the mechanical
@@ -418,16 +557,16 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 		// (or letting a quality-pass hand-renumber regress the suite). Idempotent,
 		// so a canonical suite is untouched; best-effort — a normalizer error is
 		// logged and verify.py still gates correctness.
-		if ran, err := normalizeSkillIDs(st.skillName, st.skillDir, st.cwd); err != nil {
-			st.logger.Warn("phased drive: ID normalizer reported an error (continuing; verify.py still gates)", "err", err)
+		if ran, err := normalizeSkillIDs(st.SkillName, st.SkillDir, st.Cwd); err != nil {
+			st.Logger.Warn("phased drive: ID normalizer reported an error (continuing; verify.py still gates)", "err", err)
 		} else if ran {
-			st.logger.Debug("phased drive: ran deterministic ID normalizer (P50.2)")
+			st.Logger.Debug("phased drive: ran deterministic ID normalizer (P50.2)")
 		}
-		failures, ran := verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
+		failures, ran := VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
 		if !ran {
 			return nil // nothing to verify (no verifier / no run dir / no python) — done
 		}
-		runDir := latestThreatModelRunDir(st.cwd)
+		runDir := st.runDir()
 		if failures == "" {
 			if qualityReviewed {
 				// The quality pass ran this session and the re-verify is clean.
@@ -435,22 +574,22 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 				// quality-pass edits) so a future unchanged re-run skips the
 				// expensive pass. Best-effort: a stamp-write failure must not
 				// fail an otherwise-clean drive.
-				if fp, err := suiteFingerprint(runDir); err != nil {
-					st.logger.Warn("phased drive: could not fingerprint suite for quality stamp", "err", err)
-				} else if err := writeQualityStamp(runDir, fp); err != nil {
-					st.logger.Warn("phased drive: could not write quality stamp", "err", err)
+				if fp, err := SuiteFingerprint(runDir); err != nil {
+					st.Logger.Warn("phased drive: could not fingerprint suite for quality stamp", "err", err)
+				} else if err := WriteQualityStamp(runDir, fp); err != nil {
+					st.Logger.Warn("phased drive: could not write quality stamp", "err", err)
 				} else {
-					st.logger.Info("phased drive: quality pass clean, wrote completion stamp", "run_dir", runDir)
+					st.Logger.Info("phased drive: quality pass clean, wrote completion stamp", "run_dir", runDir)
 				}
 				return nil // verified clean and quality-reviewed — done
 			}
 			// Completion-stamp short-circuit: if a prior run already quality-reviewed
 			// this exact suite (a valid .quality-stamp.json whose fingerprint matches
 			// the current on-disk suite), skip the ~25-30 min LLM quality pass. The
-			// mechanical verifySkillOutputs above still ran and is clean, so
+			// mechanical VerifySkillOutputs above still ran and is clean, so
 			// correctness is still gated; only the expensive substantive pass is skipped.
-			if shouldSkipQualityPass(runDir) {
-				st.logger.Info("phased drive: quality pass already satisfied for unchanged suite, skipping (stamp)", "run_dir", runDir)
+			if ShouldSkipQualityPass(runDir) {
+				st.Logger.Info("phased drive: quality pass already satisfied for unchanged suite, skipping (stamp)", "run_dir", runDir)
 				return nil
 			}
 			// P50.3: snapshot the known-clean suite before the quality pass, so a
@@ -459,13 +598,13 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 			// clean by construction. A snapshot failure is non-fatal — the guard
 			// just isn't available (preQuality stays nil), matching pre-P50.3.
 			if snap, err := suiteSnapshot(runDir); err != nil {
-				st.logger.Warn("phased drive: could not snapshot suite before quality pass (rollback guard disabled)", "err", err)
+				st.Logger.Warn("phased drive: could not snapshot suite before quality pass (rollback guard disabled)", "err", err)
 			} else {
 				preQuality = snap
 			}
-			st.logger.Info("phased drive: mechanical checks clean, running final quality pass (P38.1)")
-			if err := st.runPhase6Turn(ctx, runDir, qualityReviewPrompt()); err != nil {
-				switch st.recoverPhase6Error(ctx, err, "phase-6 quality pass", &overflowResets) {
+			st.Logger.Info("phased drive: mechanical checks clean, running final quality pass (P38.1)")
+			if err := st.runPhase6Turn(ctx, runDir, QualityReviewPrompt()); err != nil {
+				switch st.recoverPhase6Error(ctx, err, "phase-6 quality pass", &overflowResets, &toolFailResets) {
 				case overflowRetry:
 					continue // reset to a fresh context and re-run the quality pass
 				case overflowStop:
@@ -482,27 +621,33 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 			continue
 		}
 		// P47.9: a content-substance failure — empty finding bodies
-		// (`finding-bodies-nonempty`) or a mis-filed coverage row
-		// (`coverage-matches-related-threats`) — is substantive authoring, not a
-		// mechanical patch. On a hollow resume (markers deleted, bodies empty) the
-		// marker oracle marked every content phase "complete" and jumped straight
-		// here, so ALL that authoring lands on this bounded verify-fix loop; on a
-		// slow local model one large fill overflows the context (2026-07-27,
-		// FirewallRiskRater) and even short of that a few rounds can't author ~60
-		// sections. Route the failure back through the content phase that OWNS the
-		// failing file (findings), whose per-phase prompt frames the authoring
-		// correctly and carries the incremental-edit guardrail, giving it a full
-		// phase's turn budget instead of a fix round. Once per phase: if the
-		// re-entry can't fully clear it, fall through to the bounded generic
-		// verify-fix loop below rather than looping on re-entry forever.
-		if ph, ok := ownerPhaseForContentFailure(phasePlanFor(st.skillName), failures); ok && !reopened[ph.name] {
+		// (`finding-bodies-nonempty`), a mis-filed coverage row
+		// (`coverage-matches-related-threats`), or any of the suite-wide
+		// substance checks (P52.7's `section-bodies-nonempty`, P52.8's
+		// `evidence-cells-cited` / `no-placeholder-cells` /
+		// `none-identified-fraction` / `prose-sections-substantive`) — is
+		// substantive authoring, not a mechanical patch. On a hollow resume
+		// (markers deleted, bodies empty) the marker oracle marked every content
+		// phase "complete" and jumped straight here, so ALL that authoring lands
+		// on this bounded verify-fix loop; on a slow local model one large fill
+		// overflows the context (2026-07-27, FirewallRiskRater) and even short of
+		// that a few rounds can't author ~60 sections. Route the failure back
+		// through the content phase that OWNS the failing file — resolved from
+		// the `file:line` evidence against the phase globs, so a suite-wide check
+		// re-opens whichever phase actually owns the gap — whose per-phase prompt
+		// frames the authoring correctly and carries the incremental-edit
+		// guardrail, giving it a full phase's turn budget instead of a fix round.
+		// Once per phase (several phases can each be re-opened across the loop);
+		// if a re-entry can't fully clear its file, fall through to the bounded
+		// generic verify-fix loop below rather than looping on re-entry forever.
+		if ph, ok := ownerPhaseForContentFailure(st.plan, failures); ok && !reopened[ph.name] {
 			reopened[ph.name] = true
 			if err := st.runReopenedContentPhase(ctx, ph); err != nil {
 				return err // a non-overflow engine error is terminal (overflow is handled inside)
 			}
 			continue // re-verify: cleared checks fall through, residue hits the generic loop
 		}
-		if verifyRounds++; verifyRounds > maxVerifyRounds {
+		if verifyRounds++; verifyRounds > MaxVerifyRounds {
 			// P50.3: if the quality pass had a known-clean snapshot and the fix
 			// rounds since could not re-clean the suite, the failures were
 			// introduced by the quality pass — roll back to that clean state and
@@ -511,29 +656,29 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 			// mechanical checks by construction, so the restored suite is clean;
 			// we stamp its fingerprint directly.
 			if preQuality != nil {
-				st.logger.Warn("phased drive: quality pass regressed the suite and fix rounds could not heal it; rolling back to the pre-quality clean snapshot (P50.3)", "rounds", maxVerifyRounds)
-				fmt.Fprintf(st.errOut, "\n[notice: the final quality pass left the suite failing a mechanical check the fix rounds couldn't resolve; rolling back to the verified-clean state from just before the quality pass (P50.3)]\n")
+				st.Logger.Warn("phased drive: quality pass regressed the suite and fix rounds could not heal it; rolling back to the pre-quality clean snapshot (P50.3)", "rounds", MaxVerifyRounds)
+				fmt.Fprintf(st.ErrOut, "\n[notice: the final quality pass left the suite failing a mechanical check the fix rounds couldn't resolve; rolling back to the verified-clean state from just before the quality pass (P50.3)]\n")
 				if err := restoreSuiteSnapshot(runDir, preQuality); err != nil {
-					st.logger.Warn("phased drive: rollback to pre-quality snapshot failed; stopping with the unverified suite", "err", err)
-				} else if fp, err := suiteFingerprint(runDir); err != nil {
-					st.logger.Warn("phased drive: rolled back but could not fingerprint for the stamp", "err", err)
+					st.Logger.Warn("phased drive: rollback to pre-quality snapshot failed; stopping with the unverified suite", "err", err)
+				} else if fp, err := SuiteFingerprint(runDir); err != nil {
+					st.Logger.Warn("phased drive: rolled back but could not fingerprint for the stamp", "err", err)
 					return nil
-				} else if err := writeQualityStamp(runDir, fp); err != nil {
-					st.logger.Warn("phased drive: rolled back but could not write the completion stamp", "err", err)
+				} else if err := WriteQualityStamp(runDir, fp); err != nil {
+					st.Logger.Warn("phased drive: rolled back but could not write the completion stamp", "err", err)
 					return nil
 				} else {
-					st.logger.Info("phased drive: rolled back to the clean pre-quality suite and stamped it", "run_dir", runDir)
+					st.Logger.Info("phased drive: rolled back to the clean pre-quality suite and stamped it", "run_dir", runDir)
 					return nil
 				}
 			}
-			st.logger.Warn("chat: verification still failing after max rounds", "rounds", maxVerifyRounds)
-			fmt.Fprintf(st.errOut, "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", maxVerifyRounds)
-			fmt.Fprintf(st.errOut, "%s\n", failures)
+			st.Logger.Warn("chat: verification still failing after max rounds", "rounds", MaxVerifyRounds)
+			fmt.Fprintf(st.ErrOut, "\n[notice: phase-6 verification still failing after %d fix round(s); stopping with an unverified suite — inspect the run directory and the failures above]\n", MaxVerifyRounds)
+			fmt.Fprintf(st.ErrOut, "%s\n", failures)
 			return nil
 		}
-		st.logger.Info("phased drive: verification failed, feeding back for fix", "round", verifyRounds)
-		if err := st.runPhase6Turn(ctx, runDir, verifyFixPrompt(failures)); err != nil {
-			switch st.recoverPhase6Error(ctx, err, "phase-6 verify fix", &overflowResets) {
+		st.Logger.Info("phased drive: verification failed, feeding back for fix", "round", verifyRounds)
+		if err := st.runPhase6Turn(ctx, runDir, VerifyFixPrompt(failures)); err != nil {
+			switch st.recoverPhase6Error(ctx, err, "phase-6 verify fix", &overflowResets, &toolFailResets) {
 			case overflowRetry:
 				verifyRounds-- // an overflow/backend-reset is not a spent fix attempt — don't burn the round on it
 				continue       // reset to a fresh context and re-run verify + fix from disk
@@ -550,7 +695,7 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *phasedDriveState) error 
 // context overflow during a verify-fix or quality turn is resumable (the on-disk
 // suite is the source of truth, so a fresh context re-reads it), but only this
 // many times before stopping, so a model that overflows every attempt still
-// terminates rather than looping forever. Sized like maxVerifyRounds — a few
+// terminates rather than looping forever. Sized like MaxVerifyRounds — a few
 // resets is generous; more means the phase-6 fill is too large for this
 // model/window even after the P47.5b escalation.
 const maxPhase6OverflowResets = 3
@@ -584,18 +729,60 @@ const (
 // a phase-6 overflow died on the raw `ollama: response truncated at the context
 // limit` with no reset, no verify rounds 2/3, and no quality stamp (2026-07-27,
 // FirewallRiskRater). `where` names the step for the notices.
-func (st *phasedDriveState) recoverPhase6Overflow(err error, where string, resets *int) phase6OverflowAction {
+func (st *State) recoverPhase6Overflow(err error, where string, resets *int) phase6OverflowAction {
 	if !provider.IsContextOverflowError(err) {
 		return overflowNotHandled
 	}
 	if *resets++; *resets > maxPhase6OverflowResets {
-		st.logger.Warn("phased drive: phase-6 context overflow persists after max resets", "where", where, "resets", maxPhase6OverflowResets)
-		fmt.Fprintf(st.errOut, "\n[notice: %s kept overflowing the context after %d reset(s); stopping with an unverified suite — re-run to resume, or reduce the remaining fill]\n", where, maxPhase6OverflowResets)
+		st.Logger.Warn("phased drive: phase-6 context overflow persists after max resets", "where", where, "resets", maxPhase6OverflowResets)
+		fmt.Fprintf(st.ErrOut, "\n[notice: %s kept overflowing the context after %d reset(s); stopping with an unverified suite — re-run to resume, or reduce the remaining fill]\n", where, maxPhase6OverflowResets)
 		return overflowStop
 	}
 	st.tryEscalateWindow(where)
-	st.logger.Warn("phased drive: phase-6 context overflowed, resetting to a fresh context and retrying", "where", where, "reset", *resets, "err", err)
-	fmt.Fprintf(st.errOut, "\n[notice: context overflowed during %s; resetting to a fresh context and re-reading the suite from disk (reset %d/%d)]\n", where, *resets, maxPhase6OverflowResets)
+	st.Logger.Warn("phased drive: phase-6 context overflowed, resetting to a fresh context and retrying", "where", where, "reset", *resets, "err", err)
+	fmt.Fprintf(st.ErrOut, "\n[notice: context overflowed during %s; resetting to a fresh context and re-reading the suite from disk (reset %d/%d)]\n", where, *resets, maxPhase6OverflowResets)
+	return overflowRetry
+}
+
+// maxToolFailureResets bounds how many times one phase (or the phase-6 loop)
+// may be reset after the P52.3 circuit breaker trips. Deliberately tighter than
+// maxPhase6OverflowResets: an overflow is a mechanical limit a fresh context
+// genuinely clears, whereas a run whose every tool call fails may be a real
+// impasse (a file that isn't there, a script that won't run), and re-entering it
+// indefinitely would burn the same hours the breaker exists to save. Two fresh
+// attempts, then a resumable stop.
+const maxToolFailureResets = 2
+
+// recoverToolFailureStall classifies a P52.3 consecutive-tool-failure abort the
+// way the drive classifies a context overflow: terminal to the engine, but
+// resumable at the phase level. Without it the breaker would be a regression for
+// the phased drive — a stall that used to burn to maxIterations and continue now
+// returns a hard error, and Run's default is to treat any
+// non-overflow engine error as fatal, so an unattended run would die where it
+// previously limped on. That is precisely the manual-re-invocation failure the
+// P47.x/P50.x batches exist to remove.
+//
+// A fresh context is also the *right* remedy here, not just a compatible one:
+// the breaker fires when a model keeps re-guessing arguments, which it does by
+// reasoning from a context now dense with its own failed attempts. Dropping that
+// context and re-reading the on-disk `<!-- PENDING -->` files is a strictly
+// better starting point than the one that produced the failures.
+//
+// Unlike the overflow path it does not escalate the serving window — the window
+// is not the problem — and it keeps its own reset budget so a run that both
+// overflows and stalls cannot spend one budget on the other. Reuses the
+// phase6OverflowAction verdict enum so the call sites' switches need no new case.
+func (st *State) recoverToolFailureStall(err error, where string, resets *int) phase6OverflowAction {
+	if !errors.Is(err, engine.ErrToolFailureLimit) {
+		return overflowNotHandled
+	}
+	if *resets++; *resets > maxToolFailureResets {
+		st.Logger.Warn("phased drive: tool failures persist after max resets", "where", where, "resets", maxToolFailureResets, "err", err)
+		fmt.Fprintf(st.ErrOut, "\n[notice: %s kept failing every tool call after %d reset(s); stopping — re-run to resume, or check that the run directory and skill scripts are reachable]\n", where, maxToolFailureResets)
+		return overflowStop
+	}
+	st.Logger.Warn("phased drive: every tool call failed, resetting to a fresh context and retrying", "where", where, "reset", *resets, "err", err)
+	fmt.Fprintf(st.ErrOut, "\n[notice: every tool call failed during %s; resetting to a fresh context and re-reading from disk (reset %d/%d)]\n", where, *resets, maxToolFailureResets)
 	return overflowRetry
 }
 
@@ -603,12 +790,12 @@ func (st *phasedDriveState) recoverPhase6Overflow(err error, where string, reset
 // own fresh conversation, prefixed with an orientation preamble naming the run
 // directory — the fresh context has no memory of building the suite, so it must
 // be told where the files are and to read them first.
-func (st *phasedDriveState) runPhase6Turn(ctx context.Context, runDir, instruction string) error {
-	conv := &engine.Conversation{System: st.system}
-	conv.Append(userMessage(phase6Preamble(runDir, st.skillDir) + instruction))
-	*st.iterToolCalls = 0
-	*st.iterMutations = 0
-	return st.eng.Run(ctx, conv, st.onEvent)
+func (st *State) runPhase6Turn(ctx context.Context, runDir, instruction string) error {
+	conv := &engine.Conversation{System: st.System}
+	conv.Append(userMessage(phase6Preamble(runDir, st.SkillDir) + instruction))
+	*st.IterToolCalls = 0
+	*st.IterMutations = 0
+	return st.Engine.Run(ctx, conv, st.OnEvent)
 }
 
 // --- P47.9: route hollow-body / content-substance failures to the owning phase ---
@@ -619,20 +806,49 @@ func (st *phasedDriveState) runPhase6Turn(ctx context.Context, runDir, instructi
 // the check reads.
 type contentSubstanceCheck struct {
 	check string // verify.py check name, as it appears after "FAIL " in the report
-	phase string // skillPhase.name that owns the file this check reads
+	// phase names the Phase that owns this check's file, for a check that
+	// only ever reads one file. Empty when perFile is set.
+	phase string
+	// perFile marks a check that runs across the whole suite, so which phase
+	// owns a given failure is a property of the *evidence*, not of the check.
+	// The owner comes from the `file:line` prefix on each evidence line,
+	// matched against the phase globs (see fileOwnerPhase).
+	perFile bool
 }
 
 // contentSubstanceChecks are the verify.py checks the phased drive routes back
 // through their owning content phase (P47.9) instead of the generic verify-fix
-// turn. Both read `3-findings.md`, which the findings phase owns: a hollow
-// resume (markers deleted, bodies left empty) fails `finding-bodies-nonempty`,
-// and a coverage row filed under the wrong finding fails
-// `coverage-matches-related-threats` — both are authoring the findings phase's
-// own prompt already frames correctly. Ordered so routing is deterministic.
+// turn — the failure is substantive authoring work, not a mechanical patch a
+// bounded fix turn can make in one pass.
+//
+// The first two read `3-findings.md` alone, which the findings phase owns: a
+// hollow resume (markers deleted, bodies left empty) fails
+// `finding-bodies-nonempty`, and a coverage row filed under the wrong finding
+// fails `coverage-matches-related-threats`.
+//
+// The rest are suite-wide (P52.7's check 15 and P52.8's checks 16-19), and
+// before file-aware routing they had no way to say which phase should re-open:
+// `contentSubstanceChecks` mapped check name → phase, and one name covers all
+// seven suite files. They fell through to the generic verify-fix turn — the
+// exact fall-through P47.9 exists to prevent, reintroduced by making the checks
+// broader. They now route on the failing file instead.
+//
+// Ordered so routing is deterministic.
 var contentSubstanceChecks = []contentSubstanceCheck{
 	{check: "finding-bodies-nonempty", phase: "findings"},
 	{check: "coverage-matches-related-threats", phase: "findings"},
+	{check: "section-bodies-nonempty", perFile: true},
+	{check: "evidence-cells-cited", perFile: true},
+	{check: "no-placeholder-cells", perFile: true},
+	{check: "none-identified-fraction", perFile: true},
+	{check: "prose-sections-substantive", perFile: true},
 }
+
+// contentEvidenceFileRE pulls the filename off a verify.py evidence line.
+// verify.py formats every piece of evidence as `<basename>:<line>  <text>`
+// (its ev() helper) and prints it indented under the FAIL line, so the
+// basename is everything up to the first colon.
+var contentEvidenceFileRE = regexp.MustCompile(`^\s*-\s+([^\s:]+):\d+\s`)
 
 // failuresContainCheck reports whether the verify report text carries a failing
 // entry for the named check. verify.py prints one `FAIL <check-name>` line per
@@ -647,54 +863,168 @@ func failuresContainCheck(failures, check string) bool {
 }
 
 // phaseByName returns the phase with the given name from a plan.
-func phaseByName(phases []skillPhase, name string) (skillPhase, bool) {
+func phaseByName(phases []Phase, name string) (Phase, bool) {
 	for _, ph := range phases {
 		if ph.name == name {
 			return ph, true
 		}
 	}
-	return skillPhase{}, false
+	return Phase{}, false
 }
 
-// ownerPhaseForContentFailure returns the content phase that owns the first
-// content-substance check present in the verify failures, if any. It resolves
-// the phase against the given plan, so a skill whose plan has no such phase
-// never routes (the check names are threat-model-specific; only that plan has a
-// "findings" phase).
-func ownerPhaseForContentFailure(phases []skillPhase, failures string) (skillPhase, bool) {
-	for _, c := range contentSubstanceChecks {
-		if failuresContainCheck(failures, c.check) {
-			if ph, ok := phaseByName(phases, c.phase); ok {
+// fileOwnerPhase returns the phase that owns a suite file, matching the
+// basename against each phase's globs.
+//
+// `Phase.globs` is already a file→phase table — the phased drive reads it
+// the other way (phase → the files it must clear of PENDING markers), and this
+// reads it as written. That is why file-aware routing needs no new mapping to
+// maintain: a phase that gains a file automatically gains its failures.
+func fileOwnerPhase(phases []Phase, file string) (Phase, bool) {
+	base := filepath.Base(file)
+	for _, ph := range phases {
+		for _, g := range ph.globs {
+			if ok, err := filepath.Match(g, base); err == nil && ok {
 				return ph, true
 			}
 		}
 	}
-	return skillPhase{}, false
+	return Phase{}, false
 }
 
-// phaseHasContentFailure reports whether any content-substance check owned by
-// this phase still fails — the completion oracle for a re-opened phase (P47.9),
-// which cannot use the PENDING-marker oracle because a hollow resume has no
-// markers left.
-func phaseHasContentFailure(ph skillPhase, failures string) bool {
+// contentFailureFiles returns the distinct files named in the evidence of a
+// failing check, in report order. A check with no parseable evidence yields
+// nothing, so it simply does not route.
+func contentFailureFiles(failures, check string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, ln := range checkEvidenceLines(failures, check) {
+		m := contentEvidenceFileRE.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// checkEvidenceLines returns the indented evidence lines belonging to one
+// failing check. verify.py prints evidence as indented lines under each FAIL
+// line; any non-indented line (the next PASS/FAIL, the summary, or
+// VerifySkillOutputs' `$ …` header) ends the block.
+func checkEvidenceLines(failures, check string) []string {
+	var out []string
+	capturing := false
+	for _, ln := range strings.Split(failures, "\n") {
+		if strings.HasPrefix(ln, "FAIL ") {
+			capturing = strings.TrimSpace(strings.TrimPrefix(ln, "FAIL ")) == check
+			continue
+		}
+		if !capturing {
+			continue
+		}
+		if len(ln) > 0 && (ln[0] == ' ' || ln[0] == '\t') {
+			out = append(out, ln)
+			continue
+		}
+		capturing = false
+	}
+	return out
+}
+
+// ownerPhaseForContentFailure returns the content phase that owns the first
+// content-substance failure present in the verify report, if any.
+//
+// Phases are resolved against the given plan, so a skill whose plan has no
+// matching phase never routes: the fixed-route check names are
+// threat-model-specific (only that plan has a "findings" phase), and a per-file
+// failure only routes when some phase's globs claim the failing file.
+func ownerPhaseForContentFailure(phases []Phase, failures string) (Phase, bool) {
 	for _, c := range contentSubstanceChecks {
-		if c.phase == ph.name && failuresContainCheck(failures, c.check) {
-			return true
+		if !failuresContainCheck(failures, c.check) {
+			continue
+		}
+		if !c.perFile {
+			if ph, ok := phaseByName(phases, c.phase); ok {
+				return ph, true
+			}
+			continue
+		}
+		for _, f := range contentFailureFiles(failures, c.check) {
+			if ph, ok := fileOwnerPhase(phases, f); ok {
+				return ph, true
+			}
+		}
+	}
+	return Phase{}, false
+}
+
+// phaseHasContentFailure reports whether any content-substance failure this
+// phase owns is still present — the completion oracle for a re-opened phase
+// (P47.9), which cannot use the PENDING-marker oracle because a hollow resume
+// has no markers left.
+//
+// For a per-file check that means "this check fails on a file this phase owns",
+// not "this check fails": with suite-wide checks the latter would keep a phase
+// re-opening over another phase's file, which it is told not to edit and so
+// could never clear.
+func phaseHasContentFailure(ph Phase, failures string) bool {
+	for _, c := range contentSubstanceChecks {
+		if !failuresContainCheck(failures, c.check) {
+			continue
+		}
+		if !c.perFile {
+			if c.phase == ph.name {
+				return true
+			}
+			continue
+		}
+		for _, f := range contentFailureFiles(failures, c.check) {
+			if owner, ok := fileOwnerPhase([]Phase{ph}, f); ok && owner.name == ph.name {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// checksForPhase returns the content-substance check names owned by a phase, used
-// to extract just that phase's failure evidence for its re-entry prompt.
-func checksForPhase(ph skillPhase) []string {
+// checksForPhase returns the content-substance check names whose failures this
+// phase owns, used to extract just that phase's evidence for its re-entry
+// prompt. A per-file check is included only when it actually fails on one of
+// this phase's files — including it unconditionally would put another phase's
+// evidence in the prompt.
+func checksForPhase(ph Phase, failures string) []string {
 	var out []string
 	for _, c := range contentSubstanceChecks {
-		if c.phase == ph.name {
-			out = append(out, c.check)
+		if !c.perFile {
+			if c.phase == ph.name {
+				out = append(out, c.check)
+			}
+			continue
+		}
+		for _, f := range contentFailureFiles(failures, c.check) {
+			if owner, ok := fileOwnerPhase([]Phase{ph}, f); ok && owner.name == ph.name {
+				out = append(out, c.check)
+				break
+			}
 		}
 	}
 	return out
+}
+
+// phaseOwnsEvidenceLine reports whether an evidence line names a file this
+// phase owns. A line with no parseable `file:line` prefix belongs to whoever
+// asked — it carries no routing information of its own, so dropping it would
+// lose evidence.
+func phaseOwnsEvidenceLine(ph Phase, line string) bool {
+	m := contentEvidenceFileRE.FindStringSubmatch(line)
+	if m == nil {
+		return true
+	}
+	owner, ok := fileOwnerPhase([]Phase{ph}, m[1])
+	return ok && owner.name == ph.name
 }
 
 // extractCheckFailures pulls just the `FAIL <check>` blocks (the FAIL line plus
@@ -702,31 +1032,57 @@ func checksForPhase(ph skillPhase) []string {
 // so a re-entry prompt names the empty sections without dumping every unrelated
 // failing check at the model. verify.py prints evidence as indented `- …` lines
 // under each FAIL line; a non-indented line (the next PASS/FAIL, the summary, or
-// verifySkillOutputs' `$ …` header) ends the block. Returns "" if nothing
+// VerifySkillOutputs' `$ …` header) ends the block. Returns "" if nothing
 // matched, so the caller can fall back to the full text.
-func extractCheckFailures(failures string, checks []string) string {
+//
+// keep, when non-nil, additionally filters the evidence lines within a kept
+// block. That is what confines a suite-wide check's evidence to the re-opening
+// phase's own files: without it, re-opening "framework analysis" over a
+// `section-bodies-nonempty` failure would hand the model every other file's
+// empty sections too and invite it to edit files the phase does not own. A
+// block whose evidence is entirely filtered out is dropped along with its FAIL
+// line, so the prompt never names a check with nothing under it.
+func extractCheckFailures(failures string, checks []string, keep func(line string) bool) string {
 	want := make(map[string]bool, len(checks))
 	for _, c := range checks {
 		want[c] = true
 	}
 	var out []string
+	var block []string
+	var sawEvidence bool // the block had evidence before filtering
 	capturing := false
+	flush := func() {
+		// Drop a block only when filtering removed every line it had. A check
+		// that failed with no evidence at all still gets its FAIL line, the
+		// same as before file-aware filtering existed.
+		if len(block) > 0 && (len(block) > 1 || !sawEvidence) {
+			out = append(out, block...)
+		}
+		block, sawEvidence = nil, false
+	}
 	for _, ln := range strings.Split(failures, "\n") {
 		if strings.HasPrefix(ln, "FAIL ") {
+			flush()
 			capturing = want[strings.TrimSpace(strings.TrimPrefix(ln, "FAIL "))]
 			if capturing {
-				out = append(out, ln)
+				block = []string{ln}
 			}
 			continue
 		}
-		if capturing {
-			if len(ln) > 0 && (ln[0] == ' ' || ln[0] == '\t') {
-				out = append(out, ln) // an indented evidence line
-			} else {
-				capturing = false // any non-indented line ends the block
-			}
+		if !capturing {
+			continue
 		}
+		if len(ln) > 0 && (ln[0] == ' ' || ln[0] == '\t') {
+			sawEvidence = true
+			if keep == nil || keep(ln) {
+				block = append(block, ln) // an indented evidence line
+			}
+			continue
+		}
+		flush() // any non-indented line ends the block
+		capturing = false
 	}
+	flush()
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
@@ -740,26 +1096,27 @@ func extractCheckFailures(failures string, checks []string) string {
 // budget, or a persistent overflow — all of which hand control back to the
 // phase-6 loop) and a non-nil error only on a terminal (non-overflow) engine
 // error.
-func (st *phasedDriveState) runReopenedContentPhase(ctx context.Context, ph skillPhase) error {
-	runDir := latestThreatModelRunDir(st.cwd)
-	failures, _ := verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
-	st.logger.Info("phased drive: re-opening content phase for a content-substance failure (P47.9)", "phase", ph.name)
-	fmt.Fprintf(st.errOut, "\n[notice: the %s file failed a content-substance check the bounded phase-6 fix loop can't author in one pass; re-opening the %s phase to fill it (P47.9)]\n", ph.label(), ph.label())
+func (st *State) runReopenedContentPhase(ctx context.Context, ph Phase) error {
+	runDir := st.runDir()
+	failures, _ := VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
+	st.Logger.Info("phased drive: re-opening content phase for a content-substance failure (P47.9)", "phase", ph.name)
+	fmt.Fprintf(st.ErrOut, "\n[notice: the %s file failed a content-substance check the bounded phase-6 fix loop can't author in one pass; re-opening the %s phase to fill it (P47.9)]\n", ph.label(), ph.label())
 
 	conv := st.hollowReentryConv(ph, runDir, failures, "")
 	turns := 0
 	overflowResets := 0
+	toolFailResets := 0 // P52.3 breaker's own budget, separate from overflowResets
 	noProgress := 0
 	for {
-		*st.iterToolCalls = 0
-		*st.iterMutations = 0
-		if err := st.eng.Run(ctx, conv, st.onEvent); err != nil {
+		*st.IterToolCalls = 0
+		*st.IterMutations = 0
+		if err := st.Engine.Run(ctx, conv, st.OnEvent); err != nil {
 			// P50.1: a dead backend during a re-entry is resumable too — wait,
 			// then re-read the suite from disk into a fresh context.
 			switch st.recoverBackendDown(ctx, err, ph.label()+" re-entry") {
 			case backendRecovered:
-				runDir = latestThreatModelRunDir(st.cwd)
-				failures, _ = verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
+				runDir = st.runDir()
+				failures, _ = VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
 				conv = st.hollowReentryConv(ph, runDir, failures, "")
 				continue
 			case backendGaveUp:
@@ -767,42 +1124,55 @@ func (st *phasedDriveState) runReopenedContentPhase(ctx context.Context, ph skil
 			}
 			if provider.IsContextOverflowError(err) {
 				if overflowResets++; overflowResets > maxPhase6OverflowResets {
-					st.logger.Warn("phased drive: hollow-body re-entry overflow persists after max resets", "phase", ph.name)
-					fmt.Fprintf(st.errOut, "\n[notice: the %s re-entry kept overflowing after %d reset(s); handing back to the phase-6 fix loop]\n", ph.label(), maxPhase6OverflowResets)
+					st.Logger.Warn("phased drive: hollow-body re-entry overflow persists after max resets", "phase", ph.name)
+					fmt.Fprintf(st.ErrOut, "\n[notice: the %s re-entry kept overflowing after %d reset(s); handing back to the phase-6 fix loop]\n", ph.label(), maxPhase6OverflowResets)
 					return nil
 				}
 				st.tryEscalateWindow(ph.label() + " re-entry")
-				fmt.Fprintf(st.errOut, "\n[notice: context overflowed re-authoring the %s file; resetting to a fresh context and re-reading from disk (reset %d/%d)]\n", ph.label(), overflowResets, maxPhase6OverflowResets)
-				runDir = latestThreatModelRunDir(st.cwd)
-				failures, _ = verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
+				fmt.Fprintf(st.ErrOut, "\n[notice: context overflowed re-authoring the %s file; resetting to a fresh context and re-reading from disk (reset %d/%d)]\n", ph.label(), overflowResets, maxPhase6OverflowResets)
+				runDir = st.runDir()
+				failures, _ = VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
 				conv = st.hollowReentryConv(ph, runDir, failures, "")
 				continue
+			}
+			// P52.3: same treatment as an overflow — a breaker trip during a
+			// re-entry is resumable from disk. On give-up hand back to the
+			// phase-6 fix loop (nil) rather than killing the drive, exactly as
+			// the overflow budget above does.
+			switch st.recoverToolFailureStall(err, ph.label()+" re-entry", &toolFailResets) {
+			case overflowRetry:
+				runDir = st.runDir()
+				failures, _ = VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
+				conv = st.hollowReentryConv(ph, runDir, failures, "")
+				continue
+			case overflowStop:
+				return nil
 			}
 			return err
 		}
 		if ctx.Err() != nil {
 			return nil
 		}
-		failures, _ = verifySkillOutputs(st.skillName, st.skillDir, st.cwd)
+		failures, _ = VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
 		if !phaseHasContentFailure(ph, failures) {
-			st.logger.Info("phased drive: content-substance re-entry cleared the owning check(s)", "phase", ph.name)
+			st.Logger.Info("phased drive: content-substance re-entry cleared the owning check(s)", "phase", ph.name)
 			return nil
 		}
-		if turns++; turns >= st.maxTurns {
-			fmt.Fprintf(st.errOut, "\n[notice: the %s re-entry hit --max-turns=%d with the content-substance check still failing; handing back to the phase-6 fix loop]\n", ph.label(), st.maxTurns)
+		if turns++; turns >= st.MaxTurns {
+			fmt.Fprintf(st.ErrOut, "\n[notice: the %s re-entry hit --max-turns=%d with the content-substance check still failing; handing back to the phase-6 fix loop]\n", ph.label(), st.MaxTurns)
 			return nil
 		}
 		nudge := ""
-		if *st.iterMutations > 0 {
+		if *st.IterMutations > 0 {
 			noProgress = 0
 		} else {
-			if noProgress++; noProgress >= maxNoProgressTurns {
-				fmt.Fprintf(st.errOut, "\n[notice: the %s re-entry stalled %d turns without an edit; handing back to the phase-6 fix loop]\n", ph.label(), noProgress)
+			if noProgress++; noProgress >= MaxNoProgressTurns {
+				fmt.Fprintf(st.ErrOut, "\n[notice: the %s re-entry stalled %d turns without an edit; handing back to the phase-6 fix loop]\n", ph.label(), noProgress)
 				return nil
 			}
-			nudge = actNowNudge()
+			nudge = ActNowNudge()
 		}
-		runDir = latestThreatModelRunDir(st.cwd)
+		runDir = st.runDir()
 		conv = st.hollowReentryConv(ph, runDir, failures, nudge)
 	}
 }
@@ -810,9 +1180,9 @@ func (st *phasedDriveState) runReopenedContentPhase(ctx context.Context, ph skil
 // hollowReentryConv builds the fresh, near-stateless conversation each re-entry
 // turn runs with: system prompt + one hollow-body authoring message and nothing
 // else (P47.9, sharing P47.4's bounded-context discipline).
-func (st *phasedDriveState) hollowReentryConv(ph skillPhase, runDir, failures, nudge string) *engine.Conversation {
-	conv := &engine.Conversation{System: st.system}
-	conv.Append(userMessage(nudge + hollowBodyReentryPrompt(ph, runDir, st.skillDir, failures)))
+func (st *State) hollowReentryConv(ph Phase, runDir, failures, nudge string) *engine.Conversation {
+	conv := &engine.Conversation{System: st.System}
+	conv.Append(userMessage(nudge + hollowBodyReentryPrompt(ph, runDir, st.SkillDir, failures)))
 	return conv
 }
 
@@ -825,12 +1195,18 @@ func (st *phasedDriveState) hollowReentryConv(ph skillPhase, runDir, failures, n
 // It deliberately does NOT reuse noSelfVerifyInstruction — that text is written
 // around `<!-- PENDING -->` markers, which the hollow case lacks — but it keeps
 // the same "don't recompute counts by hand" spirit in marker-free wording.
-func hollowBodyReentryPrompt(ph skillPhase, runDir, skillDir, failures string) string {
-	evidence := extractCheckFailures(failures, checksForPhase(ph))
+func hollowBodyReentryPrompt(ph Phase, runDir, skillDir, failures string) string {
+	// Filter the evidence to this phase's own files: the suite-wide checks
+	// (P52.7/P52.8) report every file in one block, and the prompt's closing
+	// instruction is "edit only the file(s) this phase owns" — handing over
+	// another phase's failures would contradict it in the same breath.
+	evidence := extractCheckFailures(failures, checksForPhase(ph, failures), func(line string) bool {
+		return phaseOwnsEvidenceLine(ph, line)
+	})
 	if evidence == "" {
 		evidence = failures
 	}
-	return fmt.Sprintf("You are resuming the %s phase of a threat model in `%s`. This is a fresh context — read the phase's file(s) there first, and the skill's rules in `%s` if you need them. The suite's section markers are gone, but the mechanical verifier found content problems the earlier fill left behind — section headings with no prose beneath them, and/or coverage rows filed under the wrong finding:\n\n%s\n\nFix each one with real, evidence-grounded content using `edit_file` — one section or one row per edit; never regenerate the whole file in one call and never `write_file` a suite file (a monolithic write is slow and truncates into a malformed tool call). Spend each turn resolving the next flagged item and nothing else — do not recompute STRIDE/threat/coverage counts by hand to double-check your own work; the deterministic verifier re-runs automatically. Keep going until every problem listed above is resolved. This is a non-interactive run: do not stop to ask whether to proceed, and edit only the file(s) this phase owns.",
+	return fmt.Sprintf("You are resuming the %s phase of a threat model in `%s`. This is a fresh context — read the phase's file(s) there first, and the skill's rules in `%s` if you need them. The suite's section markers are gone, but the mechanical verifier found content problems the earlier fill left behind — section headings with no prose beneath them, table cells holding placeholders instead of evidence, and/or coverage rows filed under the wrong finding:\n\n%s\n\nFix each one with real, evidence-grounded content using `edit_file` — one section or one row per edit; never regenerate the whole file in one call and never `write_file` a suite file (a monolithic write is slow and truncates into a malformed tool call). Spend each turn resolving the next flagged item and nothing else — do not recompute STRIDE/threat/coverage counts by hand to double-check your own work; the deterministic verifier re-runs automatically. Keep going until every problem listed above is resolved. This is a non-interactive run: do not stop to ask whether to proceed, and edit only the file(s) this phase owns.",
 		ph.label(), filepath.ToSlash(runDir), skillAsset(skillDir, "SKILL.md"), evidence)
 }
 
@@ -877,7 +1253,7 @@ const monolithicWriteGuardrail = "Author the file incrementally: one section (or
 // phaseContinuePrompt is the in-phase continuation turn: it names only THIS
 // phase's still-PENDING files and tells the model to fill the next marker,
 // without pulling other phases into scope.
-func phaseContinuePrompt(ph skillPhase, pending []string) string {
+func phaseContinuePrompt(ph Phase, pending []string) string {
 	return fmt.Sprintf("Continue the %s phase — it is not finished. These file(s) still contain `<!-- PENDING: … -->` markers:\n- %s\n\nFill the next single `<!-- PENDING: <section> -->` marker with real content using `edit_file` — one section, one edit; never a bare `<!-- PENDING -->` and never `replace_all` on a marker. %s Keep going until NO `<!-- PENDING` marker remains in the file(s) above. %s This is a non-interactive run: do not stop to ask whether to proceed, and do not start other files.",
 		ph.label(), strings.Join(pending, "\n- "), monolithicWriteGuardrail, noSelfVerifyInstruction)
 }
@@ -891,7 +1267,7 @@ func phase6Preamble(runDir, skillDir string) string {
 
 // --- per-phase prompts (compact fresh-context seeds, faithful to SKILL.md §4.2) ---
 
-func phasePromptArchitecture(p phaseParams) string {
+func phasePromptArchitecture(p PhaseParams) string {
 	return fmt.Sprintf(`You are building a threat model of the workspace at `+"`%s`"+`, one phase at a time. This is the ARCHITECTURE phase (phase 1). Work non-interactively — do not stop to ask questions, and do not describe what you will do; do it.
 
 Setup, then fill exactly one file this phase:
@@ -912,7 +1288,7 @@ Task: %s`,
 		p.task)
 }
 
-func phasePromptDFD(p phaseParams) string {
+func phasePromptDFD(p PhaseParams) string {
 	return fmt.Sprintf(`Continue the threat model — this is the DATA-FLOW-DIAGRAM phase (phase 2). The run directory is `+"`%s`"+`. Work non-interactively; do it, do not narrate.
 
 Read `+"`%s`"+` (Mermaid shapes, fixed palette, DFD direction, pre-render checklist) and, from the run directory, `+"`0.1-architecture.md`"+` (its Key Components and Component Exposure Table — reuse those component names verbatim).
@@ -926,7 +1302,7 @@ This phase owns only those two files — do not touch the others.`,
 		skillAsset(p.skillDir, "references/diagram-conventions.md"))
 }
 
-func phasePromptAnalysis(p phaseParams) string {
+func phasePromptAnalysis(p PhaseParams) string {
 	return fmt.Sprintf(`Continue the threat model — this is the FRAMEWORK-ANALYSIS phase (phase 3), the largest file. The run directory is `+"`%s`"+`. Work non-interactively.
 
 Fill the run directory's `+"`2-<framework>-analysis.md`"+` (the `+"`2-*-analysis.md`"+` file), replacing its `+"`<!-- PENDING: <section> -->`"+` markers ONE component/section per `+"`edit_file`"+`. %s
@@ -948,7 +1324,7 @@ Rules for every threat row: state a Prerequisite no lower than the component's M
 		noSelfVerifyInstruction)
 }
 
-func phasePromptFindings(p phaseParams) string {
+func phasePromptFindings(p PhaseParams) string {
 	return fmt.Sprintf(`Continue the threat model — this is the FINDINGS phase (phase 4). The run directory is `+"`%s`"+`. Work non-interactively.
 
 Read `+"`%s`"+` (the findings-section templates and mandatory fields) and, from the run directory, `+"`2-<framework>-analysis.md`"+` and `+"`0.1-architecture.md`"+`'s Component Exposure Table.
@@ -964,7 +1340,7 @@ Reading the prior-phase analysis file to source the findings and the coverage ta
 		noSelfVerifyInstruction)
 }
 
-func phasePromptAssessment(p phaseParams) string {
+func phasePromptAssessment(p PhaseParams) string {
 	return fmt.Sprintf(`Continue the threat model — this is the ASSESSMENT phase (phase 5), the last content phase. The run directory is `+"`%s`"+`. Work non-interactively.
 
 Read `+"`%s`"+` (the assessment-section template) and `+"`%s`"+` (the inventory field names), plus all prior files in the run directory.

@@ -40,7 +40,7 @@ func (t *securityScanTool) Execute(ctx context.Context, input json.RawMessage) (
 	}
 	dir := root
 	if args.Path != "" {
-		resolved, err := resolvePath(root, args.Path)
+		resolved, err := resolveRead(ctx, root, args.Path)
 		if err != nil {
 			return tool.Result{}, err
 		}

@@ -1,8 +1,9 @@
-package cli
+package drive
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -10,16 +11,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/provider"
 )
 
-// backendState builds a phasedDriveState wired for the P50.1 backend-recovery
+// backendState builds a State wired for the P50.1 backend-recovery
 // helpers: a discard errOut/logger and a caller-supplied liveness probe.
-func backendState(check func(context.Context) (bool, bool)) *phasedDriveState {
-	return &phasedDriveState{
-		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		errOut:       io.Discard,
-		checkBackend: check,
+func backendState(check func(context.Context) (bool, bool)) *State {
+	return &State{
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ErrOut:       io.Discard,
+		CheckBackend: check,
 	}
 }
 
@@ -84,40 +86,87 @@ func TestRecoverBackendDown_CtxCancel(t *testing.T) {
 }
 
 // TestRecoverPhase6Error folds P50.1 into the phase-6 verdict: backend recovered
-// maps to overflowRetry, backend give-up to overflowStop, and a plain
-// context-overflow still delegates to the P47.7 overflow recovery.
+// maps to overflowRetry, backend give-up to overflowStop, a plain
+// context-overflow still delegates to the P47.7 overflow recovery, and a P52.3
+// tool-failure abort delegates to recoverToolFailureStall.
 func TestRecoverPhase6Error(t *testing.T) {
 	ctx := context.Background()
 	resets := 0
+	tfResets := 0
 
 	// Backend recovered → retry.
 	st := backendState(func(context.Context) (bool, bool) { return true, true })
-	st.escalateWindow = func() (int, bool) { return 0, false }
+	st.EscalateWindow = func() (int, bool) { return 0, false }
 	down := provider.NewTransportError("ollama", errors.New("connection refused"))
-	if got := st.recoverPhase6Error(ctx, down, "phase-6 quality pass", &resets); got != overflowRetry {
+	if got := st.recoverPhase6Error(ctx, down, "phase-6 quality pass", &resets, &tfResets); got != overflowRetry {
 		t.Errorf("recovered backend = %v, want overflowRetry", got)
 	}
 
 	// Backend give-up → stop.
 	restore := withShrunkBackendBudget(t, 20*time.Millisecond, 2*time.Millisecond)
 	st = backendState(func(context.Context) (bool, bool) { return false, true })
-	if got := st.recoverPhase6Error(ctx, down, "phase-6 verify fix", &resets); got != overflowStop {
+	if got := st.recoverPhase6Error(ctx, down, "phase-6 verify fix", &resets, &tfResets); got != overflowStop {
 		t.Errorf("dead backend = %v, want overflowStop", got)
 	}
 	restore()
 
 	// A context overflow (not a backend error) still flows to overflow recovery.
 	st = backendState(func(context.Context) (bool, bool) { return true, true })
-	st.escalateWindow = func() (int, bool) { return 131072, true }
+	st.EscalateWindow = func() (int, bool) { return 131072, true }
 	resets = 0
 	overflow := provider.NewContextTruncationError("ollama", "unexpected end of JSON input")
-	if got := st.recoverPhase6Error(ctx, overflow, "phase-6 quality pass", &resets); got != overflowRetry {
+	if got := st.recoverPhase6Error(ctx, overflow, "phase-6 quality pass", &resets, &tfResets); got != overflowRetry {
 		t.Errorf("overflow = %v, want overflowRetry (delegated)", got)
 	}
 
-	// A plain error is neither backend-down nor overflow → surfaced.
-	if got := st.recoverPhase6Error(ctx, errors.New("boom"), "phase-6 verify fix", &resets); got != overflowNotHandled {
+	// A P52.3 consecutive-tool-failure abort delegates to the tool-failure
+	// recovery and is resumable, spending its own budget rather than the
+	// overflow one.
+	stall := fmt.Errorf("%w (6 in a row): edit_file keeps failing", engine.ErrToolFailureLimit)
+	if got := st.recoverPhase6Error(ctx, stall, "phase-6 verify fix", &resets, &tfResets); got != overflowRetry {
+		t.Errorf("tool-failure stall = %v, want overflowRetry (delegated)", got)
+	}
+	if tfResets != 1 {
+		t.Errorf("tool-failure resets = %d, want 1 (must not spend the overflow budget)", tfResets)
+	}
+
+	// A plain error is neither backend-down, overflow, nor a breaker trip → surfaced.
+	if got := st.recoverPhase6Error(ctx, errors.New("boom"), "phase-6 verify fix", &resets, &tfResets); got != overflowNotHandled {
 		t.Errorf("plain error = %v, want overflowNotHandled", got)
+	}
+}
+
+// TestRecoverToolFailureStall pins the P52.3 breaker's phase-level treatment:
+// the abort is resumable (a fresh context re-read from disk is the right remedy
+// for a model re-guessing arguments), bounded by its own budget, and it never
+// escalates the serving window — the window is not what failed.
+func TestRecoverToolFailureStall(t *testing.T) {
+	escalated := false
+	st := backendState(func(context.Context) (bool, bool) { return true, true })
+	st.EscalateWindow = func() (int, bool) { escalated = true; return 131072, true }
+	stall := fmt.Errorf("%w (6 in a row): edit_file keeps failing with: %q",
+		engine.ErrToolFailureLimit, "old_string not found")
+
+	resets := 0
+	for i := 1; i <= maxToolFailureResets; i++ {
+		if got := st.recoverToolFailureStall(stall, "architecture phase", &resets); got != overflowRetry {
+			t.Fatalf("reset %d = %v, want overflowRetry", i, got)
+		}
+	}
+	if got := st.recoverToolFailureStall(stall, "architecture phase", &resets); got != overflowStop {
+		t.Errorf("past budget = %v, want overflowStop", got)
+	}
+	if escalated {
+		t.Error("recoverToolFailureStall escalated the context window; the window is not the failure")
+	}
+
+	// A non-breaker error is left for the caller to surface.
+	resets = 0
+	if got := st.recoverToolFailureStall(errors.New("boom"), "architecture phase", &resets); got != overflowNotHandled {
+		t.Errorf("plain error = %v, want overflowNotHandled", got)
+	}
+	if resets != 0 {
+		t.Errorf("plain error spent %d reset(s), want 0", resets)
 	}
 }
 
@@ -170,7 +219,7 @@ func TestSuiteSnapshotRoundTrip(t *testing.T) {
 // per-phase counters, tick advances the turn and records pending, and snapshot
 // reads them back — the state the background heartbeat ticker reports.
 func TestPhaseProgress(t *testing.T) {
-	p := &phaseProgress{}
+	p := &Progress{}
 	p.enter("findings")
 	if turn, _ := p.tick(4); turn != 1 {
 		t.Errorf("first tick turn = %d, want 1", turn)

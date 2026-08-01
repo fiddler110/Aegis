@@ -100,6 +100,8 @@ aegis chat "threat model this repo" --skill threat-modeling --mode build --yes
 
 **Headless skill drives (`--skill`):** built for multi-phase skills whose output is a set of files rather than a single chat reply — `threat-modeling` (scaffolds seven report files, fills them phase by phase, then runs the skill's own `verify.py`/`lint_dfd.py`/`inventory.py --check` checks and feeds any failure back for an in-place fix, bounded by `--max-turns`) and `deep-research` are the shipped examples. Requires `--mode build --yes` (or `auto`) since the drive writes files across many turns with nobody there to approve each one. If the run ends with no `<!-- PENDING -->` markers left but also no files under `.aegis/`, chat prints an explicit warning rather than reporting quiet success — a model can narrate a whole build in its reasoning trace without calling a single tool. Re-running the same command resumes an interrupted or partial drive (the PENDING markers show exactly where it left off).
 
+**The same drive runs in the daemon now**, so it is no longer CLI-only: `/drive <skill> <task…>` (or `/threat-model … unattended`) in the TUI, the **Drive** button beside the web UI composer, and `POST /sessions/{id}/drive` over the HTTP API all run the identical phase machinery. The web UI is the right home for a multi-hour build — its runs are resumable, so they survive closing the tab, which `aegis chat` does not. Any skill can opt in by declaring a `phases:` plan in its own frontmatter (see [skills.md](skills.md#phased-skills-long-unattended-builds)).
+
 ---
 
 ## `aegis acp`
@@ -438,10 +440,10 @@ aegis doctor   # run before `aegis serve`, or any time something feels misconfig
 
 ## `aegis trust`
 
-Review and accept (or revoke) a project's `.aegis/config.yaml` security-relevant settings (P27.1). A cloned repository's project config is auto-merged with no confirmation by default, but security-relevant keys (`permission.*`, `sandbox.*`, `mcp.servers`, `notify.webhook`, `hooks`) stay frozen to their user/global values until the directory is explicitly trusted here — so checking out a repo can't silently widen its own permissions, add an attacker-controlled MCP server, or run lifecycle hooks.
+Review and accept (or revoke) a project's `.aegis/config.yaml` security-relevant settings (P27.1). A cloned repository's project config is auto-merged with no confirmation by default, but security-relevant keys (`permission.*`, `sandbox.*`, `mcp.servers`, `notify.webhook`, `hooks`, `workspace.additional_roots`) stay frozen to their user/global values until the directory is explicitly trusted here — so checking out a repo can't silently widen its own permissions, add an attacker-controlled MCP server, run lifecycle hooks, or hand itself a window into the rest of your filesystem.
 
 ```bash
-aegis trust [--yes] [--revoke] [--status]
+aegis trust [--yes] [--revoke] [--status] [--dir PATH]
 ```
 
 | Flag | Description |
@@ -449,12 +451,17 @@ aegis trust [--yes] [--revoke] [--status]
 | `--yes` | Skip the confirmation prompt (non-interactive/scripted use) |
 | `--revoke` | Remove trust for this directory instead of granting it |
 | `--status` | Show what's currently frozen without prompting or changing anything |
+| `--dir PATH` | Record the decision for `PATH` instead of the current directory — how a [`workspace.additional_roots`](configuration.md#full-config-reference) entry is authorized (P52.13) |
 
 ```bash
 aegis trust --status   # see what the project config would change, no changes made
 aegis trust            # review the diff and accept it interactively
 aegis trust --revoke   # freeze this directory's project config again
+
+aegis trust --dir ../research-repo   # authorize an additional workspace root
 ```
+
+`--dir` exists because an additional root is usually a plain directory with no `.aegis/config.yaml` of its own to review, and the no-flag path short-circuits when there is nothing to freeze. What it grants is different too: not "apply this project's config" but "let a session that lists this directory under `workspace.additional_roots` reach into it at all". An additional root never inherits the primary workspace's trust.
 
 `aegis doctor`'s "workspace trust" check surfaces the same frozen-settings state. Restart the daemon after trusting a directory to apply the newly-unfrozen settings.
 

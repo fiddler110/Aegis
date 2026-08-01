@@ -140,6 +140,15 @@ should already be clean if each file's own "Post-write checks" in
       placeholder too even though the `<!-- PENDING -->` marker is gone.
       `verify.py`'s `section-bodies-nonempty` check reports these by
       `file:line` from `scaffold.py`'s `.scaffold-manifest.json`.
+- [ ] No section was *filled with nothing*: an Evidence cell that names a
+      file but pins nothing inside it, a `TBD`/`N/A`/`see code` in a
+      Mitigation or Residual-risk cell, a table whose every row reads "none
+      identified", or a narrative section shorter than a sentence.
+      `verify.py`'s `evidence-cells-cited`, `no-placeholder-cells`,
+      `none-identified-fraction` and `prose-sections-substantive` checks
+      report each by `file:line`. One or two "none identified" rows is a
+      *correct*, complete entry and never fails — only a table that is
+      nothing else does.
 - [ ] Every top-level directory from recon.py's digest appears exactly once
       in `0.1-architecture.md`'s Coverage Ledger, as `Covered — <component>`
       or `Excluded — <reason>` — including recon's auto-excluded directories

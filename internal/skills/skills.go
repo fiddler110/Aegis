@@ -49,6 +49,46 @@ type Skill struct {
 	Description string // from frontmatter `description:`; empty means eager-inject
 	Content     string // markdown body with frontmatter stripped (plus asset manifest, if bundled)
 	Dir         string // non-empty for a bundled (directory) skill; path to its companion files
+	// Phases, when non-empty, declares the skill's phased-drive plan (P52.12):
+	// the drive runs each phase in its own fresh conversation instead of
+	// building the whole thing in one growing context. Parsed from a `phases:`
+	// frontmatter list; absent means the skill uses the generic single-context
+	// drive.
+	//
+	// This lives here rather than in internal/drive so a skill can opt into
+	// the phased machinery by editing its own SKILL.md — the plan was hard-coded
+	// to one skill name before, which made "a general mechanism" untrue in
+	// practice.
+	Phases []PhaseSpec
+	// RunDir, when non-empty, is a workspace-relative path or glob naming the
+	// directory the Phases' file globs are relative to (P52.12). It exists for
+	// the pattern threat-modeling established: a setup phase scaffolds a fresh
+	// dated output directory (`.aegis/security/threat-model/*`) and the later
+	// phases fill it, so the phase globs cannot be workspace-relative — the
+	// directory's name isn't known until the run creates it. A glob resolves to
+	// its most-recently-modified matching directory. Empty means the phase globs
+	// are relative to the workspace root, which is what a skill writing to fixed
+	// paths wants and is therefore the default.
+	RunDir string
+}
+
+// PhaseSpec is one declared phase of a skill's phased-drive plan.
+type PhaseSpec struct {
+	// Name labels the phase in notices and logs, e.g. "architecture".
+	Name string `yaml:"name"`
+	// Files are run-dir-relative globs the phase must clear of `<!-- PENDING`
+	// markers before it counts as complete. They double as the file→phase
+	// table the drive uses to route a per-file verification failure back to
+	// its owning phase.
+	Files []string `yaml:"files"`
+	// Setup marks the phase that runs before the run directory exists — it
+	// does the recon and scaffolding the later phases fill in. At most one
+	// phase should set it, and it should be the first.
+	Setup bool `yaml:"setup"`
+	// Prompt seeds the phase's fresh context. Placeholders `{task}`,
+	// `{run_dir}`, `{skill_dir}`, `{cwd}`, `{phase}` and `{files}` are
+	// substituted at run time; everything else is used verbatim.
+	Prompt string `yaml:"prompt"`
 }
 
 // discoverCache memoizes Discover's result per distinct (workDir, dataDir,
@@ -432,6 +472,15 @@ func parseSkill(defaultName, raw string) Skill {
 	}
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		key := strings.ToLower(strings.TrimSpace(m.Content[i].Value))
+		// `phases:` is a sequence, not a scalar — decode it before the scalar
+		// path below rejects it.
+		if key == "phases" {
+			var specs []PhaseSpec
+			if err := m.Content[i+1].Decode(&specs); err == nil {
+				sk.Phases = validPhases(specs)
+			}
+			continue
+		}
 		var val string
 		if err := m.Content[i+1].Decode(&val); err != nil {
 			continue
@@ -444,9 +493,37 @@ func parseSkill(defaultName, raw string) Skill {
 			}
 		case "description":
 			sk.Description = val
+		case "run_dir":
+			sk.RunDir = val
 		}
 	}
 	return sk
+}
+
+// validPhases drops entries that could not drive anything — a phase with no
+// name has nothing to log and no identity to route failures to, and one with no
+// file globs has no completion oracle, so the drive would spin on it forever.
+// Returns nil when nothing survives, which reads downstream as "this skill has
+// no phase plan" and falls back to the generic single-context drive rather than
+// starting a plan that cannot finish.
+func validPhases(specs []PhaseSpec) []PhaseSpec {
+	var out []PhaseSpec
+	for _, p := range specs {
+		p.Name = strings.TrimSpace(p.Name)
+		p.Prompt = strings.TrimSpace(p.Prompt)
+		var files []string
+		for _, f := range p.Files {
+			if f = strings.TrimSpace(f); f != "" {
+				files = append(files, f)
+			}
+		}
+		p.Files = files
+		if p.Name == "" || len(p.Files) == 0 {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // splitFrontmatter separates a leading `---`-delimited YAML block from the body.

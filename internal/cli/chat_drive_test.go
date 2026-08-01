@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fiddler110/aegis/internal/drive"
+
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/skills"
@@ -202,7 +204,7 @@ func TestContinuePrompt(t *testing.T) {
 // The P39.7 act-now nudge must be forceful and name edit_file so a stalled
 // local model breaks out of "announce then yield" and mutates a file.
 func TestActNowNudge(t *testing.T) {
-	n := actNowNudge()
+	n := drive.ActNowNudge()
 	for _, want := range []string{"ACT NOW", "edit_file", "PENDING", "one section"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("actNowNudge missing %q in:\n%s", want, n)
@@ -225,8 +227,8 @@ func TestSameStrings(t *testing.T) {
 		{[]string{"a"}, []string{"b"}, false},      // same count, different set
 	}
 	for _, c := range cases {
-		if got := sameStrings(c.a, c.b); got != c.want {
-			t.Errorf("sameStrings(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
+		if got := drive.SameStrings(c.a, c.b); got != c.want {
+			t.Errorf("drive.SameStrings(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
 		}
 	}
 }

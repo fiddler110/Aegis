@@ -29,13 +29,20 @@ Contract (same posture as the sibling `recon.py`):
   * Mechanical only. Every check here is a grep/parse/compare a human could
     reproduce by hand; genuinely judgment-bound checks stay with the model.
 
+Checks 16-19 are the one exception to "mechanical bookkeeping only": they are
+a deliberately weak *substance* floor (P52.8) — a bare-filename Evidence cell,
+a literal `TBD`, a table that is nothing but "none identified", a narrative
+section shorter than a sentence. They are still mechanical (no model call), and
+every threshold is tunable; see `SUBSTANCE` below.
+
 Usage:
-  python verify.py <run-dir> [--quiet]
+  python verify.py <run-dir> [--quiet] [substance-floor flags]
 
   <run-dir>   a completed threat-model run directory (contains
               0-assessment.md, 0.1-architecture.md, 1-model.md,
               2-<framework>-analysis.md, 3-findings.md)
   --quiet     print only FAIL checks and the summary line
+              (`--help` lists the substance-floor thresholds)
 
 Exit code: 0 iff every check passed, 1 otherwise (2 on a usage/IO error).
 """
@@ -102,6 +109,103 @@ TEXT_EXTS = (".md", ".mmd", ".yaml", ".yml", ".txt")
 # check_section_bodies_nonempty. A suite scaffolded before this existed simply
 # has no manifest, and that check degrades to a pass.
 MANIFEST_FILE = ".scaffold-manifest.json"
+
+# The five markdown files every check reads, in report order.
+SUITE_FILES = ("assessment", "architecture", "model", "analysis", "findings")
+
+
+# --------------------------------------------------------------------------- #
+# Substance floor (P52.8) — every threshold in one tunable place
+# --------------------------------------------------------------------------- #
+#
+# Checks 1-15 are all *structural*: they prove the suite is shaped right and
+# that nothing was left visibly unfilled. None of them rejects vacuous content.
+# A suite in which every Evidence cell reads `see code`, every Mitigation reads
+# `TBD` and every category reads `None identified` passes all fifteen and gets
+# stamped. The P38.1 quality pass is the intended backstop, but it is an LLM
+# call and is CLI-only (P52.12), so the TUI path has no substance gate at all.
+#
+# Checks 16-19 are that mechanical floor. They are deliberately *weak*: a false
+# failure costs a verify bounce and erodes trust in the whole suite of checks,
+# which is worth more than catching every marginal cell. So each rule fires only
+# on the unambiguous case — a cell that is a bare filename with nothing else, a
+# cell that is *exactly* a placeholder token, a table in which essentially every
+# row is "none identified", a narrative section shorter than one sentence.
+#
+# Every threshold lives here and is overridable from the command line (see
+# `_apply_substance_overrides`), so a stricter run is a flag away and a suite
+# with a legitimately unusual shape can be let through without editing code.
+SUBSTANCE = {
+    # Table columns whose cells must carry a real citation (SKILL.md §3: "Every
+    # threat entry names the file, config, or code path that makes it real").
+    # `Anchor` is deliberately absent — the Key Components table's Anchor cell
+    # is *supposed* to be a bare file/class path.
+    "evidence_columns": ("evidence",),
+
+    # Table columns the skeletons mark as required-substantive: a literal
+    # placeholder token in one of these is never acceptable. Matching is on the
+    # column's header text, so a framework that renames a column simply opts out
+    # rather than misfiring. Three deliberate omissions: `Prerequisite` (`None`
+    # is one of its five fixed legal values), and the broad `Description` /
+    # `Configuration` columns, where a bare `N/A` is often the honest answer
+    # ("Analysis Scope | Time budget | N/A"). This list is also what makes a
+    # table "threat-shaped" for check 18's per-file aggregate.
+    "substantive_columns": (
+        "evidence", "mitigation", "threat", "residual risk", "control",
+        "attack vector", "justification", "business impact",
+    ),
+
+    # Cells that are *exactly* one of these (after cleaning, lowercasing and
+    # trimming decorative punctuation) are placeholders. Substring matching is
+    # deliberately not used: "TBD — owner to confirm by Q3" is a real note, and
+    # only a bare "TBD" is a placeholder.
+    "placeholder_tokens": (
+        "tbd", "t.b.d", "tba", "to be determined", "to be decided", "todo",
+        "to do", "n/a", "n.a", "not applicable", "see above", "see below",
+        "see code", "see codebase", "see source", "see the code", "as above",
+        "same as above", "fixme", "xxx", "?", "??", "???", "placeholder",
+        "pending", "unknown", "unspecified", "not specified", "not determined",
+    ),
+
+    # "None identified" is an explicitly legitimate, complete entry (SKILL.md
+    # §4) — one or two per table proves the pass happened and found nothing.
+    # Only a table in which *every* row says it means the pass never ran, so the
+    # cap defaults to 0.95: below 1.0 nothing fires. Lower it for a stricter run.
+    "none_identified_max_fraction": 0.95,
+    # Tables smaller than this are never judged: a 3-row table that is all
+    # "none identified" is an ordinary sparse component.
+    "none_identified_min_rows": 6,
+    # The same cap applied to a whole file's threat-shaped tables, which catches
+    # the suite-wide vacuous pass that per-table sparsity hides. Higher floor
+    # because it aggregates.
+    "none_identified_min_rows_file": 12,
+
+    # Minimum substantive characters in a narrative (`kind: "prose"`) section
+    # from the scaffold manifest. One short sentence clears it; "TBD." or
+    # "See findings." does not.
+    "min_prose_chars": 40,
+    # Manifest keys exempt from the prose floor — sections whose complete,
+    # correct fill is legitimately a single short token. The deployment
+    # classification is exactly one of four fixed words.
+    "prose_floor_exempt_keys": ("deployment-classification",),
+}
+
+# A cell that says the pass ran and found nothing: "none identified",
+# "none identified — no auth surface", "No Tier 1 threats identified".
+NONE_IDENTIFIED_RE = re.compile(
+    r"\bnone\s+identified\b|\bnot\s+identified\b|\bno\b[\w\s-]{0,40}\bidentified\b",
+    re.I)
+
+# A citation that pins a location: `auth.go:88`, `#L88`, `L88`, `lines 20-40`.
+LINE_NUMBER_RE = re.compile(r":\d+|#L\d+|\bL\d+\b|\blines?\s+\d+", re.I)
+
+# A single token that is only a path/filename. `internal/server/auth.go` and
+# `config.yaml` match; `newEngine()` (parens), `provider.small_model` (no
+# short extension) and `.env` (no stem) do not.
+PATHY_TOKEN_RE = re.compile(r"^[\w./\\@~+-]+$")
+FILE_EXT_RE = re.compile(r"[^/\\.]\.[A-Za-z0-9]{1,6}$")
+
+MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 
 
 # --------------------------------------------------------------------------- #
@@ -972,6 +1076,302 @@ def check_section_bodies_nonempty(suite):
     return ("section-bodies-nonempty", not fails, sorted(fails))
 
 
+# --------------------------------------------------------------------------- #
+# Substance-floor helpers (P52.8)
+# --------------------------------------------------------------------------- #
+
+def link_text(text):
+    """Replace markdown links `[text](url)` with just their link text."""
+    return MD_LINK_RE.sub(r"\1", text)
+
+
+def norm_cell(cell):
+    """Cleaned cell text, lowercased and stripped of decorative punctuation.
+
+    The normal form a placeholder token is compared against: `**TBD**`,
+    `` `TBD` ``, `— TBD —` and `TBD.` all reduce to `tbd`, while anything with
+    a real word beside the token keeps it and therefore never matches.
+    """
+    t = link_text(clean_cell(cell)).lower()
+    t = re.sub(r"\s+", " ", t).strip()
+    return t.strip(" \t*_`~\"'()[]{}<>.,;:!—–-")
+
+
+def is_none_identified_row(cells):
+    """True when any cell of a row records an explicit "none identified" entry."""
+    return any(NONE_IDENTIFIED_RE.search(clean_cell(c)) for c in cells)
+
+
+def evidence_is_cited(cell):
+    """True unless the cell is a bare filename with nothing else beside it.
+
+    SKILL.md §3 requires every threat to name "the file, config, or code path
+    that makes it real", and the skeletons' POST-TABLE-CHECK spells it out. A
+    bare `internal/server/auth.go` names a file but pins nothing inside it; a
+    line number, a symbol, a config key or any accompanying prose does.
+
+    Biased hard toward passing — it returns True for anything but the single
+    unambiguous shape:
+      * empty  -> True (a hollow table is check 15's business, not this one);
+      * carries a line number (`auth.go:88`, `#L88`, `lines 20-40`) -> True;
+      * more than one word (`config key provider.small_model`, `auth.go —
+        Authenticate() has no rate limit`) -> True;
+      * a single token that is not path-shaped (`newEngine()`, `Dockerfile`,
+        `provider.small_model`, `.env`) -> True.
+    """
+    text = link_text(clean_cell(cell)).strip()
+    if not text:
+        return True
+    if LINE_NUMBER_RE.search(text):
+        return True
+    if len(text.split()) > 1:
+        return True
+    if not PATHY_TOKEN_RE.match(text):
+        return True
+    return not ("/" in text or "\\" in text or FILE_EXT_RE.search(text))
+
+
+def substantive_rows(table):
+    """Data rows of a table minus the ones other checks own.
+
+    Skips a row still carrying skeleton syntax (check 1's) and a row that is a
+    verbatim echo of its own header (check 14's), so a single authoring mistake
+    is never reported by three checks at once.
+    """
+    head = [clean_cell(c) for c in table["header"]]
+    out = []
+    for cells, lineno in table["rows"]:
+        if is_placeholder(cells):
+            continue
+        if [clean_cell(c) for c in cells] == head:
+            continue
+        out.append((cells, lineno))
+    return out
+
+
+def region_prose_chars(lines, start, end):
+    """Substantive character count of a body region.
+
+    Counts exactly what `region_substance` calls content — prose, list items,
+    model-authored headings, table *data* rows and fenced-block bodies — and
+    ignores what it calls structure: blank lines, lone HTML comments (the
+    scaffold's guidance comments survive the fill by design), horizontal rules,
+    bare table headers/separators and the fence markers themselves.
+    """
+    region = lines[start:end]
+    data_rows = set()
+    for t in parse_tables(region):
+        for _, ln in t["rows"]:
+            data_rows.add(ln)               # 1-based within the region
+    total = 0
+    in_fence = False
+    for idx, raw in enumerate(region, 1):
+        s = raw.strip()
+        if FENCE_RE.match(s):
+            in_fence = not in_fence
+            continue
+        if not s or "<!-- PENDING" in s:
+            continue
+        if in_fence:
+            total += len(s)
+            continue
+        if HTML_COMMENT_LINE_RE.match(s) or HRULE_RE.match(s):
+            continue
+        if s.startswith("|"):
+            if idx in data_rows:
+                total += len(s)
+            continue
+        total += len(s)
+    return total
+
+
+def check_evidence_cells_cited(suite):
+    """16. Every Evidence cell pins a location, not just a file.
+
+    SKILL.md §3 requires each threat to cite "the file, config, or code path
+    that makes it real", and every framework skeleton's POST-TABLE-CHECK repeats
+    it — but nothing checked it, so a suite whose Evidence column is a column of
+    bare filenames passed clean. This asserts the weakest form of the rule that
+    is still worth asserting: a cell that is *only* a filename, with no line
+    number, symbol, config key or accompanying prose, is not a citation.
+
+    Under-flagging by construction (see `evidence_is_cited`): an empty cell, a
+    multi-word cell, a symbol, a config key and anything carrying a line number
+    all pass. Rows explicitly recording "none identified" are skipped — a
+    complete entry for a category with no threat has nothing to cite.
+    """
+    fails = []
+    columns = tuple(c.lower() for c in SUBSTANCE["evidence_columns"])
+    for name in SUITE_FILES:
+        base = suite.base(name)
+        for t in suite.tables(name):
+            for cname in columns:
+                idx = col_index(t["header"], cname)
+                if idx is None:
+                    continue
+                label = clean_cell(t["header"][idx])
+                for cells, lineno in substantive_rows(t):
+                    if idx >= len(cells) or is_none_identified_row(cells):
+                        continue
+                    if evidence_is_cited(cells[idx]):
+                        continue
+                    fails.append(ev(base, lineno,
+                                    "%s cell %r is a bare filename — cite a line "
+                                    "number, symbol, or config key (SKILL.md §3)"
+                                    % (label, clean_cell(cells[idx]))))
+    return ("evidence-cells-cited", not fails, sorted(fails))
+
+
+def check_no_placeholder_cells(suite):
+    """17. No required-substantive cell is a bare placeholder token.
+
+    `TBD`, `TODO`, `N/A`, `see above`, `see code` in an Evidence, Mitigation,
+    Threat, Residual-risk, Control, Attack-vector, Justification or
+    Business-impact cell is an unwritten cell wearing a word. Check 1 only
+    catches the *skeleton's* markers; a model that types `TBD` itself defeats it.
+
+    Matching is exact against the cleaned, lowercased, punctuation-trimmed cell
+    (`SUBSTANCE["placeholder_tokens"]`), never a substring: "TBD — owner to
+    confirm" is a real note and passes, "**TBD**" does not. Columns are matched
+    by header text, so a renamed column opts out rather than misfiring, and
+    "none identified" rows are skipped as the legitimate entries they are.
+    """
+    fails = []
+    wanted = set(c.lower() for c in SUBSTANCE["substantive_columns"])
+    tokens = set(t.lower() for t in SUBSTANCE["placeholder_tokens"])
+    for name in SUITE_FILES:
+        base = suite.base(name)
+        for t in suite.tables(name):
+            for idx, raw_head in enumerate(t["header"]):
+                label = clean_cell(raw_head)
+                if label.lower() not in wanted:
+                    continue
+                for cells, lineno in substantive_rows(t):
+                    if idx >= len(cells) or is_none_identified_row(cells):
+                        continue
+                    if norm_cell(cells[idx]) not in tokens:
+                        continue
+                    fails.append(ev(base, lineno,
+                                    "%s cell %r is a placeholder, not content"
+                                    % (label, clean_cell(cells[idx]))))
+    return ("no-placeholder-cells", not fails, sorted(fails))
+
+
+def check_none_identified_fraction(suite):
+    """18. A table is not allowed to be nothing but "none identified".
+
+    "none identified" is an explicitly valid, complete entry (SKILL.md §4) and
+    the skeletons require one rather than a missing cell — so one or two per
+    table is exactly right and must never fail. Twelve out of twelve means the
+    analysis pass never happened.
+
+    Two rules, same cap (`none_identified_max_fraction`, default 0.95 — i.e.
+    below 1.0 nothing fires at all):
+      * per table, once it has at least `none_identified_min_rows` rows, so an
+        ordinary sparse 3-row component table is never judged;
+      * per file, aggregated over that file's *threat-shaped* tables (the ones
+        carrying a required-substantive column, so a Summary table of counts
+        does not dilute the measure), once it has at least
+        `none_identified_min_rows_file` rows. This catches the suite-wide
+        vacuous pass that per-table sparsity would otherwise hide.
+    The file rule is suppressed when a table in that file already failed, so one
+    problem is reported once, at the tighter location.
+    """
+    fails = []
+    cap = SUBSTANCE["none_identified_max_fraction"]
+    min_rows = SUBSTANCE["none_identified_min_rows"]
+    min_rows_file = SUBSTANCE["none_identified_min_rows_file"]
+    wanted = set(c.lower() for c in SUBSTANCE["substantive_columns"])
+
+    for name in SUITE_FILES:
+        base = suite.base(name)
+        file_total = 0
+        file_none = 0
+        table_failed = False
+        for t in suite.tables(name):
+            head = [clean_cell(c) for c in t["header"]]
+            rows = substantive_rows(t)
+            total = len(rows)
+            none = sum(1 for cells, _ in rows if is_none_identified_row(cells))
+            if total >= min_rows and none > cap * total:
+                table_failed = True
+                fails.append(ev(base, t["line"],
+                                "table [%s]: %d of %d rows are \"none identified\" "
+                                "(%.0f%% > %.0f%% cap) — the analysis pass never "
+                                "ran for this table"
+                                % (" | ".join(head), none, total,
+                                   100.0 * none / total, 100.0 * cap)))
+            if any(h.lower() in wanted for h in head):
+                file_total += total
+                file_none += none
+        if (not table_failed and file_total >= min_rows_file
+                and file_none > cap * file_total):
+            fails.append(ev(base, 0,
+                            "%d of %d threat-table rows in this file are \"none "
+                            "identified\" (%.0f%% > %.0f%% cap) — the analysis "
+                            "pass never ran"
+                            % (file_none, file_total,
+                               100.0 * file_none / file_total, 100.0 * cap)))
+    return ("none-identified-fraction", not fails, sorted(fails))
+
+
+def check_prose_sections_substantive(suite):
+    """19. Every narrative section the manifest names carries at least a sentence.
+
+    Check 15 proves a scaffolded section is not *empty*; it passes on an
+    Executive Summary reading "TBD." or a System Purpose reading "See below."
+    This adds the smallest possible length floor on top, over exactly the
+    `kind: "prose"` entries of `scaffold.py`'s `.scaffold-manifest.json` (P52.7)
+    — the narrative sections, never the tables.
+
+    Same conservative posture as check 15, and the same skips so a site is never
+    reported twice:
+      * no manifest (a pre-P52.7 or resumed suite) -> pass;
+      * a manifest heading the file no longer has -> skipped;
+      * a section whose marker is still there -> skipped, check 1 owns it;
+      * a section with no substance at all -> skipped, check 15 owns it;
+      * a key in `prose_floor_exempt_keys` -> skipped (the deployment
+        classification's complete, correct fill is one of four fixed words).
+    """
+    manifest = suite.manifest()
+    if manifest is None:
+        return ("prose-sections-substantive", True, [])
+
+    fails = []
+    floor = SUBSTANCE["min_prose_chars"]
+    exempt = set(SUBSTANCE["prose_floor_exempt_keys"])
+    for entry in manifest:
+        if entry["kind"] != "prose" or entry["key"] in exempt:
+            continue
+        base = entry["file"]
+        logical = suite.logical(base)
+        if logical is None:
+            continue
+        lines = suite.lines(logical)
+        if not lines:
+            continue
+        marker = "<!-- PENDING: %s -->" % entry["key"]
+        if any(marker in ln for ln in lines):
+            continue                        # check 1 owns the unfilled case
+        head_line = find_heading(lines, entry["heading"], entry["level"])
+        if head_line is None:
+            continue
+        start, end = section_region(lines, head_line, entry["level"],
+                                    entry["to_eof"])
+        has_content, has_pending = region_substance(lines, start, end)
+        if has_pending or not has_content:
+            continue                        # checks 1 and 15 own these
+        chars = region_prose_chars(lines, start, end)
+        if chars >= floor:
+            continue
+        fails.append(ev(base, head_line,
+                        '%s "%s" section holds %d characters of content '
+                        "(minimum %d) — write the narrative, not a stub"
+                        % ("#" * entry["level"], entry["heading"], chars,
+                           floor)))
+    return ("prose-sections-substantive", not fails, sorted(fails))
+
+
 def check_coverage_matches_related_threats(suite):
     """13. Every coverage-table mapping Tx -> FIND-n agrees with FIND-n's own
     "Related Threats" attribute row.
@@ -1063,7 +1463,44 @@ ALL_CHECKS = [
     # (internal/cli/chat_phased.go's contentSubstanceChecks), and renaming it
     # would silently drop that routing.
     check_section_bodies_nonempty,
+    # P52.8 — the mechanical substance floor. Appended, again, so no existing
+    # check name moves. These are the only checks that judge *content* rather
+    # than structure, and they are deliberately weak: see SUBSTANCE.
+    check_evidence_cells_cited,
+    check_no_placeholder_cells,
+    check_none_identified_fraction,
+    check_prose_sections_substantive,
 ]
+
+
+def _apply_substance_overrides(args):
+    """Fold the `--*` substance-floor flags into the module-level SUBSTANCE dict.
+
+    Overriding the module dict (rather than threading a config object through
+    every check) keeps the `check(suite) -> (name, ok, evidence)` signature that
+    all nineteen checks share. A flag left unset changes nothing; a
+    comma-separated list flag *replaces* the default tuple, and an empty value
+    disables that rule entirely.
+    """
+    def csv(value):
+        return tuple(p.strip().lower() for p in value.split(",") if p.strip())
+
+    if args.min_prose_chars is not None:
+        SUBSTANCE["min_prose_chars"] = args.min_prose_chars
+    if args.none_identified_max_fraction is not None:
+        SUBSTANCE["none_identified_max_fraction"] = args.none_identified_max_fraction
+    if args.none_identified_min_rows is not None:
+        SUBSTANCE["none_identified_min_rows"] = args.none_identified_min_rows
+    if args.none_identified_min_rows_file is not None:
+        SUBSTANCE["none_identified_min_rows_file"] = args.none_identified_min_rows_file
+    if args.evidence_columns is not None:
+        SUBSTANCE["evidence_columns"] = csv(args.evidence_columns)
+    if args.substantive_columns is not None:
+        SUBSTANCE["substantive_columns"] = csv(args.substantive_columns)
+    if args.placeholder_tokens is not None:
+        SUBSTANCE["placeholder_tokens"] = csv(args.placeholder_tokens)
+    if args.prose_floor_exempt_keys is not None:
+        SUBSTANCE["prose_floor_exempt_keys"] = csv(args.prose_floor_exempt_keys)
 
 
 # --------------------------------------------------------------------------- #
@@ -1077,7 +1514,46 @@ def main(argv=None):
     ap.add_argument("run_dir", help="completed threat-model run directory")
     ap.add_argument("--quiet", action="store_true",
                     help="print only FAIL checks and the summary line")
+
+    sub = ap.add_argument_group(
+        "substance floor (P52.8)",
+        "Thresholds for checks 16-19. Defaults are deliberately permissive — "
+        "a false failure costs a verify bounce and erodes trust in every other "
+        "check. Lower them for a stricter run.")
+    sub.add_argument("--min-prose-chars", type=int, default=None, metavar="N",
+                     help="minimum substantive characters in a manifest prose "
+                          "section (default %d)" % SUBSTANCE["min_prose_chars"])
+    sub.add_argument("--none-identified-max-fraction", type=float, default=None,
+                     metavar="F",
+                     help="max fraction of a table's rows that may read \"none "
+                          "identified\" (default %.2f)"
+                          % SUBSTANCE["none_identified_max_fraction"])
+    sub.add_argument("--none-identified-min-rows", type=int, default=None,
+                     metavar="N",
+                     help="smallest table the fraction cap applies to "
+                          "(default %d)" % SUBSTANCE["none_identified_min_rows"])
+    sub.add_argument("--none-identified-min-rows-file", type=int, default=None,
+                     metavar="N",
+                     help="smallest per-file row total the fraction cap applies "
+                          "to (default %d)"
+                          % SUBSTANCE["none_identified_min_rows_file"])
+    sub.add_argument("--evidence-columns", default=None, metavar="A,B",
+                     help="columns whose cells must carry a citation "
+                          "(default %s)" % ",".join(SUBSTANCE["evidence_columns"]))
+    sub.add_argument("--substantive-columns", default=None, metavar="A,B",
+                     help="columns in which a bare placeholder token is a "
+                          "failure (default: %s)"
+                          % ",".join(SUBSTANCE["substantive_columns"]))
+    sub.add_argument("--placeholder-tokens", default=None, metavar="A,B",
+                     help="cell texts treated as placeholders "
+                          "(default: %s)" % ",".join(SUBSTANCE["placeholder_tokens"]))
+    sub.add_argument("--prose-floor-exempt-keys", default=None, metavar="A,B",
+                     help="manifest keys exempt from the prose length floor "
+                          "(default: %s)"
+                          % ",".join(SUBSTANCE["prose_floor_exempt_keys"]))
+
     args = ap.parse_args(argv)
+    _apply_substance_overrides(args)
 
     # The report uses a few Unicode glyphs; force UTF-8 so output is identical
     # on every platform (Windows cp1252 would otherwise crash on them).

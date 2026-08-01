@@ -367,11 +367,16 @@ type model struct {
 	// framework picker opens through to the follow-up dispatch once a
 	// framework is chosen.
 	pendingThreatModelTarget string
-	helpOpen                 bool
-	quitConfirm              bool // P16.6: confirm before quitting while a turn is streaming
-	activeToast              *toast
-	completion               completionState
-	approval                 *approvalState // non-nil while engine is blocked waiting for user approval
+	// pendingThreatModelUnattended carries the P52.12 `unattended` flag across
+	// the same gap. Without it the flag is parsed, then thrown away the moment
+	// the picker opens, and "/threat-model unattended" — the no-framework form,
+	// which is the common one — silently runs interactively instead.
+	pendingThreatModelUnattended bool
+	helpOpen                     bool
+	quitConfirm                  bool // P16.6: confirm before quitting while a turn is streaming
+	activeToast                  *toast
+	completion                   completionState
+	approval                     *approvalState // non-nil while engine is blocked waiting for user approval
 
 	// P16.1 attention system: notifyMode is parsed once from config/session
 	// state; focused tracks terminal focus (via tea.FocusMsg/BlurMsg) so
@@ -911,6 +916,42 @@ func (m model) startStream(text string, images []api.ImageInput) tea.Cmd {
 			return errMsg{err}
 		}
 		return streamStartedMsg{ch: ch, cancel: cancel}
+	}
+}
+
+// startDrive begins a phased skill drive (P52.12), the unattended counterpart
+// to startStream. It streams over the same SSE seam, so every event the
+// transcript already knows how to render arrives unchanged and nothing
+// downstream of here has to distinguish a drive from a turn.
+//
+// Two things differ from a message. The run is marked resumable, because a
+// phased build is the case that most wants to outlive a dropped connection —
+// a multi-hour local-model run should not die because a terminal did. That
+// choice would otherwise break interrupt (a resumable run keeps executing
+// server-side when its request context is cancelled), so the returned cancel
+// stops the run through the daemon *first* and only then closes the stream.
+// Every existing cancel site — ESC, Ctrl+C, /quit — calls that same handle, so
+// they all keep meaning "stop this run" without knowing a drive is behind it.
+func (m model) startDrive(req api.DriveRequest) tea.Cmd {
+	cl, id := m.cfg.Client, m.cfg.SessionID
+	req.GuardEnabled = m.slash.guardEnabled
+	req.Resumable = true
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		ch, err := cl.Drive(ctx, id, req)
+		if err != nil {
+			cancel()
+			return errMsg{err}
+		}
+		stop := func() {
+			sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer scancel()
+			// Best-effort: a run that already finished has nothing to stop, and
+			// the cancel below is what actually ends this client's stream.
+			_ = cl.StopRun(sctx, id)
+			cancel()
+		}
+		return streamStartedMsg{ch: ch, cancel: stop}
 	}
 }
 

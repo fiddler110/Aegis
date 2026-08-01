@@ -81,7 +81,7 @@ func (t *yamlValidateTool) Execute(ctx context.Context, input json.RawMessage) (
 	}
 	// Same workspace confinement (and symlink resolution) as every other
 	// file-touching builtin.
-	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
+	abs, err := resolveRead(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}

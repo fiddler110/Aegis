@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { api, consumeSSE, exchangeToken } from "./api";
 import type {
   BGEventItem,
+  DriveSkillInfo,
+  DriveSkillsResponse,
   Event,
   Message,
   PersonaInfo,
@@ -127,6 +129,7 @@ export function App() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [watching, setWatching] = useState(false);
+  const [driveSkills, setDriveSkills] = useState<DriveSkillInfo[]>([]);
   const [phaseLabel, setPhaseLabel] = useState("Thinking");
   const [elapsed, setElapsed] = useState(0);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -257,6 +260,22 @@ export function App() {
     setItems(itemsFromMessages(sess.messages || [], id));
     loadSessions();
     loadRuns();
+    loadDriveSkills(id);
+  };
+
+  // loadDriveSkills fetches which skills this session can drive (P52.12). Per
+  // session rather than once globally: skills are resolved against the
+  // session's own workspace, so a chat pinned to a different project offers a
+  // different set. A failure just leaves the drive control hidden — it is an
+  // affordance, not something the chat depends on.
+  const loadDriveSkills = async (id: string) => {
+    try {
+      const body = (await (await api(`/sessions/${id}/drive`)).json()) as DriveSkillsResponse;
+      setDriveSkills(body.skills || []);
+    } catch (e) {
+      console.error(e);
+      setDriveSkills([]);
+    }
   };
 
   const archiveSession = async (id: string) => {
@@ -515,15 +534,31 @@ export function App() {
         case "error":
           updateAsst((blocks) => [...blocks, { kind: "error", text: "Error: " + (ev.error || "") }]);
           break;
+        case "notice":
+          // P52.12: a phased drive narrates its phase boundaries, overflow
+          // resets and stalls as notices, and they are the only progress signal
+          // a multi-hour build produces between tool calls. Rendered inline
+          // rather than as a toast so the transcript keeps the order in which
+          // things actually happened.
+          if (ev.text) {
+            finishThinking();
+            updateAsst((blocks) => [...blocks, { kind: "notice", text: ev.text as string }]);
+          }
+          break;
         default:
-          break; // turn_done/done/steer/guard/notice: parity no-ops for now
+          break; // turn_done/done/steer/guard: parity no-ops for now
       }
     };
 
     return { handleEvent, finish: finishThinking };
   };
 
-  const send = async () => {
+  // send posts the composer's text as an ordinary turn, or — when driveSkill is
+  // given (P52.12) — as a phased drive of that skill with the text as the task.
+  // One function rather than two because everything around the request is the
+  // same: the optimistic echo, the event sink, the resumable-run stop/reconnect
+  // handling, and the post-run refresh. Only the endpoint and body differ.
+  const send = async (driveSkill?: string) => {
     const text = input.trim();
     if (!text || streaming || !currentId) return;
     setInput("");
@@ -552,32 +587,38 @@ export function App() {
     // going server-side (every web UI send is resumable), so it's worth
     // reattaching instead of just giving up with a terminal error.
     let reconnect = false;
+    // started distinguishes "the run began and the connection died" from "the
+    // daemon rejected the request outright". Only the first is worth
+    // reattaching to; the second has no server-side run to reattach to, and
+    // reporting it as a lost connection would hide the actual reason. A drive
+    // makes this the common failure — asking for a skill with no phase plan is
+    // refused by design — where a plain message could only fail this way on a
+    // spend cap or a bad session.
+    let started = false;
     try {
-      const r = await api(`/sessions/${sessionId}/messages`, {
+      const r = await api(`/sessions/${sessionId}/${driveSkill ? "drive" : "messages"}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, resumable: true }),
+        body: JSON.stringify(
+          driveSkill ? { skill: driveSkill, task: text, resumable: true } : { text, resumable: true }
+        ),
         signal: controller.signal,
       });
+      started = true;
       await consumeSSE(r, sink.handleEvent);
     } catch (e) {
       sink.finish();
       const err = e as Error;
       const stopped = err.name === "AbortError";
-      reconnect = !stopped;
+      reconnect = !stopped && started;
+      const text = stopped
+        ? "Stopped."
+        : started
+          ? "Connection lost — reconnecting…"
+          : err.message || "Request failed.";
       setItems((prev) =>
         prev.map((it) =>
-          it.id === asstId
-            ? {
-                ...it,
-                blocks: [
-                  ...it.blocks,
-                  stopped
-                    ? { kind: "error", text: "Stopped." }
-                    : { kind: "error", text: "Connection lost — reconnecting…" },
-                ],
-              }
-            : it
+          it.id === asstId ? { ...it, blocks: [...it.blocks, { kind: "error", text }] } : it
         )
       );
     } finally {
@@ -908,7 +949,9 @@ export function App() {
           onChange={setInput}
           disabled={!currentId || watching || detachedRun}
           streaming={streaming}
-          onSend={send}
+          driveSkills={driveSkills}
+          onSend={() => send()}
+          onDrive={(skill) => send(skill)}
           onStop={() => {
             controllerRef.current?.abort();
             // Every web UI send is resumable (P28.5): its context no longer

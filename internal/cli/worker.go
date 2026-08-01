@@ -195,6 +195,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		MaxTokensPerRun: maxTokensPerRun,
 		Model:           model,
 		MaxTokens:       cfg.Provider.MaxTokens,
+		ExtraRoots:      driveExtraRoots(cwd, cfg, logger),
 	})
 	if err != nil {
 		return "", cost.Snapshot{}, err

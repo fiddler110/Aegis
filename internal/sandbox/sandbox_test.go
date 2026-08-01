@@ -12,8 +12,27 @@ import (
 
 // --- path validator tests ---
 
+// tempRoot is t.TempDir() with symlinks already resolved. ValidatePath returns
+// the symlink-*resolved* path by design — that is the path a caller must open
+// to avoid a TOCTOU swap of a link under it — so a test comparing its result
+// against a raw t.TempDir() is comparing against the wrong thing on any host
+// where the temp dir is reached through a link. macOS is exactly that host:
+// /var is a symlink to /private/var, so t.TempDir() hands back /var/folders/…
+// while ValidatePath correctly returns /private/var/folders/…. Resolving the
+// expectation here (rather than teaching ValidatePath to return the unresolved
+// path, which would defeat its purpose) keeps these tests hermetic across
+// platforms — the same test-side hermeticity problem P48.1 fixed for config.
+func tempRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return root
+}
+
 func TestValidatePathBasic(t *testing.T) {
-	root := t.TempDir()
+	root := tempRoot(t)
 	// Create a file inside root.
 	inner := filepath.Join(root, "src", "main.go")
 	os.MkdirAll(filepath.Dir(inner), 0o755)
@@ -29,7 +48,7 @@ func TestValidatePathBasic(t *testing.T) {
 }
 
 func TestValidatePathAbsolute(t *testing.T) {
-	root := t.TempDir()
+	root := tempRoot(t)
 	inner := filepath.Join(root, "file.txt")
 	os.WriteFile(inner, []byte("hi"), 0o644)
 
@@ -91,7 +110,7 @@ func TestValidatePathWindowsCaseInsensitive(t *testing.T) {
 }
 
 func TestValidatePathNewFile(t *testing.T) {
-	root := t.TempDir()
+	root := tempRoot(t)
 	os.MkdirAll(filepath.Join(root, "src"), 0o755)
 
 	// File doesn't exist yet, but parent does.

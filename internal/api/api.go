@@ -141,6 +141,60 @@ type PostMessageRequest struct {
 	Resumable bool `json:"resumable,omitempty"`
 }
 
+// DriveRequest starts an unattended phased skill drive in a session
+// (POST /sessions/{id}/drive, P52.12).
+//
+// It streams over the same SSE seam as POST /sessions/{id}/messages, so no new
+// transport is involved — the difference is what runs behind it: instead of one
+// engine.Run over one growing conversation, the daemon runs the skill's phase
+// plan, each phase in its own fresh context, with the local-model machinery
+// (context escalation, backend-liveness resume, hollow-body re-entry, the
+// no-progress guard) that until now only `aegis chat --skill` could reach.
+type DriveRequest struct {
+	// Skill names the skill to drive. It must have a phase plan — a built-in
+	// one, or a `phases:` list in its own frontmatter — or the request is
+	// rejected rather than silently falling back to a single-context run,
+	// which is the failure mode the phased drive exists to avoid.
+	Skill string `json:"skill"`
+	// Task is the build request, e.g. "threat model this repository".
+	Task string `json:"task"`
+	// MaxTurns bounds each phase's turn budget. Zero uses the daemon default.
+	MaxTurns int `json:"max_turns,omitempty"`
+	// GuardEnabled overrides output_guard.enabled for the drive, as on a
+	// normal turn. A drive usually wants it off — the guard judges a final
+	// answer, and a phase's "answer" is the files it wrote.
+	GuardEnabled *bool `json:"guard_enabled,omitempty"`
+	// Resumable opts the drive into surviving an SSE drop, exactly as on
+	// PostMessageRequest. A multi-hour unattended build is the case this
+	// matters most for, so a client that is not holding a terminal open
+	// should set it — and then stop the run via POST /sessions/{id}/stop.
+	Resumable bool `json:"resumable,omitempty"`
+}
+
+// DriveSkillsResponse lists the skills a session can actually drive
+// (GET /sessions/{id}/drive, P52.12) — those with a built-in phase plan or a
+// `phases:` frontmatter list, resolved against that session's own workspace so
+// project-local skills are included.
+//
+// A UI needs this because "which skills are phased" is not derivable from the
+// skill catalog it already has: /config/skills lists the embedded built-ins,
+// not project skills, and neither reports a phase plan. Without it a drive
+// control could only offer a free-text skill name and report the mistake after
+// a round trip.
+type DriveSkillsResponse struct {
+	Skills []DriveSkillInfo `json:"skills"`
+}
+
+// DriveSkillInfo describes one drivable skill.
+type DriveSkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Phases is the number of content phases in the plan, before the verify and
+	// quality round the drive always adds — enough for a UI to say what it is
+	// about to start.
+	Phases int `json:"phases"`
+}
+
 // ImageInput attaches an image to a user turn. Provide either a Path (the daemon
 // reads and base64-encodes the file, detecting its media type) or inline base64
 // Data with an explicit MediaType. Path is convenient for the local TUI/CLI;

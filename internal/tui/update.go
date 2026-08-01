@@ -171,6 +171,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if c.kind == dialogThreatModelPicker {
 				m.pendingThreatModelTarget = ""
+				m.pendingThreatModelUnattended = false
 			}
 			return m, nil
 		}
@@ -212,10 +213,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case dialogThreatModelPicker:
 				item := sel.item.(frameworkItem)
 				target := m.pendingThreatModelTarget
+				unattended := m.pendingThreatModelUnattended
 				m.pendingThreatModelTarget = ""
+				m.pendingThreatModelUnattended = false
 				args := strings.Fields(item.name) // splits "NIST 800-154" into the two tokens extractThreatModelFramework expects
 				if target != "" {
 					args = append(args, target)
+				}
+				if unattended {
+					// Re-stated as the token the handler parses, so the picker
+					// path and the typed-framework path go through exactly one
+					// piece of flag-parsing code (P52.12).
+					args = append(args, "unattended")
 				}
 				parsed := &commands.ParsedCommand{Name: "threat-model", Args: args, Raw: "/threat-model " + strings.Join(args, " ")}
 				return m, m.handleSlashCommand(parsed)
@@ -1001,6 +1010,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			picker := newThreatModelFrameworkPicker(m.width, m.height)
 			m.dialog = &picker
 			m.pendingThreatModelTarget = *msg.ThreatModelTarget
+			m.pendingThreatModelUnattended = msg.ThreatModelUnattended
 			return m, nil
 		}
 		if msg.Output == "\x00wizard" {
@@ -1231,6 +1241,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				style = m.th.errLine
 			}
 			m.transcript.Append(style.Render(msg.Output) + "\n\n")
+		}
+		if msg.Drive != nil {
+			// P52.12: an unattended phased drive. The transcript treats it as an
+			// ordinary turn — the task is what the user asked for, and the
+			// daemon's first notice event announces the phase plan — so only the
+			// command that starts it differs from the Message branch below.
+			m.appendUser(msg.Drive.Task, nil)
+			m.beginStream()
+			m.followBottom = true
+			m.refresh()
+			return m, tea.Batch(m.startDrive(*msg.Drive), m.sp.Tick)
 		}
 		if msg.Message != "" {
 			m.appendUser(msg.Message, nil)

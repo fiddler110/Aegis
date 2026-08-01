@@ -638,8 +638,31 @@ func (c *Client) PostMessage(ctx context.Context, id, text string) (<-chan api.E
 // PostMessageReq is like PostMessage but takes the full request, allowing image
 // attachments and other fields to be set.
 func (c *Client) PostMessageReq(ctx context.Context, id string, reqBody api.PostMessageRequest) (<-chan api.Event, error) {
+	return c.postSSE(ctx, "/sessions/"+id+"/messages", reqBody)
+}
+
+// Drive starts an unattended phased skill drive in a session (P52.12) and
+// streams its events over the same SSE seam a message uses — so a caller
+// renders a drive exactly the way it renders a turn, and needs no new
+// transport, event kinds, or reconnect logic.
+func (c *Client) Drive(ctx context.Context, id string, reqBody api.DriveRequest) (<-chan api.Event, error) {
+	return c.postSSE(ctx, "/sessions/"+id+"/drive", reqBody)
+}
+
+// DriveSkills lists the skills this session can drive — those with a phase
+// plan, resolved against the session's own workspace (P52.12).
+func (c *Client) DriveSkills(ctx context.Context, id string) ([]api.DriveSkillInfo, error) {
+	var out api.DriveSkillsResponse
+	if err := c.do(ctx, http.MethodGet, "/sessions/"+id+"/drive", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Skills, nil
+}
+
+// postSSE POSTs a JSON body and returns the response's SSE event stream.
+func (c *Client) postSSE(ctx context.Context, path string, reqBody any) (<-chan api.Event, error) {
 	body, _ := json.Marshal(reqBody)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/sessions/"+id+"/messages", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

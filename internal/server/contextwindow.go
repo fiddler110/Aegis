@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/ollamainfo"
 )
@@ -15,18 +16,109 @@ import (
 // truncated from the front (system prompt first). So when the provider is —
 // or the base URL turns out to be — an Ollama server, the daemon queries the
 // native API for the served context and reconciles it with config.
+//
+// P52.1: that number is resolved *per model*, not once per server. The model a
+// turn runs on is resolved per turn (session /model override > persona config
+// override > persona file Model > global, plus small-model task routing), so a
+// single server-wide window detected against cfg.Provider.Model enforced the
+// wrong ceiling in both directions: too small for a persona pinning a
+// larger-context model (burning summarizer calls on a conversation that had
+// room), and — the failure this subsystem exists to prevent — too large for a
+// persona-pinned or routed small model, where the engine believes it has
+// headroom, never compacts, and Ollama silently drops the system prompt.
+
+// ctxWinDetectTimeout bounds the first-use detection for a model the daemon
+// hasn't seen before. The probes are cheap local GETs against the server the
+// turn is about to hit anyway (ollamainfo applies its own per-call timeouts on
+// top), but a turn must never hang on them.
+const ctxWinDetectTimeout = 5 * time.Second
+
+// ctxWinEntry is one model's resolved effective window. final marks the value
+// authoritative — a loaded-model /api/ps reading, or an explicitly configured
+// window on a backend with nothing to detect. Each model carries its own final
+// state (P52.1) because a model that hasn't been loaded yet only yields a
+// modelfile/default guess, so its entry stays non-final and re-detects after
+// the first run that loads it, independently of every other model's.
+type ctxWinEntry struct {
+	win   int
+	src   string
+	final bool
+	// max is the model's training-context maximum, when the backend reports
+	// one. It is the ceiling the phased drive's P47.5b escalation climbs
+	// toward — recorded here rather than re-probed because a daemon-hosted
+	// drive (P52.12) needs it mid-run, where a synchronous probe would stall
+	// the very turn that just overflowed.
+	max int
+}
+
+// isGlobalModel reports whether model is the configured provider model (the
+// server-wide default). The empty string means "unspecified", which every
+// caller resolves to the global model.
+func (s *Server) isGlobalModel(model string) bool {
+	return model == "" || model == s.cfg.Provider.Model
+}
+
+// windowLocked returns model's cached entry, and whether one exists. Callers
+// must hold ctxWinMu.
+//
+// The global model's entry lives in the ctxWin/ctxWinSrc/ctxWinFinal fields
+// rather than in the map: those are the numbers /status reports and the
+// summarizer is tuned to, both of which are server-wide by construction, and
+// keeping one storage location for them avoids a second source of truth that
+// could drift. Every other model lives in ctxWinByModel.
+func (s *Server) windowLocked(model string) (ctxWinEntry, bool) {
+	if s.isGlobalModel(model) {
+		return ctxWinEntry{win: s.ctxWin, src: s.ctxWinSrc, final: s.ctxWinFinal}, true
+	}
+	e, ok := s.ctxWinByModel[model]
+	return e, ok
+}
+
+// setWindowLocked records model's entry. Callers must hold ctxWinMu (or be in
+// single-threaded startup).
+//
+// The summarizer is retuned only by the model *compaction itself runs on*
+// (s.compModel — provider.small_model when configured, else the global model),
+// never by an arbitrary session's persona-pinned model: the compactor is
+// daemon-wide, so one session's reading must not redefine what every other
+// session compacts against. Keying it to compModel rather than to the global
+// model is the second half of P52.1 — compaction prefers a small model, and
+// tuning its budget to the *primary* model's window is the same wrong-model
+// mismatch, one layer down, where the truncated request is the summarizer's own.
+func (s *Server) setWindowLocked(model string, e ctxWinEntry) {
+	if s.summarizer != nil && s.compModel != "" && model == s.compModel {
+		s.summarizer.SetContextWindow(e.win)
+	}
+	if s.isGlobalModel(model) {
+		s.ctxWin, s.ctxWinSrc, s.ctxWinFinal = e.win, e.src, e.final
+		return
+	}
+	if s.ctxWinByModel == nil {
+		s.ctxWinByModel = make(map[string]ctxWinEntry)
+	}
+	s.ctxWinByModel[model] = e
+}
+
+// configEntry is the pre-detection entry for any model: the configured window,
+// or nothing at all when context_window is unset. final says whether there is
+// anything left to detect (false keeps the model in the re-detect path).
+func (s *Server) configEntry(final bool) ctxWinEntry {
+	e := ctxWinEntry{win: s.cfg.Provider.ContextWindow, final: final}
+	if e.win > 0 {
+		e.src = "config"
+	}
+	return e
+}
 
 // initContextWindow resolves the effective window once at daemon startup.
 // Called from New with s.cfg/s.logger already set, before the compactor is
 // built. When the value is not yet authoritative (Ollama up but the model not
 // loaded, so only the modelfile/default is known), later runs re-detect via
-// maybeRefreshContextWindow.
+// maybeRefreshContextWindowFor. Only the global model is resolved here; any other
+// model a turn routes to is resolved on first use (effectiveContextWindowFor).
 func (s *Server) initContextWindow(ctx context.Context) {
-	cfgWin := s.cfg.Provider.ContextWindow
-	s.ctxWin, s.ctxWinSrc = cfgWin, ""
-	if cfgWin > 0 {
-		s.ctxWinSrc = "config"
-	}
+	model := s.cfg.Provider.Model
+	s.setWindowLocked(model, s.configEntry(false))
 
 	p := s.cfg.Provider
 	// The native Ollama adapter (P33.9) pins options.num_ctx to cfgWin on every
@@ -35,7 +127,7 @@ func (s *Server) initContextWindow(ctx context.Context) {
 	// hardware Ollama can allocate less than asked (or offload KV/layers to CPU),
 	// silently truncating prompts from the front just like the compat path (P39.9).
 	// So we no longer trust cfgWin outright for native either — we run the same
-	// /api/ps-backed detection and let applyDetectedWindow downgrade to the real
+	// /api/ps-backed detection and let applyDetectedWindowFor downgrade to the real
 	// allocation when a *loaded* (authoritative) reading comes back below cfgWin.
 	// A non-authoritative reading (model not loaded yet) keeps cfgWin and retries
 	// via maybeRefreshContextWindow after the first run loads the model.
@@ -45,7 +137,7 @@ func (s *Server) initContextWindow(ctx context.Context) {
 	// (the documented way to run Aegis against a local server via the
 	// OpenAI-compat endpoint).
 	if p.Default != "ollama" && (p.Default != "openai" || p.BaseURL == "") {
-		s.ctxWinFinal = true
+		s.setWindowLocked(model, s.configEntry(true))
 		return
 	}
 	base := ollamainfo.NativeBase(p.BaseURL)
@@ -58,64 +150,122 @@ func (s *Server) initContextWindow(ctx context.Context) {
 		} else {
 			// A non-Ollama OpenAI-compatible server (LM Studio, liteLLM, real
 			// OpenAI behind a gateway): nothing to detect, config stands.
-			s.ctxWinFinal = true
+			s.setWindowLocked(model, s.configEntry(true))
 		}
 		return
 	}
 	s.ollamaBase = base
-	s.applyDetectedWindow(res)
+	s.applyDetectedWindowFor(model, res)
 }
 
-// applyDetectedWindow reconciles a detection result with config and updates
-// the effective window. Callers must hold ctxWinMu (or be in single-threaded
-// startup).
-func (s *Server) applyDetectedWindow(res ollamainfo.Result) {
+// applyDetectedWindowFor reconciles a detection result with config and updates
+// that model's effective window. Callers must hold ctxWinMu (or be in
+// single-threaded startup). The reconciliation runs per entry (P52.1): the
+// configured context_window expresses one desired window for the daemon, but
+// what a *given* model is actually served is a property of that model, so each
+// entry is compared against config on its own.
+func (s *Server) applyDetectedWindowFor(model string, res ollamainfo.Result) {
 	cfgWin := s.cfg.Provider.ContextWindow
+	// A loaded-model reading is the ground truth; anything else is worth
+	// re-checking once the first run has actually loaded the model.
+	e := ctxWinEntry{final: res.Authoritative(), max: res.ModelMax}
 	switch {
 	case cfgWin > 0 && res.Authoritative() && res.ContextWindow < cfgWin:
 		// Config promises more than Ollama is actually serving — trusting the
 		// config here is exactly the silent-truncation failure. Serve reality,
 		// tell the user how to get what they configured.
 		s.logger.Warn("configured context_window exceeds what Ollama is serving; using the served value",
-			"configured", cfgWin, "served", res.ContextWindow,
+			"model", model, "configured", cfgWin, "served", res.ContextWindow,
 			"hint", "raise OLLAMA_CONTEXT_LENGTH on the Ollama server or pin num_ctx in a modelfile")
-		s.ctxWin, s.ctxWinSrc = res.ContextWindow, "ollama:"+string(res.Source)
+		e.win, e.src = res.ContextWindow, "ollama:"+string(res.Source)
 	case cfgWin > 0:
-		s.ctxWin, s.ctxWinSrc = cfgWin, "config"
+		e.win, e.src = cfgWin, "config"
 	default:
-		s.ctxWin, s.ctxWinSrc = res.ContextWindow, "ollama:"+string(res.Source)
-		s.logger.Info("auto-detected Ollama context window", "window", res.Describe(), "model_max", res.ModelMax)
+		e.win, e.src = res.ContextWindow, "ollama:"+string(res.Source)
+		s.logger.Info("auto-detected Ollama context window", "model", model, "window", res.Describe(), "model_max", res.ModelMax)
 	}
-	// A loaded-model reading is the ground truth; anything else is worth
-	// re-checking once the first run has actually loaded the model.
-	s.ctxWinFinal = res.Authoritative()
-	if s.summarizer != nil {
-		s.summarizer.SetContextWindow(s.ctxWin)
-	}
+	s.setWindowLocked(model, e)
 }
 
 // effectiveContextWindow returns the current effective window and its source
 // ("config", "ollama:loaded", "ollama:modelfile", "ollama:default", or ""
-// when unknown).
+// when unknown) for the globally configured model — what /status reports and
+// what the daemon-wide compactor is tuned to.
 func (s *Server) effectiveContextWindow() (int, string) {
 	s.ctxWinMu.Lock()
 	defer s.ctxWinMu.Unlock()
 	return s.ctxWin, s.ctxWinSrc
 }
 
-// maybeRefreshContextWindow re-runs detection while the current value is not
-// authoritative — cheap local GETs, called after a run completes (the run is
-// what loads the model into Ollama, making /api/ps report the real
-// allocation). No-op for non-Ollama providers and once a loaded-model
-// reading has been captured.
-func (s *Server) maybeRefreshContextWindow(ctx context.Context) {
+// effectiveContextWindowFor returns the effective window and source for the
+// model a turn will actually run on (P52.1), detecting and caching it on first
+// use. Detection is synchronous because the alternative — seed from the global
+// model's window now, correct it after the run — is precisely the failure being
+// fixed: a routed/pinned small model would spend its first turn (the one
+// carrying the full system prompt plus any skill body) believing it had the
+// primary model's headroom.
+func (s *Server) effectiveContextWindowFor(ctx context.Context, model string) (int, string) {
 	s.ctxWinMu.Lock()
-	if s.ctxWinFinal || s.ollamaBase == "" {
-		s.ctxWinMu.Unlock()
+	e, ok := s.windowLocked(model)
+	base := s.ollamaBase
+	s.ctxWinMu.Unlock()
+	if ok {
+		return e.win, e.src
+	}
+	if base == "" {
+		// Nothing to detect against (cloud provider, or an OpenAI-compatible
+		// server that isn't Ollama): config is the only source, exactly as it
+		// is for the global model in initContextWindow.
+		s.ctxWinMu.Lock()
+		defer s.ctxWinMu.Unlock()
+		return s.storeLocked(model, s.configEntry(true))
+	}
+
+	dctx, cancel := context.WithTimeout(ctx, ctxWinDetectTimeout)
+	defer cancel()
+	res, detected := ollamainfo.Detect(dctx, base, model)
+
+	s.ctxWinMu.Lock()
+	defer s.ctxWinMu.Unlock()
+	// A concurrent turn on the same new model may have won the race while we
+	// were probing. Detection is idempotent, so the duplicate probe is merely
+	// wasted, but the entry it produced stands rather than being overwritten.
+	if e, ok := s.windowLocked(model); ok {
+		return e.win, e.src
+	}
+	if !detected {
+		// Ollama stopped answering between startup and now. Keep config and
+		// stay non-final so the post-run refresh retries.
+		return s.storeLocked(model, s.configEntry(false))
+	}
+	s.applyDetectedWindowFor(model, res)
+	e, _ = s.windowLocked(model)
+	return e.win, e.src
+}
+
+// storeLocked records e for model and returns its window/source, saving the
+// callers above a re-read. Callers must hold ctxWinMu.
+func (s *Server) storeLocked(model string, e ctxWinEntry) (int, string) {
+	s.setWindowLocked(model, e)
+	return e.win, e.src
+}
+
+// maybeRefreshContextWindowFor re-runs detection for model while that model's
+// value is not authoritative — cheap local GETs, called after a run completes
+// (the run is what loads the model into Ollama, making /api/ps report the real
+// allocation). No-op for non-Ollama providers and once a loaded-model reading
+// has been captured for that model. It refreshes the model the finished run
+// actually used, not cfg.Provider.Model (P52.1): a run routed to the small
+// model taught us nothing about the primary's allocation, and everything about
+// the small one's.
+func (s *Server) maybeRefreshContextWindowFor(ctx context.Context, model string) {
+	s.ctxWinMu.Lock()
+	e, known := s.windowLocked(model)
+	base := s.ollamaBase
+	s.ctxWinMu.Unlock()
+	if base == "" || (known && e.final) {
 		return
 	}
-	base, model := s.ollamaBase, s.cfg.Provider.Model
-	s.ctxWinMu.Unlock()
 
 	res, ok := ollamainfo.Detect(ctx, base, model)
 	if !ok {
@@ -123,12 +273,31 @@ func (s *Server) maybeRefreshContextWindow(ctx context.Context) {
 	}
 	s.ctxWinMu.Lock()
 	defer s.ctxWinMu.Unlock()
-	if s.ctxWinFinal {
-		return
+	if cur, known := s.windowLocked(model); known {
+		if cur.final {
+			return
+		}
+		e = cur
 	}
-	prev := s.ctxWin
-	s.applyDetectedWindow(res)
-	if s.ctxWin != prev {
-		s.logger.Info("effective context window updated", "before", prev, "after", s.ctxWin, "source", s.ctxWinSrc)
+	prev := e.win
+	s.applyDetectedWindowFor(model, res)
+	if cur, _ := s.windowLocked(model); cur.win != prev {
+		s.logger.Info("effective context window updated", "model", model, "before", prev, "after", cur.win, "source", cur.src)
 	}
+}
+
+// modelContextMax returns the model's training-context maximum as detected by
+// ollamainfo, or 0 when unknown (a cloud provider, or a model never probed).
+//
+// Zero is the honest answer for "no ceiling to climb toward", and every caller
+// treats it that way: the P47.5b escalation simply does not run, and the drive
+// falls back to the fresh-context reset alone.
+func (s *Server) modelContextMax(model string) int {
+	s.ctxWinMu.Lock()
+	defer s.ctxWinMu.Unlock()
+	e, ok := s.windowLocked(model)
+	if !ok {
+		return 0
+	}
+	return e.max
 }

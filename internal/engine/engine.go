@@ -22,6 +22,7 @@ import (
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -232,6 +233,17 @@ type Options struct {
 	// tool.WithWorkdir — without it they fall back to their own
 	// construction-time root (P25.1: per-session workdir).
 	Workdir string
+	// ExtraRoots names directories outside Workdir that workspace-confined
+	// tools may additionally resolve paths into (P52.13,
+	// workspace.additional_roots), carried to tools via tool.WithExtraRoots.
+	// Empty — the usual case — leaves confinement exactly as it was: the
+	// single Workdir root.
+	//
+	// The engine only ferries these to the tool call's context; the decisions
+	// about which roots exist, whether each is writable, and whether it has
+	// been trusted are all made before Options is built (see
+	// config.ResolveAdditionalRoots).
+	ExtraRoots []sandbox.Root
 }
 
 // Engine runs the agent loop.
@@ -258,6 +270,7 @@ type Engine struct {
 	redactSecrets       bool
 	logger              *slog.Logger
 	workdir             string
+	extraRoots          []sandbox.Root
 
 	// writtenFiles tracks workspace-relative paths touched by a successful
 	// write-capability tool call during the current Run, so the output guard
@@ -322,6 +335,7 @@ func New(opts Options) (*Engine, error) {
 		redactSecrets:       opts.RedactSecrets,
 		logger:              logger,
 		workdir:             opts.Workdir,
+		extraRoots:          opts.ExtraRoots,
 	}, nil
 }
 
@@ -362,10 +376,17 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	e.writtenFilesMu.Unlock()
 
 	// nudges tracks the corrective/nudge scaffolding injected this run (guard
-	// retries, the P28.3 zero-tool nudge, and the P34.1 empty-answer nudge,
-	// which is bounded to one attempt per run) so it can all be retracted before
-	// Run returns — see nudgeState.retractAll (P40.6).
+	// retries, the P28.3 zero-tool nudge, the P34.1 empty-answer nudge, and the
+	// P52.3 tool-failure nudge — the last two bounded to one attempt per run) so
+	// it can all be retracted before Run returns — see nudgeState.retractAll
+	// (P40.6).
 	var nudges nudgeState
+	// toolFailures is the P52.3 circuit breaker: it aggregates the per-round
+	// IsError signal (previously emitted and then dropped on the floor) so a run
+	// whose every tool call fails gets a corrective nudge and, if it keeps
+	// failing, ends with a named error instead of burning to maxIterations.
+	// Per-Run by construction, like every other counter here.
+	var toolFailures toolFailureTracker
 	toolRoundsCompleted := 0
 	ctxFullWarned := false // one context-nearly-full notice per run, not one per turn
 	// toolCallAsTextWarned bounds the P34.2 notice to one per run: the check
@@ -731,6 +752,29 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		tr.WallMS = time.Since(turnStart).Milliseconds()
 		emit(Event{Kind: KindTrace, Trace: &tr})
 
+		// P52.3: consecutive-tool-failure circuit breaker. loopDetector cannot
+		// see this stall — it matches on tool name + canonicalized input, and the
+		// common local-model failure is a model whose arguments legitimately
+		// differ every round (retry edit_file with a slightly different
+		// old_string after each "not found"), so every signature is distinct.
+		// Count failing rounds instead: nudge at the first threshold, end the run
+		// at the second rather than letting it burn to maxIterations.
+		toolFailures.record(toolUses, results)
+		if toolFailures.shouldAbort() {
+			err := toolFailures.abortError()
+			emit(Event{Kind: KindError, Err: err})
+			return err
+		}
+		if toolFailures.shouldNudge() && nudges.toolFailureNudges == 0 {
+			nudges.toolFailureNudges++
+			emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
+				"%d tool round(s) in a row failed (%s: %s) — asking the model to re-inspect state instead of retrying",
+				toolFailures.rounds(), toolFailures.toolLabel(), toolFailures.lastErrorText)})
+			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+				provider.TextBlock{Text: toolFailures.nudgeText()},
+			}})
+		}
+
 		// Drain one pending steer message (if any) between tool rounds, injecting
 		// it as a user message so the model adjusts its plan on the next turn.
 		if e.steerChan != nil {
@@ -777,6 +821,10 @@ type nudgeState struct {
 	guardRetries      int
 	zeroToolNudges    int
 	emptyAnswerNudges int
+	// toolFailureNudges counts the P52.3 consecutive-tool-failure nudge, bounded
+	// to one per run: a model that ignores it is handled by the abort threshold,
+	// not by nagging it every subsequent failing round.
+	toolFailureNudges int
 }
 
 // retractAll strips every corrective/nudge prompt this run injected from conv,
@@ -791,6 +839,9 @@ func (n *nudgeState) retractAll(conv *Conversation) {
 	}
 	if n.emptyAnswerNudges > 0 {
 		retractNudges(conv, emptyAnswerNudgePrefix)
+	}
+	if n.toolFailureNudges > 0 {
+		retractNudges(conv, toolFailureNudgePrefix)
 	}
 }
 
@@ -866,8 +917,11 @@ const emptyAnswerNudgeText = emptyAnswerNudgePrefix + " at all — the user saw 
 // to — from the conversation once the run has settled, mirroring
 // retractGuardCorrectives: the scaffolding must stay in place *during* the
 // retry (the model reconsiders against it) but has no business surviving into
-// the durable transcript or a future turn's context. Used for both the P28.3
-// zero-tool nudge and the P34.1 empty-answer nudge.
+// the durable transcript or a future turn's context. Used for the P28.3
+// zero-tool nudge, the P34.1 empty-answer nudge, and the P52.3 tool-failure
+// nudge. Only a tool-call-less *assistant* message immediately preceding the
+// nudge is dropped with it, so the tool-failure nudge (which follows a user
+// tool-results message) removes just itself, leaving the failing round intact.
 func retractNudges(conv *Conversation, prefix string) {
 	kept := make([]provider.Message, 0, len(conv.Messages))
 	removed := false
@@ -1474,6 +1528,7 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	if e.workdir != "" {
 		ctx = tool.WithWorkdir(ctx, e.workdir)
 	}
+	ctx = tool.WithExtraRoots(ctx, e.extraRoots)
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
 		return fmt.Sprintf("unknown tool %q; registered tools: %s", tu.Name, registeredToolNames(e.tools)), true

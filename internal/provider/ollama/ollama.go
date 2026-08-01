@@ -37,13 +37,20 @@ type Adapter struct {
 	keepAlive string // "" = omit, let Ollama use its own default (5m)
 	logger    *slog.Logger
 
-	// numCtx (0 = omit, let Ollama use its own default) is mutable at runtime
-	// via RaiseContextWindow, so every read and write goes through numCtxMu
-	// (P52.6). A single daemon adapter is shared across concurrent sessions,
-	// which makes an unguarded escalation a real data race, not a theoretical
-	// one.
-	numCtxMu sync.RWMutex
-	numCtx   int
+	// numCtx (0 = omit, let Ollama use its own default) is the adapter-wide
+	// *fallback* serving context window, used only for requests that carry no
+	// NumCtx of their own (P52.4 moved the authoritative value onto
+	// provider.Request, since the model is per-request and the adapter is
+	// shared). numCtxRaised is the highest window RaiseContextWindow has
+	// escalated to, 0 until one happens — see resolveNumCtx for why an
+	// escalation has to outrank a per-request value rather than fall back to it.
+	// Both are mutable at runtime, so every read and write goes through
+	// numCtxMu (P52.6): a single daemon adapter is shared across concurrent
+	// sessions, which makes an unguarded escalation a real data race, not a
+	// theoretical one.
+	numCtxMu     sync.RWMutex
+	numCtx       int
+	numCtxRaised int
 
 	// thinkRejected latches, per model, the P52.5 verdict "this model 400s the
 	// instant `think` is sent". Keyed by model rather than held per-adapter
@@ -84,9 +91,11 @@ func WithThink(v *bool) Option {
 	return func(a *Adapter) { a.think = v }
 }
 
-// WithNumCtx sets the per-request serving context window (options.num_ctx).
-// Zero (the default) omits the field, leaving Ollama's own default
-// (OLLAMA_CONTEXT_LENGTH or a modelfile-pinned value) in effect.
+// WithNumCtx sets the adapter's default serving context window
+// (options.num_ctx), used for every request that doesn't carry its own
+// provider.Request.NumCtx (P52.4). Zero (the default) omits the field when the
+// request is silent too, leaving Ollama's own default (OLLAMA_CONTEXT_LENGTH or
+// a modelfile-pinned value) in effect.
 func WithNumCtx(n int) Option {
 	return func(a *Adapter) {
 		if n > 0 {
@@ -95,7 +104,7 @@ func WithNumCtx(n int) Option {
 	}
 }
 
-// RaiseContextWindow raises the per-request num_ctx to n when n exceeds the
+// RaiseContextWindow raises the adapter's num_ctx to n when n exceeds the
 // current value, returning true when it actually grew. It implements
 // provider.ContextWindowRaiser so a driven build can escalate the serving window
 // toward the model's max on a context overflow (P47.5b) instead of aborting.
@@ -111,17 +120,48 @@ func (a *Adapter) RaiseContextWindow(n int) bool {
 	defer a.numCtxMu.Unlock()
 	if n > a.numCtx {
 		a.numCtx = n
+		a.numCtxRaised = n
 		return true
 	}
 	return false
 }
 
-// contextWindow reads the current per-request num_ctx under the lock that
+// contextWindow reads the current adapter-wide num_ctx under the lock that
 // RaiseContextWindow writes it under (P52.6).
 func (a *Adapter) contextWindow() int {
 	a.numCtxMu.RLock()
 	defer a.numCtxMu.RUnlock()
 	return a.numCtx
+}
+
+// resolveNumCtx picks the num_ctx one request is sent with (P52.4): the
+// request's own value when it has one, otherwise the adapter's configured
+// default — which preserves today's behavior for every caller that doesn't
+// populate provider.Request.NumCtx (the CLI phased drive, any non-daemon
+// embedder).
+//
+// A RaiseContextWindow escalation outranks both. That asymmetry is deliberate:
+// an escalation is a runtime *response to an overflow that already happened*
+// (P47.5b), while a request's NumCtx was computed by the server before the run
+// from the window it believed the model would be served with. Letting the
+// stale, pre-overflow number win would silently undo the escalation and send
+// the drive straight back into the same overflow — so the raised value acts as
+// a floor rather than a fallback, staying monotonic exactly as
+// RaiseContextWindow promises. Nothing escalates a shared daemon adapter today
+// (the sole caller is the single-model CLI phased drive, whose requests carry
+// no NumCtx at all), so the floor is inert until a caller deliberately raises
+// the window and then genuinely wants it applied.
+func (a *Adapter) resolveNumCtx(reqNumCtx int) int {
+	a.numCtxMu.RLock()
+	defer a.numCtxMu.RUnlock()
+	n := reqNumCtx
+	if n <= 0 {
+		n = a.numCtx
+	}
+	if a.numCtxRaised > n {
+		n = a.numCtxRaised
+	}
+	return n
 }
 
 // Healthy implements provider.HealthChecker: a cheap GET /api/version against
@@ -391,7 +431,7 @@ func (a *Adapter) doChat(ctx context.Context, req provider.Request, think *bool)
 	}
 	var opts wireOptions
 	var hasOpts bool
-	if n := a.contextWindow(); n > 0 {
+	if n := a.resolveNumCtx(req.NumCtx); n > 0 {
 		opts.NumCtx = n
 		hasOpts = true
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/workspacetrust"
@@ -311,5 +312,64 @@ func TestAppendProjectPermissionRuleAutoTrusts(t *testing.T) {
 
 	if !workspacetrust.Open(WorkspaceTrustStorePath()).IsTrusted(root) {
 		t.Error("AppendProjectPermissionRule should trust root")
+	}
+}
+
+// TestWorkspaceTrustFreezesAdditionalRoots is the P52.13 sibling of the P27.1
+// freeze above. workspace.additional_roots widens the boundary every
+// workspace-confined tool validates against, so a cloned repo nominating "/"
+// or "$HOME" as an additional root would turn read_file into an arbitrary host
+// read just by being checked out — structurally the same silent widening as a
+// project setting permission.mode: auto.
+//
+// This is the outer of two locks. Even once the *workspace* is trusted, each
+// root still needs its own decision — see
+// TestResolveAdditionalRootsRequiresPerRootTrust.
+func TestWorkspaceTrustFreezesAdditionalRoots(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	writeProjectConfig(t, `
+workspace:
+  additional_roots:
+    - path: /
+      writable: true
+`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.WorkspaceTrust.Frozen {
+		t.Fatal("a project adding workspace.additional_roots should freeze an untrusted workspace")
+	}
+	if len(cfg.Workspace.AdditionalRoots) != 0 {
+		t.Errorf("workspace.additional_roots = %+v, want frozen empty", cfg.Workspace.AdditionalRoots)
+	}
+	var found bool
+	for _, c := range cfg.WorkspaceTrust.Changes {
+		if strings.Contains(c, "workspace.additional_roots") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("changes %v do not mention workspace.additional_roots", cfg.WorkspaceTrust.Changes)
+	}
+
+	// After trust, the project value applies — the second lock (per-root
+	// trust) is what still stands between it and a widened boundary.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Workspace.AdditionalRoots) != 1 {
+		t.Fatalf("trusted: workspace.additional_roots = %+v, want the project value", cfg.Workspace.AdditionalRoots)
 	}
 }

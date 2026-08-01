@@ -110,6 +110,7 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 			MaxTokens:       s.cfg.Provider.MaxTokens,
 			Logger:          s.logger,
 			Workdir:         workdir,
+			ExtraRoots:      s.workspaceRootsFor(workdir),
 		})
 		if err != nil {
 			return "", err
