@@ -268,7 +268,40 @@ curl -X POST -H "Authorization: Bearer <token>" \
 # budget-driven trigger
 curl -X POST -H "Authorization: Bearer <token>" \
   http://127.0.0.1:4127/sessions/<id>/compact
+
+# Which skills this session can drive (those with a phase plan)
+curl -H "Authorization: Bearer <token>" \
+  http://127.0.0.1:4127/sessions/<id>/drive
+
+# Start a phased skill drive (SSE stream, same event shape as /messages)
+curl -N -X POST -H "Authorization: Bearer <token>" \
+  -d '{"skill":"threat-modeling","task":"threat model this repository","resumable":true}' \
+  http://127.0.0.1:4127/sessions/<id>/drive
 ```
+
+### Phased drives
+
+`POST /sessions/{id}/drive` runs a skill's **phase plan** instead of one
+growing conversation: each phase gets its own fresh context, the suite is
+verified and quality-passed automatically, a crashed local model server is
+waited out and resumed from disk, and a phase that stalls is re-opened rather
+than abandoned. It streams over the same SSE seam a message does, so a client
+renders it exactly the way it renders a turn — phase boundaries arrive as
+`notice` events.
+
+| Field | Meaning |
+|---|---|
+| `skill` | Skill to drive. Must have a phase plan (see [skills.md](skills.md)) — a skill without one is **refused**, not quietly run as a single-context turn |
+| `task` | The build request, e.g. `"threat model this repository"` |
+| `max_turns` | Per-phase turn budget (default 40) |
+| `guard_enabled` | Overrides `output_guard.enabled` for the drive; usually off — the guard judges a final answer, and a phase's answer is the files it wrote |
+| `resumable` | Keeps the run alive server-side across an SSE drop. A multi-hour unattended build is exactly the case for this; stop it with `POST /sessions/{id}/stop` rather than by dropping the connection |
+
+Re-issuing the same drive resumes it: a phase whose files carry no
+`<!-- PENDING -->` marker is already complete and costs no model turn. The same
+machinery is reachable from the TUI (`/drive`, `/threat-model … unattended`),
+the web UI (the **Drive** button next to the composer), and the CLI
+(`aegis chat --skill`).
 
 The bearer token is stored at `~/.config/aegis/auth` (macOS/Linux) or
 `%AppData%\aegis\auth` (Windows).

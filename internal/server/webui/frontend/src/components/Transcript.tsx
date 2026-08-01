@@ -7,6 +7,11 @@ export type RenderBlock =
   | { kind: "tool"; label: string; body: string; open: boolean; err: boolean }
   | { kind: "image"; src: string }
   | { kind: "error"; text: string }
+  // notice is the daemon's operator narration — phase boundaries during a
+  // drive, an overflow reset, a stall. It rendered nowhere before P52.12,
+  // which was survivable for a chat turn and not for a multi-hour phased
+  // build, where these lines are the only progress signal there is.
+  | { kind: "notice"; text: string }
   | {
       kind: "approval";
       reason: string;
@@ -49,6 +54,12 @@ function renderBlock(b: RenderBlock, key: number) {
     case "error":
       return (
         <p class="err" key={key}>
+          {b.text}
+        </p>
+      );
+    case "notice":
+      return (
+        <p class="notice" key={key}>
           {b.text}
         </p>
       );

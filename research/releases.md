@@ -8,8 +8,351 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-07-30 — **P52.2, P52.5, P52.6, P52.7, P52.9 shipped** (plus **P52.11**, the
-`documentation-as-code` skill, committed here), the first parallel batch off the P52.x full-stack
+**Last updated:** 2026-08-01 — **P52.12 and P52.13 shipped**, closing the P52.x review's Tier-3 work:
+the phased drive now lives in the daemon where every client can run it, and a session can reach more
+than one repository. Full suite green (61 packages, **including the three `internal/sandbox`
+`/private/var` symlink failures previously carried as known-broken** — they were never a validator
+bug: `ValidatePath` returns the symlink-*resolved* path by design, and the tests compared it against a
+raw `t.TempDir()`, which on macOS is `/var/folders/…` for `/private/var/folders/…`. Fixed test-side
+with a `tempRoot` helper, the same hermeticity problem P48.1 fixed for config), race detector clean on
+every touched package, web UI rebuilt and re-embedded.
+
+**P52.12 — lift the phased drive into the daemon (supersedes P50.5).** Every reliability mechanism
+built for local models — fresh context per phase, the P47.9 hollow-body re-entry router, P50.1
+backend liveness + resume-from-disk, P47.5b context escalation, the P39.7 no-progress guard — was
+reachable only through `aegis chat --skill`. The TUI and web UI ran the single-context drive that the
+phased drive exists *because* it fails (the P38.1 wall), which is the wrong default for the clients
+most people use and especially wrong for the web UI, where a multi-hour build most wants to live: its
+runs survive closing the tab, and `aegis chat` does not. Four parts:
+
+1. **The machinery moved to `internal/drive`** (from `internal/cli/chat_phased*.go`) unchanged in
+   behaviour. Nothing in it was ever CLI-specific — it is orchestration *above* `engine.Run`, and the
+   engine, gate, tool registry and event plumbing were already shared.
+2. **`PlanFor` reads the plan from the skill's own `phases:` frontmatter** instead of hard-coding one
+   skill name, so `deep-research`, `latex-report`, `structured-build` and `documentation-as-code` can
+   opt in without a code change. The built-in `threat-modeling` plan still wins for that one name: its
+   per-phase prompts carry guardrails a frontmatter string cannot express (P47.3 no-self-verify,
+   P39.14 anti-monolithic-write, framework-specific scaffolding) and every P38.1/P47.x live run was
+   tuned against them — letting an edited SKILL.md silently replace them would be a regression wearing
+   the clothes of a generalization.
+3. **`POST /sessions/{id}/drive`** streams over the existing SSE seam, sharing the whole `streamRun`
+   body with `POST /messages` — semaphores, spend caps, approvals, steering, checkpoints, persistence,
+   usage accounting, detached-run buffering — with the drive as the single branch at the `eng.Run`
+   call. Splitting the handlers would have meant two copies of ~300 lines of lifecycle, which is
+   exactly how a daemon grows a drive that silently misses the cost caps. A skill with no phase plan
+   is **refused**, not quietly run as a single-context turn: falling back would hand a caller that
+   explicitly asked for a phased build the failure the phased build exists to replace, and silently —
+   the symptom shows up hours later as a stalled run. `GET /sessions/{id}/drive` lists the drivable
+   skills, resolved against the session's own workspace.
+4. **Every client**: TUI `/drive <skill> <task…>` plus `/threat-model … unattended`, and a web UI
+   **Drive** button beside the composer. `/threat-model` stays interactive by default — P47.10's
+   reasoning that review between phases is *valuable* still holds; the defect was the absence of a
+   choice, which forced anyone wanting an unattended build out of the TUI entirely.
+
+**Two defects found while wiring it up, both invisible to the parts already built.** First, the
+completion oracle had not been generalized with the plan: every phase resolves its files through
+`LatestRunDir`, hard-coded to `.aegis/security/threat-model/<date>/` and keyed off a threat-model
+sentinel file, so a frontmatter-declared plan resolved `""` forever — no phase could ever report
+itself complete, and each would burn its whole turn budget before the drive moved on. Declared phases
+would have "worked" in the sense that they ran. `RunDirResolver` now decides it with the plan: a
+declared `run_dir:` glob resolves to its newest matching directory (the "each run scaffolds a fresh
+dated directory" pattern, generalized), `threat-modeling` keeps its layout exactly, and anything else
+treats the workspace root as the run directory. The end-to-end daemon test — a two-phase project skill
+driven over real HTTP — fails against the unfixed code by taking 40 turns per phase instead of one.
+Second, the TUI's resumable-run semantics: a drive is marked resumable so it outlives a dropped
+connection, which would have broken interrupt (a resumable run keeps executing server-side when its
+request context is cancelled), so the cancel handle the TUI stores now stops the run through the
+daemon *first* and then closes the stream. Every existing cancel site — ESC, Ctrl+C, `/quit` — keeps
+meaning "stop this run" without knowing a drive is behind it.
+
+**Phase boundaries are now an operator-visible signal**, not just a log line: the drive writes
+`phase N/M — <name>` / `complete` / `already complete on disk` to its notice stream, the daemon turns
+each into an SSE notice, and the web UI renders notices at all for the first time (they were a
+declared parity no-op). During a multi-hour build these are the only progress signal between tool
+calls. The web UI also now distinguishes "the run started and the connection died" from "the daemon
+refused the request" — only the first is worth reattaching to, and a drive makes the second a common
+case, where reporting it as a lost connection would hide the actual reason.
+
+**P52.13 — `workspace.additional_roots`: a session can reach more than one repository.** There was no
+multi-root support at all — every workspace-confined tool validated against the single directory Aegis
+was started in — which makes the cross-repo shape inexpressible: read research artifacts out of repo
+A, write the formal document into repo B. Starting from a common parent works and is what people did,
+but it widens confinement far past what the task needs and inflates the repo map with everything else
+under that parent. `workspace.additional_roots` takes a list of `{path, writable}` entries; relative
+paths resolve against the session workdir, and **roots are read-only unless explicitly marked
+writable**, because the workflow's own shape is asymmetric — the research repo should not be
+scribbled into just because it must be read.
+
+**Two independent locks stand in front of every entry, and they are the point of the design.** The
+config key joins `permission.*`/`sandbox.*`/`mcp.servers`/`notify.webhook`/`hooks` in the P27.1
+frozen-from-untrusted-project set: a cloned repo nominating `/` or `~` as an additional root would
+turn `read_file` into an arbitrary host read, which is precisely the silent widening that gate exists
+for. And each root additionally needs its **own** `aegis trust` decision — an additional root does not
+inherit the primary workspace's trust, since trusting the repo you are working in is not the same
+decision as granting it a window into another directory on the host. `aegis trust --dir <path>` is new
+for exactly this: an additional root usually has no `.aegis/config.yaml` of its own to review, so
+there was no way to record a decision about it without cd-ing there first. Entries that are untrusted,
+missing, not a directory, duplicated, or already nested inside the workdir are **dropped with a
+warning** rather than failing the session — a stale root in a config should degrade to plain
+single-root confinement, not stop work.
+
+**The confinement check runs per root, against each root's own `EvalSymlinks` identity — never once
+against a prefix covering the set.** That distinction is the whole security property: two roots under
+a shared parent must not make that parent reachable, so a symlink out of root A into root B's *parent*
+is refused even though it lands "between" two legitimate roots. `ValidatePathIn` also deliberately
+drops the single-root form's lexical pre-check, which assumes the candidate was built by joining
+against the root being tested — true only for the primary, and applying it per root would reject a
+relative path naming a file in an additional root before its symlinks were ever resolved. A
+one-element writable root set is bit-for-bit the old behaviour, which is what every session with
+nothing configured gets.
+
+The roots reach tools the same way the session workdir already does (`engine.Options.ExtraRoots` →
+`tool.WithExtraRoots` on the call context → `effectiveRoots`), so no tool signature changed and
+`resolveRead`/`resolveWrite` are the only new discipline: write access requires the landing root to be
+writable. The daemon memoizes resolution per session workdir — it reads the trust store off disk and
+stats every root, and `newEngine` runs per turn, per sub-agent spawn, and per debate round; restarting
+the daemon is already how a trust decision is applied. Two call sites deliberately keep the
+single-root form: `resolvePath`, for the handful of callers with no request context, and
+`shellArgsStayInRoot`, where a path outside the primary root merely disqualifies a command from the
+plan-mode read-gate *downgrade* — it still runs, under normal execute approval, so the conservative
+answer is the correct one.
+
+Previously, 2026-07-31 — **P52.1, P52.3, P52.4, P52.8, P52.10 shipped**, the second parallel
+batch off the P52.x full-stack review and the one that **closes the review's open Tier-1 and Tier-2
+build work**. Four file-disjoint lanes built concurrently, then reconciled — the reconcile pass found
+a real cross-lane defect neither lane could see, described under P52.3 below. Full suite green (61
+packages; the three pre-existing `internal/sandbox` `/private/var` symlink failures are unchanged and
+unrelated), race detector clean on every touched package.
+
+**P52.1 — the context window is now detected per model, not per server.** `contextwindow.go` resolved
+**one** effective window against `cfg.Provider.Model` and `newEngine` handed that single number to
+every run — but the model a turn actually runs on is resolved *per turn* (`resolveModel`: session
+`/model` override > persona config override > persona file `model:` > global, plus `turnModel`'s
+routing to `provider.small_model`). So the window the engine enforced and the model that had to live
+inside it could be two different models, and both directions were wrong. A persona pinning a
+larger-context model made the engine compact at 85% of a window smaller than the real one, burning
+summarizer calls — minutes, on a local model — on a conversation that had room. A persona pinning (or
+routing selecting) a *smaller*-context model was worse and is the failure this whole subsystem exists
+to prevent: the engine believed it had headroom, never compacted, and Ollama silently dropped the
+oldest tokens **including the system prompt** — the exact silent truncation `ollamainfo` was written
+to catch, reintroduced through the per-session model path that postdates it. Detection is now keyed by
+model: a `ctxWinEntry{win, src, final}` per model behind `ctxWinMu`, each carrying its **own** `final`
+state, since a model that hasn't been loaded yet only yields a modelfile/default guess and must
+re-detect independently of every other model after the first run loads it. The config-vs-served
+reconciliation in `applyDetectedWindowFor` runs per entry — the configured `context_window` expresses
+one desired window for the daemon, but what a *given* model is actually served is a property of that
+model. The globally-configured model's entry deliberately stays in the existing
+`ctxWin`/`ctxWinSrc`/`ctxWinFinal` fields rather than moving into the map: those are what `/status`
+reports and what the daemon-wide summarizer is tuned to, both server-wide by construction, and a
+reading for one session's persona-pinned model must not silently redefine what every other session
+compacts against. `newEngine` resolves the window *after* `turnModel` has picked the model and
+`maybeRefreshContextWindowFor` refreshes the model the finished run actually used — a turn routed to
+the small model taught us nothing about the primary's allocation and everything about the small one's.
+First-use detection for an unseen model is **synchronous** (5s bound): seeding from the global window
+and correcting after the run is precisely the failure being fixed, since it would leave the pinned
+model's *first* turn — the one carrying the full system prompt plus any skill body — believing it had
+the primary's headroom. The output guard gets its own model's window too, since the verdict runs on
+`provider.small_model`.
+
+**P52.4 — `num_ctx` moved from adapter state to the request.** `s.adapter` is one shared adapter built
+at daemon start; the native Ollama adapter carried `num_ctx` as **adapter state** and stamped it onto
+every request, while the model is per-request. So a turn routed to `provider.small_model` asked Ollama
+to serve that small model with the **primary** model's `num_ctx` — on VRAM-constrained hardware either
+an oversized KV allocation for a model that doesn't need it, or eviction of the primary model to make
+room, producing exactly the cold-reload churn between turns that `load_duration` telemetry was added
+to make visible. `provider.Request` gained `NumCtx`; the adapter's value is now the *fallback* when a
+request doesn't specify one, so nothing changes for any non-Ollama caller or for the CLI drive.
+**The engine was deliberately not touched.** Rather than teaching `engine.Options` about `num_ctx` —
+which the engine has no business knowing — the server wraps its shared adapter per run with a new
+`provider.WithNumCtx` decorator, following the `Unwrap() Adapter` convention the retry and failover
+decorators already use. The consequence is the point of shipping these two together: the window
+*requested* and the window *enforced* now come from the same `effectiveContextWindowFor(model)` call
+and cannot disagree. Sub-agent spawns, which can name their own model, get the same treatment.
+`RaiseContextWindow` needed a decision: an escalation responds to an overflow that already happened,
+while a request's `NumCtx` was computed *before* the run, so if the request simply won, escalating a
+daemon-shared adapter would be silently undone by the next request. Escalations are therefore applied
+as a monotonic **floor** over both request and adapter values — inert today (the only caller is the
+single-model CLI phased drive, whose requests carry no `NumCtx`) and correct once P52.12 lifts the
+drive into the daemon. Tests: per-model cache and cache-hit counting, per-entry reconciliation with
+one model downgraded while another keeps config, non-authoritative re-detect after a run leaving the
+global entry untouched, and end-to-end — a persona pinning `small:1b` produces a request with
+`Model: small:1b, NumCtx: 4096` while unpinned turns still get the configured 32768.
+
+**P52.3 — consecutive-tool-failure circuit breaker.** `IsError` was computed for every tool result,
+emitted on the event stream, and then **never aggregated into anything** — no counter, no threshold,
+no nudge, no abort. The engine's stall guards (P28.3 zero-tool, P34.1 empty-answer, P34.2
+tool-call-as-text, P2.6 step-limit, the P39.8 summarizer latch) all key on something other than a
+*failing* tool call, and the gap is structural rather than incidental: `loopDetector` matches a
+repeating signature of tool name + canonicalized input, but the common small-model failure is a model
+whose arguments *legitimately differ every turn* — call `edit_file`, get `old_string not found`, retry
+with a slightly different `old_string`, fail again. Every signature is genuinely distinct, so the
+detector never fires and the run burns all the way to `maxIterations` (default 40) producing nothing.
+On a ~7 tok/s local model that is hours. None of the three budgets catch it either: `BudgetUSD` is an
+explicit no-op for unpriced local usage, `MaxTokensPerRun` defaults to 0, and `maxIterations` is the
+thing being burned. `internal/engine/toolfailure.go` now tracks two per-`Run` counters:
+`allErrorRounds` (consecutive rounds where *every* result was an error — nothing is progressing) and
+`sameErrorRounds` (consecutive rounds whose first failure carries the same normalized error text
+regardless of arguments, which catches the same-error-different-args shape `loopDetector`
+structurally cannot see). Normalization is deliberately shallow — trim and collapse whitespace,
+nothing more — because stripping numbers or paths would start merging genuinely different failures,
+and the strict counter already covers text that varies every time. At 3 rounds a corrective nudge is
+injected in the existing `nudgeState` idiom, quoting the actual error and instructing the model to
+re-read the file rather than re-guess arguments; it is bounded to one per run and registered so
+`retractAll` strips it from the durable transcript like every other corrective. At 6 the run ends with
+an error naming the repeated failure and tool, in the same shape as the loop-detector and budget
+aborts. **One deliberate deviation from the roadmap:** only the *strict* counter can end a run. A
+round that mixes a repeating failure with a succeeding call is the ordinary edit → `go test` →
+still-fails → edit cycle, where the shell tool reports a non-zero exit as `IsError` with identical
+text every round; killing a run that is actively writing files would be a far worse failure than the
+stall it prevents. The secondary counter earns a nudge and nothing more. This closes the Tier-3
+"task-failure halt" lead filed with P46.3, which had assumed it needed a persisted task boundary to
+count against — it does not; the per-`Run` tool round is a perfectly good boundary for the failure
+shape that actually occurs.
+
+**P52.3 reconcile — the breaker would have been a regression for the phased drive.** Found in the
+cross-lane pass, invisible to any single lane: `runPhasedSkillDrive` treats every engine error that is
+not backend-down or a context overflow as **fatal to the whole drive** (`chat_phased.go`, three
+sites — the content-phase loop, the phase-6 verify/quality loop, and the P47.9 hollow re-entry). So a
+stall that previously burned to `maxIterations` and limped onward would now return a hard error and
+kill an unattended run — re-introducing exactly the manual-re-invocation failure the P47.x/P50.x
+batches exist to remove. The abort now wraps an exported `engine.ErrToolFailureLimit` sentinel so a
+caller can classify the stall instead of pattern-matching a message, and the drive treats it the way
+it treats an overflow: a resumable phase reset. A fresh context is also the *right* remedy here, not
+merely a compatible one — the breaker fires when a model keeps re-guessing arguments, which it does by
+reasoning from a context now dense with its own failed attempts, so dropping that context and
+re-reading the on-disk `<!-- PENDING -->` files is a strictly better starting point than the one that
+produced the failures. Two differences from the overflow path, both deliberate: it does **not**
+escalate the serving window (the window is not what failed), and it keeps its **own** reset budget
+(`maxToolFailureResets = 2`, tighter than `maxPhase6OverflowResets`) so a run that both overflows and
+stalls cannot spend one budget on the other — and because an overflow is a mechanical limit a fresh
+context genuinely clears, whereas every-tool-call-failing may be a real impasse worth stopping on.
+
+**P52.8 — mechanical substance floor for threat-model content.** Nothing in the 15 `verify.py` checks
+rejected vacuous content: a suite where every Evidence cell read `see code`, every Mitigation `TBD`,
+and every category `None identified` passed all of them and got stamped. The P38.1 quality pass is the
+intended backstop, but it is an LLM call and (per P52.12) CLI-only, so the TUI path had **no substance
+gate whatsoever**. Four checks were added — 16 `evidence-cells-cited` (an Evidence cell that is *only*
+a filename, with no line number, symbol, config key, or prose), 17 `no-placeholder-cells` (a
+required-substantive cell that is *exactly* `TBD`/`N/A`/`see code`/…), 18 `none-identified-fraction`
+(a table, or a file's threat-shaped tables in aggregate, that is essentially nothing but "none
+identified"), and 19 `prose-sections-substantive` (a manifest `kind: "prose"` section below a minimum
+length). They consume P52.7's `.scaffold-manifest.json` directly and reuse `find_heading` /
+`section_region` / `region_substance` as-is; `scaffold.py` needed no change, because the manifest was
+already built as a superset for this. Checks 1–15 and **their names** are untouched — `chat_phased.go`
+routes on the literal string `finding-bodies-nonempty`, so a rename would silently drop P47.9's
+hollow-body re-entry. Every threshold lives in one module-level `SUBSTANCE` dict with a matching CLI
+flag, and an empty comma-list disables a rule outright. **The calibration deliberately under-flags**,
+because a false failure costs a verify bounce and erodes trust in the whole suite: the
+`None identified` cap sits at 0.95, so nothing below 100% ever fires and a component with 6 of 7
+categories empty still passes; placeholder matching is exact rather than substring, so "TBD — owner to
+confirm by Q3" is real content; `Anchor` is **not** an evidence column (the Key Components table's
+Anchor is *supposed* to be a bare path); `Prerequisite` is not substance-checked (`None` is one of its
+legal fixed values); `Description`/`Configuration` were dropped because a bare `N/A` is often the
+honest answer; and Deployment Classification is exempt from the prose floor since its correct fill is
+one of four fixed words. Double-reporting is suppressed by construction against checks 1, 14 and 15.
+Verified against fixtures both ways: a legitimate suite gets `19 passed, 0 failed`, while a vacuous one
+that passes checks 1–15 — the roadmap's premise, reproduced exactly and now asserted as a test — fails
+4. All seven freshly-scaffolded frameworks add zero new failures on an unfilled scaffold. **Worth
+recording: these scripts had no automated coverage at all before this.** No Python test existed
+anywhere in the repo; the Go side only writes a *stub* `verify.py` (`chat_verify_test.go`) or checks
+the real one materializes byte-identically (`embedded_test.go`). The new
+`_verify_substance_test.py` (stdlib `unittest`, 15 tests) closes that. Its **leading underscore is
+load-bearing**: `internal/skills/embedded.go` uses `//go:embed builtin`, a plain directory pattern,
+which excludes `_*` and `.*` — the same rule that keeps `__pycache__` out of the binary — so it is
+tracked source that never ships inside the skill. Confirmed empirically against a built binary.
+
+**P52.10 — `latex_build` can resolve citations.** `latex_new_document` scaffolded a `biblatex`/`biber`
+block into every preamble, but `latex_build` only ever ran the LaTeX compiler in a plain multi-pass
+loop — there was **no `biber`/`bibtex` invocation anywhere in the tool**. A user who uncommented the
+block and added `references.bib` got a PDF full of `[?]` marks and no indication why, which made the
+bibliography support purely decorative for exactly the citation-heavy security writing it was there
+for. A tri-state `bib` input (omitted = auto-detect, true = force, false = suppress) now drives a real
+bib pass. Auto-detection walks the `.tex` **and its transitive in-workspace includes** for
+`\addbibresource`/`\addglobalbib`/`\bibliography{`, with comments and verbatim blocks stripped first —
+so the commented-out scaffold does *not* trigger a pass but uncommenting it does. Which tool to run is
+decided from the **generated artefacts** rather than the source, since that is what the tool actually
+consumes: a `.bcf` means `biber`, otherwise an `.aux` containing `\bibdata` means `bibtex`. After a bib
+run at least two further LaTeX passes are forced regardless of `runs`. **Confinement was the hard
+part and is the reason this had to follow P52.2.** What P52.2 delivered is a *static scan of the LaTeX
+source* — `openin_any` is inert on TeX Live 2026 — and it covers `\addbibresource`/`\bibliography`
+**arguments** but not `biber`, which resolves resources declared in the generated `.bcf`. So this item
+adds two subprocesses outside the existing confinement, and a second layer was required: a new
+`checkLatexBibConfinement` runs **after pass 1 and before the bib binary is even looked up**, parsing
+the `.bcf`'s datasource elements or the `.aux`'s `\bibdata`/`\bibstyle`, following `\@input` chains
+into nested `.aux` files (capped at 64 files / 4 MiB), and validating every name through
+`sandbox.ValidatePath` against **both** directories the tool could resolve it from — escaping from
+either is refused, and the bib binary never runs. Remote `scheme://` datasources are refused outright:
+a URL is not a path the validator can reason about, and `latex_build` has no network capability.
+`biber` also gets `--noconf`, because its first config location is `biber.conf` in the cwd — inside the
+model-writable workspace. The P52.2 traversal was factored into a shared `latexWalkSources` so the
+confinement scan and bib auto-detection cannot drift on which files are in play; the scan's behaviour
+is unchanged and all its tests pass untouched. **`latexmk` was evaluated and rejected**, against the
+roadmap's stated first preference. Its rc-file objection is answerable (`-norc` suppresses the
+arbitrary-Perl `./latexmkrc` evaluation). The decisive objection is *where the check has to sit*:
+latexmk decides for itself, mid-run, when to invoke biber over the `.bcf` it just generated, and
+exposes no seam between those two events — its only interposition point is the `$biber` command
+string, so honouring the check would mean shipping a separate wrapper executable that re-implements it
+out of process. Option 2 was implemented instead. Two smaller defects in the same function were folded
+in: the multi-pass loop now breaks on the *first* failing pass, so `lastLog` and `runErr` always
+describe the same pass (previously a failure on pass 2 was overwritten by a successful pass 3 and
+reported as `BUILD SUCCESS`), and `parseLatexLog` counts dropped warnings as it goes against a named
+`latexMaxWarnings` const instead of re-deriving the count from `len(s.warnings) == 15` after the
+`… and N more` line may already have been appended. ~25 new tests use stub `xelatex`/`biber`/`bibtex`
+scripts on a temp PATH, so **no TeX installation is required**; one live test keeps the pre-existing
+skip-if-absent idiom, and was verified against a real toolchain — before, `Citation 'aegis2026'
+undefined` + `Empty bibliography`; after, `BUILD SUCCESS (pdflatex, 3 pass(es))` with
+`bibliography: biber ran over main.bcf`. **Residual gaps, stated plainly:** there is no iteration to
+convergence (compute pass → bib → two more passes is right for the ordinary document but not one
+needing a fourth LaTeX pass — it fails loudly via LaTeX's own `Rerun to get cross-references right`
+warning, and the `runs` cap was raised 3 → 4 so the model has a real fix); the bib scan is a static
+scan on an unconfined process, like P52.2, so a TOCTOU swap of the `.bcf` between scan and exec is not
+modelled; and a workspace-local `.bst` is path-validated but not otherwise sandboxed, judged
+sufficient because BibTeX's style language is a restricted VM that can only write the `.bbl`.
+
+**Defect follow-up, same day — both batch-2 leads closed, and the suite is green for the first time
+in weeks.** The batch filed two leads and left several residual gaps; investigating them produced
+three fixes and one correction to my own reporting.
+
+*The summarizer was tuned to the wrong model's window* — the second half of P52.1. Compaction prefers
+`provider.small_model` (`compModel`), but `compaction.Options.ContextWindow` was fed the **global**
+model's window, and `setWindowLocked` only retuned the summarizer from the global model's entry. So on
+any setup with a small model configured, the summarizer's own request could exceed what Ollama serves
+it and be silently front-truncated — producing the broken/empty summary that P39.8's latch exists to
+stop looping on. The summarizer is now built from `effectiveContextWindowFor(compModel)`, retuned only
+by that model's entry (never by an arbitrary session's persona-pinned model — the compactor is
+daemon-wide), and given its own `num_ctx` via `provider.WithNumCtx`. One consequence needed closing:
+compaction runs inside the engine rather than through `newEngine`, so it never reports a run model and
+its entry would have been resolved once at startup — possibly from a not-yet-loaded modelfile guess —
+and never corrected; the post-run refresh now covers `compModel` explicitly when it differs from the
+run model. `compaction.Summarizer` gained a `ContextWindow()` accessor so the invariant is assertable.
+
+*Sub-agents had no per-turn proactive compaction* — `engine.Options.ContextWindowTokens` was left at
+0, the engine's "disabled" value, so the 85%-fill check and its nothing-left-to-compact notice never
+ran for a spawn however long it grew. Fixed by feeding it the `spawnWin` already resolved for P52.4.
+**A correction to how this was first reported:** the lead said a spawn had "no proactive compaction at
+all", which is wrong. `engine.Run` calls the compactor **unconditionally at entry**
+(`engine.go:345`), independent of `ContextWindowTokens` — so spawns always had that pass, gated by the
+summarizer's own budget. The first regression test written for this passed against *unfixed* code for
+precisely that reason, and only counting calls (1 = entry only, ≥2 = the per-turn check also ran)
+distinguishes the two. The test now asserts the count and was verified to fail against the unfixed
+code.
+
+*The three long-standing `internal/sandbox` failures were a real, fixable test defect, not host
+noise.* `TestValidatePathBasic`/`Absolute`/`NewFile` compared `ValidatePath`'s result against a raw
+`t.TempDir()`, but `ValidatePath` returns the symlink-**resolved** path by design — that is the path a
+caller must open to avoid a TOCTOU swap of a link beneath it — and on macOS `/var` is a symlink to
+`/private/var`. Fixed test-side with a `tempRoot(t)` helper (the same hermeticity shape P48.1 fixed
+for config); teaching `ValidatePath` to return the unresolved path would have defeated its purpose.
+**`go test ./...` is now fully green — 62 packages, zero failures.** That matters beyond tidiness:
+these three had been written off as environmental for weeks, and P51.1 (a shipped sandbox backend that
+executed nothing at all on macOS 26) hid behind exactly that assumption. A permanently-red suite
+trains everyone to skim past the failure that is real.
+
+A pre-existing `gofmt` misalignment in `server.go`'s struct fields was cleared at the same time, so
+`gofmt -l internal/` is clean.
+
+Previously, 2026-07-30 — **P52.2, P52.5, P52.6, P52.7, P52.9 shipped** (plus **P52.11**, the
+`documentation-as-code` skill, committed there), the first parallel batch off the P52.x full-stack
 review. Five file-disjoint items built concurrently, then reconciled.
 
 **P52.2 — `latex_build` no longer hands the host filesystem to the TeX compiler.** A `.tex` file the

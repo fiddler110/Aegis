@@ -8,6 +8,31 @@ import (
 	"strings"
 )
 
+// Root is one confinement root a path may legitimately resolve inside, along
+// with whether writes into it are permitted (P52.13). The session's own
+// workdir is always the primary, writable root; `workspace.additional_roots`
+// contributes the rest, read-only unless explicitly marked writable.
+type Root struct {
+	// Path is the directory paths must resolve inside.
+	Path string
+	// Writable allows AccessWrite validations to land here. Additional roots
+	// default to false: the workflow the feature exists for is "read research
+	// from repo A, write the document into repo B", so widening confinement
+	// for reads should not also widen it for writes.
+	Writable bool
+}
+
+// Access is the intent a caller has for a path — the distinction that lets a
+// read-only additional root serve reads while rejecting writes.
+type Access int
+
+const (
+	// AccessRead is a read, list, or scan of an existing path.
+	AccessRead Access = iota
+	// AccessWrite is a create, overwrite, edit, or output-directory use.
+	AccessWrite
+)
+
 // ValidatePath resolves path against root and verifies the result stays within
 // root, following symlinks. This hardens the basic filepath.Rel check against
 // symlink escapes and ".." traversal.
@@ -19,7 +44,82 @@ func ValidatePath(root, path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	return validateAgainstRoot(root, absCandidate(root, path), path)
+}
 
+// ValidatePathIn is ValidatePath over a set of roots (P52.13). roots[0] is the
+// primary root: relative paths resolve against it (so an unqualified name means
+// the same file it always did), and it names the workspace in error messages.
+// The resolved path validates if it lands inside *any* root permitting access.
+//
+// The confinement check runs per root, against each root's own EvalSymlinks
+// identity — never once against a prefix covering the set. That distinction is
+// the whole security property here: two roots under a shared parent must not
+// make that parent reachable, so a symlink out of root A into root B's *parent*
+// is refused even though it lands "between" two legitimate roots.
+//
+// Symlink resolution of the candidate itself happens once, before the loop,
+// because it is a fact about the filesystem rather than about any root. That
+// also means the single-root fast path's lexical pre-check is deliberately
+// absent: it assumes the candidate was built by joining against the root being
+// tested, which is false for every root but the primary — applying it per root
+// would reject a relative path naming a file in an additional root before its
+// symlinks were ever resolved. The post-resolution comparison is the
+// authoritative check in both forms; ".." is already collapsed by
+// absCandidate's Clean.
+//
+// A single-element writable root set is equivalent to ValidatePath, which is
+// what a session with no additional roots configured gets.
+func ValidatePathIn(roots []Root, path string, access Access) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if len(roots) == 0 {
+		return "", fmt.Errorf("no workspace root configured")
+	}
+	primary := roots[0].Path
+	abs := absCandidate(primary, path)
+
+	// Resolve symlinks on the real filesystem. If the full path exists, resolve
+	// it directly; otherwise walk up to the nearest existing ancestor, resolve
+	// that, and re-append the remaining segments (a write to a new file).
+	resolved, tail := resolveExisting(abs)
+	full := filepath.Join(resolved, tail)
+
+	// Track whether a read-only root would have matched, so the write case can
+	// say *why* it was refused instead of reporting a confinement escape the
+	// operator cannot act on.
+	var readOnlyMatch string
+	for _, r := range roots {
+		realRoot, err := filepath.EvalSymlinks(r.Path)
+		if err != nil {
+			realRoot = r.Path
+		}
+		if escapesRoot(realRoot, full) {
+			continue
+		}
+		if access == AccessWrite && !r.Writable {
+			if readOnlyMatch == "" {
+				readOnlyMatch = r.Path
+			}
+			continue
+		}
+		return full, nil
+	}
+	if readOnlyMatch != "" {
+		return "", fmt.Errorf("path %q is inside the read-only additional root %q; writes are only allowed in the workspace root %q (set writable: true on that entry in workspace.additional_roots to change it)", path, readOnlyMatch, primary)
+	}
+	if len(roots) == 1 {
+		return "", fmt.Errorf("path %q escapes the workspace root %q", path, primary)
+	}
+	return "", fmt.Errorf("path %q resolves outside the workspace root %q and all %d additional roots", path, primary, len(roots)-1)
+}
+
+// absCandidate turns path into the absolute path it names, resolving a
+// relative path against root. Purely lexical — no filesystem access — so a
+// multi-root validation can absolutize once and then test that one candidate
+// against every root.
+func absCandidate(root, path string) string {
 	abs := path
 	switch {
 	case filepath.IsAbs(abs):
@@ -36,11 +136,16 @@ func ValidatePath(root, path string) (string, error) {
 	default:
 		abs = filepath.Join(root, abs)
 	}
-	abs = filepath.Clean(abs)
+	return filepath.Clean(abs)
+}
 
+// validateAgainstRoot runs the confinement checks for one root against an
+// already-absolutized candidate. orig is the caller's original path, used only
+// in error messages so they name what the caller actually wrote.
+func validateAgainstRoot(root, abs, orig string) (string, error) {
 	// Fast check before symlink resolution: reject obvious escapes.
 	if escapesRoot(root, abs) {
-		return "", fmt.Errorf("path %q escapes the workspace root %q", path, root)
+		return "", fmt.Errorf("path %q escapes the workspace root %q", orig, root)
 	}
 
 	// Resolve symlinks on the real filesystem. If the full path exists, resolve
@@ -56,7 +161,7 @@ func ValidatePath(root, path string) (string, error) {
 
 	full := filepath.Join(resolved, tail)
 	if escapesRoot(realRoot, full) {
-		return "", fmt.Errorf("path %q resolves outside the workspace root %q (symlink escape)", path, root)
+		return "", fmt.Errorf("path %q resolves outside the workspace root %q (symlink escape)", orig, root)
 	}
 
 	return full, nil

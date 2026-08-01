@@ -52,12 +52,26 @@ type SlashResult struct {
 	// override alone never touched.
 	Model *string
 
+	// Drive is non-nil to start an unattended phased skill drive (P52.12)
+	// instead of sending an ordinary message. The TUI streams it over the same
+	// SSE path a message uses, so the transcript renders it identically — what
+	// differs is server-side: fresh context per phase, auto verify + quality
+	// pass, backend-liveness resume, hollow-body re-entry. Until this existed,
+	// an unattended build meant dropping out of the TUI to `aegis chat --skill`.
+	Drive *api.DriveRequest
+
 	// ThreatModelTarget is non-nil to open the /threat-model framework picker
 	// (forcing the choice up front instead of a model-turn clarifying
 	// question); its value is the already-parsed target text ("" for the
 	// whole project), carried through to re-dispatch /threat-model once a
 	// framework is picked.
 	ThreatModelTarget *string
+
+	// ThreatModelUnattended is set alongside ThreatModelTarget when the user
+	// asked for an unattended run before a framework was chosen, so the flag
+	// survives the picker round-trip and the re-dispatched command still drives
+	// (P52.12). Meaningless without ThreatModelTarget.
+	ThreatModelUnattended bool
 
 	// Transient marks output that should render in a dismissable overlay panel
 	// (P33.11) instead of being appended to the transcript — set by the
@@ -988,10 +1002,15 @@ func extractThreatModelFramework(args []string) (string, []string) {
 // passed through as an explicit choice; without one, it opens a picker
 // dialog instead of spending a model turn on the clarifying question.
 func (d *SlashDispatcher) cmdThreatModel(args []string) SlashResult {
+	// P52.12: an explicit unattended mode. Interactive stays the default —
+	// P47.10's reasoning that review between phases is *valuable* still holds;
+	// what was wrong was the absence of a choice, which forced anyone wanting
+	// an unattended build out of the TUI entirely.
+	args, unattended := extractUnattendedFlag(args)
 	framework, rest := extractThreatModelFramework(args)
 	target := strings.TrimSpace(strings.Join(rest, " "))
 	if framework == "" {
-		return SlashResult{ThreatModelTarget: &target}
+		return SlashResult{ThreatModelTarget: &target, ThreatModelUnattended: unattended}
 	}
 	// The common case is "model the thing Aegis is actually running against"
 	// — naming the workspace explicitly (and its path, when known) grounds
@@ -1008,8 +1027,46 @@ func (d *SlashDispatcher) cmdThreatModel(args []string) SlashResult {
 		prompt += fmt.Sprintf(" (%s)", d.workDir)
 	}
 	prompt += fmt.Sprintf(". Use the %s framework — this has already been decided, so skip the framework-selection clarifying question.", framework)
+	if unattended {
+		// The drive builds each phase's prompt itself from the skill's plan, so
+		// it needs the task, not the skill body — no activateSkill here.
+		return SlashResult{Drive: &api.DriveRequest{Skill: "threat-modeling", Task: prompt}}
+	}
 	body, warn := d.activateSkill("threat-modeling")
 	return SlashResult{Output: warn, Message: skillTaskMessage("threat-modeling", body, prompt)}
+}
+
+// extractUnattendedFlag pulls an `unattended` / `--unattended` token from
+// anywhere in args, returning the remaining args. Accepted anywhere rather than
+// only in the leading position because it reads naturally at either end
+// ("/threat-model unattended stride" and "/threat-model stride unattended"),
+// and the framework/target parsing that follows must not see it either way.
+func extractUnattendedFlag(args []string) (rest []string, unattended bool) {
+	for _, a := range args {
+		switch strings.ToLower(strings.TrimSpace(a)) {
+		case "unattended", "--unattended", "-u":
+			unattended = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, unattended
+}
+
+// cmdDrive starts an unattended phased drive for any skill that declares a
+// phase plan (P52.12) — the general form of /threat-model unattended, so a
+// skill that opts in via its own `phases:` frontmatter is reachable from the
+// TUI without a new slash command per skill.
+func (d *SlashDispatcher) cmdDrive(args []string) SlashResult {
+	if len(args) == 0 {
+		return SlashResult{Output: "usage: /drive <skill> <task…>", IsError: true}
+	}
+	skill := args[0]
+	task := strings.TrimSpace(strings.Join(args[1:], " "))
+	if task == "" {
+		return SlashResult{Output: "usage: /drive <skill> <task…> — the task is required, it is what the drive builds", IsError: true}
+	}
+	return SlashResult{Drive: &api.DriveRequest{Skill: skill, Task: task}}
 }
 
 // cmdReport sends a message that directly invokes the html-report or

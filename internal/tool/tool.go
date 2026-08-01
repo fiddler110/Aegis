@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // Result is the outcome of executing a tool.
@@ -286,6 +287,35 @@ func WithWorkdir(ctx context.Context, dir string) context.Context {
 func WorkdirFromContext(ctx context.Context) (string, bool) {
 	dir, _ := ctx.Value(workdirCtxKey{}).(string)
 	return dir, dir != ""
+}
+
+// extraRootsCtxKey is the context key for the session's additional
+// confinement roots.
+type extraRootsCtxKey struct{}
+
+// WithExtraRoots returns a context carrying the additional roots
+// (workspace.additional_roots, P52.13) that workspace-confined tools may
+// resolve paths into, on top of the workdir carried by WithWorkdir.
+//
+// It rides the context for the same reason the workdir does: one daemon-wide
+// Registry serves sessions rooted at different directories, so the root set is
+// a property of the call, not of the tool instance. The workdir stays a
+// separate value rather than becoming roots[0] because plenty of callers want
+// only the working directory (a shell cwd, a repo-map anchor) and have no
+// business seeing the wider set.
+func WithExtraRoots(ctx context.Context, roots []sandbox.Root) context.Context {
+	if len(roots) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, extraRootsCtxKey{}, roots)
+}
+
+// ExtraRootsFromContext returns the additional confinement roots carried by
+// ctx, or nil when the session has none — the overwhelmingly common case, and
+// the one that reproduces exactly the single-root behavior.
+func ExtraRootsFromContext(ctx context.Context) []sandbox.Root {
+	roots, _ := ctx.Value(extraRootsCtxKey{}).([]sandbox.Root)
+	return roots
 }
 
 // Get returns a registered tool by name.

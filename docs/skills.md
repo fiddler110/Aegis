@@ -24,12 +24,66 @@ Drop it in `.aegis/skills/` (project) or `~/.aegis/skills/` (user, global) and i
 
 Write the `description` the way you'd brief someone deciding whether to open the file: what the skill does, and the phrases/situations that should trigger it. The model sees only this line before deciding to load the skill, so vague descriptions ("deployment stuff") get skipped; specific ones ("Use when asked to deploy, push to staging, or ship this") get matched.
 
-**Frontmatter fields** (only two are recognized — anything else is ignored):
+**Frontmatter fields** (anything else is ignored):
 
 | Field | Required | Description |
 |-------|----------|--------------|
 | `description` | Recommended | Shown in `<skills_available>`; drives progressive disclosure. Omit it and the skill is eager-injected in full on every turn instead (legacy behavior — avoid for anything non-trivial). |
 | `name` | No | Overrides the filename/directory stem as the skill's name. |
+| `phases` | No | Declares a **phased drive** plan — see below. |
+| `run_dir` | No | Where the phase globs live, when they aren't relative to the workspace root. |
+
+---
+
+## Phased skills (long unattended builds)
+
+A skill that produces a multi-file deliverable — a threat model, a report suite,
+a documentation set — hits a wall on a local model when it's built in one
+conversation: context grows with every file read, and past roughly the model's
+window the run stalls or starts truncating tool calls. Declaring a `phases:`
+plan opts the skill into the **phased drive**, which runs each phase in its own
+fresh context so peak context stays bounded to one phase's work:
+
+```markdown
+---
+description: Produce the API documentation suite. Use when asked to document the API.
+run_dir: docs/api            # optional; omit to use the workspace root
+phases:
+  - name: outline
+    setup: true              # runs before run_dir exists; scaffolds the files
+    files: ["outline.md"]
+    prompt: Explore {cwd}, then scaffold {files} under {run_dir} with one `<!-- PENDING: <section> -->` marker per section.
+  - name: endpoints
+    files: ["endpoints-*.md"]
+    prompt: Fill every PENDING marker in {files} with real, evidence-grounded content.
+---
+```
+
+| Phase field | Meaning |
+|---|---|
+| `name` | Label used in logs and progress notices |
+| `files` | Globs (relative to `run_dir`) the phase must clear of `<!-- PENDING` markers before it counts as complete. Required — a phase with no files has no completion oracle |
+| `setup` | Marks the first phase, which runs before `run_dir` exists. At most one |
+| `prompt` | Seeds the phase's fresh context. Placeholders: `{task}`, `{run_dir}`, `{skill_dir}`, `{cwd}`, `{phase}`, `{files}`. Optional — a phase without one gets a generated prompt from its name and files |
+
+The **`<!-- PENDING: … -->` marker is the completion oracle**: the setup phase
+stubs each section with one, later phases replace them with real content, and a
+file with no markers left is done. This is also what makes a drive resumable —
+an interrupted build re-run picks up at the first file still carrying a marker,
+costing nothing for the phases already finished.
+
+`run_dir` may be a glob (`.aegis/reports/*`), which resolves to its
+most-recently-modified matching directory — the pattern for a skill whose setup
+phase scaffolds a fresh dated output directory per run. Before anything matches,
+the drive treats the plan as unscaffolded and runs the setup phase.
+
+Start a drive from any client: `/drive <skill> <task…>` in the TUI, the **Drive**
+button beside the web UI composer, `aegis chat --skill <name>` from the CLI, or
+`POST /sessions/{id}/drive` over the HTTP API (see
+[sessions.md](sessions.md#phased-drives)). A skill with no phase plan is refused
+rather than silently run as one growing conversation — that failure is exactly
+what the phased drive exists to avoid. `threat-modeling` ships with a built-in,
+hand-tuned plan and needs no frontmatter.
 
 ---
 

@@ -1,4 +1,4 @@
-package cli
+package drive
 
 import (
 	"crypto/sha256"
@@ -12,13 +12,13 @@ import (
 	"time"
 )
 
-// maxVerifyRounds bounds the P39.6 verify-and-fix loop: after the drive's
+// MaxVerifyRounds bounds the P39.6 verify-and-fix loop: after the drive's
 // PENDING markers hit zero, the bundled phase-6 checks run; each failing round
 // feeds the failure text back for an in-place fix and re-runs, but only this
 // many times before stopping with the still-failing output surfaced. Small
 // because a model that cannot clear the mechanical checks in a few tries is not
 // going to, and each round is a full model turn.
-const maxVerifyRounds = 3
+const MaxVerifyRounds = 3
 
 // verifyScript is one bundled check the P39.6 drive-completion verifier runs
 // against a completed run directory. args are appended after the <run-dir>
@@ -41,13 +41,13 @@ var threatModelVerifyScripts = []verifyScript{
 	{file: "inventory.py", args: []string{"--check"}},
 }
 
-// verifySkillOutputs runs a preloaded skill's bundled verification scripts
+// VerifySkillOutputs runs a preloaded skill's bundled verification scripts
 // against its completed run directory and returns any failure text. ran is
 // false when there is nothing to verify — the skill ships no verify.py, no run
 // directory exists yet, or no python interpreter is on PATH — in which case the
 // caller falls back to the pre-P39.6 behaviour of treating "all markers filled"
 // as done. When ran is true and failures is empty, the suite verified clean.
-func verifySkillOutputs(skillName, skillDir, cwd string) (failures string, ran bool) {
+func VerifySkillOutputs(skillName, skillDir, cwd string) (failures string, ran bool) {
 	if skillName == "" || skillDir == "" {
 		return "", false
 	}
@@ -57,7 +57,7 @@ func verifySkillOutputs(skillName, skillDir, cwd string) (failures string, ran b
 	if _, err := os.Stat(filepath.Join(skillDir, "verify.py")); err != nil {
 		return "", false
 	}
-	runDir := latestThreatModelRunDir(cwd)
+	runDir := LatestRunDir(cwd)
 	if runDir == "" {
 		return "", false
 	}
@@ -110,7 +110,7 @@ func normalizeSkillIDs(skillName, skillDir, cwd string) (ran bool, err error) {
 	if _, e := os.Stat(script); e != nil {
 		return false, nil // not bundled in this skill build
 	}
-	runDir := latestThreatModelRunDir(cwd)
+	runDir := LatestRunDir(cwd)
 	if runDir == "" {
 		return false, nil
 	}
@@ -125,7 +125,7 @@ func normalizeSkillIDs(skillName, skillDir, cwd string) (ran bool, err error) {
 }
 
 // suiteSnapshot captures the current contents of a run directory's suite report
-// files (its top-level .md/.mmd/.yaml files — the same set suiteFingerprint
+// files (its top-level .md/.mmd/.yaml files — the same set SuiteFingerprint
 // folds), keyed by basename. It backs the P50.3 quality-pass regression guard:
 // the snapshot is taken at the moment the mechanical checks first pass (a
 // known-clean state) so the drive can roll back to it if the quality pass edits
@@ -172,12 +172,12 @@ func restoreSuiteSnapshot(runDir string, snap map[string][]byte) error {
 	return nil
 }
 
-// latestThreatModelRunDir returns the most-recently-modified threat-model run
+// LatestRunDir returns the most-recently-modified threat-model run
 // directory under <cwd>/.aegis (the one the just-completed drive wrote), or ""
 // if none exists. A run directory is identified by containing 0-assessment.md,
 // the first suite file scaffold.py writes; picking newest-mtime handles a
 // workspace that accumulated several runs.
-func latestThreatModelRunDir(cwd string) string {
+func LatestRunDir(cwd string) string {
 	base := filepath.Join(cwd, ".aegis", "security", "threat-model")
 	entries, err := os.ReadDir(base)
 	if err != nil {
@@ -204,6 +204,85 @@ func latestThreatModelRunDir(cwd string) string {
 	return best
 }
 
+// RunDirResolver returns the function a drive uses to locate the directory its
+// phase globs are relative to, given the skill's name and its declared
+// `run_dir:` frontmatter (empty when it declares none).
+//
+// This is the completion oracle's half of the P52.12 generalization, and
+// without it the other half is inert: PlanFor will happily build a plan from
+// any skill's `phases:`, but every phase resolves its files under a run
+// directory, and that lookup used to be LatestRunDir unconditionally — the
+// threat-model layout, keyed off a threat-model sentinel file. A
+// documentation-as-code or latex-report plan therefore resolved "" forever, so
+// no phase could ever report itself complete and each would burn its whole
+// turn budget before the drive moved on. Declared phases would have "worked"
+// in the sense that they ran.
+//
+// Three cases, in the order they are decided:
+//   - a declared glob resolves to its newest matching directory (the "each run
+//     scaffolds a fresh dated directory" pattern, generalized);
+//   - threat-modeling with nothing declared keeps LatestRunDir exactly, since
+//     its built-in plan and its verifier both assume that layout;
+//   - anything else treats the workspace root as the run directory, which is
+//     what a skill writing to fixed paths means by a relative glob.
+func RunDirResolver(skillName, declared string) func(cwd string) string {
+	if declared = strings.TrimSpace(declared); declared != "" {
+		return func(cwd string) string { return latestDirMatching(cwd, declared) }
+	}
+	if skillName == threatModelSkill {
+		return LatestRunDir
+	}
+	return func(cwd string) string { return cwd }
+}
+
+// latestDirMatching returns the most-recently-modified directory matching a
+// workspace-relative glob, or "" when none matches yet — which the drive reads
+// as "not scaffolded", so the setup phase runs. A glob matching exactly one
+// fixed path is the degenerate case and works the same way.
+//
+// A match outside the workspace is discarded. `run_dir:` comes from a skill
+// file, which is content the model can write (`.aegis/skills/` is inside the
+// workspace), so a `../..` prefix would otherwise aim the drive's phase prompts
+// at a directory the workspace does not contain. The tools still enforce their
+// own sandbox on every write; this keeps the drive from *naming* an escape in
+// the first place.
+func latestDirMatching(cwd, glob string) string {
+	matches, err := filepath.Glob(filepath.Join(cwd, filepath.FromSlash(glob)))
+	if err != nil {
+		return ""
+	}
+	var best string
+	var bestMod time.Time
+	for _, m := range matches {
+		info, err := os.Stat(m)
+		if err != nil || !info.IsDir() || !withinRoot(cwd, m) {
+			continue
+		}
+		if best == "" || info.ModTime().After(bestMod) {
+			best, bestMod = m, info.ModTime()
+		}
+	}
+	return best
+}
+
+// withinRoot reports whether path is root itself or lies beneath it, comparing
+// symlink-resolved forms so a workspace reached through a symlink (every /tmp
+// or /var path on macOS) is not mistaken for an escape.
+func withinRoot(root, path string) bool {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	root, path = resolve(root), resolve(path)
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
 // pythonExe returns the path to a working python interpreter (python3
 // preferred), or "" if none is usable — in which case the P39.6 verifier
 // degrades to a no-op rather than failing the drive. Each candidate is probed
@@ -224,7 +303,7 @@ func pythonExe() string {
 	return ""
 }
 
-// qualityReviewPrompt is the P38.1 final quality pass. The mechanical phase-6
+// QualityReviewPrompt is the P38.1 final quality pass. The mechanical phase-6
 // scripts (verify.py/lint_dfd.py/inventory.py) verify structure and counts but
 // cannot judge substance: whether every threat is grounded in real evidence,
 // whether the prose is filler, whether the analysis is internally coherent. A
@@ -235,7 +314,7 @@ func pythonExe() string {
 // place. It is bounded to a single pass by the caller (a re-review every turn
 // would never terminate), and the mechanical checks re-run afterward, so a
 // review edit that breaks a script check is caught by the normal fix loop.
-func qualityReviewPrompt() string {
+func QualityReviewPrompt() string {
 	return "The suite is structurally complete and the mechanical checks pass. Now do ONE final quality-and-sanity review of the finished threat model, reading each file, and fix any problem you find IN PLACE with `edit_file` (do not re-scaffold, do not add `<!-- PENDING -->` markers). " + phase6IncrementalEditRule + " Check specifically:\n" +
 		"- Every threat and finding cites concrete evidence — a real `path:line` (or `path` + symbol) that exists in the codebase, not a vague reference like \"the code\" or \"various files\". Fix or remove any ungrounded claim.\n" +
 		"- No filler, placeholder, TODO, \"lorem\", or restated-boilerplate text; each row says something specific to THIS system.\n" +
@@ -246,26 +325,26 @@ func qualityReviewPrompt() string {
 		"This is a non-interactive run: make every fix now with `edit_file` and do not ask whether to proceed. If — after actually reading the files — everything is already correct, say so in one line and stop without editing."
 }
 
-// qualityStampFile is the completion stamp the phased drive writes inside a run
+// QualityStampFile is the completion stamp the phased drive writes inside a run
 // directory once the suite has passed the expensive LLM quality pass and
 // re-verified clean. It records a fingerprint of the exact on-disk suite so a
 // re-run of an unchanged, already-reviewed suite can skip the ~25-30 minute
 // quality pass instead of redoing it. It is deliberately invisible to every
 // existing suite scanner: the `.json` extension is excluded from
 // scanPendingMarkers / suiteFileCount / verify.py (which only read
-// {.md,.mmd,.yaml,.yml,.txt}) and from suiteFingerprint below, and the leading
+// {.md,.mmd,.yaml,.yml,.txt}) and from SuiteFingerprint below, and the leading
 // dot is extra safety. Its contents never contain the literal `<!-- PENDING`,
 // so scanPendingMarkers can never trip on it either.
-const qualityStampFile = ".quality-stamp.json"
+const QualityStampFile = ".quality-stamp.json"
 
-// qualityStamp is the JSON body of qualityStampFile: the suite fingerprint at
+// qualityStamp is the JSON body of QualityStampFile: the suite fingerprint at
 // the moment the quality pass last verified clean, and when that happened.
 type qualityStamp struct {
 	Fingerprint string `json:"fingerprint"`
 	ReviewedAt  string `json:"reviewed_at"`
 }
 
-// suiteFingerprint returns a deterministic sha256 over the run directory's suite
+// SuiteFingerprint returns a deterministic sha256 over the run directory's suite
 // report files (its top-level `.md`, `.mmd`, and `.yaml` files). Each file
 // contributes its name plus a sha256 of its contents, folded in sorted-name
 // order so the result is stable across calls and independent of directory
@@ -273,7 +352,7 @@ type qualityStamp struct {
 // stamp taken before the edit no longer matches and the quality pass re-fires.
 // The `.quality-stamp.json` stamp itself is excluded (its `.json` ext is not in
 // the set), so writing the stamp cannot change the fingerprint it records.
-func suiteFingerprint(runDir string) (string, error) {
+func SuiteFingerprint(runDir string) (string, error) {
 	entries, err := os.ReadDir(runDir)
 	if err != nil {
 		return "", err
@@ -301,11 +380,11 @@ func suiteFingerprint(runDir string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-// readQualityStamp reads and parses the run directory's completion stamp. ok is
+// ReadQualityStamp reads and parses the run directory's completion stamp. ok is
 // false when the stamp is absent, unreadable, malformed, or carries an empty
 // fingerprint — in every such case the caller treats the suite as un-reviewed.
-func readQualityStamp(runDir string) (stamp qualityStamp, ok bool) {
-	data, err := os.ReadFile(filepath.Join(runDir, qualityStampFile))
+func ReadQualityStamp(runDir string) (stamp qualityStamp, ok bool) {
+	data, err := os.ReadFile(filepath.Join(runDir, QualityStampFile))
 	if err != nil {
 		return qualityStamp{}, false
 	}
@@ -318,11 +397,11 @@ func readQualityStamp(runDir string) (stamp qualityStamp, ok bool) {
 	return stamp, true
 }
 
-// writeQualityStamp records the given fingerprint as the run directory's
+// WriteQualityStamp records the given fingerprint as the run directory's
 // completion stamp. Callers compute the fingerprint from the FINAL on-disk suite
 // (after any quality-pass edits) immediately before writing so the stamp
 // reflects exactly what was reviewed.
-func writeQualityStamp(runDir, fingerprint string) error {
+func WriteQualityStamp(runDir, fingerprint string) error {
 	data, err := json.Marshal(qualityStamp{
 		Fingerprint: fingerprint,
 		ReviewedAt:  time.Now().UTC().Format(time.RFC3339),
@@ -330,37 +409,37 @@ func writeQualityStamp(runDir, fingerprint string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(runDir, qualityStampFile), data, 0o644)
+	return os.WriteFile(filepath.Join(runDir, QualityStampFile), data, 0o644)
 }
 
-// shouldSkipQualityPass reports whether the run directory already carries a valid
+// ShouldSkipQualityPass reports whether the run directory already carries a valid
 // completion stamp whose fingerprint matches the current on-disk suite — i.e.
 // the suite has already been quality-reviewed and nothing has changed since, so
 // the expensive LLM quality pass can be skipped. It is the decision helper the
 // phased drive's phase-6 loop gates the quality pass on (see
 // runPhasedVerifyAndQuality). A missing/mismatched/unreadable stamp or an
 // unreadable run dir returns false so the pass runs as it does today.
-func shouldSkipQualityPass(runDir string) bool {
+func ShouldSkipQualityPass(runDir string) bool {
 	if runDir == "" {
 		return false
 	}
-	stamp, ok := readQualityStamp(runDir)
+	stamp, ok := ReadQualityStamp(runDir)
 	if !ok {
 		return false
 	}
-	fp, err := suiteFingerprint(runDir)
+	fp, err := SuiteFingerprint(runDir)
 	if err != nil {
 		return false
 	}
 	return stamp.Fingerprint == fp
 }
 
-// verifyFixPrompt is the P39.6 continuation turn: the markers are all cleared
+// VerifyFixPrompt is the P39.6 continuation turn: the markers are all cleared
 // but the bundled checks still fail, so name the exact failures and tell the
 // model to fix them in place (not re-scaffold) so the next iteration re-runs the
 // checks. Mirrors SKILL.md §5's "fix what any script flags, then re-run it until
 // clean" round, done autonomously.
-func verifyFixPrompt(failures string) string {
+func VerifyFixPrompt(failures string) string {
 	return "The suite has no `<!-- PENDING -->` markers left, but the bundled phase-6 verification scripts still FAIL. Fix the exact problems below by editing the affected files in place — do not re-scaffold and do not add new `<!-- PENDING -->` markers — then stop; the run re-verifies automatically:\n\n" +
 		failures +
 		"\n\nEdit the named files with `edit_file` to resolve every failing check now. " + phase6IncrementalEditRule + " This is a non-interactive run: make the fixes and do not ask whether to proceed."

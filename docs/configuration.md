@@ -671,6 +671,34 @@ security:
     triage: false           # security-audit skill: debate a borderline/disputed finding before suppressing it
 
 
+# ── Workspace roots ───────────────────────────────────────────────────────────
+workspace:
+  # Directories outside the session's own workdir that workspace-confined
+  # tools (read_file, ls, write_file, edit_file, multi_edit, yaml_validate,
+  # render_diagram, security_scan, latex_build, ...) may resolve paths into
+  # (P52.13).
+  #
+  # This exists for the cross-repo shape a single root makes inexpressible:
+  # read research artifacts out of repo A, write the formal document into
+  # repo B. Starting Aegis from their common parent also works, but widens
+  # confinement far past what the task needs and inflates the repo map.
+  #
+  # Two locks stand in front of every entry:
+  #   1. Like permission.*/sandbox.*/hooks, this key is frozen from an
+  #      untrusted project config — a cloned repo cannot nominate "/" as a
+  #      root just by being checked out. Run `aegis trust` in the project.
+  #   2. Each root needs its OWN decision: `aegis trust --dir <path>`. An
+  #      additional root does not inherit the workspace's trust. Entries that
+  #      are untrusted, missing, or already inside the workdir are dropped
+  #      with a warning in the daemon log rather than failing startup.
+  #
+  # Roots are read-only unless you say otherwise, which is what makes them
+  # cheap to grant. Relative paths resolve against the session workdir.
+  additional_roots: []
+  #  - path: ../research-repo    # readable, not writable
+  #  - path: /srv/shared/docs
+  #    writable: true            # opt in to writes
+
 # ── Git tools ─────────────────────────────────────────────────────────────────
 git:
   # Pre-commit test gate (P46.2). When set, the git_commit tool runs this

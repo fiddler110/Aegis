@@ -57,9 +57,14 @@ awk '
     itemNum = heading
     sub(/ .*/, "", itemNum)
     if (itemNum in globalBlocked) blocked = 1
-    flag = blocked ? "  [NOT BLOCKING -- confirm with user before starting]" : ""
+    # A shipped/resolved item keeps its heading (the analysis is the historical
+    # record) but must never be suggested as the next thing to build — without
+    # this the suggestion walks straight into finished work whenever the top of
+    # a tier has just been cleared.
+    done = (heading ~ /SHIPPED|RESOLVED/)
+    flag = done ? "  [SHIPPED]" : (blocked ? "  [NOT BLOCKING -- confirm with user before starting]" : "")
     printf("- %s\n    %s%s\n", heading, prio, flag)
-    if (!blocked && chosen == "") chosen = heading
+    if (!blocked && !done && chosen == "") chosen = heading
   }
   /^### /{
     print_section()

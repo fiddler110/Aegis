@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // latexInput marshals a latex_build argument map.
@@ -150,7 +152,7 @@ func TestLatexConfinementRejectsOutOfWorkspaceReads(t *testing.T) {
 			tex := writeLatexFile(t, root, "main.tex",
 				"\\documentclass{article}\n\\begin{document}\n"+tc.body+"\n\\end{document}\n")
 
-			v := checkLatexConfinement(root, tex)
+			v := checkLatexConfinement(soleRoot(root), tex)
 			if len(v) == 0 {
 				t.Fatalf("expected a confinement violation for %s", tc.body)
 			}
@@ -182,7 +184,7 @@ func TestLatexConfinementAllowsOrdinaryDocuments(t *testing.T) {
 \end{document}
 `)
 
-	if v := checkLatexConfinement(root, tex); len(v) != 0 {
+	if v := checkLatexConfinement(soleRoot(root), tex); len(v) != 0 {
 		t.Fatalf("ordinary document flagged: %v", v)
 	}
 }
@@ -196,7 +198,7 @@ func TestLatexConfinementFollowsIncludes(t *testing.T) {
 	tex := writeLatexFile(t, root, "main.tex",
 		"\\documentclass{article}\n\\begin{document}\n\\input{chapters/one}\n\\end{document}\n")
 
-	v := checkLatexConfinement(root, tex)
+	v := checkLatexConfinement(soleRoot(root), tex)
 	if len(v) == 0 {
 		t.Fatal("expected the transitively-included escape to be caught")
 	}
@@ -212,7 +214,7 @@ func TestLatexConfinementFollowsLocalStyle(t *testing.T) {
 	tex := writeLatexFile(t, root, "main.tex",
 		"\\documentclass{article}\n\\usepackage{aegisreport}\n\\begin{document}\nx\n\\end{document}\n")
 
-	if v := checkLatexConfinement(root, tex); len(v) == 0 {
+	if v := checkLatexConfinement(soleRoot(root), tex); len(v) == 0 {
 		t.Fatal("expected the escape inside the local .sty to be caught")
 	}
 }
@@ -338,4 +340,11 @@ func TestLatexBuildCompilesConfinedDocument(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "main.pdf")); err != nil {
 		t.Errorf("expected main.pdf: %v", err)
 	}
+}
+
+// soleRoot is the single-writable-root set the confinement scanners see for a
+// session with no workspace.additional_roots configured (P52.13) — i.e. every
+// case these tests exercise.
+func soleRoot(root string) []sandbox.Root {
+	return []sandbox.Root{{Path: root, Writable: true}}
 }

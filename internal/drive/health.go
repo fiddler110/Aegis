@@ -1,4 +1,4 @@
-package cli
+package drive
 
 import (
 	"context"
@@ -65,31 +65,31 @@ const (
 // or a backend with no liveness probe (e.g. a cloud adapter, where the retry
 // decorator already handles transient outages), returns backendNotDown so the
 // caller's existing paths handle it. `where` names the phase/step for notices.
-func (st *phasedDriveState) recoverBackendDown(ctx context.Context, err error, where string) backendAction {
+func (st *State) recoverBackendDown(ctx context.Context, err error, where string) backendAction {
 	if !provider.IsBackendUnavailableError(err) {
 		return backendNotDown
 	}
 	// No liveness probe (non-Ollama, or the hook wasn't wired): we can't tell
 	// when the backend is back, so don't spin — let the caller surface the
 	// error through its normal terminal path.
-	if st.checkBackend == nil {
+	if st.CheckBackend == nil {
 		return backendNotDown
 	}
-	if _, supported := st.checkBackend(ctx); !supported {
+	if _, supported := st.CheckBackend(ctx); !supported {
 		return backendNotDown
 	}
-	st.logger.Warn("phased drive: model backend appears unavailable; waiting to resume from disk (P50.1)",
+	st.Logger.Warn("phased drive: model backend appears unavailable; waiting to resume from disk (P50.1)",
 		"where", where, "err", err)
-	fmt.Fprintf(st.errOut, "\n[notice: the model backend became unreachable during %s (the server may have crashed or been killed); waiting up to %s for it to come back, then resuming from disk — the suite on disk is intact]\n",
+	fmt.Fprintf(st.ErrOut, "\n[notice: the model backend became unreachable during %s (the server may have crashed or been killed); waiting up to %s for it to come back, then resuming from disk — the suite on disk is intact]\n",
 		where, backendRecoverBudget)
 	st.tryAutostartBackend()
 	if st.waitForBackend(ctx, where) {
-		st.logger.Info("phased drive: backend recovered; resetting to a fresh context and resuming", "where", where)
-		fmt.Fprintf(st.errOut, "\n[notice: backend is reachable again — resetting to a fresh context and resuming %s from disk]\n", where)
+		st.Logger.Info("phased drive: backend recovered; resetting to a fresh context and resuming", "where", where)
+		fmt.Fprintf(st.ErrOut, "\n[notice: backend is reachable again — resetting to a fresh context and resuming %s from disk]\n", where)
 		return backendRecovered
 	}
-	st.logger.Warn("phased drive: backend did not recover within budget; stopping resumably", "where", where, "budget", backendRecoverBudget)
-	fmt.Fprintf(st.errOut, "\n[notice: the model backend did not come back within %s during %s; stopping — the suite on disk is intact, so re-run once the backend is up to resume]\n",
+	st.Logger.Warn("phased drive: backend did not recover within budget; stopping resumably", "where", where, "budget", backendRecoverBudget)
+	fmt.Fprintf(st.ErrOut, "\n[notice: the model backend did not come back within %s during %s; stopping — the suite on disk is intact, so re-run once the backend is up to resume]\n",
 		backendRecoverBudget, where)
 	return backendGaveUp
 }
@@ -100,37 +100,44 @@ func (st *phasedDriveState) recoverBackendDown(ctx context.Context, err error, w
 // phase) get both with one call. A backend-down error is waited out and, on
 // recovery, returns overflowRetry (the caller re-runs the turn against a fresh
 // context — runPhase6Turn always rebuilds the conversation, so the reset is
-// implicit), or overflowStop when the backend never returns. Anything else
-// (including a context overflow) falls through to recoverPhase6Overflow
-// unchanged. It reuses the phase6OverflowAction verdict enum so the call sites'
-// switch statements need no new case.
-func (st *phasedDriveState) recoverPhase6Error(ctx context.Context, err error, where string, overflowResets *int) phase6OverflowAction {
+// implicit), or overflowStop when the backend never returns. Anything else falls
+// through to recoverPhase6Overflow and then to the P52.3 tool-failure recovery,
+// both unchanged. It reuses the phase6OverflowAction verdict enum so the call
+// sites' switch statements need no new case.
+//
+// toolFailResets is the P52.3 breaker's own reset budget, kept separate from
+// overflowResets so the two failure modes cannot spend each other's allowance —
+// see recoverToolFailureStall.
+func (st *State) recoverPhase6Error(ctx context.Context, err error, where string, overflowResets, toolFailResets *int) phase6OverflowAction {
 	switch st.recoverBackendDown(ctx, err, where) {
 	case backendRecovered:
 		return overflowRetry
 	case backendGaveUp:
 		return overflowStop
 	}
-	return st.recoverPhase6Overflow(err, where, overflowResets)
+	if a := st.recoverPhase6Overflow(err, where, overflowResets); a != overflowNotHandled {
+		return a
+	}
+	return st.recoverToolFailureStall(err, where, toolFailResets)
 }
 
 // waitForBackend polls the liveness probe until the backend answers or the
 // recovery budget expires (or ctx is cancelled). It returns true only when the
 // backend became reachable. A single immediate probe short-circuits the common
 // case where the server is already back by the time the error surfaced.
-func (st *phasedDriveState) waitForBackend(ctx context.Context, where string) bool {
+func (st *State) waitForBackend(ctx context.Context, where string) bool {
 	deadline := time.Now().Add(backendRecoverBudget)
 	ticker := time.NewTicker(backendProbeInterval)
 	defer ticker.Stop()
 	announced := false
 	for {
-		if healthy, supported := st.checkBackend(ctx); supported && healthy {
+		if healthy, supported := st.CheckBackend(ctx); supported && healthy {
 			return true
 		}
 		if !announced {
 			// One heartbeat so a human tailing the run sees the drive is
 			// alive and waiting, not hung.
-			st.logger.Info("phased drive: waiting for model backend to return", "where", where)
+			st.Logger.Info("phased drive: waiting for model backend to return", "where", where)
 			announced = true
 		}
 		if time.Now().After(deadline) {
@@ -147,10 +154,10 @@ func (st *phasedDriveState) waitForBackend(ctx context.Context, where string) bo
 // stopBackendUnavailable prints the resumable stop notice for a content phase
 // whose backend never recovered, mirroring stopMaxTurns' shape so a re-run is
 // the obvious next step.
-func (st *phasedDriveState) stopBackendUnavailable(ph skillPhase, pending []string) {
+func (st *State) stopBackendUnavailable(ph Phase, pending []string) {
 	msg := fmt.Sprintf("backend unavailable during the %s phase with %d file(s) still PENDING: %s",
 		ph.label(), len(pending), strings.Join(pending, ", "))
-	st.logger.Warn("chat: " + msg)
+	st.Logger.Warn("chat: " + msg)
 }
 
 // tryAutostartBackend makes a best-effort `ollama serve` relaunch when
@@ -160,23 +167,23 @@ func (st *phasedDriveState) stopBackendUnavailable(ph skillPhase, pending []stri
 // an external supervisor like `brew services`/systemd) to bring it back. The
 // spawn is detached and its output discarded; failure is logged and ignored,
 // since waitForBackend is the real recovery signal either way.
-func (st *phasedDriveState) tryAutostartBackend() {
+func (st *State) tryAutostartBackend() {
 	if !boolEnv("AEGIS_OLLAMA_AUTOSTART") {
 		return
 	}
 	path, err := exec.LookPath("ollama")
 	if err != nil {
-		st.logger.Warn("phased drive: AEGIS_OLLAMA_AUTOSTART set but `ollama` not found on PATH", "err", err)
+		st.Logger.Warn("phased drive: AEGIS_OLLAMA_AUTOSTART set but `ollama` not found on PATH", "err", err)
 		return
 	}
 	cmd := exec.Command(path, "serve")
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
-		st.logger.Warn("phased drive: best-effort `ollama serve` relaunch failed", "err", err)
+		st.Logger.Warn("phased drive: best-effort `ollama serve` relaunch failed", "err", err)
 		return
 	}
-	st.logger.Info("phased drive: launched `ollama serve` (AEGIS_OLLAMA_AUTOSTART); waiting for it to become reachable")
-	fmt.Fprintf(st.errOut, "\n[notice: AEGIS_OLLAMA_AUTOSTART is set — launched `ollama serve`; waiting for it to become reachable]\n")
+	st.Logger.Info("phased drive: launched `ollama serve` (AEGIS_OLLAMA_AUTOSTART); waiting for it to become reachable")
+	fmt.Fprintf(st.ErrOut, "\n[notice: AEGIS_OLLAMA_AUTOSTART is set — launched `ollama serve`; waiting for it to become reachable]\n")
 	// Let go of the process handle; we only care that the port answers.
 	go func() { _ = cmd.Wait() }()
 }
@@ -194,7 +201,7 @@ func boolEnv(name string) bool {
 //
 // audit.jsonl is not flushed live and the drive logs only at phase boundaries,
 // so a phase that hangs (or a backend that died, before P50.1's wait kicks in)
-// is invisible until the whole run ends. phaseProgress carries the current
+// is invisible until the whole run ends. Progress carries the current
 // phase/turn/elapsed so a background ticker can emit a "still working"
 // heartbeat during a long single turn, and each turn boundary logs a structured
 // progress line. Together they make a stall observable — the precondition for
@@ -205,10 +212,10 @@ func boolEnv(name string) bool {
 // a large context) still produces a periodic sign of life without spamming.
 const heartbeatInterval = 30 * time.Second
 
-// phaseProgress is the shared, mutable progress snapshot the heartbeat ticker
+// Progress is the shared, mutable progress snapshot the heartbeat ticker
 // reads and the drive updates. Guarded by a mutex because the ticker goroutine
 // reads it concurrently with the drive's writes.
-type phaseProgress struct {
+type Progress struct {
 	mu      sync.Mutex
 	phase   string
 	turn    int
@@ -217,7 +224,7 @@ type phaseProgress struct {
 }
 
 // enter marks the start of a new phase, resetting the turn counter and clock.
-func (p *phaseProgress) enter(phase string) {
+func (p *Progress) enter(phase string) {
 	p.mu.Lock()
 	p.phase, p.turn, p.pending, p.started = phase, 0, 0, time.Now()
 	p.mu.Unlock()
@@ -225,7 +232,7 @@ func (p *phaseProgress) enter(phase string) {
 
 // tick records that a turn is starting in the current phase, with the count of
 // files still PENDING, and returns the new turn index and phase-elapsed.
-func (p *phaseProgress) tick(pending int) (turn int, elapsed time.Duration) {
+func (p *Progress) tick(pending int) (turn int, elapsed time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.turn++
@@ -234,7 +241,7 @@ func (p *phaseProgress) tick(pending int) (turn int, elapsed time.Duration) {
 }
 
 // snapshot returns the current progress for the heartbeat ticker.
-func (p *phaseProgress) snapshot() (phase string, turn, pending int, elapsed time.Duration) {
+func (p *Progress) snapshot() (phase string, turn, pending int, elapsed time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.phase, p.turn, p.pending, time.Since(p.started)
@@ -246,8 +253,8 @@ func (p *phaseProgress) snapshot() (phase string, turn, pending int, elapsed tim
 // signal — it never touches the drive's state beyond reading the snapshot — so
 // it is safe to run alongside everything else. A zero/empty phase (before the
 // first phase starts) is skipped so we don't log a meaningless heartbeat.
-func (st *phasedDriveState) startHeartbeat() func() {
-	if st.progress == nil {
+func (st *State) startHeartbeat() func() {
+	if st.Progress == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
@@ -260,11 +267,11 @@ func (st *phasedDriveState) startHeartbeat() func() {
 			case <-done:
 				return
 			case <-ticker.C:
-				phase, turn, pending, elapsed := st.progress.snapshot()
+				phase, turn, pending, elapsed := st.Progress.snapshot()
 				if phase == "" {
 					continue
 				}
-				st.logger.Info("phased drive: heartbeat",
+				st.Logger.Info("phased drive: heartbeat",
 					"phase", phase, "turn", turn, "pending", pending,
 					"phase_elapsed", elapsed.Round(time.Second).String())
 			}
@@ -277,12 +284,12 @@ func (st *phasedDriveState) startHeartbeat() func() {
 // always-on companion to the periodic heartbeat, so even a fast run leaves a
 // legible progress trail (phase, turn, elapsed, pending) instead of only
 // phase-start/phase-complete bookends.
-func (st *phasedDriveState) logTurn(phase string, pending int) {
-	if st.progress == nil {
+func (st *State) logTurn(phase string, pending int) {
+	if st.Progress == nil {
 		return
 	}
-	turn, elapsed := st.progress.tick(pending)
-	st.logger.Info("phased drive: turn",
+	turn, elapsed := st.Progress.tick(pending)
+	st.Logger.Info("phased drive: turn",
 		"phase", phase, "turn", turn, "pending", pending,
 		"phase_elapsed", elapsed.Round(time.Second).String())
 }

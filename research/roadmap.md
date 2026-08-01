@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-07-30
+**Last updated:** 2026-07-31
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,10 +11,12 @@ keep it when adding items.
 
 ## Status
 
-**Open items:** the **P52.x full-stack review batch** (filed 2026-07-30, **11 open** of 17 —
-**P52.1** Tier 1, **P52.3**/**P52.4**/**P52.8**/**P52.10** Tier 2, **P52.12**/**P52.13** Tier 3,
-**P52.14**-**P52.17** Tier 4 measure-first; **P52.2**, **P52.5**, **P52.6**, **P52.7**, **P52.9** and
-**P52.11** shipped 2026-07-30) — see the batch summary and its
+**Open items:** the **P52.x full-stack review batch** (filed 2026-07-30, **4 open** of 17 — all of
+them **P52.14**-**P52.17**, Tier 4 measure-first. **Every Tier-1, Tier-2 and Tier-3 item in the batch
+has shipped:** **P52.2**, **P52.5**, **P52.6**, **P52.7**, **P52.9**, **P52.11** on 2026-07-30,
+**P52.1**, **P52.3**, **P52.4**, **P52.8**, **P52.10** on 2026-07-31, and the two Tier-3 items
+**P52.12** (the batch's largest) and **P52.13** on 2026-08-01)
+— see the batch summary and its
 build-order table below, which is the authoritative sequence for future sessions. Plus **P38.1**
 (Tier 2 umbrella) + **P51.1** (Tier 1, macOS seatbelt profile — **shipped**
 2026-07-30) + the
@@ -116,19 +118,19 @@ not be built speculatively.
 
 | Order | Item | Tier | Why here |
 |---|---|---|---|
-| 1 | **P52.1** per-model context window | 1 | Silent prompt truncation; correctness, contained — **next up** |
+| 1 | **P52.1** per-model context window | 1 | **SHIPPED 2026-07-31** |
 | 2 | **P52.2** `latex_build` confinement | 1 | **SHIPPED 2026-07-30** |
-| 3 | **P52.3** tool-failure circuit breaker | 2 | Biggest remaining local-model stall; no dependency |
-| 4 | **P52.4** per-request `num_ctx` | 2 | Adapter half of P52.1 — build immediately after it |
+| 3 | **P52.3** tool-failure circuit breaker | 2 | **SHIPPED 2026-07-31** |
+| 4 | **P52.4** per-request `num_ctx` | 2 | **SHIPPED 2026-07-31** — with P52.1, as required |
 | 5 | **P52.5** `think`-rejection latch | 2 | **SHIPPED 2026-07-30** |
 | 6 | **P52.6** `RaiseContextWindow` mutex | 2 | **SHIPPED 2026-07-30** — P52.12 is now unblocked on this axis |
 | 7 | **P52.7** suite-wide hollowness check | 2 | **SHIPPED 2026-07-30** |
-| 8 | **P52.8** threat-model substance floor | 2 | Builds on P52.7's marker manifest — **manifest now exists** |
+| 8 | **P52.8** threat-model substance floor | 2 | **SHIPPED 2026-07-31** |
 | 9 | **P52.9** `yaml_validate` tool | 2 | **SHIPPED 2026-07-30** |
-| 10 | **P52.10** `latex_build` bib pass | 2 | Makes the shipped biblatex preamble actually work |
+| 10 | **P52.10** `latex_build` bib pass | 2 | **SHIPPED 2026-07-31** |
 | 11 | **P52.11** documentation-as-code skill | 2 | **SHIPPED 2026-07-30** |
-| 12 | **P52.13** `workspace.additional_roots` | 3 | Unblocks cross-repo research→document |
-| 13 | **P52.12** lift phased drive into daemon | 3 | Largest surface; P52.6 has now landed |
+| 12 | **P52.13** `workspace.additional_roots` | 3 | **SHIPPED 2026-08-01** |
+| 13 | **P52.12** lift phased drive into daemon | 3 | **SHIPPED 2026-08-01** |
 | 14 | **P52.14** session-scoped loop detector | 4 | *measure-first* |
 | 15 | **P52.15** wall-clock run budget | 4 | *measure-first* |
 | 16 | **P52.16** native tool-result disambiguation | 4 | *measure-first* — needs a live A/B |
@@ -141,6 +143,55 @@ Two findings from that batch change later work: **(a)** P52.2's prescribed `open
 static source scan instead — which matters for **P52.10**, whose `biber`/`bibtex` subprocesses the
 scan does not cover; **(b)** P52.7 added check 15 rather than renaming check 12, because
 `chat_phased.go` routes on the literal check name.
+
+**Batch 2 shipped 2026-07-31 (parallel) — the batch's Tier-1/Tier-2 work is now closed.** P52.1+P52.4
+(one lane, they are two halves of one correctness story), P52.3, P52.8 and P52.10 were built
+concurrently as four file-disjoint lanes and reconciled in one pass — see [releases.md](releases.md).
+Four findings from that batch matter to later work:
+
+- **The reconcile pass earned its keep.** P52.3's new abort would have been a *regression* for the
+  phased drive: `runPhasedSkillDrive` treats any engine error that is not backend-down or a context
+  overflow as fatal, so a stall that used to burn to `maxIterations` and limp onward would have killed
+  an unattended run — the exact manual-re-invocation failure P47.x/P50.x exist to remove. Neither lane
+  could see it (the engine lane was confined to `internal/engine`; the drive lives in `internal/cli`).
+  The abort now wraps an exported `engine.ErrToolFailureLimit` and the drive treats it as a resumable
+  phase reset at all three `eng.Run` sites. **Generalize this when building P52.12:** every new
+  terminal engine error needs a deliberate answer to "what does the phased drive do with it?", and
+  that question gets harder once the drive moves into the daemon.
+- **P52.4 did not touch `internal/engine`.** The per-run window reaches the request through a new
+  `provider.WithNumCtx` decorator the server wraps its shared adapter with, following the existing
+  `Unwrap() Adapter` convention. P52.12 should reuse that seam rather than adding a `num_ctx` field to
+  `engine.Options`.
+- **P52.10 rejected `latexmk`**, the roadmap's stated first preference. Not for the rc-file reason
+  (`-norc` answers that) but because the `.bcf` confinement check must sit *between* latexmk's own
+  generate and invoke-biber steps, and latexmk exposes no seam there. Option 2 shipped instead. If the
+  Tier-3 sandbox lead below ever lands, revisit — under real process confinement the objection
+  disappears.
+- **The threat-model Python scripts had no automated coverage at all** before P52.8 added
+  `_verify_substance_test.py`. Anything touching `verify.py`/`scaffold.py`/`normalize_ids.py` should
+  extend it rather than assume the Go side covers them — it only stubs `verify.py` or checks it
+  materializes byte-identically.
+
+**Both leads filed by batch 2 were investigated and closed the same day (2026-07-31)** — see
+[releases.md](releases.md). (a) The compaction summarizer was tuned to the *global* model's window
+while running on `provider.small_model`: confirmed real, fixed by keying the summarizer to a new
+`s.compModel` and resolving its window through `effectiveContextWindowFor`, with a post-run refresh so
+the entry doesn't stay stuck on a startup guess. (b) Sub-agent `ContextWindowTokens: 0`: confirmed,
+fixed, **and the lead's framing was wrong in a way worth recording** — spawns were *not* left with no
+compaction. `engine.Run` calls the compactor **unconditionally at entry** (`engine.go:345`),
+independent of `ContextWindowTokens`; what a spawn lacked was the *per-turn* 85%-fill check. The first
+attempt at a regression test passed against unfixed code for exactly that reason. Any future test of
+compaction behaviour must count calls, not merely assert one happened.
+
+**Follow-up filed by batch 2: content-substance check routing (extends the P52.7 follow-up).** P52.7
+noted that a `section-bodies-nonempty` failure falls through to the generic verify-fix turn instead of
+routing to the phase owning the named file. **P52.8 made this bigger**: checks 16-19 are also
+per-file, so five checks now want file-aware routing, while `contentSubstanceChecks` maps
+check-name → phase and cannot express it. The fix is to parse the failing file out of the
+`file:line` failure line and map file → owning phase (the phase globs already encode that mapping —
+`skillPhase.globs` is exactly a file→phase table read the other way). Deliberately **not** taken as a
+drive-by: it changes routing for five checks at once and deserves its own live-run validation. Tier 3,
+alongside P52.12, which touches the same drive.
 
 **Remaining P38.1 debt:** the in-harness phased-drive convergence tracking (see the P38.1 body). The
 2026-07-23 gpt-oss:20b housekeeping is now **closed** — **P39.10**/**P39.11** were already coded,
@@ -162,14 +213,27 @@ is covered by `internal/skills/embedded_test.go`).
 
 ## Open Work — Tier 1
 
-**Status:** 1 open — **P52.1** (per-model context window), filed 2026-07-30 by the P52.x full-stack
-review and now the batch's next item. **P52.2** (`latex_build` workspace confinement) **shipped
-2026-07-30**. **P51.1** (macOS seatbelt profile runs no commands) **shipped 2026-07-30**;
+**Status: none open.** **P52.1** (per-model context window) **shipped 2026-07-31** — the last open
+Tier-1 item. **P52.2** (`latex_build` workspace confinement) **shipped 2026-07-30**. **P51.1** (macOS
+seatbelt profile runs no commands) **shipped 2026-07-30**;
 **P50.1** (backend liveness + resumable reset), the P50.x batch head, **shipped 2026-07-30** (see
 [releases.md](releases.md)); batch head **P47.1** (wire proactive compaction into the CLI
 `chat --skill` drive engine) **shipped** 2026-07-24.
 
-### P52.1 — Context window is detected for the global model, not the model the turn actually runs on
+### P52.1 — Context window is detected for the global model, not the model the turn actually runs on — SHIPPED 2026-07-31
+
+Shipped with **P52.4**, as the item required. Built as specified: a per-model `ctxWinEntry{win, src,
+final}` cache behind `ctxWinMu`, each entry carrying its own re-detect state, with
+`applyDetectedWindowFor` reconciling config-vs-served per entry and `maybeRefreshContextWindowFor`
+refreshing the model the finished run actually used. Two decisions beyond the spec, both documented in
+code: the **globally-configured model's entry stays in the existing `ctxWin`/`ctxWinSrc`/`ctxWinFinal`
+fields** rather than moving into the map, because those are what `/status` reports and what the
+daemon-wide summarizer is tuned to — a reading for one session's persona-pinned model must not
+redefine what every other session compacts against; and **first-use detection for an unseen model is
+synchronous** (5s bound), because seeding from the global window and correcting after the run is
+precisely the failure being fixed — it would leave the pinned model's *first* turn, the one carrying
+the full system prompt, believing it had the primary's headroom. The output guard gets its own model's
+window too. See [releases.md](releases.md). The original analysis follows.
 
 `internal/server/contextwindow.go` resolves **one server-wide** effective context window, detected
 against `s.cfg.Provider.Model` (`initContextWindow` at `:52`, `maybeRefreshContextWindow` at `:117`),
@@ -319,21 +383,42 @@ to the drive + the Ollama adapter, no dependency.
 
 ## Open Work — Tier 2
 
-**Status:** 5 open — **P38.1** (threat-model conformance umbrella, live-run verification tracking
-rather than independent build work) plus the remainder of the P52.x full-stack review's Tier-2 batch:
-**P52.3** (tool-failure circuit breaker), **P52.4** (per-request `num_ctx`), **P52.8** (threat-model
-substance floor — **P52.7**'s manifest now exists, so it is unblocked), **P52.10** (`latex_build`
-bibliography pass). **P52.5** (`think`-rejection latch), **P52.6** (`RaiseContextWindow`
-synchronization), **P52.7** (suite-wide hollowness check), **P52.9** (`yaml_validate` tool) and
-**P52.11** (documentation-as-code skill) all **shipped 2026-07-30** — see
-[releases.md](releases.md). Build in the order given in the Status section's P52.x table. The self-contained batch items **P47.1**, **P47.2**,
+**Status:** 1 open — **P38.1** alone (threat-model conformance umbrella, live-run verification
+tracking rather than independent build work). **The P52.x review's entire Tier-2 batch has shipped:**
+**P52.5** (`think`-rejection latch), **P52.6** (`RaiseContextWindow` synchronization), **P52.7**
+(suite-wide hollowness check), **P52.9** (`yaml_validate` tool) and **P52.11**
+(documentation-as-code skill) on **2026-07-30**; **P52.3** (tool-failure circuit breaker), **P52.4**
+(per-request `num_ctx`), **P52.8** (threat-model substance floor) and **P52.10** (`latex_build`
+bibliography pass) on **2026-07-31** — see
+[releases.md](releases.md). The self-contained batch items **P47.1**, **P47.2**,
 **P47.3**, **P47.4**, **P47.5**, **P47.7**, **P47.8**, **P47.9** (the full P47.x phased-drive
 stability batch), **P48.1** (config-test hermeticity), **P49.1** (repo-map import edges, the
 P49.x batch head), and **P50.2**/**P50.3**/**P50.4** (the P50.x phased-drive determinism batch —
 deterministic ID canonicalizer, quality-pass rollback guard, live heartbeat) have all shipped — see
 [releases.md](releases.md).
 
-### P52.3 — Consecutive-tool-failure circuit breaker (the loop the loop detector cannot see)
+### P52.3 — Consecutive-tool-failure circuit breaker (the loop the loop detector cannot see) — SHIPPED 2026-07-31
+
+Shipped as specified (`internal/engine/toolfailure.go`), with **one deliberate deviation** and **one
+cross-lane fix the item did not anticipate**.
+
+**Deviation:** the item reads as if both counters feed both thresholds. Only the **strict**
+`allErrorRounds` counter can end a run; the secondary same-error counter earns a nudge and nothing
+more. A round that mixes a repeating failure with a *succeeding* call is the ordinary edit → `go test`
+→ still-fails → edit cycle, where the shell tool reports a non-zero exit as `IsError` with identical
+text every round — killing a run that is actively writing files would be a far worse failure than the
+stall it prevents. Pinned by a test.
+
+**Cross-lane fix, found in the reconcile pass:** the abort would have been a *regression* for the
+phased drive, which treats any engine error that is not backend-down or a context overflow as fatal —
+so a stall that used to burn to `maxIterations` and limp onward would have killed an unattended run,
+re-introducing exactly the manual-re-invocation failure P47.x/P50.x exist to remove. The abort now
+wraps an exported `engine.ErrToolFailureLimit` sentinel, and `chat_phased.go` classifies it as a
+**resumable phase reset** at all three `eng.Run` sites (content phase, phase-6 loop, P47.9 hollow
+re-entry) — a fresh context is the right remedy, not merely a compatible one, since the breaker fires
+when a model is reasoning from a context dense with its own failed attempts. Unlike the overflow path
+it does **not** escalate the serving window and it keeps its own reset budget
+(`maxToolFailureResets = 2`). See [releases.md](releases.md). The original analysis follows.
 
 `IsError` is computed for every tool result and emitted on the event stream (`engine.go:1276-1278`,
 `:1327`, `:1332`) and then **never aggregated into anything** — no counter, no threshold, no nudge,
@@ -369,7 +454,19 @@ ever needs it. Treat that lead as closed by this item.
 **Priority:** Tier 2 — ~30 lines in an established idiom, no dependency, and it closes the single
 most common local-model stall the current guard set misses. Highest-value Tier-2 item in the batch.
 
-### P52.4 — Per-request `num_ctx` (stop a small-model turn allocating the primary model's KV cache)
+### P52.4 — Per-request `num_ctx` (stop a small-model turn allocating the primary model's KV cache) — SHIPPED 2026-07-31
+
+Shipped alongside **P52.1**, as the item required. `provider.Request` gained `NumCtx`; the Ollama
+adapter's value is now the fallback, so nothing changes for any non-Ollama caller. **The engine was
+deliberately not touched** — instead of teaching `engine.Options` about `num_ctx`, the server wraps
+its shared adapter per run with a new `provider.WithNumCtx` decorator, following the `Unwrap()
+Adapter` convention the retry and failover decorators already use. **P52.12 should reuse that seam.**
+One decision the item did not cover: `RaiseContextWindow` escalations are applied as a monotonic
+**floor** over both the request and adapter values, not overridden by the request — an escalation
+responds to an overflow that already happened, while a request's `NumCtx` was computed *before* the
+run, so letting the request win would silently undo an escalation on a daemon-shared adapter. Inert
+today (the only caller is the single-model CLI drive), correct once P52.12 lands. See
+[releases.md](releases.md). The original analysis follows.
 
 `s.adapter` is a **single shared adapter** built once at daemon start and used by every run
 (`engine_build.go:276`). The native Ollama adapter carries `num_ctx` as **adapter state**
@@ -488,7 +585,29 @@ unfilled marker is reported once, not twice.
 **Priority:** Tier 2 — mechanical Python in an existing idiom, and it closes a proven-real check gap
 across five files. Prerequisite for **P52.8**, which reuses the same manifest.
 
-### P52.8 — Mechanical substance floor for threat-model content (anti-`TBD`)
+### P52.8 — Mechanical substance floor for threat-model content (anti-`TBD`) — SHIPPED 2026-07-31
+
+Shipped as four new checks — 16 `evidence-cells-cited`, 17 `no-placeholder-cells`, 18
+`none-identified-fraction`, 19 `prose-sections-substantive` — consuming P52.7's
+`.scaffold-manifest.json` directly and reusing `find_heading`/`section_region`/`region_substance`
+as-is. `scaffold.py` needed no change: the manifest was already built as a superset for this. Checks
+1-15 and their names are untouched, for the P52.7 reason (`chat_phased.go` routes on the literal
+string). Every threshold lives in one module-level `SUBSTANCE` dict with a matching CLI flag.
+
+**Calibration deliberately under-flags**, as the item required: the `None identified` cap is 0.95 so
+nothing below 100% fires; placeholder matching is exact, never substring; `Anchor` is not an evidence
+column, `Prerequisite`/`Description`/`Configuration` are not substance-checked, and Deployment
+Classification is exempt from the prose floor. Verified against fixtures both ways — a legitimate
+suite gets `19 passed, 0 failed`, a vacuous one that passes checks 1-15 (this item's premise,
+reproduced exactly and asserted as a test) fails 4, and all seven freshly-scaffolded frameworks add
+zero new failures on an unfilled scaffold.
+
+**Worth recording for anyone touching these scripts: they had no automated coverage at all before
+this.** No Python test existed in the repo; the Go side only stubs `verify.py`
+(`chat_verify_test.go`) or checks it materializes byte-identically (`embedded_test.go`). The new
+`_verify_substance_test.py` closes that, and its **leading underscore is load-bearing** —
+`//go:embed builtin` is a plain directory pattern, which excludes `_*`, so the test is tracked source
+that never ships inside the skill. See [releases.md](releases.md). The original analysis follows.
 
 Nothing in the 14 `verify.py` checks rejects vacuous content. A suite in which every threat's Evidence
 cell reads `see code`, every Mitigation reads `TBD`, and every category is `None identified` passes
@@ -548,7 +667,28 @@ that turns the tool into a cheap structural probe the model can use *before* edi
 **Priority:** Tier 2 — small, zero new deps, and it pays into both the threat-model flow and the
 document-authoring flow. Sequence before or alongside P52.11's first real use.
 
-### P52.10 — `latex_build` can never resolve citations (the biblatex preamble is decorative)
+### P52.10 — `latex_build` can never resolve citations (the biblatex preamble is decorative) — SHIPPED 2026-07-31
+
+Shipped as **option 2 only — `latexmk` was evaluated and rejected**, against this item's stated first
+preference. The rc-file objection is answerable (`-norc` suppresses the arbitrary-Perl `./latexmkrc`
+evaluation). The decisive objection is *where the confinement check has to sit*: latexmk decides for
+itself, mid-run, when to invoke biber over the `.bcf` it just generated, and exposes no seam between
+those two events — its only interposition point is the `$biber` command string, so honouring the check
+would mean shipping a separate wrapper executable that re-implements it out of process. If the Tier-3
+sandbox lead ever lands, revisit: under real process confinement the objection disappears.
+
+The confinement warning in this item was correct and load-bearing. A new `checkLatexBibConfinement`
+runs **after pass 1 and before the bib binary is looked up**, parsing the `.bcf`'s datasources or the
+`.aux`'s `\bibdata`/`\bibstyle`, following `\@input` chains into nested `.aux` files, and validating
+every name through `sandbox.ValidatePath` against both directories the tool could resolve it from;
+remote `scheme://` datasources are refused outright. `biber` also gets `--noconf`, since its first
+config location is `biber.conf` in the *model-writable* cwd. The P52.2 traversal was factored into a
+shared `latexWalkSources` so the scan and bib auto-detection cannot drift. Both smaller defects were
+folded in. **Residual gaps, deliberately open:** no iteration to convergence (the `runs` cap went 3 →
+4 and LaTeX's own `Rerun to get cross-references right` warning surfaces in the report); the bib scan
+is static, on an unconfined process, so a TOCTOU swap of the `.bcf` between scan and exec is not
+modelled; and a workspace-local `.bst` is path-validated but not otherwise sandboxed. See
+[releases.md](releases.md). The original analysis follows.
 
 `latex_new_document` scaffolds a `biblatex`/`biber` block into every generated preamble
 (`latex.go:476-478`, and again in the body at `:568-569`, both commented out for the user to enable).
@@ -792,10 +932,12 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status:** 2 open — **P52.12** (lift the phased drive into the daemon, which **supersedes P50.5**)
-and **P52.13** (`workspace.additional_roots`), both filed 2026-07-30 by the P52.x full-stack review.
-Build **P52.13** first: it is smaller, independent, and unblocks the cross-repo document workflow.
-P52.12's prerequisite **P52.6** **shipped 2026-07-30**, so that blocker is cleared. Of the earlier items — **P47.4** (phased-drive near-stateless continuations) and
+**Status: none open.** Both Tier-3 items **shipped 2026-08-01** — see [releases.md](releases.md).
+**P52.12** (lift the phased drive into the daemon, which **superseded P50.5**) also generalized the
+drive's run-directory oracle, without which a frontmatter-declared phase plan could never converge,
+and gave the web UI its first rendering of `notice` events. **P52.13** (`workspace.additional_roots`)
+landed with its two locks intact: the config key is frozen from an untrusted project config, and each
+root needs its own `aegis trust --dir` decision. Of the earlier items — **P47.4** (phased-drive near-stateless continuations) and
 **P47.9** (route hollow-body failures back through the owning content phase), the last two P47.x
 batch items, **shipped 2026-07-30**; **P49.2** (on-demand repo-map query tool) **shipped 2026-07-29**
 — see [releases.md](releases.md). Both P47.4 and P47.9 were built ahead of their measure-first
@@ -805,7 +947,13 @@ re-entry falls back to the generic verify-fix loop — so a live run can still m
 earn their keep. The leads below are mechanical follow-ups worth their own item once a concrete need
 appears.
 
-### P52.13 — `workspace.additional_roots` (unblock the cross-repo research→document workflow)
+### P52.13 — `workspace.additional_roots` (unblock the cross-repo research→document workflow) — SHIPPED 2026-08-01
+
+**Shipped 2026-08-01** — as specified, read-only by default, with per-root `aegis trust` (new
+`--dir` flag) on top of the P27.1 untrusted-project freeze. The confinement check runs per root
+against each root's own resolved identity rather than once against a covering prefix, so two roots
+under a shared parent never make that parent reachable. Full write-up in
+[releases.md](releases.md). The original item follows.
 
 There is **no multi-root support** — confirmed by search: no `AdditionalRoots`/`allowed_roots`
 concept exists anywhere in `internal/`. Every workspace-confined tool resolves through
@@ -831,7 +979,13 @@ require its own trust decision, not inherit the primary root's).
 **Priority:** Tier 3 — larger than a Tier-2 item because it touches path validation, config, and
 trust, but self-contained and unblocking. Build before **P52.12**; the two are independent.
 
-### P52.12 — Lift the phased drive into the daemon (every client gets the local-model machinery) — supersedes P50.5
+### P52.12 — Lift the phased drive into the daemon (every client gets the local-model machinery) — SHIPPED 2026-08-01, supersedes P50.5
+
+**Shipped 2026-08-01** — all four parts, plus two defects found in the wiring: the completion oracle
+had not been generalized with the plan (`LatestRunDir` is threat-model-specific, so a declared plan
+resolved `""` forever and every phase burned its full turn budget), and the TUI's resumable-drive
+cancel had to stop the run daemon-side or interrupt would have become a no-op. Full write-up in
+[releases.md](releases.md). The original item follows.
 
 **This supersedes P50.5**, which framed the problem as "wire the phased drive into the TUI
 `/threat-model`". The full-stack review showed the scope is wider and the framing should change: the

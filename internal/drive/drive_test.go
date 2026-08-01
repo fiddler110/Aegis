@@ -1,4 +1,4 @@
-package cli
+package drive
 
 import (
 	"os"
@@ -59,9 +59,9 @@ func TestFileHasPendingMarker(t *testing.T) {
 // files. Covers the glob-matched analysis phase and the setup phase's empty-runDir
 // case (never complete, so it always runs).
 func TestPhaseCompletionAndPending(t *testing.T) {
-	arch := threatModelPhases[0]     // setup, owns 0.1-architecture.md
-	dfd := threatModelPhases[1]      // 1.1-model.mmd, 1-model.md
-	analysis := threatModelPhases[2] // 2-*-analysis.md (glob)
+	arch := ThreatModelPhases[0]     // setup, owns 0.1-architecture.md
+	dfd := ThreatModelPhases[1]      // 1.1-model.mmd, 1-model.md
+	analysis := ThreatModelPhases[2] // 2-*-analysis.md (glob)
 
 	// An empty run dir (nothing scaffolded) is never complete, so setup runs.
 	if arch.complete("") {
@@ -73,7 +73,7 @@ func TestPhaseCompletionAndPending(t *testing.T) {
 
 	// Fully scaffolded, nothing filled: every content phase is incomplete.
 	all := scaffoldRunDir(t, nil)
-	for _, ph := range threatModelPhases {
+	for _, ph := range ThreatModelPhases {
 		if ph.complete(all) {
 			t.Errorf("phase %q must be incomplete when its files still have markers", ph.name)
 		}
@@ -106,18 +106,18 @@ func TestPhaseCompletionAndPending(t *testing.T) {
 }
 
 func TestPhasePlanFor(t *testing.T) {
-	if p := phasePlanFor("threat-modeling"); p == nil {
+	if p := PlanFor("threat-modeling", nil); p == nil {
 		t.Fatal("threat-modeling must have a phase plan")
 	}
-	if p := phasePlanFor("deep-research"); p != nil {
-		t.Error("only threat-modeling is phased today; deep-research must fall back to the generic drive")
+	if p := PlanFor("deep-research", nil); p != nil {
+		t.Error("a skill declaring no phases must fall back to the generic drive")
 	}
-	if p := phasePlanFor(""); p != nil {
+	if p := PlanFor("", nil); p != nil {
 		t.Error("empty skill must have no phase plan")
 	}
 	// The plan must lead with the setup phase and cover the five content files
 	// in dependency order (architecture → DFD → analysis → findings → assessment).
-	plan := phasePlanFor("threat-modeling")
+	plan := PlanFor("threat-modeling", nil)
 	if !plan[0].setup {
 		t.Error("first phase must be the setup phase")
 	}
@@ -138,19 +138,19 @@ func TestPhasePlanFor(t *testing.T) {
 
 func TestLinearDriveForced(t *testing.T) {
 	t.Setenv("AEGIS_SKILL_DRIVE", "")
-	if linearDriveForced() {
+	if LinearForced() {
 		t.Error("unset env must not force linear drive")
 	}
 	t.Setenv("AEGIS_SKILL_DRIVE", "linear")
-	if !linearDriveForced() {
+	if !LinearForced() {
 		t.Error("AEGIS_SKILL_DRIVE=linear must force the generic drive")
 	}
 	t.Setenv("AEGIS_SKILL_DRIVE", "LINEAR")
-	if !linearDriveForced() {
+	if !LinearForced() {
 		t.Error("the flag must be case-insensitive")
 	}
 	t.Setenv("AEGIS_SKILL_DRIVE", "phased")
-	if linearDriveForced() {
+	if LinearForced() {
 		t.Error("only 'linear' forces the generic drive")
 	}
 }
@@ -162,7 +162,7 @@ func TestLinearDriveForced(t *testing.T) {
 func TestPhasePromptsAreWired(t *testing.T) {
 	skillDir := "/ws/.aegis/builtin-skills/threat-modeling"
 	runDir := "/ws/.aegis/security/threat-model/stride-app-2026-07-24-1200"
-	p := phaseParams{task: "threat model this repo", skillDir: skillDir, cwd: "/ws", runDir: runDir}
+	p := PhaseParams{task: "threat model this repo", skillDir: skillDir, cwd: "/ws", runDir: runDir}
 
 	arch := phasePromptArchitecture(p)
 	for _, want := range []string{"recon.py", "scaffold.py", "0.1-architecture.md", "output-formats.md", "threat model this repo", "STRIDE"} {
@@ -198,7 +198,7 @@ func TestPhasePromptsAreWired(t *testing.T) {
 // and the shared in-phase continuation prompt must all carry the instruction;
 // the short DFD/assessment seeds deliberately do not.
 func TestContentPromptsSuppressSelfVerification(t *testing.T) {
-	p := phaseParams{
+	p := PhaseParams{
 		task:     "threat model this repo",
 		skillDir: "/ws/.aegis/builtin-skills/threat-modeling",
 		cwd:      "/ws",
@@ -207,7 +207,7 @@ func TestContentPromptsSuppressSelfVerification(t *testing.T) {
 	carriers := map[string]string{
 		"analysis": phasePromptAnalysis(p),
 		"findings": phasePromptFindings(p),
-		"continue": phaseContinuePrompt(threatModelPhases[2], []string{"2-stride-analysis.md"}),
+		"continue": phaseContinuePrompt(ThreatModelPhases[2], []string{"2-stride-analysis.md"}),
 	}
 	for name, prompt := range carriers {
 		if !strings.Contains(prompt, noSelfVerifyInstruction) {
@@ -232,7 +232,7 @@ func TestContentPromptsSuppressSelfVerification(t *testing.T) {
 // the model to edit incrementally and never `write_file` a whole suite file; the
 // analysis seed carries its own inline copy of the same rule.
 func TestContentPromptsForbidMonolithicWrites(t *testing.T) {
-	p := phaseParams{
+	p := PhaseParams{
 		task:     "threat model this repo",
 		skillDir: "/ws/.aegis/builtin-skills/threat-modeling",
 		cwd:      "/ws",
@@ -241,7 +241,7 @@ func TestContentPromptsForbidMonolithicWrites(t *testing.T) {
 	carriers := map[string]string{
 		"findings":   phasePromptFindings(p),
 		"assessment": phasePromptAssessment(p),
-		"continue":   phaseContinuePrompt(threatModelPhases[3], []string{"3-findings.md"}),
+		"continue":   phaseContinuePrompt(ThreatModelPhases[3], []string{"3-findings.md"}),
 		"analysis":   phasePromptAnalysis(p),
 	}
 	for name, prompt := range carriers {

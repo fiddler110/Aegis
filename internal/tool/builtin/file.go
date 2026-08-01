@@ -73,7 +73,7 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
-	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
+	abs, err := resolveRead(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -184,7 +184,7 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if len(args.Content) > maxWriteContent {
 		return tool.Result{Content: fmt.Sprintf("content too large (%d bytes, max %d)", len(args.Content), maxWriteContent), IsError: true}, nil
 	}
-	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
+	abs, err := resolveWrite(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -239,7 +239,7 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
 	}
-	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
+	abs, err := resolveWrite(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}

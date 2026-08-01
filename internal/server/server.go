@@ -58,16 +58,19 @@ const maxRequestBody = 10 << 20 // 10 MiB
 
 // Server holds the daemon's shared state.
 type Server struct {
-	cfg         *config.Config
-	store       *session.Store
-	adapter     provider.Adapter
-	tools       *tool.Registry
-	memory      memory.Sources
-	compactor   engine.Compactor
-	hooks       engine.Hooks
-	mcpClients  []*mcp.Client
-	swarm       swarm.Backend
-	swarmReg    *swarm.Registry
+	cfg        *config.Config
+	store      *session.Store
+	adapter    provider.Adapter
+	tools      *tool.Registry
+	memory     memory.Sources
+	compactor  engine.Compactor
+	hooks      engine.Hooks
+	mcpClients []*mcp.Client
+	swarm      swarm.Backend
+	swarmReg   *swarm.Registry
+	// wsRoots memoizes workspace.additional_roots resolution per session
+	// workdir (P52.13) — see workspaceroots.go.
+	wsRoots     workspaceRootCache
 	tasks       *task.Manager
 	cronSched   *cron.Scheduler
 	cronCancel  context.CancelFunc
@@ -90,21 +93,21 @@ type Server struct {
 	reachCacheMu sync.Mutex
 	reachCache   reachEntry
 	reachNow     func() time.Time
-	knowledge        *knowledge.Store // project knowledge base (P3.3); nil when unavailable
-	longMem          *longmem.Store   // long-term entity memory (P3.1); nil when unavailable
-	embedder         embed.Embedder   // shared semantic-recall embedder (P5.8); nil = BM25-only
-	runs             *runRegistry
-	sandbox          sandbox.Backend
-	lspMgr           *lsp.Manager
-	audit            *hooks.Audit
-	execHook         *hooks.Exec      // user-configured lifecycle hooks (P4.4); nil when none
-	notifier         *notify.Notifier // background-session notifications (P5.4); nil when disabled
-	cmdReg           *commands.Registry
-	permRules        []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
-	permMu           sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
-	repoMap          string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
-	repoMapMu        sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
-	personaDirs      []string          // directories rescanned by refreshPersonas for hot reload
+	knowledge    *knowledge.Store // project knowledge base (P3.3); nil when unavailable
+	longMem      *longmem.Store   // long-term entity memory (P3.1); nil when unavailable
+	embedder     embed.Embedder   // shared semantic-recall embedder (P5.8); nil = BM25-only
+	runs         *runRegistry
+	sandbox      sandbox.Backend
+	lspMgr       *lsp.Manager
+	audit        *hooks.Audit
+	execHook     *hooks.Exec      // user-configured lifecycle hooks (P4.4); nil when none
+	notifier     *notify.Notifier // background-session notifications (P5.4); nil when disabled
+	cmdReg       *commands.Registry
+	permRules    []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
+	permMu       sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
+	repoMap      string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
+	repoMapMu    sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
+	personaDirs  []string          // directories rescanned by refreshPersonas for hot reload
 
 	// knowledgeStores/repoMaps cache a per-session-Workdir instance of each
 	// daemon-wide singleton (P25.9): s.knowledge/s.repoMap above remain the
@@ -185,12 +188,22 @@ type Server struct {
 	// marks the value authoritative (explicit config on a cloud provider, or
 	// an Ollama loaded-model reading); until then runs re-detect. summarizer
 	// is the concrete compactor so a late detection can retune it in place.
-	ctxWinMu    sync.Mutex
-	ctxWin      int
-	ctxWinSrc   string
-	ctxWinFinal bool
-	ollamaBase  string // native Ollama API base when (possibly) Ollama; "" otherwise
-	summarizer  *compaction.Summarizer
+	// ctxWin/ctxWinSrc/ctxWinFinal hold the *globally configured* model's
+	// entry — the server-wide number /status reports and the summarizer runs
+	// against; ctxWinByModel holds one entry per other model a turn has
+	// actually run on (persona pin, /model override, small-model routing),
+	// each with its own re-detect state (P52.1).
+	ctxWinMu      sync.Mutex
+	ctxWin        int
+	ctxWinSrc     string
+	ctxWinFinal   bool
+	ctxWinByModel map[string]ctxWinEntry
+	ollamaBase    string // native Ollama API base when (possibly) Ollama; "" otherwise
+	summarizer    *compaction.Summarizer
+	// compModel is the model compaction runs on (provider.small_model when set,
+	// otherwise the global model). The summarizer is retuned from *this* model's
+	// window, not the global one — see setWindowLocked (P52.1).
+	compModel string
 
 	// agentLimiter throttles how many sub-agents a 'parallel' workflow batch
 	// runs simultaneously (P17), adapting from observed batch behavior. One
@@ -757,13 +770,24 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		if cfg.Provider.SmallModel != "" {
 			compModel = cfg.Provider.SmallModel // prefer a fast small model for compaction
 		}
+		s.compModel = compModel
 		// Resolve the effective context window first (P23.1): explicit config,
 		// or auto-detected from a local Ollama server — whose OpenAI-compat
 		// endpoint otherwise truncates oversized prompts silently.
 		s.initContextWindow(context.Background())
-		win, _ := s.effectiveContextWindow()
+		// Keyed to the model compaction actually *runs on*, not the global one
+		// (P52.1, second half). Compaction prefers provider.small_model, so
+		// tuning the summarizer to the primary model's window is the same
+		// wrong-model-window bug P52.1 fixed for the engine, one layer down —
+		// and worse here, because the summarizer's own request is what gets
+		// silently truncated, producing the broken/empty summary that P39.8's
+		// latch exists to stop looping on. When compModel is the global model
+		// this is a cache hit and behaves exactly as before.
+		win, _ := s.effectiveContextWindowFor(context.Background(), compModel)
 		compOpts := compaction.Options{
-			Adapter:       adapter,
+			// Serve the summarizer's own model with its own num_ctx (P52.4),
+			// for the same reason every other run gets one.
+			Adapter:       provider.WithNumCtx(adapter, win),
 			Model:         compModel,
 			ContextWindow: win,
 		}
@@ -1008,18 +1032,33 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		// teammate route straight around an operator's egress-then-write or
 		// deny rule (P10.1).
 		gate, engineHooks := s.buildGate(cfg.Mode, s.approver(), persona.Persona{})
+		// A spawn can name its own model (swarm.SpawnConfig.Model), which hits
+		// the same shared-adapter mismatch a routed turn does — serve it with
+		// *its* window, not the primary model's num_ctx (P52.4). Identical to
+		// today whenever the spawn runs on the global model.
+		spawnWin, _ := s.effectiveContextWindowFor(ctx, model)
 		eng, err := engine.New(engine.Options{
-			Adapter:         s.adapter,
-			Tools:           s.tools,
-			Gate:            gate,
-			Compactor:       s.compactor,
-			Hooks:           engineHooks,
-			Cost:            tracker,
-			BudgetUSD:       budgetUSD,
-			MaxTokensPerRun: maxTokensPerRun,
-			Model:           model,
-			MaxTokens:       s.cfg.Provider.MaxTokens,
-			Logger:          s.logger,
+			Adapter:   s.modelAdapter(spawnWin),
+			Tools:     s.tools,
+			Gate:      gate,
+			Compactor: s.compactor,
+			// A spawn had a Compactor but no window to measure against
+			// (ContextWindowTokens was left 0), so the engine's *per-turn*
+			// 85%-fill check never ran for a sub-agent however long it grew —
+			// only Run's entry-point Compact did, gated by the summarizer's own
+			// budget, which is tuned to the compaction model rather than to the
+			// model this spawn is running on. Now that the window is resolved
+			// per model just above, feed it in and the spawn gets the same
+			// proactive protection (and the same nothing-left-to-compact notice)
+			// a top-level run has.
+			ContextWindowTokens: spawnWin,
+			Hooks:               engineHooks,
+			Cost:                tracker,
+			BudgetUSD:           budgetUSD,
+			MaxTokensPerRun:     maxTokensPerRun,
+			Model:               model,
+			MaxTokens:           s.cfg.Provider.MaxTokens,
+			Logger:              s.logger,
 			// Set explicitly from cfg.Workdir (P25.8) rather than relying on
 			// the parent session's tool.WithWorkdir ctx value leaking through
 			// the spawn's context chain — that accidental inheritance only
@@ -1027,6 +1066,10 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			// background spawn's job runs under a context derived from
 			// context.Background() (task.Manager.Start) and loses it.
 			Workdir: cfg.Workdir,
+			// A spawn is confined the same way its parent session is: the
+			// additional roots are a property of the workspace, not of who
+			// is asking (P52.13).
+			ExtraRoots: s.workspaceRootsFor(cfg.Workdir),
 		})
 		if err != nil {
 			return "", err
@@ -1104,7 +1147,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handlePostMessage)
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /sessions/{id}/steer", s.handleSteer)
-	mux.HandleFunc("POST /sessions/{id}/stop", s.handleStopRun) // P28.5: stop a resumable run out of band
+	mux.HandleFunc("POST /sessions/{id}/drive", s.handleDrive)      // P52.12: phased skill drive over the SSE seam
+	mux.HandleFunc("GET /sessions/{id}/drive", s.handleDriveSkills) // P52.12: which skills this session can drive
+	mux.HandleFunc("POST /sessions/{id}/stop", s.handleStopRun)     // P28.5: stop a resumable run out of band
 	mux.HandleFunc("GET /sessions/{id}/checkpoints", s.handleListCheckpoints)
 	mux.HandleFunc("POST /sessions/{id}/rewind", s.handleRewind)
 	mux.HandleFunc("POST /sessions/{id}/fork", s.handleFork) // P22.3

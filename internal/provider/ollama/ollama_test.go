@@ -417,6 +417,88 @@ func TestRaiseContextWindow(t *testing.T) {
 	}
 }
 
+// numCtxEcho stands up an /api/chat that records the options every request
+// carried, for the per-request num_ctx tests below.
+func numCtxEcho(t *testing.T) (*httptest.Server, func() *wireRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var last wireRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		_ = json.NewDecoder(r.Body).Decode(&last)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() *wireRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		cp := last
+		return &cp
+	}
+}
+
+func drain(t *testing.T, a *Adapter, req provider.Request) {
+	t.Helper()
+	if req.Messages == nil {
+		req.Messages = []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}}
+	}
+	stream, err := a.Stream(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+}
+
+// TestStreamPerRequestNumCtx is the P52.4 guard: one shared daemon adapter
+// serves several models, so the serving window has to travel on the request
+// (which already carries the model) rather than sit in adapter state. A turn
+// routed to the small model must not ask Ollama to allocate the primary
+// model's KV cache for it.
+func TestStreamPerRequestNumCtx(t *testing.T) {
+	srv, last := numCtxEcho(t)
+	a := New(WithBaseURL(srv.URL), WithNumCtx(65536)) // primary model's window
+
+	drain(t, a, provider.Request{Model: "small:1b", NumCtx: 4096})
+	if got := last(); got.Options == nil || got.Options.NumCtx != 4096 {
+		t.Errorf("small-model num_ctx = %+v, want 4096 (not the primary's 65536)", got.Options)
+	}
+
+	// A request that says nothing still gets the adapter's configured window —
+	// the pre-P52.4 behavior every non-server caller (CLI drive, sub-agents)
+	// relies on.
+	drain(t, a, provider.Request{Model: "primary:70b"})
+	if got := last(); got.Options == nil || got.Options.NumCtx != 65536 {
+		t.Errorf("fallback num_ctx = %+v, want the adapter's 65536", got.Options)
+	}
+}
+
+// TestStreamEscalationOutranksPerRequestNumCtx documents the P52.4/P47.5b
+// interaction: a RaiseContextWindow escalation is a response to an overflow
+// that already happened, so it must act as a floor over the (older, smaller)
+// window the caller computed before the run — otherwise escalating a
+// daemon-shared adapter would be silently undone on the very next request.
+func TestStreamEscalationOutranksPerRequestNumCtx(t *testing.T) {
+	srv, last := numCtxEcho(t)
+	a := New(WithBaseURL(srv.URL), WithNumCtx(8192))
+	if !a.RaiseContextWindow(32768) {
+		t.Fatal("escalation to a larger window should report true")
+	}
+
+	drain(t, a, provider.Request{Model: "primary:70b", NumCtx: 8192})
+	if got := last(); got.Options == nil || got.Options.NumCtx != 32768 {
+		t.Errorf("num_ctx = %+v, want the escalated 32768", got.Options)
+	}
+	// A request asking for more than the escalation still gets what it asked
+	// for — the floor never shrinks a window either.
+	drain(t, a, provider.Request{Model: "primary:70b", NumCtx: 65536})
+	if got := last(); got.Options == nil || got.Options.NumCtx != 65536 {
+		t.Errorf("num_ctx = %+v, want 65536", got.Options)
+	}
+}
+
 func TestStreamSendsOptions(t *testing.T) {
 	var gotBody wireRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

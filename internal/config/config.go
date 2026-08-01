@@ -64,6 +64,7 @@ type Config struct {
 	Search         SearchConfig               `koanf:"search"`
 	Notify         NotifyConfig               `koanf:"notify"`
 	Embeddings     EmbeddingsConfig           `koanf:"embeddings"`
+	Workspace      WorkspaceConfig            `koanf:"workspace"`
 
 	// WorkspaceTrust reports the P27.1 workspace-trust gate's outcome for
 	// this load. It is never read from a config file (computed by Load()
@@ -204,6 +205,38 @@ type CleanupConfig struct {
 // SwarmConfig configures multi-agent sub-agent execution.
 type SwarmConfig struct {
 	Backend string `koanf:"backend"` // "in_process" (default) or "subprocess"
+}
+
+// WorkspaceConfig widens what the session's workspace-confined tools can
+// reach beyond the single directory Aegis was started in (P52.13).
+type WorkspaceConfig struct {
+	// AdditionalRoots names directories outside the session workdir that
+	// workspace-confined tools may resolve paths into. This exists for the
+	// cross-repo shape the single-root model makes inexpressible: read
+	// research artifacts out of repo A, write the formal document into repo
+	// B. The alternative — starting Aegis from a common parent — works but
+	// widens confinement far past what the task needs and inflates the repo
+	// map.
+	//
+	// Each root needs its own `aegis trust` decision; an additional root does
+	// not inherit the primary workspace's trust (a trusted project must not
+	// be able to nominate an untrusted directory and have it silently
+	// honored). Untrusted entries are dropped with a warning rather than
+	// failing the load.
+	AdditionalRoots []AdditionalRoot `koanf:"additional_roots"`
+}
+
+// AdditionalRoot is one entry of workspace.additional_roots.
+type AdditionalRoot struct {
+	// Path is the directory to admit. A relative path resolves against the
+	// session workdir, so `../research` in a project config means what it
+	// looks like.
+	Path string `koanf:"path"`
+	// Writable admits writes as well as reads. Off by default — the common
+	// case is reading source material out of the additional root, and
+	// read-only is a cheap, meaningful restriction on a directory the model
+	// was not started in.
+	Writable bool `koanf:"writable"`
 }
 
 // SandboxConfig configures command execution isolation.
@@ -1255,6 +1288,15 @@ func securityRelevantDiff(full, base *Config) []string {
 	if full.Git.PreCommitTestCommand != base.Git.PreCommitTestCommand {
 		diffs = append(diffs, fmt.Sprintf("git.pre_commit_test_command: %q -> %q", base.Git.PreCommitTestCommand, full.Git.PreCommitTestCommand))
 	}
+	// workspace.additional_roots (P52.13): each entry widens the confinement
+	// boundary every workspace-confined tool validates against. A cloned repo
+	// nominating "/" or "~" as an additional root would turn read_file into an
+	// arbitrary host read — exactly the class of silent widening this gate
+	// exists for. Per-root `aegis trust` is the second lock (see
+	// ResolveAdditionalRoots); this is the first.
+	if !reflect.DeepEqual(full.Workspace.AdditionalRoots, base.Workspace.AdditionalRoots) {
+		diffs = append(diffs, fmt.Sprintf("workspace.additional_roots: %d configured -> %d configured", len(base.Workspace.AdditionalRoots), len(full.Workspace.AdditionalRoots)))
+	}
 	return diffs
 }
 
@@ -1298,6 +1340,7 @@ func applyWorkspaceTrust(cfg, baseline *Config) {
 	cfg.Hooks = baseline.Hooks
 	cfg.Plugins = baseline.Plugins
 	cfg.Git.PreCommitTestCommand = baseline.Git.PreCommitTestCommand
+	cfg.Workspace.AdditionalRoots = baseline.Workspace.AdditionalRoots
 	cfg.WorkspaceTrust.Frozen = true
 	cfg.WorkspaceTrust.Changes = diffs
 }

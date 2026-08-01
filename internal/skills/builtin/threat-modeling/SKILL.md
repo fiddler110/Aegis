@@ -58,7 +58,7 @@ improvise one from a process description alone.
 | `recon.py` (bundled script, not a reference doc) | **Start of the architecture phase, before any manual exploration (§2 step 1)** | Deterministic one-pass repo digest — run it, read its stdout; replaces reading source files raw. Includes a "Top-level directories" section (every immediate child directory, flagged excluded or scanned) that drives the Coverage Ledger (§2 step 6) |
 | `inventory.py` (bundled script) | **Phase 5**, to generate `inventory.yaml` from the finished markdown; **phase 6**, with `--check`, to verify it still agrees | `python inventory.py <run-dir>` writes the sidecar (IDs, derived tiers) deterministically; `--check` regenerates in-memory and diffs vs disk, exit non-zero on drift |
 | `normalize_ids.py` (bundled script) | **Phase 6**, before `verify.py` (the phased drive runs it automatically each round) | `python normalize_ids.py <run-dir>` — deterministically canonicalizes identifiers so you never renumber by hand: strips any invented `T<n>.<suffix>` threat ID back to the bare `T<n>` the analysis defines, renumbers `FIND-##` to a gapless sequence, and rewrites the coverage table + every `Related Threats` reference in lockstep. Idempotent; `--check` reports drift without writing. Use it (not a hand edit) whenever IDs need fixing |
-| `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis, Coverage Ledger completeness, and that **no scaffolded section was emptied**: deleting a `<!-- PENDING -->` marker without writing anything in its place fails `section-bodies-nonempty`, in any of the five files) |
+| `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis, Coverage Ledger completeness, that **no scaffolded section was emptied**: deleting a `<!-- PENDING -->` marker without writing anything in its place fails `section-bodies-nonempty`, in any of the five files — and a **substance floor**: an Evidence cell that is a bare filename with nothing pinned inside it, a cell that is a literal `TBD`/`N/A`/`see code`, a table that is *nothing but* "none identified", or a narrative section shorter than one sentence) |
 | `lint_dfd.py` (bundled script) | **Phase 6** review round, whenever the DFD changed | `python lint_dfd.py <run-dir>` — Mermaid DFD linter (LR flowchart, three-palette classDefs, no stray fences/keywords, subgraph balance, labeled edges, `.mmd`↔`.md` equality) |
 | `diff_inventory.py` (bundled script) | **Update workflow (§6)**, when refreshing a baseline model | `python diff_inventory.py <baseline-inventory.yaml> <current-inventory.yaml>` — classifies threats new/resolved/still-present/changed for the Changes Since Baseline section |
 | `references/stride.md` / `linddun.md` / `pasta.md` / `trike.md` / `vast.md` / `nist-800-154.md` | Framework chosen, before exploring the workspace | That framework's process/stages and category definitions |
@@ -429,7 +429,15 @@ the manual read confirms rather than hunts:
   `0.1-architecture.md` and the analysis file agree on the deployment
   classification — a divergence silently skews every derived tier — and that no
   scaffolded section was left hollow: a heading whose body is blank, or a table
-  reduced to a bare header + separator, fails `section-bodies-nonempty`).
+  reduced to a bare header + separator, fails `section-bodies-nonempty`). It
+  also applies a **substance floor** the structural checks cannot see: an
+  Evidence cell that names a file but pins nothing inside it (no line number,
+  symbol, or config key — §3) fails `evidence-cells-cited`; a literal `TBD`,
+  `N/A` or `see code` in an Evidence/Mitigation/Threat/Residual-risk cell fails
+  `no-placeholder-cells`; a table whose every row reads "none identified" fails
+  `none-identified-fraction` (one or two such rows is a *correct*, complete
+  entry and never fails); and a narrative section shorter than a sentence fails
+  `prose-sections-substantive`.
 - `python lint_dfd.py <run-dir>` — the DFD's Mermaid conventions and
   `.mmd`↔`.md` equality.
 - `python inventory.py <run-dir> --check` — that `inventory.yaml` still

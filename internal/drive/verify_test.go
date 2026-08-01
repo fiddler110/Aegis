@@ -1,4 +1,4 @@
-package cli
+package drive
 
 import (
 	"os"
@@ -8,25 +8,25 @@ import (
 	"time"
 )
 
-// verifyFixPrompt must name the failures and forbid re-scaffolding / new markers
+// VerifyFixPrompt must name the failures and forbid re-scaffolding / new markers
 // so the model fixes in place and the next round re-verifies.
 func TestVerifyFixPrompt(t *testing.T) {
-	p := verifyFixPrompt("$ verify.py <run-dir>\nFAIL threat-coverage 3-findings.md:12")
+	p := VerifyFixPrompt("$ verify.py <run-dir>\nFAIL threat-coverage 3-findings.md:12")
 	for _, want := range []string{"FAIL threat-coverage", "edit_file", "do not re-scaffold", "verification"} {
 		if !strings.Contains(p, want) {
-			t.Errorf("verifyFixPrompt missing %q in:\n%s", want, p)
+			t.Errorf("VerifyFixPrompt missing %q in:\n%s", want, p)
 		}
 	}
 }
 
-// qualityReviewPrompt (P38.1 final pass) must ask for a substantive review the
+// QualityReviewPrompt (P38.1 final pass) must ask for a substantive review the
 // mechanical scripts can't do — groundedness, filler, internal consistency —
 // fixed in place via edit_file, non-interactively.
 func TestQualityReviewPrompt(t *testing.T) {
-	p := qualityReviewPrompt()
+	p := QualityReviewPrompt()
 	for _, want := range []string{"edit_file", "evidence", "consistency", "non-interactive", "PENDING"} {
 		if !strings.Contains(p, want) {
-			t.Errorf("qualityReviewPrompt missing %q in:\n%s", want, p)
+			t.Errorf("QualityReviewPrompt missing %q in:\n%s", want, p)
 		}
 	}
 }
@@ -39,8 +39,8 @@ func TestQualityReviewPrompt(t *testing.T) {
 // of a suite file, matching the content phases' P39.14 discipline.
 func TestPhase6PromptsCarryIncrementalEditRule(t *testing.T) {
 	prompts := map[string]string{
-		"verifyFix": verifyFixPrompt("$ verify.py <run-dir>\nFAIL x 3-findings.md:1"),
-		"quality":   qualityReviewPrompt(),
+		"verifyFix": VerifyFixPrompt("$ verify.py <run-dir>\nFAIL x 3-findings.md:1"),
+		"quality":   QualityReviewPrompt(),
 	}
 	for name, p := range prompts {
 		if !strings.Contains(p, phase6IncrementalEditRule) {
@@ -54,26 +54,26 @@ func TestPhase6PromptsCarryIncrementalEditRule(t *testing.T) {
 	}
 }
 
-// verifySkillOutputs must report ran=false (drive falls back to markers-cleared
+// VerifySkillOutputs must report ran=false (drive falls back to markers-cleared
 // = done) when there is nothing to verify: no skill, no skill dir, or a skill
 // dir with no verify.py.
 func TestVerifySkillOutputsGate(t *testing.T) {
 	cwd := t.TempDir()
-	if _, ran := verifySkillOutputs("", "", cwd); ran {
+	if _, ran := VerifySkillOutputs("", "", cwd); ran {
 		t.Error("empty skill name should not run verification")
 	}
 	emptySkill := t.TempDir()
-	if _, ran := verifySkillOutputs("threat-modeling", emptySkill, cwd); ran {
+	if _, ran := VerifySkillOutputs("threat-modeling", emptySkill, cwd); ran {
 		t.Error("skill dir without verify.py should not run verification")
 	}
 }
 
-// latestThreatModelRunDir finds the newest run directory (one containing
+// LatestRunDir finds the newest run directory (one containing
 // 0-assessment.md) under .aegis and ignores non-run directories; a missing tree
 // is "".
 func TestLatestThreatModelRunDir(t *testing.T) {
 	cwd := t.TempDir()
-	if got := latestThreatModelRunDir(cwd); got != "" {
+	if got := LatestRunDir(cwd); got != "" {
 		t.Errorf("no .aegis tree should yield \"\", got %q", got)
 	}
 
@@ -103,12 +103,12 @@ func TestLatestThreatModelRunDir(t *testing.T) {
 	newest := mk("stride-new-2026-07-21-1200", true, now)
 	mk("not-a-run", false, now.Add(time.Hour)) // newer mtime but no 0-assessment.md
 
-	if got := latestThreatModelRunDir(cwd); got != newest {
-		t.Errorf("latestThreatModelRunDir = %q, want newest run %q", got, newest)
+	if got := LatestRunDir(cwd); got != newest {
+		t.Errorf("LatestRunDir = %q, want newest run %q", got, newest)
 	}
 }
 
-// verifySkillOutputs runs the bundled scripts and surfaces failure text. Uses a
+// VerifySkillOutputs runs the bundled scripts and surfaces failure text. Uses a
 // stub verify.py so the test needs only a python interpreter (skipped if none).
 func TestVerifySkillOutputsRuns(t *testing.T) {
 	if pythonExe() == "" {
@@ -131,7 +131,7 @@ func TestVerifySkillOutputsRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	failures, ran := verifySkillOutputs("threat-modeling", skillDir, cwd)
+	failures, ran := VerifySkillOutputs("threat-modeling", skillDir, cwd)
 	if !ran {
 		t.Fatal("expected verification to run")
 	}
@@ -144,7 +144,7 @@ func TestVerifySkillOutputsRuns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skillDir, "verify.py"), []byte(pass), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	failures, ran = verifySkillOutputs("threat-modeling", skillDir, cwd)
+	failures, ran = VerifySkillOutputs("threat-modeling", skillDir, cwd)
 	if !ran || failures != "" {
 		t.Errorf("clean verify: ran=%v failures=%q, want ran=true, no failures", ran, failures)
 	}

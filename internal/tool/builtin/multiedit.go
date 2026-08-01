@@ -61,7 +61,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 	files := make(map[string]*fileState)
 
 	for i, e := range args.Edits {
-		abs, err := resolvePath(root, e.Path)
+		abs, err := resolveWrite(ctx, root, e.Path)
 		if err != nil {
 			return tool.Result{Content: fmt.Sprintf("edit %d: %v", i+1, err), IsError: true}, nil
 		}
@@ -81,7 +81,7 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 
 	// Phase 2: apply all edits in order (in memory).
 	for i, e := range args.Edits {
-		abs, _ := resolvePath(root, e.Path)
+		abs, _ := resolveWrite(ctx, root, e.Path)
 		fs := files[abs]
 		n := strings.Count(fs.content, e.OldString)
 		if n == 0 {

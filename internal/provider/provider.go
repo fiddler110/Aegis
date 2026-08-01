@@ -100,6 +100,19 @@ type Request struct {
 	MaxTokens   int
 	Temperature *float64
 	Thinking    *ThinkingConfig // nil = disabled
+	// NumCtx is the serving context window (Ollama's options.num_ctx) this
+	// request asks the backend to allocate. It belongs on the request rather
+	// than on the adapter because the *model* is per-request (P52.4): one
+	// daemon-wide adapter serves the primary model, a persona-pinned model and
+	// the small model task routing picks, and asking Ollama to serve a small
+	// model with the primary model's KV allocation either wastes VRAM or
+	// evicts the primary model between turns. Zero means "the adapter's own
+	// configured window", which is what every caller that doesn't know or care
+	// leaves it at — the engine never sets it directly (it has no business
+	// knowing about num_ctx); the daemon supplies it per run via
+	// provider.WithNumCtx, and the CLI drive leaves it unset entirely. Adapters
+	// whose window is fixed by the remote model — the cloud providers — ignore it.
+	NumCtx int
 }
 
 // StopReason explains why the model stopped generating.

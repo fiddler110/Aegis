@@ -285,6 +285,19 @@ export interface SecurityBaselineResponse {
   suppressions?: SecurityBaselineEntry[];
 }
 
+// DriveSkillInfo is one skill this session can drive to completion in phased
+// mode (GET /sessions/{id}/drive, P52.12): phases counts the content phases,
+// before the verify + quality round the drive always adds.
+export interface DriveSkillInfo {
+  name: string;
+  description: string;
+  phases: number;
+}
+
+export interface DriveSkillsResponse {
+  skills: DriveSkillInfo[];
+}
+
 export interface Event {
   kind:
     | "text"

@@ -369,3 +369,87 @@ func TestDiscoverFallsBackToPerUserBuiltinBeforeProjectMaterialized(t *testing.T
 		t.Fatalf("expected fallback to per-user builtin, got %v", got)
 	}
 }
+
+// TestParseSkillPhases covers the P52.12 `phases:` frontmatter: a skill declares
+// its own phased-drive plan, so opting in needs no code change in the drive.
+func TestParseSkillPhases(t *testing.T) {
+	sk := parseSkill("dac", `---
+name: documentation-as-code
+description: build a document
+run_dir: .aegis/docs/*
+phases:
+  - name: outline
+    setup: true
+    files: ["outline.md"]
+    prompt: |
+      Draft the outline for {task}.
+  - name: chapters
+    files:
+      - "ch-*.md"
+---
+body text
+`)
+	if sk.Name != "documentation-as-code" {
+		t.Errorf("name = %q", sk.Name)
+	}
+	if sk.Content != "body text" {
+		t.Errorf("content = %q, want the body with frontmatter stripped", sk.Content)
+	}
+	// run_dir tells the drive where the phase globs live; without it they are
+	// workspace-relative, which is wrong for a skill that scaffolds a fresh
+	// output directory per run.
+	if sk.RunDir != ".aegis/docs/*" {
+		t.Errorf("run_dir = %q, want %q", sk.RunDir, ".aegis/docs/*")
+	}
+	if len(sk.Phases) != 2 {
+		t.Fatalf("got %d phases, want 2: %+v", len(sk.Phases), sk.Phases)
+	}
+	if sk.Phases[0].Name != "outline" || !sk.Phases[0].Setup {
+		t.Errorf("phase 0 = %+v, want the outline setup phase", sk.Phases[0])
+	}
+	if sk.Phases[0].Prompt != "Draft the outline for {task}." {
+		t.Errorf("phase 0 prompt = %q", sk.Phases[0].Prompt)
+	}
+	if len(sk.Phases[1].Files) != 1 || sk.Phases[1].Files[0] != "ch-*.md" {
+		t.Errorf("phase 1 files = %v", sk.Phases[1].Files)
+	}
+}
+
+// TestParseSkillPhasesDropsUnusableEntries: a phase with no name has no identity
+// to route failures to, and one with no files has no completion oracle — the
+// drive would spin on it forever. Dropping them back to "no plan" falls to the
+// generic drive rather than starting a plan that cannot finish.
+func TestParseSkillPhasesDropsUnusableEntries(t *testing.T) {
+	sk := parseSkill("x", `---
+phases:
+  - name: ""
+    files: ["a.md"]
+  - name: nofiles
+  - name: ok
+    files: ["b.md"]
+---
+body
+`)
+	if len(sk.Phases) != 1 || sk.Phases[0].Name != "ok" {
+		t.Fatalf("phases = %+v, want only the usable entry", sk.Phases)
+	}
+
+	// Every entry unusable → no plan at all.
+	sk = parseSkill("x", "---\nphases:\n  - name: nofiles\n---\nbody\n")
+	if sk.Phases != nil {
+		t.Errorf("phases = %+v, want nil so the generic drive is used", sk.Phases)
+	}
+}
+
+// TestParseSkillMalformedPhasesIsNotFatal keeps the existing "bad frontmatter
+// degrades, never fails" contract: a `phases:` that is not a list must leave the
+// rest of the frontmatter intact.
+func TestParseSkillMalformedPhasesIsNotFatal(t *testing.T) {
+	sk := parseSkill("x", "---\nname: n\ndescription: d\nphases: not-a-list\n---\nbody\n")
+	if sk.Name != "n" || sk.Description != "d" {
+		t.Errorf("malformed phases must not disturb the rest: %+v", sk)
+	}
+	if sk.Phases != nil {
+		t.Errorf("phases = %+v, want nil", sk.Phases)
+	}
+}

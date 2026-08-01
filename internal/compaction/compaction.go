@@ -82,6 +82,15 @@ func (s *Summarizer) SetContextWindow(tokens int) {
 	s.contextWindow.Store(int64(tokens))
 }
 
+// ContextWindow reports the window currently driving compaction thresholds (0
+// when none is known and the fixed MaxBudget applies instead). It exists so a
+// caller that retunes the summarizer can assert which model's window it ended
+// up with — the daemon tunes it from the model compaction actually runs on,
+// which is not necessarily the global one (P52.1).
+func (s *Summarizer) ContextWindow() int {
+	return int(s.contextWindow.Load())
+}
+
 // shouldCompact reports whether the current estimated token count warrants
 // compaction given the configured context window or fixed budget.
 func (s *Summarizer) shouldCompact(estimated int) bool {

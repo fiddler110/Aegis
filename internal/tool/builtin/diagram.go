@@ -52,7 +52,7 @@ func (t *diagramTool) Execute(ctx context.Context, input json.RawMessage) (tool.
 		return tool.Result{Content: string(data)}, nil
 	}
 
-	abs, err := resolvePath(effectiveRoot(ctx, t.root), args.Path)
+	abs, err := resolveWrite(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}

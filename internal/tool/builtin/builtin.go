@@ -222,8 +222,28 @@ func Register(reg *tool.Registry, opts Options) error {
 // resolvePath joins p against root and rejects paths that escape it. It
 // delegates to the sandbox path validator which resolves symlinks to prevent
 // symlink-based workspace escapes.
+//
+// This is the single-root form, for the handful of callers with no request
+// context to consult. Anything reachable from a tool's Execute should use
+// resolveRead/resolveWrite instead so the session's additional roots (P52.13)
+// are honored.
 func resolvePath(root, p string) (string, error) {
 	return sandbox.ValidatePath(root, p)
+}
+
+// resolveRead resolves p for reading, against the session workdir plus any
+// additional roots configured for the session (P52.13).
+func resolveRead(ctx context.Context, root, p string) (string, error) {
+	return sandbox.ValidatePathIn(effectiveRoots(ctx, root), p, sandbox.AccessRead)
+}
+
+// resolveWrite resolves p for writing. Identical to resolveRead except that an
+// additional root only satisfies it when that root was explicitly marked
+// writable — additional roots are read-only by default, so the common
+// "read research from A, write the document into B" setup cannot accidentally
+// scribble into A.
+func resolveWrite(ctx context.Context, root, p string) (string, error) {
+	return sandbox.ValidatePathIn(effectiveRoots(ctx, root), p, sandbox.AccessWrite)
 }
 
 // effectiveRoot returns the working directory a tool call should be confined
@@ -237,6 +257,34 @@ func effectiveRoot(ctx context.Context, fallback string) string {
 		return wd
 	}
 	return fallback
+}
+
+// effectiveRoots returns the full confinement set for a call: the working
+// directory from effectiveRoot as the primary writable root, followed by the
+// session's additional roots. With none configured — the overwhelmingly common
+// case — the result is a one-element set and validation is bit-for-bit the
+// old single-root behavior.
+//
+// root is passed rather than read from the tool because callers frequently
+// already hold the resolved workdir; passing the raw fallback works too, since
+// effectiveRoot is applied here.
+func effectiveRoots(ctx context.Context, root string) []sandbox.Root {
+	primary := effectiveRoot(ctx, root)
+	extra := tool.ExtraRootsFromContext(ctx)
+	if len(extra) == 0 {
+		return []sandbox.Root{{Path: primary, Writable: true}}
+	}
+	roots := make([]sandbox.Root, 0, len(extra)+1)
+	roots = append(roots, sandbox.Root{Path: primary, Writable: true})
+	for _, r := range extra {
+		// The session workdir is always primary and always writable; a stale
+		// additional root naming it must not be able to demote it.
+		if r.Path == primary {
+			continue
+		}
+		roots = append(roots, r)
+	}
+	return roots
 }
 
 // parseArgs unmarshals tool input into v, returning a friendly error.

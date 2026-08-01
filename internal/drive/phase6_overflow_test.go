@@ -1,24 +1,22 @@
-package cli
+package drive
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"testing"
 
-	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/provider"
 )
 
-// newTestPhaseState returns a phasedDriveState wired for the pure decision
+// newTestPhaseState returns a State wired for the pure decision
 // helpers (recoverPhase6Overflow / tryEscalateWindow): a discard errOut, a real
 // logger, and an escalateWindow that records how many times it was invoked.
-func newTestPhaseState(escalate func() (int, bool)) *phasedDriveState {
-	return &phasedDriveState{
-		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		errOut:         io.Discard,
-		escalateWindow: escalate,
+func newTestPhaseState(escalate func() (int, bool)) *State {
+	return &State{
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ErrOut:         io.Discard,
+		EscalateWindow: escalate,
 	}
 }
 
@@ -96,22 +94,9 @@ func TestNextDriveWindow(t *testing.T) {
 		{0, 131072, 131072, true},       // zero start jumps to max
 	}
 	for _, c := range cases {
-		next, grew := nextDriveWindow(c.cur, c.max)
+		next, grew := NextWindow(c.cur, c.max)
 		if next != c.wantNext || grew != c.wantGrew {
-			t.Errorf("nextDriveWindow(%d, %d) = (%d, %v), want (%d, %v)", c.cur, c.max, next, grew, c.wantNext, c.wantGrew)
+			t.Errorf("NextWindow(%d, %d) = (%d, %v), want (%d, %v)", c.cur, c.max, next, grew, c.wantNext, c.wantGrew)
 		}
-	}
-}
-
-// TestRecommendPhasedDriveWindow_NonOllamaGate: the up-front window sizing
-// (P47.5a) only applies to an Ollama-backed provider. A cloud provider (no
-// base_url) must return ok=false so the caller leaves the configured window
-// untouched — no probe, no override.
-func TestRecommendPhasedDriveWindow_NonOllamaGate(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Provider.Default = "anthropic"
-	cfg.Provider.BaseURL = ""
-	if _, _, ok := recommendPhasedDriveWindow(context.Background(), cfg); ok {
-		t.Error("a non-Ollama provider must not yield a phased-drive window recommendation")
 	}
 }
