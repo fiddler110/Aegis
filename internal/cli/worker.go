@@ -193,9 +193,13 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Cost:            tracker,
 		BudgetUSD:       budgetUSD,
 		MaxTokensPerRun: maxTokensPerRun,
-		Model:           model,
-		MaxTokens:       cfg.Provider.MaxTokens,
-		ExtraRoots:      driveExtraRoots(cwd, cfg, logger),
+		// Subprocess teammates inherit the bound whole, for the same reason the
+		// in-process backend does (server.go): elapsed time isn't divisible
+		// across siblings the way spend is.
+		MaxWallClockPerRun: cfg.Cost.MaxWallClockPerRun(),
+		Model:              model,
+		MaxTokens:          cfg.Provider.MaxTokens,
+		ExtraRoots:         driveExtraRoots(cwd, cfg, logger),
 	})
 	if err != nil {
 		return "", cost.Snapshot{}, err

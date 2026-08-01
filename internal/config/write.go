@@ -388,6 +388,12 @@ type CostPatch struct {
 	SessionTokenCap int
 	DailyTokenCap   int
 	AlertThreshold  float64
+	// MaxWallClockPerRunSec (P52.15) is carried here purely so a caller that
+	// rewrites the cost block preserves it. patchCost splices in a freshly
+	// built block, so any cost key absent from this struct is silently dropped
+	// from the user's file — `aegis harden` does not set a wall-clock bound,
+	// but it must not erase one the user set.
+	MaxWallClockPerRunSec int
 }
 
 // PatchProjectCost replaces the cost: block in the project-level
@@ -424,6 +430,7 @@ func buildCostBlock(p CostPatch) string {
 	b.WriteString("cost:\n")
 	fmt.Fprintf(&b, "  budget_usd: %g\n", p.BudgetUSD)
 	fmt.Fprintf(&b, "  max_tokens_per_run: %d\n", p.MaxTokensPerRun)
+	fmt.Fprintf(&b, "  max_wall_clock_per_run: %d\n", p.MaxWallClockPerRunSec)
 	fmt.Fprintf(&b, "  session_cap_usd: %g\n", p.SessionCapUSD)
 	fmt.Fprintf(&b, "  daily_cap_usd: %g\n", p.DailyCapUSD)
 	fmt.Fprintf(&b, "  session_token_cap: %d\n", p.SessionTokenCap)
