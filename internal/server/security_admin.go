@@ -21,11 +21,16 @@ import (
 // picture without a session/model turn.
 func (s *Server) handleSecurityStatus(w http.ResponseWriter, r *http.Request) {
 	opts := security.OptionsFromConfig(s.cfg.Security)
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	// 30s rather than 10s: resolution already costs an image inspect plus a
+	// cache probe per DB-backed tool, and P55.6's database-age probe adds one
+	// more container start. Timing out would report the databases unreadable
+	// when the only problem was a cold container runtime.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
 	descs := security.Descriptors()
 	out := make([]api.SecurityToolStatus, 0, len(descs))
+	fallbacks := map[string]string{}
 	for _, d := range descs {
 		tc := s.cfg.Security.Tools[d.Name]
 		method := tc.Method
@@ -42,22 +47,30 @@ func (s *Server) handleSecurityStatus(w http.ResponseWriter, r *http.Request) {
 			Method:   method,
 		}
 
-		resolved, rt, _, reason := security.Resolve(ctx, d.Name, opts)
-		switch resolved {
+		res := security.ResolveDetailed(ctx, d.Name, opts)
+		switch res.Method {
 		case security.MethodHost:
 			st.Resolved = "host"
 			st.Status = "on PATH"
+			// Matches the TUI picker's wording exactly (see
+			// securityconfig.go's resolveCmd), which SecurityToolStatus.Status
+			// documents itself as mirroring. The full reason goes into
+			// Warnings below rather than onto this row.
+			if res.FallbackWhy != "" {
+				st.Status = "on PATH (multiscanner container unavailable)"
+				fallbacks[d.Name] = res.FallbackWhy
+			}
 		case security.MethodContainer:
 			st.Resolved = "container"
-			st.Runtime = string(rt)
-			st.Status = fmt.Sprintf("container (%s)", rt)
+			st.Runtime = string(res.Runtime)
+			st.Status = fmt.Sprintf("container (%s)", res.Runtime)
 		case security.MethodWSL:
 			st.Resolved = "wsl"
 			st.Status = "via WSL"
 		default:
 			st.Resolved = "unavailable"
-			st.Status = "unavailable: " + reason
-			if note := security.AvailabilityNote(d.Name, reason); note != "" {
+			st.Status = "unavailable: " + res.Reason
+			if note := security.AvailabilityNote(d.Name, res.Reason); note != "" {
 				st.Status += "; " + note
 			}
 		}
@@ -66,6 +79,21 @@ func (s *Server) handleSecurityStatus(w http.ResponseWriter, r *http.Request) {
 	var warnings []string
 	if drift := security.MultiscannerSourceDrift(opts.Multiscanner); drift != "" {
 		warnings = append(warnings, drift)
+	}
+	// The fallback advisory goes in Warnings rather than a new per-tool field
+	// for the reason Warnings already exists: like source drift, one cause
+	// affects every covered scanner at once, so a per-row copy would render as
+	// fourteen problems in a UI list instead of one. The per-tool half of the
+	// signal is already on the row, in Status.
+	if advisory := security.HostFallbackAdvisory(fallbacks); advisory != "" {
+		warnings = append(warnings, advisory)
+	}
+	// Database age is a Warnings entry only when it's actually stale: an
+	// operator polling this endpoint wants to know when the data went bad, not
+	// to be told its age on every poll. `aegis security status` prints the full
+	// per-tool table; this is the alarm half of it.
+	if ages := security.DatabaseAges(ctx, opts); ages.Warning(time.Now()) != "" {
+		warnings = append(warnings, ages.Warning(time.Now()))
 	}
 	writeJSON(w, http.StatusOK, api.SecurityStatusResponse{Tools: out, Warnings: warnings})
 }

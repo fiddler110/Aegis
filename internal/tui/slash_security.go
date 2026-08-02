@@ -75,28 +75,48 @@ func (d *SlashDispatcher) cmdSecurityStatus() SlashResult {
 		return SlashResult{Output: fmt.Sprintf("Failed to load config: %v", err), IsError: true}
 	}
 	opts := security.OptionsFromConfig(cfg.Security)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// 30s rather than the 15s the other probes use: this one adds the P55.6
+	// database-age probe, which is one more container start on top of
+	// resolution's image inspect and per-tool cache checks. A cold container
+	// runtime can eat most of 15s by itself, and timing out here would report
+	// the databases as unreadable when the only problem was the clock.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TOOL\tCATEGORY\tMETHOD\tDETAIL")
+	fallbacks := map[string]string{}
 	for _, dsc := range security.Descriptors() {
-		method, rt, _, reason := security.Resolve(ctx, dsc.Name, opts)
-		detail := reason
-		switch method {
+		r := security.ResolveDetailed(ctx, dsc.Name, opts)
+		detail := r.Reason
+		switch r.Method {
 		case security.MethodHost:
 			detail = "on PATH"
 		case security.MethodContainer:
-			detail = fmt.Sprintf("via %s", rt)
+			detail = fmt.Sprintf("via %s", r.Runtime)
 		default:
-			if note := security.AvailabilityNote(dsc.Name, reason); note != "" {
-				detail = reason + "; " + note
+			if note := security.AvailabilityNote(dsc.Name, r.Reason); note != "" {
+				detail = r.Reason + "; " + note
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", dsc.Name, dsc.Category, securityMethodLabel(method), detail)
+		if r.FallbackWhy != "" {
+			fallbacks[dsc.Name] = r.FallbackWhy
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", dsc.Name, dsc.Category, securityMethodLabel(r.Method), detail)
 	}
 	tw.Flush()
+	if advisory := security.HostFallbackAdvisory(fallbacks); advisory != "" {
+		fmt.Fprintf(&b, "\nnote: %s\n", advisory)
+	}
+	now := time.Now()
+	ages := security.DatabaseAges(ctx, opts)
+	if table := security.FormatDatabaseAges(ages, now); table != "" {
+		fmt.Fprintf(&b, "\n%s", table)
+	}
+	if w := ages.Warning(now); w != "" {
+		fmt.Fprintf(&b, "\nwarning: %s\n", w)
+	}
 	return SlashResult{Output: b.String()}
 }
 
@@ -356,18 +376,22 @@ func (d *SlashDispatcher) cmdScanList() SlashResult {
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SCANNER\tCATEGORY\tDEFAULT\tSTATUS")
+	fallbacks := map[string]string{}
 	for _, dsc := range security.Descriptors() {
-		method, rt, _, reason := security.Resolve(ctx, dsc.Name, opts)
-		status := reason
-		switch method {
+		r := security.ResolveDetailed(ctx, dsc.Name, opts)
+		status := r.Reason
+		switch r.Method {
 		case security.MethodHost:
 			status = "on PATH"
 		case security.MethodContainer:
-			status = fmt.Sprintf("via %s", rt)
+			status = fmt.Sprintf("via %s", r.Runtime)
 		default:
-			if note := security.AvailabilityNote(dsc.Name, reason); note != "" {
-				status = reason + "; " + note
+			if note := security.AvailabilityNote(dsc.Name, r.Reason); note != "" {
+				status = r.Reason + "; " + note
 			}
+		}
+		if r.FallbackWhy != "" {
+			fallbacks[dsc.Name] = r.FallbackWhy
 		}
 		defaultLabel := "opt-in"
 		if dsc.DefaultEnabled {
@@ -376,6 +400,9 @@ func (d *SlashDispatcher) cmdScanList() SlashResult {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", dsc.Name, dsc.Category, defaultLabel, status)
 	}
 	tw.Flush()
+	if advisory := security.HostFallbackAdvisory(fallbacks); advisory != "" {
+		fmt.Fprintf(&b, "\nnote: %s\n", advisory)
+	}
 
 	fmt.Fprintf(&b, "\nCategory aliases (/scan <alias> runs every scanner in the group):\n")
 	catTw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)

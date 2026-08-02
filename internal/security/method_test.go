@@ -667,3 +667,136 @@ func TestNjsscanDeclaresWindowsHostBroken(t *testing.T) {
 		}
 	}
 }
+
+// TestHostFallbackAdvisory covers the P55.4 display half: the per-tool
+// Resolution.Note is the right shape for one scanner and the wrong shape for
+// sixteen, so every status surface collapses the set through this instead.
+// The properties asserted here are the ones that keep it from reading as
+// nagging — one line per distinct cause, every affected tool named once, and
+// silence when nothing fell back.
+func TestHostFallbackAdvisory(t *testing.T) {
+	const runtimeDown = "the multiscanner image was built with podman, which isn't available now"
+	const noCache = "trivy needs a vulnerability database, and the cache volume doesn't have one yet"
+
+	cases := []struct {
+		name      string
+		fallbacks map[string]string
+		want      []string // substrings that must appear
+		notWant   []string
+		wantEmpty bool
+		// wantCauseLines is how many "  - " bullets the advisory should carry;
+		// 0 means the single-cause form, which has none.
+		wantCauseLines int
+	}{
+		{
+			name:      "no fallbacks is silence",
+			fallbacks: map[string]string{},
+			wantEmpty: true,
+		},
+		{
+			name:      "nil map is silence",
+			fallbacks: nil,
+			wantEmpty: true,
+		},
+		{
+			name:      "one tool reads as singular",
+			fallbacks: map[string]string{"trivy": runtimeDown},
+			want:      []string{"trivy is running from host binaries", runtimeDown, "unpinned"},
+			notWant:   []string{"  - "},
+		},
+		{
+			// The common shape on a machine whose runtime is simply stopped:
+			// every covered tool falls back for the identical reason, and the
+			// cause must be stated exactly once.
+			name: "one cause across many tools collapses to one line",
+			fallbacks: map[string]string{
+				"trivy": runtimeDown, "gitleaks": runtimeDown, "syft": runtimeDown, "grype": runtimeDown,
+			},
+			want:    []string{"gitleaks, grype, syft and trivy are running", "The container is unavailable — " + runtimeDown},
+			notWant: []string{"  - "},
+		},
+		{
+			name: "distinct causes get one bullet each",
+			fallbacks: map[string]string{
+				"trivy": noCache, "gitleaks": runtimeDown, "syft": runtimeDown,
+			},
+			want:           []string{"3 scanners are running", "gitleaks, syft: " + runtimeDown, "trivy: " + noCache},
+			wantCauseLines: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := HostFallbackAdvisory(tc.fallbacks)
+			if tc.wantEmpty {
+				if got != "" {
+					t.Fatalf("advisory = %q, want empty (nothing fell back, so nothing to say)", got)
+				}
+				return
+			}
+			if got == "" {
+				t.Fatal("advisory is empty, want an advisory")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("advisory = %q, want it to contain %q", got, want)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(got, notWant) {
+					t.Errorf("advisory = %q, want it NOT to contain %q", got, notWant)
+				}
+			}
+			if n := strings.Count(got, "\n  - "); n != tc.wantCauseLines {
+				t.Errorf("advisory has %d cause bullets, want %d:\n%s", n, tc.wantCauseLines, got)
+			}
+			// Each affected tool is listed exactly once by the advisory
+			// itself: listing a tool twice is the per-row repetition this
+			// function exists to remove. Occurrences inside a cause string
+			// are discounted — verifyMultiscannerCache's reason names the
+			// tool it is about, and that text belongs to the resolver.
+			for tool, why := range tc.fallbacks {
+				want := 1 + strings.Count(why, tool)
+				if n := strings.Count(got, tool); n != want {
+					t.Errorf("tool %q named %d times, want %d:\n%s", tool, n, want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveDetailedFallbackWhyIsBareReason pins the split between Note and
+// FallbackWhy: Note is a sentence about one tool, FallbackWhy is the same
+// cause with no tool-specific wrapping, so two tools that fell back for the
+// same reason group together in HostFallbackAdvisory instead of producing two
+// near-identical lines.
+func TestResolveDetailedFallbackWhyIsBareReason(t *testing.T) {
+	for _, toolName := range []string{"test-p556-why-a", "test-p556-why-b"} {
+		withTestDescriptor(t, ScannerDescriptor{Name: toolName, Binary: "go", DefaultEnabled: true})
+	}
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return "", false
+	})
+	opts := Options{Multiscanner: msPolicy(testImageID, "test-p556-why-a", "test-p556-why-b")}
+
+	a := ResolveDetailed(context.Background(), "test-p556-why-a", opts)
+	b := ResolveDetailed(context.Background(), "test-p556-why-b", opts)
+	if a.Method != MethodHost || b.Method != MethodHost {
+		t.Fatalf("methods = %v/%v, want both MethodHost", a.Method, b.Method)
+	}
+	if a.FallbackWhy == "" {
+		t.Fatal("FallbackWhy is empty on a container→host fallback")
+	}
+	if a.FallbackWhy != b.FallbackWhy {
+		t.Errorf("FallbackWhy differs per tool (%q vs %q) — the same cause must group", a.FallbackWhy, b.FallbackWhy)
+	}
+	if a.Note == b.Note {
+		t.Errorf("Note is identical for two tools (%q) — it is supposed to name the tool", a.Note)
+	}
+	if strings.Contains(a.FallbackWhy, "test-p556-why-a") {
+		t.Errorf("FallbackWhy = %q, want no tool name in it", a.FallbackWhy)
+	}
+	if !strings.Contains(a.Note, a.FallbackWhy) {
+		t.Errorf("Note = %q does not contain FallbackWhy = %q", a.Note, a.FallbackWhy)
+	}
+}

@@ -366,20 +366,24 @@ func printScannerList(cmd *cobra.Command) error {
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SCANNER\tCATEGORY\tDEFAULT\tSTATUS")
+	fallbacks := map[string]string{}
 	for _, d := range security.Descriptors() {
-		method, rt, _, reason := security.Resolve(cmd.Context(), d.Name, opts)
-		status := reason
-		switch method {
+		r := security.ResolveDetailed(cmd.Context(), d.Name, opts)
+		status := r.Reason
+		switch r.Method {
 		case security.MethodHost:
 			status = "on PATH"
 		case security.MethodContainer:
-			status = fmt.Sprintf("via %s", rt)
+			status = fmt.Sprintf("via %s", r.Runtime)
 		case security.MethodWSL:
 			status = "via WSL"
 		default:
-			if note := security.AvailabilityNote(d.Name, reason); note != "" {
-				status = reason + "; " + note
+			if note := security.AvailabilityNote(d.Name, r.Reason); note != "" {
+				status = r.Reason + "; " + note
 			}
+		}
+		if r.FallbackWhy != "" {
+			fallbacks[d.Name] = r.FallbackWhy
 		}
 		defaultLabel := "opt-in"
 		if d.DefaultEnabled {
@@ -388,6 +392,11 @@ func printScannerList(cmd *cobra.Command) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, d.Category, defaultLabel, status)
 	}
 	tw.Flush()
+	// Footnote to the rows above; see the same call in `aegis security status`
+	// for why one collapsed line rather than one per host-resolved tool.
+	if advisory := security.HostFallbackAdvisory(fallbacks); advisory != "" {
+		fmt.Fprintf(out, "\nnote: %s\n", advisory)
+	}
 
 	fmt.Fprintln(out, "\nCategory aliases (--scanner <alias> runs every scanner in the group):")
 	catTw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

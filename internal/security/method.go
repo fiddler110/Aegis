@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/config"
@@ -491,16 +492,105 @@ type Resolution struct {
 	// machines' findings. Empty means "nothing to add"; it never means
 	// failure, so a caller that ignores it behaves exactly as it did before
 	// this field existed.
+	//
+	// It is a complete sentence about *this one tool*, which is the right
+	// shape for a caller resolving a single scanner and the wrong shape for
+	// one resolving all sixteen — see FallbackWhy and HostFallbackAdvisory.
 	Note string
+	// FallbackWhy is the machine-usable half of Note: the bare reason the
+	// container was unavailable, with no per-tool preamble wrapped around it.
+	//
+	// It exists because every display site in this codebase resolves the whole
+	// descriptor list at once, and on a machine whose container runtime simply
+	// isn't running, *every* covered tool falls back for the identical reason.
+	// Printing Note per row would be fourteen paragraphs that differ only in a
+	// tool name — the exact noise that teaches an operator to skip the warning
+	// block. Callers collect this instead and hand the set to
+	// HostFallbackAdvisory, which prints one line per distinct cause.
+	FallbackWhy string
 }
 
 // ResolveDetailed is Resolve with Resolution.Note attached — the entry point
 // for callers that want to surface the advisory (status tables, scan reports)
 // rather than only decide whether a tool runs.
 func ResolveDetailed(ctx context.Context, name string, opts Options) Resolution {
-	var note string
-	method, rt, image, reason := resolve(ctx, name, opts, &note)
-	return Resolution{Method: method, Runtime: rt, Image: image, Reason: reason, Note: note}
+	var extra Resolution
+	method, rt, image, reason := resolve(ctx, name, opts, &extra)
+	extra.Method, extra.Runtime, extra.Image, extra.Reason = method, rt, image, reason
+	return extra
+}
+
+// HostFallbackAdvisory collapses the per-tool fallback reasons gathered across
+// a whole scanner list (Resolution.FallbackWhy, keyed by tool name) into a
+// single advisory — one clause per *distinct cause*, naming the tools it
+// affects, rather than one paragraph per tool.
+//
+// Two properties keep this from nagging, and both are load-bearing:
+//
+//   - It can only fire when the operator has actually built and pinned the
+//     multiscanner image, because Resolve only prefers the container for tools
+//     MultiscannerPolicy.Covers reports — which requires Enabled and a pinned
+//     Image. An operator who has no container runtime and never ran
+//     `aegis security build-image` sees nothing at all, which is correct: they
+//     never asked for the container path, so a host binary isn't a fallback
+//     for them, it's the plan.
+//   - When it does fire it is one line, not one per tool, and it ends in the
+//     specific thing to fix (a stopped podman machine, an unpopulated DB
+//     cache) rather than a general exhortation.
+//
+// Returns "" for an empty map, so a caller can print unconditionally.
+func HostFallbackAdvisory(fallbacks map[string]string) string {
+	if len(fallbacks) == 0 {
+		return ""
+	}
+	byWhy := map[string][]string{}
+	names := make([]string, 0, len(fallbacks))
+	for tool, why := range fallbacks {
+		byWhy[why] = append(byWhy[why], tool)
+		names = append(names, tool)
+	}
+	sort.Strings(names)
+
+	const consequence = " running from host binaries instead of the multiscanner container: unpinned (whatever version is on PATH), unverified, and outside the container's --network none confinement, so another machine can report different findings for the same tree."
+
+	whys := make([]string, 0, len(byWhy))
+	for why := range byWhy {
+		whys = append(whys, why)
+	}
+	sort.Strings(whys)
+	if len(whys) == 1 {
+		verb := "is"
+		if len(names) > 1 {
+			verb = "are"
+		}
+		return joinNames(names) + " " + verb + consequence + " The container is unavailable — " + whys[0]
+	}
+	// With more than one cause the tools are named in the bullets, so the head
+	// counts them instead of listing them — naming each tool twice in one
+	// advisory is the repetition this whole function exists to remove.
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d scanners are%s The container is unavailable:", len(names), consequence)
+	for _, why := range whys {
+		tools := byWhy[why]
+		sort.Strings(tools)
+		fmt.Fprintf(&b, "\n  - %s: %s", strings.Join(tools, ", "), why)
+	}
+	return b.String()
+}
+
+// joinNames renders a sorted name list the way a sentence wants it, so the
+// advisory reads as prose rather than as a serialized slice.
+func joinNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	}
 }
 
 // Resolve is the availability resolver every scanner calls (P11.11's
@@ -512,12 +602,13 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 	return resolve(ctx, name, opts, nil)
 }
 
-// resolve is the implementation both entry points share. note is an out-param
-// rather than a fifth return value deliberately: it is written in exactly one
-// branch, and threading a fifth value through every return here would spread
-// an "" across two dozen statements to say nothing. nil means the caller
-// doesn't want it.
-func resolve(ctx context.Context, name string, opts Options, note *string) (method Method, runtime sandbox.ContainerRuntime, image string, reason string) {
+// resolve is the implementation both entry points share. extra is an out-param
+// rather than extra return values deliberately: its fields are written in
+// exactly one branch, and threading them through every return here would
+// spread empty strings across two dozen statements to say nothing. nil means
+// the caller doesn't want them. resolve never sets extra's Method/Runtime/
+// Image/Reason — those are the tuple, and ResolveDetailed copies them in.
+func resolve(ctx context.Context, name string, opts Options, extra *Resolution) (method Method, runtime sandbox.ContainerRuntime, image string, reason string) {
 	d, ok := descriptors[name]
 	if !ok {
 		return MethodNone, "", "", name + ": no scanner descriptor registered"
@@ -678,8 +769,9 @@ func resolve(ctx context.Context, name string, opts Options, note *string) (meth
 			}
 		}
 		if hostAvailable {
-			if containerFallbackWhy != "" && note != nil {
-				*note = name + " will run from the host binary, which is unpinned (whatever version is on PATH), unverified, and not confined to --network none: the multiscanner container was preferred but is unavailable — " + containerFallbackWhy
+			if containerFallbackWhy != "" && extra != nil {
+				extra.Note = name + " will run from the host binary, which is unpinned (whatever version is on PATH), unverified, and not confined to --network none: the multiscanner container was preferred but is unavailable — " + containerFallbackWhy
+				extra.FallbackWhy = containerFallbackWhy
 			}
 			return MethodHost, "", "", ""
 		}

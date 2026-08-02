@@ -29,6 +29,12 @@ func runSecurity(t *testing.T, stdin string, args ...string) (string, error) {
 // should be silently missing from the report the way an unresolved binary
 // used to just vanish from Available()-gated output.
 func TestSecurityStatusListsBuiltinScanners(t *testing.T) {
+	// redirectConfigDir as well as chdirTemp: without it this reads the
+	// developer's *user* config, and a machine with `aegis security
+	// build-image --global` run against it would send this test through a real
+	// image inspect, per-tool cache probes, and (since P55.6) a
+	// database-age probe — real podman work inside `go test ./...`.
+	redirectConfigDir(t)
 	chdirTemp(t) // isolate from any real .aegis/config.yaml
 	out, err := runSecurity(t, "", "status")
 	if err != nil {
@@ -37,6 +43,15 @@ func TestSecurityStatusListsBuiltinScanners(t *testing.T) {
 	for _, name := range []string{"opengrep", "trivy", "gitleaks"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("status output missing %q: %s", name, out)
+		}
+	}
+	// With no multiscanner configured there is no shared cache to report on,
+	// and nothing about the container path to advise: P55.4's fallback
+	// advisory and P55.6's database table must both stay silent rather than
+	// nagging a host-only install on every invocation.
+	for _, unwanted := range []string{"Vulnerability databases", "running from host binaries"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("status output contains %q with no multiscanner configured:\n%s", unwanted, out)
 		}
 	}
 }

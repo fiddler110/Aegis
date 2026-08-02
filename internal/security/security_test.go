@@ -418,3 +418,62 @@ func TestRunWithOptionsBaselineParseErrorFailsSafe(t *testing.T) {
 		t.Error("expected BaselineError to be set for malformed YAML")
 	}
 }
+
+// TestRunWithProgressRecordsHostFallbackAdvisory is the P55.4 report half: a
+// scan that ran every tool on the host because the container was unavailable
+// must say so in the Report, not just resolve that way silently. The whole
+// point of P55.4 was that findings can differ between machines, and a report
+// is the artifact that outlives the terminal it was printed in.
+func TestRunWithProgressRecordsHostFallbackAdvisory(t *testing.T) {
+	const toolA, toolB = "test-p554-report-a", "test-p554-report-b"
+	for _, name := range []string{toolA, toolB} {
+		withTestDescriptor(t, ScannerDescriptor{Name: name, Binary: "go", DefaultEnabled: true})
+	}
+	// No runtime, so both covered tools fall back to their (present) host
+	// binary — the exact shape of a stopped podman machine.
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return "", false
+	})
+	opts := Options{Multiscanner: msPolicy(testImageID, toolA, toolB)}
+	scanners := []Scanner{
+		fakeScanner{name: toolA, available: true},
+		fakeScanner{name: toolB, available: true},
+	}
+
+	rep := RunWithOptions(context.Background(), t.TempDir(), scanners, opts)
+	if len(rep.Advisories) != 1 {
+		t.Fatalf("advisories = %v, want exactly one collapsed advisory", rep.Advisories)
+	}
+	for _, want := range []string{toolA, toolB, "unpinned", "isn't available now"} {
+		if !strings.Contains(rep.Advisories[0], want) {
+			t.Errorf("advisory = %q, want it to mention %q", rep.Advisories[0], want)
+		}
+	}
+	if !strings.Contains(rep.Format(), "Note: ") {
+		t.Errorf("Format() does not surface the advisory:\n%s", rep.Format())
+	}
+	// The tools still ran and still reported: an advisory is not a skip.
+	if len(rep.Ran) != 2 || len(rep.Skipped) != 0 {
+		t.Errorf("ran = %v, skipped = %v, want both tools run and nothing skipped", rep.Ran, rep.Skipped)
+	}
+}
+
+// TestRunWithProgressNoAdvisoryWithoutMultiscanner is the not-nagging half:
+// an operator with no multiscanner image configured never asked for the
+// container path, so a host run is the plan rather than a fallback and the
+// report must stay exactly as it was before P55.4.
+func TestRunWithProgressNoAdvisoryWithoutMultiscanner(t *testing.T) {
+	const tool = "test-p554-report-plain"
+	withTestDescriptor(t, ScannerDescriptor{Name: tool, Binary: "go", DefaultEnabled: true})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return "", false
+	})
+
+	rep := RunWithOptions(context.Background(), t.TempDir(), []Scanner{fakeScanner{name: tool, available: true}}, Options{})
+	if len(rep.Advisories) != 0 {
+		t.Fatalf("advisories = %v, want none (no multiscanner configured)", rep.Advisories)
+	}
+	if strings.Contains(rep.Format(), "Note: ") {
+		t.Errorf("Format() printed an advisory it should not have:\n%s", rep.Format())
+	}
+}

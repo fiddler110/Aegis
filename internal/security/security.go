@@ -204,6 +204,13 @@ type Report struct {
 	// visible instead of quietly doing nothing.
 	ExpiredSuppressions []string `json:"expired_suppressions,omitempty"`
 	InvalidSuppressions []string `json:"invalid_suppressions,omitempty"`
+	// Advisories describe *how* the run happened, as distinct from what it
+	// found (Findings) and what didn't run (Skipped). Today: the P55.4
+	// container→host fallback, where every tool listed did run and did report,
+	// just from an unpinned, unconfined binary rather than the verified image.
+	// Never a failure — a reader who ignores this sees exactly the report they
+	// saw before the field existed.
+	Advisories []string `json:"advisories,omitempty"`
 	// BaselineError is set if .aegis/security-baseline.yaml exists but failed
 	// to parse; suppression is skipped entirely in that case (fail safe —
 	// nothing is ever hidden by a baseline Aegis couldn't understand).
@@ -258,6 +265,12 @@ type ScanPlanEntry struct {
 	Image   string
 	Skipped bool
 	Reason  string
+	// FallbackWhy is set on a MethodHost entry that only landed on the host
+	// because the multiscanner container was preferred and unavailable
+	// (P55.4/Resolution.FallbackWhy). Empty on every other entry, including a
+	// host run the operator asked for outright. Collapsed into one advisory by
+	// RunWithProgress — see HostFallbackAdvisory for why it isn't per-tool.
+	FallbackWhy string
 }
 
 // PlanScanners resolves, for each candidate scanner, whether it would
@@ -283,7 +296,26 @@ func PlanScanners(ctx context.Context, dir string, scanners []Scanner, opts Opti
 			plan = append(plan, ScanPlanEntry{Scanner: sc, Skipped: true, Reason: reason})
 			continue
 		}
-		plan = append(plan, ScanPlanEntry{Scanner: sc, Method: method, Runtime: rt, Image: image})
+		entry := ScanPlanEntry{Scanner: sc, Method: method, Runtime: rt, Image: image}
+		// A host result for a tool the shared image carries is the one case
+		// that might be a silent downgrade rather than a choice, so ask the
+		// resolver why. Narrowly gated on purpose:
+		//
+		//   - Only MethodHost, and only when the multiscanner covers the tool,
+		//     so nothing else pays for a second resolution at all.
+		//   - The second call is not a second container run: the image and
+		//     cache verifications it repeats are memoized for
+		//     multiscannerVerifyTTL and were just populated by sc.Resolve
+		//     above, so what it actually costs is a lookPath and a runtime
+		//     detect.
+		//   - Going through ResolveDetailed rather than sc.Resolve is safe
+		//     here because the only Scanner that overrides Resolve
+		//     (trufflehog) diverges exclusively on a MethodContainer result;
+		//     a MethodHost verdict is the generic resolver's, unmodified.
+		if method == MethodHost && opts.Multiscanner.Covers(sc.Name()) {
+			entry.FallbackWhy = ResolveDetailed(ctx, sc.Name(), opts).FallbackWhy
+		}
+		plan = append(plan, entry)
 	}
 	return plan
 }
@@ -358,12 +390,19 @@ func RunWithProgress(ctx context.Context, dir string, scanners []Scanner, opts O
 
 	// Fold results in plan order — the step that makes concurrency invisible
 	// to the Report.
+	fallbacks := map[string]string{}
 	for i, entry := range plan {
 		if entry.Skipped {
 			rep.Skipped[entry.Scanner.Name()] = entry.Reason
 			continue
 		}
+		if entry.FallbackWhy != "" {
+			fallbacks[entry.Scanner.Name()] = entry.FallbackWhy
+		}
 		rep.record(entry.Scanner.Name(), entry.Method, results[i].findings, results[i].err)
+	}
+	if advisory := HostFallbackAdvisory(fallbacks); advisory != "" {
+		rep.Advisories = append(rep.Advisories, advisory)
 	}
 
 	// Dedup and ASVS-tag before baseline matching, so a suppression entry
@@ -513,6 +552,9 @@ func (r Report) Format() string {
 		}
 		sort.Strings(parts)
 		fmt.Fprintf(&b, "Scanners skipped: %s\n", strings.Join(parts, ", "))
+	}
+	for _, a := range r.Advisories {
+		fmt.Fprintf(&b, "Note: %s\n", a)
 	}
 	fmt.Fprintf(&b, "Findings: %d\n", len(r.Findings))
 	if r.BaselineError != "" {

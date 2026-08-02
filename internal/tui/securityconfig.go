@@ -149,17 +149,26 @@ func (m *securityConfigModel) resolveCmd() tea.Cmd {
 		defer cancel()
 		statuses := make(map[string]string)
 		for _, d := range security.Descriptors() {
-			method, rt, _, reason := security.Resolve(ctx, d.Name, opts)
-			switch method {
+			r := security.ResolveDetailed(ctx, d.Name, opts)
+			switch r.Method {
 			case security.MethodHost:
 				statuses[d.Name] = "on PATH"
+				// The one site that can't take the collapsed advisory the CLI
+				// and /security status print: this status is a single cell in
+				// a one-line-per-tool picker, so it gets the shortest true
+				// statement instead — enough to notice the row isn't what the
+				// operator configured, with the full reason a `/security
+				// status` away.
+				if r.FallbackWhy != "" {
+					statuses[d.Name] = "on PATH (multiscanner container unavailable)"
+				}
 			case security.MethodContainer:
-				statuses[d.Name] = "container (" + string(rt) + ")"
+				statuses[d.Name] = "container (" + string(r.Runtime) + ")"
 			case security.MethodWSL:
 				statuses[d.Name] = "via WSL"
 			default:
-				statuses[d.Name] = "unavailable: " + reason
-				if note := security.AvailabilityNote(d.Name, reason); note != "" {
+				statuses[d.Name] = "unavailable: " + r.Reason
+				if note := security.AvailabilityNote(d.Name, r.Reason); note != "" {
 					statuses[d.Name] += "; " + note
 				}
 			}
