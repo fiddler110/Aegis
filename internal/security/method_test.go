@@ -317,6 +317,192 @@ func TestResolveExplicitWSLMethod(t *testing.T) {
 	}
 }
 
+// --- P55.4: container-first resolution under "auto" ---
+
+// TestResolveAutoPrefersContainerOverHostBinary is P55.4's regression, and it
+// is deliberately a table rather than the file's usual one-test-per-rule shape:
+// the inversion is only correct if *all* of these hold together, and asserting
+// them side by side is what makes an accidental re-broadening (or re-narrowing)
+// of the rule obvious in the diff.
+//
+// Binary: "go" wherever a host binary should be present — it's guaranteed on
+// PATH while these tests run, so "container won" means it beat a real lookPath
+// hit rather than passing because nothing was installed.
+func TestResolveAutoPrefersContainerOverHostBinary(t *testing.T) {
+	const mismatchID = "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+
+	cases := []struct {
+		name string
+		// binary is the descriptor's host binary: "go" is on PATH, the long
+		// nonsense name never is.
+		binary string
+		policy ToolPolicy
+		// covered is whether the multiscanner image carries this tool. False
+		// means the image is enabled but lists some other tool, which is the
+		// "not covered by the shared image" case.
+		covered bool
+		// pinnedImage sets security.tools.<name>.image — the operator's own
+		// per-tool image, which is explicitly *not* part of the inversion.
+		pinnedImage string
+		runtimeOK   bool
+		// inspectID is what the runtime reports the image's ID to be; anything
+		// other than testImageID fails verification.
+		inspectID  string
+		wantMethod Method
+		// wantNote is a substring the advisory must carry, or "" for "there
+		// must be no advisory at all".
+		wantNote string
+	}{
+		{
+			name:       "container beats an installed host binary",
+			binary:     "go",
+			covered:    true,
+			runtimeOK:  true,
+			inspectID:  testImageID,
+			wantMethod: MethodContainer,
+		},
+		{
+			name:       "falls back to host when no runtime is available",
+			binary:     "go",
+			covered:    true,
+			runtimeOK:  false,
+			wantMethod: MethodHost,
+			wantNote:   "isn't available now",
+		},
+		{
+			name:       "falls back to host when image verification refuses",
+			binary:     "go",
+			covered:    true,
+			runtimeOK:  true,
+			inspectID:  mismatchID,
+			wantMethod: MethodHost,
+			wantNote:   "no longer matches",
+		},
+		{
+			name:       "method: host is unaffected",
+			binary:     "go",
+			policy:     ToolPolicy{Enabled: true, Method: "host"},
+			covered:    true,
+			runtimeOK:  true,
+			inspectID:  testImageID,
+			wantMethod: MethodHost,
+		},
+		{
+			name:       "method: container is unaffected",
+			binary:     "definitely-not-a-real-binary",
+			policy:     ToolPolicy{Enabled: true, Method: "container"},
+			covered:    true,
+			runtimeOK:  true,
+			inspectID:  testImageID,
+			wantMethod: MethodContainer,
+		},
+		{
+			// The multiscanner is enabled and a runtime is up, but this tool
+			// isn't in the image and has no image of its own: nothing about the
+			// inversion applies, so the host binary runs exactly as before.
+			name:       "tool not carried by the multiscanner is unaffected",
+			binary:     "go",
+			covered:    false,
+			runtimeOK:  true,
+			wantMethod: MethodHost,
+		},
+		{
+			// An operator-pinned per-tool image keeps host-first: it is the
+			// operator's own artifact, and `method: container` is the explicit,
+			// unambiguous way to ask for it to win.
+			name:        "operator-pinned per-tool image keeps host-first",
+			binary:      "go",
+			covered:     true,
+			pinnedImage: "ghcr.io/example/tool@sha256:abcdef0123456789",
+			runtimeOK:   true,
+			inspectID:   testImageID,
+			wantMethod:  MethodHost,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const toolName = "test-p554"
+			withTestDescriptor(t, ScannerDescriptor{Name: toolName, Binary: tc.binary, DefaultEnabled: true})
+			withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+				if !tc.runtimeOK {
+					return "", false
+				}
+				return sandbox.RuntimePodman, true
+			})
+			withInspectImageID(t, func(context.Context, sandbox.ContainerRuntime, string) (string, error) {
+				return tc.inspectID, nil
+			})
+			// Never consulted for this synthetic tool (it needs no vulnerability
+			// database), but seamed anyway so a future rename of the DB-tool set
+			// can't turn this into a real container run.
+			withCacheFileExists(t, true)
+			// Nothing here is WSLCapable, so this must never fire; asserting
+			// that keeps the WSL leg from quietly absorbing a fallback case.
+			withWSLBinaryAvailable(t, func(context.Context, string, string) bool {
+				t.Error("wslBinaryAvailable called for a non-WSLCapable descriptor")
+				return false
+			})
+
+			covers := toolName
+			if !tc.covered {
+				covers = "some-other-tool"
+			}
+			policy := tc.policy
+			if policy == (ToolPolicy{}) {
+				policy = ToolPolicy{Enabled: true}
+			}
+			policy.Image = tc.pinnedImage
+			opts := Options{
+				Tools:        map[string]ToolPolicy{toolName: policy},
+				Multiscanner: msPolicy(testImageID, covers),
+			}
+
+			got := ResolveDetailed(context.Background(), toolName, opts)
+			if got.Method != tc.wantMethod {
+				t.Fatalf("method = %v (reason %q, note %q), want %v", got.Method, got.Reason, got.Note, tc.wantMethod)
+			}
+			// A successful resolution never carries a Reason — every caller
+			// reads that field as "why this tool will not run".
+			if got.Method != MethodNone && got.Reason != "" {
+				t.Errorf("reason = %q on a successful resolution, want empty", got.Reason)
+			}
+			switch {
+			case tc.wantNote == "" && got.Note != "":
+				t.Errorf("note = %q, want none", got.Note)
+			case tc.wantNote != "" && !strings.Contains(got.Note, tc.wantNote):
+				t.Errorf("note = %q, want it to mention %q", got.Note, tc.wantNote)
+			}
+			if tc.wantNote != "" && !strings.Contains(got.Note, "unpinned") {
+				t.Errorf("note = %q, want it to say the host binary is unpinned", got.Note)
+			}
+		})
+	}
+}
+
+// TestResolveKeepsFourValueContract proves the P55.4 advisory did not leak into
+// the four-value Resolve every Scanner.Resolve implementation forwards: callers
+// branch on MethodNone and read `reason` only then, so a fallback advisory must
+// leave that tuple looking exactly like a clean success.
+func TestResolveKeepsFourValueContract(t *testing.T) {
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-p554-contract", Binary: "go", DefaultEnabled: true})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return "", false
+	})
+
+	opts := Options{Multiscanner: msPolicy(testImageID, "test-p554-contract")}
+	method, rt, image, reason := Resolve(context.Background(), "test-p554-contract", opts)
+	if method != MethodHost {
+		t.Fatalf("method = %v, want MethodHost", method)
+	}
+	if reason != "" || rt != "" || image != "" {
+		t.Errorf("Resolve = (%v, %q, %q, %q), want a bare MethodHost success", method, rt, image, reason)
+	}
+	if note := ResolveDetailed(context.Background(), "test-p554-contract", opts).Note; note == "" {
+		t.Error("ResolveDetailed lost the fallback advisory that Resolve deliberately drops")
+	}
+}
+
 func TestDescriptorFor(t *testing.T) {
 	d, ok := DescriptorFor("trivy")
 	if !ok {

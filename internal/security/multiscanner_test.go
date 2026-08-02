@@ -350,19 +350,31 @@ func TestResolveMultiscannerFallsBackToWSL(t *testing.T) {
 	}
 }
 
-// TestResolveHostStillWinsUnderAuto guards the pre-existing contract: adding a
-// shared image must not steal a run from an installed host binary.
-func TestResolveHostStillWinsUnderAuto(t *testing.T) {
+// TestResolveHostStillRunsWhenMultiscannerUnavailable is what survives of the
+// old TestResolveHostStillWinsUnderAuto, which asserted that a shared image
+// must never steal a run from an installed host binary. P55.4 inverted exactly
+// that: under "auto" a verified multiscanner now *does* win over a host binary,
+// because an unpinned PATH binary is the thing the image was built to stop
+// being authoritative (see the resolver's "auto" comment, and
+// TestResolveAutoPrefersContainerOverHostBinary in method_test.go).
+//
+// The half that still holds — and is the more important half, since it's what
+// keeps the inversion from turning a missing runtime into a missing scan — is
+// that an installed host binary is still used when the container can't run.
+func TestResolveHostStillRunsWhenMultiscannerUnavailable(t *testing.T) {
 	withTestDescriptor(t, ScannerDescriptor{Name: "test-ms", Binary: "go", DefaultEnabled: true})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		return "", false
+	})
 	withInspectImageID(t, func(context.Context, sandbox.ContainerRuntime, string) (string, error) {
-		t.Error("host binary is present; the multiscanner image should never be consulted")
+		t.Error("no runtime was detected; the image should never have been inspected")
 		return "", nil
 	})
 
 	opts := Options{Multiscanner: msPolicy(testImageID, "test-ms")}
 	method, _, _, _ := Resolve(context.Background(), "test-ms", opts)
 	if method != MethodHost {
-		t.Fatalf("method = %v, want MethodHost (go is on PATH)", method)
+		t.Fatalf("method = %v, want MethodHost (go is on PATH, container unavailable)", method)
 	}
 }
 

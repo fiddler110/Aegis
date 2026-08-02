@@ -463,12 +463,61 @@ var detectRuntime = sandbox.DetectBest
 // short-circuits on GOOS), so callers never need their own OS check.
 var wslBinaryAvailable = sandbox.WSLBinaryAvailable
 
+// Resolution is Resolve's full result, including information that has no
+// place in the four-value form every Scanner.Resolve implementation forwards.
+//
+// It exists because Resolve's signature is a contract, in both directions.
+// `reason` is read by every caller as "why this tool is not going to run":
+// they branch on MethodNone and only then print it, and on a successful
+// resolution they overwrite it outright ("on PATH", "via podman"). So an
+// advisory about a *successful* resolution put into `reason` would be both a
+// misuse of the field's documented meaning and, in practice, invisible.
+// Widening the tuple isn't available either — the four-value shape is the
+// Scanner interface's (internal/security/security.go, recon.go), forwarded by
+// a dozen per-scanner implementations. Hence: a separate type, and Resolve
+// stays byte-for-byte the function every existing caller already compiles
+// against.
+type Resolution struct {
+	Method  Method
+	Runtime sandbox.ContainerRuntime
+	Image   string
+	// Reason explains a MethodNone, and is empty for every other method —
+	// exactly as Resolve's fourth return value always has been.
+	Reason string
+	// Note is advisory information about a *successful* resolution. Today it
+	// carries one case: P55.4's container-preferred-but-unavailable fallback,
+	// where the scan is about to run on an unpinned host binary and the
+	// operator deserves to know rather than discovering it by diffing two
+	// machines' findings. Empty means "nothing to add"; it never means
+	// failure, so a caller that ignores it behaves exactly as it did before
+	// this field existed.
+	Note string
+}
+
+// ResolveDetailed is Resolve with Resolution.Note attached — the entry point
+// for callers that want to surface the advisory (status tables, scan reports)
+// rather than only decide whether a tool runs.
+func ResolveDetailed(ctx context.Context, name string, opts Options) Resolution {
+	var note string
+	method, rt, image, reason := resolve(ctx, name, opts, &note)
+	return Resolution{Method: method, Runtime: rt, Image: image, Reason: reason, Note: note}
+}
+
 // Resolve is the availability resolver every scanner calls (P11.11's
 // unifying seam): given a scanner's binary name and image, and the caller's
 // policy, it decides host-binary vs container-image vs unavailable — the
 // single lookup that replaces "binary on PATH or silently skip." The
 // returned image is only meaningful when method == MethodContainer.
 func Resolve(ctx context.Context, name string, opts Options) (method Method, runtime sandbox.ContainerRuntime, image string, reason string) {
+	return resolve(ctx, name, opts, nil)
+}
+
+// resolve is the implementation both entry points share. note is an out-param
+// rather than a fifth return value deliberately: it is written in exactly one
+// branch, and threading a fifth value through every return here would spread
+// an "" across two dozen statements to say nothing. nil means the caller
+// doesn't want it.
+func resolve(ctx context.Context, name string, opts Options, note *string) (method Method, runtime sandbox.ContainerRuntime, image string, reason string) {
 	d, ok := descriptors[name]
 	if !ok {
 		return MethodNone, "", "", name + ": no scanner descriptor registered"
@@ -545,7 +594,7 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		rt, ok := detectRuntime(ctx, runtimePriority)
 		if !ok {
 			if viaMultiscanner {
-				return MethodNone, "", "", "the multiscanner image was built with " + string(opts.Multiscanner.Runtime) + ", which isn't available now — start it (on Windows with Podman: `podman machine start`), or re-run `aegis security build-image` to rebuild with an available runtime"
+				return MethodNone, "", "", multiscannerNoRuntimeReason(opts)
 			}
 			return MethodNone, "", "", "security.tools." + name + ".method is \"container\" but no container runtime is available (docker/podman) — run `aegis security install " + name + "` for guided setup"
 		}
@@ -567,28 +616,79 @@ func Resolve(ctx context.Context, name string, opts Options) (method Method, run
 		}
 		return MethodNone, "", "", d.Binary + " not found inside WSL (security.tools." + name + ".method is \"wsl\") — run `aegis security install " + name + "` to install it there"
 	default: // "auto" or unset
-		if hostAvailable {
-			return MethodHost, "", "", ""
-		}
-		// multiscannerReason is held rather than returned immediately: under
-		// "auto" a broken shared image shouldn't preempt a working WSL path.
-		// If nothing else runs the tool either, it's the most actionable
-		// reason to report, so it wins over the generic no-image message.
+		// Resolution order under "auto" is container → host → WSL, and the
+		// container half of that is an inversion of the original host → container
+		// → WSL (P55.4).
+		//
+		// Host-first was right while the container was a *fallback* for tools
+		// the operator hadn't installed: any host binary beat no scan at all.
+		// It became wrong once `aegis security build-image` made the container
+		// the supported path, because it quietly discarded everything the image
+		// exists to provide — an ID-verified, reproducible build, a known
+		// scanner version with a known rule set, and --network none confinement
+		// — in favour of whatever version happened to be on PATH. Measured on a
+		// machine with both: of the scanners that ran, seven took the host and
+		// exactly one took a container path, so an image that had been built,
+		// pinned and cache-populated went almost entirely unused and two
+		// machines could report different findings for the same tree with
+		// nothing saying why.
+		//
+		// The trade-off is deliberate and it is not free: a container run costs
+		// more to start than a host binary, and this now probes for a runtime
+		// (and verifies the image, TTL-memoized) even for tools whose host
+		// binary is right there on PATH. That is the price of reproducibility,
+		// which is the reason the image exists.
+		//
+		// Scoped to viaMultiscanner on purpose. The same pinned/confined
+		// argument does apply to a per-tool security.tools.<name>.image, but
+		// that image is the operator's own explicit artifact rather than one
+		// Aegis provisions and verifies by ID, and an operator who wants it to
+		// win over a host binary already has an unambiguous way to say so —
+		// method: container. Inverting it too would silently redirect a
+		// configuration that predates this change and was never measured, so it
+		// keeps the old host-first order below.
+		//
+		// A refused container never fails the tool: an unpinned host scan beats
+		// no scan, so every path here falls through to host (then WSL) and only
+		// reports MethodNone when nothing at all can run it.
+		//
+		// multiscannerReason is held rather than returned immediately, exactly
+		// as before: under "auto" a broken shared image shouldn't preempt a
+		// working WSL path (nor, now, a working host binary). If nothing else
+		// runs the tool either, it's the most actionable reason to report, so
+		// it still wins over the generic no-image message at the tail.
 		multiscannerReason := ""
-		if image != "" {
-			if reason := imageUsable(); reason != "" {
-				return MethodNone, "", "", reason
-			}
+		// containerFallbackWhy is the note's half of the same information: it
+		// covers the missing-runtime case too, which is not a MethodNone reason
+		// (the tail's generic message is better there) but is very much
+		// something to say when the answer turns out to be an unpinned host run.
+		containerFallbackWhy := ""
+		if viaMultiscanner {
 			if rt, ok := detectRuntime(ctx, runtimePriority); ok {
-				if viaMultiscanner {
-					multiscannerReason = verifyMultiscannerImage(ctx, rt, opts.Multiscanner)
-					if multiscannerReason == "" {
-						multiscannerReason = verifyMultiscannerCache(ctx, rt, name, opts.Multiscanner)
-					}
+				multiscannerReason = verifyMultiscannerImage(ctx, rt, opts.Multiscanner)
+				if multiscannerReason == "" {
+					multiscannerReason = verifyMultiscannerCache(ctx, rt, name, opts.Multiscanner)
 				}
 				if multiscannerReason == "" {
 					return MethodContainer, rt, image, ""
 				}
+				containerFallbackWhy = multiscannerReason
+			} else {
+				containerFallbackWhy = multiscannerNoRuntimeReason(opts)
+			}
+		}
+		if hostAvailable {
+			if containerFallbackWhy != "" && note != nil {
+				*note = name + " will run from the host binary, which is unpinned (whatever version is on PATH), unverified, and not confined to --network none: the multiscanner container was preferred but is unavailable — " + containerFallbackWhy
+			}
+			return MethodHost, "", "", ""
+		}
+		if !viaMultiscanner && image != "" {
+			if reason := imageUsable(); reason != "" {
+				return MethodNone, "", "", reason
+			}
+			if rt, ok := detectRuntime(ctx, runtimePriority); ok {
+				return MethodContainer, rt, image, ""
 			}
 		}
 		if d.WSLCapable && wslBinaryAvailable(ctx, d.Binary, opts.WSLDistro) {
@@ -633,6 +733,15 @@ func noContainerImageReason(name string, opts Options) string {
 		return "the multiscanner image (" + opts.Multiscanner.Image + ") doesn't carry " + name + " — rebuild it with `aegis security build-image --profile full` to include it, or set security.tools." + name + ".image (digest-pinned) to give it an image of its own"
 	}
 	return "no container image configured for " + name + "; set security.tools." + name + ".image (digest-pinned), or run `aegis security build-image` to build the shared multiscanner image — see docs/security_scan.md"
+}
+
+// multiscannerNoRuntimeReason explains that the runtime which built the shared
+// image isn't answering. Shared by the explicit method: container branch and
+// the "auto" fallback note so the two never drift — a locally-built image lives
+// only in the storage of the engine that built it, so "no runtime" here always
+// means that specific engine, never "install docker".
+func multiscannerNoRuntimeReason(opts Options) string {
+	return "the multiscanner image was built with " + string(opts.Multiscanner.Runtime) + ", which isn't available now — start it (on Windows with Podman: `podman machine start`), or re-run `aegis security build-image` to rebuild with an available runtime"
 }
 
 // digestPinRe matches a container reference's trailing "@sha256:<hex>"
