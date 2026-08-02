@@ -70,6 +70,14 @@ ever give scans network access, that property is gone.
 The image still sets `TRIVY_SKIP_*_UPDATE=true` so a scan against an empty
 cache fails with a clear "run update-db" rather than hanging on DNS.
 
+`update-db.sh` runs each database refresh as an independent step (trivy DB,
+trivy Java DB, trivy misconfiguration checks bundle, grype DB, osv-scanner
+archives) and prints a per-step summary at the end. One tool failing no longer
+aborts the rest, so a bad run leaves the cache partially — and *visibly* —
+populated instead of silently truncated at the first error; the exit status is
+non-zero if any step failed. Re-running retries everything, and the steps that
+already succeeded are cheap no-ops.
+
 ## Not in the image, deliberately
 
 Kept as data in `multiscannerExcludedTools` (`../multiscanner.go`) so the
