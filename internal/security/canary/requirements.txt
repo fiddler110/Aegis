@@ -1,0 +1,3 @@
+# Canary: pinned to versions with long-published, well-indexed advisories.
+flask==0.12.2
+jinja2==2.10

@@ -28,12 +28,15 @@ func newSecurityCmd() *cobra.Command {
 		Long: "Inspects and provisions the scanners behind `aegis scan`/the security_scan tool. " +
 			"`status` reports whether each tool will run via its host binary, a configured " +
 			"container image, or not at all (with the exact reason). `install` walks through " +
-			"a guided, approval-gated host install for one tool. `baseline` shows the accepted-risk " +
+			"a guided, approval-gated host install for one tool. `verify-image` proves every scanner in " +
+			"the built multiscanner image can actually run and detect, by scanning an embedded fixture " +
+			"with planted findings. `baseline` shows the accepted-risk " +
 			"suppression allowlist (.aegis/security-baseline.yaml) and each entry's status.",
 	}
 	cmd.AddCommand(newSecurityStatusCmd())
 	cmd.AddCommand(newSecurityInstallCmd())
 	cmd.AddCommand(newSecurityBuildImageCmd())
+	cmd.AddCommand(newSecurityVerifyImageCmd())
 	cmd.AddCommand(newSecurityUpdateDBCmd())
 	cmd.AddCommand(newSecurityConfigCmd())
 	cmd.AddCommand(newSecurityBaselineCmd())
@@ -55,6 +58,7 @@ func newSecurityBuildImageCmd() *cobra.Command {
 		image       string
 		noCache     bool
 		global      bool
+		skipVerify  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "build-image",
@@ -126,6 +130,20 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			fmt.Fprintf(out, "  source:   %s\n", res.SourceFingerprint)
 			fmt.Fprintf(out, "  scanners: %s\n", strings.Join(res.Tools, ", "))
 			fmt.Fprintf(out, "  pinned in: %s\n", target)
+
+			if skipVerify {
+				fmt.Fprintf(out, "\nSkipped verification (--skip-verify). Run `aegis security verify-image` before trusting this image.\n")
+				fmt.Fprintf(out, "Run `aegis security status` to see which scanners now resolve to it.\n")
+				return nil
+			}
+			// Verification is part of the build, not an optional follow-up: a
+			// build that "succeeded" while shipping a tool that cannot run is
+			// exactly the state P55.3 exists to end, and an operator who has to
+			// remember a second command will not (nobody did, for two releases).
+			fmt.Fprintf(out, "\nVerifying the built image — each scanner is probed and then run against a fixture with planted findings.\n")
+			if err := runVerifyImage(cmd, patch.Multiscanner, nil); err != nil {
+				return err
+			}
 			fmt.Fprintf(out, "\nRun `aegis security status` to see which scanners now resolve to it.\n")
 			return nil
 		},
@@ -135,7 +153,102 @@ func newSecurityBuildImageCmd() *cobra.Command {
 	cmd.Flags().StringVar(&image, "image", "", "image tag to build; empty uses "+security.MultiscannerDefaultImage)
 	cmd.Flags().BoolVar(&noCache, "no-cache", false, "rebuild every layer — the way to refresh the baked vulnerability databases")
 	cmd.Flags().BoolVar(&global, "global", false, "pin in the user config (~/.config/aegis/config.yaml) instead of the project's .aegis/config.yaml")
+	// No backticks in this usage string: cobra reads a backtick-quoted word as
+	// the flag's argument placeholder, so "`verify-image`" would render as
+	// "--skip-verify verify-image" on a boolean flag.
+	cmd.Flags().BoolVar(&skipVerify, "skip-verify", false, "don't run verify-image after building (the image is pinned unverified — a scanner that can't run won't be noticed until a scan silently misses findings)")
 	return cmd
+}
+
+// newSecurityVerifyImageCmd proves the built image's scanners actually work
+// (P55.3).
+//
+// The version probe is the cheap half and catches a tool that isn't in the
+// image at all. The canary scan is the half that matters: a scanner that never
+// loaded its rules or its database does not fail — it reports zero findings and
+// exits clean, which is indistinguishable from a clean repo unless the tree
+// being scanned is known to be dirty. So the assertion is a non-zero finding
+// count against an embedded fixture full of planted vulnerabilities, not exit 0.
+func newSecurityVerifyImageCmd() *cobra.Command {
+	var tools []string
+	cmd := &cobra.Command{
+		Use:   "verify-image",
+		Short: "Prove every scanner in the built multiscanner image can actually run and detect",
+		Long: "Runs two checks per scanner the pinned image claims to carry: a version probe (catches a " +
+			"tool that isn't in the image), then a scan of a small embedded fixture with deliberately " +
+			"planted vulnerabilities, asserting the scanner reports a non-zero number of findings.\n\n" +
+			"The second check is the point. A scanner that never loaded its rule packs or its " +
+			"vulnerability database doesn't error — it exits cleanly and reports nothing, which reads " +
+			"exactly like a clean codebase. A version probe cannot see that; only running the tool " +
+			"against something known to be dirty can.\n\n" +
+			"Exits non-zero if any scanner fails, so this is usable as a provisioning gate. Tools that " +
+			"cannot be canaried (nmap/nuclei need a network target) are reported as skipped with the " +
+			"reason, never counted as passing.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			return runVerifyImage(cmd, cfg.Security.Multiscanner, tools)
+		},
+	}
+	cmd.Flags().StringSliceVar(&tools, "tool", nil, "verify only these scanners (repeatable, or comma-separated); default is every tool the image claims")
+	return cmd
+}
+
+// runVerifyImage is the shared body of `verify-image` and build-image's final
+// step, so the two can never report differently about the same image.
+func runVerifyImage(cmd *cobra.Command, mc config.MultiscannerConfig, tools []string) error {
+	out := cmd.OutOrStdout()
+	policy := security.MultiscannerPolicyFromConfig(mc)
+	// Same reasoning as `update-db`: a stale image is a live cause of scanner
+	// failures, and an operator who sees only the failing rows has no route to
+	// that cause.
+	if drift := security.MultiscannerSourceDrift(policy); drift != "" {
+		fmt.Fprintf(out, "warning: %s\n\n", drift)
+	}
+
+	// The header is printed from the first row rather than up front, so a
+	// preflight failure (no image, no runtime, a bad --tool name) reports as an
+	// error instead of an error under an empty table.
+	header := false
+	results, err := security.VerifyMultiscanner(cmd.Context(), policy, tools, func(r security.VerifyResult) {
+		if !header {
+			fmt.Fprintf(out, "%-12s  %-8s  %-10s  %s\n", "TOOL", "STATUS", "FINDINGS", "VERSION")
+			header = true
+		}
+		findings := "-"
+		if r.Expected > 0 {
+			findings = fmt.Sprintf("%d (>=%d)", r.Findings, r.Expected)
+		}
+		fmt.Fprintf(out, "%-12s  %-8s  %-10s  %s\n", r.Tool, r.Status, findings, defaultOr(r.Version, "-"))
+		if r.Status != security.VerifyPass && r.Detail != "" {
+			fmt.Fprintf(out, "%14s%s\n", "", r.Detail)
+		}
+	})
+	if err != nil {
+		return err
+	}
+
+	passed, failed, skipped, blocked := security.VerifyCounts(results)
+	fmt.Fprintf(out, "\n%d scanner(s) checked: %d verified, %d failed", len(results), passed, failed)
+	if skipped > 0 {
+		fmt.Fprintf(out, ", %d skipped (no canary possible — see the reasons above)", skipped)
+	}
+	if blocked > 0 {
+		fmt.Fprintf(out, ", %d blocked on an unpopulated database cache", blocked)
+	}
+	fmt.Fprintln(out, ".")
+	if blocked > 0 {
+		fmt.Fprintf(out, "Run `aegis security update-db` to populate %s, then re-run this command.\n", security.MultiscannerCacheVolume)
+	}
+	if failed > 0 {
+		// Non-zero exit, deliberately: this is meant to gate provisioning, and
+		// a gate that reports a problem and exits 0 is not a gate.
+		return fmt.Errorf("%d scanner(s) in %s could not be verified — see the rows above", failed, policy.Image)
+	}
+	return nil
 }
 
 func newSecurityStatusCmd() *cobra.Command {

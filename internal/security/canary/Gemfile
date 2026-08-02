@@ -1,0 +1,4 @@
+# Canary: brakeman refuses to scan anything that doesn't look like a Rails app,
+# so the fixture carries the minimum shape brakeman's own project check wants.
+source "https://rubygems.org"
+gem "rails", "6.1.7"

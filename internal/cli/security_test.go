@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/config"
 )
 
 func runSecurity(t *testing.T, stdin string, args ...string) (string, error) {
@@ -122,5 +124,42 @@ suppressions:
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q: %s", want, out)
 		}
+	}
+}
+
+// TestSecurityVerifyImageWithoutAnImage checks the preflight message rather
+// than the scan: there is nothing to verify, which must read differently from
+// "your scanners are broken".
+//
+// Deliberately calls runVerifyImage with an explicit config value instead of
+// driving the cobra command, which would config.Load() the developer's real
+// user config — and on a machine that has actually built the image, that would
+// turn a unit test into a dozen container runs.
+func TestSecurityVerifyImageWithoutAnImage(t *testing.T) {
+	cmd := newSecurityVerifyImageCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	err := runVerifyImage(cmd, config.MultiscannerConfig{}, nil)
+	if err == nil {
+		t.Fatal("verify-image with no configured image should fail, not report an empty all-clear")
+	}
+	if !strings.Contains(err.Error(), "build-image") {
+		t.Errorf("error should point at `aegis security build-image`, got %q", err)
+	}
+}
+
+// TestSecurityVerifyImageCommandIsRegistered guards the wiring: the whole
+// point is a command an operator (or a provisioning script) can run.
+func TestSecurityVerifyImageCommandIsRegistered(t *testing.T) {
+	var found bool
+	for _, sub := range newSecurityCmd().Commands() {
+		if sub.Name() == "verify-image" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("`aegis security verify-image` is not registered")
 	}
 }
