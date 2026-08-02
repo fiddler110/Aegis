@@ -11,17 +11,22 @@ keep it when adding items.
 
 ## Status
 
-**Open items (15).** The **P55.x container-only-scanning batch** was filed 2026-08-02 off a full
+**Open items (9).** The **P55.x container-only-scanning batch** was filed 2026-08-02 off a full
 functional test of the multiscanner container and a review of method resolution across all 17
-registered scanners — **9 items**, and the first Tier-1 work this file has carried since the P52.x
-batch: **P55.1** (image/source drift), **P55.2** (all-or-nothing `update-db`), **P55.3**
-(`verify-image` smoke test) in Tier 1; **P55.4** (container-first resolution), **P55.5** (global
-pin by default), **P55.6** (DB-age surfacing) in Tier 2; **P55.7** (`aegis-netscanner`, split by
-mount posture) and **P55.8** (gosec two-phase) in Tier 3; **P55.9** (relevance gating for the
-always-on scanners) parked in Tier 4. The batch's strategic goal is that a user installs **one
-image instead of 17 tools**; its Tier-1 half is the integrity work that has to land first, because
-container-only makes a broken container the whole product rather than a degraded path. Full origin
-note and test evidence in the Tier 1 header.
+registered scanners — **9 items, 6 of which shipped the same day**. Shipped: **P55.1**
+(image/source drift), **P55.2** (all-or-nothing `update-db`), **P55.3** (`verify-image` smoke test),
+**P55.4** (container-first resolution), **P55.5** (global pin by default), **P55.6** (DB-age
+surfacing) — write-ups in [releases.md](releases.md). Still open: **P55.7** (`aegis-netscanner`,
+split by mount posture) and **P55.8** (gosec two-phase) in Tier 3, plus **P55.9** (relevance gating
+for the always-on scanners) parked in Tier 4.
+
+The batch's strategic goal is that a user installs **one image instead of 17 tools**. What shipped
+makes the *existing* container trustworthy and preferred — it can no longer fall behind its own
+Containerfile unnoticed, its databases refresh per-tool instead of all-or-nothing, every bundled
+tool is proven to actually produce findings before the image is trusted, and `auto` now routes to
+the pinned, confined container rather than an unpinned host binary. **P55.7 and P55.8 are what
+remain of the goal itself**: they extend containerization to the six tools that have no container
+path today. Full origin note and test evidence in the Tier 1 header.
 
 **The 6 pre-existing items**, unchanged by the P55.x filing and described below in their own
 tiers. Before P55.x landed, Tier 2 held **P38.1** only and Tier 3 was empty — **P53.6** (non-native tool-calling
@@ -85,149 +90,39 @@ to track.
 
 ## Open Work — Tier 1
 
-**Status:** 3 open — **P55.1**, **P55.2**, **P55.3**, the Tier-1 half of the P55.x
-container-only-scanning batch (see the batch origin note below). See [releases.md](releases.md)
-for the full Tier-1 history (P52.1, P52.2, P51.1, P50.1, and the P47.x batch head).
+**Status:** empty. The P55.x container-only-scanning batch's Tier-1 half — **P55.1** (image/source
+drift), **P55.2** (all-or-nothing `update-db`) and **P55.3** (`verify-image` smoke test) — shipped
+2026-08-02, the day the batch was filed. See [releases.md](releases.md) for those write-ups and for
+the full Tier-1 history (P52.1, P52.2, P51.1, P50.1, and the P47.x batch head).
 
-**P55.x batch origin.** A full functional test of the multiscanner container (2026-08-02) against
-a purpose-built multi-language vulnerable fixture, plus a review of `internal/security`'s method
-resolution across all 17 registered scanners. The headline is that the container's *scanning* is
-sound — 14/14 bundled tools execute offline, and detection is genuinely good (trivy 59 vulns / 26
-misconfigs / 5 secrets, osv-scanner 59 offline, gitleaks 5/5 planted secrets, bandit 6, hadolint 6,
-opengrep 7, end-to-end `aegis scan` 173 findings with cross-tool dedup and ASVS tagging intact).
-What the test found instead is a cluster of **provisioning** failures, three of which share one
-shape: *the scanner silently or loudly stopped working and no layer of the system noticed*. That
-shape is Tier 1 because `internal/security/multiscanner.go` already names it as the thing this
-design most fears — "a silent all-clear from a scanner that never looked at a database."
+**P55.x batch origin**, kept here because P55.7/P55.8 below still depend on it. A full functional
+test of the multiscanner container (2026-08-02) against a purpose-built multi-language vulnerable
+fixture, plus a review of `internal/security`'s method resolution across all 17 registered scanners.
+The container's *scanning* was sound — 14/14 bundled tools execute offline and detection is good.
+What the test found instead was a cluster of **provisioning** failures, three sharing one shape:
+*the scanner silently or loudly stopped working and no layer of the system noticed*. That shape was
+Tier 1 because `internal/security/multiscanner.go` already names it as the thing this design most
+fears — "a silent all-clear from a scanner that never looked at a database." Four defects found
+alongside (kubescape fatal in container mode, kubescape's SARIF unparseable, njsscan broken by the
+semgrep removal, grype absent from the pinned image) are the evidence base; two of the four survived
+a green `go test ./...`, a successful image build, and a scan that reported findings. Full account
+in [releases.md](releases.md).
 
-**Four defects found by the test are already fixed and are not filed here**, but they are the
-evidence base for P55.3 and worth keeping together, because every one of them was invisible to the
-checks that existed:
-
-- **kubescape was fatally broken in container mode.** No rego policy library was baked, so
-  `--network none` gave `open $HOME/.kubescape/allcontrols.json: no such file or directory` —
-  fatal, exit 1, empty stdout. Fixed by baking `kubescape download artifacts` into the Containerfile
-  *and* naming an explicit framework in the container invocation (0 → 24 findings on the fixture).
-  The second half is load-bearing and non-obvious: bare `kubescape scan <dir>` defaults to the
-  `workloadscan` framework, which fails from a baked cache with `framework from file not matching`
-  **even when workloadscan.json is present**. Hand-fetching the release assets does not work either
-  — their names and contents differ from what the offline loader reads back.
-- **kubescape's SARIF was unparseable even once it ran.** The invocation used
-  `--output /dev/stdout`, but kubescape writes its human summary table to stdout as well, so the
-  report interleaved with box-drawing characters and the parse died on the first non-JSON byte
-  (`invalid character 'â'`). Fixed by writing to a file in the container and `cat`-ing it.
-- **njsscan was broken by the semgrep removal (30d4671).** njsscan doesn't just import its engine,
-  it shells out to a `semgrep` binary by name; the `/usr/local/bin/njsscan` symlink put njsscan on
-  PATH but not its venv's siblings, so the lookup escaped to the system PATH and only ever resolved
-  because a standalone semgrep happened to be there. Removing that scanner left njsscan dying with
-  `FileNotFoundError: 'semgrep'` on every run, with its own correctly pinned `semgrep==1.86.0`
-  sitting unreachable in `/opt/venv/njsscan/bin`. Fixed with a wrapper that prepends the tool's own
-  venv bin.
-- **grype was absent from the pinned image entirely** — see P55.1, which is filed because the
-  *detection* gap remains even though this instance is fixed.
-
-The njsscan case is the sharpest argument for P55.3's canary requirement: the Containerfile's
-build-time `njsscan --version` check **passed for the entire duration of the breakage**, because
-`--version` never reaches the semgrep subprocess. Two of these four defects survived a green
-`go test ./...`, a successful image build, and a scan that reported findings. Write-ups in
-[releases.md](releases.md).
-
-The batch's strategic driver is a decision to make the container the **only** way Aegis scans, so
-a user installs one image instead of 17 tools. P55.4-P55.8 sequence that; P55.1-P55.3 are the
-integrity work that has to land first, because container-only means a broken container is no
-longer a degraded path — it is the whole product.
-
-### P55.1 — Detect image/source drift (the pinned image can silently fall behind the Containerfile)
-
-The image-ID pin (`verifyMultiscannerImage`) verifies the image **hasn't changed since it was
-pinned**. It cannot see that the image no longer matches the *source it was built from*, and that
-gap produced a real, undetected failure: the pinned image was built 2026-07-16T21:18, and all
-three multiscanner commits landed after it. The image therefore never contained `grype`, which
-`fetch.sh` had since added.
-
-The consequence chained, and every link failed quietly. `update-db.sh` runs `grype db update`
-under `set -eu`, so on an image without grype the **entire database refresh aborted** — which is
-why `/cache/grype` has never existed on this machine. `multiscannerDBTools` correctly lists
-`grype` as needing `/cache/grype/db/6/vulnerability.db`, so container-method grype would have been
-refused with a clear reason; it was masked only because grype happened to be on the host PATH.
-Nothing surfaced that the pinned image was two commits stale.
-
-Fix: record a **source fingerprint** at build time — a hash over the embedded Containerfile,
-`fetch.sh`, and `update-db.sh` (the `go:embed` set is already the authoritative copy) — into config
-alongside `image_id`, and compare it at scan time the way the image ID is compared. A mismatch
-should report "the multiscanner image was built from an older Containerfile — re-run `aegis
-security build-image`", not fail closed silently. This is the same reasoning that made the image-ID
-pin replace the digest rule (README: "that verifies content, which is what the digest rule was
-reaching for"); it just extends the check one link further back, to the source.
-
-**Priority:** Tier 1 — a currently-live provisioning gap with a demonstrated silent failure, and
-small: one hash written at build, one comparison at resolve. **Effort:** S.
-
-### P55.2 — `update-db` is all-or-nothing and leaves a partially-populated cache
-
-`update-db.sh` runs under `set -eu` with the three database fetches in sequence (trivy → grype →
-osv-scanner). One tool's failure aborts the rest, and the script has no notion of partial success —
-so the observed state on this machine is trivy and osv-scanner fully populated (1.2GB and 271MB,
-both verified working offline) while grype has no database at all, from a single early `grype db
-update` failure. The operator saw one error and a non-zero exit; nothing said "2 of 3 databases are
-fine, grype's is missing."
-
-This matters more under container-only, where a missing DB is the difference between a scanner
-running and a scanner being refused. It also interacts badly with P55.1: the failure that aborted
-the run was itself caused by image drift, so an operator re-running `update-db` against the same
-stale image gets the same abort with no hint at the real cause.
-
-Fix: run each tool's refresh independently, collect per-tool outcomes, and report a summary
-(`trivy ok / osv-scanner ok / grype FAILED: <reason>`), exiting non-zero if any failed. Keep every
-existing plausibility assertion — the "implausibly small" checks on the npm archive and grype's
-`vulnerability.db` are exactly the right instinct and should stay — they just shouldn't take the
-other tools down with them.
-
-Fold in the **trivy misconfiguration policy cache**, which no step populates today. Every scan logs
-`ERROR [misconfig] failed to check cache: cache does not exist at "/cache/trivy/policy/content"`
-and falls back to embedded checks. Findings still appear (26 on the fixture), so this is degraded
-rather than broken — but it's an ERROR-level log on every single scan, which trains operators to
-ignore scanner errors, and the embedded checks are a frozen subset rather than the current bundle.
-
-**Priority:** Tier 1 — small, self-contained shell work on a script whose failure mode is a
-half-provisioned scanner set. **Effort:** S.
-
-### P55.3 — `aegis security verify-image`: prove the built image's tools actually run
-
-`MultiscannerTools(profile)` is a **static list**. Aegis routes a scan to the container on the
-strength of that list plus an image-ID match — it never checks that the named tool is present in
-the image or that it can produce a result. Both failure modes were live simultaneously: `grype` was
-in the list and absent from the image, and `kubescape` was in the list, present, and fatal on every
-invocation. A single smoke run would have caught both instantly; instead grype was masked by a host
-binary and kubescape surfaced as an availability message that read like a configuration problem.
-
-Fix: a `verify-image` subcommand (and a step at the end of `build-image`) that, for each tool the
-profile claims, runs a version probe and a **canary scan against a tiny embedded fixture with known
-findings**, then reports a per-tool table. The canary is the part that matters — a `--version` probe
-would have caught grype's absence but *not* kubescape's fatal, and would not catch the more
-dangerous class this codebase already documents for gosec and osv-scanner: a tool that exits clean
-and reports zero because it never loaded its data. Assert a **non-zero finding count**, not exit 0.
-
-This also gives P55.1 and P55.2 an end-to-end check to hang off, and gives container-only scanning
-the provisioning gate it needs: one command that answers "is my scanner image actually good?"
-
-**Priority:** Tier 1 — directly closes the detection gap behind two shipped-broken scanners, and
-is the natural gate for the whole container-only sequence. **Effort:** M.
+The batch's strategic driver is a decision to make the container the **only** way Aegis scans, so a
+user installs one image instead of 17 tools. P55.1-P55.6 have shipped, which makes the existing
+container trustworthy and preferred; **P55.7 and P55.8 are what actually close the "zero required
+host tools" goal**, by extending containerization to the tools that cannot use it at all today.
 
 ## Open Work — Tier 2
 
-**Status:** 4 open — **P55.4**, **P55.5**, **P55.6** (the Tier-2 half of the P55.x
-container-only-scanning batch; see the Tier 1 header for the batch's origin and test evidence),
-plus **P38.1** (threat-model conformance umbrella), which is live-run verification tracking rather
-than independent build work. P38.1 is no longer what `roadmap-status.sh` suggests — Tier 1 now
-leads with buildable P55.x items — but it stays at the head of this tier in document order until a
-live re-confirmation run happens. The **P53.x local-LLM
+**Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
+tracking rather than independent build work. The Tier-2 half of the P55.x batch — **P55.4**
+(container-first resolution), **P55.5** (global pin by default) and **P55.6** (DB-age surfacing) —
+shipped 2026-08-02 alongside its Tier-1 half; see [releases.md](releases.md). The **P53.x local-LLM
 comparative-review batch**'s Tier-2 half (**P53.1**-**P53.4**, filed and shipped 2026-08-01) and the
 earlier batch — P52.3, P52.4, P52.5, P52.6, P52.7, P52.8, P52.9, P52.10, P52.11, the full P47.x
 self-contained batch, P48.1, P49.1, and P50.2/P50.3/P50.4 — have shipped; see
-[releases.md](releases.md). Tier 3 is now empty (**P53.6** shipped 2026-08-02), so there is no
-buildable item queued behind P38.1 — the next work is either a live P38.1 re-test or a newly filed
-item.
+[releases.md](releases.md).
 
 **P53.x batch origin.** A comparative review (2026-08-01) of how six frontier harnesses — opencode,
 crush, pi, aider, OpenHands, goose — drive local models, cross-checked line-by-line against Aegis.
@@ -360,74 +255,6 @@ shape, and it was already interpreted by P34.12** — so osv-scanner is to the S
 brakeman was to the language-targeted half: the only one. No gate added; the measurements are now
 recorded in the `runJSON` doc comment (`internal/security/scanners.go`) so the sweep isn't re-run
 from scratch. Write-up in [releases.md](releases.md).
-
-### P55.4 — Container-first method resolution (`auto` currently defeats the container investment)
-
-`Resolve`'s `auto` branch (`internal/security/method.go`) tries **host → container → WSL**, and
-returns the host binary the moment `lookPath` succeeds. The practical result on a machine that has
-both: of the scanners that ran in the end-to-end fixture test, seven resolved to `host` and exactly
-one to a container path — and that one went to **WSL**, not the container. The multiscanner image
-was built, pinned, cache-populated, and almost entirely unused.
-
-Host-first was the right default when the container was a *fallback* for tools the operator hadn't
-installed. It is the wrong default once the container is the supported path, and it actively
-undermines the guarantees the container exists to provide: the host binaries are unpinned, whatever
-version happened to be on PATH, with no reproducibility and no `--network none` confinement. Two
-scans on two machines can silently use different scanner versions with different rule sets.
-
-Fix: when the multiscanner covers a tool and its image verifies, prefer `MethodContainer` under
-`auto`; fall back to host only when the container is unavailable, and say so. Keep an explicit
-`method: host` escape hatch — it stays necessary for the tools that genuinely can't containerize
-(P55.7/P55.8), and operators on machines without a container runtime need a working path.
-
-Sequence this **after P55.1-P55.3**: inverting the precedence makes the container load-bearing, and
-routing every scan through an image whose integrity isn't verified is how a silent all-clear
-becomes the default rather than the exception.
-
-**Priority:** Tier 2 — small and self-contained (one branch in `Resolve`, plus status/message
-updates), but deliberately gated behind the Tier-1 integrity work. **Effort:** S.
-
-### P55.5 — Pin the multiscanner globally by default
-
-`aegis security build-image` writes `security.multiscanner` to the **project's**
-`.aegis/config.yaml` unless `--global` is passed. Since the image itself is machine-wide podman
-storage and the database volume (`aegis-scanner-cache`) is explicitly "a single named volume shared
-by every scan in every project — one cache, machine-wide," project-scoped configuration is the odd
-one out: the only machine-wide asset that is remembered per-repo.
-
-The effect is invisible and confusing. Verified: inside the Aegis repo, `security status` reports
-kubescape and opengrep as `container`; from any other directory the same binary and the same built
-image report *"kubescape not installed ... run `aegis security build-image`"* — advice to rebuild an
-image that already exists. An operator provisions once and concludes it didn't work.
-
-Fix: default `build-image` to the user config and offer `--project` for the narrow case of pinning
-a different image per repo. Under container-only this stops being a papercut and becomes the
-difference between scanning working everywhere and working in exactly one directory.
-
-**Priority:** Tier 2 — a default flip plus a flag rename, but it gates whether P55.4 is felt
-outside this repo at all. **Effort:** S.
-
-### P55.6 — Surface vulnerability-database age
-
-Nothing reports how old the scanners' data is. Measured on this machine: trivy's DB carries
-`NextUpdate 2026-07-17` and was read on 2026-08-02 — 16 days past its own refresh horizon — and
-scans reported no concern. That silence is partly by construction: the image sets
-`GRYPE_DB_VALIDATE_AGE=false` and `TRIVY_SKIP_*_UPDATE=true`, deliberately disabling the tools' own
-staleness guards, because `--network none` scans cannot refresh and a cached DB is *expected* to be
-old (the Containerfile says exactly this, and it is correct).
-
-But suppressing the tools' warnings shifted the responsibility to Aegis, and Aegis never picked it
-up. A stale SCA database doesn't fail — it under-reports, which is the same silent-all-clear shape
-as P55.1-P55.3. A scan against a three-month-old DB looks identical to a clean repo.
-
-Fix: read the cache markers already known to `multiscannerDBTools` (plus trivy's `metadata.json`,
-which carries `UpdatedAt` directly), report age in `aegis security status`, and warn past a
-threshold with the `aegis security update-db` remedy. Do **not** auto-refresh or fail the scan:
-air-gapped operation is a supported posture, and the existing design decision to keep network out
-of scan runs should not be reopened for this.
-
-**Priority:** Tier 2 — small, read-only, and closes the last of the four silent-degradation paths
-the container test surfaced. **Effort:** S.
 
 ## Open Work — Tier 3
 

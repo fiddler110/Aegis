@@ -28,9 +28,23 @@ which records the resulting image ID into config; that ID is re-verified via
 registry digest to pin — see `internal/security/multiscanner.go`). `go build`
 needs no container runtime; only `build-image` does.
 
+Alongside the image ID, `build-image` records a **source fingerprint** (P55.1)
+— a hash over the embedded Containerfile/`fetch.sh`/`update-db.sh` — so an
+image built from older source is reported as drifted rather than silently
+trusted. It then runs `verify-image` (P55.3), which probes each tool's version
+**and** scans an embedded fixture with planted findings, asserting a *non-zero
+finding count*. That assertion is the point: a `--version` probe cannot catch a
+tool that exits clean and reports zero because it never loaded its data, which
+is how grype (absent from the image) and gitleaks (silently writing its report
+onto a replaced `/dev/stdout` symlink) both shipped broken. The pin is written
+**machine-wide** to the user config by default (P55.5) — the image and the DB
+volume are machine-wide, so the config was the odd one out; `--project` pins
+per-repo.
+
 ```bash
 aegis security build-image --profile core    # static scanners only
 aegis security build-image                   # full: + Python/Ruby/network, ~1.8GB
+aegis security verify-image                  # prove each tool still finds things
 aegis security update-db                     # fill the DB cache volume (needs network)
 ```
 
@@ -40,7 +54,15 @@ both a size decision (baked in they were ~3.7GB of a 5.8GB image) and a
 necessity: scanner containers run `--rm`, so without a persistent cache every
 scan would re-download trivy's ~1.2GB DB. `update-db` is the **only** container
 run given network access, and it mounts no workspace; scans keep
-`--network none` and read the volume.
+`--network none` and read the volume. Each database refreshes independently
+(P55.2) — one failing no longer aborts the rest — and `aegis security status`
+reports how old each one is (P55.6), because a stale SCA database under-reports
+rather than failing.
+
+Under `method: auto`, a tool the multiscanner covers now prefers the
+**container** over a host binary (P55.4): host binaries are unpinned and
+unconfined, so two machines can silently scan with different rule sets. A
+refused container falls back to host rather than failing the tool, and says so.
 
 Two traps when changing this:
 - The Containerfile and its scripts are `go:embed`-ed — **rebuild the binary**
