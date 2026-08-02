@@ -10,11 +10,9 @@ or next, see [roadmap.md](roadmap.md).
 
 **Last updated:** 2026-08-02 — **P53.5 shipped** (per-model capability records now persist across
 restarts instead of being re-discovered), leaving **P53.6** as the last open item of the P53.x
-local-LLM comparative-review batch. Race detector clean on every touched package. Three packages fail
-in the full suite on this Windows host and do so **identically on a clean tree** — they predate this
-work and are unrelated to it: `internal/engine`'s `TestWallClockBudgetStopsRun`,
-`internal/sandbox`'s two `TestValidatePathInSymlink*` cases, and `internal/tool/builtin`'s seven
-LaTeX-confinement tests (which assert on POSIX absolute paths such as `/etc/passwd`).
+local-LLM comparative-review batch. Race detector clean on every touched package. Also **P54.1** — the
+Windows/macOS cross-platform suite fixes, including a real LaTeX confinement bypass on Windows.
+Full suite now green on Windows; `go vet` clean cross-compiled for darwin/arm64 and linux/amd64.
 
 **Previously, 2026-08-01** — **P52.15 shipped and P52.17 closed as already-implemented**, taking
 the P52.x full-stack review batch to **2 open of 17** (P52.14 and P52.16, both correctly parked
@@ -2385,6 +2383,67 @@ separately if `structured-build` ever needs it.
 
 ---
 
+
+### P54.1 — Cross-platform suite: a LaTeX confinement bypass on Windows, plus two POSIX-only test assumptions — SHIPPED 2026-08-02
+
+Aegis is developed across a macOS machine and a Windows one, and the suite had quietly stopped being
+green on the second. Three packages failed on Windows and passed on macOS. Only one was a test
+problem in the harmless sense; the headline is a genuine security defect that was **invisible on the
+platform it was developed on**.
+
+**The bug: `\input{/etc/passwd}` validated as confined on Windows.** `latexResolveRef`
+(`internal/tool/builtin/latex.go`) gates on `filepath.IsAbs(arg)` before falling through to
+`filepath.Join(baseDir, arg)`. On Windows `filepath.IsAbs` requires a volume, so it answers **false**
+for `/etc/passwd` — the argument then went through `Join`, which folds the leading separator away and
+yields `<workspace>\etc\passwd`, a path the sandbox validator then confirms as perfectly confined.
+Meanwhile MiKTeX resolves that same argument against the current drive root. The P52.2 confinement
+scan therefore reported no escape for a read that really does leave the workspace, on Windows only.
+All seven failing LaTeX tests (source scan, `.bcf` datasources, `.aux` `\bibdata`/`\bibstyle`) were
+the same root cause, since the bibliography checker routes through the same resolver.
+
+Fixed by `latexRefIsRooted`: `filepath.IsAbs(arg) || strings.HasPrefix(arg, "/")`. A no-op on
+macOS/Linux (where `IsAbs` already covers it), and on Windows the rooted argument now reaches
+`sandbox.ValidatePathIn` still rooted, where `absCandidate`'s existing P32.1 handling resolves it
+against the drive root and correctly refuses it. Deliberately **not** symmetric on `\`: in TeX a
+leading backslash is a macro escape (`\input{\jobname.tex}`), not a Windows root, and treating it as
+a path would invent Windows-only false violations — so the scan's verdict is now identical on both
+platforms in both directions. New `TestLatexResolveRefKeepsRootedPathsRooted` pins the property
+directly (the candidate must never come back re-parented under `baseDir`) rather than relying on the
+table test that only caught it by accident.
+
+**The same trap, swept.** `server.resolveSafeImagePath` gated its "absolute image paths are not
+allowed" refusal on `filepath.IsAbs` too, so on Windows the refusal silently stopped applying and the
+path was joined onto the working directory instead. Not an escape — the subsequent `filepath.Rel`
+check still held — but the same input was refused on macOS and quietly accepted on Windows. The rule
+now has **one home**, `sandbox.IsRooted`, covering `IsAbs`, Windows rooted-without-volume (`/x`,
+`\x`), and Windows volume-relative (`C:x`); drift between three hand-written spellings of this test
+is exactly what produced the LaTeX bug, so new callers are pointed at it in the doc comment.
+
+**Two POSIX-only test assumptions, fixed as tests.**
+
+- `internal/engine`'s `TestWallClockBudgetStopsRun` expressed "already over budget" as a **1ns**
+  limit, on the stated reasoning that `time.Since` is always at least a nanosecond by the time the
+  first gate runs. True on macOS/Linux; false on Windows, where Go's monotonic clock is ~0.5ms-granular
+  and two back-to-back `time.Now` calls return the *same* instant — measured here as 1000/1000
+  zero-elapsed samples. The gate saw `elapsed == 0` and never fired. Production was never wrong (the
+  knob is configured in whole seconds), so the fix is an unexported `Engine.now` injected only by
+  same-package tests, and the test now advances a fake clock by an hour instead of trusting the host
+  clock. `TestWallClockBudgetCountsToolTime` deliberately keeps its real 120ms-vs-50ms sleep — its
+  whole point is that *actual* tool time counts, and a fake clock would hollow that out.
+- `internal/sandbox`'s two `TestValidatePathInSymlink*` cases called `t.Fatal` when `os.Symlink`
+  failed, which on an unelevated Windows account without Developer Mode is "a required privilege is
+  not held by the client" — an environment limitation reported as a defect, which trains people to
+  ignore a red suite. Now a shared `mustSymlink` helper that `t.Skipf`s with the remedy in the
+  message. Deliberately a check on the *error* rather than a blanket `GOOS == "windows"` skip, and
+  the two pre-existing blanket skips in `sandbox_test.go` were converted to it as well — a Windows box
+  with Developer Mode enabled now gets real coverage of the symlink-escape rules, which is the OS
+  whose path semantics most deserve them.
+
+Full suite green on Windows; `go vet ./...` clean cross-compiled for darwin/arm64 and linux/amd64
+(so the test files, not just the binary, are checked for both); `-race` clean on `internal/engine`,
+`internal/sandbox`, `internal/server`, `internal/tool/builtin`.
+
+---
 
 ### P53.5 — Per-model capability records persist instead of being re-discovered each restart — SHIPPED 2026-08-02
 

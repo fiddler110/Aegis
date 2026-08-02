@@ -160,6 +160,45 @@ func TestLatexConfinementRejectsOutOfWorkspaceReads(t *testing.T) {
 	}
 }
 
+// TestLatexResolveRefKeepsRootedPathsRooted is the unit-level pin under the
+// Windows confinement bug the table above only caught by accident.
+//
+// A POSIX-rooted argument must reach the sandbox validator *still rooted*. On
+// Windows `filepath.IsAbs("/etc/passwd")` is false (no volume), so the old code
+// fell through to `filepath.Join(baseDir, arg)`, which swallowed the leading
+// separator and produced `<workspace>/etc/passwd` — a path that validates as
+// confined while the real compiler reads from the drive root. The escape was
+// invisible on macOS and wide open on Windows, so this asserts the platform-
+// independent property directly: the returned candidate must never have been
+// re-parented under baseDir.
+func TestLatexResolveRefKeepsRootedPathsRooted(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "doc")
+
+	for _, arg := range []string{"/etc/passwd", "/etc/", "/etc/refs.bib"} {
+		got, ok := latexResolveRef(base, arg)
+		if !ok {
+			t.Errorf("latexResolveRef(%q) = not-checkable; a rooted path is exactly what must be checked", arg)
+			continue
+		}
+		if strings.HasPrefix(filepath.Clean(got), filepath.Clean(base)) {
+			t.Errorf("latexResolveRef(%q) = %q — re-parented under the workspace, which hides the escape from the validator", arg, got)
+		}
+	}
+
+	// The complement: a leading backslash is a TeX macro escape, never a
+	// Windows root. Treating it as a path would invent Windows-only false
+	// violations, so it must stay unresolvable on every platform.
+	if _, ok := latexResolveRef(base, `\jobname.tex`); ok {
+		t.Error(`latexResolveRef(\jobname.tex) = checkable; a macro-built name must stay unresolvable so the verdict matches across platforms`)
+	}
+
+	// And an ordinary relative reference must still resolve under the document.
+	got, ok := latexResolveRef(base, "chapters/intro.tex")
+	if !ok || !strings.HasPrefix(got, base) {
+		t.Errorf("latexResolveRef(chapters/intro.tex) = %q, %v; want a path under %q", got, ok, base)
+	}
+}
+
 func TestLatexConfinementAllowsOrdinaryDocuments(t *testing.T) {
 	root := t.TempDir()
 	writeLatexFile(t, root, "chapters/intro.tex", "Hello.\n")

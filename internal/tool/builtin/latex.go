@@ -809,13 +809,36 @@ func latexResolveRef(baseDir, arg string) (string, bool) {
 		}
 		arg = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(arg, "~"), "/"))
 	}
-	if filepath.IsAbs(arg) {
+	if latexRefIsRooted(arg) {
 		return arg, true
 	}
 	if strings.ContainsAny(arg, `\#`) {
 		return "", false // macro-built and not already rooted — unresolvable here
 	}
 	return filepath.Join(baseDir, arg), true
+}
+
+// latexRefIsRooted reports whether a TeX file argument names a location the
+// compiler resolves from a filesystem root rather than from the document's
+// directory.
+//
+// The `/`-prefix arm is what makes this correct on Windows, and it is a
+// confinement bug without it: `filepath.IsAbs` requires a volume there, so
+// `\input{/etc/passwd}` fell through to `filepath.Join(baseDir, "/etc/passwd")`,
+// which folds the leading separator away and yields `<workspace>\etc\passwd` —
+// a path that then validates as perfectly confined. Meanwhile MiKTeX resolves
+// the same argument against the current drive root, so the scan reported no
+// escape for a read that really does leave the workspace. This is the same
+// trap `sandbox.absCandidate` documents (P32.1), hit one layer further up:
+// anything that pre-joins a rooted path defeats the validator before it runs.
+//
+// Deliberately *not* symmetric on `\`: in TeX a leading backslash is a macro
+// escape (`\input{\jobname.tex}`), not a Windows root, and treating it as a
+// path would invent Windows-only false violations for documents that are fine.
+// Such arguments stay unresolvable — the caller's `\#` check catches them —
+// which keeps the scan's verdict identical on macOS and Windows.
+func latexRefIsRooted(arg string) bool {
+	return filepath.IsAbs(arg) || strings.HasPrefix(arg, "/")
 }
 
 // latexSourceCandidates returns the existing files abs could name as TeX
