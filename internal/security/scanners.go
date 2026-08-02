@@ -456,7 +456,28 @@ func findK8sManifests(dir string) ([]string, error) {
 // /dev/stdout inside the container (every scanner container is Linux).
 func (kubescapeScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		out, err := runScannerImage(ctx, rt, image, dir, opts, "kubescape", "scan", "--format", "sarif", "--output", "/dev/stdout", "/src")
+		// "framework allcontrols" rather than a bare scan, because the
+		// container has no network and kubescape's policies come from the
+		// cache baked into the image. Bare `kubescape scan` defaults to the
+		// "workloadscan" framework, which fails from that cache with
+		// "framework from file not matching" (fatal, exit 1, empty stdout)
+		// even when workloadscan.json is present. allcontrols loads cleanly
+		// offline and is the widest control set, so it's also the better
+		// default: on a Dockerfile+manifest fixture it reported 24 results
+		// where nsa reported 11 and mitre 1.
+		// --output to a file inside the container and cat it, rather than
+		// --output /dev/stdout: kubescape writes its human summary (a
+		// box-drawing table and emoji) to stdout too, so /dev/stdout
+		// interleaves that with the SARIF and the parse dies on the first
+		// non-JSON byte ("invalid character 'â'"). Redirecting kubescape's own
+		// stdout to /dev/null leaves only the report on the pipe.
+		//
+		// The trailing `;` rather than `&&` is deliberate: kubescape exits
+		// non-zero whenever controls fail, which is the normal finding case.
+		// If it fails for real the file won't exist, cat exits non-zero with
+		// empty stdout, and runContainerCLI surfaces that as a scan error.
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "sh", "-c",
+			"kubescape scan framework allcontrols --format sarif --output /tmp/ks.sarif /src >/dev/null 2>&1; cat /tmp/ks.sarif")
 		if err != nil {
 			return nil, err
 		}
