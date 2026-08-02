@@ -34,11 +34,12 @@ func TestPatchSecurityRoundTripsCarriedFields(t *testing.T) {
 		WSLDistro:     "kali-linux",
 		Debate:        DebateIntegrationConfig{ThreatModel: true, Triage: true},
 		Multiscanner: MultiscannerConfig{
-			Enabled:     true,
-			Image:       "localhost/aegis-multiscanner:v1",
-			ImageID:     "sha256:abc123",
-			Concurrency: 4,
-			Tools:       []string{"trivy", "gitleaks"},
+			Enabled:           true,
+			Image:             "localhost/aegis-multiscanner:v1",
+			ImageID:           "sha256:abc123",
+			SourceFingerprint: "deadbeef",
+			Concurrency:       4,
+			Tools:             []string{"trivy", "gitleaks"},
 		},
 	}
 	if err := PatchGlobalSecurity(want); err != nil {
@@ -58,6 +59,11 @@ func TestPatchSecurityRoundTripsCarriedFields(t *testing.T) {
 	ms := cfg.Security.Multiscanner
 	if !ms.Enabled || ms.Image != want.Multiscanner.Image || ms.ImageID != want.Multiscanner.ImageID {
 		t.Errorf("multiscanner = %+v, want %+v", ms, want.Multiscanner)
+	}
+	// The fingerprint has to survive a write it didn't originate, or an
+	// unrelated `/security-config` save would erase the drift check.
+	if ms.SourceFingerprint != "deadbeef" {
+		t.Errorf("multiscanner.source_fingerprint = %q, want deadbeef (dropped by the write)", ms.SourceFingerprint)
 	}
 	if ms.Concurrency != 4 {
 		t.Errorf("multiscanner.concurrency = %d, want 4", ms.Concurrency)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -822,5 +824,210 @@ func TestVerifyMultiscannerImageCaches(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("inspect called %d times across 5 verifies, want 1 (TTL cache)", calls)
+	}
+}
+
+// ─── source fingerprint / drift (P55.1) ─────────────────────────────────────
+
+// fpFS builds a synthetic build context so the hashing itself can be tested
+// without depending on the real Containerfile's bytes, which change often.
+func fpFS(files map[string]string) fs.FS {
+	m := fstest.MapFS{}
+	for name, body := range files {
+		m["multiscanner/"+name] = &fstest.MapFile{Data: []byte(body)}
+	}
+	return m
+}
+
+func fingerprintOrFail(t *testing.T, files map[string]string) string {
+	t.Helper()
+	fp, err := fingerprintEmbeddedContext(fpFS(files), "multiscanner")
+	if err != nil {
+		t.Fatalf("fingerprintEmbeddedContext: %v", err)
+	}
+	return fp
+}
+
+// TestFingerprintEmbeddedContextIsDeterministic pins the two properties the
+// drift check rests on: the same content always hashes the same (otherwise
+// every scan would report drift against its own image), and the hash is a
+// full-length lowercase hex sha256.
+func TestFingerprintEmbeddedContextIsDeterministic(t *testing.T) {
+	files := map[string]string{
+		"Containerfile": "FROM alpine\nRUN true\n",
+		"fetch.sh":      "#!/bin/sh\necho fetch\n",
+		"update-db.sh":  "#!/bin/sh\necho db\n",
+	}
+	first := fingerprintOrFail(t, files)
+	for i := 0; i < 3; i++ {
+		if got := fingerprintOrFail(t, files); got != first {
+			t.Fatalf("fingerprint changed across runs: %q then %q", first, got)
+		}
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(first) {
+		t.Errorf("fingerprint = %q, want a 64-char lowercase hex sha256", first)
+	}
+}
+
+// TestFingerprintEmbeddedContextDetectsChanges is the whole point of the
+// fingerprint: each of these mutations is one that produced, or could produce,
+// an image that no longer matches the source it claims to be built from.
+func TestFingerprintEmbeddedContextDetectsChanges(t *testing.T) {
+	base := map[string]string{
+		"Containerfile": "FROM alpine\nRUN true\n",
+		"fetch.sh":      "#!/bin/sh\necho fetch\n",
+	}
+	baseline := fingerprintOrFail(t, base)
+
+	cases := []struct {
+		name  string
+		files map[string]string
+	}{
+		{"content edit", map[string]string{
+			"Containerfile": "FROM alpine\nRUN true\n",
+			"fetch.sh":      "#!/bin/sh\necho fetch\ninstall grype\n",
+		}},
+		{"file added", map[string]string{
+			"Containerfile": "FROM alpine\nRUN true\n",
+			"fetch.sh":      "#!/bin/sh\necho fetch\n",
+			"update-db.sh":  "#!/bin/sh\necho db\n",
+		}},
+		{"file removed", map[string]string{
+			"Containerfile": "FROM alpine\nRUN true\n",
+		}},
+		// A rename with identical bytes: caught only because the filename is
+		// folded into the hash, and it matters because the Containerfile COPYs
+		// by name.
+		{"file renamed", map[string]string{
+			"Containerfile": "FROM alpine\nRUN true\n",
+			"fetch-v2.sh":   "#!/bin/sh\necho fetch\n",
+		}},
+		// Content moved across a file boundary — the concatenation alone would
+		// hash identically; the per-file length in the hash input separates them.
+		{"boundary shift", map[string]string{
+			"Containerfile": "FROM alpine\nRUN true\n#!/bin/sh\n",
+			"fetch.sh":      "echo fetch\n",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fingerprintOrFail(t, tc.files); got == baseline {
+				t.Errorf("fingerprint unchanged (%s) after %s — drift would go undetected", got, tc.name)
+			}
+		})
+	}
+}
+
+// TestFingerprintIgnoresLineEndings keeps a Windows checkout with autocrlf
+// from reporting drift against an image whose source is byte-identical in git.
+func TestFingerprintIgnoresLineEndings(t *testing.T) {
+	lf := fingerprintOrFail(t, map[string]string{"fetch.sh": "#!/bin/sh\necho fetch\n"})
+	crlf := fingerprintOrFail(t, map[string]string{"fetch.sh": "#!/bin/sh\r\necho fetch\r\n"})
+	if lf != crlf {
+		t.Errorf("CRLF fingerprint %s != LF fingerprint %s", crlf, lf)
+	}
+}
+
+// TestMultiscannerSourceFingerprintIsStable proves the real embedded context
+// hashes cleanly — a build that couldn't fingerprint its own source would
+// record nothing and silently disable the check from then on.
+func TestMultiscannerSourceFingerprintIsStable(t *testing.T) {
+	fp := MultiscannerSourceFingerprint()
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(fp) {
+		t.Fatalf("MultiscannerSourceFingerprint = %q, want a 64-char hex sha256", fp)
+	}
+	if again := MultiscannerSourceFingerprint(); again != fp {
+		t.Errorf("MultiscannerSourceFingerprint not stable: %q then %q", fp, again)
+	}
+}
+
+// TestMultiscannerSourceDrift covers the reporting decision table, including
+// the case that governs every existing install: a config with an image_id and
+// no fingerprint is unknown, not drifted.
+func TestMultiscannerSourceDrift(t *testing.T) {
+	current := MultiscannerSourceFingerprint()
+	stale := strings.Repeat("a", 64)
+
+	cases := []struct {
+		name      string
+		policy    MultiscannerPolicy
+		wantDrift bool
+	}{
+		{
+			name:   "fingerprint matches current source",
+			policy: MultiscannerPolicy{Enabled: true, Image: MultiscannerDefaultImage, ImageID: testImageID, SourceFingerprint: current},
+		},
+		{
+			// The upgrade path: an image built before this field existed.
+			name:   "no fingerprint recorded is unknown, not drift",
+			policy: MultiscannerPolicy{Enabled: true, Image: MultiscannerDefaultImage, ImageID: testImageID},
+		},
+		{
+			name:   "no image built yet",
+			policy: MultiscannerPolicy{Enabled: true, Image: MultiscannerDefaultImage, SourceFingerprint: stale},
+		},
+		{
+			name:   "multiscanner disabled",
+			policy: MultiscannerPolicy{Image: MultiscannerDefaultImage, ImageID: testImageID, SourceFingerprint: stale},
+		},
+		{
+			name:      "recorded fingerprint is stale",
+			policy:    MultiscannerPolicy{Enabled: true, Image: MultiscannerDefaultImage, ImageID: testImageID, SourceFingerprint: stale},
+			wantDrift: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MultiscannerSourceDrift(tc.policy)
+			if !tc.wantDrift {
+				if got != "" {
+					t.Fatalf("MultiscannerSourceDrift = %q, want \"\"", got)
+				}
+				return
+			}
+			if got == "" {
+				t.Fatal("MultiscannerSourceDrift = \"\", want a drift report")
+			}
+			// The message has to name the problem and the fix; an operator who
+			// reads only this line must know what to type next.
+			for _, want := range []string{"older Containerfile", "aegis security build-image", MultiscannerDefaultImage, shortImageID(stale)} {
+				if !strings.Contains(got, want) {
+					t.Errorf("drift report %q does not mention %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestMultiscannerSourceDriftIsNotAResolveFailure guards the design decision:
+// stale source reports, it does not fail closed. A drifted image is still the
+// image that was vetted, so scans must keep resolving to it.
+func TestMultiscannerSourceDriftIsNotAResolveFailure(t *testing.T) {
+	withInspectImageID(t, func(context.Context, sandbox.ContainerRuntime, string) (string, error) {
+		return testImageID, nil
+	})
+	p := msPolicy(testImageID, "trivy")
+	p.SourceFingerprint = strings.Repeat("b", 64)
+
+	if drift := MultiscannerSourceDrift(p); drift == "" {
+		t.Fatal("expected drift for a stale fingerprint")
+	}
+	if reason := verifyMultiscannerImage(context.Background(), sandbox.RuntimePodman, p); reason != "" {
+		t.Errorf("verifyMultiscannerImage = %q, want \"\" — drift must not block the scan", reason)
+	}
+}
+
+// TestMultiscannerPolicyCarriesSourceFingerprint proves the config field
+// reaches the policy; without this the drift check silently never fires.
+func TestMultiscannerPolicyCarriesSourceFingerprint(t *testing.T) {
+	want := strings.Repeat("c", 64)
+	p := MultiscannerPolicyFromConfig(config.MultiscannerConfig{
+		Enabled:           true,
+		Image:             MultiscannerDefaultImage,
+		ImageID:           testImageID,
+		SourceFingerprint: "  " + want + "  ",
+	})
+	if p.SourceFingerprint != want {
+		t.Errorf("SourceFingerprint = %q, want the trimmed %q", p.SourceFingerprint, want)
 	}
 }

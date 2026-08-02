@@ -833,6 +833,11 @@ type SecurityToolStatus struct {
 // `/security-config` already shows in the TUI (P15.2).
 type SecurityStatusResponse struct {
 	Tools []SecurityToolStatus `json:"tools"`
+	// Warnings carries provisioning problems that aren't attributable to a
+	// single tool — currently multiscanner source drift, which affects every
+	// container-method scanner at once and so would be misleading repeated on
+	// each row. Omitted when empty.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // SecurityBaselineEntry mirrors security.SuppressionEntry on the wire, with

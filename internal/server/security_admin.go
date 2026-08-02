@@ -63,7 +63,11 @@ func (s *Server) handleSecurityStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, st)
 	}
-	writeJSON(w, http.StatusOK, api.SecurityStatusResponse{Tools: out})
+	var warnings []string
+	if drift := security.MultiscannerSourceDrift(opts.Multiscanner); drift != "" {
+		warnings = append(warnings, drift)
+	}
+	writeJSON(w, http.StatusOK, api.SecurityStatusResponse{Tools: out, Warnings: warnings})
 }
 
 // ─── GET /security/baseline ─────────────────────────────────────────────────

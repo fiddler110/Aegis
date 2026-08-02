@@ -104,9 +104,13 @@ func newSecurityBuildImageCmd() *cobra.Command {
 					// Recorded so resolution looks in the storage of the
 					// runtime that actually built the image, rather than
 					// whatever auto-detection would prefer.
-					Runtime:     string(res.Runtime),
-					Concurrency: cfg.Security.Multiscanner.Concurrency,
-					Tools:       res.Tools,
+					Runtime: string(res.Runtime),
+					// Recorded next to the image ID so a later run can tell a
+					// stale image from a rebuilt one: the ID proves the image
+					// hasn't changed, this proves the source hasn't either.
+					SourceFingerprint: res.SourceFingerprint,
+					Concurrency:       cfg.Security.Multiscanner.Concurrency,
+					Tools:             res.Tools,
 				},
 			}
 			write, target := config.PatchProjectSecurity, config.ProjectConfigPath()
@@ -119,6 +123,7 @@ func newSecurityBuildImageCmd() *cobra.Command {
 
 			fmt.Fprintf(out, "\nBuilt %s (profile: %s, runtime: %s)\n", res.Image, res.Profile, res.Runtime)
 			fmt.Fprintf(out, "  image id: %s\n", res.ImageID)
+			fmt.Fprintf(out, "  source:   %s\n", res.SourceFingerprint)
 			fmt.Fprintf(out, "  scanners: %s\n", strings.Join(res.Tools, ", "))
 			fmt.Fprintf(out, "  pinned in: %s\n", target)
 			fmt.Fprintf(out, "\nRun `aegis security status` to see which scanners now resolve to it.\n")
@@ -144,6 +149,12 @@ func newSecurityStatusCmd() *cobra.Command {
 			}
 			opts := security.OptionsFromConfig(cfg.Security)
 			out := cmd.OutOrStdout()
+			// Printed before the table rather than folded into a tool's DETAIL
+			// column: drift affects every container-method scanner at once, and
+			// repeating it on 16 rows would read as 16 problems.
+			if drift := security.MultiscannerSourceDrift(opts.Multiscanner); drift != "" {
+				fmt.Fprintf(out, "warning: %s\n\n", drift)
+			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "TOOL\tCATEGORY\tMETHOD\tDETAIL")
 			for _, d := range security.Descriptors() {
@@ -248,6 +259,13 @@ func newSecurityUpdateDBCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			policy := security.MultiscannerPolicyFromConfig(cfg.Security.Multiscanner)
+			// Warned before the run, not after: a stale image is a live cause
+			// of update-db failures (a tool the current update script refreshes
+			// may not exist in an older image at all), and an operator who sees
+			// only the resulting error has no way to reach that cause.
+			if drift := security.MultiscannerSourceDrift(policy); drift != "" {
+				fmt.Fprintf(out, "warning: %s\n\n", drift)
+			}
 			if err := security.UpdateMultiscannerDB(cmd.Context(), policy, skipJavaDB, out); err != nil {
 				return err
 			}
