@@ -57,6 +57,7 @@ func newSecurityBuildImageCmd() *cobra.Command {
 		profile     string
 		image       string
 		noCache     bool
+		project     bool
 		global      bool
 		skipVerify  bool
 	)
@@ -68,13 +69,26 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			"the built image's ID into config. That ID is re-verified before every container run: " +
 			"if the image is rebuilt or retagged behind Aegis's back, scans fail with a specific " +
 			"reason rather than silently running something else.\n\n" +
+			"The pin is written to the user config (~/.config/aegis/config.yaml, %AppData%\\aegis on " +
+			"Windows) so every project on the machine uses the image — like the image itself and the " +
+			"shared database volume, it is machine-wide. Pass --project to pin it in this repo's " +
+			".aegis/config.yaml instead; the command always prints which file it wrote.\n\n" +
 			"Profiles: `full` (default) adds the Python (bandit/njsscan), Ruby (brakeman) " +
 			"and network (nmap/nuclei) scanners on top of `core`'s static binaries. Expect roughly " +
-			"3-4GB for full, and a long first build — vulnerability databases are baked in so scans " +
-			"keep working with networking disabled.",
+			"3-4GB for full, and a long first build — vulnerability databases are NOT in the image: " +
+			"they live in the shared aegis-scanner-cache volume, so run `aegis security update-db` " +
+				"after this or the database-backed scanners will be refused.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
+
+			// Checked before the build, not at the write: the build downloads
+			// gigabytes and takes many minutes, so a contradictory pair of flags
+			// has to fail now rather than after all of that.
+			if project && global {
+				return fmt.Errorf("--project and --global are mutually exclusive: --project pins in %s, while --global asks for the user config %s (which is now the default)",
+					config.ProjectConfigPath(), config.GlobalConfigPath())
+			}
 
 			opts := security.MultiscannerBuildOptions{
 				Runtime: sandbox.ContainerRuntime(strings.TrimSpace(runtimeName)),
@@ -87,42 +101,9 @@ func newSecurityBuildImageCmd() *cobra.Command {
 				return err
 			}
 
-			cfg, err := config.Load()
+			pinned, target, err := recordMultiscannerPin(res, project)
 			if err != nil {
-				return fmt.Errorf("load config to record the built image: %w", err)
-			}
-			// Every other security field is carried through unchanged:
-			// patchSecurity rewrites the whole security: block.
-			patch := config.SecurityPatch{
-				EgressThenWrite:  cfg.Security.EgressThenWrite,
-				NetworkAllowList: cfg.Security.NetworkAllowList,
-				DefaultMethod:    cfg.Security.DefaultMethod,
-				Tools:            cfg.Security.Tools,
-				DAST:             cfg.Security.DAST,
-				WSLDistro:        cfg.Security.WSLDistro,
-				Debate:           cfg.Security.Debate,
-				Multiscanner: config.MultiscannerConfig{
-					Enabled: true,
-					Image:   res.Image,
-					ImageID: res.ImageID,
-					// Recorded so resolution looks in the storage of the
-					// runtime that actually built the image, rather than
-					// whatever auto-detection would prefer.
-					Runtime: string(res.Runtime),
-					// Recorded next to the image ID so a later run can tell a
-					// stale image from a rebuilt one: the ID proves the image
-					// hasn't changed, this proves the source hasn't either.
-					SourceFingerprint: res.SourceFingerprint,
-					Concurrency:       cfg.Security.Multiscanner.Concurrency,
-					Tools:             res.Tools,
-				},
-			}
-			write, target := config.PatchProjectSecurity, config.ProjectConfigPath()
-			if global {
-				write, target = config.PatchGlobalSecurity, config.GlobalConfigPath()
-			}
-			if err := write(patch); err != nil {
-				return fmt.Errorf("record the built image in config: %w", err)
+				return err
 			}
 
 			fmt.Fprintf(out, "\nBuilt %s (profile: %s, runtime: %s)\n", res.Image, res.Profile, res.Runtime)
@@ -130,6 +111,18 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			fmt.Fprintf(out, "  source:   %s\n", res.SourceFingerprint)
 			fmt.Fprintf(out, "  scanners: %s\n", strings.Join(res.Tools, ", "))
 			fmt.Fprintf(out, "  pinned in: %s\n", target)
+
+			// Printed immediately under "pinned in", because it says that line
+			// is not the whole truth for this directory.
+			if !project {
+				warn, err := multiscannerShadowWarning(res.ImageID)
+				if err != nil {
+					return err
+				}
+				if warn != "" {
+					fmt.Fprintf(out, "\nwarning: %s\n", warn)
+				}
+			}
 
 			if skipVerify {
 				fmt.Fprintf(out, "\nSkipped verification (--skip-verify). Run `aegis security verify-image` before trusting this image.\n")
@@ -141,7 +134,7 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			// exactly the state P55.3 exists to end, and an operator who has to
 			// remember a second command will not (nobody did, for two releases).
 			fmt.Fprintf(out, "\nVerifying the built image — each scanner is probed and then run against a fixture with planted findings.\n")
-			if err := runVerifyImage(cmd, patch.Multiscanner, nil); err != nil {
+			if err := runVerifyImage(cmd, pinned, nil); err != nil {
 				return err
 			}
 			fmt.Fprintf(out, "\nRun `aegis security status` to see which scanners now resolve to it.\n")
@@ -152,12 +145,114 @@ func newSecurityBuildImageCmd() *cobra.Command {
 	cmd.Flags().StringVar(&profile, "profile", security.MultiscannerProfileFull, "which scanners to include: "+strings.Join(security.MultiscannerProfiles(), " or "))
 	cmd.Flags().StringVar(&image, "image", "", "image tag to build; empty uses "+security.MultiscannerDefaultImage)
 	cmd.Flags().BoolVar(&noCache, "no-cache", false, "rebuild every layer — the way to refresh the baked vulnerability databases")
-	cmd.Flags().BoolVar(&global, "global", false, "pin in the user config (~/.config/aegis/config.yaml) instead of the project's .aegis/config.yaml")
+	cmd.Flags().BoolVar(&project, "project", false, "pin in this project's .aegis/config.yaml instead of the user config — only for pinning a different image per repo")
+	cmd.Flags().BoolVar(&global, "global", false, "deprecated no-op: the user config is now the default")
+	// Kept rather than removed: --global was the documented way to get the
+	// behavior that is now the default, so provisioning scripts pass it, and
+	// deleting it would fail those runs *after* a multi-gigabyte build. It
+	// still means what it always meant, so it stays accepted and silent about
+	// anything but the deprecation. MarkDeprecated also hides it from --help,
+	// which is the point: nobody new should learn it.
+	_ = cmd.Flags().MarkDeprecated("global", "the user config is now the default; pass --project for a per-repo pin")
 	// No backticks in this usage string: cobra reads a backtick-quoted word as
 	// the flag's argument placeholder, so "`verify-image`" would render as
 	// "--skip-verify verify-image" on a boolean flag.
 	cmd.Flags().BoolVar(&skipVerify, "skip-verify", false, "don't run verify-image after building (the image is pinned unverified — a scanner that can't run won't be noticed until a scan silently misses findings)")
 	return cmd
+}
+
+// recordMultiscannerPin writes a completed build into config and returns the
+// block it wrote plus the file it wrote it to.
+//
+// The user config is the default target because everything else about the
+// multiscanner is machine-wide: the image lives in the container runtime's
+// storage, and the vulnerability databases live in one named volume shared by
+// every scan in every project. A per-repo pin left the *configuration* as the
+// only per-repo part of a machine-wide asset, so an operator who provisioned
+// once was told scanners were "not installed" — with advice to build the image
+// they had already built — in every directory but the one they built from
+// (P55.5). --project keeps the narrow case: a repo deliberately pinned to a
+// different image from the rest of the machine.
+//
+// Split out of the command body so the pin can be tested without a container
+// runtime; everything above it in build-image needs a real multi-gigabyte
+// build to reach.
+func recordMultiscannerPin(res security.MultiscannerBuildResult, project bool) (config.MultiscannerConfig, string, error) {
+	write, target := config.PatchGlobalSecurity, config.GlobalConfigPath()
+	if project {
+		write, target = config.PatchProjectSecurity, config.ProjectConfigPath()
+	}
+	// Read from the file being rewritten, not from the merged config:
+	// patchSecurity replaces that file's whole security: block, so the fields
+	// carried through unchanged have to be its own. Merged values leak across
+	// layers — pinning the user config from inside a repo would copy that
+	// repo's security.tools/wsl_distro into the user's config and apply them
+	// to every other project on the machine.
+	existing, err := config.FileSecurity(target)
+	if err != nil {
+		return config.MultiscannerConfig{}, target, fmt.Errorf("read %s to record the built image: %w", target, err)
+	}
+	ms := config.MultiscannerConfig{
+		Enabled: true,
+		Image:   res.Image,
+		ImageID: res.ImageID,
+		// Recorded so resolution looks in the storage of the runtime that
+		// actually built the image, rather than whatever auto-detection would
+		// prefer.
+		Runtime: string(res.Runtime),
+		// Recorded next to the image ID so a later run can tell a stale image
+		// from a rebuilt one: the ID proves the image hasn't changed, this
+		// proves the source hasn't either.
+		SourceFingerprint: res.SourceFingerprint,
+		Concurrency:       existing.Multiscanner.Concurrency,
+		Tools:             res.Tools,
+	}
+	patch := config.SecurityPatch{
+		EgressThenWrite:  existing.EgressThenWrite,
+		NetworkAllowList: existing.NetworkAllowList,
+		DefaultMethod:    existing.DefaultMethod,
+		Tools:            existing.Tools,
+		DAST:             existing.DAST,
+		WSLDistro:        existing.WSLDistro,
+		Debate:           existing.Debate,
+		Multiscanner:     ms,
+	}
+	if err := write(patch); err != nil {
+		return config.MultiscannerConfig{}, target, fmt.Errorf("record the built image in %s: %w", target, err)
+	}
+	return ms, target, nil
+}
+
+// multiscannerShadowWarning reports the one upgrade state that makes a
+// machine-wide pin invisible: a security.multiscanner block left in this
+// repo's .aegis/config.yaml by an older `build-image`, which — since project
+// config overrides user config — keeps winning here after the global pin is
+// written. Every operator who ran the pre-P55.5 command in a repo has exactly
+// this state, and the symptom (scans failing on an image ID that was just
+// rewritten, or quietly using an older image) points nowhere near the cause.
+//
+// justBuilt is the image ID recorded in the global config a moment ago; when
+// the project block happens to name the same one there is nothing wrong
+// today, but it will go stale at the next rebuild, so that case is warned
+// about differently rather than passed over in silence.
+func multiscannerShadowWarning(justBuilt string) (string, error) {
+	path := config.ProjectConfigPath()
+	sec, err := config.FileSecurity(path)
+	if err != nil {
+		return "", err
+	}
+	pin, label := strings.TrimSpace(sec.Multiscanner.ImageID), "image_id"
+	if pin == "" {
+		pin, label = strings.TrimSpace(sec.Multiscanner.Image), "image"
+	}
+	if pin == "" {
+		return "", nil
+	}
+	remedy := fmt.Sprintf("Delete the security.multiscanner block from %s so the machine-wide pin applies here too, or re-run with --project to keep this repo on its own image.", path)
+	if label == "image_id" && pin == strings.TrimSpace(justBuilt) {
+		return fmt.Sprintf("%s also pins security.multiscanner (%s %s — the same image just built). Project config overrides user config, so this repo will keep using the project pin, and the next rebuild will update only the user config and leave this one stale. %s", path, label, pin, remedy), nil
+	}
+	return fmt.Sprintf("%s also pins security.multiscanner (%s %s), and project config overrides user config — scans run from this directory will use that pin, not the one just written. %s", path, label, pin, remedy), nil
 }
 
 // newSecurityVerifyImageCmd proves the built image's scanners actually work

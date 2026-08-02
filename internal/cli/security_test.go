@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/security"
 )
 
 func runSecurity(t *testing.T, stdin string, args ...string) (string, error) {
@@ -139,6 +141,202 @@ suppressions:
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q: %s", want, out)
 		}
+	}
+}
+
+// fakeBuildResult stands in for a real `build-image` run: everything the pin
+// records, with none of the multi-gigabyte container build needed to produce
+// it.
+func fakeBuildResult(imageID string) security.MultiscannerBuildResult {
+	return security.MultiscannerBuildResult{
+		Runtime:           sandbox.RuntimePodman,
+		Image:             "localhost/aegis-multiscanner:v1",
+		ImageID:           imageID,
+		Profile:           security.MultiscannerProfileCore,
+		Tools:             []string{"trivy", "gitleaks"},
+		SourceFingerprint: "sha256:fingerprint-abc",
+	}
+}
+
+// TestBuildImagePinTarget is the P55.5 default flip: the pin belongs in the
+// user config, because the image and the shared database volume it points at
+// are machine-wide. --project is the opt-in for a repo that wants its own
+// image. Whichever file is chosen, the file *not* chosen must be left alone —
+// the old behavior's real damage was a pin nobody could find.
+func TestBuildImagePinTarget(t *testing.T) {
+	cases := []struct {
+		name    string
+		project bool
+	}{
+		{name: "default targets the user config"},
+		{name: "--project targets the project config", project: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			redirectConfigDir(t)
+			chdirTemp(t)
+
+			ms, target, err := recordMultiscannerPin(fakeBuildResult("sha256:deadbeef"), tc.project)
+			if err != nil {
+				t.Fatalf("recordMultiscannerPin: %v", err)
+			}
+			wantTarget, other := config.GlobalConfigPath(), config.ProjectConfigPath()
+			if tc.project {
+				wantTarget, other = other, wantTarget
+			}
+			if target != wantTarget {
+				t.Errorf("wrote to %s, want %s", target, wantTarget)
+			}
+			if _, err := os.Stat(other); !os.IsNotExist(err) {
+				t.Errorf("%s should not have been touched (stat err = %v)", other, err)
+			}
+
+			// Round-trip through the file that was actually written, not
+			// through the merged config: the merge would pass even if the pin
+			// landed in the wrong layer, which is the bug being fixed.
+			sec, err := config.FileSecurity(target)
+			if err != nil {
+				t.Fatalf("FileSecurity(%s): %v", target, err)
+			}
+			got := sec.Multiscanner
+			if !got.Enabled || got.ImageID != "sha256:deadbeef" || got.Image != ms.Image {
+				t.Errorf("multiscanner block round-tripped as %+v", got)
+			}
+			// P55.1's fingerprint and P55.3's runtime have to survive the flip:
+			// drift detection and verification both read them back from
+			// whichever file the pin was written to.
+			if got.SourceFingerprint != "sha256:fingerprint-abc" {
+				t.Errorf("source_fingerprint = %q, want it recorded alongside the image ID", got.SourceFingerprint)
+			}
+			if got.Runtime != string(sandbox.RuntimePodman) {
+				t.Errorf("runtime = %q, want podman", got.Runtime)
+			}
+		})
+	}
+}
+
+// TestBuildImageRejectsBothTargets: --global is a deprecated no-op for the new
+// default, so asking for both it and --project is a contradiction, not a
+// precedence question. It must fail before the build, since failing after one
+// would cost an operator the whole multi-gigabyte download.
+func TestBuildImageRejectsBothTargets(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	_, err := runSecurity(t, "", "build-image", "--project", "--global")
+	if err == nil {
+		t.Fatal("expected --project --global to be rejected")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error = %v, want a mutually-exclusive message", err)
+	}
+	// The check must short-circuit the build, so neither config file exists.
+	for _, path := range []string{config.GlobalConfigPath(), config.ProjectConfigPath()} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("%s was written despite the flag conflict (stat err = %v)", path, statErr)
+		}
+	}
+}
+
+// TestBuildImageWarnsAboutProjectShadow is the upgrade case that matters most:
+// an operator who ran the pre-P55.5 command in a repo has a project-level pin
+// that overrides the machine-wide one written today. Silence there reads as a
+// working global pin while every scan in that repo uses the old image.
+func TestBuildImageWarnsAboutProjectShadow(t *testing.T) {
+	cases := []struct {
+		name        string
+		projectPin  string
+		justBuilt   string
+		wantWarning bool
+		wantPhrase  string
+	}{
+		{
+			name:      "no project config at all",
+			justBuilt: "sha256:new",
+		},
+		{
+			name:        "stale project pin shadows the global one",
+			projectPin:  "sha256:old",
+			justBuilt:   "sha256:new",
+			wantWarning: true,
+			wantPhrase:  "not the one just written",
+		},
+		{
+			name:        "project pin names the same image built today",
+			projectPin:  "sha256:new",
+			justBuilt:   "sha256:new",
+			wantWarning: true,
+			wantPhrase:  "the same image just built",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			redirectConfigDir(t)
+			chdirTemp(t)
+			if tc.projectPin != "" {
+				if err := config.PatchProjectSecurity(config.SecurityPatch{
+					Multiscanner: config.MultiscannerConfig{
+						Enabled: true,
+						Image:   "localhost/aegis-multiscanner:v1",
+						ImageID: tc.projectPin,
+					},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			warn, err := multiscannerShadowWarning(tc.justBuilt)
+			if err != nil {
+				t.Fatalf("multiscannerShadowWarning: %v", err)
+			}
+			if !tc.wantWarning {
+				if warn != "" {
+					t.Fatalf("unexpected warning: %s", warn)
+				}
+				return
+			}
+			if warn == "" {
+				t.Fatal("expected a shadowing warning")
+			}
+			for _, want := range []string{config.ProjectConfigPath(), tc.projectPin, tc.wantPhrase, "--project"} {
+				if !strings.Contains(warn, want) {
+					t.Errorf("warning missing %q: %s", want, warn)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildImagePinDoesNotLeakProjectPolicyGlobally guards the side effect the
+// default flip creates: the pin rewrites the target file's whole security:
+// block, so building from inside a repo with project-scoped scanner policy
+// must not promote that policy to every project on the machine.
+func TestBuildImagePinDoesNotLeakProjectPolicyGlobally(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+
+	if err := config.PatchProjectSecurity(config.SecurityPatch{
+		WSLDistro: "kali-linux",
+		Tools:     map[string]config.SecurityToolConfig{"nmap": {Method: "wsl"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := recordMultiscannerPin(fakeBuildResult("sha256:deadbeef"), false); err != nil {
+		t.Fatalf("recordMultiscannerPin: %v", err)
+	}
+	sec, err := config.FileSecurity(config.GlobalConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sec.WSLDistro != "" || len(sec.Tools) != 0 {
+		t.Errorf("project-scoped policy leaked into the user config: wsl_distro=%q tools=%v", sec.WSLDistro, sec.Tools)
+	}
+	// ...and the project's own settings are still where the operator put them.
+	proj, err := config.FileSecurity(config.ProjectConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proj.WSLDistro != "kali-linux" {
+		t.Errorf("project wsl_distro = %q, want it untouched", proj.WSLDistro)
 	}
 }
 
