@@ -357,6 +357,12 @@ func buildSecurityBlock(p SecurityPatch) string {
 		fmt.Fprintf(&b, "    enabled: %t\n", ms.Enabled)
 		fmt.Fprintf(&b, "    image: %q\n", ms.Image)
 		fmt.Fprintf(&b, "    image_id: %q\n", ms.ImageID)
+		// Only written when known: an empty value would round-trip as
+		// "unknown" anyway, and omitting it keeps a config written by an older
+		// binary indistinguishable from one that simply has nothing to record.
+		if ms.SourceFingerprint != "" {
+			fmt.Fprintf(&b, "    source_fingerprint: %q\n", ms.SourceFingerprint)
+		}
 		if ms.Runtime != "" {
 			fmt.Fprintf(&b, "    runtime: %s\n", ms.Runtime)
 		}

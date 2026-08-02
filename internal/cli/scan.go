@@ -361,6 +361,9 @@ func printScannerList(cmd *cobra.Command) error {
 	opts := security.OptionsFromConfig(cfg.Security)
 	out := cmd.OutOrStdout()
 
+	if drift := security.MultiscannerSourceDrift(opts.Multiscanner); drift != "" {
+		fmt.Fprintf(out, "warning: %s\n\n", drift)
+	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SCANNER\tCATEGORY\tDEFAULT\tSTATUS")
 	for _, d := range security.Descriptors() {

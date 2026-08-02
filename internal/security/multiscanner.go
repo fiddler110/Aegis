@@ -232,10 +232,14 @@ func MultiscannerProfiles() []string {
 // from config.MultiscannerConfig by MultiscannerPolicyFromConfig. Decoupled
 // from internal/config the same way ToolPolicy is.
 type MultiscannerPolicy struct {
-	Enabled     bool
-	Image       string
-	ImageID     string
-	Concurrency int
+	Enabled bool
+	Image   string
+	ImageID string
+	// SourceFingerprint is the build context hash recorded at build time.
+	// Empty means the config predates the field — unknown, not drift. See
+	// MultiscannerSourceDrift.
+	SourceFingerprint string
+	Concurrency       int
 	// Runtime is the container runtime that built the image. See
 	// RuntimePriority for why resolution can't just auto-detect.
 	Runtime sandbox.ContainerRuntime
@@ -296,14 +300,15 @@ func (o Options) scanConcurrency() int {
 // MultiscannerPolicyFromConfig translates the user-facing config block.
 func MultiscannerPolicyFromConfig(cfg config.MultiscannerConfig) MultiscannerPolicy {
 	p := MultiscannerPolicy{
-		Enabled:     cfg.Enabled,
-		Image:       strings.TrimSpace(cfg.Image),
-		ImageID:     strings.TrimSpace(cfg.ImageID),
-		Runtime:     sandbox.ContainerRuntime(strings.TrimSpace(cfg.Runtime)),
-		Concurrency: cfg.Concurrency,
-		Tools:       map[string]bool{},
-		check:       &multiscannerCheck{},
-		cacheCheck:  &multiscannerCheck{},
+		Enabled:           cfg.Enabled,
+		Image:             strings.TrimSpace(cfg.Image),
+		ImageID:           strings.TrimSpace(cfg.ImageID),
+		SourceFingerprint: strings.TrimSpace(cfg.SourceFingerprint),
+		Runtime:           sandbox.ContainerRuntime(strings.TrimSpace(cfg.Runtime)),
+		Concurrency:       cfg.Concurrency,
+		Tools:             map[string]bool{},
+		check:             &multiscannerCheck{},
+		cacheCheck:        &multiscannerCheck{},
 	}
 	names := cfg.Tools
 	if len(names) == 0 {
@@ -418,8 +423,38 @@ func verifyMultiscannerImage(ctx context.Context, rt sandbox.ContainerRuntime, p
 	return fail
 }
 
+// MultiscannerSourceDrift reports whether the pinned image was built from a
+// different Containerfile than the one this binary carries, returning a
+// human-readable, actionable line or "" for "no drift, or nothing to compare".
+//
+// Deliberately not part of verifyMultiscannerImage, and deliberately not a
+// MethodNone reason: an image-ID mismatch means the thing Aegis is about to
+// run is not the thing that was vetted, which has to fail closed, whereas
+// source drift means the image is genuinely the one that was built — just from
+// older source. It is usually still a working image (it was, for the two
+// commits it went stale), so refusing to scan would trade a silent gap for a
+// loud outage. Callers surface this alongside status instead.
+//
+// Both "no fingerprint recorded" and "this binary can't compute one" return ""
+// rather than a drift claim. The first is every config written before the
+// field existed; treating those as drift would flag every working install on
+// upgrade, which is exactly the noise that teaches operators to ignore the
+// warning that matters.
+func MultiscannerSourceDrift(p MultiscannerPolicy) string {
+	if !p.Enabled || p.Image == "" || p.ImageID == "" || p.SourceFingerprint == "" {
+		return ""
+	}
+	current := MultiscannerSourceFingerprint()
+	if current == "" || strings.EqualFold(current, p.SourceFingerprint) {
+		return ""
+	}
+	return fmt.Sprintf("the multiscanner image %s was built from an older Containerfile (recorded source %s, current %s) — it may be missing scanners or fixes added since; re-run `aegis security build-image`",
+		p.Image, shortImageID(p.SourceFingerprint), shortImageID(current))
+}
+
 // shortImageID trims an image ID to the conventional 12 hex characters for
-// error messages, where the full 64 would bury the point.
+// error messages, where the full 64 would bury the point. Also used for source
+// fingerprints, which are the same shape (bare hex) and want the same trim.
 func shortImageID(id string) string {
 	id = normalizeImageID(id)
 	if len(id) > 12 {

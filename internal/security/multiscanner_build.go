@@ -1,14 +1,18 @@
 package security
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -47,6 +51,74 @@ type MultiscannerBuildResult struct {
 	ImageID string
 	Profile string
 	Tools   []string
+	// SourceFingerprint is the hash of the embedded build context this image
+	// was built from. See MultiscannerSourceFingerprint.
+	SourceFingerprint string
+}
+
+// MultiscannerSourceFingerprint hashes the embedded build context — the
+// Containerfile and its scripts — so a recorded fingerprint can later be
+// compared against the source the running binary actually carries.
+//
+// It exists because the image-ID pin answers a narrower question than it
+// looks like it does: it proves the image hasn't changed since it was pinned,
+// not that it still matches the source it was built from. Those diverge on
+// every `git pull` that touches this directory, and the divergence is silent —
+// a pinned image that predated the commit adding grype to fetch.sh simply
+// never contained grype, and nothing said so.
+//
+// Unlike the image ID, a mismatch here is *not* a fail-closed condition. A
+// stale image is usually still a working image; the right response is to tell
+// the operator to rebuild, not to refuse to scan with what they have.
+func MultiscannerSourceFingerprint() string {
+	fp, err := fingerprintEmbeddedContext(multiscannerFS, "multiscanner")
+	if err != nil {
+		// The FS is compiled into the binary, so a read failure here is a
+		// build-time impossibility rather than a runtime condition. Returning
+		// empty degrades to "unknown", which every caller already handles as
+		// "don't claim drift" — the same shape as an older config with no
+		// fingerprint recorded.
+		return ""
+	}
+	return fp
+}
+
+// fingerprintEmbeddedContext is the hashing itself, taking an fs.FS so tests
+// can fingerprint a synthetic context and prove content changes move the hash.
+//
+// Filenames are sorted (map/readdir order must not affect the result) and each
+// file's name and length are folded into the hash alongside its bytes, so a
+// rename or a two-file boundary shift can't produce the same digest as the
+// original.
+func fingerprintEmbeddedContext(fsys fs.FS, dir string) (string, error) {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return "", fmt.Errorf("read embedded build context: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+
+	h := sha256.New()
+	for _, name := range names {
+		data, err := fs.ReadFile(fsys, dir+"/"+name)
+		if err != nil {
+			return "", fmt.Errorf("read embedded %s: %w", name, err)
+		}
+		// Line endings are normalized before hashing for the same reason
+		// TestUpdateDBScriptIsExecutableShell checks for CRLF: a checkout on a
+		// Windows host with autocrlf on would otherwise report drift against an
+		// image whose source is byte-identical in git.
+		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		fmt.Fprintf(h, "%s\x00%d\x00", name, len(data))
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // UpdateMultiscannerDB refreshes the scanner databases in the cache volume by
@@ -215,5 +287,9 @@ func BuildMultiscanner(ctx context.Context, opts MultiscannerBuildOptions, out i
 		ImageID: id,
 		Profile: profile,
 		Tools:   MultiscannerTools(profile),
+		// Recorded from the same embedded FS the build context was
+		// materialized from a few lines up, so the fingerprint describes
+		// exactly what went into this image.
+		SourceFingerprint: MultiscannerSourceFingerprint(),
 	}, nil
 }

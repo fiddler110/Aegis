@@ -921,6 +921,16 @@ type MultiscannerConfig struct {
 	// "never built" — resolution reports that rather than running whatever
 	// currently answers to Image.
 	ImageID string `koanf:"image_id"`
+	// SourceFingerprint is a hash of the Containerfile and scripts the image
+	// was built from, recorded alongside ImageID. It closes the gap ImageID
+	// cannot see: an image can match its pin perfectly and still predate the
+	// source it claims to be built from, which is how a pinned image went two
+	// commits stale and silently lacked a scanner entirely.
+	//
+	// Empty means "unknown", not "drift" — configs written before this field
+	// existed have a perfectly good image, and flagging every one of them on
+	// upgrade would be noise, not a finding.
+	SourceFingerprint string `koanf:"source_fingerprint"`
 	// Concurrency bounds how many scanners run at once during a scan. Each
 	// container-method scanner is one container, so this is how many run in
 	// parallel. 0 means the built-in default (multiscannerDefaultConcurrency);
