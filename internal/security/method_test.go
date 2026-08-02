@@ -3,7 +3,9 @@ package security
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -798,5 +800,191 @@ func TestResolveDetailedFallbackWhyIsBareReason(t *testing.T) {
 	}
 	if !strings.Contains(a.Note, a.FallbackWhy) {
 		t.Errorf("Note = %q does not contain FallbackWhy = %q", a.Note, a.FallbackWhy)
+	}
+}
+
+// memoOpts builds an Options carrying the runtime-probe memo, covering every
+// name in tools — the fan-out shape a real resolution pass has, which is the
+// only shape where memoization is observable.
+func memoOpts(t *testing.T, tools ...string) Options {
+	t.Helper()
+	p := msPolicy(testImageID, tools...)
+	policies := map[string]ToolPolicy{}
+	for _, name := range tools {
+		withTestDescriptor(t, ScannerDescriptor{Name: name, Binary: name + "-absent", DefaultEnabled: true})
+		policies[name] = ToolPolicy{Enabled: true}
+	}
+	return Options{Tools: policies, Multiscanner: p, runtimeCheck: &runtimeProbeCache{}}
+}
+
+// TestResolveMemoizesRuntimeProbeAcrossAPass is the P55.4 cost regression.
+// Inverting "auto" to prefer the container moved detectRuntime from "reached
+// only when no host binary exists" to "reached once per covered tool", so a
+// single `security status` render went from roughly one `podman version` to
+// one per scanner. The memo has to collapse a whole pass onto one probe.
+func TestResolveMemoizesRuntimeProbeAcrossAPass(t *testing.T) {
+	probes := 0
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		probes++
+		return sandbox.RuntimePodman, true
+	})
+	withInspectImageID(t, func(context.Context, sandbox.ContainerRuntime, string) (string, error) {
+		return testImageID, nil
+	})
+	withCacheFileExists(t, true)
+
+	names := []string{"test-memo-a", "test-memo-b", "test-memo-c", "test-memo-d"}
+	opts := memoOpts(t, names...)
+	for _, name := range names {
+		if method, _, _, reason := Resolve(context.Background(), name, opts); method != MethodContainer {
+			t.Fatalf("%s: method = %v (%s), want MethodContainer", name, method, reason)
+		}
+	}
+	if probes != 1 {
+		t.Errorf("detectRuntime called %d times across %d tools, want 1", probes, len(names))
+	}
+}
+
+// TestResolveMemoizesNegativeRuntimeProbe covers the case that actually costs
+// the most wall-clock: "no runtime available" is only reached after every
+// candidate has timed out, so caching the negative answer matters at least as
+// much as caching the positive one.
+func TestResolveMemoizesNegativeRuntimeProbe(t *testing.T) {
+	probes := 0
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		probes++
+		return "", false
+	})
+
+	names := []string{"test-memoneg-a", "test-memoneg-b", "test-memoneg-c"}
+	opts := memoOpts(t, names...)
+	for _, name := range names {
+		if method, _, _, _ := Resolve(context.Background(), name, opts); method != MethodNone {
+			t.Fatalf("%s: method = %v, want MethodNone with no runtime and no host binary", name, method)
+		}
+	}
+	if probes != 1 {
+		t.Errorf("detectRuntime called %d times, want 1 — the negative result must cache too", probes)
+	}
+}
+
+// TestResolveRuntimeProbeMemoExpires guards the reason this is a TTL rather
+// than a process-lifetime cache: "no runtime" is precisely the state an
+// operator fixes from outside the process (`podman machine start`), and a
+// permanent cache would mean restarting the daemon before scans worked again.
+func TestResolveRuntimeProbeMemoExpires(t *testing.T) {
+	origTTL := runtimeDetectTTL
+	runtimeDetectTTL = time.Nanosecond
+	t.Cleanup(func() { runtimeDetectTTL = origTTL })
+
+	probes := 0
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		probes++
+		return "", false
+	})
+
+	opts := memoOpts(t, "test-memottl")
+	for i := 0; i < 3; i++ {
+		time.Sleep(time.Millisecond)
+		Resolve(context.Background(), "test-memottl", opts)
+	}
+	if probes != 3 {
+		t.Errorf("detectRuntime called %d times past an expired TTL, want 3 — a stale answer must not stick", probes)
+	}
+}
+
+// TestResolveRuntimeProbeCollapsesConcurrentCallers is the singleflight half.
+// engine.runTools runs read-capability tools concurrently, so without it N
+// goroutines start together, all miss a cold cache, and all shell out — the
+// same cost this removes, just moved from serial to parallel.
+func TestResolveRuntimeProbeCollapsesConcurrentCallers(t *testing.T) {
+	var mu sync.Mutex
+	probes := 0
+	release := make(chan struct{})
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		mu.Lock()
+		probes++
+		mu.Unlock()
+		<-release // hold the leader so every follower is forced to wait
+		return sandbox.RuntimePodman, true
+	})
+	withInspectImageID(t, func(context.Context, sandbox.ContainerRuntime, string) (string, error) {
+		return testImageID, nil
+	})
+	withCacheFileExists(t, true)
+
+	names := []string{"test-memocc-a", "test-memocc-b", "test-memocc-c", "test-memocc-d", "test-memocc-e"}
+	opts := memoOpts(t, names...)
+
+	var wg sync.WaitGroup
+	methods := make([]Method, len(names))
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			methods[i], _, _, _ = Resolve(context.Background(), name, opts)
+		}(i, name)
+	}
+	// Let every goroutine reach the probe before the leader is allowed to
+	// finish; without the latch they would each start one of their own.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	got := probes
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("detectRuntime called %d times from %d concurrent resolves, want 1", got, len(names))
+	}
+	for i, m := range methods {
+		if m != MethodContainer {
+			t.Errorf("%s: method = %v, want MethodContainer — every follower must get the leader's result", names[i], m)
+		}
+	}
+}
+
+// TestResolveWithoutMemoProbesEveryCall pins the deliberate nil-cache
+// behaviour: an Options built directly in code (as most tests do) gets no memo
+// and probes every time, so a seam swapped mid-test is always observed.
+func TestResolveWithoutMemoProbesEveryCall(t *testing.T) {
+	probes := 0
+	withDetectRuntime(t, func(context.Context, []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+		probes++
+		return "", false
+	})
+	withTestDescriptor(t, ScannerDescriptor{Name: "test-nomemo", Binary: "test-nomemo-absent", DefaultEnabled: true})
+
+	opts := Options{
+		Tools:        map[string]ToolPolicy{"test-nomemo": {Enabled: true}},
+		Multiscanner: msPolicy(testImageID, "test-nomemo"),
+	}
+	for i := 0; i < 3; i++ {
+		Resolve(context.Background(), "test-nomemo", opts)
+	}
+	if probes != 3 {
+		t.Errorf("detectRuntime called %d times with a nil memo, want 3", probes)
+	}
+}
+
+// TestOptionsFromConfigAllocatesRuntimeMemo pins the one place the memo is
+// allocated — the real callers all build Options this way, so a refactor that
+// dropped it would silently restore the per-tool probing.
+func TestOptionsFromConfigAllocatesRuntimeMemo(t *testing.T) {
+	if OptionsFromConfig(config.SecurityConfig{}).runtimeCheck == nil {
+		t.Error("OptionsFromConfig left runtimeCheck nil — every Resolve would re-probe")
+	}
+}
+
+// TestRuntimeProbeKeyDistinguishesPriorities: a pass legitimately mixes two
+// priority lists (the multiscanner's recorded runtime for tools it covers, the
+// OS default order for a tool with its own pinned image), and a single-slot
+// cache would thrash between them rather than memoize either.
+func TestRuntimeProbeKeyDistinguishesPriorities(t *testing.T) {
+	if a, b := runtimeProbeKey(nil), runtimeProbeKey([]sandbox.ContainerRuntime{sandbox.RuntimePodman}); a == b {
+		t.Errorf("nil and podman priorities share key %q", a)
+	}
+	if a, b := runtimeProbeKey([]sandbox.ContainerRuntime{sandbox.RuntimePodman}), runtimeProbeKey([]sandbox.ContainerRuntime{sandbox.RuntimeDocker}); a == b {
+		t.Errorf("podman and docker priorities share key %q", a)
 	}
 }
