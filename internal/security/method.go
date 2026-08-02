@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -413,6 +415,15 @@ type Options struct {
 	// selection. A distro purpose-built for security tooling (Kali) is the
 	// recommended target on Windows — see docs/security.md.
 	WSLDistro string
+
+	// runtimeCheck memoizes container-runtime detection for the duration of a
+	// resolution pass. A pointer so it survives Options being copied by value
+	// through Resolve (and through AutoEnableLanguageScanners, which rebuilds
+	// Tools but keeps the rest of the struct). Nil is valid and means "probe on
+	// every call" — the shape a test constructing Options directly gets, and
+	// the shape that keeps the seam-swapping tests below honest. Allocated only
+	// by OptionsFromConfig, exactly like MultiscannerPolicy.check.
+	runtimeCheck *runtimeProbeCache
 }
 
 func (o Options) policyFor(name string, defaultEnabled bool) ToolPolicy {
@@ -450,13 +461,156 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 		DefaultMethod: cfg.DefaultMethod,
 		WSLDistro:     cfg.WSLDistro,
 		Multiscanner:  MultiscannerPolicyFromConfig(cfg.Multiscanner),
+		runtimeCheck:  &runtimeProbeCache{},
 	}
 }
 
 // detectRuntime is a seam over sandbox.DetectBest so tests can inject a
 // deterministic container-runtime result without needing a real docker/
 // podman install.
+//
+// Never call this directly from resolve — go through Options.detectRuntime,
+// which memoizes it. See runtimeProbeCache.
 var detectRuntime = sandbox.DetectBest
+
+// runtimeDetectTTL bounds how long one container-runtime probe result is
+// reused. Deliberately the same window as multiscannerVerifyTTL, and for the
+// same reason: the two memos guard consecutive steps of the same decision, so
+// a scan that trusts a 15s-old image verification has no business insisting on
+// a fresher answer to "is podman up".
+//
+// A process-lifetime cache would be wrong here. Options is built once per
+// loaded config and held for the daemon's lifetime, and "no runtime available"
+// is precisely the state an operator fixes from outside the process (`podman
+// machine start`) — caching that forever would mean a daemon restart before
+// scans worked again. 15s collapses a resolution pass into one probe and still
+// notices the machine coming up before the next one.
+//
+// A var rather than a const only so a test can compress or extend the window
+// and assert expiry behaviour through Resolve, instead of reaching into the
+// cache's fields. Never assigned outside tests.
+var runtimeDetectTTL = multiscannerVerifyTTL
+
+// runtimeProbeCache memoizes container-runtime detection across the ~16
+// Resolve calls that make up a single resolution pass (a `security status`
+// render, a scan plan).
+//
+// Why this exists: P55.4 inverted the "auto" branch to prefer the multiscanner
+// container over an available host binary, which moved detectRuntime from
+// "reached only when no host binary exists" to "reached once per
+// multiscanner-covered tool". detectRuntime shells out (`podman version`,
+// `docker version`) under a 3s-per-candidate timeout, so one status render went
+// from roughly one probe to fourteen — and the *slow* case is the negative one,
+// where every candidate has to time out before the answer is "no". Caching the
+// negative result matters at least as much as caching the positive one.
+//
+// Why it lives here rather than in internal/sandbox: sandbox.DetectBest's other
+// callers are diagnostics (`aegis sandbox detect`, `aegis doctor`, sandbox
+// backend selection) whose whole job is to report the runtime's state *right
+// now* — silently serving them a 15s-old answer would make a diagnostic lie
+// about the thing it was run to check. The duplication is specific to this
+// resolver's fan-out over a tool list, so the memo belongs where that fan-out
+// is. DetectBest stays a straight probe; anyone who wants memoization opts in.
+//
+// Why it hangs off Options rather than a package-level var: it follows the
+// existing MultiscannerPolicy.check/.cacheCheck convention exactly, including
+// the deliberate property that an Options built directly in code (as tests do)
+// gets nil and probes every time. Package state would leak one test's canned
+// probe result into the next.
+type runtimeProbeCache struct {
+	mu      sync.Mutex
+	entries map[string]*runtimeProbeEntry
+}
+
+// runtimeProbeEntry is one cached probe result, plus the singleflight latch
+// that keeps concurrent callers from all missing and all shelling out.
+type runtimeProbeEntry struct {
+	// done is closed when the in-flight probe that created this entry
+	// completes. Waiters block on it rather than starting a probe of their own.
+	done chan struct{}
+	// pending is true until that probe writes its result. Distinct from
+	// `done == nil` so a completed entry keeps a closed channel and a late
+	// waiter's receive returns immediately instead of blocking forever.
+	pending bool
+	at      time.Time
+	rt      sandbox.ContainerRuntime
+	ok      bool
+}
+
+// runtimeProbeKey identifies one probe by the priority list it was asked for.
+// A map rather than a single slot because a pass legitimately mixes two
+// priorities — the multiscanner's recorded runtime for the tools it covers, nil
+// (OS default order) for a tool with its own pinned image — and a single slot
+// would thrash between them, reintroducing the very re-probing this removes.
+func runtimeProbeKey(priority []sandbox.ContainerRuntime) string {
+	parts := make([]string, len(priority))
+	for i, rt := range priority {
+		parts[i] = string(rt)
+	}
+	return strings.Join(parts, ",")
+}
+
+// detectRuntime resolves a container runtime for priority, reusing a recent
+// result and collapsing concurrent callers onto a single probe.
+//
+// The singleflight half is not decoration: engine.runTools runs read-capability
+// tools concurrently and scanners resolve in parallel, so without it N
+// goroutines starting together all see a cold cache and all shell out — the
+// exact cost this removes, just moved from serial to parallel. Note this is
+// stricter than the existing multiscanner memo, which holds its mutex only
+// across the cache read/write and lets concurrent misses duplicate the
+// `image inspect` (correct, since the work is idempotent, but not collapsed).
+//
+// A nil cache means "no memo": probe every time, exactly as before.
+func (o Options) detectRuntime(ctx context.Context, priority []sandbox.ContainerRuntime) (sandbox.ContainerRuntime, bool) {
+	c := o.runtimeCheck
+	if c == nil {
+		return detectRuntime(ctx, priority)
+	}
+	key := runtimeProbeKey(priority)
+	for {
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = map[string]*runtimeProbeEntry{}
+		}
+		e := c.entries[key]
+		if e != nil {
+			if e.pending {
+				done := e.done
+				c.mu.Unlock()
+				select {
+				case <-done:
+					// The leader finished; loop round and read its result
+					// (rather than reaching into e, whose TTL we still owe a
+					// check — the leader may have been slow enough to expire).
+					continue
+				case <-ctx.Done():
+					// Same answer the un-memoized path gives for a cancelled
+					// context: the probe could not confirm a runtime.
+					return "", false
+				}
+			}
+			if time.Since(e.at) < runtimeDetectTTL {
+				rt, ok := e.rt, e.ok
+				c.mu.Unlock()
+				return rt, ok
+			}
+		}
+		// Claim the probe: publish a pending entry so concurrent callers wait
+		// on it instead of duplicating the work.
+		e = &runtimeProbeEntry{done: make(chan struct{}), pending: true}
+		c.entries[key] = e
+		c.mu.Unlock()
+
+		rt, ok := detectRuntime(ctx, priority)
+
+		c.mu.Lock()
+		e.rt, e.ok, e.at, e.pending = rt, ok, time.Now(), false
+		c.mu.Unlock()
+		close(e.done)
+		return rt, ok
+	}
+}
 
 // wslBinaryAvailable is a seam over sandbox.WSLBinaryAvailable so tests can
 // inject a deterministic WSL-availability result without needing a real WSL
@@ -682,7 +836,7 @@ func resolve(ctx context.Context, name string, opts Options, extra *Resolution) 
 		if reason := imageUsable(); reason != "" {
 			return MethodNone, "", "", reason
 		}
-		rt, ok := detectRuntime(ctx, runtimePriority)
+		rt, ok := opts.detectRuntime(ctx, runtimePriority)
 		if !ok {
 			if viaMultiscanner {
 				return MethodNone, "", "", multiscannerNoRuntimeReason(opts)
@@ -755,7 +909,7 @@ func resolve(ctx context.Context, name string, opts Options, extra *Resolution) 
 		// something to say when the answer turns out to be an unpinned host run.
 		containerFallbackWhy := ""
 		if viaMultiscanner {
-			if rt, ok := detectRuntime(ctx, runtimePriority); ok {
+			if rt, ok := opts.detectRuntime(ctx, runtimePriority); ok {
 				multiscannerReason = verifyMultiscannerImage(ctx, rt, opts.Multiscanner)
 				if multiscannerReason == "" {
 					multiscannerReason = verifyMultiscannerCache(ctx, rt, name, opts.Multiscanner)
@@ -779,7 +933,7 @@ func resolve(ctx context.Context, name string, opts Options, extra *Resolution) 
 			if reason := imageUsable(); reason != "" {
 				return MethodNone, "", "", reason
 			}
-			if rt, ok := detectRuntime(ctx, runtimePriority); ok {
+			if rt, ok := opts.detectRuntime(ctx, runtimePriority); ok {
 				return MethodContainer, rt, image, ""
 			}
 		}
