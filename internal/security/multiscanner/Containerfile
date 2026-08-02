@@ -168,6 +168,29 @@ RUN set -eux; \
 	done; \
 	chmod -R a+rX /opt/semgrep-rules
 
+# Bake kubescape's rego policy library. Like opengrep's rule packs, kubescape
+# carries no policies in its binary — it fetches them from the regolibrary
+# GitHub release on every run, so a --network none container died outright:
+# "open $HOME/.kubescape/allcontrols.json: no such file or directory" (fatal,
+# exit 1, empty stdout). `download artifacts` is the supported way to
+# pre-populate that cache, and it writes the exact layout the offline loader
+# expects (attack-tracks.json, controls-inputs.json, exceptions.json, one
+# <framework>.json per framework) — hand-fetching the release assets does not:
+# their filenames and contents differ from what the cache loader reads back.
+#
+# Note this only makes the *explicit-framework* path work (`kubescape scan
+# framework allcontrols /src`). Bare `kubescape scan /src` defaults to the
+# "workloadscan" framework, which fails from cache with "framework from file
+# not matching" even when workloadscan.json is present — so the container
+# invocation names a framework (see kubescapeScanner.Scan in ../scanners.go).
+RUN set -eux; \
+	kubescape download artifacts --output "$HOME/.kubescape"; \
+	# An empty/partial cache would leave kubescape fataling at scan time, so
+	# require the framework the scanner actually asks for to be present.
+	test -s "$HOME/.kubescape/allcontrols.json"; \
+	test -s "$HOME/.kubescape/attack-tracks.json"; \
+	chmod -R a+rX "$HOME/.kubescape"
+
 # A scan mounts the workspace read-write at /src but tools must not need to
 # write outside it; /tmp as HOME covers opengrep's dotfile writes.
 WORKDIR /src
@@ -199,11 +222,31 @@ COPY --from=fetch /out/nuclei /usr/local/bin/nuclei
 
 # Each tool lives in its own venv (see the py stage), so put the entrypoints on
 # PATH by name rather than adding a shared venv's bin/ — there isn't one.
+#
+# A wrapper rather than a bare symlink, because njsscan does not only import
+# its engine — it shells out to a `semgrep` binary by name (libsast's
+# core_sgrep invokes it via subprocess). A symlink puts njsscan on PATH but not
+# its venv's siblings, so that lookup escapes to the system PATH. While a
+# standalone semgrep existed at /usr/local/bin/semgrep this happened to
+# resolve; when semgrep was removed as a first-class scanner, njsscan started
+# dying with FileNotFoundError: 'semgrep' on every run. Its own correctly
+# pinned semgrep==1.86.0 was in /opt/venv/njsscan/bin the whole time — just
+# unreachable. Prepending the tool's own venv bin keeps each venv isolated
+# (the reason they're separate) while letting a tool find its own dependencies.
+#
+# Note the --version check below passed throughout that breakage: `njsscan
+# --version` never reaches the semgrep subprocess. A version probe cannot
+# establish that a scanner works — see P55.3.
 RUN set -eux; \
 	for name in bandit njsscan; do \
-	ln -sf "/opt/venv/${name}/bin/${name}" "/usr/local/bin/${name}"; \
+	printf '#!/bin/sh\nexec env PATH="/opt/venv/%s/bin:$PATH" "/opt/venv/%s/bin/%s" "$@"\n' "${name}" "${name}" "${name}" > "/usr/local/bin/${name}"; \
+	chmod 0755 "/usr/local/bin/${name}"; \
 	"/usr/local/bin/${name}" --version >/dev/null 2>&1 || { echo "${name} is not runnable" >&2; exit 1; }; \
-	done
+	done; \
+	# Assert the dependency the wrapper exists for is actually reachable —
+	# this, not --version, is what would have caught the breakage above.
+	env PATH="/opt/venv/njsscan/bin:$PATH" semgrep --version >/dev/null 2>&1 \
+	|| { echo "njsscan cannot reach its bundled semgrep" >&2; exit 1; }
 
 ARG NUCLEI_TEMPLATES_VERSION=v10.4.6
 ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates
