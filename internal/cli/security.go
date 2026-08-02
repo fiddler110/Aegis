@@ -270,24 +270,43 @@ func newSecurityStatusCmd() *cobra.Command {
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "TOOL\tCATEGORY\tMETHOD\tDETAIL")
+			fallbacks := map[string]string{}
 			for _, d := range security.Descriptors() {
-				method, rt, _, reason := security.Resolve(cmd.Context(), d.Name, opts)
-				detail := reason
-				switch method {
+				r := security.ResolveDetailed(cmd.Context(), d.Name, opts)
+				detail := r.Reason
+				switch r.Method {
 				case security.MethodHost:
 					detail = "on PATH"
 				case security.MethodContainer:
-					detail = fmt.Sprintf("via %s", rt)
+					detail = fmt.Sprintf("via %s", r.Runtime)
 				case security.MethodWSL:
 					detail = "via WSL"
 				default:
-					if note := security.AvailabilityNote(d.Name, reason); note != "" {
-						detail = reason + "; " + note
+					if note := security.AvailabilityNote(d.Name, r.Reason); note != "" {
+						detail = r.Reason + "; " + note
 					}
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, d.Category, methodLabel(method), detail)
+				if r.FallbackWhy != "" {
+					fallbacks[d.Name] = r.FallbackWhy
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, d.Category, methodLabel(r.Method), detail)
 			}
 			tw.Flush()
+			// After the table, not before it like the drift warning: this is a
+			// footnote about rows the reader has just seen ("those seven say
+			// host — here's why that isn't what you asked for"), whereas drift
+			// invalidates the whole table and has to be read first.
+			if advisory := security.HostFallbackAdvisory(fallbacks); advisory != "" {
+				fmt.Fprintf(out, "\nnote: %s\n", advisory)
+			}
+			now := time.Now()
+			ages := security.DatabaseAges(cmd.Context(), opts)
+			if table := security.FormatDatabaseAges(ages, now); table != "" {
+				fmt.Fprintf(out, "\n%s", table)
+			}
+			if w := ages.Warning(now); w != "" {
+				fmt.Fprintf(out, "\nwarning: %s\n", w)
+			}
 			return nil
 		},
 	}

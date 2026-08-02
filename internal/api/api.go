@@ -834,9 +834,10 @@ type SecurityToolStatus struct {
 type SecurityStatusResponse struct {
 	Tools []SecurityToolStatus `json:"tools"`
 	// Warnings carries provisioning problems that aren't attributable to a
-	// single tool — currently multiscanner source drift, which affects every
-	// container-method scanner at once and so would be misleading repeated on
-	// each row. Omitted when empty.
+	// single tool: multiscanner source drift, the container→host fallback
+	// advisory (P55.4), and a stale vulnerability-database cache (P55.6). Each
+	// affects every covered scanner at once and so would be misleading
+	// repeated on each row. Omitted when empty.
 	Warnings []string `json:"warnings,omitempty"`
 }
 
