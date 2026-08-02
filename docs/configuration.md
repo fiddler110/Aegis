@@ -221,6 +221,30 @@ provider:
   #   "some-model:latest":
   #     tool_calling: ok    # or "unsupported"
 
+  # Non-native tool-calling fallback (P53.6). "off" (default) | "on".
+  #
+  # For models that cannot speak the provider's tool protocol at all — the
+  # class that emits `{"name": ..., "arguments": ...}` into its prose and then
+  # fabricates the results it never fetched. With the shim on, the tool
+  # schemas are serialized into the system prompt instead of the request's
+  # tools field, and the model calls a tool by writing:
+  #
+  #     <tool_call>
+  #     {"name": "read_file", "arguments": {"path": "main.go"}}
+  #     </tool_call>
+  #
+  # which Aegis parses back into a real tool call. Parsed calls go through the
+  # same permission gate, capability check and workspace confinement as native
+  # ones — the shim changes how a call arrives, never what it may do.
+  #
+  # Explicit-only, and off by default, on purpose: a shim that quietly starts
+  # turning prose into executable tool calls is a security surface. Turn it on
+  # only for a model you know needs it (`aegis doctor` reports the verdict).
+  # The parser is strict — a malformed attempt is refused and corrected, never
+  # repaired into a call the model didn't make — so expect a couple of wasted
+  # turns with a model that also can't follow the prompt format.
+  tool_call_shim: "off"
+
 
 # ── Permission ────────────────────────────────────────────────────────────────
 permission:

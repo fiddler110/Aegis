@@ -8,11 +8,14 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-02 — **P53.5 shipped** (per-model capability records now persist across
-restarts instead of being re-discovered), leaving **P53.6** as the last open item of the P53.x
-local-LLM comparative-review batch. Race detector clean on every touched package. Also **P54.1** — the
-Windows/macOS cross-platform suite fixes, including a real LaTeX confinement bypass on Windows.
-Full suite now green on Windows; `go vet` clean cross-compiled for darwin/arm64 and linux/amd64.
+**Last updated:** 2026-08-02 — **P53.6 shipped**, closing the P53.x local-LLM comparative-review batch
+(**0 open of 6**). Aegis had been detecting a model that writes tool calls into its prose and
+discarding the signal with a notice; `provider.tool_call_shim: on` now serves the tool schemas in the
+system prompt and parses tagged JSON back into real tool calls — opt-in only, through the same
+permission gate as native calls, with a parser that declines a malformed attempt rather than repairing
+it. Earlier the same day: **P53.5** (per-model capability records persist across restarts) and
+**P54.1** (Windows/macOS cross-platform suite fixes, including a real LaTeX confinement bypass on
+Windows). Full suite green on Windows; `go vet` clean cross-compiled for darwin/arm64 and linux/amd64.
 
 **Previously, 2026-08-01** — **P52.15 shipped and P52.17 closed as already-implemented**, taking
 the P52.x full-stack review batch to **2 open of 17** (P52.14 and P52.16, both correctly parked
@@ -2383,6 +2386,101 @@ separately if `structured-build` ever needs it.
 
 ---
 
+
+### P53.6 — Non-native tool-calling shim: act on the signal Aegis was already detecting — SHIPPED 2026-08-02
+
+Aegis detected the exact condition a fallback would handle and then threw the signal away. The P34.2
+check in `engine.go` spots a model writing `{"name": ..., "arguments": ...}` into its prose instead of
+emitting a tool call — the `qwen2.5-coder:1.5b` signature, where a model whose Ollama manifest claims
+tool support cannot speak the protocol and then fabricates the results it never fetched — and the
+comment was explicit that warning was all it would do: *"Name it once; never block."* The daemon's
+model-switch gate emitted a notice and proceeded; `aegis doctor` was diagnostic. A repo-wide search
+found no toolshim, no prompt-based tool-call parsing, no JSON repair. Warn-only was the right first
+move (a prose-only session with such a model is still legitimate, and blocking would have been worse
+than nothing), but it left the 14-27B class — exactly the class the P39.x re-test history keeps
+fighting — unable to do anything at all.
+
+**Shipped.** New `internal/toolshim` plus engine wiring, behind `provider.tool_call_shim` (`"off"`
+default, `"on"`). With the shim on, `turn()` sends **no** native tool schemas; it appends the rendered
+tool catalog and a format contract to the request's system prompt, and the model calls a tool by
+writing `<tool_call>{"name": …, "arguments": {…}}</tool_call>`, which `toolshim.Parse` turns back into
+ordinary `provider.ToolUseBlock` values before the zero-tool-calls branch is ever reached. Everything
+downstream — the loop detector, the budget gates, `runTools`, the tool-failure breaker — sees a normal
+tool round and needs no knowledge of how the calls arrived.
+
+**Three design rules, each load-bearing.**
+
+(1) **Opt-in and explicit, never auto-engaged.** A shim that quietly starts turning prose into
+executable tool calls is a security surface, not a convenience, so nothing switches it on: not a
+failed probe, not a low P53.4 conformance rate. `"auto"` is *rejected* rather than silently accepted,
+because accepting the word today would ship a value that does nothing; the daemon warns at startup on
+any unrecognized value, since "treated as off" is otherwise indistinguishable from "never set".
+Auto-engagement off the persisted rate (`modelcaps.Store.ToolCalling`) stays the follow-up the item
+sequenced it as — worth taking only once that rate is trustworthy.
+
+(2) **No shortcut past the gate.** Parsed calls are `ToolUseBlock`s and nothing else, dispatched
+through the same `runTools` path as native ones — same permission gate, capability check, hooks,
+workspace confinement. By dispatch time the engine cannot tell them apart, which is the point:
+there is deliberately no second execution path to audit. Test-pinned with a denying gate that must
+see exactly one check and let nothing execute.
+
+(3) **Decline, never repair.** goose documents its own parse failures (markdown where JSON was
+requested, malformed JSON, inconsistent shapes) and has an open request for JSON repair
+(block/goose#6688). A parser that repairs is one that can fabricate a call the model never made, with
+real side effects behind it. So `Parse` is strict: an unterminated tag, two JSON values in one tag,
+trailing prose, an unknown tool name, or non-object arguments fails the **whole turn's** calls — not
+just the bad one, because a model that lost the shape once is no longer a trustworthy source for the
+rest. The single tolerated deviation is a markdown fence *inside* the tags: chat-tuned models fence
+JSON by reflex, and unwrapping a fence cannot change what the call says. OpenAI's string-encoded
+`arguments` is unwrapped once and must itself contain an object; `parameters` is accepted as an alias.
+A failed attempt earns a corrective naming the specific reason, bounded at 2 per run
+(`shimFormatNudgeMax`) and retracted from the durable transcript afterwards like every other nudge
+family — leaving malformed tool calls in the transcript would teach a later turn that they belong
+there.
+
+**The two non-obvious integration points.** A shimmed assistant message holds only *text* — the calls
+were parsed out of it, never emitted as `tool_use` blocks — so appending `tool_result` blocks would
+leave them orphaned and get the conversation rejected by the provider. `toolshim.RenderResults`
+formats the round as tagged text instead, labelled with each call's tool name (there is no
+`tool_use_id` to correlate on, so a three-call round would otherwise come back as three anonymous
+blobs). And the shim's catalog rides every request but lives *outside* `conv.System` — appended in
+`turn()` so compaction, session persistence, and checkpoints see a clean transcript — which means the
+proactive-compaction check would undercount the real prompt by exactly what the shim adds, the wrong
+direction for a check whose job is to compact before a local server silently truncates. Estimated
+once per run and added to the fill check.
+
+**Also:** suppressed on the P2.6 step-limit summary turn (that turn asks for prose and no tools;
+serving a catalog and then parsing a call out of the requested summary would defeat it), and wired
+into all four engine construction sites — daemon sessions, in-process spawns, `aegis chat --skill`,
+and the `aegis worker` subprocess backend, because a shimmed parent whose teammates weren't shimmed
+would hand every spawned agent a model that can't act. `aegis doctor`'s zero-tool-calls verdict — the
+one verdict the shim is actually for, as opposed to the inconsistent-rate verdict it would not help —
+now names it as the fix.
+
+**Deliberately not folded in:** grammar-constrained/schema-constrained decoding (Ollama structured
+outputs, llama.cpp GBNF). It attacks the opposite end of the problem — making malformed tool-call JSON
+mechanically impossible rather than parsed-and-declined — and targets models that *do* speak the
+protocol but malform arguments (the P35.2 failure class). None of the six reviewed harnesses does it.
+File separately if pursued; the two share no implementation.
+
+**Prior art, synthesized not copied.** goose's `GOOSE_TOOLSHIM` uses a *second* model
+(mistral-nemo 12-14b) to interpret replies back into structured calls — reported to bring phi4-14b and
+gemma3-27b to roughly llama3.3-70b-native parity. OpenHands' `NonNativeToolCallingMixin` is the
+lighter variant: schemas in the prompt, regex parse, per-model native-vs-non-native from a registry.
+Shipped here is the lighter shape — no second model, no extra inference cost, no second thing that can
+be wrong — with a stricter parser than either. opencode, crush, and pi ship nothing here, so this is
+net-new capability rather than catching up.
+
+Tested: 12 `internal/toolshim` tests (mode parsing incl. rejected `"auto"`, prompt rendering + schema
+compaction, six accepted call shapes, three no-attempt cases that must read as final answers — bare
+call-shaped JSON without tags among them — nine declined-attempt cases each named by reason,
+all-or-nothing on a mixed turn, result rendering) and 7 engine tests (off-by-default changes nothing
+about the request or transcript; end-to-end parse→execute→text-result with no orphaned blocks and the
+caller's system prompt preserved; gate consulted and denial honored; malformed call corrected and not
+executed, corrective retracted; bounded give-up; a plain answer is not a correction; suppressed on the
+step-limit turn), plus 2 config tests. Full suite green.
+
+---
 
 ### P54.1 — Cross-platform suite: a LaTeX confinement bypass on Windows, plus two POSIX-only test assumptions — SHIPPED 2026-08-02
 

@@ -26,6 +26,7 @@ import (
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/toolshim"
 	"github.com/fiddler110/aegis/internal/trace"
 )
 
@@ -261,6 +262,19 @@ type Options struct {
 	// been trusted are all made before Options is built (see
 	// config.ResolveAdditionalRoots).
 	ExtraRoots []sandbox.Root
+	// ToolCallShim (P53.6, provider.tool_call_shim) switches this run to the
+	// non-native tool-calling fallback: tool schemas go into the system prompt
+	// instead of the request's tools field, and the model's tagged JSON is
+	// parsed back into tool calls (internal/toolshim). Off by default and
+	// never engaged automatically — it is reached only by explicit config,
+	// because a shim that quietly starts executing parsed prose is a safety
+	// surface, not a convenience.
+	//
+	// It changes only how calls *arrive*. Parsed calls are ordinary
+	// ToolUseBlocks by the time they reach runTools, so the gate, capability
+	// check, hooks, and workspace confinement all apply unchanged — there is
+	// deliberately no separate dispatch path for them.
+	ToolCallShim bool
 }
 
 // Engine runs the agent loop.
@@ -299,6 +313,7 @@ type Engine struct {
 	logger              *slog.Logger
 	workdir             string
 	extraRoots          []sandbox.Root
+	toolShim            bool
 
 	// writtenFiles tracks workspace-relative paths touched by a successful
 	// write-capability tool call during the current Run, so the output guard
@@ -403,6 +418,7 @@ func New(opts Options) (*Engine, error) {
 		logger:              logger,
 		workdir:             opts.Workdir,
 		extraRoots:          opts.ExtraRoots,
+		toolShim:            opts.ToolCallShim,
 	}, nil
 }
 
@@ -441,6 +457,20 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	var loop *loopDetector
 	if e.loopThreshold > 0 {
 		loop = newLoopDetector(e.loopThreshold)
+	}
+
+	// P53.6: the shim's tool catalog rides every request but is appended in
+	// turn(), outside conv.System, so the proactive-compaction check below would
+	// undercount the real prompt by exactly what the shim adds — the wrong
+	// direction for a check whose whole job is to compact *before* a local
+	// server silently truncates. Estimated once per run rather than per turn:
+	// rendering the full catalog just to measure it every turn would cost more
+	// than the precision is worth, and a mid-run exposure change moves it by
+	// less than the estimate's own error.
+	shimPromptTokens := 0
+	if e.toolShim && e.tools != nil {
+		shimPromptTokens = tokenest.Estimate(toolshim.Prompt(e.tools.Schemas()))
+		emit(Event{Kind: KindNotice, Text: "tool-call shim active (provider.tool_call_shim) — tools are described in the prompt and called as tagged JSON, not via the provider's tool protocol"})
 	}
 
 	e.writtenFilesMu.Lock()
@@ -552,7 +582,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// so when nothing can be compacted the user gets an explicit notice
 		// rather than a model that quietly forgot its instructions.
 		if e.contextWindowTokens > 0 {
-			est := conv.estimatedTokens()
+			est := conv.estimatedTokens() + shimPromptTokens
 			if est > e.contextWindowTokens*85/100 {
 				pct := est * 100 / e.contextWindowTokens
 				compacted := false
@@ -676,6 +706,27 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			toolUses = nil
 		}
 
+		// P53.6: under the shim the request carried no tool schemas, so any call
+		// this turn made is sitting in the reply text. Parse it here — before the
+		// zero-tool-calls branch below — so the whole rest of the loop (loop
+		// detector, budget gates, runTools, failure breaker) sees an ordinary
+		// tool round and needs no knowledge of how the calls arrived.
+		shimParseErr := ""
+		if e.toolShim && !suppressTools && len(toolUses) == 0 {
+			calls, err := toolshim.Parse(assistantText(assistant), e.exposedToolNames(), fmt.Sprintf("shim-%d", iter))
+			switch {
+			case errors.Is(err, toolshim.ErrNoCalls):
+				// No attempt at all — an ordinary final answer.
+			case err != nil:
+				// An attempt that doesn't meet the contract. Nothing runs: a
+				// reply the parser had to guess at is not an input a permission
+				// prompt should be built from.
+				shimParseErr = err.Error()
+			default:
+				toolUses = calls
+			}
+		}
+
 		if len(toolUses) == 0 {
 			tr.WallMS = time.Since(turnStart).Milliseconds()
 			emit(Event{Kind: KindTrace, Trace: &tr})
@@ -686,6 +737,22 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					provider.TextBlock{Text: "[Your response was cut off at the token limit. Continue from where you left off, completing any remaining task steps.]"},
 				}})
 				continue
+			}
+			// P53.6: the model tried to call a tool under the shim and got the
+			// format wrong. Hand back the specific reason and the contract, and
+			// let it try again — bounded, because a model that cannot produce
+			// the shape after two corrections is not going to on the third, and
+			// its prose answer is still worth surfacing.
+			if shimParseErr != "" {
+				if nudges.shimFormatNudges < shimFormatNudgeMax {
+					nudges.shimFormatNudges++
+					emit(Event{Kind: KindNotice, Text: "tool-call shim: could not parse the model's tool call (" + shimParseErr + ") — asking it to reformat"})
+					conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+						provider.TextBlock{Text: shimFormatNudgeText(shimParseErr)},
+					}})
+					continue
+				}
+				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model never produced a parsable tool call — answering from its text instead"})
 			}
 			// P28.3: nothing has been done yet this run (no tool round has
 			// completed), tools are actually available, retries remain, and the
@@ -866,7 +933,17 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
-		conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
+		// P53.6: a shimmed assistant message holds only text — the calls were
+		// parsed out of it, never emitted as tool_use blocks — so tool_result
+		// blocks here would be orphaned and rejected by the provider. Render
+		// them as text instead. Native rounds are unchanged.
+		if e.toolShim {
+			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+				provider.TextBlock{Text: toolshim.RenderResults(toolUses, results)},
+			}})
+		} else {
+			conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
+		}
 		toolRoundsCompleted++
 
 		tr.ToolCalls = toolTraces
@@ -967,6 +1044,11 @@ type nudgeState struct {
 	// run: a second trigger means the corrective didn't work, and the run is
 	// aborted instead of nudged again.
 	loopNudges int
+	// shimFormatNudges counts the P53.6 tool-call-shim format corrective. Bounded
+	// at shimFormatNudgeMax rather than one, because unlike the nudges above this
+	// one is teaching a syntax rather than redirecting a decision, and a small
+	// local model landing it on the second try is a normal outcome.
+	shimFormatNudges int
 }
 
 // retractAll strips every corrective/nudge prompt this run injected from conv,
@@ -987,6 +1069,9 @@ func (n *nudgeState) retractAll(conv *Conversation) {
 	}
 	if n.loopNudges > 0 {
 		retractNudges(conv, loopNudgePrefix)
+	}
+	if n.shimFormatNudges > 0 {
+		retractNudges(conv, shimFormatNudgePrefix)
 	}
 }
 
@@ -1056,6 +1141,25 @@ const emptyAnswerNudgePrefix = "[Your previous response contained no text"
 const emptyAnswerNudgeText = emptyAnswerNudgePrefix + " at all — the user saw an empty reply." +
 	" Reply now with your final answer as plain text. Put the answer itself in your visible" +
 	" response, not in your reasoning.]"
+
+// shimFormatNudgeMax bounds the P53.6 tool-call-shim format corrective per run.
+// Two, not one: the first correction is often enough for a model that simply
+// fenced its JSON or mistyped a tool name, and a second gives it one honest
+// retry — but a model still wrong on the third attempt is not learning the
+// syntax, and continuing to nudge would burn the whole iteration budget on
+// format instruction instead of surfacing the prose answer it can produce.
+const shimFormatNudgeMax = 2
+
+// shimFormatNudgePrefix opens the P53.6 corrective and, like the prefixes
+// above, doubles as the marker its retraction keys on. Retraction matters more
+// here than elsewhere: the failed attempt and its correction are pure protocol
+// scaffolding, and leaving them in the durable transcript would teach a later
+// turn that malformed tool calls are part of the conversation.
+const shimFormatNudgePrefix = "[Your previous response contained a tool call that could not be parsed"
+
+func shimFormatNudgeText(reason string) string {
+	return shimFormatNudgePrefix + ": " + reason + ".\n\n" + toolshim.FormatReminder + "]"
+}
 
 // retractNudges removes corrective-nudge scaffolding — each nudge prompt
 // opening with prefix, and the tool-call-less assistant answer it was reacting
@@ -1270,6 +1374,17 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		req.Tools = e.tools.Schemas()
 	}
 	if suppressTools {
+		req.Tools = nil
+	}
+	// P53.6: under the shim the schemas move from the request's tools field
+	// into the system prompt, and the reply is parsed back into calls by the
+	// caller. Appended to conv.System rather than written into it so the
+	// durable transcript (and everything that reads it — compaction, session
+	// persistence, checkpoints) stays free of harness scaffolding.
+	if e.toolShim && !suppressTools {
+		if shim := toolshim.Prompt(req.Tools); shim != "" {
+			req.System = strings.TrimRight(req.System, "\n") + "\n\n" + shim
+		}
 		req.Tools = nil
 	}
 

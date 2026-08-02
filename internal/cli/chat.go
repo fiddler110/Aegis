@@ -274,6 +274,7 @@ func newChatCmd() *cobra.Command {
 				Model:               cfg.Provider.Model,
 				MaxTokens:           cfg.Provider.MaxTokens,
 				ContextWindowTokens: ctxWin,
+				ToolCallShim:        cfg.Provider.ToolCallShimEnabled(),
 				Logger:              logger,
 				// The CLI drive runs in cwd, so its registry is already rooted
 				// there; additional roots are the only thing it can't derive

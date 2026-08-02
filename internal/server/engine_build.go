@@ -321,6 +321,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		OutputGuard:             guardFn,
 		OutputGuardMaxRetries:   guardRetries,
 		ZeroToolNudgeMaxRetries: s.cfg.Provider.ZeroToolNudge,
+		ToolCallShim:            s.cfg.Provider.ToolCallShimEnabled(),
 		RedactSecrets:           s.cfg.Security.RedactSecrets,
 		Logger:                  s.logger,
 		Workdir:                 workdir,

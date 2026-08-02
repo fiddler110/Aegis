@@ -473,3 +473,54 @@ func TestProviderConfig_LocalPromptProfile(t *testing.T) {
 		})
 	}
 }
+
+// TestProviderConfig_ToolCallShim pins the P53.6 opt-in: the default and every
+// unrecognized spelling leave the shim off, and an unrecognized one is
+// reportable rather than silently equivalent to the default — a user who typed
+// "auto" (the reserved follow-up value) or "true" has a setting that does
+// nothing, and deserves to be told.
+func TestProviderConfig_ToolCallShim(t *testing.T) {
+	tests := []struct {
+		raw         string
+		wantEnabled bool
+		wantValid   bool
+	}{
+		{"", false, true},
+		{"off", false, true},
+		{"on", true, true},
+		{"ON", true, true},
+		{"auto", false, false},
+		{"true", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			p := ProviderConfig{ToolCallShim: tt.raw}
+			if got := p.ToolCallShimEnabled(); got != tt.wantEnabled {
+				t.Errorf("ToolCallShimEnabled(%q) = %v, want %v", tt.raw, got, tt.wantEnabled)
+			}
+			if got := p.ToolCallShimValid(); got != tt.wantValid {
+				t.Errorf("ToolCallShimValid(%q) = %v, want %v", tt.raw, got, tt.wantValid)
+			}
+		})
+	}
+}
+
+// TestToolCallShimDefaultsOff guards the built-in default itself, not just the
+// accessor: the whole safety argument for the shim rests on it never arriving
+// unasked, and that argument is only as good as this key. Asserted against
+// defaults() rather than a full Load so the machine's own config file can't
+// decide whether the test passes.
+func TestToolCallShimDefaultsOff(t *testing.T) {
+	raw, ok := defaults()["provider.tool_call_shim"]
+	if !ok {
+		t.Fatal("provider.tool_call_shim has no built-in default")
+	}
+	s, _ := raw.(string)
+	p := ProviderConfig{ToolCallShim: s}
+	if p.ToolCallShimEnabled() {
+		t.Errorf("provider.tool_call_shim defaults to enabled (%q) — it must be opt-in", s)
+	}
+	if !p.ToolCallShimValid() {
+		t.Errorf("the built-in default %q is not a value the shim recognizes", s)
+	}
+}

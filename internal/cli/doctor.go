@@ -509,7 +509,13 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
 			Detail: fmt.Sprintf("model %q answered an obviously-actionable smoke-test prompt with zero tool calls — %s", cfg.Provider.Model, conf.Summary()),
-			Fix:    "some local models unreliably drive Aegis's tool-calling loop — see docs/providers.md's \"Tool-calling reliability for local models\" section for model families that have and haven't proven reliable",
+			// Zero tool calls across the whole sample is the one verdict the
+			// P53.6 shim is actually for — a model that cannot speak the
+			// protocol, as opposed to one that speaks it inconsistently (the
+			// rate<1 branch below, which the shim would not help). Naming it
+			// here is the point of the check: the condition was detectable long
+			// before there was anything to do about it.
+			Fix: "either switch models — see docs/providers.md's \"Tool-calling reliability for local models\" section for families that have and haven't proven reliable — or set provider.tool_call_shim: on to serve the tool schemas in the prompt and parse calls out of the reply instead",
 		}
 	}
 	// A partial rate is the signal this check exists to surface: a model that

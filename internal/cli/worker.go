@@ -199,7 +199,11 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		MaxWallClockPerRun: cfg.Cost.MaxWallClockPerRun(),
 		Model:              model,
 		MaxTokens:          cfg.Provider.MaxTokens,
-		ExtraRoots:         driveExtraRoots(cwd, cfg, logger),
+		// A subprocess teammate talks to the same model server as its parent, so
+		// it needs the same tool-calling fallback (P53.6) — a shim that applied
+		// only to the parent would leave every spawned agent unable to act.
+		ToolCallShim: cfg.Provider.ToolCallShimEnabled(),
+		ExtraRoots:   driveExtraRoots(cwd, cfg, logger),
 	})
 	if err != nil {
 		return "", cost.Snapshot{}, err
