@@ -23,7 +23,41 @@ const (
 	// smallContextWindowRatio is the fraction of the context window that must
 	// remain free before compaction triggers for small context windows.
 	smallContextWindowRatio = 0.20
+
+	// summarizeReserveBuffer / summarizeReserveRatio size the safety reserve
+	// held back when checking that the summarization request itself fits the
+	// window it exists to stay inside (P53.3). They mirror the trigger
+	// constants above — an absolute floor for large windows, a ratio for small
+	// ones — at half their size, because they cover a different and smaller
+	// error: the trigger buffer absorbs *future* growth, this reserve only has
+	// to absorb how wrong `tokenest` can be about text already in hand.
+	// tokenest is a script-aware heuristic, not a tokenizer, so an estimate
+	// that says a request fits can still be under the truth by a noticeable
+	// margin (unusual scripts, dense JSON/base64 tool payloads); without slack
+	// the "fits" verdict would be exactly as trustworthy as the estimator, and
+	// the whole point of the check is to not issue a request that turns out to
+	// be too large.
+	summarizeReserveBuffer = 10_000
+	summarizeReserveRatio  = 0.10
+
+	// summarizeSystemPrompt and summarizePreamble are the fixed parts of the
+	// summarization request. They are constants (rather than inline literals)
+	// so the fit check can price the *whole* request, not just the transcript.
+	summarizeSystemPrompt = "You compress conversation history. Produce a concise but complete summary that preserves: decisions made, facts established, file paths and identifiers, tool results that matter, and any open tasks or unresolved questions. Use terse bullet points."
+	summarizePreamble     = "Summarize this conversation so far:\n\n"
+
+	// toolResultRuneLimit is the long-standing per-tool-result cap applied when
+	// rendering a transcript, independent of any fit-driven shrinking.
+	toolResultRuneLimit = 800
 )
+
+// blockTruncationLadder is the descending ladder of per-block rune caps tried,
+// in order, when the summarization request does not fit its budget. Truncating
+// oversized individual blocks comes before dropping whole messages: the failure
+// shape this guards against is one very large tool result, and dropping
+// messages to deal with that would discard many small useful ones to fix a
+// single fat one.
+var blockTruncationLadder = []int{4000, 2000, 1000, 500, 250}
 
 // Summarizer implements engine.Compactor.
 type Summarizer struct {
@@ -251,15 +285,107 @@ func (s *Summarizer) boundary(msgs []provider.Message) int {
 	return 0
 }
 
-// summarize asks the model to condense the prefix transcript.
+// summarizeFitBudget reports the maximum estimated token size the
+// summarization request (system prompt + preamble + transcript) may have, or 0
+// when no meaningful budget is known and the fit check is skipped entirely. It
+// falls back from the context window to maxBudget the same way the rest of the
+// file does. A budget no larger than the reserved summary output cannot be a
+// real context window (no model's is) — it is a fixed trigger budget, which
+// says nothing about what a request may weigh — so there is nothing coherent
+// to fit inside and the check is skipped rather than invented. A negative
+// result means even an empty transcript cannot fit; the caller turns that into
+// a (non-fatal) error rather than issuing the request anyway.
+func (s *Summarizer) summarizeFitBudget() int {
+	budget := int(s.contextWindow.Load())
+	if budget <= 0 {
+		budget = s.maxBudget
+	}
+	if budget <= s.summaryTokens {
+		return 0
+	}
+	reserve := summarizeReserveBuffer
+	if budget <= largeContextWindowThreshold {
+		reserve = int(float64(budget) * summarizeReserveRatio)
+	}
+	return budget - s.summaryTokens - reserve
+}
+
+// summarizeRequestTokens estimates the full summarization request — system
+// prompt and preamble included, not just the transcript — using the shared
+// tokenest estimator (the single token heuristic in this repo).
+func summarizeRequestTokens(transcript string) int {
+	return tokenest.Messages(summarizeSystemPrompt, []provider.Message{
+		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: summarizePreamble + transcript}}},
+	})
+}
+
+// fitTranscript renders the prefix into a transcript small enough that the
+// summarization request built from it fits the budget from summarizeFitBudget,
+// and reports how many of the oldest prefix messages had to be dropped to get
+// there (0 in the common case). Shrinking is deterministic and runs in two
+// stages: oversized individual blocks are truncated first (middle-out, with a
+// visible elision marker), and only if that is still not enough are the oldest
+// messages dropped, oldest-first, until it fits.
+func (s *Summarizer) fitTranscript(prefix []provider.Message) (transcript string, dropped int, err error) {
+	full := renderTranscript(prefix)
+	budget := s.summarizeFitBudget()
+	if budget == 0 {
+		return full, 0, nil // no budget to check against
+	}
+	fits := func(t string) bool { return summarizeRequestTokens(t) <= budget }
+	if budget < 0 || !fits("") {
+		// The reserve (or the fixed request scaffolding alone) already exceeds
+		// the whole budget: no amount of shrinking can help. Non-fatal — the
+		// caller logs this and the run continues uncompacted.
+		return "", 0, fmt.Errorf("summarization request cannot fit the context budget (%d tokens available for the transcript)", budget)
+	}
+	if fits(full) {
+		return full, 0, nil
+	}
+
+	// Stage 1: truncate oversized blocks, tightening the cap until it fits.
+	limit := blockTruncationLadder[len(blockTruncationLadder)-1]
+	for _, capRunes := range blockTruncationLadder {
+		limit = capRunes
+		truncated := renderTranscriptCapped(prefix, capRunes)
+		if fits(truncated) {
+			return truncated, 0, nil
+		}
+	}
+
+	// Stage 2: still too large — drop the oldest messages, oldest-first.
+	for n := 1; n < len(prefix); n++ {
+		truncated := renderTranscriptCapped(prefix[n:], limit)
+		if fits(truncated) {
+			return truncated, n, nil
+		}
+	}
+	return "", 0, fmt.Errorf("summarization request cannot be shrunk to fit the context budget (%d tokens available for the transcript)", budget)
+}
+
+// omissionNote is appended to a summary whose transcript had messages dropped.
+// Dropped messages vanish permanently — Compact replaces the entire prefix with
+// the summary — so a silently-lossy summary must never present itself as
+// complete.
+func omissionNote(dropped int) string {
+	return fmt.Sprintf("[Compaction note: the %d earliest message(s) of this span were omitted from the summary — "+
+		"the transcript was too large to summarize even after truncating oversized blocks, so nothing above reflects their content.]", dropped)
+}
+
+// summarize asks the model to condense the prefix transcript, first shrinking
+// that transcript (P53.3) until the request it produces fits the window the
+// compaction exists to stay inside.
 func (s *Summarizer) summarize(ctx context.Context, prefix []provider.Message) (string, error) {
-	transcript := renderTranscript(prefix)
+	transcript, dropped, err := s.fitTranscript(prefix)
+	if err != nil {
+		return "", err
+	}
 	req := provider.Request{
 		Model:     s.model,
 		MaxTokens: s.summaryTokens,
-		System:    "You compress conversation history. Produce a concise but complete summary that preserves: decisions made, facts established, file paths and identifiers, tool results that matter, and any open tasks or unresolved questions. Use terse bullet points.",
+		System:    summarizeSystemPrompt,
 		Messages: []provider.Message{
-			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "Summarize this conversation so far:\n\n" + transcript}}},
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: summarizePreamble + transcript}}},
 		},
 	}
 	stream, err := s.adapter.Stream(ctx, req)
@@ -279,26 +405,55 @@ func (s *Summarizer) summarize(ctx context.Context, prefix []provider.Message) (
 	if out == "" {
 		return "", fmt.Errorf("summarizer returned empty output")
 	}
+	if dropped > 0 {
+		out += "\n\n" + omissionNote(dropped)
+	}
 	return out, nil
 }
 
 func renderTranscript(msgs []provider.Message) string {
+	return renderTranscriptCapped(msgs, 0)
+}
+
+// renderTranscriptCapped renders the transcript, optionally capping every
+// rendered block at cap runes (cap <= 0 means only the standing tool-result
+// limit applies).
+func renderTranscriptCapped(msgs []provider.Message, capRunes int) string {
+	resultLimit := toolResultRuneLimit
+	if capRunes > 0 && capRunes < resultLimit {
+		resultLimit = capRunes
+	}
 	var b strings.Builder
 	for _, m := range msgs {
 		for _, blk := range m.Content {
 			switch v := blk.(type) {
 			case provider.TextBlock:
-				fmt.Fprintf(&b, "%s: %s\n", m.Role, v.Text)
+				fmt.Fprintf(&b, "%s: %s\n", m.Role, truncateForSummary(v.Text, capRunes))
 			case provider.ToolUseBlock:
-				fmt.Fprintf(&b, "%s called tool %s(%s)\n", m.Role, v.Name, string(v.Input))
+				fmt.Fprintf(&b, "%s called tool %s(%s)\n", m.Role, v.Name, truncateForSummary(string(v.Input), capRunes))
 			case provider.ToolResultBlock:
-				result := v.Content
-				if len([]rune(result)) > 800 {
-					result = string([]rune(result)[:800]) + "…"
-				}
-				fmt.Fprintf(&b, "tool result: %s\n", result)
+				fmt.Fprintf(&b, "tool result: %s\n", truncateForSummary(v.Content, resultLimit))
 			}
 		}
 	}
 	return b.String()
+}
+
+// truncateForSummary shortens s to roughly limit runes, middle-out: head and
+// tail are kept and the middle is replaced by an explicit marker. The marker is
+// deliberately visible — a summarizing model must not mistake a truncated block
+// for a complete one. limit <= 0 means no truncation.
+func truncateForSummary(s string, limit int) string {
+	if limit <= 0 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	head := limit / 2
+	tail := limit - head
+	return string(r[:head]) +
+		fmt.Sprintf("\n…[truncated by compaction: %d characters elided]…\n", len(r)-limit) +
+		string(r[len(r)-tail:])
 }

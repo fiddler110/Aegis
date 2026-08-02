@@ -2378,6 +2378,122 @@ separately if `structured-build` ever needs it.
 ---
 
 
+### P53.4 — `toolcallprobe` reports a conformance rate, not just a boolean — SHIPPED 2026-08-01
+
+The probe ran one smoke prompt and reported `ToolCalls`/`Truncated` — answering "can this model ever
+emit a tool call" but not "how often does it", and the second question is the one deciding whether an
+unattended drive survives. A model that complies 60% of the time passed cleanly and then failed a long
+run in a way that looked like a harness bug, which is the class of confusion the P39.x re-test history
+is full of. aider's polyglot leaderboard publishes percent-using-the-correct-edit-format as a second
+column for exactly this reason; goose publishes the gradient informally (discussion #1403) and ships
+no probe at all.
+
+**Shipped.** `Run` is untouched — same signature, same contract, same single-trial semantics, since it
+is the fast path other code depends on. New `internal/toolcallprobe/conformance.go` adds
+`RunTrials(ctx, adapter, model, trials)` returning a `Conformance{Trials, ToolCallTrials, NoVerdict,
+Results, Err}` with `Denominator()`, `Rate() (float64, bool)`, `Verdict()`, and `Summary()`. Trials
+run **sequentially** on purpose: a local model server serializes generation anyway, so concurrency
+would only distort latency and, on a memory-tight box, the results.
+
+**The no-verdict accounting is the point.** `Run`'s contract — `ToolCalls == 0 && Truncated` is *no
+verdict*, never failure — is preserved **per trial**, and such trials are excluded from the
+denominator rather than counted as misses; aggregating them as failures would silently re-introduce
+the P34.2 false positive the contract exists to prevent. Rate is `ToolCallTrials / (Trials −
+NoVerdict)`. A trial that made a call and *then* truncated counts as a call. When every trial is
+no-verdict there is **no rate at all** — `Rate()` returns `ok=false` and `Verdict()` returns
+`Unknown`, so there is no bare float that could read as 0.0 and accuse a model the probe never got an
+answer out of. `Verdict()` is deliberately *not* a threshold on the rate: "made a tool call at least
+once" is the claim this probe can justify, and turning a partial rate into an `Unsupported` verdict is
+a policy decision belonging to whatever engages a fallback (P53.6), not to the measurement.
+
+**Transport errors abort only if nothing was measured.** A first-trial failure returns an error,
+identical to `Run`. A failure after ≥1 successful trial stops the loop and returns the partial sample
+with `Conformance.Err` set and a nil error — a rate over 3 of 5 trials is worth more than discarding
+the sample — and `Summary()` says "sample cut short after N trial(s)".
+
+**Config:** `provider.tool_call_probe_trials`, default 5 (the sample `SmokeMaxTokens`'s own
+calibration used). `1` or less reproduces pre-P53.4 behavior exactly — one `Run`, no background
+goroutine — and that equivalence is test-pinned at both `RunTrials` and `Gate`.
+
+**`aegis doctor`** runs the full sample inline and reports the rate. Because that is up to N× slower,
+it announces the cost *before* any check runs rather than appearing to hang, naming the trial count,
+the model, the per-trial bound, and the config key to turn it off; the announcement is suppressed for
+cloud/unresolved-model configs and for `trials=1`. The command's overall timeout grows per extra trial
+so the extra trials cannot starve the other rows.
+
+**The daemon must not pay for this, and doesn't.** `Gate` is consulted from the message path before
+the user's first reply, so five sequential generations inline would be minutes of dead air on a model
+running at single-digit tokens/sec. The **first** trial runs exactly as before and produces the
+blocking verdict; the remaining trials run in **one background goroutine per model**, publishing each
+result as it lands so even a cancelled refinement contributes what it measured. It is parented to the
+gate's own lifetime context (`bgCtx` from `context.Background()`), explicitly **not** the per-request
+context — that one is cancelled the moment the message completes, which is roughly when refinement
+would be starting, and a regression test cancels the request context and asserts no background trial
+dies with it. Each background trial is bounded by the same `ProbeTimeout`; `Gate.Close()` cancels
+`bgCtx` and waits with a 2s grace (blocking daemon shutdown on a slow model server would be the worse
+trade) and is called from the server's shutdown branch. Refinement is scheduled inside the existing
+singleflight flight and further guarded by a `refining[model]` map so a re-probe cannot start a
+second. All conformance state lives behind the gate's existing mutex; `-race` clean on
+`internal/toolcallprobe` and `internal/server`.
+
+The live tier (`probe_live_test.go`, `live_probe` tag) had a hand-rolled 5-run loop; it now calls
+`RunTrials` + `Rate()`, so the tier that exists to check the probe against real model behavior
+exercises the shipped accounting rather than a parallel copy of it. Feeds **P53.5** (the rate is the
+value worth persisting) and **P53.6** (the rate is the natural trigger for engaging a fallback).
+
+---
+
+### P53.3 — Compaction reserves headroom for its own summarization call — SHIPPED 2026-08-01
+
+`summarize` sent the **entire** prefix transcript in one unbounded request — no chunking, no size
+cap, and no check that the resulting request fit the window it exists to stay inside. goose has hit
+this repeatedly and unrecoverably (block/goose#8642, #4635: compaction fires too late, the
+summarization call itself exceeds the limit, session dead). Aegis was better protected — the trigger
+leaves real slack, `pruneStaleToolResults` runs first and unconditionally, and a failed compaction is
+non-fatal (logged, run continues uncompacted, falling through to reactive `RaiseContextWindow`) — so
+this shipped as hardening, not a live-bug fix.
+
+**Shipped.** `fitTranscript` runs before the request is built. `summarizeFitBudget` = context window
+(or `maxBudget`) − `summaryTokens` − a reserve; `summarizeRequestTokens` prices the **whole** request
+via `tokenest` (the repo's single estimator — no second heuristic), including the system prompt and
+preamble, which were extracted into `summarizeSystemPrompt`/`summarizePreamble` constants precisely so
+they could be counted. If it does not fit, a deterministic two-stage shrink runs: **stage 1**
+truncates oversized individual blocks middle-out down a descending rune-cap ladder
+(`{4000, 2000, 1000, 500, 250}`), re-estimating at each step; **stage 2**, only if that is still
+insufficient, drops the oldest messages one at a time. If even that cannot fit, it returns an error
+rather than issuing a request already known to be too large — non-fatal, on the existing logged path.
+
+`summarizeReserveBuffer = 10_000` / `summarizeReserveRatio = 0.10` mirror the trigger constants
+(`largeContextWindowBuffer` 20k / `smallContextWindowRatio` 0.20) at half size, across the same
+`largeContextWindowThreshold` split. Half is the point: the trigger buffer absorbs *future* growth,
+while this reserve only has to absorb how wrong `tokenest` can be about text already in hand.
+
+**Truncation is marked, and omission is admitted.** Middle-out keeps both what a block is and what it
+concluded, with a visible `…[truncated by compaction: N characters elided]…` marker so the
+summarizing model cannot mistake a truncated block for a complete one. Stage-2 drops are worse than
+lossy — `Compact` replaces the whole prefix with the summary, so anything dropped is gone from
+history with no record — so when stage 2 fires, the returned summary carries an explicit note that
+the N earliest messages were omitted and nothing above reflects their content. A silently-lossy
+summary must never present itself as complete.
+
+**Two things worth knowing.** (1) The fit check is skipped when the budget is `<= summaryTokens`, not
+only when it is 0. Several existing tests and the `MaxBudget` semantics use a tiny fixed *trigger*
+budget (`MaxBudget: 5`, `400`; the server uses `1`), which is not a context window and says nothing
+about what a request may weigh — treating one as a fit budget would turn every such caller into a
+hard error. Real windows (2048 up) are still checked. (2) The roadmap filed this against "a single
+very large tool result", but that shape was already largely defused: `renderTranscript` has long
+capped tool results at 800 runes. The genuinely uncapped paths are **text blocks and tool-use
+inputs**, so those are what stage 1 actually protects, and the tests exercise a giant text block for
+that reason. The standing 800-rune tool-result cap now carries the same explicit marker instead of a
+bare `…`.
+
+`boundary`'s pairing invariant is untouched: `Compact` replaces the entire prefix with one summary
+message and re-appends `msgs[boundary:]` verbatim, so truncating and dropping only affect rendered
+text that never reaches the wire as blocks — no `tool_use`/`tool_result` pair can be split. Five
+regression tests in a new `fit_test.go`, including one proving the common path renders unchanged.
+
+---
+
 ### P53.2 — Loop detector: polling exemption + differentiated outcomes — SHIPPED 2026-08-01
 
 Two defects in one mechanism, found by cross-checking against OpenHands' Stuck Detector. **(a)** An

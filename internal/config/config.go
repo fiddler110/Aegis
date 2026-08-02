@@ -500,6 +500,19 @@ type ProviderConfig struct {
 	// and any-to-local failover never requires this flag. Guards against a
 	// local-only session silently sending data off the machine on an outage.
 	AllowCloudFallback bool `koanf:"allow_cloud_fallback"`
+	// ToolCallProbeTrials is how many times the tool-calling smoke probe
+	// (internal/toolcallprobe) is run when measuring a model's conformance
+	// *rate* rather than a yes/no verdict (P53.4). Default
+	// toolcallprobe.DefaultTrials (5) — the sample SmokeMaxTokens's own
+	// calibration used. 1 reduces the probe to a single trial, exactly the
+	// pre-P53.4 behavior, and disables the daemon's background refinement
+	// entirely. Only ever applies to local Ollama-style providers, the same
+	// scope the probe itself has. In the daemon the first trial is the only
+	// one on the message path — the rest run in the background — so raising
+	// this never adds first-message latency; in `aegis doctor` it is fully
+	// blocking, which is why that command announces the trial count before
+	// starting.
+	ToolCallProbeTrials int `koanf:"tool_call_probe_trials"`
 	// PromptProfile selects the system-prompt/tool-exposure shape (P25.6):
 	// "auto" (default) infers from BaseURL — loopback/localhost gets the
 	// "local" profile (trimmed prompt, web_search/web_fetch/security_scan/
@@ -1004,6 +1017,10 @@ func defaults() map[string]any {
 		"provider.max_tokens":     32768,
 		"provider.max_retries":    4,
 		"provider.prompt_profile": "auto",
+		// Sample size for the tool-calling conformance probe (P53.4). Mirrors
+		// toolcallprobe.DefaultTrials — spelled as a literal here to keep the
+		// config package free of a dependency on the probe.
+		"provider.tool_call_probe_trials": 5,
 		"server.addr":             "127.0.0.1:4127",
 		// Conservative non-zero caps by default (P27.12/FIND-14) — see
 		// ServerConfig's doc comments for why these values are safe for a

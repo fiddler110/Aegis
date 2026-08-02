@@ -1106,7 +1106,11 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 // newWithDeps assembles a Server from explicit dependencies. It is the seam
 // used by tests to inject a mock adapter and an in-memory store.
 func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, adapter provider.Adapter, tools *tool.Registry) *Server {
-	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry(), toolCalling: toolcallprobe.NewGate()}
+	// The gate probes once inline (the message path's blocking verdict) and
+	// refines the rest of the P53.4 conformance sample in the background, so
+	// provider.tool_call_probe_trials never costs first-message latency.
+	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry(),
+		toolCalling: toolcallprobe.NewGate(toolcallprobe.WithTrials(cfg.Provider.ToolCallProbeTrials))}
 	if cfg.Server.MaxConcurrentRuns > 0 {
 		s.runSem = make(chan struct{}, cfg.Server.MaxConcurrentRuns)
 	}
@@ -1296,6 +1300,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		defer cancel()
 		if s.cronCancel != nil {
 			s.cronCancel()
+		}
+		if s.toolCalling != nil {
+			// Cancels any background conformance refinement (P53.4) so probe
+			// goroutines die with the daemon rather than generating against a
+			// model server nobody is listening to.
+			s.toolCalling.Close()
 		}
 		if s.swarm != nil {
 			s.swarm.Shutdown(shutdownCtx)

@@ -11,16 +11,14 @@ keep it when adding items.
 
 ## Status
 
-**Open items (10).** Tier 2: the **P53.x local-LLM comparative-review batch** — **P53.3** (compaction
-reserves no headroom for its own summarization call), **P53.4** (`toolcallprobe` reports a boolean,
-not a conformance rate) — plus **P38.1**. Tier 3: **P53.5** (persist per-model capability records
+**Open items (8).** Tier 2: **P38.1** only. Tier 3: **P53.5** (persist per-model capability records
 instead of re-discovering them each restart) and **P53.6** (no fallback for models that fail the
-tool-calling probe — the batch's confirmed capability gap and highest-value item). Suggested build
-order is document order: P53.3 → P53.4 → P53.5 → P53.6, with the last three sequenced by a real
-dependency chain (P53.4's conformance rate is the value P53.5 persists and the signal P53.6 engages
-on). The batch's first two items — **P53.1** (stale `WithKeepAlive` comment) and **P53.2** (loop
-detector: polling exemption + differentiated outcomes) — shipped 2026-08-01; see
-[releases.md](releases.md).
+tool-calling probe — the batch's confirmed capability gap and highest-value item), the last two of
+the **P53.x local-LLM comparative-review batch**. Build order is P53.5 → P53.6: P53.5 is where
+P53.4's conformance rate gets persisted, and P53.6 consumes that rate as its engagement signal. The
+batch's whole Tier-2 half — **P53.1** (stale `WithKeepAlive` comment), **P53.2** (loop detector:
+polling exemption + differentiated outcomes), **P53.3** (compaction summarization-call headroom) and
+**P53.4** (probe conformance rate) — shipped 2026-08-01; see [releases.md](releases.md).
 
 Tier 2 also: **P38.1** — the threat-model conformance umbrella. Mechanism
 (recon → scaffold → incremental fill, no orchestration mis-route) is live-confirmed repeatedly;
@@ -70,14 +68,13 @@ P51.1, P50.1, and the P47.x batch head).
 
 ## Open Work — Tier 2
 
-**Status:** 3 open — the **P53.x local-LLM comparative-review batch** (**P53.3**-**P53.4**, filed
-2026-08-01; **P53.1**/**P53.2** shipped 2026-08-01) plus **P38.1** (threat-model conformance
-umbrella). The
-P53.x items are listed first deliberately: P38.1 is live-run verification tracking, not independent
-build work, so leaving it at the head of the tier made `roadmap-status.sh` suggest a non-buildable
-item indefinitely. The rest of the earlier batch — P52.3, P52.4, P52.5, P52.6, P52.7, P52.8, P52.9,
-P52.10, P52.11, the full P47.x self-contained batch, P48.1, P49.1, and P50.2/P50.3/P50.4 — has
-shipped; see [releases.md](releases.md).
+**Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
+tracking rather than independent build work, so `roadmap-status.sh` will now suggest a non-buildable
+item at the head of this tier until a live re-confirmation run happens. The **P53.x local-LLM
+comparative-review batch**'s Tier-2 half (**P53.1**-**P53.4**, filed and shipped 2026-08-01) and the
+earlier batch — P52.3, P52.4, P52.5, P52.6, P52.7, P52.8, P52.9, P52.10, P52.11, the full P47.x
+self-contained batch, P48.1, P49.1, and P50.2/P50.3/P50.4 — have shipped; see
+[releases.md](releases.md). The next buildable work is Tier 3's **P53.5**.
 
 **P53.x batch origin.** A comparative review (2026-08-01) of how six frontier harnesses — opencode,
 crush, pi, aider, OpenHands, goose — drive local models, cross-checked line-by-line against Aegis.
@@ -95,58 +92,6 @@ limitation is separately tracked as **P52.16**), `<think>`-before-tool-parse ord
 impossible to break on the native path — reasoning and tool calls arrive in separate NDJSON fields,
 `ollama.go:590-600`), and tool-set shrinking for weak models (P25.6, `builtin.go:170-180`). What
 follows is what survived verification.
-
-### P53.3 — Compaction reserves no headroom for its own summarization call
-
-`summarize` sends the **entire** prefix transcript in one unbounded request
-(`compaction.go:254-264`) — no chunking, no size cap, and no check that the resulting request fits
-the window it is trying to stay inside. The failure shape is therefore structurally present, and it
-is one goose has hit repeatedly and unrecoverably (block/goose#8642, #4635: compaction fires too
-late, the summarization call itself exceeds the limit, the session is dead).
-
-Aegis is meaningfully better protected than goose, which is why this is Tier 2 hardening and not a
-Tier 1 bug. Three things blunt it: the trigger leaves real slack (20% of the window free, or an
-absolute 20k above a 200k window — `compaction.go:19-25`); the deterministic
-`pruneStaleToolResults` pass runs first and unconditionally (`compaction.go:149`); and, decisively,
-a failed compaction is **not** session-fatal — `Compact`'s error is logged as "context compaction
-failed" and the run continues with uncompacted messages (`engine.go:412-414`), falling through to
-the reactive `RaiseContextWindow` path.
-
-Residual risk is real but bounded: `tokenest` is a heuristic, so a single very large tool result
-landing between two checks can push the prefix past the window with no reserve to catch it. Fix
-would be a fit check before the summarization request with a fallback that drops or truncates the
-oldest prefix entries until it fits, rather than issuing a request already known to be too large.
-
-**Priority:** Tier 2, Effort S — a bounded, self-contained check at one call site with an existing
-non-fatal failure path to fall back to.
-
-### P53.4 — `toolcallprobe` reports a boolean verdict, not a conformance rate
-
-The probe runs one smoke prompt (`probe.go:26-41`) and reports `ToolCalls`/`Truncated`
-(`probe.go:56-66`). That answers "can this model ever emit a tool call" but not "how often does it",
-and the second question is the one that decides whether an unattended drive survives. A model that
-complies 60% of the time passes the probe cleanly and then fails a long run in a way that looks like
-a harness bug — precisely the class of confusion the P39.x re-test history is full of.
-
-aider's polyglot leaderboard is the pattern worth copying: it publishes **two** numbers per model,
-percent-correct and percent-using-the-correct-edit-format. That second column *is* a capability
-probe, and it is how an aider user learns a model cannot hold the output contract before committing
-to a session. goose publishes the analogous gradient informally (block/goose discussion #1403: vs
-Sonnet 3.5, 32B ≈ −30%, 14B ≈ −50%, 8B unreliable) but ships no probe at all.
-
-Change: run the probe N times (N configurable, default small — 5 matches the sample the
-`SmokeMaxTokens` calibration itself used, per `probe.go:48-53`) and report a rate plus the existing
-per-run truncation detail. The existing "`ToolCalls == 0 && Truncated` is *no verdict*, never
-failure" contract (`probe.go:60-65`) must be preserved per-trial and excluded from the denominator,
-not counted as a miss — that contract is what P34.2 was filed to establish and it is easy to
-accidentally regress when aggregating. Surface the rate in `aegis doctor` and in the daemon's
-model-switch notice.
-
-Feeds **P53.5** (the rate is the value worth persisting) and **P53.6** (the rate is the natural
-trigger for engaging a fallback). Build it before either.
-
-**Priority:** Tier 2, Effort S/M — mostly a loop plus aggregation around an existing probe; the care
-is in the no-verdict accounting and in not making `doctor` N× slower without saying so.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
