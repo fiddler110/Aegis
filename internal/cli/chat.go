@@ -118,7 +118,7 @@ func newChatCmd() *cobra.Command {
 				}
 			}
 
-			adapter, err := providerfactory.Build(cfg, nil)
+			adapter, err := providerfactory.Build(cfg, nil, providerfactory.WithModelCaps(cfg.OpenModelCaps()))
 			if err != nil {
 				return err
 			}

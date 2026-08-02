@@ -59,6 +59,33 @@ type Adapter struct {
 	// a sibling model that supports it. Values are always true; presence is
 	// the signal.
 	thinkRejected sync.Map // model name -> bool
+
+	// caps, when set, backs thinkRejected with an on-disk record so the latch
+	// survives process exit (P53.5). It stays a *cache in front of* the
+	// in-memory map, not a replacement: the map is the hot path and the only
+	// thing Stream consults per request, and a store miss falls through to the
+	// live discovery path exactly as before. It also carries the user's
+	// declared overrides, which is why a store hit can say "not rejected" and
+	// must be honored — that is how a stale latch is retracted without
+	// deleting the file.
+	caps CapabilityStore
+	// capsLoaded remembers which models have had their persisted verdict
+	// consulted, so a model whose record says nothing doesn't re-read on every
+	// request.
+	capsLoaded sync.Map // model name -> bool
+}
+
+// CapabilityStore is the slice of internal/modelcaps this adapter needs.
+// Declared as an interface here so the provider package doesn't depend on the
+// store (and so tests can substitute a trivial fake); *modelcaps.Store
+// satisfies it, including as a nil pointer, which is why no nil check is
+// needed beyond the interface itself.
+type CapabilityStore interface {
+	// ThinkRejected reports the persisted-or-declared verdict for model, and
+	// whether one exists at all.
+	ThinkRejected(model string) (rejected bool, known bool)
+	// SetThinkRejected persists a newly-discovered rejection.
+	SetThinkRejected(model string, rejected bool)
 }
 
 // Option configures the adapter.
@@ -89,6 +116,14 @@ func WithHeaders(h map[string]string) Option {
 // plain content-only responses. Nil (the default) omits the parameter.
 func WithThink(v *bool) Option {
 	return func(a *Adapter) { a.think = v }
+}
+
+// WithCapabilityStore backs the per-model `think`-rejection latch with a
+// persistent store (P53.5), so a restart doesn't re-send the request a model
+// has already been proven to reject. Omitting it leaves the latch
+// process-lifetime only, exactly as before.
+func WithCapabilityStore(s CapabilityStore) Option {
+	return func(a *Adapter) { a.caps = s }
 }
 
 // WithNumCtx sets the adapter's default serving context window
@@ -372,7 +407,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	// of the session.
 	think := a.think
 	if think != nil {
-		if _, latched := a.thinkRejected.Load(req.Model); latched {
+		if a.thinkIsRejected(req.Model) {
 			think = nil
 		}
 	}
@@ -398,6 +433,11 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 				if _, already := a.thinkRejected.LoadOrStore(req.Model, true); !already {
 					a.logger.Warn("ollama: model rejected the think parameter; retried without it and will omit it for this model from now on",
 						"model", req.Model, "error", rejection)
+					// P53.5: persist it too, so "from now on" means past this
+					// process rather than only until the next restart.
+					if a.caps != nil {
+						a.caps.SetThinkRejected(req.Model, true)
+					}
 				}
 			}
 		}
@@ -409,6 +449,34 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	out := make(chan provider.Event)
 	go consume(ctx, resp.Body, out)
 	return out, nil
+}
+
+// thinkIsRejected reports whether `think` must be omitted for model: the
+// in-memory latch first, then — once per model — the persisted/declared record
+// (P53.5).
+//
+// The persisted answer is folded into the in-memory map only when it says
+// "rejected". A store that says "not rejected" (a user declaring `think: true`)
+// is honored by simply not latching, which leaves the live discovery path
+// intact: if the model really does reject it, the retry-and-latch below fires
+// as it always did. That asymmetry is what keeps a wrong persisted value from
+// wedging anything — the worst it can cost is one re-discovered 400.
+func (a *Adapter) thinkIsRejected(model string) bool {
+	if _, latched := a.thinkRejected.Load(model); latched {
+		return true
+	}
+	if a.caps == nil || model == "" {
+		return false
+	}
+	if _, seen := a.capsLoaded.LoadOrStore(model, true); seen {
+		return false
+	}
+	rejected, known := a.caps.ThinkRejected(model)
+	if known && rejected {
+		a.thinkRejected.Store(model, true)
+		return true
+	}
+	return false
 }
 
 // isThinkRejected reports whether err is the HTTP 400 Ollama returns when a

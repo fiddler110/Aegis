@@ -36,6 +36,7 @@ import (
 	"github.com/fiddler110/aegis/internal/lsp"
 	"github.com/fiddler110/aegis/internal/mcp"
 	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/modelcaps"
 	"github.com/fiddler110/aegis/internal/notify"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
@@ -77,6 +78,10 @@ type Server struct {
 	checkpoints *checkpoint.Store
 	fileTracker *filetracker.Tracker
 	toolCalling *toolcallprobe.Gate // P34.2: per-model tool-calling verdict cache
+	// modelCaps is the P53.5 on-disk capability cache shared by the adapter
+	// (the `think`-rejection latch) and toolCalling (probe verdict + P53.4
+	// conformance sample). Nil in tests built through newWithDeps.
+	modelCaps *modelcaps.Store
 	// toolCallWarned records the (session, model) pairs already warned about a
 	// tool-incapable model, so the notice informs once rather than nagging every
 	// turn. Written only when a model actually fails the probe.
@@ -494,9 +499,16 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
+	// Per-model capability cache (P53.5): opened before the adapter so the
+	// Ollama adapter starts with the `think`-rejection latches a previous
+	// process already paid for, and reconciled against the models actually
+	// present so a re-pulled tag can't inherit the old weights' verdicts.
+	modelCaps := cfg.OpenModelCaps()
+	reconcileModelCaps(cfg, modelCaps, logger)
+
 	// A missing API key is not fatal: the daemon still serves session
 	// management and reports the error only when a turn is actually run.
-	adapter, err := providerfactory.Build(cfg, logger)
+	adapter, err := providerfactory.Build(cfg, logger, providerfactory.WithModelCaps(modelCaps))
 	if err != nil {
 		logger.Warn("provider not ready; message runs will fail until configured", "err", err)
 		adapter = nil
@@ -681,6 +693,17 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	s = newWithDeps(cfg, logger, store, adapter, reg)
+	// Hand the tool-calling gate the same capability store the adapter got, so
+	// a probe verdict measured in an earlier process is reused instead of
+	// re-run (P53.5). Replacing the gate rather than parameterising
+	// newWithDeps keeps that constructor's 50-odd test call sites untouched,
+	// and is safe because nothing has consulted the gate yet — it is only ever
+	// reached from a run, which cannot start until New returns.
+	s.modelCaps = modelCaps
+	s.toolCalling = toolcallprobe.NewGate(
+		toolcallprobe.WithTrials(cfg.Provider.ToolCallProbeTrials),
+		toolcallprobe.WithStore(modelcaps.ProbeStore{S: modelCaps}),
+	)
 	// Parse text-based permission rules once at startup. A malformed rule is
 	// logged and skipped rather than aborting the daemon.
 	if len(cfg.Permission.Rules) > 0 {

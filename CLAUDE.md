@@ -164,6 +164,7 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/cron` | Cron scheduler for background tasks; shelled commands run under a fixed `cronJobTimeout` (10 min, `internal/server/helpers.go`) |
 | `internal/guard` | Output validation — calls a second model pass against a rubric or JSON schema |
 | `internal/toolcallprobe` | Tool-calling smoke probe shared by `aegis doctor` and the daemon's model-switch warning — checks a model can actually emit tool calls before a session relies on it |
+| `internal/modelcaps` | Persisted per-model capability cache (`<data_dir>/model_caps.json`): the `think`-rejection latch, the tool-calling probe verdict + conformance rate, and the manifest's native-tool claim. Records are keyed to the model's **content digest** (a mutable Ollama tag can't inherit the old weights' verdicts) and are a cache only — deleting the file costs a re-probe, never correctness. Precedence: `provider.model_capabilities` declarations > persisted-discovered > live discovery |
 | `internal/eval` | Scenario-based agent-behavior regression harness: scripted multi-turn conversations run against a real engine (deterministic adapter, no live model) with tool-call/text/error assertions and golden transcripts |
 
 ### Provider model

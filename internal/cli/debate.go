@@ -72,7 +72,7 @@ func newDebateCmd() *cobra.Command {
 				return err
 			}
 
-			adapter, err := providerfactory.Build(cfg, nil)
+			adapter, err := providerfactory.Build(cfg, nil, providerfactory.WithModelCaps(cfg.OpenModelCaps()))
 			if err != nil {
 				return err
 			}

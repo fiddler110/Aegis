@@ -30,18 +30,40 @@ import (
 // value, including "-1" or "0", overrides it.
 const defaultOllamaKeepAlive = "30m"
 
+// Option configures a Build call.
+type Option func(*options)
+
+type options struct {
+	caps ollama.CapabilityStore
+}
+
+// WithModelCaps backs the built adapter with the persistent per-model
+// capability store (P53.5), so a discovered quirk — today, the `think`-
+// rejection latch — survives process exit instead of being re-paid with a
+// failed request on every start. Only the Ollama adapter consumes it; the
+// cloud adapters declare their capabilities statically.
+//
+// Passing a typed-nil store is safe and reduces to the unwired behavior.
+func WithModelCaps(s ollama.CapabilityStore) Option {
+	return func(o *options) { o.caps = s }
+}
+
 // Build constructs the adapter selected by cfg.Provider.Default, wrapped with
 // retry/backoff for transient failures, and — when cfg.Provider.Fallback is
 // non-empty — chained with failover to those providers on exhausted retries
 // (P5.9). Pass a non-nil logger so retry/failover WARN messages go there
 // instead of slog.Default() (which writes to stderr and would corrupt the
 // TUI display).
-func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
+func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Adapter, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	var o options
+	for _, fn := range opts {
+		fn(&o)
+	}
 
-	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger)
+	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger, o.caps)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +84,7 @@ func Build(cfg *config.Config, logger *slog.Logger) (provider.Adapter, error) {
 			continue
 		}
 		apiKey := config.ProviderAPIKey(fb.Provider)
-		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger)
+		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger, o.caps)
 		if err != nil {
 			logger.Warn("provider fallback: skipping misconfigured fallback", "provider", fb.Provider, "err", err)
 			continue
@@ -157,7 +179,7 @@ func validateBaseURL(name, apiKey, baseURL string, logger *slog.Logger) error {
 // the primary and every fallback target so their construction rules
 // (base URL defaults, thinking/reasoning options, key requirements) stay
 // identical.
-func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, responseHeaderTimeout time.Duration, logger *slog.Logger) (provider.Adapter, error) {
+func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, responseHeaderTimeout time.Duration, logger *slog.Logger, caps ollama.CapabilityStore) (provider.Adapter, error) {
 	if err := validateBaseURL(name, apiKey, baseURL, logger); err != nil {
 		return nil, err
 	}
@@ -213,6 +235,9 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 			keepAlive = defaultOllamaKeepAlive
 		}
 		opts = append(opts, ollama.WithKeepAlive(keepAlive))
+		if caps != nil {
+			opts = append(opts, ollama.WithCapabilityStore(caps))
+		}
 		return ollama.New(opts...), nil
 
 	case "openai":

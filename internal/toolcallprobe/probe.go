@@ -128,15 +128,29 @@ const (
 // proceed either way.
 const ProbeTimeout = 90 * time.Second
 
+// Store is the slice of internal/modelcaps the Gate needs, declared as an
+// interface so this package stays free of the store's dependencies and tests
+// can substitute a fake. Verdicts cross the boundary as the strings "ok" and
+// "unsupported"; Unknown is never persisted and never returned.
+type Store interface {
+	// ToolCalling returns the persisted-or-declared sample for model.
+	ToolCalling(model string) (verdict string, trials, toolCallTrials, noVerdict int, ok bool)
+	// SetToolCalling persists a sample. Implementations must ignore a verdict
+	// that is neither "ok" nor "unsupported".
+	SetToolCalling(model, verdict string, trials, toolCallTrials, noVerdict int)
+}
+
 // Gate caches one verdict per model name and collapses concurrent probes of the
 // same model into a single call.
 //
-// The cache is deliberately in-memory and never persisted: an Ollama tag is
-// mutable (`ollama pull` can replace what "qwen3:14b" means without the name
-// changing), so a verdict written to disk could outlive the model it describes
-// and warn about a model since replaced by a capable one. A process-lifetime
-// cache is short enough for that to stay unlikely, and the probe is cheap
-// enough to repay on restart.
+// The in-memory cache is per process; a Store (P53.5), when one is installed,
+// carries it across restarts. Persisting was long refused here for a real
+// reason — an Ollama tag is mutable (`ollama pull` can replace what "qwen3:14b"
+// means without the name changing), so a verdict written to disk could outlive
+// the model it describes and warn about a model since replaced by a capable
+// one. What makes it safe now is that the store invalidates on the model's
+// content digest rather than trusting the name, and that a persisted verdict is
+// still only ever a cache: deleting it costs a re-probe and nothing else.
 // The conformance rate (P53.4) is layered on top of that cache rather than
 // beside it: the *first* trial is what the blocking caller waits for and is
 // what produces the verdict, exactly as before, and the remaining trials run
@@ -161,6 +175,13 @@ type Gate struct {
 	bgCancel context.CancelFunc
 	wg       sync.WaitGroup
 
+	// store, when non-nil, persists verdicts and conformance samples across
+	// restarts. Read lazily per model (on the first Verdict miss) rather than
+	// eagerly at construction, because the gate is built before the model name
+	// is known and most daemons only ever ask about one.
+	store  Store
+	loaded sync.Map // model name -> bool, "already consulted the store"
+
 	mu       sync.RWMutex
 	verdicts map[string]Verdict
 	conf     map[string]Conformance
@@ -183,6 +204,13 @@ func WithTrials(n int) GateOption {
 		}
 		g.trials = n
 	}
+}
+
+// WithStore backs the gate with a persistent capability store (P53.5). Without
+// one the gate behaves exactly as it always has: a process-lifetime cache that
+// re-probes every model after a restart.
+func WithStore(s Store) GateOption {
+	return func(g *Gate) { g.store = s }
 }
 
 // withRefinedHook installs the test seam described on Gate.onRefined.
@@ -288,6 +316,10 @@ func (g *Gate) refine(adapter provider.Adapter, model string) {
 			delete(g.refining, model)
 			c := g.conf[model]
 			g.mu.Unlock()
+			// Write the refined sample over the trial-1 one. A cancelled
+			// refinement still persists what it managed to measure — a 3-of-5
+			// sample is worth more on the next start than none.
+			g.persist(model)
 			if g.onRefined != nil {
 				g.onRefined(model, c)
 			}
@@ -306,6 +338,79 @@ func (g *Gate) refine(adapter provider.Adapter, model string) {
 	}()
 }
 
+// verdictString maps a Verdict to the store's wire spelling; Unknown maps to
+// "", which every store implementation must refuse to persist.
+func verdictString(v Verdict) string {
+	switch v {
+	case OK:
+		return "ok"
+	case Unsupported:
+		return "unsupported"
+	default:
+		return ""
+	}
+}
+
+// loadPersisted seeds model's in-memory verdict and conformance from the store,
+// once per model, and reports whether a usable verdict came back.
+//
+// A persisted sample is adopted whole: it is the same measurement this process
+// would have taken, and re-taking it is exactly the cost P53.5 exists to avoid.
+// If the sample is short of the configured trial count (an earlier run was cut
+// off, or the count was raised since), refine tops it up in the background —
+// the caller still returns immediately on the persisted verdict.
+func (g *Gate) loadPersisted(adapter provider.Adapter, model string) (Verdict, bool) {
+	if g.store == nil {
+		return Unknown, false
+	}
+	if _, seen := g.loaded.LoadOrStore(model, true); seen {
+		return Unknown, false
+	}
+	verdict, trials, calls, noVerdict, ok := g.store.ToolCalling(model)
+	if !ok {
+		return Unknown, false
+	}
+	var v Verdict
+	switch verdict {
+	case "ok":
+		v = OK
+	case "unsupported":
+		v = Unsupported
+	default:
+		return Unknown, false
+	}
+	if trials > 0 {
+		g.mu.Lock()
+		// Only seed a sample this process hasn't already started measuring —
+		// a live trial always outranks a recorded one.
+		if g.conf[model].Trials == 0 {
+			g.conf[model] = Conformance{Trials: trials, ToolCallTrials: calls, NoVerdict: noVerdict}
+		}
+		g.mu.Unlock()
+	}
+	g.storeVerdict(model, v)
+	g.refine(adapter, model)
+	return v, true
+}
+
+// persist writes model's current verdict and sample to the store, if any.
+// Silent on Unknown — see the Store contract.
+func (g *Gate) persist(model string) {
+	if g.store == nil {
+		return
+	}
+	v, ok := g.Cached(model)
+	if !ok {
+		return
+	}
+	s := verdictString(v)
+	if s == "" {
+		return
+	}
+	c, _ := g.Conformance(model)
+	g.store.SetToolCalling(model, s, c.Trials, c.ToolCallTrials, c.NoVerdict)
+}
+
 // Cached reports the stored verdict for model, if the probe has reached one.
 func (g *Gate) Cached(model string) (Verdict, bool) {
 	g.mu.RLock()
@@ -314,7 +419,7 @@ func (g *Gate) Cached(model string) (Verdict, bool) {
 	return v, ok
 }
 
-func (g *Gate) store(model string, v Verdict) {
+func (g *Gate) storeVerdict(model string, v Verdict) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.verdicts[model] = v
@@ -333,6 +438,11 @@ func (g *Gate) Verdict(ctx context.Context, adapter provider.Adapter, model stri
 		// slot. Without this, that caller probes a second time — a wasted model
 		// load, which is the whole cost this cache exists to avoid.
 		if v, ok := g.Cached(model); ok {
+			return v, nil
+		}
+		// A verdict a previous process already measured for these exact weights
+		// (P53.5). Same reasoning as the in-flight re-check, one restart later.
+		if v, ok := g.loadPersisted(adapter, model); ok {
 			return v, nil
 		}
 		pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
@@ -357,7 +467,12 @@ func (g *Gate) Verdict(ctx context.Context, adapter provider.Adapter, model stri
 		if res.ToolCalls == 0 {
 			v = Unsupported
 		}
-		g.store(model, v)
+		g.storeVerdict(model, v)
+		// Persisted from trial 1 rather than waiting for the background sample
+		// to land: a daemon that exits mid-refinement should still have saved
+		// the verdict it actually reached, and refine's own completion writes
+		// the fuller sample over it.
+		g.persist(model)
 		return v, nil
 	})
 	if err != nil {

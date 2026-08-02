@@ -24,6 +24,7 @@ import (
 	"github.com/knadh/koanf/v2"
 
 	"github.com/fiddler110/aegis/internal/fsguard"
+	"github.com/fiddler110/aegis/internal/modelcaps"
 	"github.com/fiddler110/aegis/internal/provider/sse"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/workspacetrust"
@@ -513,6 +514,25 @@ type ProviderConfig struct {
 	// blocking, which is why that command announces the trial count before
 	// starting.
 	ToolCallProbeTrials int `koanf:"tool_call_probe_trials"`
+	// ModelCapabilities pre-declares per-model quirks, keyed by model name
+	// (P53.5). Aegis normally discovers these by probing — sending `think` and
+	// taking the 400, running the tool-calling smoke probe — and persists what
+	// it learns under <data_dir>/model_caps.json. A declaration here outranks
+	// anything discovered, which serves two purposes: telling Aegis about a
+	// model it has never met so the failing request is never sent even once,
+	// and overriding a persisted verdict that has gone stale without having to
+	// delete the cache file.
+	//
+	//   provider:
+	//     model_capabilities:
+	//       "mythos-sec:24b":
+	//         think: false          # never send the think parameter
+	//       "some-model:latest":
+	//         tool_calling: ok      # or "unsupported"
+	//
+	// Unset fields declare nothing and leave discovery in charge; `think:
+	// false` is a declaration of non-support, not merely a default.
+	ModelCapabilities map[string]modelcaps.Declared `koanf:"model_capabilities"`
 	// PromptProfile selects the system-prompt/tool-exposure shape (P25.6):
 	// "auto" (default) infers from BaseURL — loopback/localhost gets the
 	// "local" profile (trimmed prompt, web_search/web_fetch/security_scan/
@@ -1021,7 +1041,7 @@ func defaults() map[string]any {
 		// toolcallprobe.DefaultTrials — spelled as a literal here to keep the
 		// config package free of a dependency on the probe.
 		"provider.tool_call_probe_trials": 5,
-		"server.addr":             "127.0.0.1:4127",
+		"server.addr":                     "127.0.0.1:4127",
 		// Conservative non-zero caps by default (P27.12/FIND-14) — see
 		// ServerConfig's doc comments for why these values are safe for a
 		// normal single-user session while still bounding a runaway/DoS case.
@@ -1425,6 +1445,30 @@ func (c *Config) EnsureDataDir() error {
 // SessionDBPath returns the path to the session database.
 func (c *Config) SessionDBPath() string {
 	return filepath.Join(c.DataDir, "sessions.db")
+}
+
+// ModelCapsPath returns the path to the persisted per-model capability cache
+// (P53.5). Anchored to cfg.DataDir rather than the fixed user-level directory
+// the workspace-trust store uses: this file is a discovery cache with no
+// security decision behind it, so a project-level data_dir pointing it
+// elsewhere costs at most a re-probe.
+// An empty DataDir yields an empty path, which modelcaps.Open turns into a
+// working in-memory-only store. That matters: filepath.Join("", name) is a
+// *relative* path, so without this guard a config with no data dir (every
+// hand-built test Config) would drop the cache file into the working
+// directory.
+func (c *Config) ModelCapsPath() string {
+	if c.DataDir == "" {
+		return ""
+	}
+	return filepath.Join(c.DataDir, modelcaps.FileName)
+}
+
+// OpenModelCaps opens the per-model capability cache with this config's
+// declared overrides applied. Always returns a usable store — a missing or
+// unreadable file simply starts empty.
+func (c *Config) OpenModelCaps() *modelcaps.Store {
+	return modelcaps.Open(c.ModelCapsPath(), modelcaps.WithDeclared(c.Provider.ModelCapabilities))
 }
 
 // LogPath returns the path to the harness log file.

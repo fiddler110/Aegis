@@ -114,7 +114,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	if err != nil {
 		return "", cost.Snapshot{}, err
 	}
-	adapter, err := providerfactory.Build(cfg, nil)
+	adapter, err := providerfactory.Build(cfg, nil, providerfactory.WithModelCaps(cfg.OpenModelCaps()))
 	if err != nil {
 		return "", cost.Snapshot{}, err
 	}

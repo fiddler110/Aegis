@@ -204,6 +204,23 @@ provider:
   # never adds first-message latency. 1 = the single-trial check, unchanged.
   tool_call_probe_trials: 5
 
+  # Pre-declared per-model capabilities (P53.5), keyed by model name. Aegis
+  # normally *discovers* these — it finds out a model rejects `think` by
+  # sending one and taking the 400, and finds out whether it can call tools by
+  # probing — and caches what it learns in <data_dir>/model_caps.json so a
+  # restart doesn't re-pay the discovery. That cache is keyed on the model's
+  # content digest, so re-pulling a tag invalidates its record automatically.
+  #
+  # A declaration here outranks anything discovered. Use it to tell Aegis about
+  # a model it has never met (so the failing request is never sent even once),
+  # or to override a cached verdict without deleting the file. Unset fields
+  # declare nothing and leave discovery in charge.
+  model_capabilities: {}
+  #   "mythos-sec:24b":
+  #     think: false        # never send the think parameter to this model
+  #   "some-model:latest":
+  #     tool_calling: ok    # or "unsupported"
+
 
 # ── Permission ────────────────────────────────────────────────────────────────
 permission:
