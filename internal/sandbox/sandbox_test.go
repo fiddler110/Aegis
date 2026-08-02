@@ -125,17 +125,14 @@ func TestValidatePathNewFile(t *testing.T) {
 }
 
 func TestValidatePathSymlinkEscape(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink tests require elevated privileges on Windows")
-	}
 	root := t.TempDir()
 	outside := t.TempDir()
 
-	// Create a symlink inside root pointing outside.
+	// Create a symlink inside root pointing outside. mustSymlink skips on a
+	// platform that refuses rather than hard-skipping all of Windows, so a box
+	// with Developer Mode enabled still exercises the escape check.
 	link := filepath.Join(root, "escape")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	mustSymlink(t, outside, link)
 
 	_, err := ValidatePath(root, "escape/secret.txt")
 	if err == nil {
@@ -147,18 +144,13 @@ func TestValidatePathSymlinkEscape(t *testing.T) {
 }
 
 func TestValidatePathSymlinkInside(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink tests require elevated privileges on Windows")
-	}
 	root := t.TempDir()
 	target := filepath.Join(root, "real")
 	os.MkdirAll(target, 0o755)
 	os.WriteFile(filepath.Join(target, "file.txt"), []byte("ok"), 0o644)
 
 	link := filepath.Join(root, "link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	mustSymlink(t, target, link)
 
 	// Symlink that stays inside root should succeed.
 	_, err := ValidatePath(root, "link/file.txt")

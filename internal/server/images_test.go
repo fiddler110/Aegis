@@ -49,6 +49,27 @@ func TestBuildImageBlocksFromPath(t *testing.T) {
 	}
 }
 
+// TestResolveSafeImagePathRefusesRootedPaths pins the refusal on the spellings
+// `filepath.IsAbs` misses on Windows. Before this, a POSIX-rooted path was
+// refused on macOS and silently accepted on Windows, where it was joined onto
+// the working directory instead — the same input, two different behaviors.
+func TestResolveSafeImagePathRefusesRootedPaths(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	for _, p := range []string{"/etc/passwd", `\Windows\System32\config\SAM`} {
+		if _, err := resolveSafeImagePath(p); err == nil {
+			t.Errorf("resolveSafeImagePath(%q) was accepted; a rooted path must be refused on every platform", p)
+		}
+	}
+	// Ordinary relative paths still resolve, and traversal is still caught.
+	if _, err := resolveSafeImagePath("shot.png"); err != nil {
+		t.Errorf("relative path refused: %v", err)
+	}
+	if _, err := resolveSafeImagePath(filepath.Join("..", "escape.png")); err == nil {
+		t.Error("traversal out of the working directory was accepted")
+	}
+}
+
 func TestBuildImageBlocksFromData(t *testing.T) {
 	data := base64.StdEncoding.EncodeToString(pngBytes)
 	blocks, err := buildImageBlocks([]api.ImageInput{{MediaType: "image/png", Data: data}})

@@ -3,9 +3,29 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// mustSymlink creates link -> target, skipping the test when the platform
+// refuses rather than failing it.
+//
+// Windows grants SeCreateSymbolicLinkPrivilege only to elevated processes or
+// with Developer Mode enabled, so `os.Symlink` fails there with "a required
+// privilege is not held by the client" on an ordinary developer account. That
+// is an environment limitation, not a defect in the validator, and reporting it
+// as a failure trains people to ignore a red suite. Deliberately a runtime
+// check on the *error* rather than a blanket `GOOS == "windows"` skip: a
+// Windows box with Developer Mode on can create symlinks fine, and those users
+// should get the real coverage — the symlink-escape rules this file pins are
+// exactly the ones worth verifying on the OS whose path semantics differ most.
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable in this environment (%v); on Windows enable Developer Mode or run elevated to exercise this test", err)
+	}
+}
 
 // mustDir creates dir under parent and returns its symlink-resolved path, so
 // tests compare against the same namespace the validator returns (on macOS a
@@ -128,9 +148,7 @@ func TestValidatePathInSymlinkEscapeCheckedPerRoot(t *testing.T) {
 	mustWrite(t, filepath.Join(baseReal, "secret.txt"), "shared-parent secret")
 
 	// primary/escape -> the parent both roots live under.
-	if err := os.Symlink(baseReal, filepath.Join(primary, "escape")); err != nil {
-		t.Fatal(err)
-	}
+	mustSymlink(t, baseReal, filepath.Join(primary, "escape"))
 
 	roots := []Root{{Path: primary, Writable: true}, {Path: other}}
 	if _, err := ValidatePathIn(roots, "escape/secret.txt", AccessRead); err == nil {
@@ -149,9 +167,7 @@ func TestValidatePathInSymlinkIntoAnotherRootIsAllowed(t *testing.T) {
 	note := filepath.Join(research, "notes.md")
 	mustWrite(t, note, "findings")
 
-	if err := os.Symlink(research, filepath.Join(primary, "link")); err != nil {
-		t.Fatal(err)
-	}
+	mustSymlink(t, research, filepath.Join(primary, "link"))
 
 	roots := []Root{{Path: primary, Writable: true}, {Path: research}}
 	got, err := ValidatePathIn(roots, "link/notes.md", AccessRead)
@@ -174,5 +190,39 @@ func TestValidatePathInSymlinkIntoAnotherRootIsAllowed(t *testing.T) {
 func TestValidatePathInRejectsEmptyRootSet(t *testing.T) {
 	if _, err := ValidatePathIn(nil, "/etc/passwd", AccessRead); err == nil {
 		t.Error("empty root set validated a path")
+	}
+}
+
+// TestIsRootedCoversWindowsSpellings pins the rule that filepath.IsAbs alone
+// gets wrong. The POSIX-rooted and volume-relative spellings must be reported
+// as rooted on Windows — that is the whole reason this helper exists, since
+// callers that pre-join such a path produce something that looks confined while
+// the OS resolves it from a drive root.
+func TestIsRootedCoversWindowsSpellings(t *testing.T) {
+	// Rooted on every platform.
+	for _, p := range []string{"/etc/passwd", "/"} {
+		if !IsRooted(p) {
+			t.Errorf("IsRooted(%q) = false, want true on every platform", p)
+		}
+	}
+
+	// Never rooted anywhere: the ordinary relative forms. Calling these rooted
+	// would refuse perfectly legitimate paths.
+	for _, p := range []string{"", "notes.md", "sub/notes.md", "../escape.md", "./x"} {
+		if IsRooted(p) {
+			t.Errorf("IsRooted(%q) = true, want false on every platform", p)
+		}
+	}
+
+	// Windows-only spellings. filepath.IsAbs answers false for the first two
+	// even on Windows, which is precisely the gap this helper closes; on POSIX
+	// all three are just unusual relative filenames, and reading them as rooted
+	// there would be wrong.
+	windowsRooted := []string{`\Windows\System32`, `C:notes.txt`, `C:\Windows`}
+	for _, p := range windowsRooted {
+		want := runtime.GOOS == "windows"
+		if got := IsRooted(p); got != want {
+			t.Errorf("IsRooted(%q) = %v on %s, want %v", p, got, runtime.GOOS, want)
+		}
 	}
 }

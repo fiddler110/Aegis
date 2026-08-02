@@ -179,6 +179,34 @@ func isWindowsRootedNoVolume(p string) bool {
 	return (p[0] == '/' || p[0] == '\\') && filepath.VolumeName(p) == ""
 }
 
+// IsRooted reports whether the OS will resolve p from a filesystem root rather
+// than from the current directory — i.e. whether joining it onto a base
+// directory would misrepresent where it actually points.
+//
+// It exists because `filepath.IsAbs` alone is the wrong test on Windows and
+// gets this wrong in a direction that hides escapes: it requires a volume, so
+// it answers false for `/etc/passwd`, `\Windows\System32`, and the
+// drive-relative `C:notes.txt`, all of which the OS resolves against a drive
+// root. Code that then does `filepath.Join(base, p)` folds the leading
+// separator away and produces a path that looks perfectly confined while the
+// real read goes elsewhere — the P32.1 trap absCandidate documents. Any caller
+// that pre-joins a caller-supplied path before validating it needs this test
+// first; use it rather than writing a fourth spelling of the rule.
+func IsRooted(p string) bool {
+	if p == "" {
+		return false
+	}
+	if filepath.IsAbs(p) {
+		return true
+	}
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	// Windows: rooted-without-volume (`/x`, `\x`) and volume-relative (`C:x`)
+	// both escape a naive Join.
+	return p[0] == '/' || p[0] == '\\' || filepath.VolumeName(p) != ""
+}
+
 // escapesRoot reports whether target lies outside root. On Windows the
 // comparison is case-insensitive, since the filesystem treats "C:\Work" and
 // "c:\work" as the same directory and a case difference must not be mistaken

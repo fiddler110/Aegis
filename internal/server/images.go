@@ -10,6 +10,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 const (
@@ -36,7 +37,13 @@ func resolveSafeImagePath(p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("empty image path")
 	}
-	if filepath.IsAbs(p) {
+	// sandbox.IsRooted, not filepath.IsAbs: the latter answers false on Windows
+	// for "/etc/passwd" and `\Windows\...`, so this refusal silently stopped
+	// applying there and the path fell through to the Join below, which folds
+	// the leading separator and resolves it somewhere under the working
+	// directory instead. Not an escape — the Rel check below still holds — but
+	// the same input was refused on macOS and quietly accepted on Windows.
+	if sandbox.IsRooted(p) {
 		return "", fmt.Errorf("absolute image paths are not allowed")
 	}
 

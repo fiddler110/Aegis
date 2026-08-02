@@ -265,19 +265,29 @@ type Options struct {
 
 // Engine runs the agent loop.
 type Engine struct {
-	adapter             provider.Adapter
-	tools               *tool.Registry
-	gate                Gate
-	compactor           Compactor
-	hooks               Hooks
-	cost                *cost.Tracker
-	prepareStep         PrepareStepFunc
-	outputGuard         guard.Func
-	outputGuardMax      int
-	zeroToolNudgeMax    int
-	budgetUSD           float64
-	maxTokensPerRun     int
-	maxWallClock        time.Duration
+	adapter          provider.Adapter
+	tools            *tool.Registry
+	gate             Gate
+	compactor        Compactor
+	hooks            Hooks
+	cost             *cost.Tracker
+	prepareStep      PrepareStepFunc
+	outputGuard      guard.Func
+	outputGuardMax   int
+	zeroToolNudgeMax int
+	budgetUSD        float64
+	maxTokensPerRun  int
+	maxWallClock     time.Duration
+	// now supplies the clock the wall-clock budget reads, defaulting to
+	// time.Now. Unexported and injected only by same-package tests, because the
+	// alternative is a test that depends on the host's monotonic-clock
+	// resolution: on Windows two back-to-back time.Now calls return the *same*
+	// instant (Go's nanotime there is ~0.5ms-granular), so a "budget already
+	// spent" assertion written as a 1ns limit passes on macOS and silently never
+	// fires on Windows. Real budgets are configured in whole seconds, so this
+	// changes nothing in production — it just stops the tests from encoding a
+	// POSIX-only assumption.
+	now                 func() time.Time
 	model               string
 	maxTokens           int
 	temperature         *float64
@@ -314,6 +324,15 @@ var ErrInterrupted = errors.New("engine: interrupted")
 // resetting and continuing past it would defeat the point of setting one.
 var ErrWallClockLimit = errors.New("engine: wall-clock budget reached")
 
+// clock returns the time source the wall-clock budget reads — time.Now unless
+// a test injected one. See the note on Engine.now.
+func (e *Engine) clock() func() time.Time {
+	if e.now != nil {
+		return e.now
+	}
+	return time.Now
+}
+
 // wallClockExceeded reports whether this run has outlived maxWallClock, and
 // returns the abort error if so. start is the run's own start time, so the
 // bound is per-Run — which in the phased drive means per phase turn, the unit
@@ -323,7 +342,7 @@ func (e *Engine) wallClockExceeded(start time.Time) error {
 	if e.maxWallClock <= 0 {
 		return nil
 	}
-	elapsed := time.Since(start)
+	elapsed := e.clock()().Sub(start)
 	if elapsed < e.maxWallClock {
 		return nil
 	}
@@ -398,7 +417,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// P52.15 wall-clock budget baseline. Taken before compaction rather than at
 	// the loop, since a compaction pass is a model call that can itself take
 	// real time on a local backend — time the operator's bound should cover.
-	runStart := time.Now()
+	runStart := e.clock()()
 
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the

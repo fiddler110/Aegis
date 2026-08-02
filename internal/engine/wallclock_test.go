@@ -34,13 +34,39 @@ func (s *sleepTool) Execute(ctx context.Context, _ json.RawMessage) (tool.Result
 	return tool.Result{Content: "slept"}, nil
 }
 
+// fakeClock advances by step on every reading after the first, so a test can
+// put a run over its budget without sleeping and without depending on the
+// host's monotonic-clock resolution.
+//
+// That dependency is why this exists. The original test expressed "already over
+// budget" as a 1ns limit, reasoning that time.Since is always at least a
+// nanosecond by the time the first gate runs. That is true on macOS and Linux
+// and false on Windows, where Go's nanotime is ~0.5ms-granular and two
+// back-to-back time.Now calls return the *same* instant — so the gate saw
+// elapsed == 0, never fired, and the test failed on one OS while passing on the
+// other. Real budgets are configured in whole seconds, so nothing about the
+// production gate was wrong; only the test's clock assumption was.
+type fakeClock struct {
+	t     time.Time
+	step  time.Duration
+	reads int
+}
+
+func (c *fakeClock) now() time.Time {
+	c.reads++
+	if c.reads > 1 {
+		c.t = c.t.Add(c.step)
+	}
+	return c.t
+}
+
 // TestWallClockBudgetStopsRun is the P52.15 regression: none of the three
 // pre-existing budgets bound elapsed time, so a slow local model could burn
 // all 40 iterations — potentially hours at ~7 tok/s — with no safety valve.
 //
-// A 1ns limit is deterministic rather than degenerate: time.Since is always at
-// least a nanosecond by the time the first gate runs, so this asserts the gate
-// fires and, importantly, that it fires *before* the first paid model call.
+// The run starts on budget and the very first gate reading finds an hour gone,
+// which asserts the gate fires and, importantly, that it fires *before* the
+// first paid model call.
 func TestWallClockBudgetStopsRun(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
 		{
@@ -53,12 +79,13 @@ func TestWallClockBudgetStopsRun(t *testing.T) {
 		Adapter:            adapter,
 		Tools:              tool.NewRegistry(),
 		Cost:               cost.NewTracker(),
-		MaxWallClockPerRun: time.Nanosecond,
+		MaxWallClockPerRun: time.Minute,
 		Model:              "llama3.1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.now = (&fakeClock{t: time.Now(), step: time.Hour}).now
 
 	var gotErr error
 	conv := &Conversation{}
