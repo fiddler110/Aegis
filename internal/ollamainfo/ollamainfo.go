@@ -272,6 +272,113 @@ func WarmIfUnloaded(ctx context.Context, nativeBase, model string) bool {
 	return true
 }
 
+// Digests fetches every locally-pulled model's content digest from GET
+// /api/tags, keyed by the name Ollama reports (both the `name` and the `model`
+// spelling are indexed, since callers spell models either way).
+//
+// It exists for P53.5's staleness rule: a tag is mutable, so "qwen3:14b" after
+// an `ollama pull` may be different weights with different capabilities under
+// the same name. The digest is the one value that moves when that happens,
+// which makes it the invalidation key for any persisted per-model record.
+//
+// ok is false when the request fails or the server does not answer 200 — a
+// non-Ollama base or an unreachable one — as distinct from a successful empty
+// list (nothing pulled). Callers must treat !ok as "cannot tell", never as
+// "everything is stale".
+func Digests(ctx context.Context, nativeBase string) (map[string]string, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nativeBase+"/api/tags", nil)
+	if err != nil {
+		return nil, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var out struct {
+		Models []struct {
+			Name   string `json:"name"`
+			Model  string `json:"model"`
+			Digest string `json:"digest"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, false
+	}
+	digests := make(map[string]string, len(out.Models)*2)
+	for _, m := range out.Models {
+		if m.Digest == "" {
+			continue
+		}
+		if m.Name != "" {
+			digests[m.Name] = m.Digest
+		}
+		if m.Model != "" {
+			digests[m.Model] = m.Digest
+		}
+	}
+	return digests, true
+}
+
+// NativeToolSupport reports whether model's own manifest advertises the "tools"
+// capability, per POST /api/show. The bool result is the claim; the second
+// return says whether the claim was observable at all (older Ollama versions
+// omit the capabilities list entirely, and an unreachable server tells us
+// nothing).
+//
+// This is deliberately only the *manifest's* claim, never a substitute for
+// internal/toolcallprobe: a manifest can advertise tool support the weights
+// don't deliver, which is the whole reason the probe exists. Recording both
+// lets the disagreement be seen rather than silently resolved one way.
+func NativeToolSupport(ctx context.Context, nativeBase, model string) (bool, bool) {
+	caps, ok := showCapabilities(ctx, nativeBase, model)
+	if !ok {
+		return false, false
+	}
+	for _, c := range caps {
+		if c == "tools" {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// showCapabilities returns /api/show's capabilities list for model. ok is false
+// when the request fails or the field is absent (pre-0.6 Ollama).
+func showCapabilities(ctx context.Context, nativeBase, model string) ([]string, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]string{"model": model, "name": model})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nativeBase+"/api/show", bytes.NewReader(body))
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var out struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, false
+	}
+	if out.Capabilities == nil {
+		return nil, false
+	}
+	return out.Capabilities, true
+}
+
 // showInfo queries POST /api/show for a modelfile-pinned num_ctx and the
 // model's training context length. Either may be 0 when absent.
 func showInfo(ctx context.Context, nativeBase, model string) (numCtx, modelMax int) {

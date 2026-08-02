@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-02
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,14 +11,15 @@ keep it when adding items.
 
 ## Status
 
-**Open items (8).** Tier 2: **P38.1** only. Tier 3: **P53.5** (persist per-model capability records
-instead of re-discovering them each restart) and **P53.6** (no fallback for models that fail the
-tool-calling probe — the batch's confirmed capability gap and highest-value item), the last two of
-the **P53.x local-LLM comparative-review batch**. Build order is P53.5 → P53.6: P53.5 is where
-P53.4's conformance rate gets persisted, and P53.6 consumes that rate as its engagement signal. The
-batch's whole Tier-2 half — **P53.1** (stale `WithKeepAlive` comment), **P53.2** (loop detector:
-polling exemption + differentiated outcomes), **P53.3** (compaction summarization-call headroom) and
-**P53.4** (probe conformance rate) — shipped 2026-08-01; see [releases.md](releases.md).
+**Open items (7).** Tier 2: **P38.1** only. Tier 3: **P53.6** (no fallback for models that fail the
+tool-calling probe — the batch's confirmed capability gap and highest-value item), now the **last**
+open item of the **P53.x local-LLM comparative-review batch**. Its prerequisite is in place:
+**P53.5** shipped 2026-08-02, so the P53.4 conformance rate is persisted per model (keyed to the
+model's content digest, with user declarations outranking it) and P53.6 can consume it as its
+engagement signal instead of re-measuring. The rest of the batch — **P53.1** (stale `WithKeepAlive`
+comment), **P53.2** (loop detector: polling exemption + differentiated outcomes), **P53.3**
+(compaction summarization-call headroom) and **P53.4** (probe conformance rate) — shipped
+2026-08-01. All five write-ups are in [releases.md](releases.md).
 
 Tier 2 also: **P38.1** — the threat-model conformance umbrella. Mechanism
 (recon → scaffold → incremental fill, no orchestration mis-route) is live-confirmed repeatedly;
@@ -74,7 +75,8 @@ item at the head of this tier until a live re-confirmation run happens. The **P5
 comparative-review batch**'s Tier-2 half (**P53.1**-**P53.4**, filed and shipped 2026-08-01) and the
 earlier batch — P52.3, P52.4, P52.5, P52.6, P52.7, P52.8, P52.9, P52.10, P52.11, the full P47.x
 self-contained batch, P48.1, P49.1, and P50.2/P50.3/P50.4 — have shipped; see
-[releases.md](releases.md). The next buildable work is Tier 3's **P53.5**.
+[releases.md](releases.md). The next buildable work is Tier 3's **P53.6** (its prerequisite **P53.5**
+shipped 2026-08-02).
 
 **P53.x batch origin.** A comparative review (2026-08-01) of how six frontier harnesses — opencode,
 crush, pi, aider, OpenHands, goose — drive local models, cross-checked line-by-line against Aegis.
@@ -204,40 +206,12 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status:** 2 open — **P53.5** and **P53.6**, the larger half of the P53.x local-LLM
-comparative-review batch (see the Tier 2 header for the batch's origin and for the five candidate
-gaps that were refuted by code reading). Both former Tier-3 items — **P52.12** (lift the phased
-drive into the daemon) and **P52.13** (`workspace.additional_roots`) — shipped 2026-08-01; see
-[releases.md](releases.md).
-
-### P53.5 — Per-model capability records are discovered at runtime and lost at exit
-
-Aegis learns model quirks the hard way and then forgets them. The `think`-parameter rejection latch
-is the clearest case: `thinkRejected sync.Map` (`ollama.go:55-61`, `:366-397`) discovers that a model
-400s on any `think` value by *sending one and getting rejected*, then caches that in memory for the
-process lifetime. Every daemon restart re-pays the failed request. The same is true of anything
-`toolcallprobe` learns.
-
-pi (badlogic/pi-mono) has the pattern worth adopting: a declarative per-model `compat` block in
-`models.json` recording `supportsDeveloperRole`, `supportsReasoningEffort`,
-`supportsUsageInStreaming` (which gates `stream_options.include_usage`), `supportsStrictTools`, and
-a `thinkingLevelMap` mapping pi's thinking levels onto provider values or `null` where unsupported.
-Capability there is *recorded*, not probed — which is the complement of what Aegis does, not a
-replacement for it. The synthesis is better than either: probe once, persist the result, let the
-user pre-declare a quirk for a model the probe has not met, and let an explicit user declaration
-outrank a discovered value.
-
-Scope: a small on-disk store under the data dir, keyed by model name, holding at minimum the
-`think`-rejection flag, the P53.4 tool-calling conformance rate, and native-tool-calling support.
-Precedence must be user-declared > persisted-discovered > default, and the store must be treated as
-a cache that is safe to delete — never a source of truth that can wedge a model into a wrong
-capability permanently. Note pi's maintainer position that core should not auto-probe local
-providers (pi-mono#3151); Aegis has already decided the other way with `toolcallprobe`, and this
-item is where that decision starts paying off rather than being re-paid each restart.
-
-**Priority:** Tier 3, Effort M — new persistent store, precedence rules, and staleness/invalidation
-semantics (a re-pulled model under the same name may have different capabilities). Sequence after
-**P53.4**, whose conformance rate is the most valuable field it would hold.
+**Status:** 1 open — **P53.6**, the last of the P53.x local-LLM comparative-review batch (see the
+Tier 2 header for the batch's origin and for the five candidate gaps that were refuted by code
+reading). **P53.5** (persist per-model capability records) shipped 2026-08-02, so P53.6's
+engagement signal — a persisted per-model conformance rate — already exists. The two former Tier-3
+items **P52.12** (lift the phased drive into the daemon) and **P52.13** (`workspace.additional_roots`)
+shipped 2026-08-01. All three write-ups are in [releases.md](releases.md).
 
 ### P53.6 — No fallback for models that fail the tool-calling probe (warn-only today)
 
@@ -278,8 +252,10 @@ cannot speak the protocol at all. File separately if pursued — the two do not 
 implementation.
 
 **Priority:** Tier 3, Effort M/L — the largest item in the batch and the highest-value one.
-Sequence last: it consumes P53.4's conformance rate as its engagement signal and P53.5's store as
-the place to record "this model needs the shim", and both are far cheaper to build first.
+Sequenced last, and both of its prerequisites are now in place: P53.4's conformance rate is the
+engagement signal, and P53.5's `internal/modelcaps` store (shipped 2026-08-02) is where "this model
+needs the shim" gets recorded — a persisted rate is already readable per model via
+`Store.ToolCalling`, with user declarations outranking it.
 
 ## Open Work — Tier 4
 

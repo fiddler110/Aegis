@@ -765,6 +765,145 @@ func TestStreamLatchesThinkRejectionPerModel(t *testing.T) {
 	}
 }
 
+// fakeCapStore is a minimal in-memory CapabilityStore standing in for
+// *modelcaps.Store, so this package's tests stay free of the store's file I/O.
+type fakeCapStore struct {
+	mu       sync.Mutex
+	rejected map[string]bool
+	writes   int
+}
+
+func newFakeCapStore() *fakeCapStore { return &fakeCapStore{rejected: map[string]bool{}} }
+
+func (f *fakeCapStore) ThinkRejected(model string) (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.rejected[model]
+	return v, ok
+}
+
+func (f *fakeCapStore) SetThinkRejected(model string, rejected bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejected[model] = rejected
+	f.writes++
+}
+
+// TestThinkRejectionPersistsAcrossAdapters is the P53.5 regression: the P52.5
+// latch was process-lifetime only, so every daemon restart re-sent `think` to a
+// model already proven to reject it and re-paid the 400. With a capability
+// store wired in, the second adapter — standing in for the next process — must
+// send no `think` at all, and must not re-write what it already knows.
+func TestThinkRejectionPersistsAcrossAdapters(t *testing.T) {
+	var mu sync.Mutex
+	var withThink []bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw struct {
+			Think json.RawMessage `json:"think"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &raw)
+		has := len(raw.Think) > 0
+		mu.Lock()
+		withThink = append(withThink, has)
+		mu.Unlock()
+		if has {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"\"rejector\" does not support thinking"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	caps := newFakeCapStore()
+	falseVal := false
+	run := func(a *Adapter) {
+		t.Helper()
+		stream, err := a.Stream(context.Background(), provider.Request{
+			Model:    "rejector",
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+		})
+		if err != nil {
+			t.Fatalf("Stream: %v", err)
+		}
+		for range stream {
+		}
+	}
+
+	first := New(WithBaseURL(srv.URL), WithThink(&falseVal), WithCapabilityStore(caps))
+	run(first)
+	if rejected, known := caps.ThinkRejected("rejector"); !known || !rejected {
+		t.Fatalf("rejection not persisted: rejected=%v known=%v", rejected, known)
+	}
+
+	// A fresh adapter with an empty in-memory latch: the store must carry the
+	// verdict, so the doomed first attempt never happens.
+	second := New(WithBaseURL(srv.URL), WithThink(&falseVal), WithCapabilityStore(caps))
+	run(second)
+	run(second)
+
+	mu.Lock()
+	got := append([]bool(nil), withThink...)
+	mu.Unlock()
+	want := []bool{true, false, false, false} // one discovery 400, then never again
+	if len(got) != len(want) {
+		t.Fatalf("requests = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("request %d sent think=%v, want %v (full sequence %v)", i, got[i], want[i], got)
+		}
+	}
+	if caps.writes != 1 {
+		t.Errorf("store written %d times, want 1 — the verdict is a one-time finding", caps.writes)
+	}
+}
+
+// TestDeclaredThinkSupportOverridesStore covers the precedence rule that keeps a
+// wrong persisted value recoverable: a store reporting "not rejected" (a user
+// declaring the model does accept `think`) must leave live discovery in charge
+// rather than latching, so the parameter is sent and the model gets to answer
+// for itself.
+func TestDeclaredThinkSupportOverridesStore(t *testing.T) {
+	var mu sync.Mutex
+	var sawThink bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw struct {
+			Think json.RawMessage `json:"think"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &raw)
+		mu.Lock()
+		sawThink = sawThink || len(raw.Think) > 0
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	caps := newFakeCapStore()
+	caps.rejected["m"] = false // the shape a `think: true` declaration produces
+
+	falseVal := false
+	a := New(WithBaseURL(srv.URL), WithThink(&falseVal), WithCapabilityStore(caps))
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "m",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawThink {
+		t.Error("a store saying \"not rejected\" suppressed think; a wrong cached value would then be unrecoverable")
+	}
+}
+
 // TestRaiseContextWindowConcurrentWithStream is the P52.6 regression, and is
 // meaningful only under `go test -race`: RaiseContextWindow's write to numCtx
 // and doChat's read of it must be synchronized. Before the fix this was an

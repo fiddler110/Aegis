@@ -102,6 +102,22 @@ Takeaways:
   cold load rather than adding one. The daemon deliberately blocks on **one** trial only — the rest
   of the conformance sample runs in the background and refines the cached rate for later notices — so
   raising `provider.tool_call_probe_trials` never delays your first reply.
+- Since P53.5 that verdict is no longer re-paid on every restart. The probe result — and the
+  conformance rate behind it — is persisted per model in `<data_dir>/model_caps.json`, alongside the
+  other quirk Aegis learns the hard way (a model that 400s the instant the `think` parameter is
+  sent). An `aegis doctor` run, which takes the full blocking sample, seeds the same file, so a
+  daemon started afterwards reuses it and probes nothing at all.
+
+  Staleness is handled by not trusting the name: an Ollama tag is mutable, so records are keyed to
+  the model's **content digest** and a re-pulled model loses its record and gets re-probed. The file
+  is a cache and nothing else — deleting it costs one re-probe, never correctness — and an
+  unreachable model server invalidates nothing (Aegis cannot tell whether the weights moved, and
+  "cannot tell" must not mean "everything is stale").
+
+  You can also skip discovery entirely with `provider.model_capabilities` (see
+  [Configuration](configuration.md)): a declaration there outranks anything discovered, which both
+  tells Aegis about a model it has never met — so the failing request is never sent even once — and
+  gives you a way to override a cached verdict without deleting the file.
 - Independently, the engine watches for the `qwen2.5-coder:1.5b` signature above: if a turn's answer
   contains tool-call-shaped JSON naming a real tool but made no actual tool call, it says so. This
   costs nothing and needs no probe, so it also covers `aegis chat`, which runs its own in-process

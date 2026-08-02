@@ -198,7 +198,7 @@ func TestBuildOne_OllamaDefaultsKeepAliveResident(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "", 0, nil)
+	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "", 0, nil, nil)
 	if err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestBuildOne_OllamaKeepAliveExplicitWins(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "-1", 0, nil)
+	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "-1", 0, nil, nil)
 	if err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}

@@ -8,7 +8,15 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-01 — **P52.15 shipped and P52.17 closed as already-implemented**, taking
+**Last updated:** 2026-08-02 — **P53.5 shipped** (per-model capability records now persist across
+restarts instead of being re-discovered), leaving **P53.6** as the last open item of the P53.x
+local-LLM comparative-review batch. Race detector clean on every touched package. Three packages fail
+in the full suite on this Windows host and do so **identically on a clean tree** — they predate this
+work and are unrelated to it: `internal/engine`'s `TestWallClockBudgetStopsRun`,
+`internal/sandbox`'s two `TestValidatePathInSymlink*` cases, and `internal/tool/builtin`'s seven
+LaTeX-confinement tests (which assert on POSIX absolute paths such as `/etc/passwd`).
+
+**Previously, 2026-08-01** — **P52.15 shipped and P52.17 closed as already-implemented**, taking
 the P52.x full-stack review batch to **2 open of 17** (P52.14 and P52.16, both correctly parked
 measure-first). Full suite green, race detector clean on every touched package.
 
@@ -2377,6 +2385,85 @@ separately if `structured-build` ever needs it.
 
 ---
 
+
+### P53.5 — Per-model capability records persist instead of being re-discovered each restart — SHIPPED 2026-08-02
+
+Aegis learned model quirks the hard way and then forgot them every restart. The `think`-parameter
+rejection latch was the clearest case: `thinkRejected sync.Map` discovered that a model 400s on any
+`think` value *by sending one and being rejected*, then cached that for the process lifetime only —
+so every daemon start re-paid the failed request. The same was true of everything `toolcallprobe`
+learned, including the P53.4 conformance sample, which on a model generating at single-digit
+tokens/sec is five sequential generations thrown away at exit.
+
+**Shipped.** New `internal/modelcaps`: a JSON store under `<data_dir>/model_caps.json`, keyed by
+model name, holding the `think`-rejection flag, the P53.4 conformance sample (verdict + trials +
+tool-call trials + no-verdict count), and the model manifest's own native tool-support claim. 0600,
+owner-restricted via `fsguard`, human-readable.
+
+**pi's pattern, synthesized rather than copied.** pi (badlogic/pi-mono) records capability
+declaratively in `models.json` (`supportsDeveloperRole`, `supportsReasoningEffort`,
+`thinkingLevelMap`, …) — the *complement* of what Aegis does, not a replacement. The synthesis
+shipped here is better than either: probe once, persist the result, let the user pre-declare a quirk
+for a model the probe has never met, and let an explicit declaration outrank a discovered value.
+Precedence is **declared > persisted-discovered > default**, enforced inside the store so no caller
+can get it wrong.
+
+**Staleness is the reason this was never done before, and is what the design turns on.**
+`toolcallprobe.Gate`'s own comment refused persistence on exactly these grounds: an Ollama tag is
+mutable, so `ollama pull qwen3:14b` can replace the weights without the name changing, and a verdict
+written to disk could outlive the model it describes. Records are therefore keyed to the model's
+**content digest**, not its name: new `ollamainfo.Digests` reads `/api/tags`, `Store.Reconcile` drops
+every record whose digest moved and stamps the rest, and `modelcaps.ReconcileOllama` runs that before
+anything writes — in the daemon at start, and in `aegis doctor` before it probes, so a verdict is
+always stamped with the digest it was actually measured against. A model *absent* from the digest map
+is deliberately left alone: absence means "couldn't ask" (unreachable server, non-Ollama provider),
+and "cannot tell" must never be read as "everything is stale". A record written with no digest
+available (server down at the time) is adopted by the next reconcile rather than discarded — losing a
+real measurement on missing evidence is the wrong trade.
+
+**Cache, never source of truth.** Nothing here can wedge a model into a capability it doesn't have.
+A record is only ever consulted to *skip* work already proven to fail; every miss falls through to
+the live discovery path unchanged. Deleting the file costs exactly one re-probe. The asymmetry in the
+adapter is the load-bearing part: a store saying "rejected" latches, a store saying "not rejected"
+(what a `think: true` declaration produces) latches *nothing* and lets the model answer for itself —
+which is what makes a wrong cached value recoverable without touching the filesystem. An **unreached**
+verdict is never persisted at all (`SetToolCalling` refuses anything but `ok`/`unsupported`), because
+persisting one would carry the P34.2 false positive across restarts rather than merely across
+sessions.
+
+**Wiring.** `ollama.WithCapabilityStore` backs the P52.5 latch (in-memory map stays the hot path;
+the store is consulted once per model on first miss, and written once on discovery).
+`toolcallprobe.WithStore` seeds the gate's verdict *and* sample, so a restarted daemon returns the
+persisted verdict with **zero** probes — test-pinned against an adapter that fails on any call. The
+gate persists from trial 1 rather than waiting for background refinement, so a daemon exiting
+mid-sample still saved the verdict it reached; refinement overwrites with the fuller sample. Both
+interfaces are declared in the consuming packages over flattened scalars, so neither
+`internal/provider/ollama` nor `internal/toolcallprobe` imports `modelcaps` — `modelcaps.ProbeStore`
+adapts across, preserving the manifest claim across probe writes (the measured verdict and the
+manifest's claim are allowed to disagree, and that disagreement is the informative part, so neither
+may erase the other). `providerfactory.Build` grew a variadic `Option` with `WithModelCaps`, wired
+from the daemon and from `aegis chat` / `aegis worker` / `aegis debate` / `aegis doctor`.
+
+**`aegis doctor` seeds the daemon.** doctor takes the best sample Aegis ever takes — fully blocking,
+full trial count — and now writes it to the same store, so a daemon started afterwards reuses it and
+probes nothing on its first message.
+
+**Config:** `provider.model_capabilities`, a map of model name → `{think, tool_calling}`, every field
+optional (unset declares nothing). Documented in [configuration.md](../docs/configuration.md) and
+[providers.md](../docs/providers.md). `Config.ModelCapsPath()` returns `""` for an empty `data_dir`,
+which `modelcaps.Open` turns into a working in-memory-only store — without that guard
+`filepath.Join("", name)` is *relative* and every hand-built test config would drop a cache file into
+the working directory.
+
+Tested: 13 store tests (round-trip across reopen, both declaration-overrides-persisted directions,
+unknown-verdict-never-written, digest reconcile drop/keep/adopt, manifest-claim preservation, corrupt
+file, nil receiver, path-less store, JSON shape), 2 adapter tests (latch survives a fresh adapter and
+re-writes nothing; a store saying "not rejected" does not suppress `think`), 4 gate tests (persist +
+reuse-with-zero-probes, no-verdict never persisted, trial-1 persisted before refinement completes, no
+store = unchanged behavior). `-race` clean on `internal/toolcallprobe` and `internal/provider/ollama`.
+Feeds **P53.6**, which consumes the persisted rate as its fallback-engagement signal.
+
+---
 
 ### P53.4 — `toolcallprobe` reports a conformance rate, not just a boolean — SHIPPED 2026-08-01
 

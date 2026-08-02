@@ -18,6 +18,7 @@ import (
 	xterm "github.com/charmbracelet/x/term"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/modelcaps"
 	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/security"
@@ -467,7 +468,12 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	adapter, err := providerfactory.Build(cfg, logger)
+	// Reconcile before probing so this run's verdict is stamped with the digest
+	// it was actually measured against — and so a model re-pulled since the
+	// last run is re-probed here rather than reported from a stale record.
+	caps := cfg.OpenModelCaps()
+	modelcaps.ReconcileOllama(ctx, caps, ollamaNativeBase(cfg), cfg.Provider.Model, nil)
+	adapter, err := providerfactory.Build(cfg, logger, providerfactory.WithModelCaps(caps))
 	if err != nil {
 		// doctorProviderCheck already reports provider misconfiguration.
 		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — provider not configured"}
@@ -478,6 +484,11 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	defer cancel()
 
 	conf, err := toolcallprobe.RunTrials(rctx, adapter, cfg.Provider.Model, trials)
+	// Persist whatever verdict this sample reached (P53.5). doctor's sample is
+	// the best one Aegis ever takes — fully blocking, full trial count — so
+	// seeding the cache here means a daemon started afterwards reuses it
+	// instead of re-probing on its first message.
+	persistDoctorConformance(caps, cfg.Provider.Model, conf)
 	if err != nil {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
@@ -515,6 +526,30 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 		Name: name, Severity: doctorPass,
 		Detail: fmt.Sprintf("model %q — %s", cfg.Provider.Model, conf.Summary()),
 	}
+}
+
+// persistDoctorConformance writes a doctor sample into the per-model
+// capability cache (P53.5), if it reached a verdict at all.
+//
+// An all-truncated sample (Conformance.Verdict() == Unknown) is deliberately
+// not written: the probe's contract is that a verdict it could not justify must
+// never be cached, and persisting one would carry the mistake across restarts
+// rather than only across sessions. A transport failure partway through still
+// persists the trials that did land — a partial sample is real data.
+func persistDoctorConformance(caps *modelcaps.Store, model string, conf toolcallprobe.Conformance) {
+	if caps == nil || model == "" || conf.Trials == 0 {
+		return
+	}
+	var verdict string
+	switch conf.Verdict() {
+	case toolcallprobe.OK:
+		verdict = "ok"
+	case toolcallprobe.Unsupported:
+		verdict = "unsupported"
+	default:
+		return
+	}
+	modelcaps.ProbeStore{S: caps}.SetToolCalling(model, verdict, conf.Trials, conf.ToolCallTrials, conf.NoVerdict)
 }
 
 // doctorToolCallTrials is the sample size doctorToolCallCheck runs (P53.4),
