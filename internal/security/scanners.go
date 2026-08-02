@@ -158,12 +158,22 @@ func (gitleaksScanner) Resolve(ctx context.Context, opts Options) (Method, sandb
 }
 func (gitleaksScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
-		// /dev/stdout avoids needing a second bind mount for the report file:
-		// every scanner container is a Linux image (Docker Desktop/Podman run
-		// Linux containers even on a Windows/macOS host), so /dev/stdout
-		// always exists there regardless of host OS.
-		out, err := runScannerImage(ctx, rt, image, dir, opts, "gitleaks", "detect", "--source", "/src", "--no-git",
-			"--report-format", "json", "--report-path", "/dev/stdout", "--exit-code", "0")
+		// Write the report to a real path inside the container and cat it,
+		// rather than --report-path /dev/stdout the way gosec/bandit/brakeman
+		// do. Those three genuinely stream to the pipe; gitleaks 8.30 does not
+		// — it produces its report file by writing a temporary file and
+		// renaming it into place, and a rename onto /dev/stdout replaces the
+		// symlink instead of writing to the pipe. It succeeds, exits 0, and
+		// emits nothing, so Aegis parsed empty output as "gitleaks: 0 secrets"
+		// on a tree full of them: the silent all-clear this package exists to
+		// rule out. Found by P55.3's gitleaks canary (0 findings against a
+		// fixture with planted tokens gitleaks reports fine on the CLI).
+		//
+		// Same `;` rather than `&&` reasoning as kubescape: if gitleaks fails
+		// for real, no report file exists, cat exits non-zero with empty
+		// stdout, and runContainerCLI surfaces that as a scan error.
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "sh", "-c",
+			"gitleaks detect --source /src --no-git --report-format json --report-path /tmp/gitleaks.json --exit-code 0 >/dev/null 2>&1; cat /tmp/gitleaks.json")
 		if err != nil {
 			return nil, err
 		}

@@ -1,0 +1,2 @@
+# Canary: part of the minimal Rails shape brakeman requires. See Gemfile.
+require_relative "config/application"

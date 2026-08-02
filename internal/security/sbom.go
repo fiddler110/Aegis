@@ -28,7 +28,14 @@ func GenerateSBOM(ctx context.Context, dir string, opts Options) ([]byte, Method
 	if method == MethodContainer {
 		args := append([]string{"dir:/src"}, scaExcludeArgs()...)
 		args = append(args, "-o", SBOMFormat)
-		out, err := runContainerImage(ctx, rt, image, dir, args...)
+		// runScannerImage, not runContainerImage: the shared multiscanner image
+		// carries a dozen tools and therefore has no ENTRYPOINT, so the binary
+		// name has to lead the argument list. Passing bare args made the runtime
+		// try to exec "/src/dir:/src" and die with exit 127 — container-mode
+		// syft never worked, and nothing noticed, because the only caller that
+		// could see it (grype's SBOM-first path) silently falls back to a direct
+		// dir: scan on any error. Found by P55.3's syft canary.
+		out, err := runScannerImage(ctx, rt, image, dir, opts, "syft", args...)
 		return out, method, err
 	}
 	args := append([]string{"dir:."}, scaExcludeArgs()...)
