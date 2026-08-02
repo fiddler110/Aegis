@@ -84,13 +84,24 @@ func newDoctorCmd() *cobra.Command {
 				return fmt.Errorf("config failed to load")
 			}
 
+			// 30s covers every other check plus one tool-calling trial; each
+			// additional P53.4 trial buys its own slice, so raising the trial
+			// count can't starve the rest of the report.
 			timeout := 30 * time.Second
+			if extra := doctorToolCallTrials(cfg) - 1; extra > 0 {
+				timeout += time.Duration(extra) * doctorToolCallTrialTimeout
+			}
 			if deep {
 				timeout += deepFillCheckTimeout
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
 
+			// Announced before the checks run, not after: the conformance
+			// probe is the slow row and silence for minutes reads as a hang.
+			if notice := doctorToolCallNotice(cfg); notice != "" {
+				fmt.Fprintln(out, notice)
+			}
 			checks := runDoctorChecks(ctx, cfg)
 			if deep {
 				checks = append(checks, doctorDeepFillCheck(ctx, cfg))
@@ -412,10 +423,17 @@ func doctorDetectModelMax(ctx context.Context, p config.ProviderConfig) int {
 // share one definition; this alias is kept for the tests that assert on it.
 const doctorToolCallSmokePrompt = toolcallprobe.SmokePrompt
 
-// doctorToolCallCheck (P28.2) does a cheap live round-trip smoke test against
-// the configured model: send a single obviously-actionable prompt with one
-// trivial tool schema and check whether the response contains at least one
-// tool call. Live evaluation (`TestLiveWorkflow`, 2026-07-14) found wide
+// doctorToolCallCheck (P28.2, extended to a conformance rate by P53.4) does a
+// live round-trip smoke test against the configured model: send an
+// obviously-actionable prompt with one trivial tool schema and check whether
+// the response contains at least one tool call — repeated
+// provider.tool_call_probe_trials times, because "can this model ever call a
+// tool" and "how often does it" are different questions and only the second
+// one predicts whether an unattended run survives. Trials truncated at the
+// token cap reach no verdict and are excluded from the rate's denominator
+// rather than counted as misses (Run's P34.2 contract, preserved per trial).
+// Because the trials run inline here, the command announces the sample size
+// before starting (doctorToolCallNotice). Live evaluation (`TestLiveWorkflow`, 2026-07-14) found wide
 // variance in local-model tool-calling reliability — `qwythos:latest` (this
 // repo's own configured default) diagnosed a bug but never called
 // edit_file/write_file to fix it, and `deepseek-r1:8b` made zero tool calls
@@ -455,10 +473,11 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 		return doctorCheck{Name: name, Severity: doctorPass, Detail: "skipped — provider not configured"}
 	}
 
-	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	trials := doctorToolCallTrials(cfg)
+	rctx, cancel := context.WithTimeout(ctx, time.Duration(trials)*doctorToolCallTrialTimeout)
 	defer cancel()
 
-	res, err := toolcallprobe.Run(rctx, adapter, cfg.Provider.Model)
+	conf, err := toolcallprobe.RunTrials(rctx, adapter, cfg.Provider.Model, trials)
 	if err != nil {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
@@ -466,24 +485,69 @@ func doctorToolCallCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 			Fix:    "best-effort check, not fatal — retry `aegis doctor` once the model server is responsive",
 		}
 	}
-	if res.ToolCalls == 0 && res.Truncated {
+	rate, ok := conf.Rate()
+	if !ok {
+		// Every trial was truncated: no verdict at all, never a 0% rate.
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
-			Detail: fmt.Sprintf("model %q hit the smoke test's %d-token cap before answering — no verdict", cfg.Provider.Model, toolcallprobe.SmokeMaxTokens),
+			Detail: fmt.Sprintf("model %q hit the smoke test's %d-token cap before answering on all %d trial(s) — no verdict", cfg.Provider.Model, toolcallprobe.SmokeMaxTokens, conf.Trials),
 			Fix:    "not a failure: the model ran out of tokens mid-answer, so the check proves nothing either way — common with reasoning models that think at length before acting",
 		}
 	}
-	if res.ToolCalls == 0 {
+	if conf.ToolCallTrials == 0 {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
-			Detail: fmt.Sprintf("model %q answered an obviously-actionable smoke-test prompt with zero tool calls", cfg.Provider.Model),
+			Detail: fmt.Sprintf("model %q answered an obviously-actionable smoke-test prompt with zero tool calls — %s", cfg.Provider.Model, conf.Summary()),
 			Fix:    "some local models unreliably drive Aegis's tool-calling loop — see docs/providers.md's \"Tool-calling reliability for local models\" section for model families that have and haven't proven reliable",
+		}
+	}
+	// A partial rate is the signal this check exists to surface: a model that
+	// complies on some trials and not others passes a single-trial probe and
+	// then fails a long unattended run in a way that reads like a harness bug.
+	if rate < 1 {
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: fmt.Sprintf("model %q calls tools inconsistently — %s", cfg.Provider.Model, conf.Summary()),
+			Fix:    "an unattended run needs consistency, not capability — see docs/providers.md's \"Tool-calling reliability for local models\" section, or raise provider.tool_call_probe_trials for a larger sample",
 		}
 	}
 	return doctorCheck{
 		Name: name, Severity: doctorPass,
-		Detail: fmt.Sprintf("model %q made %d tool call(s) on the smoke-test prompt", cfg.Provider.Model, res.ToolCalls),
+		Detail: fmt.Sprintf("model %q — %s", cfg.Provider.Model, conf.Summary()),
 	}
+}
+
+// doctorToolCallTrials is the sample size doctorToolCallCheck runs (P53.4),
+// from provider.tool_call_probe_trials, defaulting to
+// toolcallprobe.DefaultTrials when unset.
+func doctorToolCallTrials(cfg *config.Config) int {
+	if n := cfg.Provider.ToolCallProbeTrials; n > 0 {
+		return n
+	}
+	return toolcallprobe.DefaultTrials
+}
+
+// doctorToolCallTrialTimeout bounds one trial. The whole check gets this per
+// trial rather than one shared budget: an N-trial sample where trial 3 is slow
+// shouldn't starve trials 4 and 5 into a transport error.
+const doctorToolCallTrialTimeout = 20 * time.Second
+
+// doctorToolCallNotice is the line `aegis doctor` prints before it starts,
+// when the tool-calling check is going to run a multi-trial sample. Unlike the
+// daemon, doctor runs the whole sample inline — that is up to N generations
+// against a local model, and a command that goes quiet for minutes with no
+// explanation reads as a hang. Returns "" when the check will skip or when a
+// single trial makes it no slower than it has always been.
+func doctorToolCallNotice(cfg *config.Config) string {
+	if ollamaNativeBase(cfg) == "" || cfg.Provider.Model == "" || cfg.Provider.Model == "auto" {
+		return ""
+	}
+	trials := doctorToolCallTrials(cfg)
+	if trials <= 1 {
+		return ""
+	}
+	return fmt.Sprintf("running the tool-calling conformance probe: %d trials against model %q (up to %s each) — set provider.tool_call_probe_trials=1 for the single-trial check",
+		trials, cfg.Provider.Model, doctorToolCallTrialTimeout)
 }
 
 // deepFillCheckTimeout bounds doctorDeepFillCheck: it drives up to

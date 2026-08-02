@@ -196,6 +196,14 @@ provider:
   # regardless of base_url.
   prompt_profile: auto
 
+  # How many times the tool-calling smoke probe runs when measuring a local
+  # model's conformance *rate* rather than a yes/no verdict (P53.4). Local
+  # (Ollama-style) providers only. `aegis doctor` runs the whole sample inline
+  # (and announces the trial count before it starts); the daemon blocks on only
+  # the first trial and refines the rest in the background, so raising this
+  # never adds first-message latency. 1 = the single-trial check, unchanged.
+  tool_call_probe_trials: 5
+
 
 # ── Permission ────────────────────────────────────────────────────────────────
 permission:

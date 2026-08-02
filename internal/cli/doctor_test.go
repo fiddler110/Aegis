@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -486,8 +487,9 @@ func TestDoctorToolCallCheckDetectsZeroToolCalls(t *testing.T) {
 	}
 }
 
-// TestDoctorToolCallCheckPassesOnToolCall confirms a model that does call
-// the smoke-test tool reports PASS with the observed call count.
+// TestDoctorToolCallCheckPassesOnToolCall confirms a model that calls the
+// smoke-test tool on every trial reports PASS with the observed conformance
+// rate (P53.4) rather than a single run's call count.
 func TestDoctorToolCallCheckPassesOnToolCall(t *testing.T) {
 	const body = `{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_files","arguments":{"path":"."}}}]},"done":false}
 {"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":3}
@@ -501,8 +503,65 @@ func TestDoctorToolCallCheckPassesOnToolCall(t *testing.T) {
 	if got.Severity != doctorPass {
 		t.Fatalf("one tool call: got %v, want pass; detail=%q", got.Severity, got.Detail)
 	}
-	if !strings.Contains(got.Detail, "1 tool call") {
-		t.Errorf("expected detail to report the call count, got %q", got.Detail)
+	if !strings.Contains(got.Detail, "5/5 trials made a tool call") {
+		t.Errorf("expected detail to report the conformance rate over the default sample, got %q", got.Detail)
+	}
+}
+
+// TestDoctorToolCallCheckReportsPartialConformance is the model shape P53.4
+// exists for: one that calls the tool sometimes. It passes a single-trial
+// probe cleanly and then fails a long unattended run, so doctor must WARN and
+// name the rate rather than reporting a clean PASS.
+func TestDoctorToolCallCheckReportsPartialConformance(t *testing.T) {
+	const withCall = `{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"list_files","arguments":{"path":"."}}}]},"done":false}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}
+`
+	const prose = `{"message":{"role":"assistant","content":"I would list the files by running ls."},"done":false}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}
+`
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		// Alternate: calls on trials 1 and 3, prose on 2 and 4.
+		if n.Add(1)%2 == 1 {
+			_, _ = w.Write([]byte(withCall))
+			return
+		}
+		_, _ = w.Write([]byte(prose))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: srv.URL, Model: "qwen3:14b", ToolCallProbeTrials: 4}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	got := doctorToolCallCheck(ctx, cfg)
+	if got.Severity != doctorWarn {
+		t.Fatalf("inconsistent tool calling: got %v, want warn; detail=%q", got.Severity, got.Detail)
+	}
+	if !strings.Contains(got.Detail, "2/4 trials made a tool call") {
+		t.Errorf("expected detail to name the observed rate, got %q", got.Detail)
+	}
+}
+
+// TestDoctorToolCallNoticeAnnouncesTheCost: running the sample inline makes
+// this check up to N× slower, so the command must say so before it starts
+// rather than going quiet for minutes. A single-trial config is no slower than
+// before and says nothing.
+func TestDoctorToolCallNoticeAnnouncesTheCost(t *testing.T) {
+	local := func(trials int) *config.Config {
+		return &config.Config{Provider: config.ProviderConfig{Default: "ollama", BaseURL: "http://localhost:11434", Model: "qwen3:14b", ToolCallProbeTrials: trials}}
+	}
+	notice := doctorToolCallNotice(local(0)) // unset = default sample
+	if !strings.Contains(notice, "5 trials") || !strings.Contains(notice, "qwen3:14b") {
+		t.Errorf("notice = %q, want it to name the trial count and model before the probe runs", notice)
+	}
+	if got := doctorToolCallNotice(local(1)); got != "" {
+		t.Errorf("single-trial notice = %q, want silence — that check is no slower than it has always been", got)
+	}
+	cloud := &config.Config{Provider: config.ProviderConfig{Default: "anthropic", APIKey: "sk-test-fake", Model: "claude-x"}}
+	if got := doctorToolCallNotice(cloud); got != "" {
+		t.Errorf("cloud-provider notice = %q, want silence — the check skips entirely", got)
 	}
 }
 

@@ -33,23 +33,31 @@ func TestLiveProbeReachesAVerdict(t *testing.T) {
 	}
 	a := openai.New("ollama", openai.WithBaseURL(baseURL))
 
-	const runs = 5
-	var truncated int
-	for i := 0; i < runs; i++ {
-		res, err := Run(context.Background(), a, model)
-		if err != nil {
-			t.Fatalf("run %d: probe could not run (is %s serving %s?): %v", i, baseURL, model, err)
-		}
-		t.Logf("run %d: tool_calls=%d truncated=%v", i, res.ToolCalls, res.Truncated)
-		if res.ToolCalls == 0 && !res.Truncated {
-			t.Errorf("run %d: %s finished its turn without a tool call — either the model genuinely can't call tools, or the probe is accusing a capable one (the P34.2 false positive)", i, model)
-		}
-		if res.Truncated {
-			truncated++
-		}
+	// Run as the P53.4 aggregate rather than a hand-rolled loop, so the tier
+	// exercises the shipped conformance accounting against real streams too:
+	// the no-verdict exclusion is only ever interesting when a real model
+	// actually truncates.
+	const runs = DefaultTrials
+	conf, err := RunTrials(context.Background(), a, model, runs)
+	if err != nil {
+		t.Fatalf("probe could not run (is %s serving %s?): %v", baseURL, model, err)
 	}
-	if truncated > 0 {
-		t.Errorf("%d/%d runs hit the %d-token cap — SmokeMaxTokens is too tight for %s's reasoning preamble; the guard keeps this from becoming a false accusation, but a truncated probe reaches no verdict at all", truncated, runs, SmokeMaxTokens, model)
+	if conf.Err != nil {
+		t.Fatalf("sample cut short after %d trial(s): %v", conf.Trials, conf.Err)
+	}
+	for i, res := range conf.Results {
+		t.Logf("run %d: tool_calls=%d truncated=%v", i, res.ToolCalls, res.Truncated)
+	}
+	t.Logf("conformance: %s", conf.Summary())
+	rate, ok := conf.Rate()
+	if !ok {
+		t.Fatalf("all %d runs hit the %d-token cap — no verdict at all; SmokeMaxTokens is too tight for %s's reasoning preamble", conf.Trials, SmokeMaxTokens, model)
+	}
+	if rate < 1 {
+		t.Errorf("%s called the tool on only %d of %d verdict-reaching runs — either the model is genuinely inconsistent (the conformance gap P53.4 exists to surface) or the probe is accusing a capable one (the P34.2 false positive)", model, conf.ToolCallTrials, conf.Denominator())
+	}
+	if conf.NoVerdict > 0 {
+		t.Errorf("%d/%d runs hit the %d-token cap — SmokeMaxTokens is too tight for %s's reasoning preamble; those runs are excluded from the rate rather than counted as misses, but a truncated probe reaches no verdict at all", conf.NoVerdict, conf.Trials, SmokeMaxTokens, model)
 	}
 	if w := NewGate().Warning(context.Background(), a, model); w != "" {
 		t.Errorf("Gate warns about a model that calls tools: %q", w)

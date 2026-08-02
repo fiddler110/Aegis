@@ -137,14 +137,174 @@ const ProbeTimeout = 90 * time.Second
 // and warn about a model since replaced by a capable one. A process-lifetime
 // cache is short enough for that to stay unlikely, and the probe is cheap
 // enough to repay on restart.
+// The conformance rate (P53.4) is layered on top of that cache rather than
+// beside it: the *first* trial is what the blocking caller waits for and is
+// what produces the verdict, exactly as before, and the remaining trials run
+// in the background against the gate's own lifetime context, refining the
+// stored Conformance so later notices can carry a rate. That shape is forced
+// by where Gate is consulted from — the daemon's message path, before the
+// user's first reply — where running five sequential generations inline would
+// be minutes of dead air on a model that generates at single-digit tokens/sec.
 type Gate struct {
 	sf singleflight.Group
 
+	// trials is the full sample size; 1 disables background refinement
+	// entirely and reduces the gate to its pre-P53.4 behavior.
+	trials int
+
+	// bgCtx is the gate's own lifetime context, the parent of every background
+	// refinement. Deliberately NOT the per-request context a probe is first
+	// triggered from: that one is cancelled the moment the message completes,
+	// which is roughly when the refinement would be getting started. Close
+	// cancels it, so refinements die with the server rather than outliving it.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	wg       sync.WaitGroup
+
 	mu       sync.RWMutex
 	verdicts map[string]Verdict
+	conf     map[string]Conformance
+	refining map[string]bool
+	// onRefined, when set, fires after a background refinement finishes. Test
+	// seam only: it makes the background path assertable without sleeps.
+	onRefined func(model string, c Conformance)
 }
 
-func NewGate() *Gate { return &Gate{verdicts: make(map[string]Verdict)} }
+// GateOption configures a Gate at construction.
+type GateOption func(*Gate)
+
+// WithTrials sets how many probe trials make up a model's conformance sample.
+// n < 1 is clamped to 1, which reproduces the single-trial behavior exactly:
+// no background work is scheduled at all.
+func WithTrials(n int) GateOption {
+	return func(g *Gate) {
+		if n < 1 {
+			n = 1
+		}
+		g.trials = n
+	}
+}
+
+// withRefinedHook installs the test seam described on Gate.onRefined.
+func withRefinedHook(fn func(model string, c Conformance)) GateOption {
+	return func(g *Gate) { g.onRefined = fn }
+}
+
+func NewGate(opts ...GateOption) *Gate {
+	ctx, cancel := context.WithCancel(context.Background())
+	g := &Gate{
+		trials:   1,
+		bgCtx:    ctx,
+		bgCancel: cancel,
+		verdicts: make(map[string]Verdict),
+		conf:     make(map[string]Conformance),
+		refining: make(map[string]bool),
+	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
+}
+
+// Close cancels any in-flight background refinement and waits briefly for the
+// goroutines to unwind, so a daemon shutdown doesn't leave probes generating
+// against a model server nobody is listening to. Safe to call more than once
+// and safe never to call — a Gate with trials == 1 never starts a goroutine.
+func (g *Gate) Close() {
+	g.bgCancel()
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		// Cancellation has already been delivered; the adapter unwinds on its
+		// own. Blocking shutdown on a slow model server would be the worse
+		// trade.
+	}
+}
+
+// wait blocks until every background refinement has finished. Test helper —
+// production code uses Close.
+func (g *Gate) wait() { g.wg.Wait() }
+
+// Conformance returns what the trials so far observed for model, if any have.
+// Refinement runs in the background, so this may report a partial sample (one
+// trial right after the blocking probe, the full count once refinement lands).
+func (g *Gate) Conformance(model string) (Conformance, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	c, ok := g.conf[model]
+	return c, ok
+}
+
+// addResult folds one trial into model's stored conformance.
+func (g *Gate) addResult(model string, res Result) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.conf[model]
+	c.Add(res)
+	g.conf[model] = c
+}
+
+func (g *Gate) setConformanceErr(model string, err error) {
+	if err == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.conf[model]
+	c.Err = err
+	g.conf[model] = c
+}
+
+// refine runs the sample's remaining trials in the background, publishing each
+// one into the stored conformance as it lands so a cancelled refinement still
+// contributes what it measured.
+//
+// Called from inside the singleflight flight that just ran trial 1, so at most
+// one refinement per model is ever in flight; the refining map keeps a later
+// re-probe (a model whose verdict wasn't cacheable) from starting a second.
+func (g *Gate) refine(adapter provider.Adapter, model string) {
+	if g.trials <= 1 {
+		return
+	}
+	g.mu.Lock()
+	if g.refining[model] || g.conf[model].Trials >= g.trials {
+		g.mu.Unlock()
+		return
+	}
+	remaining := g.trials - g.conf[model].Trials
+	g.refining[model] = true
+	g.mu.Unlock()
+
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		defer func() {
+			g.mu.Lock()
+			delete(g.refining, model)
+			c := g.conf[model]
+			g.mu.Unlock()
+			if g.onRefined != nil {
+				g.onRefined(model, c)
+			}
+		}()
+		var scratch Conformance
+		// Each trial is bounded by the same ProbeTimeout the blocking probe
+		// uses, and the whole thing dies with g.bgCtx.
+		err := runTrialsInto(g.bgCtx, adapter, model, remaining, ProbeTimeout, &scratch, func(res Result) {
+			g.addResult(model, res)
+		})
+		if err != nil {
+			g.setConformanceErr(model, err)
+			return
+		}
+		g.setConformanceErr(model, scratch.Err)
+	}()
+}
 
 // Cached reports the stored verdict for model, if the probe has reached one.
 func (g *Gate) Cached(model string) (Verdict, bool) {
@@ -181,6 +341,11 @@ func (g *Gate) Verdict(ctx context.Context, adapter provider.Adapter, model stri
 		if err != nil {
 			return Unknown, err
 		}
+		// Trial 1 of the conformance sample: recorded, then the rest handed to
+		// the background so this caller's latency is one probe, as it has
+		// always been.
+		g.addResult(model, res)
+		g.refine(adapter, model)
 		if res.ToolCalls == 0 && res.Truncated {
 			// The model ran out of tokens before it finished, so silence here
 			// is the cap's doing, not the model's. Unknown, and deliberately
@@ -220,6 +385,15 @@ func (g *Gate) Warning(ctx context.Context, adapter provider.Adapter, model stri
 	if g.Verdict(ctx, adapter, model) != Unsupported {
 		return ""
 	}
-	return fmt.Sprintf("model %q made no tool call on a trivial tool-calling probe — it likely can't use tools,"+
+	warn := fmt.Sprintf("model %q made no tool call on a trivial tool-calling probe — it likely can't use tools,"+
 		" so it may answer from guesswork instead of reading your files; see docs/providers.md", model)
+	// The rate, when a background refinement has produced one worth naming.
+	// The first notice on a fresh model necessarily carries only the blocking
+	// trial (Trials == 1, nothing to add); a later session on the same model
+	// gets the sample. Deliberately additive: the verdict itself still comes
+	// from the probe's own contract, not from a threshold on the rate.
+	if c, ok := g.Conformance(model); ok && c.Trials > 1 {
+		warn += fmt.Sprintf(" (conformance over %d trials: %s)", c.Trials, c.Summary())
+	}
+	return warn
 }

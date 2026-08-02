@@ -82,13 +82,26 @@ Takeaways:
   sends a cheap, obviously-actionable smoke-test prompt to the configured local model and **warns**
   (never fails hard — safe for offline/CI use) if it comes back with zero tool calls. Run it after
   switching models to catch this before it costs you a real task.
+- Since P53.4 that check reports a **conformance rate**, not a yes/no verdict: it runs the probe
+  `provider.tool_call_probe_trials` times (default 5) and reports how many trials actually produced a
+  tool call — `3/5 trials made a tool call (60%)` warns, `5/5` passes. "Can this model ever call a
+  tool" and "how often does it" are different questions, and only the second predicts whether an
+  unattended run survives; a model that complies 60% of the time passes a single-trial probe and then
+  fails a long drive in a way that reads like a harness bug. Trials cut off at the probe's token cap
+  reach **no verdict** and are excluded from the rate's denominator rather than counted as misses, so
+  a slow-thinking reasoning model is never accused by the arithmetic; if *every* trial is truncated
+  there is no rate at all, and doctor says so. Because these trials run inline, `aegis doctor`
+  announces the trial count before it starts; set `provider.tool_call_probe_trials: 1` for the old
+  single-trial check.
 - You no longer have to remember to run it (P34.2). The daemon runs that same probe itself at run
   start, for local Ollama-style providers only, and warns before the turn is spent if the model can't
   call tools — once per model (the verdict is cached for the daemon's life) and once per session (a
   tool-incapable model is still fine to converse with). A probe that can't reach a verdict — an
   unreachable server, a timeout — stays silent rather than blaming the model. The probe is not extra
   latency in practice: it runs against the model your turn is about to load anyway, so it shares that
-  cold load rather than adding one.
+  cold load rather than adding one. The daemon deliberately blocks on **one** trial only — the rest
+  of the conformance sample runs in the background and refines the cached rate for later notices — so
+  raising `provider.tool_call_probe_trials` never delays your first reply.
 - Independently, the engine watches for the `qwen2.5-coder:1.5b` signature above: if a turn's answer
   contains tool-call-shaped JSON naming a real tool but made no actual tool call, it says so. This
   costs nothing and needs no probe, so it also covers `aegis chat`, which runs its own in-process
