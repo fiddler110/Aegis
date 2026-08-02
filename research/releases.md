@@ -8,7 +8,22 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-02 — **P54.2 closed: no gap found.** The long-standing "accurate refusal,
+**Last updated:** 2026-08-02 — **the P55.x container-only-scanning batch shipped 6 of its 9 items
+the day it was filed** (P55.1-P55.6; P55.7/P55.8 stay open in Tier 3, P55.9 parked in Tier 4). The
+batch came out of a full functional test of the multiscanner container, which found the container's
+*scanning* sound and its *provisioning* full of silent failures — three sharing one shape: the
+scanner stopped working and no layer of the system noticed. Now: the image carries a source
+fingerprint so it can't fall behind the Containerfile unnoticed; `update-db` runs each database
+independently with a per-step summary instead of aborting the rest on the first failure; a new
+`aegis security verify-image` runs every bundled tool against a planted-findings fixture and asserts
+a **non-zero finding count**, not exit 0; `auto` resolution prefers the pinned, confined container
+over an unpinned host binary; the pin is machine-wide by default; and database age is reported.
+`verify-image` justified itself immediately, catching two live silent-all-clears on its first run —
+syft's container mode broken outright, and gitleaks reporting zero secrets on a tree full of them.
+Measured: 12/14 tools verified with findings, and `security status` went from 6.55s to 4.03s median
+after memoizing the runtime probe the resolution flip made hot. Full suite green.
+
+**Previously, 2026-08-02** — **P54.2 closed: no gap found.** The long-standing "accurate refusal,
 error-shaped" lead for the SCA/secrets scanners was swept by measurement and produced no bug —
 osv-scanner's exit 128 is the only refusal of that shape and P34.12 already interpreted it. The
 measurements are recorded in code so the sweep isn't repeated. Also 2026-08-02: **P53.6 shipped**,
@@ -2483,6 +2498,235 @@ about the request or transcript; end-to-end parse→execute→text-result with n
 caller's system prompt preserved; gate consulted and denial honored; malformed call corrected and not
 executed, corrective retracted; bounded give-up; a plain answer is not a correction; suppressed on the
 step-limit turn), plus 2 config tests. Full suite green.
+
+---
+
+## P55.x — container-only scanning: making the multiscanner trustworthy, then preferred (SHIPPED 2026-08-02)
+
+Filed and shipped the same day, off a full functional test of the multiscanner container against a
+purpose-built multi-language vulnerable fixture plus a review of `internal/security`'s method
+resolution across all 17 registered scanners. **Six of nine items shipped** — P55.1-P55.6, the Tier-1
+integrity half and the Tier-2 half. P55.7 (`aegis-netscanner`) and P55.8 (gosec two-phase) remain
+open in Tier 3; P55.9 stays parked in Tier 4 by its own measure-first criteria.
+
+The strategic goal is that a user installs **one image instead of 17 tools**. The Tier-1 work had to
+land first, because container-only means a broken container is no longer a degraded path — it is the
+whole product.
+
+**What the test actually found.** The container's *scanning* was sound: 14/14 bundled tools execute
+offline and detection is genuinely good (trivy 59 vulns / 26 misconfigs / 5 secrets, osv-scanner 59
+offline, gitleaks 5/5 planted secrets, end-to-end `aegis scan` 173 findings with cross-tool dedup and
+ASVS tagging intact). What it found instead was a cluster of **provisioning** failures sharing one
+shape: *the scanner silently or loudly stopped working and no layer of the system noticed.*
+
+Four defects were fixed ahead of the batch and are its evidence base: kubescape fatally broken in
+container mode (no rego library baked, so `--network none` gave `open $HOME/.kubescape/allcontrols.json:
+no such file or directory`); kubescape's SARIF unparseable even once it ran (`--output /dev/stdout`
+interleaved with its human summary table); njsscan broken by the semgrep removal (it shells out to a
+`semgrep` binary by name, and the bare symlink let that lookup escape to the system PATH); and grype
+absent from the pinned image entirely. **Two of the four survived a green `go test ./...`, a
+successful image build, and a scan that reported findings.** The njsscan case is the sharpest
+argument for P55.3: the Containerfile's build-time `njsscan --version` check passed for the entire
+duration of the breakage, because `--version` never reaches the semgrep subprocess.
+
+### P55.1 — Image/source drift detection
+
+The image-ID pin proves the image hasn't changed since it was pinned; it cannot see that the image no
+longer matches the *source it was built from*. That gap produced a real, undetected failure: the
+pinned image predated three multiscanner commits, so it never contained grype. The consequence
+chained and every link failed quietly — `update-db.sh` ran `grype db update` under `set -eu` on an
+image without grype, aborting the entire database refresh, which is why `/cache/grype` had never
+existed on that machine. Container-method grype would have been correctly refused by
+`multiscannerDBTools`; it was masked only because grype happened to be on the host PATH.
+
+A sha256 **source fingerprint** over the embedded Containerfile, `fetch.sh` and `update-db.sh` (the
+`go:embed` set is already authoritative) is recorded at build time as
+`security.multiscanner.source_fingerprint` and compared wherever image state is surfaced. Filenames
+are included in the hash input so a rename is detected, and CRLF is normalized before hashing so a
+Windows checkout with `autocrlf` doesn't report drift against byte-identical source.
+
+**Drift reports rather than fails closed** — a deliberate departure in mechanism, not intent, from the
+image-ID path whose wording it otherwise follows. An ID mismatch means "not the vetted artifact" and
+must fail closed; drift means "the vetted artifact, built from older source," which is still a real
+image worth scanning with. Refusing it would trade a silent under-report for a silent no-scan. A
+config carrying `image_id` but no fingerprint reads as *unknown*, not as drift, so existing installs
+upgrade without a spurious warning.
+
+### P55.2 — `update-db` per-step, plus trivy's checks bundle
+
+`update-db.sh` ran three fetches straight-line under `set -eu`, so the first failure aborted every
+later one with no notion of partial success. The observed state was trivy and osv-scanner fully
+populated while grype had no database at all, from a single early failure — one error, a non-zero
+exit, and nothing saying "2 of 3 are fine."
+
+Each refresh is now its own step. The load-bearing implementation detail: steps **re-invoke the script
+as a child process** rather than running as a function or `if`/`||` condition, because those suppress
+`errexit` for everything inside them — which would have silently lost the intra-step error detection
+the plausibility assertions depend on. A separate process keeps its own `set -eu` fully armed while
+the parent reads only the exit status. Outcomes collect into a summary; the exit status is non-zero if
+any step failed. Inside the osv step, one ecosystem's failure no longer abandons the other nine.
+
+Every plausibility assertion is preserved, scoped to its own step — the grype `vulnerability.db` and
+npm `all.zip` size checks are exactly the right instinct and stay; they just no longer take the other
+tools down with them.
+
+Also folded in the **trivy misconfiguration checks bundle**, which no step populated, so every scan
+logged `failed to check cache: cache does not exist at "/cache/trivy/policy/content"` and fell back to
+trivy's embedded (frozen, older) checks. Degraded rather than broken — but an ERROR on every single
+scan trains operators to ignore scanner errors. There is no download-only flag for the bundle at trivy
+0.72, so the step runs one misconfig scan against a throwaway Dockerfile through the same
+`trivy fs --scanners misconfig` entry point a real scan uses, then asserts the cache landed — a trivy
+that can't reach the registry falls back to embedded checks and still exits 0. Verified in the image:
+3.1MB written to `/cache/trivy/policy/content`.
+
+### P55.3 — `aegis security verify-image`
+
+`MultiscannerTools(profile)` is a **static list**. Aegis routed a scan to the container on the strength
+of that list plus an image-ID match, never checking the named tool was present in the image or could
+produce a result. Both failure modes were live simultaneously: grype in the list and absent from the
+image; kubescape in the list, present, and fatal on every invocation.
+
+`verify-image` runs a version probe **and** a canary scan against a small embedded fixture for each
+tool the profile claims, asserting a **non-zero finding count rather than exit 0**. That assertion is
+the entire point: a `--version` probe would have caught grype's absence but not kubescape's fatal, and
+neither catches the class this codebase already documents for gosec and osv-scanner — a tool that
+exits clean and reports zero because it never loaded its data. It runs as the last step of
+`build-image` (`--skip-verify` opts out) and exits non-zero, so it works as a provisioning gate. A
+missing DB cache is a distinct `blocked` status, not a tool failure.
+
+**The canary found three real defects on its first run**, which is the item justifying itself:
+
+- **syft's container mode was entirely broken.** `sbom.go` used `runContainerImage` (bare args, for
+  entrypointed per-tool images) instead of `runScannerImage`, so the runtime tried to exec
+  `/src/dir:/src` and exited 127. Invisible because its only caller silently falls back to a direct
+  scan on any error.
+- **gitleaks container mode reported 0 on a tree full of secrets** — the exact silent all-clear this
+  item exists to catch. gitleaks 8.30 writes a temp report and *renames* it into place, and a rename
+  onto `/dev/stdout` replaces the symlink instead of writing to the pipe: exit 0, empty stdout, parsed
+  as zero secrets. Fixed with the report-file + `cat` pattern kubescape already uses.
+  gosec/bandit/brakeman genuinely do stream to `/dev/stdout` and are unaffected.
+- **Detector allowlists defeat "obviously fake" secrets.** Both gitleaks and trufflehog explicitly
+  allowlist `AKIAIOSFODNN7EXAMPLE`, so a fixture built from canonically-fake credentials reported
+  zero from both. The fixture keeps that pair as a documented trap and adds synthetic tokens that do
+  fire; a test asserts every planted value is visibly fake.
+
+Measured against the built image: **12 of 14 tools verified with findings** (trivy 48, kubescape 24,
+grype 18, osv-scanner 16, opengrep 14, syft 7 components, bandit 6, hadolint 6, brakeman 5, njsscan 4,
+gitleaks 2, trufflehog 1). nmap and nuclei take a network target, so no filesystem fixture can trip
+them; they are skipped with a stated reason and get a version probe only. That is the one place the
+canary requirement isn't met, and it isn't closable with a fixture.
+
+### P55.4 — Container-first method resolution
+
+`Resolve`'s `auto` branch tried host → container → WSL and returned the host binary the moment
+`lookPath` succeeded. Of the scanners that ran in the end-to-end fixture test, seven resolved to
+`host` and exactly one to a container path — and that one went to **WSL**, not the container. The
+image was built, pinned, cache-populated, and almost entirely unused.
+
+Host-first was right when the container was a *fallback* for tools the operator hadn't installed. It
+is wrong once the container is the supported path: host binaries are unpinned, whatever version
+happened to be on PATH, with no reproducibility and no `--network none` confinement, so two scans on
+two machines can silently use different scanner versions and rule sets.
+
+`auto` is now **container → host → WSL**, with the container leg gated on the multiscanner covering
+the tool. A refused container never fails the tool — image-ID or cache verification refusing falls
+through to host, since a working unpinned scan beats no scan. `method: host` and `method: container`
+are untouched.
+
+Deliberately **not** inverted for an operator-pinned per-tool `security.tools.<name>.image`: that
+image is the operator's own artifact, gets only the digest-pin regex rather than the real image-ID
+comparison the multiscanner gets, and already has an unambiguous opt-in in `method: container`. The
+multiscanner had no such knob, which is why its default had to move.
+
+Falling back to host is recorded rather than silent. `Resolve`'s four-value shape is the
+`Scanner.Resolve` interface's, forwarded by ~14 implementations, so widening it was unavailable;
+overloading `reason` would have been safe but invisible, since every display site discards it on
+success. A `ResolveDetailed`/`Resolution.Note` seam carries it instead, collapsed at the display sites
+to one advisory per distinct cause naming each tool once rather than fourteen near-identical
+paragraphs. It cannot fire for an operator who never built the image, since `Resolve` only prefers the
+container for tools the multiscanner covers — a host binary isn't their fallback, it's their plan.
+
+**Cost regression, fixed in the same batch.** The inversion moved `detectRuntime` from "reached only
+when no host binary exists" to "reached once per covered tool" — it shells out to `podman version` /
+`docker version` under a 3s per-candidate timeout, so one `security status` render went from roughly
+one probe to one per scanner. Image and cache verification were already memoized behind a 15s TTL; the
+runtime probe was not. It now is, hanging off `Options` following the existing
+`MultiscannerPolicy.check` convention — including the deliberate property that an `Options` built
+directly in code gets nil and probes every call, which keeps the seam-swapping tests honest.
+Deliberately not in `internal/sandbox`: `DetectBest`'s other callers are diagnostics
+(`aegis sandbox detect`, `aegis doctor`) whose job is to report the runtime's state *right now*, and
+serving them a 15s-old answer would make a diagnostic lie about the thing it was run to check. The
+negative result caches too — it is the slow path, only reached after every candidate has timed out —
+and concurrent callers collapse onto one probe via a pending-entry latch, since `engine.runTools` runs
+read-capability tools concurrently and without it N goroutines would all miss a cold cache and all
+shell out. Measured on `aegis security status` over three runs with podman up: **median 6.55s → 4.03s.**
+
+### P55.5 — Pin the multiscanner globally by default
+
+`build-image` wrote `security.multiscanner` to the *project's* `.aegis/config.yaml` unless `--global`
+was passed. But the image lives in machine-wide container storage and the database volume is
+explicitly one cache shared by every scan in every project — so the configuration was the only
+per-repo part of an otherwise machine-wide asset.
+
+The effect was invisible. Inside the repo it was built from, `security status` reported scanners as
+`container`; from any other directory the same binary and the same image reported *"not installed …
+run `aegis security build-image`"* — advice to rebuild an image that already existed. An operator
+provisions once and concludes it didn't work.
+
+The user config is now the default target, with `--project` for the narrow case of a repo deliberately
+on a different image. `--global` is kept as a deprecated, hidden no-op rather than removed: it asked
+for exactly what is now the default, so provisioning scripts pass it, and deleting it would fail those
+runs *after* a multi-gigabyte build.
+
+Since project config overrides user config, a `security.multiscanner` block left in a repo by an older
+build silently shadows the new machine-wide pin — and every operator who ran the old command has that
+state, with a symptom (an image ID that was just rewritten still failing) that points nowhere near the
+cause. `build-image` now warns when it finds one, including the case where the project block names the
+same image, which is harmless today but goes stale at the next rebuild.
+
+The pin is also now built from the file being rewritten rather than from the merged config, via a new
+`config.FileSecurity`. `patchSecurity` replaces a file's whole `security:` block, so carrying fields
+through from the merge would copy one layer into the other — pinning the user config from inside a
+repo would have promoted that repo's `security.tools` and `wsl_distro` machine-wide.
+
+### P55.6 — Surface vulnerability-database age
+
+Nothing reported how old the scanners' data was. Measured during the test: trivy's DB carried
+`NextUpdate 2026-07-17` and was read on 2026-08-02 — 16 days past its own refresh horizon — and scans
+reported no concern. That silence is partly by construction: the image sets
+`GRYPE_DB_VALIDATE_AGE=false` and `TRIVY_SKIP_*_UPDATE=true`, deliberately disabling the tools' own
+staleness guards, because `--network none` scans cannot refresh and a cached DB is *expected* to be
+old. That is correct — but it shifted the responsibility to Aegis, and Aegis never picked it up. A
+stale SCA database doesn't fail; it **under-reports**, the same silent-all-clear shape as P55.1-P55.3.
+
+Age comes from trivy's `metadata.json` `UpdatedAt` (the database's own build time) and, for grype and
+osv-scanner, the marker mtime — a *download* time, which is a lower bound on data age: it can
+under-state age but never invent it, which is the safe direction. Each row states which source it
+used. Marker paths come from the existing `multiscannerDBTools` map, so a new DB-backed scanner gets
+an age report for free.
+
+Warns past **7 days**, justified on the constant: every tool measures "current" in hours (trivy
+rebuilds every 6h, grype and osv publish daily) and the loosest guard any of them ships is grype's
+5-day `max-allowed-built-age`. Seven sits just past that on purpose — a daily *or weekly* refresh
+cadence never warns and so never gets tuned out, while the case it catches is the real one: a cache
+populated once at provisioning and never again.
+
+Read-only by design: **never auto-refreshes and never fails a scan.** Air-gapped operation is a
+supported posture and the no-network-in-scans decision is not reopened. Costs exactly one extra
+container run, with a test asserting the count rather than a comment claiming it. Renders nothing at
+all when no multiscanner is pinned — host-only scanners manage their own databases, and Aegis has no
+standing to advise a container build on every status call.
+
+### Two roadmap measurements that no longer reproduce
+
+Recorded so they aren't re-investigated. The `aegis-scanner-cache` volume was repopulated during the
+batch, so **grype's database is present, not absent**, and **trivy's DB is hours old, not 16 days** —
+P55.6's stale path is covered by a fixture rather than by the live cache, and P55.1's account of the
+grype-absence chain is now history rather than current state. Separately, the image pinned on the
+development machine predates P55.1, so it carries no fingerprint and correctly reports *unknown*
+rather than drift; drift begins reporting after the next `build-image`, which is also when P55.2's
+rewritten `update-db.sh` enters the fingerprint set.
+
 
 ---
 
