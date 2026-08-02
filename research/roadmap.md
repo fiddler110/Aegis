@@ -208,10 +208,16 @@ once a live built-in drive — now reachable from any client via P52.12 — is c
 verify-clean suite unattended, in one invocation, on a local model. Not Tier 1 because it is
 live-run verification tracking, not independent build work.
 
-**Lead (not yet filed):** the "accurate refusal, error-shaped" exit-code question for the
-SCA/secrets scanners. P34.6 checked the *language*-targeted tools; nothing has swept the
-SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I broke". No
-`### P<n>.<m>` heading yet.
+**Lead closed 2026-08-02 as P54.2 — swept, no gap found.** The "accurate refusal, error-shaped"
+exit-code question for the SCA/secrets scanners (P34.6 checked only the *language*-targeted tools)
+was answered by running all six at their pinned versions against an empty tree and a docs/C/shell
+tree with no dependency manifests. trivy, grype and syft exit 0 with valid output; gitleaks forces
+`--exit-code 0` and its report file is read independently of the run's error; trufflehog exits 0
+with empty stdout, which is the success branch. **osv-scanner's exit 128 is the only refusal of this
+shape, and it was already interpreted by P34.12** — so osv-scanner is to the SCA/secrets half what
+brakeman was to the language-targeted half: the only one. No gate added; the measurements are now
+recorded in the `runJSON` doc comment (`internal/security/scanners.go`) so the sweep isn't re-run
+from scratch. Write-up in [releases.md](releases.md).
 
 ## Open Work — Tier 3
 
