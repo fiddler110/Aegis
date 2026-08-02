@@ -11,15 +11,23 @@ keep it when adding items.
 
 ## Status
 
-**Open items (7).** Tier 2: **P38.1** only. Tier 3: **P53.6** (no fallback for models that fail the
-tool-calling probe — the batch's confirmed capability gap and highest-value item), now the **last**
-open item of the **P53.x local-LLM comparative-review batch**. Its prerequisite is in place:
-**P53.5** shipped 2026-08-02, so the P53.4 conformance rate is persisted per model (keyed to the
-model's content digest, with user declarations outranking it) and P53.6 can consume it as its
-engagement signal instead of re-measuring. The rest of the batch — **P53.1** (stale `WithKeepAlive`
-comment), **P53.2** (loop detector: polling exemption + differentiated outcomes), **P53.3**
-(compaction summarization-call headroom) and **P53.4** (probe conformance rate) — shipped
-2026-08-01. All five write-ups are in [releases.md](releases.md).
+**Open items (6).** Tier 2: **P38.1** only. Tier 3: **none** — **P53.6** (non-native tool-calling
+shim) shipped 2026-08-02, closing the **P53.x local-LLM comparative-review batch** at **0 open of
+6**. The batch's confirmed capability gap and highest-value item is now built: Aegis had been
+detecting a model that writes tool calls into its prose and discarding the signal, and
+`provider.tool_call_shim: on` now serves the tool schemas in the system prompt and parses tagged
+JSON back into real tool calls — opt-in only, through the same permission gate as a native call,
+with a parser that declines a malformed attempt rather than repairing it. The rest of the batch —
+**P53.1** (stale `WithKeepAlive` comment), **P53.2** (loop detector: polling exemption +
+differentiated outcomes), **P53.3** (compaction summarization-call headroom), **P53.4** (probe
+conformance rate) and **P53.5** (persisted per-model capability records) — shipped 2026-08-01/02.
+All six write-ups are in [releases.md](releases.md).
+
+**One follow-up P53.6 deliberately left unfiled-as-built:** auto-engaging the shim off a low P53.4
+conformance rate. The plumbing exists (the rate is persisted per model via
+`modelcaps.Store.ToolCalling`), and the shim's config key rejects `"auto"` rather than accepting it
+as a no-op precisely so the word stays available. It is worth taking only once the rate is
+trustworthy — i.e. once live runs show it predicting drive outcomes — and not before.
 
 Tier 2 also: **P38.1** — the threat-model conformance umbrella. Mechanism
 (recon → scaffold → incremental fill, no orchestration mis-route) is live-confirmed repeatedly;
@@ -75,8 +83,9 @@ item at the head of this tier until a live re-confirmation run happens. The **P5
 comparative-review batch**'s Tier-2 half (**P53.1**-**P53.4**, filed and shipped 2026-08-01) and the
 earlier batch — P52.3, P52.4, P52.5, P52.6, P52.7, P52.8, P52.9, P52.10, P52.11, the full P47.x
 self-contained batch, P48.1, P49.1, and P50.2/P50.3/P50.4 — have shipped; see
-[releases.md](releases.md). The next buildable work is Tier 3's **P53.6** (its prerequisite **P53.5**
-shipped 2026-08-02).
+[releases.md](releases.md). Tier 3 is now empty (**P53.6** shipped 2026-08-02), so there is no
+buildable item queued behind P38.1 — the next work is either a live P38.1 re-test or a newly filed
+item.
 
 **P53.x batch origin.** A comparative review (2026-08-01) of how six frontier harnesses — opencode,
 crush, pi, aider, OpenHands, goose — drive local models, cross-checked line-by-line against Aegis.
@@ -206,56 +215,27 @@ SCA/secrets tools for non-zero exits that mean "nothing to do" rather than "I br
 
 ## Open Work — Tier 3
 
-**Status:** 1 open — **P53.6**, the last of the P53.x local-LLM comparative-review batch (see the
-Tier 2 header for the batch's origin and for the five candidate gaps that were refuted by code
-reading). **P53.5** (persist per-model capability records) shipped 2026-08-02, so P53.6's
-engagement signal — a persisted per-model conformance rate — already exists. The two former Tier-3
-items **P52.12** (lift the phased drive into the daemon) and **P52.13** (`workspace.additional_roots`)
-shipped 2026-08-01. All three write-ups are in [releases.md](releases.md).
+**Status: none open.** **P53.6** (non-native tool-calling shim — `internal/toolshim`,
+`provider.tool_call_shim`) shipped 2026-08-02, the last of the P53.x local-LLM comparative-review
+batch (see the Tier 2 header for the batch's origin and for the five candidate gaps that were
+refuted by code reading). The two former Tier-3 items **P52.12** (lift the phased drive into the
+daemon) and **P52.13** (`workspace.additional_roots`) shipped 2026-08-01. All three write-ups are in
+[releases.md](releases.md).
 
-### P53.6 — No fallback for models that fail the tool-calling probe (warn-only today)
+**Two leads left by P53.6, neither filed:**
 
-The confirmed capability gap, and the only one of the first-pass review's candidates that survived
-code verification. Aegis **detects** the exact condition a fallback would handle and then discards
-the signal. `engine.go:701-713` spots a model writing a tool call into its prose, and the comment is
-explicit that this is by design: *"Name it once; never block."* The daemon's model-switch gate
-likewise emits a notice and proceeds (`messages.go:379-381`), and `aegis doctor` is diagnostic. A
-repo-wide search finds no toolshim, no XML/prompt-based tool-call parsing, and no JSON repair.
-
-Warn-only was the right first move — a prose-only session with such a model is still legitimate, and
-blocking would have been worse than nothing. But two harnesses have since shown the detection is
-worth acting on. goose's `GOOSE_TOOLSHIM` puts tool schemas in the system prompt and uses a *second*
-model (mistral-nemo 12-14b in its published benchmarks; `GOOSE_TOOLSHIM_OLLAMA_MODEL` overrides) to
-interpret the reply back into structured calls — reported to bring phi4-14b and gemma3-27b to
-roughly llama3.3-70b-native parity, which is a large capability gain on exactly the 14-27B class
-this repo's P39.x history keeps fighting. OpenHands' `NonNativeToolCallingMixin` is the lighter
-variant: serialize schemas into the prompt, parse with regex, and pick native-vs-non-native per model
-from a `model_features.py` registry overridable by env. Notably, opencode, crush, and pi ship
-**nothing** here, so this is net-new capability rather than catching up.
-
-Design constraints specific to Aegis: the fallback must be **opt-in and explicit** (a
-`provider.tool_call_shim` config key), not silently auto-engaged — a shim that quietly starts parsing
-prose into executable tool calls is a real safety surface, and every parsed call must pass through
-the same permission gate, capability check, and workspace confinement as a native one, with no
-shortcut path. Goose documents its own parse failures (markdown emitted where JSON was requested,
-malformed JSON, inconsistent formats — block/goose#6688 requests JSON repair), so a strict parser
-that declines cleanly and falls back to warn-only is better than a lenient one that fabricates a
-call. Ship behind explicit config first; auto-engagement on a low P53.4 conformance rate is a
-follow-up worth taking only once the rate is trustworthy.
-
-Adjacent and deliberately **not** folded in: grammar-constrained/schema-constrained decoding (Ollama
-structured outputs, llama.cpp GBNF) attacks the same problem from the other end by making malformed
-tool-call JSON mechanically impossible rather than parsed-and-repaired. None of the six reviewed
-harnesses does it. It is the stronger long-term answer for models that *do* speak the tool protocol
-but truncate or malform arguments (the P35.2 failure class), whereas this item targets models that
-cannot speak the protocol at all. File separately if pursued — the two do not share an
-implementation.
-
-**Priority:** Tier 3, Effort M/L — the largest item in the batch and the highest-value one.
-Sequenced last, and both of its prerequisites are now in place: P53.4's conformance rate is the
-engagement signal, and P53.5's `internal/modelcaps` store (shipped 2026-08-02) is where "this model
-needs the shim" gets recorded — a persisted rate is already readable per model via
-`Store.ToolCalling`, with user declarations outranking it.
+- **Auto-engage the shim off a low conformance rate.** Explicitly sequenced as a follow-up rather
+  than dropped: the persisted P53.4 rate is already readable per model (`modelcaps.Store.ToolCalling`)
+  and the config key rejects `"auto"` rather than silently accepting it, so the word stays available
+  for exactly this. Promote when live runs show the rate predicting drive outcomes — engaging a
+  prose-parsing fallback off a signal that isn't trustworthy is worse than requiring the operator to
+  ask for it.
+- **Grammar-constrained decoding** (Ollama structured outputs, llama.cpp GBNF). Deliberately not
+  folded into P53.6 and still unfiled. It attacks the opposite end of the problem — making malformed
+  tool-call JSON mechanically impossible rather than parsed-and-declined — and targets models that
+  *do* speak the protocol but truncate or malform arguments (the P35.2 failure class), whereas the
+  shim targets models that cannot speak it at all. None of the six reviewed harnesses does it. The
+  two share no implementation, so this needs its own `### P<n>.<m>` heading if pursued.
 
 ## Open Work — Tier 4
 

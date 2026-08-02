@@ -27,6 +27,7 @@ import (
 	"github.com/fiddler110/aegis/internal/modelcaps"
 	"github.com/fiddler110/aegis/internal/provider/sse"
 	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/toolshim"
 	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
@@ -533,6 +534,28 @@ type ProviderConfig struct {
 	// Unset fields declare nothing and leave discovery in charge; `think:
 	// false` is a declaration of non-support, not merely a default.
 	ModelCapabilities map[string]modelcaps.Declared `koanf:"model_capabilities"`
+	// ToolCallShim opts a session into the non-native tool-calling fallback
+	// (P53.6, internal/toolshim): tool schemas are serialized into the system
+	// prompt and the model's tagged JSON is parsed back into tool calls, for
+	// models that cannot speak the provider's tool protocol at all — the
+	// qwen2.5-coder:1.5b signature Aegis already detects and, without this,
+	// only warns about.
+	//
+	//   provider:
+	//     tool_call_shim: on     # "off" (default) | "on"
+	//
+	// Deliberately explicit-only. Auto-engaging it off a low measured
+	// conformance rate (internal/modelcaps) is a follow-up that is only sound
+	// once that rate is trustworthy, so "auto" is rejected rather than
+	// silently accepted as a no-op. Off is also the safe direction: a shim
+	// that quietly turns prose into executable tool calls is a security
+	// surface, not a convenience. Parsed calls still pass through the same
+	// permission gate, capability check, and workspace confinement as native
+	// ones — the shim changes how a call arrives, never what it is allowed to
+	// do. An unrecognized value is treated as off; ToolCallShimValid reports
+	// whether it was recognized, so a caller can say so rather than leaving a
+	// typo looking like a working setting.
+	ToolCallShim string `koanf:"tool_call_shim"`
 	// PromptProfile selects the system-prompt/tool-exposure shape (P25.6):
 	// "auto" (default) infers from BaseURL — loopback/localhost gets the
 	// "local" profile (trimmed prompt, web_search/web_fetch/security_scan/
@@ -553,6 +576,21 @@ func (p ProviderConfig) ResponseHeaderTimeout() time.Duration {
 		return sse.DefaultResponseHeaderTimeout
 	}
 	return time.Duration(p.ResponseHeaderTimeoutSec) * time.Second
+}
+
+// ToolCallShimEnabled reports whether provider.tool_call_shim turns the P53.6
+// non-native tool-calling fallback on.
+func (p ProviderConfig) ToolCallShimEnabled() bool {
+	return toolshim.Enabled(p.ToolCallShim)
+}
+
+// ToolCallShimValid reports whether provider.tool_call_shim holds a value the
+// shim recognizes ("", "off", "on"). Callers surface a false as a warning: an
+// unrecognized value is treated as off, and a user who typed "auto" or "true"
+// deserves to be told that rather than to discover it from a run that never
+// shimmed anything.
+func (p ProviderConfig) ToolCallShimValid() bool {
+	return toolshim.ValidMode(p.ToolCallShim)
 }
 
 // LocalPromptProfile reports whether the "local" prompt profile (P25.6)
@@ -1041,6 +1079,11 @@ func defaults() map[string]any {
 		// toolcallprobe.DefaultTrials — spelled as a literal here to keep the
 		// config package free of a dependency on the probe.
 		"provider.tool_call_probe_trials": 5,
+		// The non-native tool-calling fallback (P53.6) is opt-in: a shim that
+		// turns model prose into executable tool calls must never arrive by
+		// default. Spelled here rather than left empty so `aegis config` shows
+		// the key exists and what its off value is.
+		"provider.tool_call_shim": toolshim.ModeOff,
 		"server.addr":                     "127.0.0.1:4127",
 		// Conservative non-zero caps by default (P27.12/FIND-14) — see
 		// ServerConfig's doc comments for why these values are safe for a

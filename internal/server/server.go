@@ -485,6 +485,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	if err := skills.MaterializeBuiltins(cfg.DataDir); err != nil {
 		logger.Warn("failed to materialize built-in skills", "err", err)
 	}
+	// P53.6: an unrecognized provider.tool_call_shim is treated as off, which is
+	// indistinguishable from not setting it — so say so once at startup rather
+	// than leaving a typo ("auto", "true") looking like a working setting.
+	if !cfg.Provider.ToolCallShimValid() {
+		logger.Warn("provider.tool_call_shim is not a recognized value; the tool-call shim stays off",
+			"value", cfg.Provider.ToolCallShim, "expected", `"off" or "on"`)
+	} else if cfg.Provider.ToolCallShimEnabled() {
+		logger.Info("tool-call shim enabled: tool schemas are served in the system prompt and calls are parsed from the model's reply (provider.tool_call_shim)")
+	}
 	// Screen untrusted bundled skill directories through the same filesystem
 	// scan `aegis security scan` drives, so a compromised .aegis/skills/ bundle's
 	// scripts surface a HIGH/CRITICAL warning rather than reaching the model
@@ -1087,7 +1096,11 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			MaxWallClockPerRun: s.cfg.Cost.MaxWallClockPerRun(),
 			Model:              model,
 			MaxTokens:          s.cfg.Provider.MaxTokens,
-			Logger:             s.logger,
+			// Same model server as the parent session, so the same tool-calling
+			// fallback (P53.6) — a shimmed session whose spawns weren't shimmed
+			// would hand every teammate a model that can't call a tool.
+			ToolCallShim: s.cfg.Provider.ToolCallShimEnabled(),
+			Logger:       s.logger,
 			// Set explicitly from cfg.Workdir (P25.8) rather than relying on
 			// the parent session's tool.WithWorkdir ctx value leaking through
 			// the spawn's context chain — that accidental inheritance only

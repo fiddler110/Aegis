@@ -122,6 +122,38 @@ Takeaways:
   contains tool-call-shaped JSON naming a real tool but made no actual tool call, it says so. This
   costs nothing and needs no probe, so it also covers `aegis chat`, which runs its own in-process
   engine and never touches the daemon's run path.
+- If a model **cannot** speak the tool protocol at all, the notice above is as far as Aegis goes on
+  its own — but since P53.6 you can opt into a fallback instead of settling for a prose-only session.
+  Set `provider.tool_call_shim: on` and the tool schemas move out of the request's tools field and
+  into the system prompt, where the model calls a tool by writing:
+
+  ```
+  <tool_call>
+  {"name": "read_file", "arguments": {"path": "main.go"}}
+  </tool_call>
+  ```
+
+  which Aegis parses back into a real tool call. This is what recovers the 14-27B class that claims
+  tool support in its manifest and can't deliver it.
+
+  Three things to know before turning it on:
+
+  - **It is explicit-only, and off by default.** A shim that quietly turns prose into executable tool
+    calls is a security surface, so nothing engages it automatically — not a failed probe, not a low
+    conformance rate. Turn it on for a model you have checked (`aegis doctor`).
+  - **Parsed calls are not privileged.** They go through the same permission gate, capability check,
+    hooks, and workspace confinement as native ones; by the time a call is dispatched the engine
+    cannot tell how it arrived, and there is deliberately no separate path for shimmed calls.
+  - **The parser declines rather than repairs.** A malformed attempt — fenced-off JSON is tolerated,
+    but a truncated object, two objects in one tag, an unknown tool name, or non-object arguments is
+    not — executes nothing and earns a corrective naming the reason, bounded to two per run. A parser
+    that repairs is a parser that can invent a call the model never made, with real side effects
+    behind it. The cost is that a model which can't follow the prompt format either will waste a
+    couple of turns before falling back to a prose answer.
+
+  Grammar-constrained decoding (Ollama structured outputs, llama.cpp GBNF) is a *different* answer to
+  a *different* problem — it helps models that do speak the protocol but malform their arguments —
+  and is not part of this.
 - If a model diagnoses correctly but doesn't act on it (the `qwythos:latest` pattern above), a more
   directive follow-up prompt ("now call `edit_file` to apply the fix") often unsticks it — and as of
   P28.3, the engine does this automatically: when the first response to a plainly actionable request
