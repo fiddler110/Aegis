@@ -553,12 +553,22 @@ Guided, approval-gated host install for one scanner — prints the exact command
 ### `aegis security build-image`
 
 ```bash
-aegis security build-image [--profile core|full] [--runtime docker|podman] [--image TAG] [--no-cache] [--global]
+aegis security build-image [--profile core|full] [--runtime docker|podman] [--image TAG] [--no-cache] [--project] [--skip-verify]
 ```
 
 Builds one local image carrying every bundled scanner, then records its image ID in config so container-method scanning needs a single image instead of a digest-pinned image per tool. `--profile core` builds only the statically-linked scanners; the default `full` adds the Python (bandit/njsscan), Ruby (brakeman) and network (nmap/nuclei) scanners (~1.8GB).
 
-The recorded image ID is re-verified before every container run — an image rebuilt or retagged behind Aegis's back fails closed rather than running silently. Run `aegis security update-db` afterwards to populate the vulnerability databases. See [security_scan.md](security_scan.md#the-multiscanner-image-one-image-instead-of-sixteen).
+The pin is written to the **user** config, so every project on the machine uses the image — like the image itself and the shared `aegis-scanner-cache` volume, it is a machine-wide asset. `--project` pins it in this repo's `.aegis/config.yaml` instead, for the narrow case of a repo deliberately on a different image; the command always prints which file it wrote. Since project config overrides user config, a `security.multiscanner` block left in a repo by an older build shadows the machine-wide pin — `build-image` warns when it finds one. (`--global` is accepted as a deprecated no-op: it asked for what is now the default.)
+
+The recorded image ID is re-verified before every container run — an image rebuilt or retagged behind Aegis's back fails closed rather than running silently. A source fingerprint is recorded alongside it, so an image built from an older Containerfile is reported as drifted rather than silently trusted. The build finishes by running `aegis security verify-image` (`--skip-verify` opts out). Run `aegis security update-db` afterwards to populate the vulnerability databases. See [security_scan.md](security_scan.md#the-multiscanner-image-one-image-instead-of-sixteen).
+
+### `aegis security verify-image`
+
+```bash
+aegis security verify-image [--tool a,b]
+```
+
+Proves the built image's scanners actually run: each tool the profile claims gets a version probe **and** a canary scan against a small embedded fixture with planted findings, asserting a non-zero finding count rather than exit 0. A tool that exits clean while reporting zero — because it never loaded its database, or was never in the image at all — is the failure this catches; a `--version` probe alone does not. Exits non-zero if any tool fails, so it works as a provisioning gate. A missing database cache is reported distinctly from a broken tool.
 
 ### `aegis security update-db`
 
@@ -566,7 +576,9 @@ The recorded image ID is re-verified before every container run — an image reb
 aegis security update-db [--skip-java-db]
 ```
 
-Downloads/refreshes the trivy, grype, and osv-scanner vulnerability databases into the `aegis-scanner-cache` volume. Run it once after `build-image`, then whenever you want fresher data — the databases are only as current as the last run. `--skip-java-db` drops trivy's ~1.4GB Java database.
+Downloads/refreshes the trivy, grype, and osv-scanner vulnerability databases into the `aegis-scanner-cache` volume, plus trivy's misconfiguration checks bundle. Run it once after `build-image`, then whenever you want fresher data — the databases are only as current as the last run, and `aegis security status` reports their age. `--skip-java-db` drops trivy's ~1.4GB Java database.
+
+Each database is fetched independently: one failing does not abandon the rest, and the run ends with a per-step summary saying exactly which landed and which did not, exiting non-zero if any failed. Re-running retries only what failed, since steps that already succeeded are cheap no-ops.
 
 This is the only Aegis container run given network access, and it mounts no workspace; scans still run with `--network none` and read the databases from the volume.
 

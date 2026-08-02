@@ -1179,6 +1179,45 @@ func ProjectConfigPath() string {
 	return filepath.Join(".aegis", "config.yaml")
 }
 
+// FileSecurity returns the security: block exactly as written in one config
+// file, with no other layer merged in — no defaults, no environment, and in
+// particular no *other* file.
+//
+// Load() deliberately cannot answer this: it returns the winner of the layer
+// merge without saying which file it came from. Two callers need the
+// unmerged view (P55.5):
+//
+//   - A writer. patchSecurity rewrites a file's whole security: block, so the
+//     fields it carries through unchanged must come from the file it is about
+//     to rewrite. Carrying them from the merged config copies one layer's
+//     settings into the other — writing the user config from inside a repo
+//     would promote that repo's security.tools/wsl_distro machine-wide.
+//   - The shadowing check. Project config overrides user config, so a pin
+//     left in a repo by an older `build-image` silently wins over the
+//     machine-wide pin; seeing that requires reading the project file alone.
+//
+// A missing file is not an error — it yields the zero value, which
+// buildSecurityBlock renders as exactly the built-in defaults. An unreadable
+// or malformed one is: silently treating it as absent would hand a caller a
+// blank block to write over the operator's settings.
+func FileSecurity(path string) (SecurityConfig, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return SecurityConfig{}, nil
+		}
+		return SecurityConfig{}, fmt.Errorf("stat config %s: %w", path, err)
+	}
+	k := koanf.New(".")
+	if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
+		return SecurityConfig{}, fmt.Errorf("load config %s: %w", path, err)
+	}
+	var sec SecurityConfig
+	if err := k.Unmarshal("security", &sec); err != nil {
+		return SecurityConfig{}, fmt.Errorf("unmarshal security block of %s: %w", path, err)
+	}
+	return sec, nil
+}
+
 // loadDotEnv reads a .env-style file and sets any variables it contains into
 // the process environment, skipping variables already present so that real
 // environment variables always take precedence. The file format is KEY=VALUE
