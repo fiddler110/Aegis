@@ -8,7 +8,11 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-02 — **P53.6 shipped**, closing the P53.x local-LLM comparative-review batch
+**Last updated:** 2026-08-02 — **P54.2 closed: no gap found.** The long-standing "accurate refusal,
+error-shaped" lead for the SCA/secrets scanners was swept by measurement and produced no bug —
+osv-scanner's exit 128 is the only refusal of that shape and P34.12 already interpreted it. The
+measurements are recorded in code so the sweep isn't repeated. Also 2026-08-02: **P53.6 shipped**,
+closing the P53.x local-LLM comparative-review batch
 (**0 open of 6**). Aegis had been detecting a model that writes tool calls into its prose and
 discarding the signal with a notice; `provider.tool_call_shim: on` now serves the tool schemas in the
 system prompt and parses tagged JSON back into real tool calls — opt-in only, through the same
@@ -2479,6 +2483,53 @@ about the request or transcript; end-to-end parse→execute→text-result with n
 caller's system prompt preserved; gate consulted and denial honored; malformed call corrected and not
 executed, corrective retracted; bounded give-up; a plain answer is not a correction; suppressed on the
 step-limit turn), plus 2 config tests. Full suite green.
+
+---
+
+### P54.2 — SCA/secrets scanners swept for "accurate refusal, error-shaped" exit codes — CLOSED 2026-08-02, no gap found
+
+Carried as an unfiled lead in roadmap.md since 2026-07-19. `runJSON`/`runContainerCLI` tolerate a
+non-zero exit whenever output was produced (scanners exit non-zero on findings) and report the
+*empty-stdout* case as a scan error. That rule is only correct if no scanner uses "non-zero exit,
+nothing on stdout" to mean "there is nothing here to analyze" — which is exactly the P34.6 bug, where
+brakeman's accurate refusal on a non-Rails repo surfaced as `brakeman: error: exit status 4`. P34.6
+swept the four language-targeted engines and found brakeman was the only offender. Nobody had swept
+the SCA/secrets half.
+
+**Answered by running them, not by reading them** — the same methodology P34.6 used, and the reason
+that item's follow-on question was trustworthy. Each tool was invoked at the version pinned in the
+multiscanner Containerfile, with the exact arguments Aegis passes, against two workspaces with
+nothing for an SCA tool to find: an empty directory, and a docs/C/shell tree (`README.md`, `main.c`,
+`run.sh`) with no dependency manifest of any kind.
+
+| tool | version | exit | stdout | verdict |
+|---|---|---|---|---|
+| trivy | 0.72.0 | 0 | valid SARIF | no gate needed |
+| grype | 0.115.0 | 0 | valid SARIF | no gate needed |
+| syft | 1.46.0 | 0 | valid CycloneDX | no gate needed |
+| gitleaks | 8.30.1 | 0 | report file written | forced via `--exit-code 0`; report read independently of `Run()`'s error |
+| trufflehog | 3.95.9 | 0 | *empty* | JSON Lines with zero lines is how it says "no secrets" — empty stdout with a zero exit is the success branch, so it parses to zero findings |
+| osv-scanner | 2.4.0 | **128** | *empty* | the only refusal of this shape — already interpreted by P34.12 |
+
+**Result: no code change to scanner behavior, and no new `RelevanceChecker`.** osv-scanner is to the
+SCA/secrets half precisely what brakeman was to the language-targeted half — the one tool whose "not
+applicable" was indistinguishable from "failed" — and it was fixed two batches ago. `interpretOSVError`
+was re-confirmed to cover **both** execution paths (`osvScanner.Scan` routes the host and container
+runners through it alike), so there is no half-covered case hiding behind the measurement.
+
+Two notes on rigor, since a sweep that finds nothing is only worth as much as its method:
+trufflehog was not installed on the measuring host, so rather than reason from its documentation the
+pinned 3.95.9 release binary was downloaded and **SHA256-verified against the upstream checksums
+file** the way `fetch.sh` does, then measured — it is the one tool whose result would otherwise have
+been an assumption. And these are *host*-path measurements; the container path runs the same binaries
+at the same pinned versions through `runContainerCLI`, which applies the identical empty-output rule.
+
+**Shipped as documentation, deliberately.** A negative sweep's whole value is not re-running it, so
+the measured table now lives in the `runJSON` doc comment (`internal/security/scanners.go`) — next to
+the rule it justifies, in the same style as osv.go's measured exit-code block — with an instruction to
+re-measure before adding a tool to `DefaultScanners` rather than assuming the pattern holds. No tests
+added: these are claims about external binaries' behavior, which a unit test can only restate, not
+verify. Full suite green.
 
 ---
 

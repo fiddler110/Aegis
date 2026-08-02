@@ -21,6 +21,29 @@ func lookPath(bin string) bool {
 // runJSON runs a command and returns stdout. A non-zero exit is tolerated as
 // long as output was produced, because scanners exit non-zero when they find
 // issues.
+//
+// The converse — non-zero exit with *empty* stdout — is reported as a scan
+// error, which is only correct if no scanner uses that combination to say
+// "nothing here to analyze". That is the P34.6 failure shape: brakeman's
+// accurate refusal on a non-Rails repo rendered as `brakeman: error: exit
+// status 4`. P34.6 swept the language-targeted tools; the SCA/secrets half was
+// swept separately (P54.2) by running each tool at its pinned version against
+// an empty directory and a docs/C/shell tree with no dependency manifests:
+//
+//	trivy 0.72.0        exit 0, valid SARIF          — no gate needed
+//	grype 0.115.0       exit 0, valid SARIF          — no gate needed
+//	syft 1.46.0         exit 0, valid CycloneDX      — no gate needed
+//	gitleaks 8.30.1     exit 0 (forced --exit-code 0, report file read
+//	                    independently of Run()'s error)
+//	trufflehog 3.95.9   exit 0, empty stdout — JSON Lines with zero lines is
+//	                    how it says "no secrets"; empty+zero is the success
+//	                    branch here, so it parses to zero findings
+//	osv-scanner 2.4.0   exit 128, empty stdout — the one tool that does refuse
+//	                    this way; interpreted in osv.go (P34.12), not here
+//
+// So osv-scanner remains the only SCA/secrets scanner needing interpretation,
+// as brakeman was the only language-targeted one. Re-measure before adding a
+// tool to DefaultScanners rather than assuming the pattern holds.
 func runJSON(ctx context.Context, dir, bin string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
