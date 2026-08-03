@@ -1,0 +1,52 @@
+// Materialized as vuln.go — see MaterializeCanaryFixture's .canary rule.
+//
+// Deliberately vulnerable Go, for gosec's canary. Several independent rules are
+// tripped rather than one, so a single upstream rule being retired or retuned
+// downgrades the canary's margin instead of turning it red.
+package main
+
+import (
+	"crypto/md5"
+	"fmt"
+	"math/rand"
+	"net/http"
+	"os"
+	"os/exec"
+)
+
+// G101: hardcoded credentials.
+const apiToken = "AKIAIOSFODNN7EXAMPLE"
+
+func weakHash(data []byte) string {
+	// G401/G501: MD5 for hashing.
+	sum := md5.Sum(data)
+	return fmt.Sprintf("%x", sum)
+}
+
+func weakRandom() int {
+	// G404: math/rand where crypto/rand is required.
+	return rand.Intn(100000)
+}
+
+func readAnything(name string) ([]byte, error) {
+	// G304: file inclusion via a variable path.
+	return os.ReadFile(name)
+}
+
+func runAnything(cmdName string) error {
+	// G204: subprocess launched with a variable.
+	return exec.Command(cmdName, "-l").Run()
+}
+
+func serve() error {
+	// G114: ListenAndServe without timeouts.
+	return http.ListenAndServe(":8080", nil)
+}
+
+func main() {
+	fmt.Println(apiToken, weakHash([]byte("x")), weakRandom())
+	// G104: unhandled errors.
+	readAnything(os.Args[1])
+	runAnything("ls")
+	serve()
+}

@@ -114,7 +114,7 @@ var descriptors = map[string]ScannerDescriptor{
 		Name:           "gosec",
 		Binary:         "gosec",
 		Category:       "SAST (Go)",
-		Summary:        "Go-specific static analysis: scans for insecure use of crypto, SQL injection, hardcoded credentials, and other Go-idiomatic security anti-patterns. Opt-in — enable for Go projects (P11.3).",
+		Summary:        "Go-specific static analysis: scans for insecure use of crypto, SQL injection, hardcoded credentials, and other Go-idiomatic security anti-patterns. Opt-in — enable for Go projects (P11.3). Compile-assisted, so the container path runs it in two phases (P55.8): a networked `go mod download` with the workspace mounted read-only, then the analysis itself with --network none, exactly as every other scanner runs. A failed warm phase aborts the tool rather than letting it scan a cold cache, because gosec does not fail on one — it silently drops every type-aware rule and still exits clean.",
 		DefaultEnabled: false,
 		Install: map[string]string{
 			"darwin":  "brew install gosec",
@@ -409,6 +409,13 @@ type Options struct {
 	// multiscanner.go. Zero value = disabled, leaving resolution exactly as it
 	// was before the shared image existed.
 	Multiscanner MultiscannerPolicy
+	// Netscanner is the second locally-built image (P55.7): network on, no
+	// workspace mount, for the tools that scan a remote target rather than
+	// local source. Read only by ResolveNetwork — the directory-scanner resolver
+	// never consults it, and vice versa, which is what keeps "container" from
+	// meaning two postures at one call site. Zero value = disabled, leaving
+	// image scanning and network recon exactly as they were.
+	Netscanner NetscannerPolicy
 	// WSLDistro names a specific registered WSL distro (e.g. "kali-linux") to
 	// target for every WSLCapable scanner (P14.x), instead of whatever `wsl
 	// --set-default` currently points at. Empty uses WSL's own default-distro
@@ -461,6 +468,7 @@ func OptionsFromConfig(cfg config.SecurityConfig) Options {
 		DefaultMethod: cfg.DefaultMethod,
 		WSLDistro:     cfg.WSLDistro,
 		Multiscanner:  MultiscannerPolicyFromConfig(cfg.Multiscanner),
+		Netscanner:    NetscannerPolicyFromConfig(cfg.Netscanner),
 		runtimeCheck:  &runtimeProbeCache{},
 	}
 }
@@ -1028,17 +1036,30 @@ func runScannerImage(ctx context.Context, rt sandbox.ContainerRuntime, image, di
 	args = append([]string{binary}, args...)
 	cliArgs := containerRunArgs(rt, image, dir, args...)
 	cliArgs = withCacheVolume(cliArgs, image)
+	if binary == "gosec" {
+		// The one compile-assisted scanner in the image needs its module cache
+		// too, warmed by the phase that ran before this one (P55.8).
+		cliArgs = withVolume(cliArgs, image, MultiscannerGoCacheVolume+":"+multiscannerGoCacheMount)
+	}
 	return runContainerCLI(ctx, rt, image, cliArgs)
 }
 
 // withCacheVolume inserts the scanner cache mount just before the image
 // reference, which is where a run's flags have to stop and its command begins.
 func withCacheVolume(cliArgs []string, image string) []string {
+	return withVolume(cliArgs, image, MultiscannerCacheVolume+":"+multiscannerCacheMount)
+}
+
+// withVolume inserts a -v mount just before the image reference — the point
+// where a run's flags have to stop and its command begins. Returns cliArgs
+// unchanged if the reference isn't there, so a caller can't accidentally append
+// a mount flag into the container's argv.
+func withVolume(cliArgs []string, image, spec string) []string {
 	for i, a := range cliArgs {
 		if a == image {
 			out := make([]string, 0, len(cliArgs)+2)
 			out = append(out, cliArgs[:i]...)
-			out = append(out, "-v", MultiscannerCacheVolume+":"+multiscannerCacheMount)
+			out = append(out, "-v", spec)
 			return append(out, cliArgs[i:]...)
 		}
 	}
@@ -1084,9 +1105,7 @@ func runContainerCLI(ctx context.Context, rt sandbox.ContainerRuntime, image str
 // testable without actually invoking a container runtime.
 func containerRunArgs(rt sandbox.ContainerRuntime, image, dir string, args ...string) []string {
 	cliArgs := []string{"run", "--rm", "--network", "none"}
-	if rt != sandbox.RuntimeAppleContainers {
-		cliArgs = append(cliArgs, "--cap-drop=ALL", "--security-opt=no-new-privileges")
-	}
+	cliArgs = append(cliArgs, sandbox.OCIHardeningFlags(rt)...)
 	cliArgs = append(cliArgs, "-v", sandbox.HostMountPath(rt, dir)+":/src", "-w", "/src", image)
 	return append(cliArgs, args...)
 }

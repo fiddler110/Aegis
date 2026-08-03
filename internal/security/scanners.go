@@ -13,7 +13,13 @@ import (
 )
 
 // lookPath reports whether a binary is on PATH.
-func lookPath(bin string) bool {
+//
+// A var rather than a plain func so a test can assert a resolution *rule*
+// instead of asserting what happens to be installed on the machine running it —
+// P34.7's lesson, and the same reason hostGOOS and detectRuntime are seams.
+// "the container beat the host binary" is only a meaningful assertion if the
+// host binary is known to be there.
+var lookPath = func(bin string) bool {
 	_, err := exec.LookPath(bin)
 	return err == nil
 }
@@ -782,6 +788,12 @@ func (gosecScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.
 }
 func (gosecScanner) Scan(ctx context.Context, dir string, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
 	if method == MethodContainer {
+		// Two phases, and the first one has to succeed: gosec cannot load
+		// packages without a warm module cache, and it reports zero findings
+		// rather than failing when it can't. See gosec.go for the full argument.
+		if _, err := warmGoModuleCache(ctx, rt, image, dir); err != nil {
+			return nil, err
+		}
 		out, err := runScannerImage(ctx, rt, image, dir, opts, "gosec", "-fmt=sarif", "-out=/dev/stdout", "./...")
 		if err != nil {
 			return nil, err

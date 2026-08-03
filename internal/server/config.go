@@ -263,6 +263,7 @@ func (s *Server) handlePatchConfigSecurity(w http.ResponseWriter, r *http.Reques
 		WSLDistro:        cfg.Security.WSLDistro,
 		Debate:           cfg.Security.Debate,
 		Multiscanner:     cfg.Security.Multiscanner,
+		Netscanner:       cfg.Security.Netscanner,
 	}
 	if req.EgressThenWrite != nil {
 		patch.EgressThenWrite = *req.EgressThenWrite

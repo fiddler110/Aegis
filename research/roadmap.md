@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-03
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,22 +11,28 @@ keep it when adding items.
 
 ## Status
 
-**Open items (9).** The **P55.x container-only-scanning batch** was filed 2026-08-02 off a full
-functional test of the multiscanner container and a review of method resolution across all 17
-registered scanners — **9 items, 6 of which shipped the same day**. Shipped: **P55.1**
-(image/source drift), **P55.2** (all-or-nothing `update-db`), **P55.3** (`verify-image` smoke test),
-**P55.4** (container-first resolution), **P55.5** (global pin by default), **P55.6** (DB-age
-surfacing) — write-ups in [releases.md](releases.md). Still open: **P55.7** (`aegis-netscanner`,
-split by mount posture) and **P55.8** (gosec two-phase) in Tier 3, plus **P55.9** (relevance gating
-for the always-on scanners) parked in Tier 4.
+**Open items (5).** The **P55.x container-only-scanning batch is closed** — filed 2026-08-02 off a
+full functional test of the multiscanner container and a review of method resolution across all 17
+registered scanners, **9 items, 8 built**. Shipped 2026-08-02: **P55.1** (image/source drift),
+**P55.2** (all-or-nothing `update-db`), **P55.3** (`verify-image` smoke test), **P55.4**
+(container-first resolution), **P55.5** (global pin by default), **P55.6** (DB-age surfacing).
+Shipped 2026-08-03: **P55.7** (`aegis-netscanner`) and **P55.8** (gosec two-phase) — the two
+structural items that actually close the goal. **P55.9** (relevance gating for the always-on
+scanners) was dropped 2026-08-03: P54.2 already showed no correctness gap exists (the dependency
+scanners exit 0 with valid empty output on a manifest-free tree), so this was a pure latency
+optimization with no measured complaint behind it, and its own write-up noted a naive manifest check
+risks trading a slow-correct scan for a fast-wrong one. Not worth tracking speculatively. All
+write-ups in [releases.md](releases.md).
 
-The batch's strategic goal is that a user installs **one image instead of 17 tools**. What shipped
-makes the *existing* container trustworthy and preferred — it can no longer fall behind its own
-Containerfile unnoticed, its databases refresh per-tool instead of all-or-nothing, every bundled
-tool is proven to actually produce findings before the image is trusted, and `auto` now routes to
-the pinned, confined container rather than an unpinned host binary. **P55.7 and P55.8 are what
-remain of the goal itself**: they extend containerization to the six tools that have no container
-path today. Full origin note and test evidence in the Tier 1 header.
+The batch's strategic goal was that a user installs **one image instead of 17 tools**, and it is
+met. P55.1-P55.6 made the *existing* container trustworthy and preferred; P55.7 and P55.8 extended
+containerization to the six tools that had no container path at all, by recognizing that the split
+those tools needed was **mount posture** rather than tool category (a second image with network on
+and no workspace, ever) and that the one genuine exception — gosec, which needs both — is solved by
+the two-phase split `update-db` already uses rather than by relaxing the hardening. Two tools stay
+host-only by explicit decision, each with its reason stated in code: zap (already runs from its own
+official image) and dockle (needs the container engine socket, a privilege axis that deserves its
+own decision).
 
 **The 6 pre-existing items**, unchanged by the P55.x filing and described below in their own
 tiers. Before P55.x landed, Tier 2 held **P38.1** only and Tier 3 was empty — **P53.6** (non-native tool-calling
@@ -54,8 +60,8 @@ live-run verification tracking, not independent build work — see its body belo
 re-test history. Tier 4, all measure-first or parked with no build trigger yet: **P52.14**
 (session-scoped loop detector — reviewed 2026-08-01, see below), **P52.16** (native Ollama
 tool-result disambiguation for parallel same-tool calls), **P49.3** (LSP-backed repo-map symbol
-precision), **P49.4** (LLM-summarized repo-map concept nodes), **P25.9** (per-session scoping of
-the last daemon-singleton service, `lsp.Manager` — parked pending a concrete multi-tenant need).
+precision), **P25.9** (per-session scoping of the last daemon-singleton service, `lsp.Manager` —
+parked pending a concrete multi-tenant need).
 
 **Everything else has shipped or closed.** The **P52.x full-stack review batch** (filed
 2026-07-30) closed 15 of its 17 items between 2026-07-30 and 2026-08-01 — **P52.15** (wall-clock
@@ -63,7 +69,8 @@ run budget) shipped and **P52.17** (auto tool-calling probe on model switch) clo
 already-implemented were the last two, leaving **P52.14** and **P52.16** as the batch's only open
 items. Also shipped/closed since the last cleanup: **P51.1** (macOS seatbelt profile), the
 **P50.x** phased-drive determinism batch, the **P49.x** repo-map batch head (**P49.1**/**P49.2** —
-**P49.3**/**P49.4** remain open above), the entire **P47.x** phased-drive stability batch,
+**P49.3** remains open above; **P49.4** was dropped, see the Tier 4 header), the entire **P47.x**
+phased-drive stability batch,
 **P48.1** (config-test hermeticity), and **P38.8** (external per-phase threat-model wrapper —
 superseded once its mechanism shipped in-harness for P38.1, see releases.md). Full write-ups for
 all of it are in [releases.md](releases.md).
@@ -95,7 +102,7 @@ drift), **P55.2** (all-or-nothing `update-db`) and **P55.3** (`verify-image` smo
 2026-08-02, the day the batch was filed. See [releases.md](releases.md) for those write-ups and for
 the full Tier-1 history (P52.1, P52.2, P51.1, P50.1, and the P47.x batch head).
 
-**P55.x batch origin**, kept here because P55.7/P55.8 below still depend on it. A full functional
+**P55.x batch origin**, kept as the evidence record for a closed batch. A full functional
 test of the multiscanner container (2026-08-02) against a purpose-built multi-language vulnerable
 fixture, plus a review of `internal/security`'s method resolution across all 17 registered scanners.
 The container's *scanning* was sound — 14/14 bundled tools execute offline and detection is good.
@@ -108,10 +115,9 @@ semgrep removal, grype absent from the pinned image) are the evidence base; two 
 a green `go test ./...`, a successful image build, and a scan that reported findings. Full account
 in [releases.md](releases.md).
 
-The batch's strategic driver is a decision to make the container the **only** way Aegis scans, so a
-user installs one image instead of 17 tools. P55.1-P55.6 have shipped, which makes the existing
-container trustworthy and preferred; **P55.7 and P55.8 are what actually close the "zero required
-host tools" goal**, by extending containerization to the tools that cannot use it at all today.
+The batch's strategic driver was a decision to make the container the **only** way Aegis scans, so a
+user installs one image instead of 17 tools. All eight built items have shipped; see the Status
+section above for what P55.7 and P55.8 changed, and [releases.md](releases.md) for the write-ups.
 
 ## Open Work — Tier 2
 
@@ -258,11 +264,19 @@ from scratch. Write-up in [releases.md](releases.md).
 
 ## Open Work — Tier 3
 
-**Status:** 2 open — **P55.7** and **P55.8**, the two structural items in the P55.x
-container-only-scanning batch (see the Tier 1 header for the batch's origin). Both are sequenced
-behind the Tier-1/Tier-2 P55.x work and are what actually close the "zero required host tools"
-goal; everything before them makes the *existing* container trustworthy and preferred, while these
-two extend containerization to the tools that currently cannot use it at all.
+**Status:** empty. **P55.7** (`aegis-netscanner`, a second image split by mount posture) and
+**P55.8** (gosec's two-phase warm/analyze split) shipped 2026-08-03, closing the P55.x
+container-only-scanning batch — see the Tier 1 header for the batch's origin and
+[releases.md](releases.md) for the write-ups.
+
+One decision was deliberately *not* made while building them, and is recorded here rather than
+filed: **whether Aegis should ever mount a container engine socket.** `dockle` is the only tool
+that wants one — it inspects an image through the local engine rather than pulling it — and socket
+access is effectively host root, a third privilege axis beyond the network/workspace split P55.7 is
+built on. It could live in the netscanner image and run socket-mounted and workspace-free, but that
+is a posture decision on its own merits, not a side effect of building a second image. dockle stays
+host-only and says so; promote this to a `### P<n>.<m>` item only if someone actually needs
+container-only dockle.
 
 **P53.6** (non-native tool-calling shim — `internal/toolshim`,
 `provider.tool_call_shim`) shipped 2026-08-02, the last of the P53.x local-LLM comparative-review
@@ -286,116 +300,12 @@ daemon) and **P52.13** (`workspace.additional_roots`) shipped 2026-08-01. All th
   shim targets models that cannot speak it at all. None of the six reviewed harnesses does it. The
   two share no implementation, so this needs its own `### P<n>.<m>` heading if pursued.
 
-### P55.7 — `aegis-netscanner`: a second image split by mount posture, not by tool category
-
-Six scanners have no container path today (`gosec`, `dockle`, `trivy image`, `grype <ref>`, `nmap`,
-`nuclei`), and `reconContainerFallbackUnsupported` states the reason plainly: they need network
-egress, "and punching a network hole through that hardening isn't done for v1." That leaves nmap
-and nuclei **baked into the multiscanner image but routed through WSL** — on Windows, an operator
-must install and provision a Kali distro to run two tools that are already sitting in the image
-they built.
-
-Reviewing what each tool actually needs shows the split is not offline-vs-network. It is **what the
-container is allowed to see**:
-
-| Tool | Needs | Needs the workspace? |
-|---|---|---|
-| `trivy image`, `grype <ref>` | registry egress | No — takes an image reference |
-| `nmap`, `nuclei` | egress to the target host | No — takes a target list |
-| `zap` | egress to the target app | No — takes a URL |
-| `dockle` | container **engine socket** | No — inspects a built image |
-| `gosec` | Go toolchain + module-proxy egress | **Yes** |
-| `trufflehog --verify` | egress to provider APIs | **Yes** |
-
-Only the last two need the workspace *and* the network at once — which is precisely the
-combination the current hardening forbids, and rightly: workspace + egress is an exfiltration path
-out of a hostile repo. Everything above them needs egress but has nothing to steal, because it
-scans a remote target rather than local source.
-
-So: a second locally-built image run with **network on and no workspace mount, ever** — carrying
-nmap, nuclei, `trivy image` and `grype <ref>`. The invariant is enforceable rather than
-conventional: its runner takes a target argument and has no directory parameter to pass. The
-existing `--network none` + workspace-mounted runner stays exactly as it is, and the two runners
-never converge.
-
-Two carve-outs. **ZAP is already solved** and should stay as-is: `dast.go` runs it from the
-official zaproxy image with its own `/zap/wrk` mount contract, so it already requires no host
-install; folding a large Java app into a locally-built image buys nothing. **dockle needs the
-engine socket**, which is a *third* privilege axis — socket access is effectively host root, not
-merely egress. It can live in this image, but it must run socket-mounted and workspace-free, and
-whether Aegis should mount a container socket at all deserves an explicit decision rather than
-arriving as a side effect of this item.
-
-**Priority:** Tier 3 — real value (it is most of the remaining install burden, and removes the WSL
-dependency on Windows outright) but larger, and sequence-dependent: it wants P55.3's verification
-harness to cover a second image, and it reopens a hardening posture that was closed deliberately,
-so the mount-posture invariant needs to be built in from the start rather than retrofitted.
-**Effort:** L.
-
-### P55.8 — gosec without a host Go toolchain (two-phase, network and analysis never overlap)
-
-`gosec` is the one tool container-only cannot simply absorb, and `multiscannerExcludedTools`
-already states why with unusual precision: it is compile-assisted, resolves packages via `go list`
-(needing a Go toolchain and the module cache, i.e. the network), and **reports zero findings rather
-than failing when it can't**. Measured on this repo: host 244 findings, container 0. Dropping the
-host path without solving this would silently delete all Go SAST coverage from a Go-first codebase
-— the single worst outcome available, and exactly the failure class P55.1-P55.3 exist to prevent.
-
-The approach that preserves the hardening invariant is the split this codebase already uses for
-`update-db`: **two phases, where the phase with network does no analysis and the phase that
-analyzes has no network.** Mount the workspace read-only into a networked container and run
-`go mod download` into a persistent module-cache volume; then run gosec `--network none` against
-that warmed cache. `go mod download` fetches modules but does not execute them, so the exposure is
-materially smaller than a general network-plus-workspace grant, and the analysis step keeps the
-same confinement every other scanner has.
-
-The weaker fallback, if the two-phase split proves impractical: one networked container with the
-workspace mounted **read-only** and egress restricted to the module proxy. Worse, and it should be
-named as a deliberate concession rather than slipped in — but still strictly better for a user than
-"install Go and gosec yourself."
-
-`trufflehog --verify` is the same shape (workspace + egress, currently host-only per its `Resolve`
-override) and can ride whichever mechanism lands, though it is off by default and far less costly
-to leave host-only.
-
-Whatever is built, the acceptance test is not "it runs." It is **finding parity against the host
-run on this repo** — a container gosec reporting near-zero while exiting clean is the precise
-failure this item exists to avoid, and P55.3's canary assertion should cover it.
-
-**Priority:** Tier 3 — the last blocker to "zero required host tools" for a Go project, but the
-most delicate item in the batch: it is the one place where container-only trades against the
-network/workspace separation, so it should land last, after the verification work can prove the
-result. **Effort:** L.
-
 ## Open Work — Tier 4
 
-**Status:** 6 open, all measure-first or explicitly parked; none has a build trigger yet.
-
-### P55.9 — Relevance gating for the always-on scanners (measure-first)
-
-Scanner selection is already good and this item should not be read as a gap in it: `DetectLanguages`
-auto-enables the matching language engine, and `RelevanceChecker` skips tools whose input isn't
-present. Verified on a Go-only fixture — gosec auto-enabled from `go.mod`, while hadolint
-("no Dockerfile found"), kubescape ("no Kubernetes manifests found") and brakeman ("no Rails
-application found") each skipped with an accurate reason.
-
-The residue is that `RelevanceChecker` is implemented by only three scanners (kubescape, hadolint,
-brakeman). The dependency-oriented tools — `osv-scanner`, `grype`, `syft` — run unconditionally,
-including on trees with no dependency manifest at all, where they walk the workspace to conclude
-nothing. On the fixture that cost ~12s of a ~15s scan for osv-scanner alone.
-
-Two reasons this is Tier 4 rather than an obvious win. First, the cost is wall-clock only — these
-tools already exit 0 with valid empty output on a manifest-free tree (measured and recorded by
-P54.2), so there is no correctness gap to close. Second, a manifest check is a genuinely worse
-oracle than it looks: vendored dependencies, lockfiles in unexpected locations, and syft's
-binary-artifact detection all find packages with no manifest present, so a naive `Relevant` would
-convert a slow-but-correct scan into a fast wrong one — the trade this batch is otherwise trying to
-eliminate.
-
-**Promote when:** scan latency is an actual complaint, and only with a relevance check validated
-against a corpus that includes vendored and lockfile-only projects.
-
-**Priority:** Tier 4 — measure-first, no correctness trigger; do not build speculatively. **Effort:** S.
+**Status:** 4 open, all measure-first or explicitly parked; none has a build trigger yet. **P55.9**
+(relevance gating for the always-on scanners) and **P49.4** (LLM-summarized concept nodes) were
+reviewed and dropped 2026-08-03 rather than left parked — see the Status section and the P49.x note
+above for why.
 
 ### P52.14 — Session-scoped loop detector (cross-`Run` loops are invisible)
 
@@ -470,19 +380,15 @@ the structural tier matters *and* that regex extraction (not edge coverage) is t
 LSP adds per-language server availability as a dependency and startup cost; don't pay it
 speculatively. The regex path stays the floor regardless.
 
-### P49.4 — LLM-summarized concept nodes (graft pass-2 analog)
-
-graft's second pass has an LLM summarize files into ~20–50 plain-English "concept nodes" with typed
-links — the part that gives an agent *what a subsystem does*, not just its symbols. The analog here
-would be an opt-in `aegis index --semantic` pass that groups files into concept summaries cached by
-content hash. Two reasons this is last and speculative: (1) it costs an LLM pass per file (real
-latency/token cost, cache-invalidation surface), unlike every other P49 item which is deterministic
-and free; (2) it overlaps `internal/knowledge` and `internal/memory`, which already carry
-project-level prose context — a semantic index might belong *there* rather than as a third store.
-
-Priority: Tier 4 — speculative, **do not build until measured**: only if the deterministic
-structural tiers (P49.1–P49.3) demonstrably fail to close the re-discovery gap, and only after
-deciding whether the summaries live in a new store or extend `knowledge`/`memory`. No trigger yet.
+**P49.4 (LLM-summarized concept nodes) dropped 2026-08-03.** graft's second pass has an LLM
+summarize files into ~20–50 plain-English "concept nodes" with typed links; the analog here would
+have been an opt-in `aegis index --semantic` pass. Dropped rather than parked because it carries two
+unresolved problems at once rather than one: it costs an LLM pass per file (real latency/token cost,
+cache-invalidation surface) where every other P49 item is deterministic and free, and it overlaps
+`internal/knowledge`/`internal/memory`, which already carry project-level prose context — so before
+it could even be measure-first candidate it needs a decision on whether it's a new store or belongs
+in one of those. Re-file only if the deterministic structural tiers (P49.1–P49.3) demonstrably fail
+to close the re-discovery gap and that store question has an answer.
 
 ### P25.9 — per-session scoping of `lsp.Manager` (remaining daemon singleton)
 

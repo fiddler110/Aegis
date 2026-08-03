@@ -125,8 +125,15 @@ var canaryExpectations = map[string]canaryExpectation{
 	"hadolint":    {versionArgs: []string{"--version"}, minFindings: 1},
 	"opengrep":    {versionArgs: []string{"--version"}, minFindings: 1},
 	"bandit":      {versionArgs: []string{"--version"}, minFindings: 1},
-	"brakeman":    {versionArgs: []string{"--version"}, minFindings: 1},
-	"njsscan":     {versionArgs: []string{"--version"}, minFindings: 1},
+	// gosec's canary is the one this whole command was designed around: it is
+	// the tool that reports zero rather than failing when it cannot load
+	// packages, so "did it find something in a module full of planted issues"
+	// is the only question worth asking of it. The fixture trips half a dozen
+	// independent rules, so 1 is a floor with a wide margin, not a tight
+	// detection benchmark.
+	"gosec":    {versionArgs: []string{"--version"}, minFindings: 1},
+	"brakeman": {versionArgs: []string{"--version"}, minFindings: 1},
+	"njsscan":  {versionArgs: []string{"--version"}, minFindings: 1},
 	// nmap and nuclei take a network target, not a directory. There is no file
 	// that can be planted in a fixture tree to make them report something, and
 	// standing up a listener inside a --network none container to scan would be
@@ -195,6 +202,19 @@ func countSBOMComponents(sbom []byte) (int, error) {
 	return len(doc.Components), nil
 }
 
+// canarySuffix marks a fixture file that must not exist under its real name
+// inside this repository, and is renamed on materialization.
+//
+// It exists for gosec's canary and nothing else so far. The fixture needs a
+// go.mod and a .go file, and both are hostile to the tree they live in: a
+// nested go.mod excludes its directory from the parent module (and from the
+// embed pattern that has to reach it), and a .go file full of deliberate
+// vulnerabilities would otherwise be compiled — and scanned — as part of Aegis
+// itself. Storing them under a suffix the Go tool ignores and restoring the
+// real name here keeps both problems out of the repo without giving gosec a
+// fixture that differs from a real module.
+const canarySuffix = ".canary"
+
 // MaterializeCanaryFixture writes the embedded canary tree into dir.
 func MaterializeCanaryFixture(dir string) error {
 	return fs.WalkDir(canaryFS, "canary", func(path string, d fs.DirEntry, err error) error {
@@ -204,6 +224,9 @@ func MaterializeCanaryFixture(dir string) error {
 		rel, relErr := filepath.Rel("canary", path)
 		if relErr != nil {
 			return relErr
+		}
+		if !d.IsDir() {
+			rel = strings.TrimSuffix(rel, canarySuffix)
 		}
 		target := filepath.Join(dir, filepath.FromSlash(rel))
 		if d.IsDir() {

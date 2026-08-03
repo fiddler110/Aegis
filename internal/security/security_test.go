@@ -295,6 +295,13 @@ type fakeImageScanner struct {
 	name     string
 	method   Method
 	findings []Finding
+
+	// Recorded so a test can prove ScanImage forwards the resolution rather
+	// than re-deriving it — the netscanner image reference reaches the scanner
+	// only through this hand-off (P55.7).
+	sawMethod  Method
+	sawRuntime sandbox.ContainerRuntime
+	sawImage   string
 }
 
 func (f fakeImageScanner) Name() string { return f.name }
@@ -304,7 +311,8 @@ func (f fakeImageScanner) Resolve(context.Context, Options) (Method, sandbox.Con
 	}
 	return f.method, "", "", ""
 }
-func (f fakeImageScanner) ScanImage(context.Context, string, Method) ([]Finding, error) {
+func (f fakeImageScanner) ScanImage(_ context.Context, _ string, method Method, rt sandbox.ContainerRuntime, scannerImage string) ([]Finding, error) {
+	f.sawMethod, f.sawRuntime, f.sawImage = method, rt, scannerImage
 	return f.findings, nil
 }
 
@@ -326,21 +334,55 @@ func TestScanImageAggregatesAndSorts(t *testing.T) {
 	}
 }
 
-// TestScanImageSkipsContainerFallback is the P11.5 scoping regression: a
-// scanner that Resolve would run via a container must be skipped with the
-// documented reason, never silently run through a --network none container
-// that can't reach a registry.
-func TestScanImageSkipsContainerFallback(t *testing.T) {
+// TestScanImageRunsContainerResolvedScanners is the P55.7 inversion of what
+// this test used to assert. A container-resolved image scanner used to be
+// skipped outright, because the only container runner Aegis had denied network
+// and so could not reach a registry. The netscanner image supplies exactly that
+// missing property, so the run now goes ahead — and the resolution has to reach
+// the scanner intact, since the image it runs *out of* is carried nowhere else.
+func TestScanImageRunsContainerResolvedScanners(t *testing.T) {
 	scanners := []ImageScanner{
 		fakeImageScanner{name: "container-only", method: MethodContainer, findings: []Finding{{Tool: "x", Severity: SevHigh}}},
 	}
 	rep := ScanImage(context.Background(), "alpine:3.20", scanners, Options{})
-	if len(rep.Findings) != 0 {
-		t.Fatalf("expected no findings from a container-resolved scanner, got %+v", rep.Findings)
+	if len(rep.Findings) != 1 {
+		t.Fatalf("expected the container-resolved scanner to run, got %+v / skipped %v", rep.Findings, rep.Skipped)
 	}
-	if rep.Skipped["container-only"] != imageContainerFallbackUnsupported {
-		t.Errorf("reason = %q, want the container-fallback-unsupported message", rep.Skipped["container-only"])
+	if rep.RanVia["container-only"] != string(MethodContainer) {
+		t.Errorf("RanVia = %v, want container", rep.RanVia)
 	}
+}
+
+// TestScanImageForwardsTheResolvedImage: the netscanner reference comes from
+// Resolve and is used by nothing else, so dropping it here would send every
+// container image scan to an empty image reference.
+func TestScanImageForwardsTheResolvedImage(t *testing.T) {
+	var got fakeImageScanner
+	sc := recordingImageScanner{inner: fakeImageScanner{name: "trivy", method: MethodContainer,
+		findings: []Finding{{Tool: "trivy", Severity: SevHigh}}}, out: &got}
+	rep := ScanImage(context.Background(), "alpine:3.20", []ImageScanner{sc}, Options{})
+	if len(rep.Findings) != 1 {
+		t.Fatalf("scanner did not run: %+v", rep.Skipped)
+	}
+	if got.sawMethod != MethodContainer || got.sawImage != "localhost/aegis-netscanner:v1" {
+		t.Errorf("forwarded method/image = %q/%q, want container/localhost/aegis-netscanner:v1", got.sawMethod, got.sawImage)
+	}
+}
+
+// recordingImageScanner resolves to a fixed netscanner reference and captures
+// what ScanImage was handed.
+type recordingImageScanner struct {
+	inner fakeImageScanner
+	out   *fakeImageScanner
+}
+
+func (r recordingImageScanner) Name() string { return r.inner.name }
+func (r recordingImageScanner) Resolve(context.Context, Options) (Method, sandbox.ContainerRuntime, string, string) {
+	return MethodContainer, sandbox.RuntimePodman, "localhost/aegis-netscanner:v1", ""
+}
+func (r recordingImageScanner) ScanImage(_ context.Context, _ string, method Method, rt sandbox.ContainerRuntime, scannerImage string) ([]Finding, error) {
+	r.out.sawMethod, r.out.sawRuntime, r.out.sawImage = method, rt, scannerImage
+	return r.inner.findings, nil
 }
 
 // TestRunWithOptionsDedupsAcrossScanners is the P11.8 regression: two

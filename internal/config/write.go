@@ -250,6 +250,11 @@ type SecurityPatch struct {
 	WSLDistro    string
 	Debate       DebateIntegrationConfig
 	Multiscanner MultiscannerConfig
+	// Netscanner is the second built image's pin (P55.7), carried through for
+	// the same reason as Multiscanner: `aegis security build-image` rewrites
+	// this block, so a netscanner pin absent here is one deleted by whichever
+	// of the two images was built second.
+	Netscanner NetscannerConfig
 }
 
 // PatchProjectSecurity replaces the security: block in the project-level
@@ -374,6 +379,30 @@ func buildSecurityBlock(p SecurityPatch) string {
 		} else {
 			b.WriteString("    tools:\n")
 			for _, t := range ms.Tools {
+				fmt.Fprintf(&b, "      - %s\n", t)
+			}
+		}
+	}
+
+	// Same "only once something was built" rule as the multiscanner block above,
+	// and the same reason: an enabled block naming no image resolves to a
+	// MethodNone reason on every image scan and recon run.
+	if ns := p.Netscanner; ns.Image != "" || ns.ImageID != "" {
+		b.WriteString("  netscanner:\n")
+		fmt.Fprintf(&b, "    enabled: %t\n", ns.Enabled)
+		fmt.Fprintf(&b, "    image: %q\n", ns.Image)
+		fmt.Fprintf(&b, "    image_id: %q\n", ns.ImageID)
+		if ns.SourceFingerprint != "" {
+			fmt.Fprintf(&b, "    source_fingerprint: %q\n", ns.SourceFingerprint)
+		}
+		if ns.Runtime != "" {
+			fmt.Fprintf(&b, "    runtime: %s\n", ns.Runtime)
+		}
+		if len(ns.Tools) == 0 {
+			b.WriteString("    tools: []\n")
+		} else {
+			b.WriteString("    tools:\n")
+			for _, t := range ns.Tools {
 				fmt.Fprintf(&b, "      - %s\n", t)
 			}
 		}

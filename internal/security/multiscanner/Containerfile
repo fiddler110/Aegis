@@ -12,17 +12,22 @@
 #   zap     - large Java app with its own mount contract (/zap/wrk:rw); keeps
 #             its own official image (see internal/security/dast.go).
 #   dockle  - inspects a built image through the local container engine socket,
-#             so it can't run from inside a --network none scanner container
-#             (internal/security/images.go).
+#             so it needs the engine socket — a privilege axis (effectively host
+#             root) neither Aegis image grants (internal/security/images.go).
 #
-# Note on grype: the grype *binary* is carried here for source SCA (grype
-# dir:/src, internal/security/scanners.go). Scanning a built container *image*
-# by reference (grype <ref>) remains host-only — that needs registry egress the
-# scanner container denies (see imageContainerFallbackUnsupported).
+# Note on grype and trivy: their binaries are carried here for source scanning
+# (grype dir:/src, trivy fs). Scanning a built container *image* by reference
+# needs registry egress, which this image denies — that runs from the netscanner
+# stage further down instead, which has network and no workspace.
 #
-# PROFILE=core  static scanner binaries only (no Python/Ruby/network tools).
+# This file builds TWO images. The default target is the multiscanner (offline,
+# workspace-mounted); `--target netscanner` builds the network-facing one. They
+# share this context on purpose: one fetch.sh, one set of pinned versions, one
+# source fingerprint.
+#
+# PROFILE=core  static scanner binaries only (no Python/Ruby/Go/network tools).
 # PROFILE=full  everything: adds bandit/njsscan (Python), brakeman
-#               (Ruby), nmap + nuclei (network).
+#               (Ruby), gosec + the Go toolchain (Go), nmap + nuclei (network).
 ARG PROFILE=full
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,6 +54,12 @@ ARG OPENGREP_VERSION=1.25.0
 # opengrep publishes sigstore signatures, not checksums — digest pinned here.
 ARG OPENGREP_SHA256=9ac4aebb47ba3f7b0d8fc641ac8749cb6c2f253f616131a67d9631e00d4bea33
 ARG NUCLEI_VERSION=3.11.0
+ARG GOSEC_VERSION=2.28.0
+# The Go toolchain gosec needs to load packages. go.dev serves checksums on its
+# download index rather than beside the artifact, so this is digest-pinned here
+# the same way opengrep is — bump the pair together. See fetch.sh's get_go.
+ARG GO_VERSION=1.26.5
+ARG GO_SHA256=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
 
 COPY fetch.sh /usr/local/bin/fetch.sh
 RUN chmod +x /usr/local/bin/fetch.sh && /usr/local/bin/fetch.sh
@@ -98,14 +109,16 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates curl git unzip \
 	&& rm -rf /var/lib/apt/lists/*
 
-# One scanner is deliberately absent:
-#
-#   gosec  needs a Go toolchain and module resolution (network) to load
-#          packages, and reports zero findings rather than failing when it
-#          can't — which --network none guarantees. Measured on the Aegis repo:
-#          host 244 findings, container 0.
-#
-# See multiscannerExcludedTools in ../multiscanner.go.
+# gosec is deliberately absent from *this* stage and present in profile-full
+# below. It is compile-assisted — it resolves packages through `go list`, so it
+# needs a Go toolchain and a warm module cache, and it does not fail when it has
+# neither: with no toolchain it reports zero, and with a toolchain but no modules
+# it quietly drops every type-aware rule (measured on the Aegis repo: host 244,
+# no toolchain 0, cold cache 258, warm cache 283). Carrying it here would add
+# ~250MB of Go toolchain to the profile whose whole point is static scanner
+# binaries, so it rides with the other language-targeted analyzers instead. How
+# the module cache is warmed without giving the analysis run network access is
+# P55.8's two-phase split — see gosec.go.
 COPY --from=fetch /out/trivy /out/gitleaks /out/trufflehog /out/syft \
 	/out/osv-scanner /out/grype /out/kubescape \
 	/out/hadolint /out/opengrep /usr/local/bin/
@@ -219,6 +232,32 @@ RUN apt-get update \
 
 COPY --from=py /opt/venv /opt/venv
 COPY --from=fetch /out/nuclei /usr/local/bin/nuclei
+COPY --from=fetch /out/gosec /usr/local/bin/gosec
+COPY --from=fetch /out/go /usr/local/go
+
+# gosec's environment. Every path here points into /gocache, which is a mounted
+# volume at runtime (AegisGoCacheVolume) rather than image content — that is
+# what lets the networked warm phase and the --network none analysis phase see
+# the same modules without the analysis phase ever being able to fetch.
+#
+# GOFLAGS=-mod=readonly is load-bearing, not tidiness: the warm phase mounts the
+# workspace READ-ONLY, and a Go that decides it needs to update go.mod/go.sum
+# would fail on the mount rather than on the thing that is actually wrong. With
+# readonly it says so directly ("missing go.sum entry ... run go mod download").
+#
+# GOTOOLCHAIN=auto lets a repo whose go.mod names a newer Go than ${GO_VERSION}
+# still be analyzed: the warm phase (which has network) downloads that toolchain
+# into GOMODCACHE, and the analysis phase finds it already there. Without it,
+# such a repo would fail outright on any toolchain bump upstream of this image.
+ENV PATH=/usr/local/go/bin:$PATH \
+	GOPATH=/gocache/gopath \
+	GOMODCACHE=/gocache/mod \
+	GOCACHE=/gocache/build \
+	GOFLAGS=-mod=readonly \
+	GOTOOLCHAIN=auto
+RUN mkdir -p /gocache && chmod 777 /gocache \
+	&& go version \
+	&& gosec --version
 
 # Each tool lives in its own venv (see the py stage), so put the entrypoints on
 # PATH by name rather than adding a shared venv's bin/ — there isn't one.
@@ -269,6 +308,95 @@ RUN set -eux; \
 	rm -f /tmp/templates.tar.gz; \
 	chmod -R a+rX "${NUCLEI_TEMPLATES_DIR}"; \
 	test -d "${NUCLEI_TEMPLATES_DIR}/http" || { echo "nuclei templates ${NUCLEI_TEMPLATES_VERSION} look wrong: no http/ dir" >&2; exit 1; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# netscanner — P55.7: the second image, split by MOUNT POSTURE, not by tool
+#              category. Built with `--target netscanner` from this same
+#              context, so there is one fetch.sh, one set of pinned versions,
+#              and one source fingerprint covering both images.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Every tool here needs network egress and none of them needs the workspace,
+# because each one scans a REMOTE target rather than local source:
+#
+#   nmap, nuclei    egress to the target host; take a target list
+#   trivy image     registry egress; takes an image reference
+#   grype <ref>     registry egress; takes an image reference
+#
+# That is the whole reason a second image exists. The scanner hardening forbids
+# network-plus-workspace in one container because it is an exfiltration path out
+# of a hostile repo — but these four have nothing to exfiltrate, since they never
+# see the source. So this image runs with network ON and **no workspace mount,
+# ever**, and the invariant is structural rather than conventional: its runner
+# (runNetscannerImage in ../netscanner.go) takes no directory parameter at all.
+# The multiscanner's --network none + workspace-mounted runner is untouched, and
+# the two never converge.
+#
+# Deliberately NOT here:
+#   zap     already solved — dast.go runs the official zaproxy image with its own
+#           /zap/wrk mount contract, so it already needs no host install. Folding
+#           a large Java app in here would buy nothing.
+#   dockle  needs the container ENGINE SOCKET, which is a third privilege axis:
+#           socket access is effectively host root, not merely egress. Whether
+#           Aegis should mount a container socket at all deserves its own
+#           decision rather than arriving as a side effect of this image.
+FROM debian:bookworm-slim AS netscanner
+
+# nmap from the distro: it is a C program with a large data set (service probes,
+# NSE scripts), not a static release binary like the tools in the fetch stage.
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates curl nmap \
+	&& rm -rf /var/lib/apt/lists/*
+
+COPY --from=fetch /out/trivy /out/grype /out/nuclei /usr/local/bin/
+
+# This image's cache is its OWN volume, not the multiscanner's
+# (AegisNetscannerCacheVolume vs MultiscannerCacheVolume). Two reasons, and the
+# second is the one that matters: this container has network, so it can refresh
+# its own databases on demand and needs no `update-db` step at all — which is
+# also why the TRIVY_SKIP_*/GRYPE_DB_AUTO_UPDATE flags are the *opposite* of the
+# multiscanner's. Pointing both at one volume would put a networked writer
+# inside the cache that the offline scans read, and there is no reason to accept
+# that when a second volume costs nothing.
+ENV HOME=/opt/aegis-home \
+	AEGIS_CACHE_DIR=/cache \
+	XDG_CACHE_HOME=/cache \
+	TRIVY_CACHE_DIR=/cache/trivy \
+	GRYPE_DB_CACHE_DIR=/cache/grype/db \
+	GRYPE_DB_AUTO_UPDATE=true
+
+RUN mkdir -p "$HOME" /cache && chmod 777 "$HOME" /cache
+
+ARG NUCLEI_TEMPLATES_VERSION=v10.4.6
+ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates
+# Baked and pinned for the same reason as in profile-full: templates are
+# executable network-probe logic and are never pulled at an unpinned "latest".
+# Baking them also removes the host-side git clone the recon scanner needs on
+# the host path (resolveNucleiTemplates), which is why the container path can
+# run without security.tools.nuclei.templates_version being set at all.
+RUN set -eux; \
+	mkdir -p "${NUCLEI_TEMPLATES_DIR}"; \
+	curl -fsSL --retry 3 \
+	"https://github.com/projectdiscovery/nuclei-templates/archive/refs/tags/${NUCLEI_TEMPLATES_VERSION}.tar.gz" \
+	-o /tmp/templates.tar.gz; \
+	tar -xzf /tmp/templates.tar.gz -C "${NUCLEI_TEMPLATES_DIR}" --strip-components=1; \
+	rm -f /tmp/templates.tar.gz; \
+	chmod -R a+rX "${NUCLEI_TEMPLATES_DIR}"; \
+	test -d "${NUCLEI_TEMPLATES_DIR}/http" || { echo "nuclei templates ${NUCLEI_TEMPLATES_VERSION} look wrong: no http/ dir" >&2; exit 1; }
+
+# /tmp, not /src. There is no /src in this image and there never will be — see
+# the header. Tools that need to write a report write it here and Aegis cats it
+# back out over stdout, because with no mount there is no shared file to read.
+WORKDIR /tmp
+
+ARG AEGIS_NETSCANNER_VERSION=v1
+LABEL org.opencontainers.image.title="aegis-netscanner" \
+	org.opencontainers.image.description="Aegis network- and registry-facing security scanners (no workspace mount)" \
+	org.opencontainers.image.source="https://github.com/fiddler110/aegis" \
+	io.aegis.netscanner.version="${AEGIS_NETSCANNER_VERSION}"
+
+ENTRYPOINT []
+CMD ["/bin/sh", "-c", "echo 'aegis netscanner: invoke a scanner by name, e.g. nmap -sV 10.0.0.1' >&2; exit 64"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # final — selected by --build-arg PROFILE=core|full

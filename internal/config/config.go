@@ -861,6 +861,11 @@ type SecurityConfig struct {
 	// Written by `aegis security build-image`; see MultiscannerConfig.
 	Multiscanner MultiscannerConfig `koanf:"multiscanner"`
 
+	// Netscanner points at the second locally-built image, the one for tools
+	// that scan a remote target rather than local source. Written by
+	// `aegis security build-image --netscanner`; see NetscannerConfig.
+	Netscanner NetscannerConfig `koanf:"netscanner"`
+
 	// WSLDistro names a specific registered WSL distro (e.g. "kali-linux") to
 	// target for every WSLCapable scanner (nmap, nuclei, opengrep, kubescape;
 	// P14.x), instead of whatever `wsl --set-default` currently points at.
@@ -939,6 +944,44 @@ type MultiscannerConfig struct {
 	// Tools optionally restricts which scanners resolve to the shared image.
 	// Empty (the default) means every scanner the image is known to carry.
 	// A per-tool security.tools.<name>.image always wins over this.
+	Tools []string `koanf:"tools"`
+}
+
+// NetscannerConfig points at the second locally-built scanner image (P55.7),
+// the one carrying tools that scan a *remote* target — nmap and nuclei against
+// a host list, trivy/grype against a container image reference.
+//
+// It is a separate image from the multiscanner, and separate for exactly one
+// reason: mount posture. Every tool here needs network egress and none of them
+// needs the workspace, so this image runs with network ON and no workspace
+// mounted, ever — while the multiscanner keeps --network none with the
+// workspace mounted. The two runners are separate functions with separate
+// signatures (the netscanner's has no directory parameter at all), so the
+// invariant is structural rather than a convention someone has to remember.
+//
+// Pinning works exactly as MultiscannerConfig's does, for the same reason: a
+// locally-built image has no registry digest, so its real image ID is recorded
+// and re-verified before every run.
+type NetscannerConfig struct {
+	// Enabled turns the network-facing image on as the container path for the
+	// tools it carries. False (the default) leaves image scanning and network
+	// recon host-binary-only, exactly as they were before this image existed.
+	Enabled bool `koanf:"enabled"`
+	// Image is the local reference `aegis security build-image --netscanner`
+	// tagged, e.g. "localhost/aegis-netscanner:v1". Never pulled.
+	Image string `koanf:"image"`
+	// Runtime is the container runtime that built the image, recorded because a
+	// locally-built image exists only in that engine's storage.
+	Runtime string `koanf:"runtime"`
+	// ImageID is the full "sha256:..." ID as built, re-verified before use.
+	// Empty means "never built".
+	ImageID string `koanf:"image_id"`
+	// SourceFingerprint is a hash of the build context the image came from.
+	// Both images are built from one context, so this is the same hash the
+	// multiscanner records. Empty means "unknown", not "drift".
+	SourceFingerprint string `koanf:"source_fingerprint"`
+	// Tools optionally restricts which scanners resolve to this image. Empty
+	// (the default) means every scanner the image is known to carry.
 	Tools []string `koanf:"tools"`
 }
 
@@ -1094,7 +1137,7 @@ func defaults() map[string]any {
 		// default. Spelled here rather than left empty so `aegis config` shows
 		// the key exists and what its off value is.
 		"provider.tool_call_shim": toolshim.ModeOff,
-		"server.addr":                     "127.0.0.1:4127",
+		"server.addr":             "127.0.0.1:4127",
 		// Conservative non-zero caps by default (P27.12/FIND-14) — see
 		// ServerConfig's doc comments for why these values are safe for a
 		// normal single-user session while still bounding a runaway/DoS case.

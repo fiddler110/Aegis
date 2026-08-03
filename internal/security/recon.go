@@ -36,12 +36,6 @@ type ReconOptions struct {
 // mistaken host list fails loudly instead of scanning a partial list.
 const maxReconTargets = 256
 
-// reconContainerFallbackUnsupported mirrors imageContainerFallbackUnsupported's
-// reasoning: nmap/nuclei need to reach a LAN target directly, which the
-// network-isolated (--network none) scanner-container runner can't do, and
-// punching a network hole through that hardening isn't done for v1.
-const reconContainerFallbackUnsupported = "container fallback for network recon is not yet supported (it would need a network-egress exception to the scanner-container hardening posture) — install this tool natively instead"
-
 // ReconScanner is one network-target scanning tool (nmap, nuclei) — the
 // recon_scan analogue of Scanner (which analyzes a source directory) and
 // ImageScanner (which analyzes a container image by reference).
@@ -83,6 +77,15 @@ func RunRecon(ctx context.Context, opts ReconOptions, scanOpts Options) (Report,
 
 	var disallowed []string
 	for _, target := range opts.Targets {
+		// Rejected before anything else looks at it: a target is appended to an
+		// argv (host path) or handed to a container as a positional parameter
+		// (P55.7), and in both places a leading "-" reads as a flag to the tool
+		// rather than as a host. Neither nmap nor nuclei has a hostname that
+		// legitimately starts with one.
+		if strings.HasPrefix(strings.TrimSpace(target), "-") {
+			disallowed = append(disallowed, fmt.Sprintf("%q (a target may not start with \"-\" — it would be read as a scanner flag)", target))
+			continue
+		}
 		host, err := targetHost(target)
 		if err != nil {
 			disallowed = append(disallowed, fmt.Sprintf("%q (%v)", target, err))
@@ -96,14 +99,17 @@ func RunRecon(ctx context.Context, opts ReconOptions, scanOpts Options) (Report,
 		return rep, fmt.Errorf("target authorization failed for: %s", strings.Join(disallowed, "; "))
 	}
 
+	// MethodContainer is no longer a skip here (P55.7). It used to be, and the
+	// reason was sound at the time: the only container runner Aegis had denied
+	// network outright, so "run nmap in a container" meant "run nmap where it
+	// cannot reach anything". The netscanner image inverts exactly that one
+	// property — network on, no workspace mounted — which is what a tool
+	// pointed at a remote target needs and what a tool pointed at local source
+	// must never have.
 	for _, sc := range DefaultReconScanners() {
 		method, rt, image, reason := sc.Resolve(ctx, scanOpts)
 		if method == MethodNone {
 			rep.Skipped[sc.Name()] = reason
-			continue
-		}
-		if method == MethodContainer {
-			rep.Skipped[sc.Name()] = reconContainerFallbackUnsupported
 			continue
 		}
 		findings, err := sc.Scan(ctx, opts.Targets, opts.AllowActive, method, rt, image, scanOpts)
@@ -144,8 +150,14 @@ type nmapScanner struct{}
 func (nmapScanner) Name() string { return "nmap" }
 
 func (nmapScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
-	return Resolve(ctx, "nmap", opts)
+	return ResolveNetwork(ctx, "nmap", opts)
 }
+
+// nmapContainerReportPath is where nmap writes its XML inside the netscanner
+// container. A path, not /dev/stdout: nmap's XML writer seeks, and with no
+// workspace mount there is no shared file to read back either way, so the report
+// is written inside and cat'd out (see netscannerCollect).
+const nmapContainerReportPath = "/tmp/aegis-nmap.xml"
 
 // Scan runs nmap against targets and parses its XML output into Findings.
 // No shell string-building for the host path: exec.CommandContext takes an
@@ -158,6 +170,17 @@ func (nmapScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.C
 // file this function reads back below, with no cross-boundary file copy
 // needed.
 func (nmapScanner) Scan(ctx context.Context, targets []string, active bool, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
+	if method == MethodContainer {
+		// No host temp file at all on this path: with nothing mounted, the
+		// report only exists inside the container, so it comes back over stdout.
+		data, err := runNetscannerReport(ctx, rt, image, "nmap", nmapContainerReportPath,
+			nmapArgs(targets, active, nmapContainerReportPath))
+		if err != nil {
+			return nil, err
+		}
+		return parseNmapXML(data)
+	}
+
 	tmpFile, err := os.CreateTemp("", "aegis-nmap-*.xml")
 	if err != nil {
 		return nil, err
@@ -323,14 +346,33 @@ type nucleiScanner struct{}
 func (nucleiScanner) Name() string { return "nuclei" }
 
 func (nucleiScanner) Resolve(ctx context.Context, opts Options) (Method, sandbox.ContainerRuntime, string, string) {
-	return Resolve(ctx, "nuclei", opts)
+	return ResolveNetwork(ctx, "nuclei", opts)
 }
+
+// nucleiContainerReportPath is where nuclei writes its SARIF inside the
+// netscanner container, for the same reason nmap's report does.
+const nucleiContainerReportPath = "/tmp/aegis-nuclei.sarif"
 
 // Scan mirrors nmapScanner.Scan's MethodWSL handling: both the pinned
 // templates directory and the SARIF output path are translated to their WSL
 // mount form via sandbox.WSLPath so nuclei-inside-WSL reads/writes the exact
 // same files this function already has open on the host side.
 func (nucleiScanner) Scan(ctx context.Context, targets []string, active bool, method Method, rt sandbox.ContainerRuntime, image string, opts Options) ([]Finding, error) {
+	if method == MethodContainer {
+		// The pin is satisfied by the image rather than by config here: the
+		// netscanner bakes a pinned nuclei-templates release
+		// (NUCLEI_TEMPLATES_VERSION), covered by the same image-ID verification
+		// as the binaries beside it. So security.tools.nuclei.templates_version
+		// is not required on this path — and, more to the point, the host
+		// path's git clone of an unpinned working copy isn't either.
+		data, err := runNetscannerReport(ctx, rt, image, "nuclei", nucleiContainerReportPath,
+			nucleiArgs(targets, active, netscannerTemplatesDir, nucleiContainerReportPath))
+		if err != nil {
+			return nil, err
+		}
+		return ParseSARIF(data, "nuclei")
+	}
+
 	templatesDir, err := resolveNucleiTemplates(ctx, opts)
 	if err != nil {
 		return nil, err

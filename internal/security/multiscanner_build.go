@@ -154,9 +154,12 @@ func UpdateMultiscannerDB(ctx context.Context, p MultiscannerPolicy, skipJavaDB 
 		// the entire job. Kept safe by what's absent: no workspace mount, so
 		// there is no source for a networked container to reach.
 		"--network", "bridge",
-		"--cap-drop=ALL", "--security-opt=no-new-privileges",
 		"-v", MultiscannerCacheVolume + ":" + multiscannerCacheMount,
 	}
+	// Inserted after the fixed flags rather than baked into the literal: wslc
+	// rejects them outright, and update-db failing on a flag would read as a
+	// database problem (see sandbox.OCIHardeningFlags).
+	args = append(args, sandbox.OCIHardeningFlags(rt)...)
 	if skipJavaDB {
 		args = append(args, "-e", "AEGIS_SKIP_JAVA_DB=true")
 	}
@@ -214,6 +217,119 @@ func MaterializeMultiscannerContext(dir string) error {
 	return nil
 }
 
+// buildFromEmbeddedContext runs one image build out of an already-materialized
+// build context and returns the built image's canonical ID.
+//
+// Shared by both images (P55.7), which is the point: they come out of the same
+// Containerfile via different --target stages, so they share one fetch script,
+// one set of pinned tool versions, and one source fingerprint. A second build
+// function with its own copy of the ID-inspection logic would be the obvious
+// place for the two to drift apart on exactly the thing that binds Aegis to an
+// image.
+func buildFromEmbeddedContext(ctx context.Context, rt sandbox.ContainerRuntime, dir, image, target string, noCache bool, buildArgs []string, out io.Writer) (string, error) {
+	args := []string{"build"}
+	for _, a := range buildArgs {
+		args = append(args, "--build-arg", a)
+	}
+	if target != "" {
+		args = append(args, "--target", target)
+	}
+	args = append(args, "-t", image, "-f", filepath.Join(dir, "Containerfile"))
+	if noCache {
+		args = append(args, "--no-cache")
+	}
+	args = append(args, dir)
+
+	cmd := exec.CommandContext(ctx, string(rt), args...)
+	if out != nil {
+		cmd.Stdout = out
+		cmd.Stderr = out
+	}
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%s build failed: %w", rt, err)
+	}
+
+	id, err := inspectImageID(ctx, rt, image)
+	if err != nil {
+		return "", fmt.Errorf("build reported success but the image can't be inspected: %w", err)
+	}
+	id = strings.TrimSpace(id)
+	if normalizeImageID(id) == "" {
+		return "", fmt.Errorf("%s returned an empty image ID for %s", rt, image)
+	}
+	// Store the canonical "sha256:<hex>" form regardless of which dialect the
+	// runtime reported (podman omits the prefix, docker includes it);
+	// normalizeImageID makes the comparison itself format-agnostic either way.
+	if !strings.HasPrefix(id, "sha256:") {
+		id = "sha256:" + id
+	}
+	return id, nil
+}
+
+// NetscannerBuildResult is what a successful netscanner build recorded.
+type NetscannerBuildResult struct {
+	Runtime sandbox.ContainerRuntime
+	Image   string
+	ImageID string
+	Tools   []string
+	// SourceFingerprint is the same build-context hash the multiscanner
+	// records, because both images are built from that one context.
+	SourceFingerprint string
+}
+
+// BuildNetscanner builds the network-facing image (P55.7) — the one that runs
+// with network on and no workspace mounted — and returns its identity.
+//
+// No profile argument, deliberately. The multiscanner has profiles because its
+// cost is dominated by interpreter stacks a given project may not need; this
+// image is four tools with one shared posture, and a "core netscanner" would be
+// a knob with nothing behind it.
+func BuildNetscanner(ctx context.Context, opts MultiscannerBuildOptions, out io.Writer) (NetscannerBuildResult, error) {
+	var res NetscannerBuildResult
+
+	image := strings.TrimSpace(opts.Image)
+	if image == "" {
+		image = NetscannerDefaultImage
+	}
+	if image == MultiscannerDefaultImage {
+		// Two different images under one tag would leave whichever was built
+		// second answering for both pins, and the first one's ID check failing
+		// with a message about a rebuild that never happened.
+		return res, fmt.Errorf("%s is the multiscanner's tag — the netscanner needs its own (default %s)", image, NetscannerDefaultImage)
+	}
+
+	rt := opts.Runtime
+	if rt == "" {
+		detected, ok := detectRuntime(ctx, nil)
+		if !ok {
+			return res, fmt.Errorf("no container runtime available (looked for docker/podman) — install one, then re-run; on Windows with Podman, `podman machine start` must also have been run")
+		}
+		rt = detected
+	}
+
+	dir, err := os.MkdirTemp("", "aegis-netscanner-*")
+	if err != nil {
+		return res, fmt.Errorf("create build context: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := MaterializeMultiscannerContext(dir); err != nil {
+		return res, err
+	}
+
+	id, err := buildFromEmbeddedContext(ctx, rt, dir, image, netscannerBuildTarget, opts.NoCache, nil, out)
+	if err != nil {
+		return res, err
+	}
+
+	return NetscannerBuildResult{
+		Runtime:           rt,
+		Image:             image,
+		ImageID:           id,
+		Tools:             NetscannerTools(),
+		SourceFingerprint: MultiscannerSourceFingerprint(),
+	}, nil
+}
+
 // BuildMultiscanner builds the shared scanner image and returns its identity,
 // streaming the runtime's build output to out (which may be nil).
 //
@@ -251,34 +367,9 @@ func BuildMultiscanner(ctx context.Context, opts MultiscannerBuildOptions, out i
 		return res, err
 	}
 
-	args := []string{"build", "--build-arg", "PROFILE=" + profile, "-t", image, "-f", filepath.Join(dir, "Containerfile")}
-	if opts.NoCache {
-		args = append(args, "--no-cache")
-	}
-	args = append(args, dir)
-
-	cmd := exec.CommandContext(ctx, string(rt), args...)
-	if out != nil {
-		cmd.Stdout = out
-		cmd.Stderr = out
-	}
-	if err := cmd.Run(); err != nil {
-		return res, fmt.Errorf("%s build failed: %w", rt, err)
-	}
-
-	id, err := inspectImageID(ctx, rt, image)
+	id, err := buildFromEmbeddedContext(ctx, rt, dir, image, "", opts.NoCache, []string{"PROFILE=" + profile}, out)
 	if err != nil {
-		return res, fmt.Errorf("build reported success but the image can't be inspected: %w", err)
-	}
-	id = strings.TrimSpace(id)
-	if normalizeImageID(id) == "" {
-		return res, fmt.Errorf("%s returned an empty image ID for %s", rt, image)
-	}
-	// Store the canonical "sha256:<hex>" form regardless of which dialect the
-	// runtime reported (podman omits the prefix, docker includes it);
-	// normalizeImageID makes the comparison itself format-agnostic either way.
-	if !strings.HasPrefix(id, "sha256:") {
-		id = "sha256:" + id
+		return res, err
 	}
 
 	return MultiscannerBuildResult{

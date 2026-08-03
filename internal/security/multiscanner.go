@@ -48,6 +48,21 @@ const (
 	// --network none, so the workspace is never mounted into a networked
 	// container.
 	MultiscannerCacheVolume = "aegis-scanner-cache"
+
+	// MultiscannerGoCacheVolume holds the Go module cache, build cache and any
+	// toolchain GOTOOLCHAIN=auto downloaded, for the one compile-assisted
+	// scanner in the image (gosec, P55.8).
+	//
+	// Separate from MultiscannerCacheVolume rather than a subdirectory of it,
+	// because the two are written by runs with opposite network postures and
+	// keeping them apart keeps that legible: the vulnerability databases are
+	// written only by `aegis security update-db`, whereas this one is written by
+	// gosec's per-scan warm phase. Mixing them would put a per-scan writer inside
+	// the volume whose contents `aegis security status` reports the age of.
+	MultiscannerGoCacheVolume = "aegis-scanner-gocache"
+	// multiscannerGoCacheMount must match the GOPATH/GOMODCACHE/GOCACHE prefix
+	// the Containerfile sets for the full profile.
+	multiscannerGoCacheMount = "/gocache"
 	// multiscannerCacheMount is where MultiscannerCacheVolume is mounted; it
 	// must match the cache paths the Containerfile sets (TRIVY_CACHE_DIR,
 	// XDG_CACHE_HOME).
@@ -185,28 +200,27 @@ var multiscannerCoreTools = []string{
 	"osv-scanner", "grype", "kubescape", "hadolint", "opengrep",
 }
 
-// multiscannerFullOnlyTools need an interpreter or a network stack, so they
-// only exist in the full profile.
+// multiscannerFullOnlyTools need an interpreter, a compiler toolchain, or a
+// network stack, so they only exist in the full profile.
 var multiscannerFullOnlyTools = []string{
-	"bandit", "brakeman", "njsscan", "nmap", "nuclei",
+	"bandit", "brakeman", "gosec", "njsscan", "nmap", "nuclei",
 }
 
 // multiscannerExcludedTools are scanners the shared image deliberately does
 // not carry, and why. Kept as data rather than prose so the resolver can tell
 // an operator the actual reason instead of "rebuild with --profile full" for a
 // tool no profile will ever include.
+// gosec used to be listed here, and the reason it no longer is, is P55.8. It is
+// compile-assisted: it resolves packages via `go list`, needing a Go toolchain
+// and a populated module cache, and it does not fail when it has neither — with
+// no toolchain it reports zero, and with a toolchain but no modules it silently
+// drops every type-aware rule while still looking healthy. What unblocked it is
+// not relaxing --network none but splitting the run in two, the same way
+// `update-db` splits fetching from scanning — see gosecScanner.Scan for the
+// measurements.
 var multiscannerExcludedTools = map[string]string{
 	"zap":    "zap is a large Java app with its own mount contract (/zap/wrk) and automation-framework invocation; it keeps its own official image",
-	"dockle": "dockle inspects an image through the local container engine, so it needs the engine socket and can't run from inside a scanner container",
-	// gosec is the subtle one, and the reason it's excluded is worth stating
-	// precisely: it is a compile-assisted analyzer. It resolves packages via
-	// `go list`, which needs a Go toolchain and the module cache — i.e. the
-	// network — and scanner containers run with --network none. It does not
-	// fail when it can't do that; it reports zero findings and exits clean.
-	// Measured on this repo: the host finds 244 issues, the container found 0.
-	// A silent all-clear is the worst possible failure for a security tool, so
-	// gosec runs on the host or not at all.
-	"gosec": "gosec needs a Go toolchain and module resolution (network) to load packages, which a --network none scanner container can't provide — and it reports zero findings rather than failing when it can't, so it runs on the host instead (`aegis security install gosec`)",
+	"dockle": "dockle inspects an image through the local container engine, so it needs the engine socket — a privilege level (effectively host root) neither scanner image grants; it runs on the host instead (`aegis security install dockle`)",
 }
 
 // MultiscannerTools returns the scanners the named profile's image carries,

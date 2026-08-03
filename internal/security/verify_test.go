@@ -277,16 +277,16 @@ func TestVerifySkipsExcludedAndUnknownTools(t *testing.T) {
 	stubVerifyEnvironment(t, true)
 	withCanaryRunner(t, nil, nil)
 
-	results, err := VerifyMultiscanner(context.Background(), verifyPolicy("gosec", "definitely-not-a-scanner"), nil, nil)
+	results, err := VerifyMultiscanner(context.Background(), verifyPolicy("dockle", "definitely-not-a-scanner"), nil, nil)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	excluded := resultFor(t, results, "gosec")
+	excluded := resultFor(t, results, "dockle")
 	if excluded.Status != VerifySkip {
-		t.Errorf("gosec: want skip, got %s", excluded.Status)
+		t.Errorf("dockle: want skip, got %s", excluded.Status)
 	}
-	if !strings.Contains(excluded.Detail, "Go toolchain") {
-		t.Errorf("gosec skip should carry the real exclusion reason, got %q", excluded.Detail)
+	if !strings.Contains(excluded.Detail, "engine socket") {
+		t.Errorf("dockle skip should carry the real exclusion reason, got %q", excluded.Detail)
 	}
 	unknown := resultFor(t, results, "definitely-not-a-scanner")
 	if unknown.Status != VerifyFail {
@@ -382,9 +382,9 @@ func TestVerifyReportsScanErrorsAsFailures(t *testing.T) {
 // (syft/grype).
 func TestFirstVersionLinePicksTheVersion(t *testing.T) {
 	cases := map[string]string{
-		"Version: 0.72.0":                                   "Version: 0.72.0",
-		"Application:   syft\nVersion:       1.48.0\nBuild": "Version: 1.48.0",
-		"\x1b[34m\x1b[0m\n njsscan: v0.4.3 | Ajin Abraham":  "njsscan: v0.4.3 | Ajin Abraham",
+		"Version: 0.72.0": "Version: 0.72.0",
+		"Application:   syft\nVersion:       1.48.0\nBuild":   "Version: 1.48.0",
+		"\x1b[34m\x1b[0m\n njsscan: v0.4.3 | Ajin Abraham":    "njsscan: v0.4.3 | Ajin Abraham",
 		"[\x1b[34mINF\x1b[0m] Nuclei Engine Version: v3.11.0": "[INF] Nuclei Engine Version: v3.11.0",
 	}
 	for in, want := range cases {
