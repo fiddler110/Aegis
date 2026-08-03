@@ -1,4 +1,4 @@
-package tui
+package termsafe
 
 import "testing"
 
@@ -75,9 +75,9 @@ func TestStripControlSeqs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := stripControlSeqs(tt.in)
+			got := StripControlSeqs(tt.in)
 			if got != tt.want {
-				t.Errorf("stripControlSeqs(%q) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("StripControlSeqs(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -88,14 +88,14 @@ func TestStripControlSeqs(t *testing.T) {
 // escape fragments that could reassemble into a sequence.
 func TestStripControlSeqsIdempotent(t *testing.T) {
 	in := "hello \x1b[31mworld\x1b[0m \x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ done\x1b[10;5H!"
-	once := stripControlSeqs(in)
-	twice := stripControlSeqs(once)
+	once := StripControlSeqs(in)
+	twice := StripControlSeqs(once)
 	if once != twice {
 		t.Errorf("not idempotent: once=%q twice=%q", once, twice)
 	}
 }
 
-// TestStripDangerousSeqs covers P28.1: unlike stripControlSeqs, SGR colour
+// TestStripDangerousSeqs covers P28.1: unlike StripControlSeqs, SGR colour
 // (used by remapANSI16 on legitimate tool output) must survive; every other
 // sequence class must not.
 func TestStripDangerousSeqs(t *testing.T) {
@@ -181,9 +181,9 @@ func TestStripDangerousSeqs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := stripDangerousSeqs(tt.in)
+			got := StripDangerousSeqs(tt.in)
 			if got != tt.want {
-				t.Errorf("stripDangerousSeqs(%q) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("StripDangerousSeqs(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -194,8 +194,8 @@ func TestStripDangerousSeqs(t *testing.T) {
 // variant deliberately preserves.
 func TestStripDangerousSeqsIdempotent(t *testing.T) {
 	in := "hello \x1b[31mworld\x1b[0m \x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ done\x1b[10;5H!"
-	once := stripDangerousSeqs(in)
-	twice := stripDangerousSeqs(once)
+	once := StripDangerousSeqs(in)
+	twice := StripDangerousSeqs(once)
 	if once != twice {
 		t.Errorf("not idempotent: once=%q twice=%q", once, twice)
 	}

@@ -110,6 +110,22 @@ npm --prefix internal/server/webui/frontend ci
 npm --prefix internal/server/webui/frontend run build   # regenerates dist/ — commit the result
 ```
 
+Assistant text in the transcript is **markdown**, rendered via `src/markdown.ts`
+(`marked` → **DOMPurify** → an `.md` container). The sanitize call is the
+security boundary, not marked's escaping: marked passes raw HTML through by
+design and model output can carry anything a prompt-injection vector put there.
+Two traps if you touch it — `.md p` must override the transcript's
+`white-space:pre-wrap` (it is what kept *unrendered* text legible and would
+double every blank line once the parser decides the breaks), and the render is
+memo-cached because `Transcript` re-renders every item on every state change
+while text streams in token by token.
+
+The plain CLI (`aegis chat`) renders the same markdown through glamour
+(`internal/cli/chat_render.go`), buffering to *block* boundaries chosen so a
+fenced block or a loose list is never severed (see `safeSplit`). It is on only
+when stdout is a terminal: piped output stays byte-identical, which a test
+enforces, because scripts and other agents consume it that way.
+
 ## Testing
 
 ```bash
@@ -201,6 +217,7 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/lsp` | Minimal LSP client managing language-server subprocesses over stdio JSON-RPC, for diagnostics and reference resolution (`LSP` tool, `aegis doctor`) |
 | `internal/cost` | Tracks token spend per run/session and converts it to an estimated USD cost; backs the budget knobs (`cost.*` config: USD, token, wall-clock, iteration limits) enforced in `internal/engine` |
 | `internal/tui` | Bubbletea TUI: timeline, streaming, dialog, persona/session pickers, slash commands, cost display |
+| `internal/termsafe` | The one home for ANSI/OSC control-sequence stripping — `StripControlSeqs` for model prose (strips everything, including SGR) and `StripDangerousSeqs` for raw tool output (keeps SGR colour, drops cursor/OSC/DCS). Lifted out of `internal/tui` when the CLI renderer needed the same two policies; the TUI keeps thin aliases |
 | `internal/config` | Layered config (defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` → `AEGIS_*` env vars) |
 | `internal/mcp` | MCP client (stdio + HTTP/SSE) — Aegis calling *out* to external MCP servers; registered tools appear alongside builtins |
 | `internal/mcpserver` | MCP server (`aegis mcp-serve`) — the reverse direction: exposes Aegis sessions as MCP tools (`aegis_prompt`, `aegis_new_session`, `aegis_list_sessions`) to other MCP-speaking harnesses |

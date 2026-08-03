@@ -8,7 +8,56 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-03 — **P55.7 and P55.8 shipped, closing the P55.x
+**Last updated:** 2026-08-03 — **P56.1: the two surfaces that never rendered the model's
+markdown now do.** The models write headings, tables, fenced code and lists; two of the three
+places that display them threw that structure away. The TUI has rendered markdown through glamour
+since TQ10, so this was easy to believe was solved everywhere — it was not. `aegis chat` wrote
+`ev.Text` straight to stdout, and the web UI's transcript rendered assistant text as a single
+`<p>{text}</p>`. A scan-summary table arrived as its literal pipe-delimited source in both.
+
+**CLI.** The default `text` format now buffers prose and flushes it through glamour at *block*
+boundaries. Per-block rather than per-turn is the whole design question: markdown cannot be styled
+a token at a time, because what a line means (`| a | b |`, `  - x`) is not knowable until its block
+closes — but buffering a whole turn would replace a live stream with a long silence. So the split
+point is chosen structurally, and it is stricter than "ends in a blank line", because two
+constructs span blank lines and render wrongly when severed: a **fenced code block** (whose body
+may contain blank lines and is not markdown at all) and a **loose list** (where cutting between
+items restarts an ordered list's numbering at 1 and turns one list into several). A cut is refused
+while an odd number of fences precede it, and refused while the following text continues a list.
+The invariant that matters more than any individual boundary is covered by a byte-at-a-time
+round-trip test: repeated cut-and-emit must never drop or duplicate a byte. Tool calls changed too
+— the argument JSON was one unbroken line, so a `write_file` pushed its path off the screen behind
+its own payload; it is now indented, with string leaves clipped (the keys are the information, the
+4KB file body is not).
+
+The compatibility guarantee is explicit and tested: **piped output is byte-identical to what it
+was**, since `--render auto` only enables rendering when stdout is a terminal, and scripts, CI jobs
+and other agents consume this through a pipe. `--render on` forces it (for `| less -R`), `off`
+disables it. `NO_COLOR` governs both halves — glamour's styling and the renderer's own chrome —
+because styling only one of them is the worst of the three outcomes.
+
+**Web UI.** Assistant text and thinking traces now go through `marked` → **DOMPurify** → an `.md`
+container. The sanitize call is the security boundary, not marked's escaping: marked passes raw
+HTML through by design, and model output is untrusted in the one sense that matters — a
+prompt-injection vector can put arbitrary text into it. Verified headlessly against the real
+module: `<script>`, `<img onerror>`, `javascript:` hrefs, `<iframe>`, `<style>` and `<svg onload>`
+are all neutralized, while tables, lists, fenced code and inline code render. Links get
+`rel="noopener noreferrer"`. Two non-obvious details: `.md p` must override the transcript's
+`white-space:pre-wrap` (which is what kept *unrendered* text legible and would double every blank
+line once the parser has already decided where breaks go), and rendering needs a **bounded memo
+cache** — `Transcript` re-renders every item on every state change and text streams in token by
+token, so without one, each SSE event would re-parse and re-sanitize the entire conversation
+history.
+
+Also in this change: the ANSI/OSC sanitizers moved out of `internal/tui` into
+**`internal/termsafe`**, since the CLI renderer writes the same two classes of text (model prose,
+raw tool output) to the same kind of terminal. A second copy is the shape of bug this codebase paid
+for once already — the duplicated OCI hardening-flag list that made every wslc container scan
+impossible (P55.7). The TUI keeps thin aliases, so its call sites and `sanitize_test.go` are
+unchanged. Verified live: `aegis chat --render on` against gpt-oss:20b returns a drawn table,
+bullets and inline-code pills; full Go suite green.
+
+**Previously, 2026-08-03** — **P55.7 and P55.8 shipped, closing the P55.x
 container-only-scanning batch at 8 of 9 built (P55.9 dropped, not deferred).** These were the two
 items that actually close the batch's "zero required host tools" goal; everything before them made
 the *existing* container trustworthy and preferred.
