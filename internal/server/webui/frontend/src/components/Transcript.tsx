@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "preact/hooks";
 import { Approval } from "./Approval";
+import { renderMarkdown } from "../markdown";
 
 export type RenderBlock =
   | { kind: "text"; text: string }
@@ -34,12 +35,18 @@ export interface TranscriptItem {
 function renderBlock(b: RenderBlock, key: number) {
   switch (b.kind) {
     case "text":
-      return <p key={key}>{b.text}</p>;
+      // Sanitized in renderMarkdown; see the note there on why marked's own
+      // escaping is not the boundary.
+      return (
+        <div class="md" key={key} dangerouslySetInnerHTML={{ __html: renderMarkdown(b.text) }} />
+      );
     case "thinking":
+      // Reasoning traces get the same treatment — they are prose from the same
+      // model, and are just as likely to contain a list or a code fence.
       return (
         <details class="think" key={key} open={b.open}>
           <summary>{b.label}</summary>
-          <p>{b.text}</p>
+          <div class="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(b.text) }} />
         </details>
       );
     case "tool":

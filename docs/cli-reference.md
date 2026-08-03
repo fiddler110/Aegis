@@ -75,7 +75,8 @@ aegis chat                     # reads prompt from stdin
 | `--mode <plan\|build\|auto>` | Permission mode |
 | `--persona <name>` | Persona name |
 | `--yes` | Auto-approve all tool calls (unattended use) |
-| `--output-format <text\|json\|stream-json>` | `text` streams to stdout as-is (default); `json` emits one final result object; `stream-json` emits one JSON event per line plus a trailing result |
+| `--output-format <text\|json\|stream-json>` | `text` streams to stdout (default); `json` emits one final result object; `stream-json` emits one JSON event per line plus a trailing result |
+| `--render <auto\|on\|off>` | Markdown rendering of the `text` format (default `auto`: on when stdout is a terminal, off when piped). Headings, tables, lists and fenced code are rendered through glamour instead of arriving as one undifferentiated block of text, and a tool call shows indented, scalar-clipped argument JSON instead of one unbroken line. `on` forces it (e.g. for `\| less -R`); `off` gives the raw byte stream. Honors `NO_COLOR` and `GLAMOUR_STYLE` |
 | `--skill <name>` | Preload the named skill's full instructions into the prompt (a small local model never has to discover/fetch it via the `skill` tool) and drive the run to completion — after each turn, if any file under `.aegis/` still carries a `<!-- PENDING -->` marker, chat auto-continues instead of stopping at the model's first yield. This is what lets a long multi-phase skill (`threat-modeling`, `deep-research`) finish non-interactively |
 | `--max-turns <n>` | With `--skill`, the maximum number of drive-to-completion turns before stopping with a resumable partial result (default `40`) |
 

@@ -45,6 +45,7 @@ func newChatCmd() *cobra.Command {
 		outputFormat string
 		skillName    string
 		maxTurns     int
+		renderFlag   string
 	)
 
 	cmd := &cobra.Command{
@@ -336,7 +337,23 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
+			rmode, err := parseRenderMode(renderFlag)
+			if err != nil {
+				return err
+			}
+
 			out := cmd.OutOrStdout()
+			// P56.1: the default text format streamed raw model output and raw
+			// tool-argument JSON, so a markdown table or a heading reached the
+			// terminal as one undifferentiated chunk. The renderer buffers
+			// prose to block boundaries and styles it through glamour when
+			// stdout is a terminal; piped or under --render off it stays
+			// byte-identical to the raw stream, which is what scripts consume.
+			rend := newChatRenderer(out, rmode)
+			// An error or a cancelled run never reaches KindDone, and buffered
+			// prose that is never flushed is prose the user never sees — a
+			// strictly worse failure than the unrendered stream this replaces.
+			defer rend.Flush()
 			var answer strings.Builder
 			toolCalls := 0
 			iterToolCalls := 0
@@ -366,23 +383,19 @@ func newChatCmd() *cobra.Command {
 				default: // text
 					switch ev.Kind {
 					case engine.KindText:
-						fmt.Fprint(out, ev.Text)
+						rend.Text(ev.Text)
 					case engine.KindNotice:
 						// Advisories (empty answer, cold load, a model that
 						// can't call tools) were dropped entirely here, so the
 						// default output format was the one surface that never
 						// showed them.
-						fmt.Fprintf(out, "\n[notice: %s]\n", ev.Text)
+						rend.Notice(ev.Text)
 					case engine.KindToolCall:
-						fmt.Fprintf(out, "\n[tool: %s %s]\n", ev.ToolName, string(ev.ToolInput))
+						rend.ToolCall(ev.ToolName, ev.ToolInput)
 					case engine.KindToolResult:
-						tag := "ok"
-						if ev.ToolIsError {
-							tag = "error"
-						}
-						fmt.Fprintf(out, "[tool result (%s): %s]\n", tag, truncate(ev.ToolResult, 500))
+						rend.ToolResult(ev.ToolResult, ev.ToolIsError)
 					case engine.KindDone:
-						fmt.Fprintln(out)
+						rend.Done()
 					}
 				}
 			}
@@ -640,6 +653,7 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().StringVar(&outputFormat, "output-format", "text", "output format: text, json (final result object), or stream-json (one event per line)")
 	cmd.Flags().StringVar(&skillName, "skill", "", "preload the named skill's full instructions into the prompt and drive the run to completion (auto-continue while `<!-- PENDING -->` markers remain under .aegis/) — for multi-phase skills like threat-modeling that a one-shot turn would leave half-finished")
 	cmd.Flags().IntVar(&maxTurns, "max-turns", 40, "with --skill, the maximum number of drive-to-completion turns before stopping with a resumable partial result")
+	cmd.Flags().StringVar(&renderFlag, "render", "auto", "markdown rendering of the text output format: auto (on when stdout is a terminal), on, or off (raw stream)")
 	return cmd
 }
 
