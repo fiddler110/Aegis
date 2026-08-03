@@ -62,6 +62,7 @@ func ComputeHardenPlan(cfg *Config) HardenPlan {
 		WSLDistro:        cfg.Security.WSLDistro,
 		Debate:           cfg.Security.Debate,
 		Multiscanner:     cfg.Security.Multiscanner,
+		Netscanner:       cfg.Security.Netscanner,
 	}
 	securityChanged := !cfg.Security.EgressThenWrite
 

@@ -615,8 +615,8 @@ even when a host binary exists.
 
 **Profiles.** `core` carries the statically-linked scanners (trivy, gitleaks, trufflehog,
 syft, grype, osv-scanner, kubescape, hadolint, opengrep). `full` (the default) adds the
-Python engines (bandit, njsscan), Ruby (brakeman), and the network scanners
-(nmap, nuclei).
+Python engines (bandit, njsscan), Ruby (brakeman), Go (gosec, plus the Go toolchain it
+needs — see below), and the network scanners (nmap, nuclei).
 
 **Size.** The full image is ~1.8GB. The vulnerability databases are deliberately *not* in
 it — baked in they were ~3.7GB of a 5.8GB image. They live in a podman/docker volume
@@ -633,16 +633,52 @@ duplicated per-project, so you don't accumulate GBs per repo. Inspect or reclaim
 explain itself rather than suggesting a rebuild that wouldn't help:
 
 - **zap** — a large Java app with a different mount contract; keeps its own image.
-- **dockle** and the image scanners (`trivy image`, `grype <ref>`) — need the container
-  engine socket, or are host-only by design. (The grype *binary* is carried for source
-  SCA — `grype dir:/src` — with its DB in the cache volume; only scanning a built image
-  by reference stays host-only.)
-- **gosec** — excluded for a subtler reason. It's a compile-assisted analyzer that
-  resolves packages via `go list`, needing a Go toolchain and module downloads, which
-  `--network none` can't provide. It doesn't fail when it can't; it reports **zero
-  findings and exits clean**. Measured on this repo: host 244 findings, container 0. A
-  silent all-clear is the worst failure mode for a security tool, so gosec runs on the
-  host (`aegis security install gosec`) or not at all.
+- **dockle** — needs the container **engine socket** to inspect an image through the local
+  engine. That's a different privilege axis from network egress: socket access is
+  effectively host root. It runs from a host binary (`aegis security install dockle`).
+
+The image scanners (`trivy image`, `grype <ref>`) and the network scanners (nmap, nuclei)
+are *not* in this list — they moved to a second image; see
+[The netscanner image](#the-netscanner-image-network-on-workspace-never) below.
+
+**gosec: two phases, not an exclusion.** gosec used to be excluded here, and the reason
+was real: it's a compile-assisted analyzer that resolves packages via `go list`, needing a
+Go toolchain and module downloads, which `--network none` can't provide — and it doesn't
+fail when it can't. Measured on this repo (gosec 2.28.0):
+
+| | findings | exit |
+|---|---|---|
+| host binary | 244 | 0 |
+| no Go toolchain | **0** | 0 |
+| toolchain, cold module cache | **258** | 0 |
+| toolchain, warm module cache | 283 | 0 |
+
+The third row is the one to read twice, and it's why the fail-closed rule below exists.
+With no modules to resolve, `go list` leaves packages with type errors, gosec logs
+"skipping SSA analysis" to stderr and continues with the AST-only rules — so every
+type-aware rule silently stops firing (G115 3→0, G118 5→0, G124 1→0, G702 1→0, G122 5→1,
+G703 13→2) while the total still looks perfectly healthy. A zero draws the eye. A confident
+258 does not.
+
+What unblocked it is not relaxing `--network none`. It's the same split `update-db`
+already uses — *the phase with network does no analysis, and the phase that analyzes has
+no network*:
+
+| gosec phase | network | workspace |
+|---|---|---|
+| 1. warm (`go mod download`) | **yes** | mounted **read-only** |
+| 2. analyze (`gosec ./...`) | no (`--network none`) | mounted, as every scanner |
+
+`go mod download` fetches modules but never executes them, and it can't write to the
+source tree, so the exposure is materially smaller than a general network-plus-workspace
+grant. Modules (and any toolchain `GOTOOLCHAIN=auto` pulls for a repo on a newer Go) land
+in the `aegis-scanner-gocache` volume, which phase 2 reads offline.
+
+**A failed warm phase aborts gosec rather than downgrading it.** That's the whole point: a
+warm phase that quietly gives up hands gosec a cold cache, and the table above is what a
+cold cache produces — not an obvious zero but a confident, wrong-by-25 report with a whole
+class of rules missing, which nothing downstream can tell apart from a good run. You'll see
+the fetch error instead.
 
 #### Why an image ID rather than a digest pin
 
@@ -669,6 +705,7 @@ Databases have to be fetched from somewhere. The split is:
 | | network | workspace mounted |
 |---|---|---|
 | `aegis security update-db` | **yes** | no |
+| gosec phase 1 (`go mod download`) | **yes** | **read-only** |
 | every scan | no (`--network none`) | yes |
 
 `update-db` runs the image's `aegis-update-db` script with networking on and *no* source
@@ -688,6 +725,77 @@ the checksum its project publishes. That catches corruption and wrong asset name
 compromised upstream — the checksum ships from the same release as the artifact. The
 image-ID pin is what actually binds Aegis to a specific image. See
 `internal/security/multiscanner/README.md` for how to bump a scanner version.
+
+### The netscanner image: network on, workspace never
+
+Four tools don't fit the image above, and not because of what they *are* — because of what
+they need to **see**. `nmap` and `nuclei` scan a host list. `trivy image` and
+`grype <ref>` scan a container image by reference. All four need network egress; none of
+them needs your source code.
+
+That distinction is the whole design. Network *plus* workspace in one container is an
+exfiltration path out of a hostile repo, which is why the multiscanner refuses it. But
+these four have nothing to exfiltrate — they never see the workspace. So they get their own
+image, run with **network on and no workspace mount, ever**:
+
+```bash
+aegis security build-image --netscanner    # ~570MB; no update-db step needed
+aegis security verify-image --netscanner   # needs network — that's what's being verified
+```
+
+```yaml
+security:
+  netscanner:
+    enabled: true
+    image: "localhost/aegis-netscanner:v1"
+    image_id: "sha256:..."      # same ID pin, same fail-closed check as the multiscanner
+    runtime: podman
+    tools: [grype, nmap, nuclei, trivy]
+```
+
+The invariant is **structural, not conventional**: the netscanner's runner
+(`runNetscannerImage`) takes a target argument and has no directory parameter at all, so
+there is nothing a future call site could pass. The multiscanner's runner keeps its
+directory parameter and its `--network none`. The two never converge, and a test asserts
+both halves.
+
+Both images are built from **one** embedded build context (`--target netscanner` selects
+the stage), so they share one fetch script, one set of pinned tool versions, and one source
+fingerprint — `aegis security build-image` can't drift from `--netscanner`.
+
+**What this replaces.** Before it, `aegis scan --image` and the `recon_scan` tool reported
+"container fallback ... is not yet supported — install this tool natively instead", even on
+Windows where nmap and nuclei were *already sitting inside the multiscanner image the
+operator had built* and reachable only by provisioning a Kali WSL distro. Both now resolve
+to the container first, falling back to a host binary (and saying so) when it isn't
+available.
+
+**No `update-db` for this one.** It has network, so trivy and grype refresh their own
+databases into a separate volume (`aegis-netscanner-cache`). Deliberately separate: pointing
+both images at one volume would put a networked writer inside the cache every offline scan
+reads.
+
+**Capabilities.** Runs are `--cap-drop=ALL --security-opt=no-new-privileges` like every
+other scanner run, with exactly one exception: nmap gets `--cap-add=NET_RAW`, without which
+it silently degrades to a TCP connect scan and refuses OS detection outright.
+
+**Still not included.** `zap` keeps its own official image and its `/zap/wrk` mount
+contract — it already needs no host install, so folding a large Java app in here would buy
+nothing. `dockle` needs the container engine socket, which is effectively host root rather
+than merely egress; whether Aegis should ever mount a container socket is a decision to
+make on its own, not a side effect of building this image, so dockle stays host-only and
+says exactly that.
+
+**Verification.** `verify-image --netscanner` probes each tool's version, then scans
+`debian:11-slim` with trivy and grype, requiring **at least 20** findings (both report ~190).
+Choosing that image was not obvious and the measurements are recorded in code: a tiny EOL
+Alpine — the obvious pick — makes **trivy report zero on a working scanner**, because Alpine's
+security data is per-branch and trivy stops reporting once a branch leaves support
+(`alpine:3.14` → trivy 0, `alpine:3.10` → trivy 1, `debian:11-slim` → trivy 190). A floor of
+1 against a canary that swings between 0 and 1 would fail a correct image; a floor of 20
+against ~190 catches a partial database without being brittle. nmap and nuclei get a version
+probe only, reported as skipped with the reason: canarying them would mean standing up a
+deliberately vulnerable service to attack.
 
 #### Parallelism
 

@@ -135,10 +135,28 @@ That catches truncation, corruption, and a wrong asset name — not a compromise
 upstream release, since the checksum ships from the same place as the artifact.
 The image-ID pin is the control that actually binds Aegis to a specific image.
 
-`opengrep` is the one exception: it publishes sigstore `.cert`/`.sig` pairs
+`opengrep` is one exception: it publishes sigstore `.cert`/`.sig` pairs
 rather than a checksum file, so its digest is pinned directly as
 `OPENGREP_SHA256`. Bump it together with `OPENGREP_VERSION` — a stale pair
 fails the build loudly rather than installing something unverified.
+
+The **Go toolchain** is the other, for a different reason: go.dev publishes
+checksums on its download index (`go.dev/dl/?mode=json`) rather than as a file
+served beside the artifact, so `GO_SHA256` is pinned as an ARG the same way.
+Bump it with `GO_VERSION`. It exists only because gosec is compile-assisted and
+reports zero findings rather than failing without a toolchain — so the two are
+fetched together and copied together, and a build that carried gosec without Go
+would ship exactly the silent all-clear this image's verification exists to
+prevent.
+
+## Two images, one context
+
+`--target netscanner` builds a second, much smaller image out of this same
+context: nmap, nuclei, trivy and grype, for scanning *remote* targets. It runs
+with network on and no workspace mounted, ever — the opposite posture to
+everything above, which is why it is a separate image rather than a profile.
+Sharing this context is deliberate: one fetch script, one set of pinned
+versions, one source fingerprint covering both.
 
 To bump a scanner: change its `ARG`, rebuild, and re-pin. The build fails if
 the release's asset names have changed.

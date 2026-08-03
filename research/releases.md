@@ -8,7 +8,108 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-02 — **the P55.x container-only-scanning batch shipped 6 of its 9 items
+**Last updated:** 2026-08-03 — **P55.7 and P55.8 shipped, closing the P55.x
+container-only-scanning batch at 8 of 9 built (P55.9 dropped, not deferred).** These were the two
+items that actually close the batch's "zero required host tools" goal; everything before them made
+the *existing* container trustworthy and preferred.
+
+**P55.7 — `aegis-netscanner`: a second image split by mount posture, not tool category.** Six
+scanners had no container path, and the stated reason was always the same: they need network
+egress, and the scanner runner denies it. Reviewing what each one actually needs showed the split
+isn't offline-vs-network — it's *what the container is allowed to see*. `nmap`/`nuclei` take a
+target list, `trivy image`/`grype <ref>` take an image reference: all four need egress and **none
+of them needs the workspace**, because they scan a remote target rather than local source. Only
+`gosec` and `trufflehog --verify` want both at once, which is the combination the hardening exists
+to forbid. So there is now a second locally-built image that runs with **network on and no
+workspace mount, ever** — and the invariant is structural rather than conventional:
+`runNetscannerImage` takes a target and has no directory parameter to pass, while the
+multiscanner's `runScannerImage` keeps its `dir` and its `--network none`. The two resolve through
+separate resolvers (`ResolveNetwork` vs `Resolve`) so "container" never means two postures at one
+call site. Both images are built from **one** embedded context via `--target`, so they share one
+fetch script, one set of pinned tool versions, and one source fingerprint. The concrete win: on
+Windows, `recon_scan` used to require provisioning a Kali WSL distro to run nmap and nuclei — two
+tools that were already sitting inside the multiscanner image the operator had built. Two
+carve-outs kept, both named rather than implied: zap stays on its own official image (already no
+host install, and folding a large Java app in buys nothing), and dockle stays host-only because it
+needs the **engine socket**, a third privilege axis (effectively host root) that deserves its own
+decision. Verification covers the second image too: version probes plus a trivy/grype scan of a
+known-vulnerable public image. Picking that image took measurement rather than intuition — the
+obvious choice, a tiny EOL Alpine, makes **trivy report zero on a perfectly working scanner**
+(Alpine security data is per-branch and trivy stops reporting once a branch leaves support:
+`alpine:3.14` → 0, `alpine:3.10` → 1, `debian:11-slim` → 190). A canary that swings between 0 and
+1 would have failed correct images with the exact message reserved for a broken one, so the canary
+is `debian:11-slim` with a floor of 20 against ~190.
+
+**P55.8 — gosec without a host Go toolchain.** gosec was the one tool container-only could not
+absorb, and dropping the host path without solving it would have silently deleted all Go SAST
+coverage from a Go-first codebase: it is compile-assisted, resolves packages via `go list`, and
+**does not fail** when it can't. The fix is not a relaxed `--network none` but the split this codebase already uses for
+`update-db` — *the phase with network does no analysis, the phase that analyzes has no network*.
+Phase 1 runs `go mod download` with network on and the workspace mounted **read-only**, filling a
+persistent module-cache volume; phase 2 runs gosec under `--network none` against that warm cache,
+mounted exactly as every other scanner is. `go mod download` fetches modules without executing
+them and cannot write to the source tree, so the exposure is materially smaller than a general
+network-plus-workspace grant. Live testing sharpened the justification for the fail-closed rule, and it is worth recording
+because the original framing was wrong in a way that mattered. Measured on this repo with the
+built image (gosec 2.28.0): host **244**, no toolchain **0**, toolchain with a *cold* module cache
+**258**, toolchain with a warm cache **283**. The zero is the documented shape. The 258 is worse:
+with no modules to resolve, `go list` leaves packages with type errors, gosec logs "skipping SSA
+analysis" and carries on with the AST-only rules, so every type-aware rule silently stops firing
+(G115 3→0, G118 5→0, G124 1→0, G702 1→0, G122 5→1, G703 13→2) while the total still looks
+healthy. A zero draws the eye; a confident 258 does not, and nothing downstream can tell it apart
+from a good run. So **a failed warm phase aborts gosec** rather than falling through. `GOTOOLCHAIN=auto` in the image means a repo on a newer Go than the
+pinned toolchain gets that toolchain downloaded during phase 1, where the network exists. The
+acceptance test is finding parity rather than "it runs": the canary fixture gained a real Go module
+(stored as `.canary`-suffixed files so a nested `go.mod` can't break the embed and the planted
+vulnerabilities can't be compiled into Aegis), and `verify-image` now asserts gosec finds something
+in it.
+
+Also in this change: recon targets beginning with `-` are rejected up front, since a target is
+appended to an argv on the host path and passed as a positional parameter on the container path,
+and in both places a leading dash reads as a scanner flag. `aegis security status` grew a second
+table for the network-facing tools — resolving all sixteen descriptors through the directory
+resolver reported nmap as "not installed" on machines where it was sitting inside a built image.
+**Verified live against podman 6.0.0**, not just by unit test. Both images build clean.
+Netscanner (569MB): all four tools probe, `VerifyNetscanner` reports trivy 190 / grype 184
+through the real `ScanImage` path, nmap's no-mount report round-trip returns a parsed finding
+with service detection against a live container (`nginx 1.31.3` on :80), and nuclei returns 14
+findings using the **baked** template set with no `templates_version` configured — the host
+path's git clone is genuinely unnecessary now. Multiscanner full (1.85GB): Go 1.26.5 and gosec
+2.28.0 verified in-build, gosec's two-phase run produced **283 findings on this repo in 2m35s**
+(vs the 244 host baseline), and its canary passes at 10 findings on the materialized `.canary`
+fixture. Full suite green.
+
+**Three defects the live rollout found**, each of the class this batch exists to catch — a
+component reporting success while doing nothing:
+
+- **wslc runs were never possible.** `internal/security` carried its own copy of "which
+  runtimes accept the OCI hardening flags" and excluded only Apple Containers. wslc presents a
+  Docker-style CLI but rejects `--cap-drop`/`--security-opt`, so on any Windows machine where
+  `DetectBest` picked wslc — which it prefers there — *every* container-method scan died on
+  "Argument name was not recognized", surfaced per tool as "the tool is missing from the image
+  or cannot start". `internal/sandbox` had known this since wslRunArgs was written; the
+  duplicate is what drifted. Now one exported `sandbox.OCIHardeningFlags`, used by all five
+  runners, with a test that fails if a sixth is added with its own literal flags.
+- **`build-image` silently migrated engines.** A rebuild with no `--runtime` auto-detected
+  from scratch, so an operator with a working podman setup who re-ran it got the image rebuilt
+  into *wslc's* store. Everything that makes the setup work is per-runtime — the image and
+  both cache volumes — so the build succeeded, the pin was rewritten, and the populated
+  vulnerability databases were left behind in podman, surfacing as "cache not populated"
+  immediately after a successful build. A rebuild now reuses the runtime already recorded in
+  config; `--runtime` still overrides for a deliberate migration.
+- **`--netscanner` pinned nothing.** `SecurityPatch` grew a `Netscanner` field and
+  `buildSecurityBlock` was never taught to write it. The command built the image, printed
+  "pinned in: <file>", exited 0, and wrote no block — after which every network tool resolved
+  as though the image did not exist. Because `patchSecurity` replaces the whole `security:`
+  block, an unwritten field isn't merely unsaved, it is *deleted* on the next unrelated write.
+  Fixed, plus a round-trip test over a fully-populated patch and a reflection check that fails
+  when a field is added to `SecurityPatch` without being covered.
+
+Since both images share one build context they also share one fingerprint, so rebuilding
+either one marks the other stale. `build-image` now says so at the moment it happens rather
+than leaving the next `security status` to raise a warning the operator has just "fixed".
+
+**Previously, 2026-08-02** — **the P55.x container-only-scanning batch shipped 6 of its 9 items
 the day it was filed** (P55.1-P55.6; P55.7/P55.8 stay open in Tier 3, P55.9 parked in Tier 4). The
 batch came out of a full functional test of the multiscanner container, which found the container's
 *scanning* sound and its *provisioning* full of silent failures — three sharing one shape: the

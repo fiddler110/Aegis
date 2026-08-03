@@ -506,18 +506,33 @@ func TestMultiscannerToolsByProfile(t *testing.T) {
 	if !has(full, "bandit") || !has(full, "brakeman") || !has(full, "nmap") {
 		t.Errorf("full profile is missing an expected tool: %v", full)
 	}
-	// No profile may claim an excluded tool. gosec is the one that matters
-	// most here: it can't resolve Go packages without a toolchain and network,
-	// and reports zero findings rather than failing when it can't — measured
-	// at host 244 vs container 0 on this repo. Putting it back into the image
-	// would ship a silent all-clear.
+	// No profile may claim an excluded tool.
 	for excluded := range multiscannerExcludedTools {
 		if has(full, excluded) || has(core, excluded) {
 			t.Errorf("%s is excluded (%s) but a profile claims it", excluded, multiscannerExcludedTools[excluded])
 		}
 	}
-	if _, ok := multiscannerExcludedTools["gosec"]; !ok {
-		t.Error("gosec must stay excluded: it silently reports 0 findings in a --network none container")
+	// gosec was excluded until P55.8 and is now carried by the full profile
+	// only: it needs a ~250MB Go toolchain, which is the opposite of what
+	// `core` (static scanner binaries) is for. Both halves are asserted,
+	// because "gosec is in the image" without the toolchain beside it is the
+	// silent-all-clear shape this whole area exists to prevent — the
+	// Containerfile COPYs the two together and TestGosecCanaryFixtureIsAModule
+	// plus the two-phase tests below cover the rest.
+	if _, ok := multiscannerExcludedTools["gosec"]; ok {
+		t.Error("gosec must not be listed as excluded: P55.8's two-phase warm makes it runnable in the container")
+	}
+	if !has(full, "gosec") {
+		t.Errorf("full profile should carry gosec: %v", full)
+	}
+	if has(core, "gosec") {
+		t.Errorf("core profile must not claim gosec — it has no Go toolchain: %v", core)
+	}
+	// dockle is the remaining exclusion, and for a different reason than gosec
+	// ever had: it needs the container engine socket, which is effectively host
+	// root rather than merely egress.
+	if why, ok := multiscannerExcludedTools["dockle"]; !ok || !strings.Contains(why, "socket") {
+		t.Errorf("dockle must stay excluded for the engine-socket reason, got %q", why)
 	}
 	// grype is carried by the image (core profile) for source SCA — it was
 	// reinstated once the DB moved to the cache volume like trivy's/osv's.

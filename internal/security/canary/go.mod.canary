@@ -1,0 +1,14 @@
+// Materialized as go.mod — see MaterializeCanaryFixture's .canary rule.
+//
+// Deliberately dependency-free. A canary with real requirements would make
+// `aegis security verify-image` need network access and a working module proxy
+// to say anything at all about gosec, which would turn a provisioning gate into
+// a flake. What this fixture has to establish is narrower and is the thing that
+// was actually broken: that gosec in the image has a Go toolchain, loads
+// packages, and reports what it finds instead of exiting clean on nothing.
+//
+// The other half of P55.8 — that the module cache gets warmed at all — is not
+// asserted here but by warmGoModuleCache treating a failed warm phase as fatal.
+module aegis.canary/gosec
+
+go 1.21

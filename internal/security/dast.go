@@ -143,10 +143,7 @@ func runZAPContainer(ctx context.Context, rt sandbox.ContainerRuntime, image, wo
 // the network — the one documented exception to every other scanner
 // container's network isolation (see runContainerImage's doc comment).
 func zapContainerRunArgs(rt sandbox.ContainerRuntime, image, workDir string) []string {
-	args := []string{"run", "--rm"}
-	if rt != sandbox.RuntimeAppleContainers {
-		args = append(args, "--cap-drop=ALL", "--security-opt=no-new-privileges")
-	}
+	args := append([]string{"run", "--rm"}, sandbox.OCIHardeningFlags(rt)...)
 	args = append(args, "-v", sandbox.HostMountPath(rt, workDir)+":/zap/wrk:rw", image,
 		"zap.sh", "-cmd", "-autorun", "/zap/wrk/zap.yaml")
 	return args

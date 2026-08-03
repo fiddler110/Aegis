@@ -553,22 +553,26 @@ Guided, approval-gated host install for one scanner — prints the exact command
 ### `aegis security build-image`
 
 ```bash
-aegis security build-image [--profile core|full] [--runtime docker|podman] [--image TAG] [--no-cache] [--project] [--skip-verify]
+aegis security build-image [--profile core|full] [--netscanner] [--runtime docker|podman] [--image TAG] [--no-cache] [--project] [--skip-verify]
 ```
 
-Builds one local image carrying every bundled scanner, then records its image ID in config so container-method scanning needs a single image instead of a digest-pinned image per tool. `--profile core` builds only the statically-linked scanners; the default `full` adds the Python (bandit/njsscan), Ruby (brakeman) and network (nmap/nuclei) scanners (~1.8GB).
+Builds one local image carrying every bundled scanner, then records its image ID in config so container-method scanning needs a single image instead of a digest-pinned image per tool. `--profile core` builds only the statically-linked scanners; the default `full` adds the Python (bandit/njsscan), Ruby (brakeman), Go (gosec plus the Go toolchain it needs) and network (nmap/nuclei) scanners (~2.1GB).
 
 The pin is written to the **user** config, so every project on the machine uses the image — like the image itself and the shared `aegis-scanner-cache` volume, it is a machine-wide asset. `--project` pins it in this repo's `.aegis/config.yaml` instead, for the narrow case of a repo deliberately on a different image; the command always prints which file it wrote. Since project config overrides user config, a `security.multiscanner` block left in a repo by an older build shadows the machine-wide pin — `build-image` warns when it finds one. (`--global` is accepted as a deprecated no-op: it asked for what is now the default.)
 
 The recorded image ID is re-verified before every container run — an image rebuilt or retagged behind Aegis's back fails closed rather than running silently. A source fingerprint is recorded alongside it, so an image built from an older Containerfile is reported as drifted rather than silently trusted. The build finishes by running `aegis security verify-image` (`--skip-verify` opts out). Run `aegis security update-db` afterwards to populate the vulnerability databases. See [security_scan.md](security_scan.md#the-multiscanner-image-one-image-instead-of-sixteen).
 
+`--netscanner` builds the **second** image instead (~570MB, most of it the pinned nuclei template set): nmap, nuclei, and image-reference scanning with trivy/grype. It is separate from the multiscanner for exactly one reason — mount posture. Every tool in it needs network egress and none needs the workspace, so it runs with network **on** and no workspace mounted, ever, while the multiscanner keeps `--network none` with the workspace mounted. Both images come out of the same embedded build context (`--target` selects the stage), so they share one fetch script, one set of pinned tool versions and one source fingerprint. It needs no `update-db` — it has network, so trivy and grype refresh their own databases into a separate `aegis-netscanner-cache` volume. See [security_scan.md](security_scan.md#the-netscanner-image-network-on-workspace-never).
+
 ### `aegis security verify-image`
 
 ```bash
-aegis security verify-image [--tool a,b]
+aegis security verify-image [--tool a,b] [--netscanner]
 ```
 
 Proves the built image's scanners actually run: each tool the profile claims gets a version probe **and** a canary scan against a small embedded fixture with planted findings, asserting a non-zero finding count rather than exit 0. A tool that exits clean while reporting zero — because it never loaded its database, or was never in the image at all — is the failure this catches; a `--version` probe alone does not. Exits non-zero if any tool fails, so it works as a provisioning gate. A missing database cache is reported distinctly from a broken tool.
+
+`--netscanner` verifies the network-facing image instead. Its canary is a trivy/grype scan of `debian:11-slim`, requiring at least 20 findings where both tools report ~190 — a result far below that means a missing or partial vulnerability database, not a clean image. (A small EOL Alpine, the obvious canary, makes trivy report *zero* on a working scanner: Alpine security data is per-branch and trivy stops reporting once a branch leaves support.) This one needs working network access, which is inherent: an image whose whole purpose is registry and target egress cannot be verified offline. nmap and nuclei get a version probe only, reported as skipped with the reason.
 
 ### `aegis security update-db`
 
@@ -580,7 +584,7 @@ Downloads/refreshes the trivy, grype, and osv-scanner vulnerability databases in
 
 Each database is fetched independently: one failing does not abandon the rest, and the run ends with a per-step summary saying exactly which landed and which did not, exiting non-zero if any failed. Re-running retries only what failed, since steps that already succeeded are cheap no-ops.
 
-This is the only Aegis container run given network access, and it mounts no workspace; scans still run with `--network none` and read the databases from the volume.
+This mounts no workspace, and scans still run with `--network none` and read the databases from the volume. Two other runs are given network access, both by the same rule — *the run with network does no analysis, or sees no workspace*: gosec's `go mod download` warm phase (workspace mounted **read-only**, no analysis) and the netscanner image (no workspace at all).
 
 ### `aegis security config`
 

@@ -468,24 +468,20 @@ func (r *Report) sortFindings() {
 	})
 }
 
-// imageContainerFallbackUnsupported explains why ScanImage skips a tool
-// that Resolve would otherwise run via a container: pulling/inspecting an
-// image needs registry network egress, which the source-scanning container
-// runner deliberately denies (--network none, P11.1's hardening posture).
-// Extending that runner with a network-enabled exception for image scans is
-// tracked as P11.5 follow-up; until then, image scanning only runs via a
-// natively installed host binary.
-const imageContainerFallbackUnsupported = "container fallback for image scanning is not yet supported (it would need a network-egress exception to the scanner-container hardening posture) — install this tool natively instead"
-
 // ImageScanner is one container-image analysis tool (P11.5): unlike
 // Scanner, which analyzes a source directory, an ImageScanner analyzes a
 // built image by reference (e.g. "alpine:3.20" or a registry ref).
 type ImageScanner interface {
 	Name() string
+	// Resolve routes through ResolveNetwork, not Resolve: an image scan needs
+	// registry egress and no workspace, which is the netscanner image's posture
+	// (P55.7), not the multiscanner's.
 	Resolve(ctx context.Context, opts Options) (method Method, runtime sandbox.ContainerRuntime, image string, reason string)
-	// ScanImage analyzes ref using method (always MethodHost — see
-	// ScanImage's doc comment) and returns normalized findings.
-	ScanImage(ctx context.Context, ref string, method Method) ([]Finding, error)
+	// ScanImage analyzes ref using the method/runtime/image Resolve returned.
+	// runtime and scannerImage are only meaningful for MethodContainer, where
+	// scannerImage is the netscanner image the tool runs *out of* — not to be
+	// confused with ref, the image being scanned.
+	ScanImage(ctx context.Context, ref string, method Method, runtime sandbox.ContainerRuntime, scannerImage string) ([]Finding, error)
 }
 
 // DefaultImageScanners returns the built-in container-image scanners.
@@ -498,31 +494,29 @@ func DefaultImageScanners() []ImageScanner {
 }
 
 // ScanImage runs every available ImageScanner against ref and aggregates
-// findings, sorted by severity. Image scanning is host-binary only for now
-// (see imageContainerFallbackUnsupported): a scanner that Resolve would run
-// via a container is reported skipped with that reason rather than silently
-// scanning through a container runtime that has no network access to pull
-// the image.
+// findings, sorted by severity.
+//
+// Container-method runs here mean the netscanner image (P55.7) — network on, no
+// workspace mounted — which is what makes a registry pull possible at all.
+// Before it existed, a tool that resolved to a container was reported skipped
+// with "container fallback for image scanning is not yet supported", because
+// the only container runner available denied network outright. dockle is the
+// one tool still in that position, and now for a narrower reason: it needs the
+// engine socket, not merely egress.
 func ScanImage(ctx context.Context, ref string, scanners []ImageScanner, opts Options) Report {
 	rep := newReport()
 	for _, sc := range scanners {
-		method, _, _, reason := sc.Resolve(ctx, opts)
+		method, rt, scannerImage, reason := sc.Resolve(ctx, opts)
 		if method == MethodNone {
 			rep.Skipped[sc.Name()] = reason
 			continue
 		}
-		if method == MethodContainer {
-			rep.Skipped[sc.Name()] = imageContainerFallbackUnsupported
-			continue
-		}
-		findings, err := sc.ScanImage(ctx, ref, method)
+		findings, err := sc.ScanImage(ctx, ref, method, rt, scannerImage)
 		rep.record(sc.Name(), method, findings, err)
 	}
 	// Image scans have no natural directory root to load a baseline from
 	// (an image reference isn't a project checkout), so P11.8's suppression
-	// baseline is scoped to RunWithOptions only — same scoping call already
-	// made for image scanning's container fallback (see
-	// imageContainerFallbackUnsupported above). Dedup/ASVS still apply: it's
+	// baseline is scoped to RunWithOptions only. Dedup/ASVS still apply: it's
 	// common for trivy/grype/dockle to all flag the same image CVE.
 	rep.Findings = DedupFindings(rep.Findings)
 	assignASVS(rep.Findings)

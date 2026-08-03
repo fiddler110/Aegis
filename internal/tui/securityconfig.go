@@ -64,6 +64,10 @@ type securityConfigModel struct {
 	wslDistro        string
 	debate           config.DebateIntegrationConfig
 	multiscanner     config.MultiscannerConfig
+	// netscanner is carried, never edited here, for the same reason
+	// multiscanner is: saving replaces the whole security: block, so a pin this
+	// form never shows would be deleted by the save.
+	netscanner config.NetscannerConfig
 
 	defaultMethod string
 	tools         map[string]config.SecurityToolConfig // working copy, mutated as the user edits
@@ -117,6 +121,7 @@ func newSecurityConfigModel(width, height int, th theme, global bool) *securityC
 		wslDistro:        sec.WSLDistro,
 		debate:           sec.Debate,
 		multiscanner:     sec.Multiscanner,
+		netscanner:       sec.Netscanner,
 		defaultMethod:    strOrDefault(sec.DefaultMethod, "auto"),
 		tools:            tools,
 		statuses:         map[string]string{},
@@ -530,6 +535,7 @@ func (m *securityConfigModel) saveCmd() tea.Cmd {
 		WSLDistro:        m.wslDistro,
 		Debate:           m.debate,
 		Multiscanner:     m.multiscanner,
+		Netscanner:       m.netscanner,
 	}
 	write := config.PatchProjectSecurity
 	if m.global {

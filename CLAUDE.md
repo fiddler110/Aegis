@@ -43,10 +43,36 @@ per-repo.
 
 ```bash
 aegis security build-image --profile core    # static scanners only
-aegis security build-image                   # full: + Python/Ruby/network, ~1.8GB
+aegis security build-image                   # full: + Python/Ruby/Go/network, ~2.1GB
 aegis security verify-image                  # prove each tool still finds things
 aegis security update-db                     # fill the DB cache volume (needs network)
+aegis security build-image --netscanner      # the second image (P55.7), ~570MB
+aegis security verify-image --netscanner     # needs network — that is what it verifies
 ```
+
+A **second image** (`aegis-netscanner`, P55.7) exists, built from the same embedded
+context via `--target netscanner`, and the split between them is **mount posture**, not
+tool category. nmap, nuclei, `trivy image` and `grype <ref>` all need network egress and
+none of them needs the workspace, because each scans a *remote* target. So that image runs
+with network **on** and **no workspace mount, ever** — enforced structurally rather than by
+convention: `runNetscannerImage` has no directory parameter to pass, while the
+multiscanner's `runScannerImage` keeps its `dir` and its `--network none`. They resolve
+through separate resolvers (`ResolveNetwork` vs `Resolve`) so "container" never means two
+postures at one call site. Two carve-outs stay host-only: zap (already solved via the
+official zaproxy image) and dockle (needs the engine socket — effectively host root, a
+third privilege axis that deserves its own decision).
+
+**gosec** (P55.8) is no longer excluded from the multiscanner, but it is the one scanner
+run in **two phases**, using the same split as `update-db`: a networked `go mod download`
+with the workspace mounted **read-only**, then the analysis itself under `--network none`.
+A failed warm phase **aborts the tool** rather than falling through, and the measured
+reason is sharper than the "reports zero" story that motivated the original exclusion
+(host 244, no toolchain 0, cold cache **258**, warm cache **283**): with a toolchain but no
+modules, `go list` leaves type errors, gosec skips SSA analysis and every type-aware rule
+silently stops firing (G115/G118/G124/G702 to zero) while the total still looks healthy. A
+confident 258 is harder to notice than a 0, which is exactly why phase 1 must fail loudly.
+Modules and any `GOTOOLCHAIN=auto` download land in `aegis-scanner-gocache`; the full
+profile carries a pinned Go toolchain.
 
 Vulnerability databases are **not** in the image — they live in a container
 volume (`aegis-scanner-cache`), populated by `aegis security update-db`. That's
@@ -70,10 +96,8 @@ Two traps when changing this:
   COPYs must be in the embed pattern (a test enforces this).
 - Anything a scanner fetches on first use must be baked in **and** the tool
   told to use the local copy. Opengrep's "pinned" rule packs are still an HTTP
-  fetch; osv-scanner calls api.osv.dev per run. `gosec` is excluded outright —
-  it needs a Go toolchain and module resolution, and reports zero findings
-  rather than failing without them (host 244 vs container 0 on this repo). See
-  `multiscannerExcludedTools`.
+  fetch; osv-scanner calls api.osv.dev per run. See `multiscannerExcludedTools`
+  for what no profile will ever carry, and why.
 
 The embedded web UI (`aegis ui`, served at `/ui`) is built from
 `internal/server/webui/frontend` (Vite + Preact + TypeScript); its output

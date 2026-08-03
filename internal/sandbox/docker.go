@@ -161,9 +161,43 @@ func wslHostPath(p string) string {
 	return p
 }
 
+// OCIHardeningFlags returns the run flags that drop every capability and block
+// privilege escalation, or nil for a runtime whose CLI does not accept them.
+//
+// Exported because this is a per-runtime CLI *fact*, and every package that
+// builds its own container command line needs it. internal/security had its own
+// copy that excluded only Apple Containers, which meant every scanner container
+// run under wslc died on "Argument name was not recognized for the current
+// command: '--cap-drop=ALL'" — a total failure of container-method scanning on
+// any Windows machine where DetectBest picked wslc, reported per tool as "the
+// tool is missing from the image or cannot start". One helper, so a runtime added
+// here can't leave a second call site guessing.
+//
+// Returning nil is a real hardening difference, not a formality: a wslc or Apple
+// Containers run keeps its default capability set. Both are accepted for the
+// reason SocketRuntime gives — each already isolates in a per-user VM rather than
+// through a host-privileged socket — and this mirrors the stance wslRunArgs and
+// appleContainerArgs have always taken for the sandbox's own containers.
+func OCIHardeningFlags(rt ContainerRuntime) []string {
+	switch rt {
+	case RuntimeWSL, RuntimeAppleContainers:
+		return nil
+	default:
+		return []string{"--cap-drop=ALL", "--security-opt=no-new-privileges"}
+	}
+}
+
+// SupportsCapAdd reports whether rt's CLI accepts --cap-add. Same CLI-surface
+// question as OCIHardeningFlags, asked separately because a caller granting a
+// capability (nmap's NET_RAW) needs to know whether the grant is even
+// expressible, not just whether the drops are.
+func SupportsCapAdd(rt ContainerRuntime) bool {
+	return len(OCIHardeningFlags(rt)) > 0
+}
+
 // ociRunArgs builds `docker run` / `podman run` arguments.
 func (c *ContainerBackend) ociRunArgs(command string, opts ExecOpts) []string {
-	args := []string{"run", "--rm", "--cap-drop=ALL", "--security-opt=no-new-privileges"}
+	args := append([]string{"run", "--rm"}, OCIHardeningFlags(c.runtime)...)
 	if !c.network {
 		args = append(args, "--network", "none")
 	}

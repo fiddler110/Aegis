@@ -30,7 +30,13 @@ func newSecurityCmd() *cobra.Command {
 			"container image, or not at all (with the exact reason). `install` walks through " +
 			"a guided, approval-gated host install for one tool. `verify-image` proves every scanner in " +
 			"the built multiscanner image can actually run and detect, by scanning an embedded fixture " +
-			"with planted findings. `baseline` shows the accepted-risk " +
+			"with planted findings.\n\n" +
+			"There are two images, split by what the container is allowed to SEE. The multiscanner " +
+			"(`build-image`) analyzes your source: workspace mounted, --network none. The netscanner " +
+			"(`build-image --netscanner`) scans remote targets — a host list for nmap/nuclei, an image " +
+			"reference for trivy/grype — so it runs with network access and no workspace mounted, ever. " +
+			"Both take a --netscanner flag on build-image/verify-image.\n\n" +
+			"`baseline` shows the accepted-risk " +
 			"suppression allowlist (.aegis/security-baseline.yaml) and each entry's status.",
 	}
 	cmd.AddCommand(newSecurityStatusCmd())
@@ -60,6 +66,7 @@ func newSecurityBuildImageCmd() *cobra.Command {
 		project     bool
 		global      bool
 		skipVerify  bool
+		netscanner  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "build-image",
@@ -73,11 +80,18 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			"Windows) so every project on the machine uses the image — like the image itself and the " +
 			"shared database volume, it is machine-wide. Pass --project to pin it in this repo's " +
 			".aegis/config.yaml instead; the command always prints which file it wrote.\n\n" +
-			"Profiles: `full` (default) adds the Python (bandit/njsscan), Ruby (brakeman) " +
-			"and network (nmap/nuclei) scanners on top of `core`'s static binaries. Expect roughly " +
+			"Profiles: `full` (default) adds the Python (bandit/njsscan), Ruby (brakeman), Go " +
+			"(gosec, plus the Go toolchain it cannot work without) and network (nmap/nuclei) scanners " +
+			"on top of `core`'s static binaries. Expect roughly " +
 			"3-4GB for full, and a long first build — vulnerability databases are NOT in the image: " +
 			"they live in the shared aegis-scanner-cache volume, so run `aegis security update-db` " +
-				"after this or the database-backed scanners will be refused.",
+			"after this or the database-backed scanners will be refused.\n\n" +
+			"--netscanner builds the second, much smaller image instead (~250MB): nmap, nuclei, and " +
+			"image-reference scanning with trivy/grype. It is separate for one reason — mount posture. " +
+			"Every tool in it needs network egress and none needs your source, so it runs with network " +
+			"ON and no workspace mounted, ever, while this image keeps --network none with the workspace " +
+			"mounted. It needs no update-db: having network, it refreshes its own databases into a " +
+			"separate volume.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
@@ -95,6 +109,19 @@ func newSecurityBuildImageCmd() *cobra.Command {
 				Profile: profile,
 				Image:   image,
 				NoCache: noCache,
+			}
+			if opts.Runtime == "" {
+				opts.Runtime = stickyBuildRuntime(netscanner)
+			}
+			if netscanner {
+				if profile != security.MultiscannerProfileFull {
+					// Rejected rather than ignored: --profile means something
+					// real for the other image, so silently dropping it here
+					// would leave an operator believing they built a smaller
+					// netscanner than they did.
+					return fmt.Errorf("--profile applies only to the multiscanner image; the netscanner has no profiles (it is four tools with one posture)")
+				}
+				return runBuildNetscanner(cmd, opts, project, skipVerify)
 			}
 			res, err := security.BuildMultiscanner(cmd.Context(), opts, out)
 			if err != nil {
@@ -126,6 +153,9 @@ func newSecurityBuildImageCmd() *cobra.Command {
 
 			if skipVerify {
 				fmt.Fprintf(out, "\nSkipped verification (--skip-verify). Run `aegis security verify-image` before trusting this image.\n")
+				if warn := siblingDriftWarning("multiscanner"); warn != "" {
+					fmt.Fprintf(out, "\nnote: %s\n", warn)
+				}
 				fmt.Fprintf(out, "Run `aegis security status` to see which scanners now resolve to it.\n")
 				return nil
 			}
@@ -136,6 +166,9 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			fmt.Fprintf(out, "\nVerifying the built image — each scanner is probed and then run against a fixture with planted findings.\n")
 			if err := runVerifyImage(cmd, pinned, nil); err != nil {
 				return err
+			}
+			if warn := siblingDriftWarning("multiscanner"); warn != "" {
+				fmt.Fprintf(out, "\nnote: %s\n", warn)
 			}
 			fmt.Fprintf(out, "\nRun `aegis security status` to see which scanners now resolve to it.\n")
 			return nil
@@ -158,7 +191,95 @@ func newSecurityBuildImageCmd() *cobra.Command {
 	// the flag's argument placeholder, so "`verify-image`" would render as
 	// "--skip-verify verify-image" on a boolean flag.
 	cmd.Flags().BoolVar(&skipVerify, "skip-verify", false, "don't run verify-image after building (the image is pinned unverified — a scanner that can't run won't be noticed until a scan silently misses findings)")
+	cmd.Flags().BoolVar(&netscanner, "netscanner", false, "build the network-facing image instead: nmap, nuclei, and image-reference scanning with trivy/grype — it runs with network access and no workspace mounted")
 	return cmd
+}
+
+// runBuildNetscanner is `build-image --netscanner`: the second image (P55.7).
+//
+// A flag on the same command rather than a command of its own, because the two
+// builds are the same operation over the same build context — one Containerfile,
+// one fetch script, one set of pinned tool versions, selected by --target. Two
+// commands would invite them to drift, and every operator who built one would
+// have to discover the other existed.
+func runBuildNetscanner(cmd *cobra.Command, opts security.MultiscannerBuildOptions, project, skipVerify bool) error {
+	out := cmd.OutOrStdout()
+	res, err := security.BuildNetscanner(cmd.Context(), opts, out)
+	if err != nil {
+		return err
+	}
+	pinned, target, err := recordNetscannerPin(res, project)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "\nBuilt %s (runtime: %s)\n", res.Image, res.Runtime)
+	fmt.Fprintf(out, "  image id: %s\n", res.ImageID)
+	fmt.Fprintf(out, "  source:   %s\n", res.SourceFingerprint)
+	fmt.Fprintf(out, "  scanners: %s\n", strings.Join(res.Tools, ", "))
+	fmt.Fprintf(out, "  pinned in: %s\n", target)
+	fmt.Fprintf(out, "\nThis image runs with network access and NO workspace mounted, ever — that is the whole\n"+
+		"reason it is separate from the multiscanner, which runs with --network none and the\n"+
+		"workspace mounted. Its runner takes no directory argument, so the split is structural.\n")
+
+	if skipVerify {
+		fmt.Fprintf(out, "\nSkipped verification (--skip-verify). Run `aegis security verify-image --netscanner` before trusting this image.\n")
+		if warn := siblingDriftWarning("netscanner"); warn != "" {
+			fmt.Fprintf(out, "\nnote: %s\n", warn)
+		}
+		return nil
+	}
+	fmt.Fprintf(out, "\nVerifying — each scanner is probed, and trivy/grype are run against a known-vulnerable\nimage (%s) to prove they load a vulnerability database. This needs network access.\n", security.NetscannerCanaryImage())
+	if err := runVerifyNetscanner(cmd, pinned, nil); err != nil {
+		return err
+	}
+	if warn := siblingDriftWarning("netscanner"); warn != "" {
+		fmt.Fprintf(out, "\nnote: %s\n", warn)
+	}
+	return nil
+}
+
+// recordNetscannerPin writes a completed netscanner build into config, using
+// the same target-file rules as recordMultiscannerPin (user config by default;
+// --project for a repo that deliberately pins its own image).
+func recordNetscannerPin(res security.NetscannerBuildResult, project bool) (config.NetscannerConfig, string, error) {
+	write, target := config.PatchGlobalSecurity, config.GlobalConfigPath()
+	if project {
+		write, target = config.PatchProjectSecurity, config.ProjectConfigPath()
+	}
+	// Read from the file being rewritten rather than the merged config, for the
+	// reason recordMultiscannerPin states: patchSecurity replaces that file's
+	// whole security: block, so merged values would leak across layers.
+	existing, err := config.FileSecurity(target)
+	if err != nil {
+		return config.NetscannerConfig{}, target, fmt.Errorf("read %s to record the built image: %w", target, err)
+	}
+	ns := config.NetscannerConfig{
+		Enabled:           true,
+		Image:             res.Image,
+		ImageID:           res.ImageID,
+		Runtime:           string(res.Runtime),
+		SourceFingerprint: res.SourceFingerprint,
+		Tools:             res.Tools,
+	}
+	patch := config.SecurityPatch{
+		EgressThenWrite:  existing.EgressThenWrite,
+		NetworkAllowList: existing.NetworkAllowList,
+		DefaultMethod:    existing.DefaultMethod,
+		Tools:            existing.Tools,
+		DAST:             existing.DAST,
+		WSLDistro:        existing.WSLDistro,
+		Debate:           existing.Debate,
+		// Carried, not rebuilt: this command builds one of the two images and
+		// must not delete the other's pin as a side effect of rewriting the
+		// block they share.
+		Multiscanner: existing.Multiscanner,
+		Netscanner:   ns,
+	}
+	if err := write(patch); err != nil {
+		return config.NetscannerConfig{}, target, fmt.Errorf("record the built image in %s: %w", target, err)
+	}
+	return ns, target, nil
 }
 
 // recordMultiscannerPin writes a completed build into config and returns the
@@ -216,11 +337,86 @@ func recordMultiscannerPin(res security.MultiscannerBuildResult, project bool) (
 		WSLDistro:        existing.WSLDistro,
 		Debate:           existing.Debate,
 		Multiscanner:     ms,
+		// Carried, not rebuilt: this rewrites the whole security: block, so a
+		// netscanner pin written by the other half of this command would be
+		// deleted by whichever image was built second.
+		Netscanner: existing.Netscanner,
 	}
 	if err := write(patch); err != nil {
 		return config.MultiscannerConfig{}, target, fmt.Errorf("record the built image in %s: %w", target, err)
 	}
 	return ms, target, nil
+}
+
+// stickyBuildRuntime returns the container runtime a rebuild should reuse: the
+// one already recorded in config, or "" to let BuildMultiscanner auto-detect.
+//
+// A rebuild with no --runtime used to auto-detect from scratch, and on Windows
+// that is not a no-op — sandbox.DetectBest prefers wslc, so an operator with a
+// working podman setup who simply re-ran `build-image` got the image rebuilt
+// into *wslc's* storage instead. Everything that makes the setup work is
+// per-runtime: the image lives in one engine's store, and so do the
+// aegis-scanner-cache and aegis-scanner-gocache volumes. So the rebuild
+// succeeded, the pin was rewritten to the new engine, and the operator's
+// populated vulnerability databases were left behind in podman — surfacing as
+// every database-backed scanner reporting "cache not populated" right after a
+// successful build, with nothing connecting that to the engine having changed.
+//
+// Observed on exactly that machine. The recorded runtime is the operator's
+// effective choice whether or not they ever typed --runtime, so a rebuild
+// honours it; --runtime still overrides, which is how they'd migrate on purpose.
+func stickyBuildRuntime(netscanner bool) sandbox.ContainerRuntime {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	recorded := cfg.Security.Multiscanner.Runtime
+	if netscanner {
+		recorded = cfg.Security.Netscanner.Runtime
+		if strings.TrimSpace(recorded) == "" {
+			// First netscanner build on a machine that already has a
+			// multiscanner: follow it rather than auto-detecting, so the pair
+			// doesn't end up split across two engines by default.
+			recorded = cfg.Security.Multiscanner.Runtime
+		}
+	}
+	return sandbox.ContainerRuntime(strings.TrimSpace(recorded))
+}
+
+// siblingDriftWarning reports that the image this command did *not* just build
+// is pinned and now built from older source.
+//
+// It exists because the two images share one build context (that sharing is
+// deliberate — one fetch script, one set of pinned versions, one fingerprint),
+// which means editing either one's stages moves the fingerprint for both. So
+// rebuilding one image leaves the other reporting drift, and nothing at the
+// moment of rebuilding says so: the operator fixes the warning they were shown,
+// and the next `aegis security status` shows them a fresh one. Twice is enough
+// for a warning to become noise, and a drift warning that gets ignored is worse
+// than no drift warning at all — the whole point of P55.1 is that this one gets
+// read.
+//
+// built names the image just rebuilt, purely for the message. Returns "" when
+// the sibling isn't pinned or isn't stale, so a caller can print unconditionally.
+func siblingDriftWarning(built string) string {
+	cfg, err := config.Load()
+	if err != nil {
+		// Not worth failing a successful multi-gigabyte build over: the
+		// authoritative drift report is `aegis security status`, and this is a
+		// convenience nudge on top of it.
+		return ""
+	}
+	switch built {
+	case "multiscanner":
+		if drift := security.NetscannerSourceDrift(security.NetscannerPolicyFromConfig(cfg.Security.Netscanner)); drift != "" {
+			return "the netscanner image is pinned too, and is now the stale one — both images are built from the same source, so this rebuild moved it out of date. Run `aegis security build-image --netscanner` to bring it along."
+		}
+	case "netscanner":
+		if drift := security.MultiscannerSourceDrift(security.MultiscannerPolicyFromConfig(cfg.Security.Multiscanner)); drift != "" {
+			return "the multiscanner image is pinned too, and is now the stale one — both images are built from the same source, so this rebuild moved it out of date. Run `aegis security build-image` to bring it along."
+		}
+	}
+	return ""
 }
 
 // multiscannerShadowWarning reports the one upgrade state that makes a
@@ -265,7 +461,10 @@ func multiscannerShadowWarning(justBuilt string) (string, error) {
 // being scanned is known to be dirty. So the assertion is a non-zero finding
 // count against an embedded fixture full of planted vulnerabilities, not exit 0.
 func newSecurityVerifyImageCmd() *cobra.Command {
-	var tools []string
+	var (
+		tools      []string
+		netscanner bool
+	)
 	cmd := &cobra.Command{
 		Use:   "verify-image",
 		Short: "Prove every scanner in the built multiscanner image can actually run and detect",
@@ -285,11 +484,56 @@ func newSecurityVerifyImageCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if netscanner {
+				return runVerifyNetscanner(cmd, cfg.Security.Netscanner, tools)
+			}
 			return runVerifyImage(cmd, cfg.Security.Multiscanner, tools)
 		},
 	}
 	cmd.Flags().StringSliceVar(&tools, "tool", nil, "verify only these scanners (repeatable, or comma-separated); default is every tool the image claims")
+	cmd.Flags().BoolVar(&netscanner, "netscanner", false, "verify the network-facing image instead; needs network access, since that is the thing being verified")
 	return cmd
+}
+
+// runVerifyNetscanner is the netscanner half of verify-image, shared with
+// `build-image --netscanner`'s final step so the two can never report
+// differently about the same image.
+func runVerifyNetscanner(cmd *cobra.Command, nc config.NetscannerConfig, tools []string) error {
+	out := cmd.OutOrStdout()
+	policy := security.NetscannerPolicyFromConfig(nc)
+	if drift := security.NetscannerSourceDrift(policy); drift != "" {
+		fmt.Fprintf(out, "warning: %s\n\n", drift)
+	}
+
+	header := false
+	results, err := security.VerifyNetscanner(cmd.Context(), policy, tools, func(r security.VerifyResult) {
+		if !header {
+			fmt.Fprintf(out, "%-12s  %-8s  %-10s  %s\n", "TOOL", "STATUS", "FINDINGS", "VERSION")
+			header = true
+		}
+		findings := "-"
+		if r.Expected > 0 {
+			findings = fmt.Sprintf("%d (>=%d)", r.Findings, r.Expected)
+		}
+		fmt.Fprintf(out, "%-12s  %-8s  %-10s  %s\n", r.Tool, r.Status, findings, defaultOr(r.Version, "-"))
+		if r.Status != security.VerifyPass && r.Detail != "" {
+			fmt.Fprintf(out, "%14s%s\n", "", r.Detail)
+		}
+	})
+	if err != nil {
+		return err
+	}
+
+	passed, failed, skipped, _ := security.VerifyCounts(results)
+	fmt.Fprintf(out, "\n%d scanner(s) checked: %d verified, %d failed", len(results), passed, failed)
+	if skipped > 0 {
+		fmt.Fprintf(out, ", %d skipped (no canary possible — see the reasons above)", skipped)
+	}
+	fmt.Fprintln(out, ".")
+	if failed > 0 {
+		return fmt.Errorf("%d scanner(s) in %s could not be verified — see the rows above", failed, policy.Image)
+	}
+	return nil
 }
 
 // runVerifyImage is the shared body of `verify-image` and build-image's final
@@ -363,6 +607,9 @@ func newSecurityStatusCmd() *cobra.Command {
 			if drift := security.MultiscannerSourceDrift(opts.Multiscanner); drift != "" {
 				fmt.Fprintf(out, "warning: %s\n\n", drift)
 			}
+			if drift := security.NetscannerSourceDrift(opts.Netscanner); drift != "" {
+				fmt.Fprintf(out, "warning: %s\n\n", drift)
+			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "TOOL\tCATEGORY\tMETHOD\tDETAIL")
 			fallbacks := map[string]string{}
@@ -394,6 +641,14 @@ func newSecurityStatusCmd() *cobra.Command {
 			if advisory := security.HostFallbackAdvisory(fallbacks); advisory != "" {
 				fmt.Fprintf(out, "\nnote: %s\n", advisory)
 			}
+			// A second table, because these tools resolve through a different
+			// resolver against a different image with the opposite network
+			// posture (P55.7). Folding them into the table above would report
+			// nmap as "not installed" on a machine where it sits inside an image
+			// Aegis built — the directory resolver has no opinion about the
+			// network path, and never did. trivy and grype appear in both, which
+			// is the truth: two paths, either of which can work alone.
+			printNetworkFacingStatus(cmd, opts)
 			now := time.Now()
 			ages := security.DatabaseAges(cmd.Context(), opts)
 			if table := security.FormatDatabaseAges(ages, now); table != "" {
@@ -404,6 +659,38 @@ func newSecurityStatusCmd() *cobra.Command {
 			}
 			return nil
 		},
+	}
+}
+
+// printNetworkFacingStatus renders how the remote-target tools would run:
+// `aegis scan --image` (trivy/grype/dockle against a registry reference) and
+// the recon_scan tool (nmap/nuclei against a host list), plus DAST's zap.
+func printNetworkFacingStatus(cmd *cobra.Command, opts security.Options) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "\nNetwork-facing tools — image scans (`aegis scan --image`) and network recon.\n")
+	fmt.Fprintf(out, "These run from the netscanner image, which has network access and mounts no workspace.\n")
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "TOOL\tMETHOD\tDETAIL")
+	fallbacks := map[string]string{}
+	for _, name := range security.NetworkFacingTools() {
+		r := security.ResolveNetworkDetailed(cmd.Context(), name, opts)
+		detail := r.Reason
+		switch r.Method {
+		case security.MethodHost:
+			detail = "on PATH"
+		case security.MethodContainer:
+			detail = fmt.Sprintf("via %s (netscanner)", r.Runtime)
+		case security.MethodWSL:
+			detail = "via WSL"
+		}
+		if r.FallbackWhy != "" {
+			fallbacks[name] = r.FallbackWhy
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", name, methodLabel(r.Method), detail)
+	}
+	tw.Flush()
+	if advisory := security.HostFallbackAdvisory(fallbacks); advisory != "" {
+		fmt.Fprintf(out, "\nnote: %s\n", advisory)
 	}
 }
 

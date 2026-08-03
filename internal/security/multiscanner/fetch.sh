@@ -18,6 +18,7 @@ set -eu
 : "${SYFT_VERSION:?}" "${OSV_SCANNER_VERSION:?}" "${GRYPE_VERSION:?}"
 : "${KUBESCAPE_VERSION:?}" "${HADOLINT_VERSION:?}"
 : "${OPENGREP_VERSION:?}" "${OPENGREP_SHA256:?}" "${NUCLEI_VERSION:?}"
+: "${GOSEC_VERSION:?}" "${GO_VERSION:?}" "${GO_SHA256:?}"
 
 OUT=/out
 WORK=/tmp/fetch
@@ -151,6 +152,43 @@ get_nuclei() {
 	install -m 0755 nuclei "$OUT/nuclei"
 }
 
+# gosec, and the Go toolchain it cannot work without.
+#
+# gosec is compile-assisted: it resolves packages through `go list`, so without
+# a toolchain it does not fail — it reports zero findings and exits clean
+# (measured on the Aegis repo: host 244, toolchain-less container 0). Carrying
+# the binary without carrying Go would therefore ship the exact silent
+# all-clear this image's verification exists to rule out, which is why the two
+# are fetched together and copied together (see the profile-full stage).
+get_gosec() {
+	base="https://github.com/securego/gosec/releases/download/v${GOSEC_VERSION}"
+	dl "${base}/gosec_${GOSEC_VERSION}_linux_amd64.tar.gz"
+	dl "${base}/gosec_${GOSEC_VERSION}_checksums.txt"
+	verify "gosec_${GOSEC_VERSION}_checksums.txt" "gosec_${GOSEC_VERSION}_linux_amd64.tar.gz"
+	tar -xzf "gosec_${GOSEC_VERSION}_linux_amd64.tar.gz" gosec
+	install -m 0755 gosec "$OUT/gosec"
+}
+
+# The Go toolchain publishes its checksums on the download index (go.dev/dl,
+# `?mode=json`) rather than as a file served beside the artifact, so — like
+# opengrep — the expected digest is pinned directly as a build ARG (GO_SHA256)
+# instead of being fetched from the same place as the tarball. Bump the two
+# together; a stale pair fails the build loudly.
+#
+# Unpacked whole into /out/go rather than reduced to a binary: gosec needs the
+# standard library and `go list`, not just the `go` command.
+get_go() {
+	dl "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+	echo "${GO_SHA256}  go${GO_VERSION}.linux-amd64.tar.gz" >go.sha256
+	verify "go.sha256" "go${GO_VERSION}.linux-amd64.tar.gz"
+	tar -xzf "go${GO_VERSION}.linux-amd64.tar.gz" go
+	rm -rf "${OUT:?}/go"
+	mv go "$OUT/go"
+	# A toolchain that can't report its own version is not one gosec can drive,
+	# and finding that out here beats finding it out as "gosec: 0 findings".
+	"$OUT/go/bin/go" version
+}
+
 echo "fetching pinned scanner binaries..."
 fetch trivy get_trivy
 fetch gitleaks get_gitleaks
@@ -162,6 +200,8 @@ fetch kubescape get_kubescape
 fetch hadolint get_hadolint
 fetch opengrep get_opengrep
 fetch nuclei get_nuclei
+fetch gosec get_gosec
+fetch go get_go
 
 rm -rf "$WORK"
 echo "all binaries verified and installed to $OUT"
