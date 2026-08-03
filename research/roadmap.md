@@ -11,7 +11,7 @@ keep it when adding items.
 
 ## Status
 
-**Open items (5).** The **P55.x container-only-scanning batch is closed** — filed 2026-08-02 off a
+**Open items (6).** The **P55.x container-only-scanning batch is closed** — filed 2026-08-02 off a
 full functional test of the multiscanner container and a review of method resolution across all 17
 registered scanners, **9 items, 8 built**. Shipped 2026-08-02: **P55.1** (image/source drift),
 **P55.2** (all-or-nothing `update-db`), **P55.3** (`verify-image` smoke test), **P55.4**
@@ -23,6 +23,12 @@ scanners exit 0 with valid empty output on a manifest-free tree), so this was a 
 optimization with no measured complaint behind it, and its own write-up noted a naive manifest check
 risks trading a slow-correct scan for a fast-wrong one. Not worth tracking speculatively. All
 write-ups in [releases.md](releases.md).
+
+**One new item filed 2026-08-03: P57.1.** A dedicated P38.1 live re-confirmation run (see the Tier 2
+section below) reconfirmed the threat-modeling phased drive's mechanism, but the first invocation
+aborted rather than reaching a verify-clean suite: the phase-6 content-substance reopen (P47.9) got
+stuck in an unbreakable model reasoning loop, and only a second manual invocation succeeded. Filed
+in Tier 3 — see its write-up.
 
 The batch's strategic goal was that a user installs **one image instead of 17 tools**, and it is
 met. P55.1-P55.6 made the *existing* container trustworthy and preferred; P55.7 and P55.8 extended
@@ -57,7 +63,10 @@ Tier 2 also: **P38.1** — the threat-model conformance umbrella. Mechanism
 (recon → scaffold → incremental fill, no orchestration mis-route) is live-confirmed repeatedly;
 conformance (a live unattended run reaching a verify-clean suite) is still unmet. Stays open as
 live-run verification tracking, not independent build work — see its body below for the full
-re-test history. Tier 4, all measure-first or parked with no build trigger yet: **P52.14**
+re-test history. **2026-08-03 re-test filed a new Tier-3 item, P57.1:** mechanism reconfirmed
+again, but the first invocation aborted on an unbreakable model reasoning loop during the phase-6
+content-substance reopen, and only a second manual invocation reached a verify-clean suite — see
+below and the Tier 3 write-up. Tier 4, all measure-first or parked with no build trigger yet: **P52.14**
 (session-scoped loop detector — reviewed 2026-08-01, see below), **P52.16** (native Ollama
 tool-result disambiguation for parallel same-tool calls), **P49.3** (LSP-backed repo-map symbol
 precision), **P25.9** (per-session scoping of the last daemon-singleton service, `lsp.Manager` —
@@ -235,21 +244,45 @@ implement exactly that.
   (route hollow-body failures to the owning content phase) as the Tier-3 follow-up, **shipped
   2026-07-30**.
 
+- **2026-08-03, qwen3.6-fast-32k (local Ollama) vs an external target (Documentation-as-Code, a
+  Python CLI toolset with no network listener) — dedicated live re-confirmation run:** mechanism
+  reconfirmed again — recon → scaffold → phased fill across all 5 content phases (architecture, DFD,
+  STRIDE analysis, findings, assessment) completed with zero orchestration mis-route, correctly
+  self-recovered from a mid-findings-phase context overflow (fresh context, resumed from disk), and
+  correctly classified the deployment as `local-desktop`. **Single-invocation conformance still not
+  met — new failure mode found.** Phase 6's verify pass correctly caught genuine cross-file defects
+  (five threat IDs each reused for two different threats, nine threats missing from the coverage
+  table, incomplete `Related Threats` cross-references) and correctly told them apart from
+  mechanical ID-format issues — confirmed independently by running `normalize_ids.py --check`, which
+  reported the suite already canonical throughout, so the P47.9 reopen (findings phase) was the
+  right call. But the reopened phase then got stuck: the model repeatedly mis-derived a T0-vs-T01
+  zero-padding offset that didn't actually exist, re-read the same ~30 analysis-file lines five turns
+  running, and the loop detector's one corrective nudge did not break the cycle — `engine: aborting
+  suspected loop: identical tool calls repeated 5 turns` ended the run with the suite still
+  verify-failing. A second manual `aegis chat` invocation against the same target and model, with a
+  fresh context, resolved every defect and reached a fully verify-clean suite (`verify.py` 19/19,
+  `inventory.py --check` 10/10, `lint_dfd.py` 6/6). Confirms the mechanism and the check scripts are
+  sound — the residual gap is the reopened phase's resilience to a model stuck on its own incorrect
+  theory of the data, not the overall design. Filed as **P57.1** (Tier 3).
+
 Reproduce: `cd <fresh target copy>` (must be inside the target — the sandbox rejects reads
 outside the workspace root); run `aegis chat "threat model this repo" --skill threat-modeling --mode build --yes`
 (the prompt is required — `aegis chat` errors with "no prompt provided" without one) — it now
 prints a `phased mode` notice and resets context each phase. Closure condition: the real suite's
-PENDING markers reach zero and `verify.py`/`lint_dfd.py`/`inventory.py --check` all pass (met
-2026-07-24 on FirewallRuleAnalyzer; **unattended single-invocation** stability shipped via P47.x but
-has not had its own dedicated live re-confirmation run since — the umbrella stays open until one
-happens).
+PENDING markers reach zero and `verify.py`/`lint_dfd.py`/`inventory.py --check` all pass,
+**unattended, in one invocation**. Met once, 2026-07-24 on FirewallRuleAnalyzer. The dedicated live
+re-confirmation run this item was waiting on happened 2026-08-03 (above) — it did not repeat that
+result: the first invocation aborted on the new P57.1 loop rather than reaching a clean suite, so
+single-invocation conformance is still unmet. The umbrella stays open, now specifically blocked on
+P57.1.
 
 Priority: Tier 2 — every load-bearing harness fix the re-tests have root-caused (P39.5-P39.15) has
 shipped, and P47.x/P52.12 address the two structural gaps (single-invocation stability,
-CLI-only reach) found since. This item stays open only as the conformance **umbrella**, closeable
-once a live built-in drive — now reachable from any client via P52.12 — is confirmed to reach a
-verify-clean suite unattended, in one invocation, on a local model. Not Tier 1 because it is
-live-run verification tracking, not independent build work.
+CLI-only reach) found before 2026-08-03. This item stays open only as the conformance **umbrella**,
+closeable once a live built-in drive — now reachable from any client via P52.12 — is confirmed to
+reach a verify-clean suite unattended, in one invocation, on a local model; the 2026-08-03 re-test
+found one further blocker (P57.1) rather than closing it. Not Tier 1 because it is live-run
+verification tracking, not independent build work.
 
 **Lead closed 2026-08-02 as P54.2 — swept, no gap found.** The "accurate refusal, error-shaped"
 exit-code question for the SCA/secrets scanners (P34.6 checked only the *language*-targeted tools)
@@ -264,10 +297,11 @@ from scratch. Write-up in [releases.md](releases.md).
 
 ## Open Work — Tier 3
 
-**Status:** empty. **P55.7** (`aegis-netscanner`, a second image split by mount posture) and
-**P55.8** (gosec's two-phase warm/analyze split) shipped 2026-08-03, closing the P55.x
-container-only-scanning batch — see the Tier 1 header for the batch's origin and
-[releases.md](releases.md) for the write-ups.
+**Status:** 1 open — **P57.1**, filed 2026-08-03 off a dedicated P38.1 re-confirmation run (see the
+Tier 2 section); unrelated to the P55.x batch, it is a threat-modeling phased-drive robustness gap.
+**P55.7** (`aegis-netscanner`, a second image split by mount posture) and **P55.8** (gosec's
+two-phase warm/analyze split) shipped 2026-08-03, closing the P55.x container-only-scanning batch —
+see the Tier 1 header for the batch's origin and [releases.md](releases.md) for the write-ups.
 
 One decision was deliberately *not* made while building them, and is recorded here rather than
 filed: **whether Aegis should ever mount a container engine socket.** `dockle` is the only tool
@@ -299,6 +333,36 @@ daemon) and **P52.13** (`workspace.additional_roots`) shipped 2026-08-01. All th
   *do* speak the protocol but truncate or malform arguments (the P35.2 failure class), whereas the
   shim targets models that cannot speak it at all. None of the six reviewed harnesses does it. The
   two share no implementation, so this needs its own `### P<n>.<m>` heading if pursued.
+
+### P57.1 — Phase-6 content-substance reopen can stall in an unbreakable model reasoning loop
+
+Found 2026-08-03 during a dedicated P38.1 live re-confirmation run (qwen3.6-fast-32k vs an external
+target; full account in the P38.1 write-up, Tier 2 above). The phased drive's mechanism and its
+mechanical check scripts (`verify.py`, `normalize_ids.py`, `inventory.py`) all behaved correctly:
+verify caught real cross-file defects, correctly told mechanical ID-format issues (already
+canonical) apart from genuine content-authorship gaps (reused threat IDs, missing coverage rows,
+incomplete cross-references), and reopened only the owning content phase (P47.9) for the latter.
+
+What has no guard today is the reopened phase itself getting stuck reasoning about a **theory of
+the data that is simply wrong** — here, the model convinced itself a T0-vs-T01 zero-padding offset
+existed between the analysis file and the findings file, re-derived it identically five turns
+running, and the general-purpose loop detector's single corrective nudge ("change approach or
+answer") did not break the cycle, so the engine aborted the run entirely rather than resolving or
+degrading gracefully. A second invocation with a fresh context (no inherited wrong theory) fixed
+every defect immediately, which is the strongest evidence this is a stuck-reasoning problem specific
+to that context, not a capability gap in the model or a defect in the check scripts.
+
+Candidate direction, not yet designed: when the phase-6 reopen's own retry/nudge budget is
+exhausted without the content-substance check clearing, hand the model the **verify.py diff
+directly** (the specific failing check + line) rather than asking it to re-derive the mismatch from
+the raw files — the same shift from "figure out what's wrong" to "here is what's wrong" that
+`scaffold.py` (P38.4) already made for structure. Needs a live re-test against the same failure
+shape to confirm before committing to a mechanism.
+
+**Priority:** Tier 3 — real (aborted an otherwise-working unattended run) but narrow and
+sequence-dependent: reproducing it deliberately (rather than waiting for it to recur) is the
+prerequisite for validating any fix, and no reliable repro exists yet beyond re-running the same
+skill against weak-enough local models. **Effort:** M.
 
 ## Open Work — Tier 4
 
