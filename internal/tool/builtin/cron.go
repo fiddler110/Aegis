@@ -34,10 +34,14 @@ func (t *cronCreateTool) Description() string {
 		"(minute hour dom month dow) or a macro (@hourly, @daily, @weekly, @monthly). " +
 		"The command runs as a background shell job each time it fires. Because no one is " +
 		"present to approve the run when it fires unattended, the job is blocked at fire time " +
-		"unless the daemon's current permission mode is auto, or auto_approve is set here."
+		"unless the daemon's current permission mode is auto, or auto_approve is set here. " +
+		"Set notify to have each fire's outcome and output delivered out-of-band (desktop " +
+		"notification and/or webhook, per the user's notify config) instead of only being " +
+		"readable via cron_history — use it for jobs whose whole purpose is to tell the user " +
+		"something, such as a daily digest or a watch job."
 }
 func (t *cronCreateTool) InputSchema() json.RawMessage {
-	return schema(`{"type":"object","properties":{"schedule":{"type":"string","description":"5-field cron expression or @hourly/@daily/@weekly/@monthly"},"command":{"type":"string","description":"shell command to run on each tick"},"title":{"type":"string","description":"optional short label for the job"},"auto_approve":{"type":"boolean","description":"allow this job to fire unattended even in build mode, where shell execution would otherwise require interactive approval (default false)"}},"required":["schedule","command"]}`)
+	return schema(`{"type":"object","properties":{"schedule":{"type":"string","description":"5-field cron expression or @hourly/@daily/@weekly/@monthly"},"command":{"type":"string","description":"shell command to run on each tick"},"title":{"type":"string","description":"optional short label for the job"},"auto_approve":{"type":"boolean","description":"allow this job to fire unattended even in build mode, where shell execution would otherwise require interactive approval (default false)"},"notify":{"type":"boolean","description":"deliver each fire's status and output over the configured notification channels (default false). Requires notify.desktop or notify.webhook to be configured; inert otherwise."}},"required":["schedule","command"]}`)
 }
 func (t *cronCreateTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
@@ -45,6 +49,7 @@ func (t *cronCreateTool) Execute(ctx context.Context, input json.RawMessage) (to
 		Command     string `json:"command"`
 		Title       string `json:"title"`
 		AutoApprove bool   `json:"auto_approve"`
+		Notify      bool   `json:"notify"`
 	}
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
@@ -60,7 +65,7 @@ func (t *cronCreateTool) Execute(ctx context.Context, input json.RawMessage) (to
 	// instead of always running in the daemon's cwd regardless of which
 	// session scheduled it.
 	workdir, _ := tool.WorkdirFromContext(ctx)
-	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title, args.AutoApprove, workdir)
+	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title, args.AutoApprove, workdir, args.Notify)
 	if err != nil {
 		return tool.Result{Content: "cron_create: " + err.Error(), IsError: true}, nil
 	}
@@ -96,6 +101,9 @@ func (t *cronListTool) Execute(ctx context.Context, _ json.RawMessage) (tool.Res
 		approve := ""
 		if j.AutoApprove {
 			approve = " [auto_approve]"
+		}
+		if j.Notify {
+			approve += " [notify]"
 		}
 		fmt.Fprintf(&sb, "%s  %-10s  %-14s  %s  %s%s\n", j.ID, enabled, j.Schedule, j.Command, j.Title, approve)
 	}

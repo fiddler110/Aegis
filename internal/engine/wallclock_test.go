@@ -206,3 +206,99 @@ func TestWallClockBudgetOffByDefault(t *testing.T) {
 		})
 	}
 }
+
+// blockingAdapter stalls inside Stream until its context is cancelled, standing
+// in for a local model runner that wedges mid-generation. It never emits a Done
+// event, so nothing the engine polls between turns can end the run.
+type blockingAdapter struct{ started chan struct{} }
+
+func (b *blockingAdapter) Name() string { return "blocking" }
+
+func (b *blockingAdapter) Stream(ctx context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	out := make(chan provider.Event)
+	go func() {
+		defer close(out)
+		if b.started != nil {
+			close(b.started)
+		}
+		<-ctx.Done()
+		select {
+		case out <- provider.Event{Type: provider.EventError, Err: ctx.Err()}:
+		case <-time.After(time.Second):
+		}
+	}()
+	return out, nil
+}
+
+// TestWallClockBudgetFiresDuringATurn (P59.2) is the gap the two polled gates
+// could not cover: the run wedges *inside* a model turn, so neither the
+// pre-turn nor the pre-tool-round check ever runs again. The budget must still
+// end the run, and must end it as a wall-clock abort rather than as a bare
+// interrupt or an adapter transport error a caller would try to resume from.
+func TestWallClockBudgetFiresDuringATurn(t *testing.T) {
+	eng, err := New(Options{
+		Adapter:            &blockingAdapter{started: make(chan struct{})},
+		Cost:               cost.NewTracker(),
+		MaxWallClockPerRun: 100 * time.Millisecond,
+		Model:              "llama3.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(context.Background(), conv, func(Event) {}) }()
+
+	select {
+	case runErr := <-done:
+		if !errors.Is(runErr, ErrWallClockLimit) {
+			t.Fatalf("a turn that hangs past the budget must abort on the wall clock, got %v", runErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run never returned — the wall-clock budget cannot fire mid-turn")
+	}
+}
+
+// TestWallClockOffLeavesAHungTurnAlone is the false-positive guard for the
+// deadline above: with no budget configured, nothing in the engine may bound a
+// turn. A run that hangs stays hung until its caller cancels — the pre-existing
+// contract, and the reason the wall clock is opt-in.
+func TestWallClockOffLeavesAHungTurnAlone(t *testing.T) {
+	started := make(chan struct{})
+	eng, err := New(Options{
+		Adapter: &blockingAdapter{started: started},
+		Cost:    cost.NewTracker(),
+		Model:   "llama3.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx, conv, func(Event) {}) }()
+
+	<-started
+	select {
+	case runErr := <-done:
+		t.Fatalf("the run ended on its own with no budget configured: %v", runErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case runErr := <-done:
+		if errors.Is(runErr, ErrWallClockLimit) {
+			t.Errorf("a caller cancel must not be reported as a wall-clock abort, got %v", runErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run did not return after its context was cancelled")
+	}
+}

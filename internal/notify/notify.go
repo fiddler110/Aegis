@@ -23,16 +23,33 @@ const (
 	StatusCompleted  Status = "completed"
 	StatusError      Status = "error"
 	StatusNeedsInput Status = "needs_input"
+	// StatusBlocked is a cron fire the permission gate refused. It is kept
+	// distinct from StatusError because the two want different reactions: an
+	// error means the job ran and failed, blocked means it never ran and the
+	// job's auto_approve/permission setup is what needs attention.
+	StatusBlocked Status = "blocked"
 )
 
 // Event is one notification payload.
+//
+// SessionID and JobID are alternative origins, not both set: a background
+// session sets the former, a cron fire the latter.
 type Event struct {
-	SessionID string  `json:"session_id"`
-	Title     string  `json:"title,omitempty"`
-	Status    Status  `json:"status"`
-	Message   string  `json:"message,omitempty"`
-	CostUSD   float64 `json:"cost_usd,omitempty"`
-	Time      string  `json:"time"`
+	SessionID string `json:"session_id,omitempty"`
+	// JobID is the originating cron job (P58.1); empty for session events.
+	JobID   string  `json:"job_id,omitempty"`
+	Title   string  `json:"title,omitempty"`
+	Status  Status  `json:"status"`
+	Message string  `json:"message,omitempty"`
+	CostUSD float64 `json:"cost_usd,omitempty"`
+	// Output carries the originating run's captured output, already truncated
+	// by the caller. It is delivered over the webhook only — a desktop
+	// notification has no room for it and the OS truncates mid-word. This is
+	// what makes a scheduled digest job useful: the digest *is* the output, so
+	// a notification that only said "job completed" would send the user back
+	// to cron_history to read the thing they asked to be told about.
+	Output string `json:"output,omitempty"`
+	Time   string `json:"time"`
 }
 
 // Notifier delivers notifications via the configured channels.
@@ -102,7 +119,11 @@ const desktopTitle = "Aegis"
 func (n *Notifier) sendDesktop(ev Event) {
 	msg := ev.Message
 	if msg == "" {
-		msg = "session " + ev.SessionID + " " + string(ev.Status)
+		origin := "session " + ev.SessionID
+		if ev.SessionID == "" && ev.JobID != "" {
+			origin = "cron job " + ev.JobID
+		}
+		msg = origin + " " + string(ev.Status)
 	}
 	cmd := desktopCommand(msg, ev.Title)
 	if cmd == nil {

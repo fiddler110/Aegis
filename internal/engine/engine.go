@@ -204,6 +204,21 @@ type Options struct {
 	PrepareStep           PrepareStepFunc // optional; called before every model turn
 	OutputGuard           guard.Func      // optional; validates the final answer (and any files written this turn)
 	OutputGuardMaxRetries int             // corrective retries on guard failure; 0 -> 1 when a guard is set
+	// OutputGuardFormat is a JSON Schema describing the shape OutputGuard
+	// requires of the final answer (guard.SchemaFormat, P59.8). When set, the
+	// corrective retry after a guard failure is sent with decoding constrained
+	// to it on backends that can (Ollama), rather than being asked again in
+	// prose and checked again afterwards.
+	//
+	// Only the retry is constrained, never the ordinary turns. A first turn is
+	// where the model does the actual work — reading files, calling tools — and
+	// a grammar that forces a JSON object out of it would forbid exactly that;
+	// by the time a schema guard has rejected an answer, the remaining task
+	// genuinely is "emit this object", which is the one moment the constraint
+	// describes the intent instead of fighting it. Tools are suppressed on that
+	// turn for the same reason. Empty (the default, and every non-schema guard)
+	// leaves the retry as free generation.
+	OutputGuardFormat json.RawMessage
 	// ZeroToolNudgeMaxRetries (P28.3) bounds the corrective-nudge retries fired
 	// when the model's first response to a task produces zero tool calls even
 	// though the request plainly reads as actionable (looksActionable) and
@@ -214,6 +229,17 @@ type Options struct {
 	ZeroToolNudgeMaxRetries int
 	BudgetUSD               float64 // optional; >0 aborts the run past this cost
 	MaxTokensPerRun         int     // optional; >0 aborts the run past this cumulative token count (P10.5) — always enforceable, unlike BudgetUSD which is a no-op for unpriced/estimated usage
+	// MaxGeneratedTokensPerRun (P59.4) aborts a run past this cumulative
+	// *output* token count, checked at the same two gates as the other three
+	// budgets. 0 (the default) disables it.
+	//
+	// MaxTokensPerRun above is a context budget: it sums the whole prompt every
+	// turn, which is exactly the billed quantity on a priced provider and a
+	// ~O(N²)-in-conversation-length number on a local one, where the prompt is
+	// re-counted in full each turn. This is the work budget — what the model
+	// actually produced — so "stop after roughly this much output" is
+	// expressible without either key changing meaning by provider.
+	MaxGeneratedTokensPerRun int
 	// MaxWallClockPerRun (P52.15) aborts a run that has been going longer than
 	// this, checked at the same two gates as the cost/token budgets. 0 (the
 	// default) disables it.
@@ -238,6 +264,18 @@ type Options struct {
 	LoopThreshold       int           // identical tool-call turns before aborting; 0 -> default, <0 disables
 	ContextWindowTokens int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
 	SteerChan           <-chan string // optional; steering messages injected between tool rounds
+	// ContextWindowFloor, when set, is consulted before every turn for a
+	// serving window the adapter has been escalated to at runtime (P47.5b), and
+	// the larger of it and ContextWindowTokens is what the proactive-compaction
+	// trigger measures against (P59.7).
+	//
+	// It is a func rather than a value because ContextWindowTokens is captured
+	// at New and the escalation happens mid-run: an engine holding the
+	// pre-escalation number keeps compacting a conversation that now has room,
+	// which on a local model costs minutes of summarizer calls during the very
+	// overflow recovery that raised the window. Nil (every non-escalating
+	// backend) leaves ContextWindowTokens as the only source, unchanged.
+	ContextWindowFloor func() int
 	// RedactSecrets opts in to running a read-capability tool's output through
 	// gitleaks-backed secret detection (security.RedactText) before it's
 	// appended to the conversation sent to the model provider (P24.12 /
@@ -288,9 +326,11 @@ type Engine struct {
 	prepareStep      PrepareStepFunc
 	outputGuard      guard.Func
 	outputGuardMax   int
+	outputGuardFmt   json.RawMessage
 	zeroToolNudgeMax int
 	budgetUSD        float64
 	maxTokensPerRun  int
+	maxGenTokens     int // P59.4: cumulative output-token cap; 0 = unbounded
 	maxWallClock     time.Duration
 	// now supplies the clock the wall-clock budget reads, defaulting to
 	// time.Now. Unexported and injected only by same-package tests, because the
@@ -308,6 +348,7 @@ type Engine struct {
 	maxIterations       int
 	loopThreshold       int
 	contextWindowTokens int
+	contextWindowFloor  func() int
 	steerChan           <-chan string
 	redactSecrets       bool
 	logger              *slog.Logger
@@ -339,6 +380,18 @@ var ErrInterrupted = errors.New("engine: interrupted")
 // resetting and continuing past it would defeat the point of setting one.
 var ErrWallClockLimit = errors.New("engine: wall-clock budget reached")
 
+// ErrLoopDetected is wrapped by every loop-guard abort below so a caller driving
+// the engine can classify the stop without matching on the message text — the
+// same reason ErrToolFailureLimit exists.
+//
+// Like ErrToolFailureLimit and unlike ErrWallClockLimit, the phased drive treats
+// this as a resumable reset rather than a terminal error (P57.1): the loop guard
+// fires when a model keeps re-deriving one wrong theory of the data, and it is
+// precisely the context holding that theory which makes the next turn repeat it.
+// Dropping the context and re-reading from disk is the remedy — a second
+// invocation with a fresh context is what resolved the 2026-08-03 stall by hand.
+var ErrLoopDetected = errors.New("engine: aborting suspected loop")
+
 // clock returns the time source the wall-clock budget reads — time.Now unless
 // a test injected one. See the note on Engine.now.
 func (e *Engine) clock() func() time.Time {
@@ -363,6 +416,108 @@ func (e *Engine) wallClockExceeded(start time.Time) error {
 	}
 	return fmt.Errorf("%w: ran %s of a %s limit — raise cost.max_wall_clock_per_run for longer tasks",
 		ErrWallClockLimit, elapsed.Round(time.Second), e.maxWallClock)
+}
+
+// tokenBudgetExceeded reports whether this run has crossed either token budget,
+// and returns the abort error if so. Both are checked in one place because both
+// are checked at both gates (before each model turn and before each tool round)
+// and because the message for the first only makes sense alongside the second
+// (P59.4): a user who set max_tokens_per_run as a work budget needs to be told,
+// at the moment it fires, that the number it reports is not the quantity they
+// were thinking of and which key is.
+func (e *Engine) tokenBudgetExceeded() error {
+	if e.cost == nil {
+		return nil
+	}
+	if e.maxGenTokens > 0 {
+		if gen := e.cost.TotalGeneratedTokens(); gen >= e.maxGenTokens {
+			return fmt.Errorf("engine: generation budget reached: the model generated %d of %d tokens (cost.max_generated_tokens_per_run)",
+				gen, e.maxGenTokens)
+		}
+	}
+	if e.maxTokensPerRun > 0 {
+		if total := e.cost.TotalTokens(); total >= e.maxTokensPerRun {
+			return fmt.Errorf("engine: token budget reached: counted %d of %d tokens (cost.max_tokens_per_run). "+
+				"That count includes the whole prompt on every turn, so it grows with conversation length as well as with work done — "+
+				"to bound generated output instead, set cost.max_generated_tokens_per_run",
+				total, e.maxTokensPerRun)
+		}
+	}
+	return nil
+}
+
+// wallClockOverride re-attributes an error produced by cancellation when the
+// run's own deadline (P59.2) is what fired. Without it the budget abort would
+// surface as whatever the cancelled call happened to return — a bare
+// ErrInterrupted, or an adapter transport error a caller classifies as
+// backend-unavailable and would then wait for and resume, turning a deliberate
+// budget stop into a retry loop. err is returned unchanged when the run is
+// still inside its budget, so an ordinary interrupt keeps its own identity.
+func (e *Engine) wallClockOverride(runStart time.Time, err error) error {
+	if wcErr := e.wallClockExceeded(runStart); wcErr != nil {
+		return wcErr
+	}
+	return err
+}
+
+// compactionTrigger returns the estimated prompt size at which proactive
+// compaction fires (P59.1).
+//
+// It used to be a flat 85% of the window. That number reserves headroom for
+// *prompt growth* and was never sized against generation — but on Ollama
+// num_ctx covers prompt and completion out of one budget, so the completion has
+// to fit in whatever the prompt leaves. At a 4096 window (Ollama's own server
+// default, and a routinely detected one) a flat 85% leaves ~614 tokens for a
+// max_tokens configured at 32768, and the run then hits the ceiling mid-answer,
+// takes the "continue from where you left off" path, and grows the context
+// again on every retry until it burns to maxIterations.
+//
+// So the trigger is sized against the generation the request may actually ask
+// for: window - min(maxTokens, window/2) - a small margin, floored at half the
+// window and capped at the old 85%. The min() is what keeps a large max_tokens
+// from reserving the entire window and compacting on an empty conversation —
+// past the halfway point, reserving more space for output than for the
+// conversation is never the right trade. The 85% cap means a generous window
+// with a modest max_tokens (a cloud model, say) behaves exactly as before.
+func compactionTrigger(window, maxTokens int) int {
+	if window <= 0 {
+		return 0
+	}
+	trigger := window * 85 / 100
+	if maxTokens > 0 {
+		reserve := maxTokens
+		if half := window / 2; reserve > half {
+			reserve = half
+		}
+		// A margin over the reservation itself: the prompt figure this is
+		// compared against is an estimate, not a token count.
+		if sized := window - reserve - window/20; sized < trigger {
+			trigger = sized
+		}
+	}
+	if floor := window / 2; trigger < floor {
+		trigger = floor
+	}
+	return trigger
+}
+
+// effectiveContextWindow is the window the proactive-compaction trigger
+// measures against this turn: the larger of the window resolved at
+// construction and any runtime escalation the adapter reports (P59.7).
+//
+// The larger wins because the escalation is a floor on the adapter's side
+// (resolveNumCtx in the Ollama adapter serves it in preference to a
+// per-request value), so treating it as anything else here would let the two
+// disagree about the same request. A missing or zero floor leaves the
+// constructed window untouched, which is every backend that cannot escalate.
+func (e *Engine) effectiveContextWindow() int {
+	win := e.contextWindowTokens
+	if e.contextWindowFloor != nil {
+		if floor := e.contextWindowFloor(); floor > win {
+			return floor
+		}
+	}
+	return win
 }
 
 // New constructs an Engine.
@@ -403,9 +558,11 @@ func New(opts Options) (*Engine, error) {
 		prepareStep:         opts.PrepareStep,
 		outputGuard:         opts.OutputGuard,
 		outputGuardMax:      opts.OutputGuardMaxRetries,
+		outputGuardFmt:      opts.OutputGuardFormat,
 		zeroToolNudgeMax:    zeroToolNudgeMax,
 		budgetUSD:           opts.BudgetUSD,
 		maxTokensPerRun:     opts.MaxTokensPerRun,
+		maxGenTokens:        opts.MaxGeneratedTokensPerRun,
 		maxWallClock:        opts.MaxWallClockPerRun,
 		model:               opts.Model,
 		maxTokens:           maxTok,
@@ -413,6 +570,7 @@ func New(opts Options) (*Engine, error) {
 		maxIterations:       maxIter,
 		loopThreshold:       loopThreshold,
 		contextWindowTokens: opts.ContextWindowTokens,
+		contextWindowFloor:  opts.ContextWindowFloor,
 		steerChan:           opts.SteerChan,
 		redactSecrets:       opts.RedactSecrets,
 		logger:              logger,
@@ -434,6 +592,20 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// the loop, since a compaction pass is a model call that can itself take
 	// real time on a local backend — time the operator's bound should cover.
 	runStart := e.clock()()
+
+	// P59.2: make the budget a deadline on the run's context, not only a value
+	// polled between turns. The two gates below (before each model turn, before
+	// each tool round) cannot fire *during* a turn, which is exactly where a
+	// local backend hangs — so "don't spend more than N minutes on this" was
+	// structurally unable to hold on the one class of stall it was asked to
+	// cover. The polls stay: they produce the explanatory abort error, and they
+	// are what a fake clock in tests drives. This only ensures a wedged call
+	// actually returns so a poll can run.
+	if e.maxWallClock > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.maxWallClock)
+		defer cancel()
+	}
 
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the
@@ -499,6 +671,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// toolCallAsTextWarned bounds the P34.2 notice to one per run: the check
 	// sits on a path a guard retry can re-enter.
 	toolCallAsTextWarned := false
+	// constrainNext carries the JSON Schema the *next* turn is decoded under
+	// (P59.8). Only the schema-guard corrective retry sets it, and only for the
+	// one turn that answers the correction.
+	var constrainNext json.RawMessage
 	// compactionFailures counts consecutive proactive-compaction failures
 	// within this run (P28.4). Reset to 0 on any successful compaction
 	// (LLM-summarized or deterministic-fallback); never carries across runs,
@@ -534,7 +710,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	for iter := 0; iter < e.maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
-			return ErrInterrupted
+			return e.wallClockOverride(runStart, ErrInterrupted)
 		default:
 		}
 
@@ -553,8 +729,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
-		if e.maxTokensPerRun > 0 && e.cost != nil && e.cost.TotalTokens() >= e.maxTokensPerRun {
-			err := fmt.Errorf("engine: token budget reached: used %d of %d token limit", e.cost.TotalTokens(), e.maxTokensPerRun)
+		if err := e.tokenBudgetExceeded(); err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -581,10 +756,17 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// silently drop the oldest tokens instead — including the system prompt —
 		// so when nothing can be compacted the user gets an explicit notice
 		// rather than a model that quietly forgot its instructions.
-		if e.contextWindowTokens > 0 {
+		// P59.7: re-read the window every turn rather than trusting the value
+		// captured at New — a mid-run escalation has to reach the trigger, or
+		// the recovery it is part of pays for compaction it no longer needs.
+		if win := e.effectiveContextWindow(); win > 0 {
 			est := conv.estimatedTokens() + shimPromptTokens
-			if est > e.contextWindowTokens*85/100 {
-				pct := est * 100 / e.contextWindowTokens
+			// P59.1: the trigger reserves room for the *completion* as well as
+			// for prompt growth — on a shared prompt+completion budget (Ollama's
+			// num_ctx) a prompt that merely fits is not a prompt that can be
+			// answered.
+			if est > compactionTrigger(win, e.maxTokens) {
+				pct := est * 100 / win
 				compacted := false
 				if e.compactor != nil {
 					// P39.8: once the LLM summarizer has proven unreliable this run,
@@ -655,7 +837,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// model produces a plain-text progress summary rather than aborting with an
 		// error. If no tools ran yet, skip the injection (model is in its first turn
 		// and should simply answer).
-		suppressTools := false
+		// P59.8: a schema-guard corrective retry is sent with decoding
+		// constrained to the required shape, and with tools off — the remaining
+		// task at that point is "emit this object", and a grammar plus a tool
+		// schema pull the same turn in two directions. constrainNext is consumed
+		// by this turn and cleared, so a *second* failure re-asks under the
+		// constraint again rather than latching it on for the rest of the run.
+		suppressTools := constrainNext != nil
 		if iter == e.maxIterations-1 && toolRoundsCompleted > 0 {
 			suppressTools = true
 			emit(Event{Kind: KindNotice, Text: fmt.Sprintf("step limit reached (%d tool rounds) — asking the model to summarize; raise provider.max_iterations for longer tasks", e.maxIterations)})
@@ -665,8 +853,18 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		turnStart := time.Now()
-		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit, suppressTools)
+		format := constrainNext
+		constrainNext = nil
+		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit, suppressTools, format)
 		if err != nil {
+			// P59.2: when the run deadline above is what killed the turn, the
+			// adapter reports whatever cancellation looked like from its side —
+			// typically a transport error, which callers classify as
+			// backend-unavailable and would then *wait for and resume*, turning a
+			// deliberate budget abort into a retry loop. Re-derive the real
+			// reason first so the wall-clock error (fatal by design, unlike a
+			// context overflow or a tool-failure trip) is what propagates.
+			err = e.wallClockOverride(runStart, err)
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -706,6 +904,12 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			toolUses = nil
 		}
 
+		// nativeCalls is the count of tool calls that arrived through the
+		// provider's own protocol, captured before the shim parse below can add
+		// to toolUses — the P59.6 checks need to tell "the model emitted a real
+		// call" from "we recovered one from its prose".
+		nativeCalls := len(toolUses)
+
 		// P53.6: under the shim the request carried no tool schemas, so any call
 		// this turn made is sitting in the reply text. Parse it here — before the
 		// zero-tool-calls branch below — so the whole rest of the loop (loop
@@ -724,6 +928,64 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				shimParseErr = err.Error()
 			default:
 				toolUses = calls
+			}
+		}
+
+		// P59.6: both prose-tool-call checks used to sit inside the zero-call
+		// branch below, which asks "can this model produce the protocol at all".
+		// The question that actually matters for the 14-27B class is how
+		// *often* — a model that emits one real call and prints two more as
+		// prose in the same reply is the common shape, and the zero-call gate
+		// made it invisible: no notice, and under the shim the printed calls
+		// were silently dropped rather than parsed or declined. Run the checks
+		// on any turn whose reply text carries the shape.
+		//
+		// shimMixedPending carries the mixed-round correction past the tool
+		// round, for the same reason loopNudgePending does: the native calls
+		// this turn made are real and must still be answered with tool_result
+		// blocks, so nothing may be appended between them and their results.
+		shimMixedPending := false
+		if e.toolShim && !suppressTools && nativeCalls > 0 {
+			// The parsed calls are deliberately *not* dispatched. Both readings
+			// of a mixed round are defensible — parsed calls are unprivileged
+			// and pass the same permission gate — but declining is the safer
+			// default and the one consistent with the parser's existing
+			// decline-rather-than-repair posture: a turn that half-speaks two
+			// protocols is a turn whose intent is genuinely ambiguous, and
+			// running both halves would double-execute a model that wrote the
+			// same call twice in two dialects.
+			_, err := toolshim.Parse(assistantText(assistant), e.exposedToolNames(), fmt.Sprintf("shim-mixed-%d", iter))
+			if !errors.Is(err, toolshim.ErrNoCalls) {
+				shimMixedPending = true
+			}
+		}
+		//
+		// The zero-call gate is dropped; the "no tool call has succeeded all
+		// run" gate is deliberately kept for the zero-native-call case, because
+		// there it is still doing real work: a model that has already made a
+		// structured call and then quotes JSON in its answer is quoting, not
+		// failing, and warning about that is the false positive
+		// TestToolCallAsTextNoticeSkippedAfterRealToolCall exists to prevent.
+		// A *mixed* turn is different in kind — the printed call was written to
+		// be executed and silently wasn't — so it warns regardless of history.
+		if !toolCallAsTextWarned && !suppressTools && (nativeCalls > 0 || toolRoundsCompleted == 0) {
+			if names := e.exposedToolNames(); len(names) > 0 && looksLikeToolCallJSON(assistantText(assistant), names) {
+				toolCallAsTextWarned = true
+				if nativeCalls > 0 {
+					// A partial-protocol turn. The P34.2 claim below would be
+					// wrong here — this model demonstrably *can* call a tool —
+					// so name what was actually lost instead.
+					emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
+						"model wrote a tool call into its prose alongside %d real tool call(s) — the written one did not run", nativeCalls)})
+				} else {
+					// P34.2: the qwen2.5-coder:1.5b signature — a model whose
+					// Ollama manifest claims tool support simply cannot speak
+					// the protocol, then fabricates the results it never
+					// fetched. Name it once; never block, since a prose-only
+					// session with such a model is still legitimate and the user
+					// may not care.
+					emit(Event{Kind: KindNotice, Text: "model emitted a tool call as text — it may not support tool calling; run `aegis doctor` to check this model"})
+				}
 			}
 		}
 
@@ -789,19 +1051,9 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				}
 				emit(Event{Kind: KindNotice, Text: "model produced no text even after being asked for a plain-text answer — the reply is empty"})
 			}
-			// P34.2: the model wrote a tool call into its prose instead of
-			// emitting one, and no tool call has succeeded all run — the
-			// qwen2.5-coder:1.5b signature, where a model whose Ollama manifest
-			// claims tool support simply cannot speak the protocol, then
-			// fabricates the results it never fetched. Name it once; never
-			// block, since a prose-only session with such a model is still
-			// legitimate and the user may not care.
-			if !toolCallAsTextWarned && !suppressTools && toolRoundsCompleted == 0 {
-				if names := e.exposedToolNames(); len(names) > 0 && looksLikeToolCallJSON(assistantText(assistant), names) {
-					toolCallAsTextWarned = true
-					emit(Event{Kind: KindNotice, Text: "model emitted a tool call as text — it may not support tool calling; run `aegis doctor` to check this model"})
-				}
-			}
+			// The P34.2 prose-tool-call notice used to live here, gated on a
+			// zero-call turn; P59.6 hoisted it above so a mixed round reaches it
+			// too.
 			if e.outputGuard != nil {
 				maxRetries := e.outputGuardMax
 				if maxRetries <= 0 {
@@ -812,6 +1064,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					e.logger.Debug("output guard result", "passed", ok, "guard_status", string(status))
 					if !ok && nudges.guardRetries < maxRetries {
 						nudges.guardRetries++
+						// P59.8: re-ask under the schema rather than merely
+						// asking again. Set per retry, not once per run, so it
+						// cannot leak onto an unrelated later turn.
+						constrainNext = e.outputGuardFmt
 						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason, GuardStatus: string(status), GuardRetrying: true})
 						corrective := guardCorrectivePrefix + reason +
 							". This means the actual deliverable is incomplete or unpolished, not just its" +
@@ -892,7 +1148,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			if shouldRecord && loop.record(sig) {
 				recoverable := !loop.cycleHadError() && nudges.loopNudges == 0
 				if !recoverable {
-					err := fmt.Errorf("engine: aborting suspected loop: identical tool calls repeated %d turns", e.loopThreshold)
+					err := fmt.Errorf("%w: identical tool calls repeated %d turns", ErrLoopDetected, e.loopThreshold)
 					if nudges.loopNudges > 0 {
 						err = fmt.Errorf("%w — the corrective prompt did not break the cycle", err)
 					}
@@ -916,8 +1172,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
-		if e.maxTokensPerRun > 0 && e.cost != nil && e.cost.TotalTokens() >= e.maxTokensPerRun {
-			err := fmt.Errorf("engine: token budget reached: used %d of %d token limit", e.cost.TotalTokens(), e.maxTokensPerRun)
+		if err := e.tokenBudgetExceeded(); err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -930,6 +1185,9 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 
 		results, toolTraces, err := e.runTools(ctx, toolUses, emit)
 		if err != nil {
+			// P59.2: the run deadline cancels tool execution too, so the same
+			// re-attribution the model turn needs applies here.
+			err = e.wallClockOverride(runStart, err)
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -945,6 +1203,16 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
 		}
 		toolRoundsCompleted++
+		// P59.10: retract the zero-tool nudge here rather than at run end. The
+		// nudge is now spent — the gate at the injection site only fires it while
+		// toolRoundsCompleted == 0, so a completed round makes it permanently
+		// ineligible this run — and retracting a message from the middle of the
+		// conversation invalidates a local runner's KV prefix cache from that
+		// point on. Doing it now, when only this round sits after it, costs one
+		// small re-prefill; doing it at run end costs a re-prefill of everything
+		// the run produced in between. See prefixcache_test.go for both halves of
+		// the measurement.
+		nudges.retractSpentZeroTool(conv)
 
 		tr.ToolCalls = toolTraces
 		tr.WallMS = time.Since(turnStart).Milliseconds()
@@ -966,6 +1234,23 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				provider.TextBlock{Text: loopNudgeText(e.loopThreshold)},
 			}})
 		}
+		// P59.6: the same injection point, for the mixed-round correction. The
+		// native calls of this turn have just run and been answered; now tell
+		// the model the ones it *printed* did not, and how to emit them. Bounded
+		// by the same counter as the P53.6 format corrective — a model that
+		// keeps mixing dialects after two corrections is not going to stop, and
+		// its real calls are still working.
+		if shimMixedPending {
+			if nudges.shimFormatNudges < shimFormatNudgeMax {
+				nudges.shimFormatNudges++
+				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model printed a tool call in its prose alongside a real one — the printed call was not run; asking it to emit all calls in the shim format"})
+				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+					provider.TextBlock{Text: shimMixedNudgeText()},
+				}})
+			} else {
+				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model is still printing tool calls in its prose — those did not run"})
+			}
+		}
 
 		// P52.3: consecutive-tool-failure circuit breaker. loopDetector cannot
 		// see this stall — it matches on tool name + canonicalized input, and the
@@ -980,8 +1265,21 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
-		if toolFailures.shouldNudge() && nudges.toolFailureNudges == 0 {
+		// P59.11: an outstanding corrective becomes spent the moment the failure
+		// streak it was correcting ends, so retract it here rather than at run
+		// end. Retraction is a mid-history edit and everything after it must be
+		// re-prefilled by a local runner; doing it now leaves only the rounds
+		// between the nudge and the recovery downstream of the break, instead of
+		// the entire rest of the run (measured at 25.9x — see prefixcache_test.go).
+		// The correction is not lost: the injection gate below can fire again if
+		// failures recur, which is an append and costs nothing.
+		if toolFailures.cleared() {
+			nudges.retractSpentToolFailure(conv)
+		}
+		if toolFailures.shouldNudge() && !nudges.toolFailureOutstanding &&
+			nudges.toolFailureNudges < toolFailureNudgeMax {
 			nudges.toolFailureNudges++
+			nudges.toolFailureOutstanding = true
 			emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
 				"%d tool round(s) in a row failed (%s: %s) — asking the model to re-inspect state instead of retrying",
 				toolFailures.rounds(), toolFailures.toolLabel(), toolFailures.lastErrorText)})
@@ -1033,13 +1331,22 @@ const guardCorrectivePrefix = "[Your previous response did not pass output valid
 // (P40.6). Behavior is unchanged — retractAll runs the same three retractions,
 // each guarded by its own count, in the same order.
 type nudgeState struct {
-	guardRetries      int
-	zeroToolNudges    int
+	guardRetries   int
+	zeroToolNudges int
+	// zeroToolRetracted records that retractSpentZeroTool already stripped the
+	// zero-tool nudge mid-run (P59.10), so retractAll does not repeat the walk.
+	zeroToolRetracted bool
 	emptyAnswerNudges int
 	// toolFailureNudges counts the P52.3 consecutive-tool-failure nudge, bounded
-	// to one per run: a model that ignores it is handled by the abort threshold,
-	// not by nagging it every subsequent failing round.
+	// at toolFailureNudgeMax. A model that ignores it is handled by the abort
+	// threshold, not by nagging it every subsequent failing round — that job
+	// belongs to toolFailureOutstanding below, not to the count.
 	toolFailureNudges int
+	// toolFailureOutstanding records that a tool-failure nudge is currently in
+	// conv un-retracted. It is what stops a second one being injected while the
+	// first is still doing its work (the old "one per run" bound), and what
+	// tells retractAll whether there is anything left to strip (P59.11).
+	toolFailureOutstanding bool
 	// loopNudges counts the P53.2 recoverable-loop nudge, also bounded to one per
 	// run: a second trigger means the corrective didn't work, and the run is
 	// aborted instead of nudged again.
@@ -1054,17 +1361,71 @@ type nudgeState struct {
 // retractAll strips every corrective/nudge prompt this run injected from conv,
 // so the scaffolding never leaks into the surfaced transcript or a later run's
 // context. Only the families actually used (count > 0) are touched.
+// retractSpentZeroTool retracts the P28.3 zero-tool nudge as soon as it can no
+// longer fire — i.e. the moment the run's first tool round completes — instead
+// of waiting for retractAll (P59.10).
+//
+// Retraction is a mid-history edit, so a local runner re-prefills everything
+// after it on the next request. Measured on Ollama 0.30.10 / qwen3:14b, a run
+// whose zero-tool nudge was retracted at run end made the *next* run's first
+// turn cost 3604ms of prefill against 71ms for the same run unretracted — a 51x
+// regression, and within noise of a cold prefill of the whole conversation
+// (3711ms), i.e. the cache was not merely dented but wholly lost. The engine
+// already treats the nudge as spent after a tool round (see the
+// toolRoundsCompleted == 0 gate at the injection site), so retracting it there
+// removes no corrective pressure the run could still have used, and leaves only
+// that one round downstream of the break rather than the entire run.
+//
+// Idempotent: retractAll still runs at the end and must not redo this.
+func (n *nudgeState) retractSpentZeroTool(conv *Conversation) {
+	if n.zeroToolNudges == 0 || n.zeroToolRetracted {
+		return
+	}
+	n.zeroToolRetracted = true
+	retractNudges(conv, zeroToolNudgePrefix)
+}
+
+// retractSpentToolFailure retracts the P52.3 tool-failure nudge as soon as the
+// failure streak it was correcting ends, instead of waiting for retractAll
+// (P59.11).
+//
+// This is the same trade retractSpentZeroTool makes, but it needed a different
+// definition of "spent". The zero-tool nudge is spent by construction — its
+// injection gate can never fire again once a tool round completes — whereas the
+// tool-failure nudge was only *bounded* to one per run, so retracting it early
+// would have silently removed a correction whose failures could still recur.
+// The measurement that motivated this (67ms of next-run prefill unretracted
+// against 1745ms retracted, 25.9x) was therefore left standing at P59.10.
+//
+// What makes it safe is pairing the early retraction with re-injectability: the
+// nudge is dropped only on an observed recovery (toolFailureTracker.cleared),
+// and if failures start again the injection gate fires a fresh nudge quoting the
+// *new* error — an append, which no prefix cache minds. So the corrective is
+// never absent while it is needed, and the break costs the recovery window
+// rather than the whole remainder of the run.
+//
+// Idempotent, and retractAll still runs at the end for a nudge outstanding when
+// the run finished mid-streak.
+func (n *nudgeState) retractSpentToolFailure(conv *Conversation) {
+	if !n.toolFailureOutstanding {
+		return
+	}
+	n.toolFailureOutstanding = false
+	retractNudges(conv, toolFailureNudgePrefix)
+}
+
 func (n *nudgeState) retractAll(conv *Conversation) {
 	if n.guardRetries > 0 {
 		retractGuardCorrectives(conv)
 	}
-	if n.zeroToolNudges > 0 {
+	if n.zeroToolNudges > 0 && !n.zeroToolRetracted {
 		retractNudges(conv, zeroToolNudgePrefix)
 	}
 	if n.emptyAnswerNudges > 0 {
 		retractNudges(conv, emptyAnswerNudgePrefix)
 	}
-	if n.toolFailureNudges > 0 {
+	if n.toolFailureOutstanding {
+		n.toolFailureOutstanding = false
 		retractNudges(conv, toolFailureNudgePrefix)
 	}
 	if n.loopNudges > 0 {
@@ -1159,6 +1520,19 @@ const shimFormatNudgePrefix = "[Your previous response contained a tool call tha
 
 func shimFormatNudgeText(reason string) string {
 	return shimFormatNudgePrefix + ": " + reason + ".\n\n" + toolshim.FormatReminder + "]"
+}
+
+// shimMixedNudgeText is the P59.6 mixed-round correction: the turn carried both
+// a real tool call and one written out in prose, and only the first ran. It
+// deliberately reuses shimFormatNudgePrefix so it retracts with the rest of the
+// shim scaffolding and needs no second marker — the two say the same thing to
+// the model ("that call did not happen, here is the shape") and differ only in
+// why the parser refused.
+func shimMixedNudgeText() string {
+	return shimFormatNudgePrefix +
+		": you also wrote a tool call directly in your reply text, and only the calls you made properly were executed. " +
+		"The written one did NOT run and produced no result — do not assume its output.\n\n" +
+		toolshim.FormatReminder + "]"
 }
 
 // retractNudges removes corrective-nudge scaffolding — each nudge prompt
@@ -1362,13 +1736,18 @@ const coldLoadNoticeThresholdMS = 1000
 
 // turn performs a single model call, accumulating the assistant message and any
 // tool-use blocks from the stream.
-func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, suppressTools bool) (provider.Message, []provider.ToolUseBlock, *provider.Usage, provider.StopReason, error) {
+func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, suppressTools bool, format json.RawMessage) (provider.Message, []provider.ToolUseBlock, *provider.Usage, provider.StopReason, error) {
 	req := provider.Request{
 		Model:       e.model,
 		System:      conv.System,
 		Messages:    conv.Messages,
 		MaxTokens:   e.maxTokens,
 		Temperature: e.temperature,
+		// P59.8: non-empty only on a schema-guard corrective retry. Adapters
+		// that cannot constrain decoding ignore it, and the guard's own check
+		// still decides — so this never becomes a correctness dependency on a
+		// backend feature.
+		Format: format,
 	}
 	if e.tools != nil {
 		req.Tools = e.tools.Schemas()

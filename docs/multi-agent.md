@@ -256,9 +256,15 @@ The cron scheduler runs recurring jobs on a standard 5-field cron schedule.
 {
   "schedule": "0 9 * * 1-5",
   "command": "aegis scan .",
-  "title": "Daily security scan"
+  "title": "Daily security scan",
+  "notify": true
 }
 ```
+
+`notify: true` delivers each fire's status and output over the configured `notify:` channels
+(desktop and/or webhook) rather than leaving it to be discovered via `cron_history` — set it for
+jobs whose purpose is to report something. Off by default and per-job; see
+[tools-reference.md](tools-reference.md#cron_create).
 
 Cron expression format: `minute hour day-of-month month day-of-week`
 

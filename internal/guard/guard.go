@@ -95,6 +95,52 @@ func SchemaGuard(required []string) Func {
 	}
 }
 
+// SchemaFormat renders required as a JSON Schema for a backend that can
+// constrain decoding to it (provider.Request.Format, P59.8). Returns nil when
+// there is nothing to require, which every caller reads as "don't constrain".
+//
+// This is the same contract SchemaGuard checks, expressed ahead of generation
+// instead of after it — a top-level object that must carry each required key.
+// Nothing is said about the *values*: SchemaGuard only asserts key presence, and
+// a schema that invented types would constrain the model beyond what the guard
+// will actually enforce, which is a different (and unrequested) behavior change.
+// additionalProperties is left open for the same reason.
+//
+// The constrained request is an optimization, not the check: SchemaGuard still
+// runs on the reply. That ordering matters — a backend that ignores Format (every
+// non-Ollama adapter today) has to keep failing loudly rather than silently
+// passing on the strength of a constraint that was never applied.
+func SchemaFormat(required []string) json.RawMessage {
+	props := map[string]struct{}{}
+	keys := make([]string, 0, len(required))
+	for _, k := range required {
+		if k = strings.TrimSpace(k); k == "" {
+			continue
+		}
+		if _, dup := props[k]; dup {
+			continue
+		}
+		props[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	properties := make(map[string]map[string]any, len(keys))
+	for _, k := range keys {
+		properties[k] = map[string]any{}
+	}
+	out, err := json.Marshal(map[string]any{
+		"type":       "object",
+		"properties": properties,
+		"required":   keys,
+	})
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // LLMGuard asks model whether the output satisfies rubric, expecting "PASS"
 // or "FAIL: <reason>". When in.Files is non-empty (write-capability tools ran
 // this turn), their content is folded into the judged content so the rubric

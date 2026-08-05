@@ -651,3 +651,77 @@ func TestDoctorProviderAdapterPassesOnNativeAdapter(t *testing.T) {
 		t.Fatalf("severity = %v, want PASS; detail=%q", got.Severity, got.Detail)
 	}
 }
+
+// TestDoctorGenerationBudget (P59.1) covers the pair nothing else validates:
+// provider.max_tokens against the context window the model is actually served
+// with. The shipped default (32768) against a stock Ollama window (4096) is the
+// case that reaches a user with no config at all, and it must warn.
+func TestDoctorGenerationBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cfg        config.ProviderConfig
+		detected   int
+		wantSev    doctorSeverity
+		wantDetail string
+	}{
+		{
+			name:       "shipped default against a stock ollama window",
+			cfg:        config.ProviderConfig{Default: "ollama", Model: "llama3.2", MaxTokens: 32768},
+			detected:   4096,
+			wantSev:    doctorWarn,
+			wantDetail: ">= the whole 4096-token context window",
+		},
+		{
+			name:    "explicit context_window wins over detection",
+			cfg:     config.ProviderConfig{Default: "ollama", Model: "llama3.2", MaxTokens: 32768, ContextWindow: 131072},
+			wantSev: doctorPass,
+		},
+		{
+			name:       "over half the window still warns",
+			cfg:        config.ProviderConfig{Default: "ollama", Model: "llama3.2", MaxTokens: 24000, ContextWindow: 32768},
+			wantSev:    doctorWarn,
+			wantDetail: "claims most of the",
+		},
+		{
+			name:     "undetectable window is not an error",
+			cfg:      config.ProviderConfig{Default: "ollama", Model: "llama3.2", MaxTokens: 32768},
+			detected: 0,
+			wantSev:  doctorPass,
+		},
+		{
+			// A cloud provider bills max_tokens against a separate output
+			// allowance, so the same numbers are correct there.
+			name:    "not applicable to a cloud provider",
+			cfg:     config.ProviderConfig{Default: "anthropic", Model: "claude-opus-5", MaxTokens: 32768, ContextWindow: 8192},
+			wantSev: doctorPass,
+		},
+		{
+			// The legacy OpenAI-compat path talks to the same server, so it has
+			// the same shared budget underneath.
+			name:       "legacy ollama compat is still ollama",
+			cfg:        config.ProviderConfig{Default: "openai", BaseURL: "http://localhost:11434/v1", Model: "llama3.2", MaxTokens: 32768, ContextWindow: 8192},
+			wantSev:    doctorWarn,
+			wantDetail: "8192-token context window",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			detected := tc.detected
+			withDetectOllamaInfo(t, func(context.Context, string, string) (ollamainfo.Result, bool) {
+				if detected <= 0 {
+					return ollamainfo.Result{}, false
+				}
+				return ollamainfo.Result{ContextWindow: detected}, true
+			})
+			got := doctorGenerationBudgetCheck(context.Background(), &config.Config{Provider: tc.cfg})
+			if got.Severity != tc.wantSev {
+				t.Fatalf("severity = %v, want %v; detail=%q", got.Severity, tc.wantSev, got.Detail)
+			}
+			if tc.wantDetail != "" && !strings.Contains(got.Detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to contain %q", got.Detail, tc.wantDetail)
+			}
+			if tc.wantSev == doctorWarn && got.Fix == "" {
+				t.Error("a warn row must name the corrective knob")
+			}
+		})
+	}
+}

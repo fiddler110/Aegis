@@ -579,7 +579,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	runCronCmd := cronShellRunner(sb, cwd)
 	cronRun := newCronRunFunc(cronStore, taskMgr, runCronCmd,
-		func(ctx context.Context, j cron.Job) (bool, string) { return s.cronPermCheck(ctx, j) }, logger)
+		func(ctx context.Context, j cron.Job) (bool, string) { return s.cronPermCheck(ctx, j) },
+		func(j cron.Job, status, output string) { s.cronNotify(j, status, output) }, logger)
 	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
 
 	// Shared team task list for agent-team coordination (P5.1); reuses the
@@ -903,9 +904,13 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 	switch cfg.Backend {
 	case "container", "auto":
 		opts := sandbox.ContainerOpts{
-			Image:    cfg.Image,
-			Network:  cfg.Network,
-			Priority: sandbox.ParseRuntimes(cfg.Priority),
+			Image:      cfg.Image,
+			Network:    cfg.Network,
+			Priority:   sandbox.ParseRuntimes(cfg.Priority),
+			Limits:     cfg.Limits.Sandbox(),
+			Persistent: cfg.Persistent,
+			SessionTTL: cfg.SandboxSessionTTL(),
+			Logger:     logger,
 		}
 		// Only "container" honors an explicit forced runtime; "auto" always detects.
 		if cfg.Backend == "container" {
@@ -928,6 +933,41 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 		// container backend for isolation sees it. See docs/security_scan.md.
 		if notice := sandbox.SocketPrivilegeNotice(csb.DetectedRuntime()); notice != "" {
 			logger.Info(notice)
+		}
+		// P60.1: a configured cap that this runtime's CLI cannot express is
+		// worse than no cap, because the operator believes it is in force. Say
+		// so at selection time rather than leaving them to infer a bound from
+		// the config file.
+		// P60.2: a persistent container owns state, which means it also owns the
+		// obligation to say so — both that commands now share an environment
+		// (the thing that makes the backend usable) and that a runtime without
+		// the verified detach/exec surface silently keeps the old per-command
+		// behavior. Reap first: a daemon that crashed mid-session left a
+		// container that will not expire for hours.
+		if cfg.Persistent {
+			if sandbox.SupportsPersistentContainer(csb.DetectedRuntime()) {
+				logger.Info("sandbox: persistent session container enabled — state persists between tool calls",
+					"runtime", csb.DetectedRuntime(), "ttl", cfg.SandboxSessionTTL())
+				reapCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if n, rerr := sandbox.ReapOrphanSandboxes(reapCtx, csb.DetectedRuntime(), logger); rerr != nil {
+					logger.Warn("sandbox: could not scan for orphaned containers", "err", rerr)
+				} else if n > 0 {
+					logger.Info("sandbox: reaped orphaned containers", "count", n)
+				}
+				cancel()
+			} else {
+				logger.Info("sandbox: sandbox.persistent has no effect on this runtime — one container per command, so no state survives a tool call",
+					"runtime", csb.DetectedRuntime())
+			}
+		}
+		if lim := cfg.Limits.Sandbox(); !lim.Empty() {
+			if sandbox.SupportsResourceLimits(csb.DetectedRuntime()) {
+				logger.Info("sandbox resource limits", "runtime", csb.DetectedRuntime(),
+					"memory", lim.Memory, "cpus", lim.CPUs, "pids", lim.PIDs)
+			} else {
+				logger.Warn("sandbox: configured sandbox.limits are NOT enforced on this runtime — its CLI does not accept resource flags; a runaway command inside the sandbox can still consume the host",
+					"runtime", csb.DetectedRuntime())
+			}
 		}
 		return csb, false, "", nil
 	case "os":
@@ -1088,6 +1128,13 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			Cost:                tracker,
 			BudgetUSD:           budgetUSD,
 			MaxTokensPerRun:     maxTokensPerRun,
+			// P59.4: inherited whole rather than as a divided share. The
+			// share computation above carries exactly two dimensions
+			// (swarm.WithBudgetOverride), and widening that seam to a third is
+			// its own change; inheriting whole bounds each teammate
+			// individually, which is weaker than a share but strictly better
+			// than the uncapped alternative for an opt-in, off-by-default key.
+			MaxGeneratedTokensPerRun: s.cfg.Cost.MaxGeneratedTokensPerRun,
 			// A spawned teammate inherits the operator's time bound rather than
 			// getting its own share of it, unlike the cost/token floors above:
 			// those are divisible (spend is additive across siblings), elapsed

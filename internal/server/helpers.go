@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/hooks"
 	"github.com/fiddler110/aegis/internal/mcp"
+	"github.com/fiddler110/aegis/internal/notify"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
@@ -251,11 +253,18 @@ func cronShellRunner(sb sandbox.Backend, defaultCwd string) func(ctx context.Con
 // rather than a fixed decision so each fire re-reads the daemon's *current*
 // permission mode/rules, not whatever they were when the scheduler was
 // constructed.
+// notifyRun, when non-nil, is additionally invoked once per fire attempt with
+// the same (status, output) pair written to the audit record — but only for a
+// job that opted in via Job.Notify (P58.1). Without this, a scheduled job's
+// result reached the user only if they remembered to call cron_history, which
+// makes a scheduled digest or watch job pointless: the whole value of firing
+// it unattended is being told the outcome without asking.
 func newCronRunFunc(
 	cronStore *cron.Store,
 	taskMgr *task.Manager,
 	runCronCmd func(ctx context.Context, command, dir string, emit func(string)) error,
 	permCheck func(ctx context.Context, j cron.Job) (bool, string),
+	notifyRun func(j cron.Job, status, output string),
 	logger *slog.Logger,
 ) cron.RunFunc {
 	return func(j cron.Job) {
@@ -279,9 +288,18 @@ func newCronRunFunc(
 				outBuf.WriteString(s)
 				emit(s)
 			}
-			recordRun := func(status string) {
-				if err := cronStore.RecordRun(context.Background(), j.ID, firedAt, status, outBuf.String()); err != nil {
+			// Ends one fire attempt: persist the durable audit record and, for
+			// an opted-in job, deliver the outcome out-of-band. Both take the
+			// same (status, output) pair and fire at the same three points, so
+			// they share one call site — a notification that disagreed with
+			// the audit log would be worse than no notification.
+			finishRun := func(status string) {
+				out := outBuf.String()
+				if err := cronStore.RecordRun(context.Background(), j.ID, firedAt, status, out); err != nil {
 					logger.Error("cron: record run", "job", j.ID, "err", err)
+				}
+				if j.Notify && notifyRun != nil {
+					notifyRun(j, status, out)
 				}
 			}
 
@@ -299,7 +317,7 @@ func newCronRunFunc(
 				blocked := fmt.Sprintf("cron job %q blocked: %s", j.Title, reason)
 				logger.Warn("cron: job blocked by permission check", "job", j.ID, "reason", reason)
 				capture(blocked)
-				recordRun("blocked")
+				finishRun("blocked")
 				return "", errors.New(blocked)
 			}
 			runErr := runCronCmd(ctx, j.Command, j.Workdir, capture)
@@ -307,10 +325,73 @@ func newCronRunFunc(
 			if runErr != nil {
 				status = "error"
 			}
-			recordRun(status)
+			finishRun(status)
 			return "", runErr
 		})
 	}
+}
+
+// cronNotifyExcerptBytes caps how much of a job's output is inlined into the
+// human-readable notification message. A desktop notification is truncated by
+// the OS well before this, but the same message also reaches webhook
+// consumers that render it as a single line; the untruncated output travels
+// separately in Event.Output.
+const cronNotifyExcerptBytes = 280
+
+// cronNotify delivers one cron fire outcome over the configured notification
+// channels (P58.1). It reads s.notifier at call time rather than capturing it,
+// because the cron.RunFunc is constructed in Server.New before the notifier
+// field is assigned — and returns silently when no channel is configured,
+// which is the common case.
+func (s *Server) cronNotify(j cron.Job, status, output string) {
+	if s.notifier == nil {
+		return
+	}
+	title := j.Title
+	if title == "" {
+		title = j.Command
+	}
+	ev := notify.Event{
+		JobID:  j.ID,
+		Title:  title,
+		Output: output,
+	}
+	switch status {
+	case "ok":
+		ev.Status = notify.StatusCompleted
+		ev.Message = fmt.Sprintf("Cron job %q completed", title)
+	case "blocked":
+		ev.Status = notify.StatusBlocked
+		ev.Message = fmt.Sprintf("Cron job %q was blocked by the permission gate", title)
+	default:
+		ev.Status = notify.StatusError
+		ev.Message = fmt.Sprintf("Cron job %q failed", title)
+	}
+	// The output is the payload for a digest-style job, so lead the message
+	// with a slice of it rather than making the user go read cron_history.
+	if excerpt := cronOutputExcerpt(output); excerpt != "" {
+		ev.Message += ": " + excerpt
+	}
+	s.notifier.Notify(context.Background(), ev)
+}
+
+// cronOutputExcerpt flattens a run's captured output into a single-line
+// excerpt suitable for a notification body, or "" when there was no output.
+func cronOutputExcerpt(output string) string {
+	flat := strings.Join(strings.Fields(output), " ")
+	if flat == "" {
+		return ""
+	}
+	if len(flat) > cronNotifyExcerptBytes {
+		// Trim on a rune boundary — a byte slice can split a multi-byte
+		// character and produce U+FFFD in the notification.
+		cut := flat[:cronNotifyExcerptBytes]
+		for len(cut) > 0 && !utf8.ValidString(cut) {
+			cut = cut[:len(cut)-1]
+		}
+		flat = cut + "…"
+	}
+	return flat
 }
 
 // cronPermCheck is the fire-time permission check for cron jobs

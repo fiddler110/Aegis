@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider/sse"
 )
 
 func TestTranslateToolResultUsesName(t *testing.T) {
@@ -1090,5 +1091,307 @@ func TestStreamMidStreamConnectionDropIsBackendUnavailable(t *testing.T) {
 	}
 	if !provider.IsBackendUnavailableError(gotErr) {
 		t.Errorf("mid-stream connection drop = %v, want it classified backend-unavailable (P50.1)", gotErr)
+	}
+}
+
+// TestStreamWithoutDoneChunkIsAnError (P59.3): a body that closes cleanly
+// mid-generation produces no read error, so before this fix the adapter emitted
+// EventDone with zeroed usage and StopEndTurn — a truncated answer presented as
+// a complete one. It must be classified as a transport failure instead, so the
+// existing backend-unavailable resume path handles it.
+func TestStreamWithoutDoneChunkIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		// Well-formed content chunks, then a clean EOF — no done:true ever.
+		_, _ = w.Write([]byte("{\"message\":{\"content\":\"partial \"}}\n"))
+		_, _ = w.Write([]byte("{\"message\":{\"content\":\"answer\"}}\n"))
+	}))
+	defer srv.Close()
+
+	stream, err := New(WithBaseURL(srv.URL)).Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var gotErr error
+	sawDone := false
+	for ev := range stream {
+		switch ev.Type {
+		case provider.EventError:
+			gotErr = ev.Err
+		case provider.EventDone:
+			sawDone = true
+		}
+	}
+	if sawDone {
+		t.Error("emitted EventDone for a stream that never sent a completion chunk")
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error event for a stream truncated before done:true")
+	}
+	if !provider.IsBackendUnavailableError(gotErr) {
+		t.Errorf("truncated stream = %v, want it classified backend-unavailable so the P50.1 resume path handles it", gotErr)
+	}
+}
+
+// TestStreamDoneChunkStillCompletes guards the other side of P59.3: a normal
+// stream that does end with done:true must still finish with EventDone and no
+// error event.
+func TestStreamDoneChunkStillCompletes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte("{\"message\":{\"content\":\"hi\"}}\n"))
+		_, _ = w.Write([]byte("{\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":11,\"eval_count\":2}\n"))
+	}))
+	defer srv.Close()
+
+	stream, err := New(WithBaseURL(srv.URL)).Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var done *provider.Event
+	for ev := range stream {
+		if ev.Type == provider.EventError {
+			t.Fatalf("unexpected error event: %v", ev.Err)
+		}
+		if ev.Type == provider.EventDone {
+			e := ev
+			done = &e
+		}
+	}
+	if done == nil {
+		t.Fatal("expected EventDone")
+	}
+	if done.Stop != provider.StopEndTurn {
+		t.Errorf("stop = %q, want %q", done.Stop, provider.StopEndTurn)
+	}
+	if done.Usage == nil || done.Usage.InputTokens != 11 || done.Usage.OutputTokens != 2 {
+		t.Errorf("usage = %+v, want 11/2", done.Usage)
+	}
+}
+
+// TestStreamIdleTimeoutAbortsAStalledRunner (P59.2): headers arrive, one chunk
+// streams, then the runner wedges and sends nothing more. ResponseHeaderTimeout
+// no longer applies and the streaming client has no overall timeout, so before
+// the idle bound this blocked forever. It must end as a transport error — the
+// same classification a crashed server gets, so the existing resume path
+// handles it — and the message must name the knob.
+func TestStreamIdleTimeoutAbortsAStalledRunner(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte("{\"message\":{\"content\":\"thinking\"}}\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	stream, err := New(WithBaseURL(srv.URL), WithStreamIdleTimeout(100*time.Millisecond)).
+		Stream(context.Background(), provider.Request{
+			Model:    "llama3.2",
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+		})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	type outcome struct {
+		err  error
+		done bool
+	}
+	res := make(chan outcome, 1)
+	go func() {
+		var o outcome
+		for ev := range stream {
+			switch ev.Type {
+			case provider.EventError:
+				o.err = ev.Err
+			case provider.EventDone:
+				o.done = true
+			}
+		}
+		res <- o
+	}()
+
+	select {
+	case o := <-res:
+		if o.done {
+			t.Error("a stalled stream must not produce EventDone")
+		}
+		if o.err == nil {
+			t.Fatal("expected an error event once the idle bound elapsed")
+		}
+		if !provider.IsBackendUnavailableError(o.err) {
+			t.Errorf("stalled stream = %v, want it classified backend-unavailable so the resume path handles it", o.err)
+		}
+		if !strings.Contains(o.err.Error(), "stream_idle_timeout") {
+			t.Errorf("error should name the knob that relaxes it, got %q", o.err.Error())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream never ended — the idle bound did not fire")
+	}
+}
+
+// TestStreamIdleTimeoutResetsPerChunk is the false-positive guard: a model that
+// keeps emitting, slowly, must never be cut off. Chunks arrive at ~60ms against
+// a 200ms bound, for longer in total than the bound itself — only a bound that
+// resets per chunk survives that.
+func TestStreamIdleTimeoutResetsPerChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		for i := 0; i < 8; i++ {
+			_, _ = w.Write([]byte("{\"message\":{\"content\":\"tok \"}}\n"))
+			w.(http.Flusher).Flush()
+			time.Sleep(60 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte("{\"done\":true,\"done_reason\":\"stop\"}\n"))
+	}))
+	defer srv.Close()
+
+	stream, err := New(WithBaseURL(srv.URL), WithStreamIdleTimeout(200*time.Millisecond)).
+		Stream(context.Background(), provider.Request{
+			Model:    "llama3.2",
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+		})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	sawDone := false
+	for ev := range stream {
+		if ev.Type == provider.EventError {
+			t.Fatalf("a slow but progressing stream was aborted: %v", ev.Err)
+		}
+		if ev.Type == provider.EventDone {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Error("expected the slow stream to complete normally")
+	}
+}
+
+// TestStreamIdleTimeoutDisabled: a negative configured value must turn the
+// bound off entirely, leaving the pre-P59.2 behavior available to anyone who
+// wants an unbounded stream.
+func TestStreamIdleTimeoutDisabled(t *testing.T) {
+	a := New(WithStreamIdleTimeout(-1))
+	if got := a.resolveStreamIdleTimeout(); got != 0 {
+		t.Errorf("negative config = %v, want 0 (disabled)", got)
+	}
+	if got := New().resolveStreamIdleTimeout(); got != sse.DefaultStreamIdleTimeout {
+		t.Errorf("unset = %v, want the %v default", got, sse.DefaultStreamIdleTimeout)
+	}
+}
+
+// TestStreamClampsNumPredictToHeadroom (P59.1): num_ctx covers prompt and
+// completion out of one budget, so a max_tokens larger than what the prompt
+// leaves is a request to be truncated mid-answer. The adapter must send what
+// actually fits — and must never inflate a caller's smaller request.
+func TestStreamClampsNumPredictToHeadroom(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		numCtx    int
+		maxTokens int
+		prompt    string
+		check     func(t *testing.T, sent int)
+	}{
+		{
+			// The shipped default pair on a stock Ollama window.
+			name: "default max_tokens against a stock window", numCtx: 4096, maxTokens: 32768, prompt: "hi",
+			check: func(t *testing.T, sent int) {
+				if sent >= 4096 || sent <= 0 {
+					t.Errorf("num_predict = %d, want a positive value below the 4096 window", sent)
+				}
+			},
+		},
+		{
+			name: "room to spare passes through untouched", numCtx: 131072, maxTokens: 8192, prompt: "hi",
+			check: func(t *testing.T, sent int) {
+				if sent != 8192 {
+					t.Errorf("num_predict = %d, want the requested 8192 — the clamp must never lower a request that fits", sent)
+				}
+			},
+		},
+		{
+			name: "a caller asking for little still gets little", numCtx: 131072, maxTokens: 64, prompt: "hi",
+			check: func(t *testing.T, sent int) {
+				if sent != 64 {
+					t.Errorf("num_predict = %d, want the requested 64 — the clamp is one-directional", sent)
+				}
+			},
+		},
+		{
+			// The prompt has already eaten the window. A negative num_predict
+			// means "generate until the context is full" to Ollama, which is
+			// the exact behavior being avoided, so a floor applies.
+			name:   "prompt already over the window floors rather than going negative",
+			numCtx: 512, maxTokens: 32768, prompt: strings.Repeat("token ", 4000),
+			check: func(t *testing.T, sent int) {
+				if sent != minNumPredict {
+					t.Errorf("num_predict = %d, want the %d floor", sent, minNumPredict)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody wireRequest
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				_, _ = w.Write([]byte(`{"message":{"content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+			}))
+			defer srv.Close()
+
+			stream, err := New(WithBaseURL(srv.URL), WithNumCtx(tc.numCtx)).Stream(context.Background(), provider.Request{
+				Model:     "llama3.2",
+				MaxTokens: tc.maxTokens,
+				Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: tc.prompt}}}},
+			})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			for range stream {
+			}
+			if gotBody.Options == nil {
+				t.Fatal("expected options to be sent")
+			}
+			tc.check(t, gotBody.Options.NumPredict)
+		})
+	}
+}
+
+// TestStreamWithoutNumCtxLeavesMaxTokensAlone: with no window known, the
+// adapter has nothing to reconcile against and must not invent a bound — the
+// pre-P59.1 behavior for any caller that never sets a context window.
+func TestStreamWithoutNumCtxLeavesMaxTokensAlone(t *testing.T) {
+	var gotBody wireRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	stream, err := New(WithBaseURL(srv.URL)).Stream(context.Background(), provider.Request{
+		Model:     "llama3.2",
+		MaxTokens: 32768,
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+	if gotBody.Options == nil || gotBody.Options.NumPredict != 32768 {
+		t.Errorf("num_predict = %+v, want the unclamped 32768 when no window is known", gotBody.Options)
 	}
 }

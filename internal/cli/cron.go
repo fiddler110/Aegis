@@ -51,6 +51,9 @@ func newCronListCmd() *cobra.Command {
 				if j.AutoApprove {
 					approve = "  [AUTO_APPROVE — fires unattended, bypassing interactive approval]"
 				}
+				if j.Notify {
+					approve += "  [NOTIFY — delivers its output over the configured notify channels]"
+				}
 				title := j.Title
 				if title == "" {
 					title = "(untitled)"

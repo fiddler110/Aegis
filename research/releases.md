@@ -8,7 +8,627 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-03 — **P56.1: the two surfaces that never rendered the model's
+**P59.11 — the tool-failure nudge's 25.9x, closed by finding the missing observation (SHIPPED
+2026-08-05).** P59.10 fixed the zero-tool nudge's 51x prefill cost and deliberately left the
+tool-failure nudge (P52.3) at **25.9x** (67ms → 1745ms of next-run prefill), for a stated reason:
+the zero-tool nudge is *spent* by construction — its injection gate can never fire again after a
+tool round — whereas the tool-failure nudge was merely **bounded** to one per run, so retracting it
+early would have removed a live correction while the failures it addressed could still recur. A
+measured cost traded for an unmeasured behavioral risk.
+
+The gap was an observation, not a mechanism. A tool-failure corrective is spent when **the failure
+streak it was correcting ends** — which the engine already computes, since
+`toolFailureTracker.reset()` clears both counters on a round with no errors at all. That is now
+exposed as `cleared()`, and `nudgeState.retractSpentToolFailure` strips the nudge at that point
+instead of at run end.
+
+What makes it safe is the second half: the nudge is now **re-injectable**. The old "one per run"
+bound was doing two jobs — stop the engine nagging on every subsequent failing round, and bound the
+total. Only the first matters, and it is now held by `toolFailureOutstanding`: while an un-retracted
+nudge is in the conversation no second one is ever injected, so a run that keeps failing still sees
+exactly one nudge and then the abort threshold, unchanged. A second nudge is reachable only after a
+demonstrated recovery *and* a fresh threshold-length streak — a new episode, quoting the new error,
+and an **append**, which no prefix cache minds. `toolFailureNudgeMax` (3) bounds the pathological
+oscillation. So the corrective is never absent while it is needed, and the break costs the recovery
+window rather than the whole remainder of the run.
+
+The roadmap's alternative (retract from the persisted transcript only) stays rejected for the same
+reason P59.10 rejected it: P25.3 wants the scaffolding out of a later turn's context too.
+
+Tests: `TestP5911ToolFailureNudgeRetractedOnRecovery` replaces the old measurement-holding test and
+asserts the break; `TestP5911ToolFailureNudgeReinjectedAfterRecovery` holds the property that makes
+early retraction safe (streak → recovery → relapse gets a second nudge, and never two at once);
+`TestP5911ToolFailureNudgeSurvivesAnOngoingStreak` is the converse — a run that never recovers keeps
+the corrective in front of the model to the end, so the 25.9x case still exists and is now exactly
+the case where paying it is correct. The pre-existing P52.3 suite
+(`TestToolFailureNudgeAfterThreeAllErrorRounds`, the abort test) is unchanged and still passes,
+which is the check that the one-per-run behavior it encodes was preserved rather than relaxed.
+
+---
+
+**Last updated:** 2026-08-05 (fourth pass) — **P59.10 + P52.16 + the P59.9 loose end: the
+measure-first batch.** Three items that had been parked in Tier 4 with explicit "do not build
+without a measurement" instructions. The measurements were taken; two of the three promoted and
+shipped, and the third corrected a *rationale* rather than a behavior. The batch's shape is that in
+every case the recorded hypothesis was partly wrong, and the measurement is what said which part.
+
+**P59.10 — nudge retraction versus Ollama's prefix cache.** `nudges.retractAll` strips corrective
+scaffolding out of the middle of `conv.Messages` once a run settles, so the next run re-sends an
+edited history and a local runner's KV prefix cache is invalid from the first changed token onward.
+The item's promotion trigger was "a measured turn shows `prompt_eval_duration` failing to collapse".
+It does not collapse. Measured against Ollama 0.30.10 / qwen3:14b, the next run's first turn cost
+**3604ms of prefill against 71ms unretracted — 51x**, and within noise of a cold prefill of the whole
+conversation (3711ms), meaning the cache was not dented but wholly lost. `prompt_eval_count` stayed
+at the full prompt length throughout (4621 either way), reconfirming P35.13: duration, not count, is
+the cache-hit signal.
+
+The measurement also **refuted the item's own cost model**. P59.10 assumed the damage was "bounded to
+the tail — nudges are appended late in a run". That holds for exactly one of the three families
+measured. The guard corrective genuinely is a tail edit (85ms → 57ms, free) because the guard only
+runs once a final answer exists. But the **zero-tool nudge is injected as early in a run as it is
+possible to be** — its gate fires only while `toolRoundsCompleted == 0` — so retracting it at run end
+invalidates every token the run produced, and the more productive the run the more its own retraction
+costs. The tool-failure nudge lands mid-run and measured 25.9x.
+
+The fix is a change of **when**, not whether. `nudgeState.retractSpentZeroTool` strips the zero-tool
+nudge the moment the first tool round completes — which is the moment the engine already treats it as
+spent, since the injection gate can never fire again that run. Nothing the run could still have used
+is removed, and only that one round sits downstream of the break instead of the whole run. Measured
+back to **73ms (1.0x)**, i.e. indistinguishable from never having retracted. The roadmap's own
+proposed fix (retract from the persisted transcript only, leaving the in-memory conversation intact)
+was **not** taken: P25.3 states the scaffolding has no business in the durable transcript *or a later
+turn's context*, and that fix sacrifices the second half — it would have bought the prefill back by
+re-opening the leak P25.3 exists to close. The tool-failure nudge was left at 25.9x: it is
+bounded to one per run, so unlike the zero-tool nudge retracting it early would permanently remove a
+correction while the failures it addresses can still recur — a measured prefill cost traded for an
+unmeasured behavioral risk. (**P59.11 closed that later the same day**, by making the retraction
+conditional on the streak actually clearing and the nudge re-injectable — see the write-up above.)
+Tests: `internal/engine/prefixcache_test.go` is a committed measurement
+harness (break position and re-prefill tokens per family, plus an `AEGIS_P5910_DUMP` hook that emits
+the replay inputs for the Ollama-side half), with `TestP5910ZeroToolNudgeStillRetractedFromTranscript`
+holding the P25.3 property the timing change must not weaken.
+
+**P52.16 — native Ollama tool-result disambiguation.** Ollama's native API correlates tool results by
+*name*, with no ID, so three parallel `read_file` calls — which the engine explicitly permits, since
+read-capability tools run concurrently in `runTools` — produce three wire messages identical in their
+correlation metadata, leaving position as the only signal. The item was measure-first because the
+proposed mitigation (prefixing each result with a compact echo of its call) could plausibly *hurt* by
+adding noise. A paired A/B on a 3-parallel-read attribution task, graded on naming the file a fact
+came from, found the conflation is real and confined to where the item predicted it — small models:
+
+| model | bare | echoed |
+|---|---|---|
+| qwen2.5-coder:1.5b | 32/40 | 38/40 |
+| qwen3:14b | 9/10 | 10/10 |
+| gemma4:12b | 20/20 | 20/20 |
+
+One methodological note worth keeping: a first run scored 10/10 in *both* arms because the fixture's
+file bodies named their own path, letting the bare arm attribute from content and never exercising
+the missing metadata at all. Removing that confound is what surfaced the effect.
+
+Shipped narrower than proposed. The echo is applied **only to rounds that call the same tool more
+than once** (`ambiguousRound`) — the case where the protocol genuinely cannot disambiguate. A round
+calling each tool once keeps today's exact bytes, so the common case pays no tokens and, more
+importantly, no prefix-cache churn from a re-encoded history. The rendering (`toolResultEcho`) sorts
+keys and truncates values so it is deterministic and bounded: an echo that varied run-to-run would
+break the very cache `translate`'s ordering rationale exists to protect. Tests:
+`internal/provider/ollama/toolresultecho_test.go` (5 cases: unambiguous rounds byte-identical,
+same-tool rounds disambiguated, order-independence, value bounding, non-scalar args skipped).
+
+**P59.9's loose end — the concurrency default was a stated policy, not a measured one.** P59.9
+shipped `provider.max_concurrent_requests` defaulting local backends to 1, and the roadmap recorded
+that the measurement behind that number was never taken. Taking it **kept the default and corrected
+the reason for it**. The stated rationale was correctness: that Ollama splits its KV cache across
+`OLLAMA_NUM_PARALLEL` slots, so a request sized against the full `num_ctx` is silently truncated.
+That does not reproduce. A needle test — four concurrent ~12k-token requests at `num_ctx` 16384, each
+carrying a passphrase in its *first* tokens, the region truncation drops first — returned all four
+verbatim, with identical `prompt_eval_count` (12034) and zero failures. Nothing was truncated and
+nothing was evicted.
+
+What concurrency actually costs is latency, and the aggregate gain is well short of linear: 11.2
+tok/s at K=1, 15.6 (1.40x) at K=2, 17.9 (1.60x) at K=4, while p50 turn latency goes 5.7s → 6.7s →
+9.8s. So a second in-flight request buys ~40% throughput for ~70% worse turn latency — the wrong
+trade for an interactive agent, a defensible one for a batch of independent sub-agents. The default
+stays 1 on that basis. The correction matters because the old comment told an operator that raising
+the depth risked silent truncation, which would have deterred exactly the swarm use case where it is
+the right call; prefix-cache reuse also survives concurrency intact (29–47ms prefills at every depth
+measured), so raising it forfeits nothing but latency headroom. No behavior change — the doc comments
+in `internal/provider/admission.go` and `internal/config/config.go` and the `docs/providers.md`
+section now state what was measured.
+
+**Last updated:** 2026-08-05 — **P59.9 + P60.2 + P60.4: three places where the harness owned no
+policy for something it was nonetheless doing.** Nothing bounded how many requests reached one local
+model server; nothing owned a sandbox's lifetime, so it had none; and nothing separated the harness
+from the model when a live run failed.
+
+**P59.9 — no admission control in front of a local backend.** The daemon serves concurrent sessions,
+swarm spawns sub-agents, and the guard/compaction/title passes are requests of their own. Against a
+cloud endpoint that is harmless — the provider fans them out across a fleet. Against one Ollama
+server it is false in a way that costs correctness rather than latency: every request is built
+believing it owns the full detected `num_ctx` (`WithNumCtx`, `engine_build.go`), while Ollama splits
+its KV cache across `OLLAMA_NUM_PARALLEL` slots and evicts models to fit. Detection reads `/api/ps`
+for the *loaded* allocation, which is a correct reading of one resident model and says nothing about
+N concurrent claims on it. On a 16GB box that is the OOM-and-evict path — and it lands squarely on
+the two failures the P59.x batch already built for: a shrunken per-slot window is P59.1's truncation,
+an eviction mid-run is P59.2's stall.
+
+Built as `provider.WithAdmissionControl`, a semaphore decorator wired in `providerfactory`, with
+`provider.max_concurrent_requests` as the policy: 0 is *auto* (local backends get 1, cloud stays
+unbounded), a positive value applies to any backend, and a negative one opts a local backend back out
+— which is why 0 could not simply mean "unbounded". Three placement decisions carry the design. The
+slot is held for the **whole life of the stream**, not until `Stream` returns, because the request
+occupies the model until its last token; a cancelled run releases immediately (the forwarder drains
+the base channel in the background) so an abandoned stream cannot permanently cost one unit of a
+depth that defaults to 1. It sits **inside** the retry decorator, so a backoff sleep does not sit on
+a slot a queued caller could use. And it is applied **per built adapter**, not once around the
+composed chain, so a local primary with a cloud fallback does not hand the cloud its single-GPU queue
+depth. "Local" is deliberately broader than the factory's data-residency test — any loopback
+`base_url` (LM Studio, llama.cpp, a proxy) is one GPU too.
+
+It deliberately does **not** detect VRAM: P20.3 and P17.5 both rejected that and their reasons hold.
+A queue depth is a policy an operator sets, not a capacity a harness infers — which is also the
+answer to why `swarm.AdaptiveLimiter` was not extended instead. That limiter bounds *spawns*,
+reactively, by observing whether measured speedup tracks n; that is the right question for "is this
+host CPU-bound" and the wrong one for a fixed VRAM budget, which is not something you discover after
+the fact. This makes the limiter's job easier rather than replacing it. The default of 1 is a
+judgement, not a measurement: the item asked for a measured before/after to size it, and until that
+exists the conservative end of its own suggested range is the honest choice, with the key documented
+so a host with room says so explicitly.
+
+**P60.2 — the container sandbox was a fresh container per command, so nothing persisted between tool
+calls.** `ContainerBackend.Exec` built `docker run --rm …` for *every* invocation and `Close()` was a
+no-op because there was nothing to close. The visible cost was start latency; the real cost was that
+no state survived a tool call. An installed toolchain, a warmed build cache, a background dev server,
+a half-applied migration — discarded the moment the command returned, with the workspace bind-mount
+the only channel through which anything was observable. An agent could not do the ordinary thing
+(`npm install`, then `npm test`) without collapsing it into one shell string. That is why the
+container backend was hard to recommend: for multi-step work it was behaviourally *worse* than
+`local`, not merely slower.
+
+Built as the shape Orchard Env uses: `run -d` per workspace directory, `exec` per command, teardown
+on `Close()` — on by default (`sandbox.persistent`) wherever the CLI surface is verified, which is
+docker and podman only, the same "only where verified" rule `OCIHardeningFlags` and `ResourceFlags`
+already follow. wslc and Apple Containers keep the per-command behavior and the daemon says so at
+startup rather than letting an operator infer persistence that isn't there. Explicitly not adopted:
+Orchard's in-pod HTTP agent, which exists to bypass the Kubernetes API server across ~1000 sandboxes;
+`docker exec` gets the whole benefit on one host.
+
+One claim was narrowed while building it, because the intuitive version is wrong: **filesystem and
+process state persist, shell state does not.** Each `exec` is a new process with a new shell, so `cd`
+and `export` still die with the command — exactly as they do between two shell calls on the `local`
+backend. What now survives is everything installed, everything written outside the mount, and
+anything left running.
+
+The honest cost is that `--rm`-per-command is what made the old design leak-free, and this trades
+that for owned state. Three things buy it back, and all three are the design rather than hygiene:
+every container carries `aegis.sandbox` and `aegis.sandbox.owner=<pid>@<host>` labels; its entrypoint
+is a bounded `sleep` (`sandbox.session_ttl_sec`, 4h) under `--rm`, so an orphan removes *itself* with
+nothing needing to run; and a daemon start reaps containers whose owning pid is verifiably absent on
+this same host. That reaper's safety property is asymmetric on purpose — PID reuse can only make it
+too conservative (an orphan left to its TTL), never too aggressive (killing a live session's
+sandbox). Alongside: a failed start degrades to one-shot runs and says so *once* rather than per tool
+call; a vanished container is restarted and the command retried exactly once, so a TTL expiry reads
+as a slow command rather than a failed one; the container count is capped per backend so an unusual
+set of directories cannot leak; the detached run carries the *same* hardening flags, resource limits
+and network posture a per-command run does, so persistence never becomes a quiet way to get a weaker
+container; and the subprocess swarm worker closes its own sandbox, since one leaked container per
+spawned teammate adds up fast. Tested against a fake container CLI, so the whole lifecycle is covered
+by `go test ./...` on a machine with no container runtime installed.
+
+**P60.4 — the live-workflow eval had no cross-harness control group.** `TestLiveWorkflow` measures
+Aegis and the model *fused together*: when a run failed its workflow-shape assertions, nothing in the
+result distinguished "this local model is too weak" from "our scaffolding regressed". That was only
+ever knowable because the same model had passed before — no help at all for a model being tried for
+the first time, and the P25.x regressions it caught were all scaffolding.
+
+The adoptable idea from Orchard is its evaluation discipline, not its infrastructure: hold the
+environment fixed and swap the harness. The obstacle was that the task lived *inside* the test —
+`writeSeededBugFixture` was Go that materialized a fixture and the assertions read Aegis's SSE
+stream. Built the split the item asked for: `internal/eval/workflowtask.go` now owns the fixture, the
+prompt and the **outcome** check (re-run the program and check the answer — never the agent's claim
+of success), harness-independent, with a `Harness` seam whose implementations are Aegis-over-HTTP+SSE
+and any other CLI agent (`AEGIS_EVAL_BASELINE_HARNESS='claude -p {prompt}'`). `Compare` turns two
+outcomes into an attribution: only-Aegis-failed is **scaffolding** (a test failure), both-failed is
+**model** and an unusable baseline is **unknown** (both skips — a control group must be able to
+*decline* to blame the harness, or a weak local model turns this tier red and teaches people to
+ignore it).
+
+Two boundaries are deliberate. The SSE-shape assertions (tool-call budget, no `find /` detours, no
+guard meta-text leakage, token accounting) stay Aegis-only: they read our own event stream, and a
+baseline required to emit them would restrict the comparison to harnesses built like ours — exactly
+the bias a control group must not have. And the outcome check rejects the two ways to "pass" by
+deleting the problem (hardcoding the answer, dropping the data source), because a harness comparison
+is worthless if passing can mean that. Because nothing in the task file talks to a model or the
+network, it is ordinary code unit-tested by plain `go test ./...` — the live tiers stay behind their
+build tags, and the baseline tier is opt-in on top, since a stale baseline is worse than none.
+
+---
+
+**Last updated:** 2026-08-05 — **P59.7 + P60.1 + P59.8: three seams where a number, a limit and a
+constraint each lived in only one of the places that needed them.** Different subsystems, one shape:
+something the system already knew was not reaching the component whose behavior depended on it.
+
+**P59.7 — the engine's context window was immutable while the adapter's was not.** The P47.5b
+overflow escalation makes the served `num_ctx` a monotonic runtime floor on the Ollama adapter,
+outranking any per-request value. But `engine.contextWindowTokens` was captured once at
+`engine.New` and never re-read, and the compactor learns its window from the server's per-model
+detection path. Nothing connected the escalation to either — so a mid-run raise left the engine
+compacting against the pre-escalation number, burning summarizer calls (minutes, on a local model)
+on a conversation that now had room, during the very overflow recovery that raised the window.
+Latent rather than live, since only the CLI drive escalates today, and about to become live the
+moment a daemon-hosted drive (P52.12) uses the escalation.
+
+Built as a *reading* seam matching the writing one: `provider.ContextWindowFloorReporter` +
+`provider.RaisedContextWindow`, which unwraps the retry/failover decorators exactly as
+`RaiseContextWindow` does — because the escalation is written *through* that chain, so anything that
+stopped at the retry decorator would report 0 forever and be silently wrong. The Ollama adapter
+reports `numCtxRaised`, not `numCtx`, and that distinction is the whole correctness argument:
+`numCtx` is the adapter-wide *fallback* for requests carrying none of their own, so a consumer
+reading it would mistake a configured default for an escalation and override a correctly-detected
+per-model window (P52.1) with a server-wide one. `numCtxRaised` is non-zero only because
+`RaiseContextWindow` made it so. `engine.Options.ContextWindowFloor` is a func rather than a value
+for the same reason the bug existed — a value would be captured at construction again — and the
+engine takes the larger of it and the constructed window before every turn, so the floor is a floor
+on both sides rather than an override. Nil (every non-escalating backend) changes nothing.
+
+One consumer was deliberately *not* connected: the summarizer's own token budget. The CLI drive had
+already recorded that as a considered choice ("a larger num_ctx only buys physical headroom against
+a transient overshoot"), and it is right — sizing the summary request to the new room spends the
+recovery's winnings on the recovery. What was wrong was the *trigger*, not the budget. The comment
+now says which of the two is deliberate, so the split reads as a decision rather than as the same
+oversight one layer down.
+
+Tests: an engine run whose conversation trips the trigger against the constructed window and must
+not compact once a floor reports room; the inverse for a zero floor (no escalation yet) and a
+smaller-than-configured one, since a floor that could shrink the window would silently disable
+proactive compaction for every backend that can't escalate; and the decorator-unwrap guard through
+failover→retry→base.
+
+**P60.1 — the container sandbox set no resource limits.** `OCIHardeningFlags` covers the privilege
+axis correctly (`--cap-drop=ALL --security-opt=no-new-privileges`) and there was nothing at all on
+the resource axis: no `--memory`, no `--cpus`, no `--pids-limit`, on any of the three run paths. A
+model-driven `go build`, `npm ci` or test run could consume the whole host, and on a 16GB machine
+that host is also running the daemon *and* the model server — so the failure mode is the OOM killer
+choosing between Ollama and Aegis, not a failed command. `--rm`-per-command bounds a runaway's
+*duration* and never its peak, and the peak is what binds: one `go build` is enough.
+
+Built: `sandbox.ResourceLimits` (memory, cpus, pids) + `sandbox.ResourceFlags(rt, lim)`, appended by
+all three run paths, configured under `sandbox.limits.*` and defaulted conservatively (4G / 2 CPUs /
+1024 pids) — sized to let ordinary build and test work through while making a runaway a failed
+command. Values pass through to the runtime CLI verbatim in its own vocabulary ("4G", "512M", "1.5")
+rather than being parsed here; the engines already own that vocabulary and a second, poorer parser
+would only add ways to be wrong. Each field is independently optional, so emptying one is the
+documented escape hatch for a heavy toolchain.
+
+The per-runtime split is the part with teeth, and it is decided the way `OCIHardeningFlags` decides
+its own: a flag a runtime does not know is **not a weaker limit, it is a container that refuses to
+start** — which is exactly how the pre-P24 hardening copy silently killed every wslc scanner run,
+reported as "the tool is missing from the image". So a flag appears only where it is verified.
+docker/podman take all three. Apple Containers takes `--memory` and `--cpus` (both documented
+Resource Options of `container run`) and not `--pids-limit`, which its CLI does not have. wslc takes
+nothing: its resource surface is unverified, and applying an unverified flag to the one runtime
+already known to reject unknown arguments is a trade this codebase has paid for once. That gap is
+surfaced rather than hidden — `SupportsResourceLimits` backs a startup WARN when limits are
+configured but the selected runtime cannot enforce them, because a cap the operator believes is in
+force and isn't is worse than no cap. `aegis sandbox test` runs with the limits applied for the same
+reason: a test that passes uncapped and a real run that dies at the cap is the failure that command
+exists to catch.
+
+Tests: the per-runtime subset matrix, field independence (including a non-positive pids count
+meaning "uncapped" rather than `--pids-limit -1`, and whitespace-trimmed values), the flags actually
+reaching all three built command lines with the hardening flags undisplaced and the image still
+preceding the shell invocation, and an end-to-end config check that the defaults survive the layers
+and arrive in the sandbox package's shape.
+
+**P59.8 — Ollama structured outputs (`format`) for the schema guard.** `wireRequest` had no `Format`
+field, so grammar-constrained decoding was unused anywhere in the harness. This does **not** reopen
+the parked question of grammar-constrained *tool calls* (P53.6's lead); it takes the one caller with
+no open design question behind it. `guard.SchemaGuard` requires the final text to parse as a JSON
+object carrying every required key, and that requirement was expressible to the backend ahead of
+generation and wasn't being expressed — the guard asked in prose, then hoped, tolerating a leading
+```json fence precisely because the hope often fails.
+
+Two pieces, as the item sequenced them. The plumbing: `provider.Request.Format` (a JSON Schema),
+passed through by the native Ollama adapter as `format` and ignored by every other adapter —
+deliberately, and documented as such. OpenAI's `response_format` wants a *named* schema plus a
+decision about strict mode (which would reject the open-ended property schemas this carries), and
+Anthropic has no equivalent; ignoring it is safe because it is an optimization and never a
+correctness requirement — the guard's own check still runs and is what decides. A backend that
+ignores the constraint has to keep failing loudly rather than passing on the strength of a
+constraint that was never applied.
+
+The use: `guard.SchemaFormat` renders the required keys as `{"type":"object", properties:{k:{}},
+required:[…]}` — presence only, open values, open `additionalProperties`, because that is exactly
+what `SchemaGuard` asserts and a schema that invented types would constrain the model beyond what
+the guard will enforce, under a grammar it cannot argue with.
+
+The one design decision the item left implicit is *which turn* gets constrained, and the answer is
+**only the corrective retry after a schema-guard failure**, never the ordinary turns. A first turn is
+where the model does the work — reading files, calling tools — and a grammar forcing a JSON object
+out of it forbids exactly that. By the time a schema guard has rejected an answer, the remaining task
+genuinely is "emit this object", which is the one moment the constraint describes the intent instead
+of fighting it. Tools are suppressed on that turn for the same reason, reusing the existing
+`suppressTools` path. The constraint is consumed per retry rather than latched for the run, so a
+second failure re-applies it and no unrelated later turn inherits it.
+
+Tests: the first turn unconstrained and still carrying tools while the retry carries the schema and
+no tools; an llm-mode guard's retry staying free generation *with* its tools (that retry's whole
+point can be "go fix the file you wrote"); the per-retry rather than per-run lifetime across two
+failures; `SchemaFormat` requiring exactly the keys the guard checks, de-duplicated and trimmed, with
+`{}` value schemas and nil for nothing-to-require; and two adapter wire tests — the schema arriving
+verbatim, and `format` absent from the serialized body on every ordinary request (a decoded struct
+cannot tell an omitted key from a null, so the raw body is checked).
+
+Full suite green.
+
+---
+
+**Previously, 2026-08-05:** **P59.4 + P59.5 + P59.6: the Tier-2 half of the P59.x
+local-execution review, minus P59.7.** Three items that each take a mechanism built for a cloud
+provider and ask what it means on one local GPU. None is a correctness bug; all three are cases where
+the harness gives a locally-correct answer to a question the local user was not asking.
+
+**P59.4 — one token budget was answering two different questions.** `cost.max_tokens_per_run` sums
+`prompt_eval_count` across every turn, and on Ollama that count is the *full prompt each turn*, not a
+per-turn delta (as `ollama.go`'s translate doc establishes at length, and correctly). For a priced
+provider that is exactly right — you are billed on the whole prompt every turn and the number is the
+spend. For an unpriced local backend it is the only budget that does anything (`BudgetUSD` is a
+documented no-op there), so users reach for it as a *work* budget and get an ~O(N²)-in-conversation-
+length number instead: a 20-turn run on an 8k window reports ~160k tokens consumed while the model
+generated a small fraction of that, and a cap set with local work in mind aborts far earlier than
+intended. The item offered two fixes — document the current meaning, or re-point the cap at generated
+tokens for unpriced providers — and flagged the second's cost: it splits one key's meaning across
+provider classes. **Neither was taken; a third avoids that cost.** `cost.max_tokens_per_run` keeps its
+meaning untouched for everyone already using it, and a separate `cost.max_generated_tokens_per_run`
+counts output tokens only, backed by a new `cost.Tracker.TotalGeneratedTokens()`. Two keys, each
+saying in its own name what it counts, and no config value whose meaning depends on which provider
+you pointed it at. Both are checked at the same two gates as the other budgets, via one
+`tokenBudgetExceeded()` helper — the generation cap first, so a run that blew both is told the more
+specific thing. The abort messages carried equal weight: the old one ("used N of M token limit") gave
+a user nothing to reason from precisely because the number it reported was not the quantity they had
+in mind, so the context-budget abort now says the count includes the whole prompt every turn and
+names the key that bounds generated output instead. Sub-agents inherit the new cap **whole** rather
+than as a divided share — `swarm.WithBudgetOverride` carries exactly two dimensions and widening that
+seam is its own change — which bounds each teammate individually and is documented as such.
+
+**P59.5 — a documentation recommendation was re-introducing the exact churn `keep_alive` exists to
+prevent.** `docs/providers.md` recommended configuring a fast `small_model` before enabling the
+output guard, and `engine_build.go` correctly resolved that model's own context window (P52.4). The
+advice is sound on Anthropic, where the small model is separate remote capacity. On one local Ollama
+server it inverts: the guard fires on every final answer plus its corrective retries, and each call
+naming a model other than the resident one can evict that model and force a full cold reload on the
+next turn — on a 16GB-VRAM box, every post-guard turn. That is precisely what
+`providerfactory.defaultOllamaKeepAlive` and the P33.9 `load_duration` telemetry were built to
+eliminate, and the engine was already *reporting* it (the cold-load notice would fire on every
+post-guard turn) while attributing it to nothing. `guardModel` now resolves per backend: an explicit
+`output_guard.model` first, then `provider.small_model` on a cloud provider, then the session's own
+model — which on a local backend means the guard runs on the weights already loaded. The new
+`output_guard.model` key is the deliberate half: an operator with the VRAM to hold two models still
+gets the split, but by asking for it rather than inheriting it from a key meant for compaction and
+titles. `docs/providers.md` now splits cloud from local instead of giving one recommendation for
+both; the advice about avoiding a *thinking* model for the guard's PASS/FAIL contract is unchanged
+and still correct, with the added note that on a thinking session model with no VRAM headroom,
+leaving the guard off beats paying a reload per turn.
+
+**P59.6 — prose-emitted tool calls were only detected on turns with no tool calls.** Both the P34.2
+notice and the P53.6 shim parse sat inside the `len(toolUses) == 0` branch, so a model that emitted
+one *real* tool call and printed two more as prose in the same reply got neither: no notice, and
+under the shim the printed calls were silently dropped rather than parsed or declined — after which
+the model reasoned about results that never existed. That partial-protocol shape is characteristic of
+the 14-27B class the shim was built for; the zero-call gate encoded "can this model ever produce the
+protocol" into a check that should have been asking "how often", which is exactly the distinction
+P53.4's conformance rate exists for. Both checks now run on any turn whose reply text carries the
+shape. The notice branches on what actually happened — a mixed turn is reported as a partial-protocol
+reply naming what did not run, not as a model that cannot call tools, since it demonstrably can. Its
+"no tool call has succeeded all run" gate is **kept** for the zero-native-call case, where it is
+still doing real work: a model quoting JSON after its calls have succeeded is quoting, not failing,
+and warning there is the false positive `TestToolCallAsTextNoticeSkippedAfterRealToolCall` exists to
+prevent. The shim half needed the mixed-round decision the old gate sidestepped, and it went the way
+the item called the safer default: **decline and correct**, consistent with the parser's existing
+decline-rather-than-repair posture — a turn written half in each dialect is genuinely ambiguous about
+intent, and dispatching both halves would double-execute a model that wrote one call twice. The
+correction rides `shimMixedPending` to just *after* the tool round, the same mechanism
+`loopNudgePending` uses and for the same reason: the native calls are real and must still be answered
+with their results, so nothing may be appended between an assistant's tool_use blocks and them. It
+reuses `shimFormatNudgePrefix`, so it retracts with the rest of the shim scaffolding and is bounded
+by the same two-per-run budget.
+
+Tests: a two-case table proving the generation budget ignores 800k of accumulated input and fires
+exactly on generated output, a direct assertion that the context-budget abort names the other key and
+that the generation budget takes precedence when both are blown, the local/cloud/explicit matrix for
+`guardModel` (the P25.3 small-model regression is untouched and still passes — the local case is its
+inverse, not its contradiction), a mixed-round notice test asserting the real call still executes,
+and a shim mixed-round test asserting the printed call never runs, the correction lands after the
+results rather than between them, and it is retracted from the durable transcript. Full suite green,
+race detector clean on `engine`/`server`/`cost`/`config`. **P59.7 remains open** — it is the one
+Tier-2 P59.x item that is latent rather than live, and its fix is a plumbing change to how three
+consumers read the context window.
+
+---
+
+**Previously, 2026-08-04:** **P59.1 + P59.2 + P59.3: the harness now reasons about the
+generation, not only about the prompt.** The Tier-1 half of the P59.x local-execution review batch,
+built the day it was filed. The three items share one root: every part of the context subsystem
+reasons about the *prompt* — how big it is, when to compact it, how to detect the served window —
+and nothing reasoned about the *completion* or about the stream carrying it. On Ollama that is a
+false split, because `num_ctx` is one budget covering both.
+
+**P59.1 — `max_tokens` was never reconciled with the served window.** `provider.max_tokens` defaults
+to 32768 and rode straight through to `options.num_predict` in the same request that carries
+`num_ctx`, and detected windows are routinely 4096 (Ollama's own server default). Nothing validated
+the pair — not `internal/config`, not `aegis doctor`. The engine compounded it by compacting at a
+flat 85%, a threshold that reserves headroom for prompt *growth* and was never sized against
+generation: at 4096 it left ~614 tokens to answer in. What made this Tier 1 rather than a config
+footgun is that the recovery path *amplifies* it — exhausting the context mid-generation yields
+`done_reason: "length"` → `StopMaxTokens` → the engine's "continue from where you left off" retry,
+which grows the context, shrinks the next turn's headroom, truncates sooner, and burns to
+`maxIterations`. Silent front-truncation reached through generation instead of prompt growth, which
+is the one direction nothing watched. Fixed in all three of the places the write-up identified,
+each independently shippable: `compactionTrigger(window, maxTokens)` sizes the trigger as
+`window - min(maxTokens, window/2)` less a margin, floored at half the window and **capped at the
+old 85%** so it can only ever compact earlier, never later (a property a table test asserts across
+the whole window/max_tokens grid — compacting *later* would be a new way to overrun a window);
+the native adapter clamps `num_predict` at request-build time to the headroom the prompt actually
+leaves, using the same `internal/tokenest` estimate the engine compacts against so the two agree
+about how full a window is, one-directional so a caller asking for a short answer still gets one,
+and floored at 512 because the honest number for an over-full prompt is negative, which Ollama reads
+as "generate until the context is full" — the exact behavior being avoided; and `aegis doctor` grew
+a **generation budget** row that warns when `max_tokens` claims more than half the served window,
+naming the knob. The doctor row is the one that reaches the user *before* the failure, and it fires
+on the shipped default config against a stock Ollama install.
+
+**P59.2 — nothing bounded the gap between streamed tokens, and no budget could fire mid-turn.**
+`sse.NewStreamingClient` leaves `Timeout` at zero and bounds only `ResponseHeaderTimeout`, which is
+correct and well-argued (the timeout covers reading the body too, and Ollama withholds the header
+until prefill finishes — why P38.1 raised it to 30m). But once headers arrive nothing watched the
+gap between chunks: a wedged runner left `for ev := range stream` blocked indefinitely, and
+`MaxWallClockPerRun` — the one budget whose entire purpose is "don't spend more than N minutes on
+this" — is polled at exactly two gates, before each model turn and before each tool round, so it was
+structurally unable to fire during the phase where local backends actually hang. Both halves fixed.
+An inter-chunk idle watchdog in the adapter's `consume` closes the body when nothing arrives for
+`provider.stream_idle_timeout` (default 10 minutes, negative disables); it resets per *delivered
+line* rather than per parsed chunk, since a line we skip is still evidence the runner is alive. The
+resulting error lands on the existing P50.1 branch, so a wedged server takes the same
+`waitForBackend`/resume-from-disk path a crashed one already did — no new recovery machinery, which
+is what made this cheap. The bound is deliberately generous: prefill precedes the headers, so every
+gap it sees is an inter-token gap, and a bound tight enough to catch a hang quickly would guillotine
+a legitimately slow run (the regression shape P52.15 avoided by leaving the wall clock off by
+default). Separately the wall-clock budget became a `context.WithTimeout` on the run in addition to
+the polls, so it bounds the turn it is already inside. That needed one piece of care: cancellation
+surfaces as whatever the cancelled call returned — a bare `ErrInterrupted`, or an adapter transport
+error a caller *classifies as backend-unavailable and would then wait for and resume*, turning a
+deliberate budget abort into a retry loop. `wallClockOverride` re-derives the real reason at all
+three exits (loop-top cancel, turn error, tool-round error), leaving an ordinary interrupt its own
+identity. Tested at both ends: a run that hangs inside a turn aborts on the wall clock, and a run
+with no budget configured still hangs until its caller cancels — the pre-existing contract, and the
+reason the knob is opt-in.
+
+**P59.3 — a stream ending without a `done` chunk was indistinguishable from a finished turn.** In
+`consume`, `usage` started zeroed and `stop` defaulted to `StopEndTurn`, and `EventDone` was emitted
+at function end regardless of whether `chunk.Done` was ever seen. A server closing the body cleanly
+mid-stream leaves `scanner.Err()` nil, so neither the P50.1 mid-stream-read-failure path nor the
+P35.12 line-limit path fired; the engine saw zero usage, substituted estimates and flagged
+`IsEstimated` — the same treatment a legitimately usage-free provider gets — so a truncated response
+surfaced as a complete short answer with a stop reason claiming the model chose to end its turn. Now
+tracked with a `sawDone` flag and classified as a transport error, which is what it is: the same
+failure P50.1 handles, minus the read error. Cheap on its own, and it also removes the ambiguity that
+would have made P59.2's idle-timeout trips hard to tell from clean short answers — which is why it
+went first.
+
+Docs updated (`docs/configuration.md`, `docs/providers.md`), including one pre-existing drift caught
+alongside: the response-header-timeout section still documented the pre-P38.1 5-minute default.
+Full Go suite green, `-race` clean on `internal/engine` and `internal/provider/ollama`.
+
+**Previously, 2026-08-04** — **P58.1 + P58.2: closing the two gaps between "task runner" and
+"daily assistant".** Filed off a whole-solution review (2026-08-04) asking a question this project
+had never explicitly asked: is Aegis usable as an everyday copilot for research, documentation, and
+code analysis, rather than as a security/threat-modeling task runner? Most of the answer was yes and
+already built — `deep-research` is a real structured-research workflow, the report and diagram
+skills produce real deliverables, sessions are daemon-backed with a picker and no git-repo
+requirement, and `workspacetrust` gates *project config*, not plain chat in an arbitrary directory,
+so asking a general question outside a repo has no friction. Two gaps were real, and both were
+narrow:
+
+**P58.1 — a scheduled job could not tell anyone anything.** `internal/cron` is a generic recurring
+scheduler, not a security-specific one, so "give me a 9am digest" was already expressible. But a
+fire's outcome only ever landed in the `cron_runs` audit table, readable via a `cron_history` tool
+call from inside a session. Nothing pushed. That makes a digest or watch job self-defeating: the
+entire value of firing unattended is being *told* the outcome, and the user had to remember to go
+ask. The fix needed no new subsystem — `internal/notify` (desktop via osascript/notify-send/toast,
+plus an optional JSON webhook) had existed since P5.4 and was wired to exactly one producer,
+background-session completion. So cron became its second producer rather than growing a parallel
+mechanism. `Job.Notify` is a per-job opt-in (schema-migrated like `auto_approve` and `workdir`
+before it, so existing rows are untouched), surfaced on `cron_create`, `cron_list`, `aegis cron
+list`, and the operator-facing API view. It is per-job rather than a global switch on purpose:
+whether an outcome is worth interrupting a human for is a property of the job — a daily digest
+wants delivery on success, a minute-by-minute watch job would be a firehose — and off-by-default
+means no existing job changes behaviour. Delivery hangs off the *same* call site that writes the
+audit record, taking the same `(status, output)` pair, because a notification that disagreed with
+the durable log would be worse than no notification; it fires on all three outcomes, including
+`blocked`, which got its own `notify.Status` rather than being folded into `error` since the two
+want different reactions (blocked means it never ran and the permission setup is what needs
+attention). `Event` gained `JobID` and `Output`: the output *is* the payload for a digest, so the
+webhook carries it in full and the human-readable message leads with a rune-safe single-line
+excerpt, rather than a notification that says "job completed" and sends the user back to
+`cron_history` to read the thing they asked to be told about. Tested at the fire seam: notification
+on success/failure/blocked with status and output matching the audit record exactly, silence for a
+job that did not opt in, `Notify` surviving a `Toggle` rewrite (the whole row is rewritten, so a
+field that scanned but never persisted would reset silently), and the excerpt's flattening and
+UTF-8-boundary truncation.
+
+**P58.2 — no generic "document this codebase" skill.** `documentation-as-code` reads like one and
+is not: it only activates when an *external* DaC repository supplies `docforge.py` and an
+organization's branded template families, and it explicitly defers to `latex-report` otherwise.
+`html-report`/`latex-report` are report-shaped — a standalone deliverable about a moment in time for
+a reader outside the repo. Nothing covered the everyday ask: a README, an ARCHITECTURE doc, a
+package overview, an API reference, an onboarding guide — a file a maintainer edits next month,
+living next to the code. `document-codebase` fills that, and the distinction drives its content:
+repo documentation is judged by whether it is still true in six months, so the skill is organised
+around the four ways generated docs fail — restating the code, documenting what was inferred rather
+than read, duplicating detail that guarantees drift, and bulldozing human-authored prose. Hence:
+settle audience and document type first (they do not merge), read before describing, run the
+commands you document or flag them unverified, cite `file:line` while drafting but keep only stable
+anchors in the delivered text, write one section per edit (the same anti-monolithic-write
+constraint P39.14 measured), and default to surgical edits over replacement when a doc already
+exists. Surfaced as `/document` in the TUI alongside `/report` and `/research`, on the same stated
+rationale those two carry — a discoverable entry point beats relying on the model noticing a trigger
+phrase. Being a built-in it stays dormant until enabled, so it costs nothing until asked for.
+
+Both items also corrected pre-existing documentation drift found on the way: every built-in-skills
+list in `docs/` and `CLAUDE.md` was still missing `documentation-as-code`, and CLAUDE.md now states
+how to choose between the three confusably-named documentation skills, since picking wrong produces
+a correctly-built document of the wrong kind. Full Go suite green.
+
+**Previously, 2026-08-03** — **P57.1: a model looping on its own wrong theory no longer kills
+the drive.** The 2026-08-03 P38.1 live re-confirmation run did everything right except finish. The
+phased drive reconned, scaffolded and filled all five content phases with no mis-route, recovered
+itself from a mid-findings context overflow, and phase 6's verifier caught real cross-file defects
+and correctly told them apart from mechanical ID-format ones (confirmed independently:
+`normalize_ids.py --check` reported the suite already canonical). It re-opened the owning content
+phase, exactly as P47.9 intends. Then the re-opened phase decided a `T0`-vs-`T01` zero-padding
+offset existed between two files — it did not — re-read the same ~30 lines five turns running, the
+engine's one corrective nudge failed to break the cycle, and the engine aborted. A second manual
+invocation against the same target and the same model, with a fresh context, fixed every defect and
+reached a clean suite (verify.py 19/19, inventory 10/10, lint_dfd 6/6). That contrast is the whole
+diagnosis: not the model, not the check scripts — **the context**, which by then held four
+restatements of a wrong theory and nothing contradicting it.
+
+The drive already knew how to survive two errors that are terminal to the engine but resumable at
+the phase level: a context overflow (P47.2/P47.7) and a consecutive-tool-failure trip
+(P52.3). Both recover the same way — discard the context, re-read the suite from disk. The loop
+abort was the one remaining engine error still fatal, and its own rationale
+(`recoverToolFailureStall`'s "a model re-guessing arguments from a context dense with its own
+failures") describes the loop case at least as well. So it is now classified the same way:
+`engine.ErrLoopDetected` is a wrapped sentinel (matched with `errors.Is`, never by message text),
+and `recoverReasoningLoop` gives it a **fresh-context reset with its own budget** — separate from
+the overflow and tool-failure budgets, so two failure modes cannot spend each other's allowance —
+at all three engine-error sites: content phases, the phase-6 verify/quality loop, and the P47.9
+re-entry where it actually fired. Two resets, then a resumable stop, deliberately tighter than the
+overflow budget: an overflow is a mechanical limit a fresh context genuinely clears, while a model
+looping may be looping on something real.
+
+The reset alone would only be half the fix, because the same phase with the same prompt can rebuild
+the same theory. So a loop-recovered retry also carries **`StuckLoopDirective`** — the roadmap's
+filed candidate direction, which is the same shift from "figure out what's wrong" to "here is
+what's wrong" that `scaffold.py` (P38.4) made for structure. It tells the fresh context that the
+verifier's `file:line` report already in its prompt *is* the finding rather than a hint, that
+identifier numbering/padding/offsets are not a scheme to be worked out (the checks compare exact
+strings), not to re-read a file it has already read this turn, and to leave a defeating item and
+fix the others. It takes a `withReport` flag because a content phase's prompt carries a PENDING
+file list rather than a verifier report, and pointing a stuck model at a report its prompt does not
+contain would invite the exact invention the directive exists to remove. It is not a second copy of
+`ActNowNudge`: that one fights narration, and this model was calling tools every single turn.
+
+Tested at the seam the failure lives on, matching the package's existing convention (its `Engine`
+is concrete, so there is no fake-engine end-to-end): the verdict's budget/escalation behaviour, the
+sentinel's separation from the tool-failure and wall-clock ones in both directions, the directive's
+content and its two variants, and the wiring — that the directive leads each of the three prompts
+after a loop abort, that the verifier evidence survives alongside it, and that an ordinary first
+attempt never pays for it. The abort's user-visible message text is unchanged. Full Go suite green.
+**Live re-test still owed**, and it is the real closure condition — this is a fix aimed at a
+failure shape observed once, and the roadmap item said so when it was filed.
+
+**Previously, 2026-08-03** — **P56.1: the two surfaces that never rendered the model's
 markdown now do.** The models write headings, tables, fenced code and lists; two of the three
 places that display them threw that structure away. The TUI has rendered markdown through glamour
 since TQ10, so this was easy to believe was solved everywhere — it was not. `aegis chat` wrote

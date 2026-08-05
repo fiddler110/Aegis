@@ -198,7 +198,7 @@ func TestBuildOne_OllamaDefaultsKeepAliveResident(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "", 0, nil, nil)
+	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "", 0, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestBuildOne_OllamaKeepAliveExplicitWins(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "-1", 0, nil, nil)
+	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "-1", 0, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
@@ -243,4 +243,88 @@ func TestBuildOne_OllamaKeepAliveExplicitWins(t *testing.T) {
 	}
 	for range stream {
 	}
+}
+
+// TestBuild_AdmissionBoundsLocalNotCloud is the P59.9 wiring check: the queue
+// depth is resolved per backend, so an unconfigured local primary is bounded by
+// default and an unconfigured cloud primary is not.
+func TestBuild_AdmissionBoundsLocalNotCloud(t *testing.T) {
+	local, err := Build(&config.Config{Provider: config.ProviderConfig{Default: "ollama", MaxRetries: 2}}, nil)
+	if err != nil {
+		t.Fatalf("Build(ollama): %v", err)
+	}
+	if got := provider.AdmissionDepth(local); got != config.MaxConcurrentRequestsDefaultLocal {
+		t.Errorf("local admission depth = %d, want %d", got, config.MaxConcurrentRequestsDefaultLocal)
+	}
+
+	cloud, err := Build(&config.Config{Provider: config.ProviderConfig{Default: "anthropic", APIKey: "fake-key", MaxRetries: 2}}, nil)
+	if err != nil {
+		t.Fatalf("Build(anthropic): %v", err)
+	}
+	if got := provider.AdmissionDepth(cloud); got != 0 {
+		t.Errorf("cloud admission depth = %d, want 0 (unbounded)", got)
+	}
+}
+
+// TestBuild_AdmissionExplicitValues: a positive value applies to any backend,
+// and a negative one opts a local backend back out of the default bound.
+func TestBuild_AdmissionExplicitValues(t *testing.T) {
+	cloud, err := Build(&config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "fake-key", MaxRetries: 2, MaxConcurrentRequests: 3,
+	}}, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := provider.AdmissionDepth(cloud); got != 3 {
+		t.Errorf("explicit cloud admission depth = %d, want 3", got)
+	}
+
+	unbounded, err := Build(&config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", MaxRetries: 2, MaxConcurrentRequests: -1,
+	}}, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := provider.AdmissionDepth(unbounded); got != 0 {
+		t.Errorf("explicitly unbounded local admission depth = %d, want 0", got)
+	}
+}
+
+// TestBuild_AdmissionIsPerBackendAcrossFailover: a local primary must not hand
+// its single-GPU queue depth to a cloud fallback target, and the cloud target
+// must not leave the local primary unbounded either.
+func TestBuild_AdmissionIsPerBackendAcrossFailover(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", MaxRetries: 2, AllowCloudFallback: true,
+		Fallback: []config.ProviderFallbackConfig{{Provider: "anthropic", Model: "claude-x"}},
+	}}
+	t.Setenv("ANTHROPIC_API_KEY", "fake-key")
+	a, err := Build(cfg, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := provider.AdmissionDepth(a); got != config.MaxConcurrentRequestsDefaultLocal {
+		t.Errorf("primary (ollama) admission depth = %d, want %d", got, config.MaxConcurrentRequestsDefaultLocal)
+	}
+
+	// The failover decorator keeps its targets private, so assert the same
+	// property on the function its construction loop calls: admit() is what
+	// decides per target, and it must decide "unbounded" for the cloud one.
+	base := &noopAdapter{name: "anthropic"}
+	if got := provider.AdmissionDepth(admit(cfg, "anthropic", "", base, testLogger(&bytes.Buffer{}))); got != 0 {
+		t.Errorf("cloud fallback admission depth = %d, want 0 (unbounded)", got)
+	}
+	if got := provider.AdmissionDepth(admit(cfg, "ollama", "", base, testLogger(&bytes.Buffer{}))); got != config.MaxConcurrentRequestsDefaultLocal {
+		t.Errorf("local fallback admission depth = %d, want %d", got, config.MaxConcurrentRequestsDefaultLocal)
+	}
+}
+
+// noopAdapter is a bare Adapter used where only the decorator chain matters.
+type noopAdapter struct{ name string }
+
+func (n *noopAdapter) Name() string { return n.name }
+func (n *noopAdapter) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event)
+	close(ch)
+	return ch, nil
 }

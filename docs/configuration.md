@@ -119,6 +119,16 @@ provider:
   task_routing: false
 
   # Maximum tokens in the model's response. Capped by the model's own limits.
+  #
+  # On Ollama this shares ONE budget with the prompt: num_ctx covers both, so a
+  # max_tokens at or above context_window is a request for more output than the
+  # whole conversation is allowed to occupy. Aegis reconciles the pair at two
+  # points (P59.1) — proactive compaction reserves room for the completion
+  # rather than triggering at a flat 85%, and the native adapter clamps the
+  # per-request num_predict to the headroom the prompt actually leaves — but
+  # neither makes a badly-sized pair a good idea. `aegis doctor` reports it
+  # under "generation budget". Cloud providers bill max_tokens against a
+  # separate output allowance, where a large value is correct.
   max_tokens: 8192
 
   # Retry count for transient failures (connection errors, rate limits).
@@ -172,6 +182,48 @@ provider:
   # than lower context_window if a run dies mid-turn with
   # "timeout awaiting response headers" (P35.5). See docs/providers.md#response-header-timeout.
   response_header_timeout: 0
+
+  # How long a streamed response may go with NO chunk at all before the request
+  # is abandoned, in seconds (P59.2). response_header_timeout above stops
+  # applying the moment the headers arrive and the streaming client has no
+  # overall timeout (one would cap a legitimately long turn), so before this key
+  # a model runner that wedged mid-generation left the turn blocked forever —
+  # and cost.max_wall_clock_per_run could not help, since it is checked between
+  # turns, never inside one. The bound resets on every chunk, so a slow but
+  # progressing model is never cut off. A trip is reported as a transport
+  # error, which routes into the same wait-and-resume path a crashed server
+  # takes. 0 = default (10 minutes); negative disables the bound entirely.
+  stream_idle_timeout: 0
+
+  # How many requests may be in flight against the backend at once (P59.9);
+  # the rest queue inside the adapter until a slot frees. This is admission
+  # control, not a rate limit: the slot is held for the whole life of a
+  # stream, because that is how long the request occupies the model.
+  #
+  #   0 (unset) — auto: a LOCAL backend gets 1, a cloud backend is unbounded
+  #   n > 0     — at most n concurrent requests, whatever the backend
+  #   negative  — explicitly unbounded, local included
+  #
+  # "Local" means the native ollama adapter, or any OpenAI-compatible adapter
+  # pointed at a loopback base_url (LM Studio, llama.cpp, a local proxy).
+  # Those are bounded by default because a local server is ONE GPU: every
+  # concurrent request is built believing it owns the full detected num_ctx,
+  # while Ollama splits its KV cache across OLLAMA_NUM_PARALLEL slots and
+  # evicts models to fit. Two concurrent requests do not get two GPUs — they
+  # get one GPU serving two smaller windows, which is the truncation
+  # (context) and eviction (stall) this bound exists to prevent. Queueing is
+  # honest there; oversubscribing is not. Cloud endpoints fan out across a
+  # fleet, so bounding them by default would only slow multi-agent work down.
+  #
+  # It applies at the adapter layer, so every caller in the daemon passes
+  # through it — sessions, in-process swarm agents, the phased drive, the
+  # output guard, compaction. It does NOT bound a separate process (the
+  # subprocess swarm worker builds its own adapter).
+  #
+  # Aegis deliberately does not detect VRAM or infer a capacity here. This is
+  # a policy you set; raise it if your host genuinely has room (a big card,
+  # OLLAMA_NUM_PARALLEL tuned to match).
+  max_concurrent_requests: 0
 
   # Ordered (provider, model) pairs tried in sequence after the primary
   # adapter exhausts max_retries (P5.9). Empty = no failover.
@@ -295,7 +347,29 @@ cost:
   # output + cache, across every turn) reaches this amount. Always
   # enforceable — token counts are present even when usage was estimated or
   # the model is unpriced, unlike budget_usd.
+  #
+  # Read this as a *context/billing* budget, not a work budget. It sums the
+  # whole prompt on every turn, which is precisely what a priced provider
+  # bills you for — but Ollama's prompt_eval_count is also the full prompt
+  # each turn rather than a per-turn delta, so on a local model the sum grows
+  # with conversation length as well as with work done (a 20-turn run on an 8k
+  # window reports ~160k tokens while the model may have generated a few
+  # thousand). If what you mean is "don't do more than this much work", use
+  # max_generated_tokens_per_run below.
   max_tokens_per_run: 0
+
+  # 0 = unlimited (the default). Aborts a run once the model has *generated*
+  # this many tokens — output only, with no input or cache tokens folded in
+  # (P59.4). This is the work budget; max_tokens_per_run above is the context
+  # budget. They are separate keys rather than one key that changes meaning by
+  # provider class, so neither number is ever ambiguous about what it counted.
+  #
+  # Most useful on a local/Ollama setup, where budget_usd is a silent no-op and
+  # max_tokens_per_run answers a question you weren't asking. Note that spawned
+  # sub-agents inherit this cap whole rather than a divided share (unlike
+  # budget_usd/max_tokens_per_run, which are split across teammates), so N
+  # teammates can each generate up to this much.
+  max_generated_tokens_per_run: 0
 
   # 0 = unlimited (the default). Seconds of wall-clock time a single run may
   # take before it aborts, checked before each model turn and before each tool
@@ -526,14 +600,19 @@ search:
   scan_output: true
 
 
-# ── Background session notifications ──────────────────────────────────────────
-# Alert when a detached session finishes, errors, or needs input.
+# ── Out-of-band notifications ─────────────────────────────────────────────────
+# Alert when a detached session finishes, errors, or needs input — and when a
+# cron job that opted in (cron_create's `notify: true`) fires. These are the
+# channels; what gets sent over them is decided per session/per job.
 notify:
   # Desktop notification via osascript (macOS), notify-send (Linux), or
   # PowerShell toast (Windows). Enabled by default.
   desktop: true
 
   # POST the event JSON to this URL (optional). Leave empty to disable.
+  # The payload carries session_id or job_id, title, status
+  # (completed/error/needs_input/blocked), message, and — for a cron fire —
+  # the run's full captured output in `output`.
   webhook: ""
 
 
@@ -605,6 +684,68 @@ sandbox:
 
   # Allow network access inside containers. false = network-isolated (safer).
   network: false
+
+  # Per-container resource caps (P60.1). The hardening flags Aegis applies
+  # (--cap-drop=ALL, --security-opt=no-new-privileges) cover the privilege
+  # axis; these cover the resource one. Without them a model-driven `go
+  # build`, `npm ci` or test run inside the sandbox can consume the whole
+  # host — and on a machine that is also running the model server, that means
+  # the OOM killer choosing between the model and the daemon rather than a
+  # single failed command. `--rm` per command bounds how long a runaway
+  # lasts, never its peak, and the peak is what binds.
+  #
+  # Values are in the container runtime's own vocabulary and are passed
+  # through verbatim ("4G", "512M", "1.5"). Empty (or 0 for pids_limit)
+  # removes that cap; raise them for a heavy toolchain.
+  #
+  # Enforcement is per-runtime, because a flag a runtime's CLI doesn't accept
+  # is not a weaker limit — it's a container that refuses to start:
+  #   docker/podman  — memory, cpus, pids_limit
+  #   container      — memory, cpus (Apple's CLI has no --pids-limit)
+  #   wslc           — none; its resource surface is unverified, the same
+  #                    reason it gets no hardening flags. The daemon logs a
+  #                    WARN at startup when limits are configured but the
+  #                    selected runtime cannot enforce them, so an operator
+  #                    never infers a bound that isn't there.
+  # Only applies to backend: container (and auto when it selects one).
+  limits:
+    memory: "4G"
+    cpus: "2"
+    pids_limit: 1024
+
+  # One long-lived container per workspace directory for the daemon's
+  # lifetime, with each command run inside it, instead of a fresh
+  # `run --rm` per command (P60.2).
+  #
+  # Why it defaults to true: with a container per command, nothing an agent
+  # does survives the call that did it. An installed toolchain, a warmed
+  # build cache, a background dev server, a half-applied migration — all
+  # discarded the moment the command returns, with the workspace bind-mount
+  # as the only channel through which anything is observable. That made the
+  # container backend behaviourally WORSE than `local` for multi-step work,
+  # not merely slower: an agent could not do `npm install` and then
+  # `npm test` without collapsing them into one shell string.
+  #
+  # What persists and what doesn't: filesystem and process state persist —
+  # anything installed, anything written outside the mount, anything left
+  # running. Shell state does not: each command is a new process with a new
+  # shell, so `cd` and `export` still die with it, exactly as they do
+  # between two shell calls on the `local` backend.
+  #
+  # The container carries the same hardening flags, resource limits and
+  # network posture a per-command run would. Only docker and podman are
+  # supported (verified `run -d`/`exec`/`rm -f` surface); on wslc and Apple
+  # Containers this key has no effect and the daemon says so at startup.
+  # Set false for the strictly leak-free per-command posture.
+  persistent: true
+
+  # How long a persistent container lives when the daemon never gets to tear
+  # it down — SIGKILL, a host that sleeps forever (P60.2). The container is
+  # held open by a `sleep` of this length under `--rm`, so expiry removes it
+  # with nothing needing to run. A daemon start also reaps containers whose
+  # owning process is verifiably gone (matched by label, never touching a
+  # container belonging to a live Aegis process). 0 = 4 hours.
+  session_ttl_sec: 14400
 
   # If backend=container/os and the runtime can't be initialized (e.g. Docker
   # daemon down), the default is to log a warning and fall back to running
@@ -790,11 +931,32 @@ output_guard:
   # Toggle per-session with /guard on|off inside the TUI.
   enabled: true
 
-  # "llm"    — second model call checks the answer against the rubric. Runs on
-  #            provider.small_model when set (recommended, especially for local
-  #            setups — a fast non-thinking judge), otherwise the session model.
+  # "llm"    — second model call checks the answer against the rubric.
   # "schema" — the answer must be valid JSON containing the required keys
+  #
+  # In schema mode the corrective retry after a failure is sent with decoding
+  # constrained to the required shape (P59.8): the required keys are compiled
+  # into a JSON Schema and passed as Ollama's `format`, so the retry cannot
+  # produce a non-conforming object rather than being asked nicely and checked
+  # again. Only the retry is constrained — the first turn is where the model
+  # does the actual work, and tools are suppressed on the constrained turn
+  # since a grammar and a tool schema pull it in two directions. Backends that
+  # can't constrain decoding (OpenAI, Anthropic) ignore it and fall back to
+  # today's ask-and-check behavior; the schema check itself runs either way and
+  # is what actually decides.
   mode: llm
+
+  # Which model runs the verdict. Empty (the default) resolves per backend
+  # (P59.5):
+  #   cloud — provider.small_model when set, a fast non-thinking judge being
+  #           both cheaper and better at the strict PASS/FAIL contract;
+  #   local — the session's own model. The guard fires on every final answer,
+  #           and on one Ollama server naming a second model evicts the
+  #           resident one and pays a full cold reload on the next turn, which
+  #           costs far more than the cheaper verdict saves.
+  # Set it explicitly to override either default — e.g. a small local judge on
+  # a box with the VRAM to keep both models resident.
+  model: ""
 
   # Rubric for llm mode. Empty = built-in rubric (fully addresses request, no
   # unfinished work like TODOs/stubs, grounded in tool output). Clearly-marked
@@ -827,7 +989,7 @@ personas:
 # Skills embedded in the Aegis binary (content-review, html-report,
 # security-audit, architecture-diagram, debug-investigation,
 # redteam-engagement, threat-modeling, latex-report, deep-research,
-# structured-build — see
+# structured-build, documentation-as-code, document-codebase — see
 # `aegis skills list`). Empty by
 # default: they stay dormant (no system-prompt cost) until named here, via
 # `aegis skills enable <name>`, or
@@ -1122,6 +1284,26 @@ cost:
   session_token_cap: 1000000   # refuse new turns once a session hits 1M tokens
   daily_token_cap: 5000000     # refuse new turns once all sessions hit 5M tokens in a UTC day
 ```
+
+**Which token cap you want depends on the question you are asking (P59.4).**
+`max_tokens_per_run` counts input + output + cache, summed over every turn — and
+on Ollama the input half is the *entire prompt, re-counted each turn*, not a
+delta. That is the right number when you are billed on it, and a surprising one
+when you are not: it grows roughly with the square of conversation length, so a
+cap chosen to mean "do at most this much work" trips far earlier than intended,
+and the abort reports a figure that has little to do with how much the model
+actually produced.
+
+For a work budget, cap generated output instead:
+
+```yaml
+cost:
+  max_generated_tokens_per_run: 40000   # abort once the model has written 40k tokens
+```
+
+Both can be set at once; whichever is reached first ends the run, and each abort
+names the key that fired. On a local backend, `max_generated_tokens_per_run` is
+usually the one that means what you meant.
 
 ### Bound a run by time (unattended runs on slow local hardware)
 

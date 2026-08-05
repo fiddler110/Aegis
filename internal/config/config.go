@@ -265,6 +265,59 @@ type SandboxConfig struct {
 	// toolchain installed somewhere non-standard. Each entry that doesn't
 	// exist on the host is silently skipped.
 	OSExtraReadPaths []string `koanf:"os_extra_read_paths"`
+	// Limits caps what a single sandboxed container run may consume (P60.1).
+	// Applies to the "container"/"auto" backends only — the local and os
+	// backends run on the host, where there is no per-command resource knob to
+	// set. Defaults are conservative (see the defaults map); set a field empty
+	// or zero to remove that cap.
+	Limits SandboxLimits `koanf:"limits"`
+	// Persistent keeps one long-lived container per workspace directory for the
+	// daemon's lifetime and runs each command in it, instead of a fresh
+	// `run --rm` per command (P60.2). On by default (see the defaults map)
+	// wherever the runtime supports it, because per-command containers make the
+	// container backend behaviourally worse than `local` for multi-step work:
+	// an installed toolchain, a warmed cache or a background server does not
+	// survive the call that created it. Set false to go back to a fresh
+	// container per command — the strictly leak-free posture, at the cost of
+	// remembering nothing.
+	Persistent bool `koanf:"persistent"`
+	// SessionTTLSec bounds a persistent container's life when the daemon never
+	// gets to tear it down (SIGKILL, a host that sleeps forever). The container
+	// holds itself open with a `sleep` of this length under `--rm`, so expiry
+	// removes it with nothing needing to run. 0 uses sandbox.DefaultSessionTTL
+	// (4h). No effect unless Persistent is set.
+	SessionTTLSec int `koanf:"session_ttl_sec"`
+}
+
+// SandboxSessionTTL returns sandbox.session_ttl_sec as a duration, substituting
+// sandbox.DefaultSessionTTL when unset (P60.2).
+func (s SandboxConfig) SandboxSessionTTL() time.Duration {
+	if s.SessionTTLSec <= 0 {
+		return sandbox.DefaultSessionTTL
+	}
+	return time.Duration(s.SessionTTLSec) * time.Second
+}
+
+// SandboxLimits is the resource cap applied to each sandboxed container run
+// (P60.1). It is a separate axis from the capability drops in
+// sandbox.OCIHardeningFlags: those stop a container doing something
+// privileged, these stop it eating the machine the daemon and the model server
+// are also living on.
+//
+// The values are strings in the container runtime's own vocabulary ("4G",
+// "512M", "1.5") rather than typed quantities, so an operator writes what the
+// engine documents and Aegis does not interpose a second, poorer parser between
+// them. Sandbox.Limits{} (all empty) restores the pre-P60.1 behavior of no cap
+// at all.
+type SandboxLimits struct {
+	Memory string `koanf:"memory"`     // --memory, e.g. "4G"; empty = uncapped
+	CPUs   string `koanf:"cpus"`       // --cpus, e.g. "2"; empty = uncapped
+	PIDs   int    `koanf:"pids_limit"` // --pids-limit; 0 = uncapped
+}
+
+// Sandbox returns the limits in the form the sandbox package takes them.
+func (l SandboxLimits) Sandbox() sandbox.ResourceLimits {
+	return sandbox.ResourceLimits{Memory: l.Memory, CPUs: l.CPUs, PIDs: l.PIDs}
 }
 
 // sandboxBackendAliases maps the container-runtime names CLAUDE.md/the docs
@@ -327,7 +380,24 @@ type CostConfig struct {
 	// guardrail (P10.5): unlike BudgetUSD, it is always enforceable because
 	// token counts are present even for unpriced or local/Ollama models where
 	// BudgetUSD silently never fires (estimated usage carries no dollar cost).
+	// Note this is a *context* budget on any backend that reports the full
+	// prompt each turn rather than a delta — see MaxGeneratedTokensPerRun.
 	MaxTokensPerRun int `koanf:"max_tokens_per_run"`
+
+	// MaxGeneratedTokensPerRun aborts a run past this cumulative *output* token
+	// count; 0 = unlimited (P59.4). The work budget, where MaxTokensPerRun is
+	// the context/billing budget.
+	//
+	// The two are separate keys on purpose. MaxTokensPerRun sums the whole
+	// prompt every turn, which is precisely what a priced provider bills — but
+	// on Ollama prompt_eval_count is the full prompt each turn rather than a
+	// delta, so the sum grows ~O(N²) in conversation length and a cap set with
+	// "how much work should this do" in mind aborts far earlier than intended.
+	// Overloading one key to mean output tokens on unpriced backends and total
+	// tokens elsewhere would make a single config value mean two things
+	// depending on the provider; a second key says what it counts in its name
+	// and leaves MaxTokensPerRun's meaning intact for everyone already using it.
+	MaxGeneratedTokensPerRun int `koanf:"max_generated_tokens_per_run"`
 
 	// MaxWallClockPerRunSec aborts a run that has been going longer than this
 	// many seconds; 0 = unlimited (P52.15). The time dimension the other two
@@ -484,6 +554,17 @@ type ProviderConfig struct {
 	// behavior is unchanged unless a user opts in to raising it further. Read
 	// via ResponseHeaderTimeout(), never this field directly.
 	ResponseHeaderTimeoutSec int `koanf:"response_header_timeout"`
+	// StreamIdleTimeoutSec bounds the gap between two streamed chunks, in
+	// seconds (P59.2). ResponseHeaderTimeoutSec above stops applying the moment
+	// the headers arrive, and the streaming client deliberately has no overall
+	// timeout, so before this key a model runner that wedged mid-generation left
+	// the turn blocked on a read indefinitely — and cost.max_wall_clock_per_run
+	// could not help, because it is checked between turns, never inside one.
+	// 0 (unset) keeps the default (sse.DefaultStreamIdleTimeout, 10 minutes);
+	// a negative value disables the bound. Read via StreamIdleTimeout(), never
+	// this field directly. Honored by the native ollama adapter, where the
+	// stall this catches actually happens.
+	StreamIdleTimeoutSec int `koanf:"stream_idle_timeout"`
 	// TaskRouting opts a session's user-facing turns into per-turn model
 	// routing (P9.4): a local heuristic classifies each turn as "simple" or
 	// "complex" and simple turns run on SmallModel instead of Model. Off by
@@ -556,6 +637,23 @@ type ProviderConfig struct {
 	// whether it was recognized, so a caller can say so rather than leaving a
 	// typo looking like a working setting.
 	ToolCallShim string `koanf:"tool_call_shim"`
+	// MaxConcurrentRequests bounds how many requests may be in flight against
+	// the backend at once (P59.9); the rest queue in the adapter until a slot
+	// frees. It is a policy the operator sets, not a capacity Aegis infers —
+	// no VRAM detection is attempted (P20.3/P17.5 both rejected that).
+	//
+	//   0 (unset) — auto: local backends get MaxConcurrentRequestsDefaultLocal,
+	//               cloud backends stay unbounded.
+	//   n > 0     — at most n concurrent requests, whatever the backend.
+	//   negative  — explicitly unbounded, including for a local backend.
+	//
+	// Auto bounds local backends because a single Ollama server is one GPU:
+	// every concurrent request is built believing it owns the full detected
+	// num_ctx, while Ollama splits its KV cache across OLLAMA_NUM_PARALLEL
+	// slots and evicts models to fit. Queueing is honest there; oversubscribing
+	// is not. Cloud endpoints fan out across a fleet, so bounding them by
+	// default would only slow multi-agent work down.
+	MaxConcurrentRequests int `koanf:"max_concurrent_requests"`
 	// PromptProfile selects the system-prompt/tool-exposure shape (P25.6):
 	// "auto" (default) infers from BaseURL — loopback/localhost gets the
 	// "local" profile (trimmed prompt, web_search/web_fetch/security_scan/
@@ -576,6 +674,72 @@ func (p ProviderConfig) ResponseHeaderTimeout() time.Duration {
 		return sse.DefaultResponseHeaderTimeout
 	}
 	return time.Duration(p.ResponseHeaderTimeoutSec) * time.Second
+}
+
+// StreamIdleTimeout returns the configured provider.stream_idle_timeout as a
+// time.Duration (P59.2), substituting sse.DefaultStreamIdleTimeout when unset.
+// A negative configured value is passed through as a negative duration, which
+// the adapter reads as "disable the bound" — distinct from unset, so a user who
+// wants a legitimately unbounded stream can say so.
+func (p ProviderConfig) StreamIdleTimeout() time.Duration {
+	if p.StreamIdleTimeoutSec == 0 {
+		return sse.DefaultStreamIdleTimeout
+	}
+	return time.Duration(p.StreamIdleTimeoutSec) * time.Second
+}
+
+// MaxConcurrentRequestsDefaultLocal is the in-flight request bound applied to a
+// local backend when provider.max_concurrent_requests is unset (P59.9). One,
+// because a local server is a single-GPU resource: two concurrent requests do
+// not get two GPUs, they get one GPU time-slicing between them.
+//
+// Measured (2026-08-05, Ollama 0.30.10 / qwen3:14b / 16GB card) rather than
+// assumed — see the admissionAdapter doc comment in internal/provider for the
+// full numbers and for what the measurement *corrected*. In short: concurrency
+// here is a latency cost, not the correctness hazard this constant was
+// originally justified by. Four concurrent ~12k-token requests were not
+// truncated, so the bound is chosen for turn latency (K=4 costs ~70% worse p50
+// for ~60% more aggregate throughput), which is the wrong trade for an
+// interactive agent and a defensible one for a batch of sub-agents. An operator
+// running swarm work on a host with room raises it explicitly, and gives up
+// nothing but latency headroom by doing so.
+const MaxConcurrentRequestsDefaultLocal = 1
+
+// AdmissionLimit resolves provider.max_concurrent_requests for one concrete
+// (provider name, base URL) pair, returning the number of requests allowed in
+// flight against it — 0 meaning unbounded, the value
+// provider.WithAdmissionControl reads as "add no layer at all".
+//
+// It takes the pair rather than reading p.Default/p.BaseURL because a fallback
+// target is a different backend with the same policy: a local primary with a
+// cloud fallback must not carry its queue depth over to the cloud, and a
+// local-to-local fallback must.
+func (p ProviderConfig) AdmissionLimit(name, baseURL string) int {
+	if p.MaxConcurrentRequests > 0 {
+		return p.MaxConcurrentRequests
+	}
+	if p.MaxConcurrentRequests < 0 {
+		return 0 // explicitly unbounded, local included
+	}
+	if LocalBackend(name, baseURL) {
+		return MaxConcurrentRequestsDefaultLocal
+	}
+	return 0
+}
+
+// LocalBackend reports whether a (provider, base URL) pair names a model server
+// running on this machine — the native Ollama adapter, or any OpenAI-compatible
+// adapter pointed at a loopback address (LM Studio, llama.cpp, a local proxy).
+// This is the "one GPU, not a fleet" test AdmissionLimit gates on, and it is
+// deliberately broader than providerfactory's local/cloud *data-residency*
+// check: an LM Studio endpoint is not a cloud provider for failover purposes
+// either, but the question there is where the data goes and the question here is
+// how many requests the hardware can hold.
+func LocalBackend(name, baseURL string) bool {
+	if strings.EqualFold(strings.TrimSpace(name), "ollama") {
+		return true
+	}
+	return isLoopbackBaseURL(baseURL)
 }
 
 // ToolCallShimEnabled reports whether provider.tool_call_shim turns the P53.6
@@ -1080,6 +1244,14 @@ type OutputGuardConfig struct {
 	Mode       string `koanf:"mode"`        // "llm" (default) or "schema"
 	Rubric     string `koanf:"rubric"`      // default llm rubric
 	MaxRetries int    `koanf:"max_retries"` // corrective retries on failure
+
+	// Model pins the model guard verdict calls run on, outranking every default
+	// (P59.5). Empty means: provider.small_model on a cloud provider, the
+	// session's own model on a local Ollama one — where naming a second model
+	// evicts the resident one and pays a cold reload on the next turn, costing
+	// far more than the cheaper verdict saves. Set this when you have the VRAM
+	// to hold both and want the split anyway.
+	Model string `koanf:"model"`
 }
 
 // PersonaOverride holds per-persona config overrides keyed by persona name.
@@ -1137,7 +1309,12 @@ func defaults() map[string]any {
 		// default. Spelled here rather than left empty so `aegis config` shows
 		// the key exists and what its off value is.
 		"provider.tool_call_shim": toolshim.ModeOff,
-		"server.addr":             "127.0.0.1:4127",
+		// Admission control in front of the backend (P59.9). 0 is "auto", not
+		// "unbounded": a local backend gets MaxConcurrentRequestsDefaultLocal
+		// and a cloud one stays unbounded. Spelled here so the key is visible
+		// in `aegis config` alongside its auto value.
+		"provider.max_concurrent_requests": 0,
+		"server.addr":                      "127.0.0.1:4127",
 		// Conservative non-zero caps by default (P27.12/FIND-14) — see
 		// ServerConfig's doc comments for why these values are safe for a
 		// normal single-user session while still bounding a runaway/DoS case.
@@ -1167,26 +1344,44 @@ func defaults() map[string]any {
 		"sandbox.backend":                        "local",
 		"sandbox.image":                          "ubuntu:22.04",
 		"sandbox.network":                        false,
-		"security.egress_then_write":             false,
-		"security.redact_secrets":                true,
-		"security.default_method":                "auto",
-		"security.dast.allow_active":             false,
-		"security.debate.threat_model":           false,
-		"security.debate.triage":                 false,
-		"output_guard.enabled":                   true,
-		"output_guard.mode":                      "llm",
-		"output_guard.max_retries":               1,
-		"output_guard.rubric":                    DefaultGuardRubric,
-		"tui.humor_mode":                         true,
-		"tui.theme":                              "auto",
-		"tui.notifications":                      "both",
-		"tui.image_rendering":                    "auto",
-		"embeddings.enabled":                     false,
-		"embeddings.provider":                    "ollama",
-		"embeddings.model":                       "nomic-embed-text",
-		"embeddings.base_url":                    "http://localhost:11434",
-		"mcp_server.auto_approve":                false,
-		"mcp_server.default_mode":                "plan",
+		// P60.1: conservative per-container caps. Sized to let ordinary
+		// build/test work through (a `go build`, an `npm ci`) while making a
+		// runaway inside the sandbox a failed command rather than a host-wide
+		// OOM — the machine running the container is usually also running the
+		// model server, so an unbounded container competes with the thing the
+		// agent needs to keep thinking. Raise them for a heavy toolchain; empty
+		// or 0 removes a cap entirely.
+		"sandbox.limits.memory":     "4G",
+		"sandbox.limits.cpus":       "2",
+		"sandbox.limits.pids_limit": 1024,
+		// P60.2: one container per session rather than per command, wherever
+		// the runtime supports it. On by default because the per-command
+		// alternative discards everything a command did the moment it returned
+		// — the reason the container backend was hard to recommend for real
+		// work. Containers are labelled, TTL-bounded and reaped, which is what
+		// makes owning state affordable.
+		"sandbox.persistent":           true,
+		"sandbox.session_ttl_sec":      int(sandbox.DefaultSessionTTL / time.Second),
+		"security.egress_then_write":   false,
+		"security.redact_secrets":      true,
+		"security.default_method":      "auto",
+		"security.dast.allow_active":   false,
+		"security.debate.threat_model": false,
+		"security.debate.triage":       false,
+		"output_guard.enabled":         true,
+		"output_guard.mode":            "llm",
+		"output_guard.max_retries":     1,
+		"output_guard.rubric":          DefaultGuardRubric,
+		"tui.humor_mode":               true,
+		"tui.theme":                    "auto",
+		"tui.notifications":            "both",
+		"tui.image_rendering":          "auto",
+		"embeddings.enabled":           false,
+		"embeddings.provider":          "ollama",
+		"embeddings.model":             "nomic-embed-text",
+		"embeddings.base_url":          "http://localhost:11434",
+		"mcp_server.auto_approve":      false,
+		"mcp_server.default_mode":      "plan",
 		// Heuristic invisible-char/base64 prompt-injection scan of
 		// web_fetch/web_search output on by default (P27.13/FIND-12) — see
 		// SearchConfig.ScanOutput's doc comment.
