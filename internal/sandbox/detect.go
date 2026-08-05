@@ -30,11 +30,24 @@ const probeTimeout = 3 * time.Second
 var probeRuntime probeFunc = realProbe
 
 // candidateRuntimes returns the runtimes worth probing on a given OS, in the
-// default preference order. WSL containers are preferred on Windows.
+// default preference order.
+//
+// Windows prefers podman, then docker, and only then wslc. wslc used to be
+// first, on the reasoning that Windows Containers are the native option there,
+// but the ordering costs more than it buys: wslc's Docker-shaped CLI does not
+// carry the hardening surface (no --cap-drop/--security-opt/--read-only — see
+// hardeningArgs) or the persistent-container detach/exec surface that docker
+// and podman do, and it cannot build an image from the embedded scanner build
+// context at all. So on a machine with both, auto-detection was picking the
+// least capable runtime and then reporting per-tool failures that read as
+// broken scanners rather than as a runtime choice.
+//
+// podman leads docker because it is rootless by default; a machine with only
+// one of them is unaffected by the order either way.
 func candidateRuntimes(goos string) []ContainerRuntime {
 	switch goos {
 	case "windows":
-		return []ContainerRuntime{RuntimeWSL, RuntimeDocker, RuntimePodman}
+		return []ContainerRuntime{RuntimePodman, RuntimeDocker, RuntimeWSL}
 	case "darwin":
 		return []ContainerRuntime{RuntimeDocker, RuntimePodman, RuntimeAppleContainers}
 	default:

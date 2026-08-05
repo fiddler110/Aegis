@@ -281,10 +281,12 @@ func (m MultiscannerPolicy) Covers(name string) bool {
 //
 // A locally-built image is not portable between runtimes — it lives in the
 // storage of whichever engine built it, and is never pulled. Auto-detecting
-// instead would silently look in the wrong place: on Windows, DetectBest
-// prefers wslc, so a podman-built image gets reported as missing while sitting
-// right there in podman's storage. Returning nil (no recorded runtime) keeps
-// the pre-multiscanner auto-detect behavior.
+// instead would silently look in the wrong place on any machine with two
+// engines installed: DetectBest returns the first *available* one in priority
+// order, not the one that built anything, so a docker-built image gets
+// reported as missing while sitting right there in docker's storage because
+// podman also answered. Returning nil (no recorded runtime) keeps the
+// pre-multiscanner auto-detect behavior.
 func (m MultiscannerPolicy) RuntimePriority() []sandbox.ContainerRuntime {
 	if m.Runtime == "" {
 		return nil

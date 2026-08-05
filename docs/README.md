@@ -7,7 +7,7 @@ Welcome to the Aegis documentation. These guides cover every aspect of using, co
 | Document | What it covers |
 |----------|----------------|
 | [Overview & Architecture](overview.md) | How Aegis works internally: daemon/client model, agent loop, event system |
-| [Installation & First Run](installation.md) | Building from source, platform setup, first-time configuration |
+| [Installation & First Run](installation.md) | Building from source, platform setup, first-time configuration, and setting up the security scanners (container or host) |
 | [Configuration Reference](configuration.md) | Every config key explained, precedence rules, environment variables |
 | [CLI Reference](cli-reference.md) | Every command and flag (`aegis`, `aegis serve`, `aegis chat`, `aegis sessions`, …) |
 | [TUI Guide](tui-guide.md) | Terminal interface layout, keyboard shortcuts, all slash commands |

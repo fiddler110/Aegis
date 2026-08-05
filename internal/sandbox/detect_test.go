@@ -20,7 +20,7 @@ func stubProbe(avail map[ContainerRuntime]bool) probeFunc {
 func TestDetectRuntimesCandidatesByOS(t *testing.T) {
 	probe := stubProbe(nil)
 	cases := map[string][]ContainerRuntime{
-		"windows": {RuntimeWSL, RuntimeDocker, RuntimePodman},
+		"windows": {RuntimePodman, RuntimeDocker, RuntimeWSL},
 		"darwin":  {RuntimeDocker, RuntimePodman, RuntimeAppleContainers},
 		"linux":   {RuntimeDocker, RuntimePodman},
 	}
@@ -46,21 +46,35 @@ func TestDetectBestPicksFirstAvailableInPriority(t *testing.T) {
 	}
 }
 
-func TestDetectBestDefaultWindowsPrefersWSL(t *testing.T) {
-	// All available, no explicit priority -> OS default order (wslc first on win).
+// TestDetectBestDefaultWindowsPrefersPodman pins the Windows default order to
+// podman → docker → wslc. wslc is last deliberately: it carries neither the
+// hardening flags nor the persistent-container surface docker and podman do,
+// and cannot build the scanner images at all, so preferring it on a machine
+// that has a real engine produced failures that read as broken scanners.
+func TestDetectBestDefaultWindowsPrefersPodman(t *testing.T) {
 	probe := stubProbe(map[ContainerRuntime]bool{RuntimeWSL: true, RuntimeDocker: true, RuntimePodman: true})
 	rt, ok := detectBest(context.Background(), "windows", nil, probe)
-	if !ok || rt != RuntimeWSL {
-		t.Fatalf("got (%q, %v), want (wslc, true)", rt, ok)
+	if !ok || rt != RuntimePodman {
+		t.Fatalf("got (%q, %v), want (podman, true)", rt, ok)
 	}
 }
 
 func TestDetectBestSkipsUnavailable(t *testing.T) {
-	// wslc unavailable -> falls through to docker.
-	probe := stubProbe(map[ContainerRuntime]bool{RuntimeDocker: true})
+	// podman unavailable -> falls through to docker, still ahead of wslc.
+	probe := stubProbe(map[ContainerRuntime]bool{RuntimeDocker: true, RuntimeWSL: true})
 	rt, ok := detectBest(context.Background(), "windows", nil, probe)
 	if !ok || rt != RuntimeDocker {
 		t.Fatalf("got (%q, %v), want (docker, true)", rt, ok)
+	}
+}
+
+// wslc is still reachable — last, not removed. A Windows machine with only
+// Windows Containers must still auto-detect something.
+func TestDetectBestWindowsFallsBackToWSL(t *testing.T) {
+	probe := stubProbe(map[ContainerRuntime]bool{RuntimeWSL: true})
+	rt, ok := detectBest(context.Background(), "windows", nil, probe)
+	if !ok || rt != RuntimeWSL {
+		t.Fatalf("got (%q, %v), want (wslc, true)", rt, ok)
 	}
 }
 
