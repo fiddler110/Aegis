@@ -396,3 +396,45 @@ func TestFirstVersionLinePicksTheVersion(t *testing.T) {
 		t.Errorf("long banner not truncated: %q", got)
 	}
 }
+
+// TestSCACanaryManifestsAreSuffixed guards the second reason canarySuffix
+// exists (see its doc comment). requirements.txt and package-lock.json are
+// pinned to long-published advisories on purpose, so under their real names
+// GitHub's dependency graph reads them as real dependencies and files a
+// Dependabot alert per advisory — eighteen of them, none actionable, because
+// nothing installs from this directory.
+//
+// The failure this guards against is not the alerts themselves. It is the
+// obvious-looking "fix": bumping the pins would leave trivy, grype and
+// osv-scanner finding nothing in the fixture built to prove they find things.
+func TestSCACanaryManifestsAreSuffixed(t *testing.T) {
+	for _, real := range []string{"requirements.txt", "package-lock.json"} {
+		if _, err := os.Stat(filepath.Join("canary", real)); err == nil {
+			t.Errorf("canary/%s exists under its real name — GitHub's dependency graph will file an alert per advisory; store it as %s%s", real, real, canarySuffix)
+		}
+	}
+}
+
+// TestCanaryFixtureMaterializesUnderRealNames is the other half: every
+// suffixed file must come back under its real name, or the scanner that needs
+// it reports zero findings and verify-image blames the image.
+func TestCanaryFixtureMaterializesUnderRealNames(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeCanaryFixture(dir); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	for _, name := range []string{"requirements.txt", "package-lock.json", "go.mod", "vuln.go"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("materialized fixture is missing %s (the %s rename did not apply): %v", name, canarySuffix, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read materialized dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), canarySuffix) {
+			t.Errorf("%s was materialized under its repo name; the tool that needs it would scan nothing", e.Name())
+		}
+	}
+}
