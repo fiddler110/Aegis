@@ -55,7 +55,13 @@ func writeConfigTemplate(path, template, label string, overwrite bool) error {
 // in (see configupdate.go), so a fresh `--first-init`/`--init` and a
 // reconciled `aegis config update` run against an older file converge on the
 // same content.
-var globalConfigTemplate = fmt.Sprintf(globalConfigTemplateRaw, securityScannerAdditionBlock)
+//
+// Both security blocks go through the single %s verb, joined here: a fresh
+// --first-init must contain every addition `aegis config update` would splice
+// into an older file, or the two paths diverge the moment a second addition
+// ships.
+var globalConfigTemplate = fmt.Sprintf(globalConfigTemplateRaw,
+	securityScannerAdditionBlock+"\n\n"+securityContainerImagesAdditionBlock)
 
 const globalConfigTemplateRaw = `# ═══════════════════════════════════════════════════════════════════════════════
 # Aegis  ·  Global Configuration
@@ -342,8 +348,13 @@ sandbox:
   # runtime: ""              # Force a runtime when backend=container:
                              #   docker | podman | wslc (Windows WSL containers) | container (Apple)
                              #   Empty = auto-detect.
-  # priority: [wslc, docker, podman]  # Auto-detect order; empty = OS default.
+  # priority: [podman, docker, wslc]  # Auto-detect order; empty = OS default.
                              #   (Run: aegis sandbox detect  to see what's available.)
+                             #   OS defaults: Windows [podman, docker, wslc];
+                             #   macOS [docker, podman, container]; Linux [docker, podman].
+                             #   wslc is last on Windows: no hardening flags, no
+                             #   persistent-container support, and it can't build
+                             #   the scanner images.
   # image: ubuntu:22.04      # Container image when backend=container/auto.
   # network: false           # Allow outbound network inside containers?
 
@@ -481,7 +492,10 @@ const projectConfigTemplate = `# ═══════════════�
 #     - "docs.python.org"
 #
 #   # ── Per-scanner overrides (aegis scan / security_scan tool) ────────────
-#   default_method: auto        # host | container | auto (fallback default)
+#   default_method: auto        # host | container | auto (default). Under "auto" a
+#                               # tool the multiscanner image carries prefers the
+#                               # CONTAINER over a host binary; a refused container
+#                               # falls back to host and says so.
 #   wsl_distro: kali-linux      # Windows only: target this WSL distro for nmap/nuclei/
 #                               # opengrep/kubescape instead of the WSL default
 #   tools:
@@ -492,6 +506,15 @@ const projectConfigTemplate = `# ═══════════════�
 #     allow_active: false
 #   debate:
 #     triage: false
+#
+# ── Do NOT put a multiscanner:/netscanner: block here ─────────────────────────
+# The container scanner images and their shared database volume are machine-wide
+# assets, so "aegis security build-image" pins them in your USER config
+# (~/.config/aegis/config.yaml, %AppData%\aegis\config.yaml on Windows). Project
+# config wins over user config, so an image_id copied into this file shadows the
+# machine-wide pin and fails closed the first time the image is rebuilt:
+# "no longer matches the ID recorded in config". Use "build-image --project" only
+# when this repo deliberately runs a different image from the rest of the machine.
 
 
 # ── Project-specific LSP servers ─────────────────────────────────────────────

@@ -26,7 +26,7 @@ git clone https://github.com/fiddler110/Aegis.git; cd Aegis
 .\build-windows.ps1
 ```
 
-The script prompts you to: (1) compile and install `aegis` to your Go bin directory, (2) optionally add an `aegis-config` shell helper that opens the config file in your editor, and (3) optionally (opt-in — pass `3` explicitly, e.g. `./build-linux.sh "all 3"`) install every security scanner tool `aegis scan` uses (trivy, gitleaks, opengrep, ...). See [docs/installation.md](docs/installation.md#what-the-build-script-does).
+The script prompts you to: (1) compile and install `aegis` to your Go bin directory, (2) optionally add an `aegis-config` shell helper that opens the config file in your editor, (3) optionally build the **container scanner images** `aegis scan` uses, and (4) optionally install those scanners as **host binaries** instead. Actions 3 and 4 are opt-in alternatives — pass one explicitly, e.g. `./build-linux.sh "all 3"`. Prefer 3: host binaries are unpinned and unconfined, so two machines can silently scan with different rule sets. See [docs/installation.md](docs/installation.md#security-scanners-container-or-host).
 
 **2. Generate config and set the API key**
 

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-# Build and install the binary (macOS)
+# Build and install the binary (macOS; build-linux.sh / build-windows.ps1 mirror it)
 ./build-macos.sh
 
 # Build manually (outputs ./aegis, then installs)
@@ -18,6 +18,15 @@ go run ./cmd/aegis
 aegis --first-init
 export OPENAI_API_KEY="ollama"   # or ANTHROPIC_API_KEY for cloud
 ```
+
+The three build scripts present **four** actions ([1] binary, [2] `aegis-config` shell
+helper, [3] container scanner images, [4] host scanner binaries); `all` still means 1+2,
+and 3/4 are opt-in **alternatives**. [3] is the recommended path and runs `build-image` →
+`update-db` → optional `--netscanner`; [4] is the fallback for a machine with no container
+runtime, plus `dockle`, which no image can carry. If you change what the images contain or
+how they're built, these scripts and `docs/installation.md` are part of the change — the
+container path was documented everywhere *except* the install path for two releases, so
+operators kept installing fifteen host binaries.
 
 The multiscanner container image (`internal/security/multiscanner/Containerfile`
 + `fetch.sh`) bundles every filesystem scanner into one locally-built image, so
@@ -234,7 +243,7 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/mcp` | MCP client (stdio + HTTP/SSE) — Aegis calling *out* to external MCP servers; registered tools appear alongside builtins |
 | `internal/mcpserver` | MCP server (`aegis mcp-serve`) — the reverse direction: exposes Aegis sessions as MCP tools (`aegis_prompt`, `aegis_new_session`, `aegis_list_sessions`) to other MCP-speaking harnesses |
 | `internal/acp` | ACP JSON-RPC server for editor integrations (Zed, Neovim) |
-| `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers. The container backend keeps **one long-lived container per workspace directory** (`sandbox.persistent`, on by default on docker/podman — P60.2) and runs each command with `exec`, so state survives a tool call; containers are labelled, TTL-bounded and reaped, and carry the same hardening/limits a per-command run would |
+| `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers. The container backend keeps **one long-lived container per workspace directory** (`sandbox.persistent`, on by default on docker/podman — P60.2) and runs each command with `exec`, so state survives a tool call; containers are labelled, TTL-bounded and reaped, and carry the same hardening/limits a per-command run would. Auto-detect order is OS-specific (`candidateRuntimes`); on Windows it is **podman → docker → wslc**, with `wslc` deliberately last — its Docker-shaped CLI carries neither the hardening flags nor the persistent-container surface, and cannot build the scanner images, so preferring it surfaced as broken scanners rather than as a runtime choice |
 | `internal/workspacetrust` | Per-directory trust decisions (`aegis trust --dir`) gating which roots a session may touch — including `workspace.additional_roots` entries, which need their own trust grant even when frozen from project config |
 | `internal/cron` | Cron scheduler for background tasks; shelled commands run under a fixed `cronJobTimeout` (10 min, `internal/server/helpers.go`) |
 | `internal/guard` | Output validation — calls a second model pass against a rubric or JSON schema |
