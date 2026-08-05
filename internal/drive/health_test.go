@@ -88,24 +88,27 @@ func TestRecoverBackendDown_CtxCancel(t *testing.T) {
 // TestRecoverPhase6Error folds P50.1 into the phase-6 verdict: backend recovered
 // maps to overflowRetry, backend give-up to overflowStop, a plain
 // context-overflow still delegates to the P47.7 overflow recovery, and a P52.3
-// tool-failure abort delegates to recoverToolFailureStall.
+// tool-failure abort delegates to recoverToolFailureStall, and a P57.1
+// loop-guard abort delegates to recoverReasoningLoop (returning loopRetry, so
+// the caller escalates the retry's prompt as well as resetting it).
 func TestRecoverPhase6Error(t *testing.T) {
 	ctx := context.Background()
 	resets := 0
 	tfResets := 0
+	loopResets := 0
 
 	// Backend recovered → retry.
 	st := backendState(func(context.Context) (bool, bool) { return true, true })
 	st.EscalateWindow = func() (int, bool) { return 0, false }
 	down := provider.NewTransportError("ollama", errors.New("connection refused"))
-	if got := st.recoverPhase6Error(ctx, down, "phase-6 quality pass", &resets, &tfResets); got != overflowRetry {
+	if got := st.recoverPhase6Error(ctx, down, "phase-6 quality pass", &resets, &tfResets, &loopResets); got != overflowRetry {
 		t.Errorf("recovered backend = %v, want overflowRetry", got)
 	}
 
 	// Backend give-up → stop.
 	restore := withShrunkBackendBudget(t, 20*time.Millisecond, 2*time.Millisecond)
 	st = backendState(func(context.Context) (bool, bool) { return false, true })
-	if got := st.recoverPhase6Error(ctx, down, "phase-6 verify fix", &resets, &tfResets); got != overflowStop {
+	if got := st.recoverPhase6Error(ctx, down, "phase-6 verify fix", &resets, &tfResets, &loopResets); got != overflowStop {
 		t.Errorf("dead backend = %v, want overflowStop", got)
 	}
 	restore()
@@ -115,7 +118,7 @@ func TestRecoverPhase6Error(t *testing.T) {
 	st.EscalateWindow = func() (int, bool) { return 131072, true }
 	resets = 0
 	overflow := provider.NewContextTruncationError("ollama", "unexpected end of JSON input")
-	if got := st.recoverPhase6Error(ctx, overflow, "phase-6 quality pass", &resets, &tfResets); got != overflowRetry {
+	if got := st.recoverPhase6Error(ctx, overflow, "phase-6 quality pass", &resets, &tfResets, &loopResets); got != overflowRetry {
 		t.Errorf("overflow = %v, want overflowRetry (delegated)", got)
 	}
 
@@ -123,15 +126,28 @@ func TestRecoverPhase6Error(t *testing.T) {
 	// recovery and is resumable, spending its own budget rather than the
 	// overflow one.
 	stall := fmt.Errorf("%w (6 in a row): edit_file keeps failing", engine.ErrToolFailureLimit)
-	if got := st.recoverPhase6Error(ctx, stall, "phase-6 verify fix", &resets, &tfResets); got != overflowRetry {
+	if got := st.recoverPhase6Error(ctx, stall, "phase-6 verify fix", &resets, &tfResets, &loopResets); got != overflowRetry {
 		t.Errorf("tool-failure stall = %v, want overflowRetry (delegated)", got)
 	}
 	if tfResets != 1 {
 		t.Errorf("tool-failure resets = %d, want 1 (must not spend the overflow budget)", tfResets)
 	}
 
-	// A plain error is neither backend-down, overflow, nor a breaker trip → surfaced.
-	if got := st.recoverPhase6Error(ctx, errors.New("boom"), "phase-6 verify fix", &resets, &tfResets); got != overflowNotHandled {
+	// A P57.1 loop-guard abort delegates to the reasoning-loop recovery, spends
+	// its own budget, and asks for the escalated retry rather than a plain one.
+	looped := fmt.Errorf("%w: identical tool calls repeated 5 turns", engine.ErrLoopDetected)
+	if got := st.recoverPhase6Error(ctx, looped, "phase-6 verify fix", &resets, &tfResets, &loopResets); got != loopRetry {
+		t.Errorf("loop abort = %v, want loopRetry (delegated)", got)
+	}
+	if loopResets != 1 {
+		t.Errorf("loop resets = %d, want 1 (must not spend the overflow or tool-failure budget)", loopResets)
+	}
+	if tfResets != 1 {
+		t.Errorf("tool-failure resets = %d after a loop abort, want 1 (unchanged)", tfResets)
+	}
+
+	// A plain error is neither backend-down, overflow, a breaker trip, nor a loop → surfaced.
+	if got := st.recoverPhase6Error(ctx, errors.New("boom"), "phase-6 verify fix", &resets, &tfResets, &loopResets); got != overflowNotHandled {
 		t.Errorf("plain error = %v, want overflowNotHandled", got)
 	}
 }

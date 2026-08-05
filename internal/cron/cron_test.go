@@ -140,7 +140,7 @@ func TestSchedulerCreateAndToggle(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) {}, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo", false, "")
+	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo", false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +165,55 @@ func TestSchedulerCreateAndToggle(t *testing.T) {
 	}
 }
 
+// TestSchedulerCreateNotifyRoundTrips pins P58.1's per-job opt-in through the
+// store: Toggle and the scheduler's own reloads write the whole row back, so a
+// field that scanned but never persisted would silently reset the flag on the
+// first toggle rather than failing loudly.
+func TestSchedulerCreateNotifyRoundTrips(t *testing.T) {
+	db := testDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := NewScheduler(store, func(j Job) {}, nil)
+	ctx := context.Background()
+
+	quiet, err := sched.Create(ctx, "@daily", "echo quiet", "quiet", false, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loud, err := sched.Create(ctx, "@daily", "echo loud", "loud", false, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quiet.Notify {
+		t.Error("default job must not opt into notification")
+	}
+	if !loud.Notify {
+		t.Error("Create(notify=true) did not set Notify")
+	}
+
+	got, err := store.Get(ctx, loud.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Notify {
+		t.Error("Notify did not survive the store round-trip")
+	}
+
+	// Toggle rewrites the row; the unrelated Notify flag must survive it.
+	if _, err := sched.Toggle(ctx, loud.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.Get(ctx, loud.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Notify {
+		t.Error("Notify was lost when Toggle rewrote the job")
+	}
+}
+
 func TestSchedulerCreateBadSchedule(t *testing.T) {
 	db := testDB(t)
 	store, err := NewStore(db)
@@ -172,7 +221,7 @@ func TestSchedulerCreateBadSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	sched := NewScheduler(store, func(j Job) {}, nil)
-	if _, err := sched.Create(context.Background(), "not a cron", "echo", "", false, ""); err == nil {
+	if _, err := sched.Create(context.Background(), "not a cron", "echo", "", false, "", false); err == nil {
 		t.Error("expected error for bad schedule")
 	}
 }
@@ -195,7 +244,7 @@ func TestTickFiresAndIdempotent(t *testing.T) {
 	sched := NewScheduler(store, run, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes", false, "")
+	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes", false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +408,7 @@ func TestTickSkipsDisabled(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) { fired = true }, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo", "", false, "")
+	j, err := sched.Create(ctx, "* * * * *", "echo", "", false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -119,9 +119,12 @@ Takeaways:
   tells Aegis about a model it has never met — so the failing request is never sent even once — and
   gives you a way to override a cached verdict without deleting the file.
 - Independently, the engine watches for the `qwen2.5-coder:1.5b` signature above: if a turn's answer
-  contains tool-call-shaped JSON naming a real tool but made no actual tool call, it says so. This
+  contains tool-call-shaped JSON naming a real tool, it says so. This
   costs nothing and needs no probe, so it also covers `aegis chat`, which runs its own in-process
-  engine and never touches the daemon's run path.
+  engine and never touches the daemon's run path. Since P59.6 this includes a turn that *did* make a
+  real tool call and printed another one as prose alongside it — a partial-protocol reply, reported
+  as such rather than as a model that can't call tools. A model quoting JSON in a settled answer
+  after tool calls have already succeeded is still left alone: that is quotation, not incapacity.
 - If a model **cannot** speak the tool protocol at all, the notice above is as far as Aegis goes on
   its own — but since P53.6 you can opt into a fallback instead of settling for a prose-only session.
   Set `provider.tool_call_shim: on` and the tool schemas move out of the request's tools field and
@@ -150,6 +153,15 @@ Takeaways:
     that repairs is a parser that can invent a call the model never made, with real side effects
     behind it. The cost is that a model which can't follow the prompt format either will waste a
     couple of turns before falling back to a prose answer.
+  - **A mixed round is declined too** (P59.6). A model that makes one call properly and *prints*
+    another in the same reply is the common shape for this size class — "can it produce the protocol"
+    and "how often does it" are different questions. Both the parse and the notice used to run only
+    on turns with no tool calls at all, so that reply had its printed call silently dropped and the
+    model went on to reason about a result that never existed. Now the properly-made calls run, the
+    printed one does not, and the model is told so explicitly (bounded by the same two-per-run
+    correction budget). Dispatching both would be defensible — parsed calls are unprivileged either
+    way — but a turn written half in each dialect is genuinely ambiguous about intent, and running
+    both halves would double-execute a model that wrote one call twice.
 
   Grammar-constrained decoding (Ollama structured outputs, llama.cpp GBNF) is a *different* answer to
   a *different* problem — it helps models that do speak the protocol but malform their arguments —
@@ -492,7 +504,19 @@ provider:
                                              # verdict calls
 ```
 
-If `small_model` is empty, the main model is used for these background calls (more expensive but always available). For local/Ollama setups, set `small_model` to a fast **non-thinking** model before enabling the output guard — a thinking model rarely satisfies the guard's strict PASS/FAIL reply contract quickly.
+If `small_model` is empty, the main model is used for these background calls (more expensive but always available).
+
+**Cloud vs local, for the output guard specifically (P59.5).** On Anthropic or OpenAI, `small_model` is separate remote capacity, so routing guard verdicts to it is a straight cost and latency win. On a single local Ollama server it is the same GPU. The guard fires on *every* final answer plus its corrective retries, and each call naming a model other than the resident one can evict that model and force a full cold reload on the next turn — on a 16GB-VRAM box, every post-guard turn. That churn is what the bounded `keep_alive` default exists to prevent, and it costs far more than the cheaper verdict saves.
+
+So on a local backend Aegis runs guard verdicts on the **session's own model**, ignoring `small_model`, unless you name one explicitly:
+
+```yaml
+output_guard:
+  enabled: true
+  model: "llama3.2:1b"   # only if you have the VRAM to keep both resident
+```
+
+The advice about **non-thinking** models still stands wherever you do split them: a thinking model rarely satisfies the guard's strict PASS/FAIL reply contract quickly. If your session model *is* a thinking model and you have no VRAM headroom for a second, prefer leaving the guard off over paying a reload per turn.
 
 ---
 
@@ -621,7 +645,9 @@ It never blocks a tool call — a scan failure or a detected secret both still l
 
 ## Context Window
 
-Aegis uses the model's context window size to decide when to compact the conversation (proactively at 85% fill, with a visible `⚠ context …` notice in the TUI when it happens).
+Aegis uses the model's context window size to decide when to compact the conversation, with a visible `⚠ context …` notice in the TUI when it happens.
+
+The trigger is **sized against the completion**, not a flat percentage (P59.1). On Ollama `num_ctx` is one budget covering the prompt *and* the generated answer, so a prompt that merely fits is not a prompt that can be answered: the trigger is `window - min(max_tokens, window/2)` less a small margin, floored at half the window and capped at 85%. A generous window with a modest `max_tokens` therefore behaves exactly as it always did (85%), while a 4096-token window facing the default 32768 `max_tokens` compacts at half the window instead of leaving ~600 tokens to answer in.
 
 **Ollama auto-detection.** Ollama's OpenAI-compatible endpoint gives no way to set or read `num_ctx`, and when a prompt exceeds the served context Ollama **silently drops the oldest tokens — the system prompt and task instructions go first**, which is why a long agent task on a local model can "forget" what it was doing and stop without output. To close that gap, when the provider is `ollama` — or an `openai` provider whose `base_url` points at an Ollama server — the daemon queries Ollama's native API for the context actually being served, in order of authority:
 
@@ -630,6 +656,8 @@ Aegis uses the model's context window size to decide when to compact the convers
 3. Ollama's server default (4096), capped by the model's training context.
 
 The detected value drives compaction, the engine's proactive per-turn check, and the TUI's context-usage bar; `/status` shows the number and where it came from.
+
+**Mid-run escalation.** A phased skill drive that overflows raises the served `num_ctx` toward the model's maximum rather than aborting (P47.5b). That raise is a runtime *floor* on the adapter — it outranks the per-request window computed before the run — and the engine re-reads it before every turn (P59.7), so a phase that just gained room stops compacting as if it hadn't. Before this, the compaction trigger kept measuring against the pre-escalation number and burned summarizer calls, on a local model, in the middle of the overflow recovery that raised the window. The summarizer's own budget deliberately stays at the sized window: the extra `num_ctx` buys physical headroom against a transient overshoot, and spending it on the recovery rather than the work would defeat the point.
 
 **Raising the served context** happens on the Ollama side, not in Aegis — Ollama sizes its KV cache from available (V)RAM, so this is where "how much memory the system has" actually enters the picture:
 
@@ -674,4 +702,46 @@ provider:
   response_header_timeout: 900   # seconds; 0 or missing = default (5 minutes)
 ```
 
-Raise this if you run large local contexts (`context_window` in the tens of thousands of tokens) on a slower box and see the run die mid-turn with that error. `0` or missing keeps the previous hardcoded 5-minute behavior — no change unless you opt in.
+Raise this if you run large local contexts (`context_window` in the tens of thousands of tokens) on a slower box and see the run die mid-turn with that error. `0` or missing keeps the default, which P38.1 raised from 5 minutes to **30 minutes** after the built-in threat-model drive aborted at the 5m ceiling reading a 2845-line file on a local 35B model.
+
+### Stream idle timeout
+
+The header timeout above stops applying the moment the headers arrive, and the streaming client deliberately has **no** overall timeout — one would cap how long a turn may legitimately stream and kill a slow local model mid-answer as a transport error. That left one window unwatched: the gap *between* streamed chunks. An Ollama runner that wedges mid-generation leaves the engine blocked on a read indefinitely, and `cost.max_wall_clock_per_run` cannot help, because it is checked before each model turn and before each tool round — never inside a turn (P59.2).
+
+```yaml
+provider:
+  stream_idle_timeout: 600   # seconds; 0 or missing = default (10 minutes), negative disables
+```
+
+The bound **resets on every chunk**, so it measures "the server has sent nothing at all for this long" rather than the length of the response — a model emitting at 7 tok/s never approaches it. Prefill happens before the headers on Ollama, so every gap this sees is an inter-token gap. A trip is surfaced as a transport error, which means the phased drive's existing wait-for-backend/resume-from-disk path (built for a *crashed* server) handles a *wedged* one too, with no separate recovery machinery.
+
+Two related behaviors close the same gap from the other side:
+
+- `cost.max_wall_clock_per_run`, when set, is now also a deadline on the run's context rather than only a value polled between turns — so it can end a turn it is already inside. The abort is still reported as a wall-clock error, never as an interrupt or a transport failure a caller would try to resume from.
+- A stream that ends **without** a completion chunk (`done: true`) is reported as a truncation instead of a finished turn (P59.3). Previously a body closed cleanly mid-generation produced no read error, so the answer surfaced as a complete short response whose stop reason claimed the model chose to end its turn.
+
+### Concurrency against a local backend
+
+Nothing in the harness used to bound how many requests were in flight against one model server. The daemon serves concurrent sessions, swarm spawns sub-agents, and the output guard, compaction and title passes are requests of their own. Against a cloud endpoint that is fine — the provider fans them out across its fleet. Against one Ollama server every one of those requests is a claim on the same GPU (P59.9).
+
+**What this costs was measured, and the measurement corrected the original reasoning.** This section used to say the hazard was correctness: that each request is built believing it owns the full detected `num_ctx` while Ollama splits its KV cache across `OLLAMA_NUM_PARALLEL` slots, silently truncating. On Ollama 0.30.10 (qwen3:14b, `num_ctx` 16384, 16GB card) that does not reproduce — four concurrent ~12k-token requests, each with a passphrase in its *first* tokens, all returned it verbatim with identical `prompt_eval_count` and no failures. Nothing was truncated or evicted. The real cost is latency, and the throughput gain is well short of linear:
+
+| in flight | aggregate | p50 turn latency |
+|---|---|---|
+| 1 | 11.2 tok/s | 5.7s |
+| 2 | 15.6 tok/s (1.40x) | 6.7s |
+| 4 | 17.9 tok/s (1.60x) | 9.8s (max 14.3s) |
+
+```yaml
+provider:
+  max_concurrent_requests: 0   # 0 = auto (local: 1, cloud: unbounded); n = at most n; negative = unbounded
+```
+
+The default bounds local backends at 1, because a second in-flight request buys ~40% aggregate throughput and pays ~70% worse turn latency for it — a bad trade when one turn's latency is what you are waiting on, and a reasonable one when you are running a batch of independent sub-agents. "Local" means the native Ollama adapter or any OpenAI-compatible adapter pointed at a loopback `base_url` (LM Studio, llama.cpp, a local proxy). **Raising it is safe**: prefix-cache reuse survives concurrency intact (continuations of a shared conversation held 29–47ms prefills at every depth measured), so you give up latency headroom and nothing else. Set a negative value to opt out entirely.
+
+Two properties worth knowing:
+
+- The slot is held for the **whole life of a stream**, not just until the request is accepted, because that is how long the request occupies the model. A cancelled run releases its slot immediately rather than holding it behind an abandoned reader.
+- It sits **inside** the retry decorator, so a retry's backoff sleep does not sit on a slot a queued caller could be using, and it is applied **per backend**, so a local primary with a cloud fallback does not hand the cloud its single-GPU queue depth.
+
+This deliberately does **not** detect VRAM or infer a capacity — a queue depth is a policy you set, not something the harness guesses (the same conclusion P20.3 and P17.5 reached). It also does not replace `swarm.AdaptiveLimiter`, which bounds *spawns* by observing measured speedup: that is the right instrument for "is this host CPU-bound" and the wrong one for a fixed VRAM budget. With the backend no longer thrashing, the limiter is left bounding spawn setup cost, which is what it is good at.

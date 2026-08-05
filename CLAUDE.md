@@ -177,6 +177,18 @@ go test -tags live_probe ./internal/toolcallprobe/... -run TestLiveProbeReachesA
 # only, same no-scheduled-CI-job policy as live_eval. To run locally:
 ollama pull qwen3.6:35b-a3b-deep   # or any tool-calling-capable local model
 go test -tags live_workflow ./internal/eval/... -run TestLiveWorkflow -v
+
+# Cross-harness control group (P60.4): the same task, environment and model,
+# run through Aegis AND a second CLI agent, so an Aegis failure can be
+# attributed. A task both harnesses fail is the model; a task only Aegis fails
+# is our scaffolding — the distinction TestLiveWorkflow alone cannot make,
+# because it measures Aegis and the model fused together. The task definition
+# (fixture + prompt + outcome check) lives in internal/eval/workflowtask.go,
+# harness-independent and unit-tested by plain `go test ./...`; only the
+# *outcome* is compared, while the SSE-shape assertions stay Aegis-only.
+# Point the other agent at the same model server.
+AEGIS_EVAL_BASELINE_HARNESS='claude -p {prompt}' \
+  go test -tags live_workflow ./internal/eval/... -run TestLiveWorkflowBaseline -v
 ```
 
 ## Architecture
@@ -199,7 +211,7 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 |---------|------|
 | `internal/engine` | Core agent loop: calls the model, dispatches tool calls, handles compaction, output guard, loop detection, budget enforcement |
 | `internal/server` | HTTP daemon; wires sessions, tools, permissions, personas, swarm, MCP, cron, checkpoints |
-| `internal/provider` | Normalized `Adapter` interface (stream-based) + message types; adapters in `provider/anthropic` and `provider/openai` |
+| `internal/provider` | Normalized `Adapter` interface (stream-based) + message types; adapters in `provider/anthropic` and `provider/openai`. Decorators compose around it — retry, failover, `num_ctx`, and admission control (`provider.max_concurrent_requests`, P59.9: local backends default to one in-flight request, since a local server is one GPU and every request is built believing it owns the full `num_ctx`) |
 | `internal/session` | SQLite-backed session store (conversations, turn traces, cost) |
 | `internal/tool` | `Tool` interface + `Registry` (register/expose separation lets permission modes gate capability without unregistering) |
 | `internal/tool/builtin` | All 50+ built-in tools (file ops, git, shell, web, memory, LSP, security scan, security engagement/CVE lookup, diagram, cron, agent spawning, etc.) |
@@ -222,7 +234,7 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/mcp` | MCP client (stdio + HTTP/SSE) — Aegis calling *out* to external MCP servers; registered tools appear alongside builtins |
 | `internal/mcpserver` | MCP server (`aegis mcp-serve`) — the reverse direction: exposes Aegis sessions as MCP tools (`aegis_prompt`, `aegis_new_session`, `aegis_list_sessions`) to other MCP-speaking harnesses |
 | `internal/acp` | ACP JSON-RPC server for editor integrations (Zed, Neovim) |
-| `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers |
+| `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers. The container backend keeps **one long-lived container per workspace directory** (`sandbox.persistent`, on by default on docker/podman — P60.2) and runs each command with `exec`, so state survives a tool call; containers are labelled, TTL-bounded and reaped, and carry the same hardening/limits a per-command run would |
 | `internal/workspacetrust` | Per-directory trust decisions (`aegis trust --dir`) gating which roots a session may touch — including `workspace.additional_roots` entries, which need their own trust grant even when frozen from project config |
 | `internal/cron` | Cron scheduler for background tasks; shelled commands run under a fixed `cronJobTimeout` (10 min, `internal/server/helpers.go`) |
 | `internal/guard` | Output validation — calls a second model pass against a rubric or JSON schema |
@@ -262,4 +274,13 @@ Each built-in persona's `Tools` field is **advisory, never enforced**: `permissi
 
 Skills (`internal/skills`) are progressive-disclosure playbooks: at session start only a `name — description` line is injected per skill into `<skills_available>`; the model loads the full body on demand via the `skill` tool. A skill is a `.md` file (or a directory bundling a `SKILL.md` manifest with companion assets like templates/scripts, referenced via a generated `<skill_assets>` manifest) under project `.aegis/skills/` or user `~/.aegis/skills/`. Skills without a frontmatter `description:` fall back to eager injection for backward compatibility.
 
-Aegis also ships several skills **embedded in the binary** (`internal/skills/builtin/`, extracted via `go:embed` and materialized to `<data_dir>/builtin-skills/` at daemon startup by `skills.MaterializeBuiltins`) — content-review, html-report, security-audit, architecture-diagram, debug-investigation, redteam-engagement, threat-modeling, latex-report, deep-research, structured-build. These stay **dormant by default** (zero system-prompt cost) until named in the `skills.builtin_enabled` config list, via `aegis skills enable <name> [--global]`, or the `/skills enable <name> [global]` TUI command; disable the same way. Precedence when a name collides: project skill file > user skill file > embedded built-in.
+Aegis also ships several skills **embedded in the binary** (`internal/skills/builtin/`, extracted via `go:embed` and materialized to `<data_dir>/builtin-skills/` at daemon startup by `skills.MaterializeBuiltins`) — content-review, html-report, security-audit, architecture-diagram, debug-investigation, redteam-engagement, threat-modeling, latex-report, deep-research, structured-build, documentation-as-code, document-codebase. These stay **dormant by default** (zero system-prompt cost) until named in the `skills.builtin_enabled` config list, via `aegis skills enable <name> [--global]`, or the `/skills enable <name> [global]` TUI command; disable the same way. Precedence when a name collides: project skill file > user skill file > embedded built-in.
+
+Three of those built-ins have confusably similar remits, and picking the wrong one produces a
+correctly-built document of the wrong kind: **`document-codebase`** maintains documentation that
+lives in *this* repo and will be edited again (README, ARCHITECTURE, module/API docs) — its bias is
+toward surviving change and never restating the code; **`html-report`**/**`latex-report`** produce a
+standalone deliverable about a moment in time for a reader who is not in the repo;
+**`documentation-as-code`** only applies when an *external* Documentation-as-Code repo
+(`docforge.py` + `_templates/`) supplies an organization's own branded template families, and it
+explicitly defers to `latex-report` when no such repo is present.

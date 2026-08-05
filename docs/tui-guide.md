@@ -235,6 +235,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/drive <skill> <task…>` | Drive any phased skill to completion without stopping between phases — fresh context per phase, automatic verify + quality pass, backend-liveness resume, resumes from `<!-- PENDING -->` markers. The skill must declare a phase plan (see [skills.md](skills.md#phased-skills-long-unattended-builds)); one that doesn't is refused rather than quietly run as a single growing conversation |
 | `/report [latex] <sources…>` | Consolidate existing markdown docs into one report — a shareable `.html` page by default, or a LaTeX/PDF report with `latex` |
 | `/research [topic or question]` | Deep-research a topic on the web via the `deep-research` skill — planned rounds, a source-quality bar, and a report with numbered citations |
+| `/document [what to document]` | Write or update documentation that lives in the repo (README, architecture doc, module overview, API reference, onboarding guide) via the `document-codebase` skill — claims grounded in code actually read, documented commands run or flagged unverified, existing docs edited surgically rather than rewritten. Use `/report` instead for a standalone deliverable |
 
 ### Display & Session
 

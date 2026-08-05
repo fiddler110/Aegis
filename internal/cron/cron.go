@@ -32,6 +32,15 @@ type Job struct {
 	// behavior — jobs always fired in the daemon's cwd regardless of which
 	// session created them.
 	Workdir string `json:"workdir,omitempty"`
+	// Notify opts this job into delivering its fire outcome over the
+	// configured notification channels (P58.1). Off by default so existing
+	// jobs are unchanged and a minute-by-minute job cannot spam the desktop:
+	// it is per-job rather than global because "tell me about this one" is a
+	// property of the job, not of the scheduler — a digest job wants delivery
+	// on success, a monitoring job that fires every minute wants none.
+	// Delivery still requires a channel to be configured (notify.desktop or
+	// notify.webhook); with neither, this flag is inert.
+	Notify bool `json:"notify"`
 }
 
 // ErrNotFound is returned for an unknown job id.
@@ -78,6 +87,7 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 	// already there.
 	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN workdir TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN notify INTEGER NOT NULL DEFAULT 0`)
 	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS cron_runs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,8 +111,8 @@ func (s *Store) Save(ctx context.Context, j *Job) error {
 		last = j.LastRun.UnixMilli()
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created, auto_approve, workdir)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     schedule     = excluded.schedule,
     command      = excluded.command,
@@ -110,15 +120,16 @@ ON CONFLICT(id) DO UPDATE SET
     enabled      = excluded.enabled,
     last_run     = excluded.last_run,
     auto_approve = excluded.auto_approve,
-    workdir      = excluded.workdir`,
-		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli(), boolToInt(j.AutoApprove), j.Workdir)
+    workdir      = excluded.workdir,
+    notify       = excluded.notify`,
+		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli(), boolToInt(j.AutoApprove), j.Workdir, boolToInt(j.Notify))
 	return err
 }
 
 // Get loads a job by id.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir FROM cron_jobs WHERE id = ?`, id)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify FROM cron_jobs WHERE id = ?`, id)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -129,7 +140,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 // List returns all jobs, newest first.
 func (s *Store) List(ctx context.Context) ([]*Job, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir FROM cron_jobs ORDER BY created DESC`)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify FROM cron_jobs ORDER BY created DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -206,15 +217,16 @@ type scanner interface{ Scan(...any) error }
 
 func scanJob(sc scanner) (*Job, error) {
 	var (
-		j                    Job
-		enabled, autoApprove int
-		last, created        int64
+		j                            Job
+		enabled, autoApprove, notify int
+		last, created                int64
 	)
-	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created, &autoApprove, &j.Workdir); err != nil {
+	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created, &autoApprove, &j.Workdir, &notify); err != nil {
 		return nil, err
 	}
 	j.Enabled = enabled != 0
 	j.AutoApprove = autoApprove != 0
+	j.Notify = notify != 0
 	if last != 0 {
 		j.LastRun = time.UnixMilli(last)
 	}
@@ -255,8 +267,11 @@ func NewScheduler(store *Store, run RunFunc, logger *slog.Logger) *Scheduler {
 // current permission mode would otherwise require approval for shell
 // execution (see Job.AutoApprove). workdir is the directory the job's
 // command runs in (P25.8); "" falls back to the daemon's own working
-// directory at fire time.
-func (s *Scheduler) Create(ctx context.Context, schedule, command, title string, autoApprove bool, workdir string) (*Job, error) {
+// directory at fire time. notify opts the job into out-of-band delivery of
+// its fire outcome (P58.1; see Job.Notify) — kept at the end of the signature
+// rather than beside autoApprove so the two independent booleans are not
+// adjacent and cannot be silently swapped at a call site.
+func (s *Scheduler) Create(ctx context.Context, schedule, command, title string, autoApprove bool, workdir string, notify bool) (*Job, error) {
 	if _, err := Parse(schedule); err != nil {
 		return nil, err
 	}
@@ -272,6 +287,7 @@ func (s *Scheduler) Create(ctx context.Context, schedule, command, title string,
 		AutoApprove: autoApprove,
 		Created:     s.now(),
 		Workdir:     workdir,
+		Notify:      notify,
 	}
 	if err := s.store.Save(ctx, j); err != nil {
 		return nil, err

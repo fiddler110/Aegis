@@ -406,9 +406,22 @@ Create a recurring cron job using a standard 5-field cron expression.
 {
   "schedule": "0 9 * * 1-5",      // 9am Monday-Friday
   "command": "aegis scan .",
-  "title": "Daily security scan"
+  "title": "Daily security scan",
+  "notify": true
 }
 ```
+
+Set `notify` when the point of the job is to *tell you something* — a morning digest, a watch job,
+a scheduled scan whose result you want to see. Each fire's status and output is then delivered over
+the channels configured under `notify:` in config (desktop notification and/or webhook) instead of
+only being readable after the fact via `cron_history`. The full captured output travels in the
+webhook payload's `output` field; the desktop notification carries a leading excerpt.
+
+It is **per-job and off by default**: a job that fires every minute would otherwise turn the
+desktop into a firehose, and whether an outcome is worth interrupting a human for is a property of
+the job, not of the scheduler. Delivery also requires a channel to be configured — with neither
+`notify.desktop` nor `notify.webhook` set, the flag is inert. Notification never replaces the
+`cron_runs` audit record; it reports exactly the status and output that were persisted.
 
 No one is present to approve a job when it fires unattended, so at fire time the command is
 checked against the full permission gate stack — the same one interactive shell calls get: text
@@ -421,7 +434,8 @@ an interactive prompt here — set it to allow the job to fire even when the dae
 otherwise require approval.
 
 Run `aegis cron list` from the CLI (not a model-facing tool call) to review persisted jobs as an
-operator, including which ones carry `auto_approve`; add `--auto-approve-only` to see just those.
+operator, including which ones carry `auto_approve` and which carry `notify`; add
+`--auto-approve-only` to see just those that fire unattended.
 
 ---
 

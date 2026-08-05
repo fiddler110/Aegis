@@ -63,13 +63,13 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 		fn(&o)
 	}
 
-	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger, o.caps)
+	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), cfg.Provider.StreamIdleTimeout(), logger, o.caps)
 	if err != nil {
 		return nil, err
 	}
 	policy := provider.DefaultRetryPolicy()
 	policy.MaxRetries = cfg.Provider.MaxRetries
-	primary := provider.WithRetry(primaryBase, policy, logger)
+	primary := provider.WithRetry(admit(cfg, cfg.Provider.Default, cfg.Provider.BaseURL, primaryBase, logger), policy, logger)
 
 	if len(cfg.Provider.Fallback) == 0 {
 		return primary, nil
@@ -84,17 +84,42 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 			continue
 		}
 		apiKey := config.ProviderAPIKey(fb.Provider)
-		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), logger, o.caps)
+		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), cfg.Provider.StreamIdleTimeout(), logger, o.caps)
 		if err != nil {
 			logger.Warn("provider fallback: skipping misconfigured fallback", "provider", fb.Provider, "err", err)
 			continue
 		}
 		targets = append(targets, provider.FallbackTarget{
-			Adapter: provider.WithRetry(fbBase, policy, logger),
+			Adapter: provider.WithRetry(admit(cfg, fb.Provider, fb.BaseURL, fbBase, logger), policy, logger),
 			Model:   fb.Model,
 		})
 	}
 	return provider.WithFailover(primary, cfg.Provider.Model, targets, logger), nil
+}
+
+// admit wraps base in the P59.9 admission-control decorator when the resolved
+// queue depth for this backend bounds anything.
+//
+// Two placement decisions are load-bearing. It goes *inside* WithRetry, so a
+// retry's backoff sleep does not sit on a slot a queued caller could use. And it
+// is applied per built adapter rather than once around the composed chain, so
+// each backend carries its own bound: a local primary that fails over to a cloud
+// target must not hand the cloud its single-GPU queue depth, and the reverse
+// (cloud primary, local fallback) must still bound the local one.
+//
+// One consequence worth stating: the daemon builds one adapter and shares it, so
+// this bounds everything in that process — sessions, in-process swarm agents,
+// the drive, the guard and compaction passes. It does not bound a *separate*
+// process (the subprocess swarm worker builds its own adapter), which is honest
+// rather than complete: a cross-process bound would need a lock outside the
+// harness, and the in-process case is where concurrency is actually generated.
+func admit(cfg *config.Config, name, baseURL string, base provider.Adapter, logger *slog.Logger) provider.Adapter {
+	n := cfg.Provider.AdmissionLimit(name, baseURL)
+	if n <= 0 {
+		return base
+	}
+	logger.Debug("provider admission control", "provider", name, "max_in_flight", n)
+	return provider.WithAdmissionControl(base, n, logger)
 }
 
 // isLocalProvider reports whether provider name keeps data on the local
@@ -179,7 +204,7 @@ func validateBaseURL(name, apiKey, baseURL string, logger *slog.Logger) error {
 // the primary and every fallback target so their construction rules
 // (base URL defaults, thinking/reasoning options, key requirements) stay
 // identical.
-func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, responseHeaderTimeout time.Duration, logger *slog.Logger, caps ollama.CapabilityStore) (provider.Adapter, error) {
+func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, responseHeaderTimeout, streamIdleTimeout time.Duration, logger *slog.Logger, caps ollama.CapabilityStore) (provider.Adapter, error) {
 	if err := validateBaseURL(name, apiKey, baseURL, logger); err != nil {
 		return nil, err
 	}
@@ -220,6 +245,7 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 			ollama.WithHeaders(headers),
 			ollama.WithThink(think),
 			ollama.WithResponseHeaderTimeout(responseHeaderTimeout),
+			ollama.WithStreamIdleTimeout(streamIdleTimeout),
 			ollama.WithLogger(logger),
 		}
 		if contextWindow > 0 {

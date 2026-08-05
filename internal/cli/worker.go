@@ -141,6 +141,14 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	} else if fallbackReason != "" {
 		logger.Warn("worker: sandbox fallback", "reason", fallbackReason)
 	}
+	if workerSandbox != nil {
+		// P60.2: a persistent container is owned state, and this worker is the
+		// process that owns it. Without this the container would outlive the
+		// worker until its TTL — recoverable (the reaper finds it once this pid
+		// is gone) but wasteful, and one leaked container per spawned teammate
+		// adds up fast.
+		defer workerSandbox.Close()
+	}
 
 	reg := tool.NewRegistry()
 	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Sandbox: workerSandbox, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
@@ -193,6 +201,10 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Cost:            tracker,
 		BudgetUSD:       budgetUSD,
 		MaxTokensPerRun: maxTokensPerRun,
+		// P59.4: inherited whole, for the same reason the in-process backend
+		// does (server.go) — the WorkerSpec's remaining-allowance computation
+		// carries two dimensions, and widening it is a separate change.
+		MaxGeneratedTokensPerRun: cfg.Cost.MaxGeneratedTokensPerRun,
 		// Subprocess teammates inherit the bound whole, for the same reason the
 		// in-process backend does (server.go): elapsed time isn't divisible
 		// across siblings the way spend is.

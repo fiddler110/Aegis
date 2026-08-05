@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/engine"
@@ -59,14 +61,36 @@ func (s *Server) resolveModel(p persona.Persona, sessionModel string) string {
 	return s.personaModel(p)
 }
 
-// guardModel picks the model output-guard verdict calls run on: the configured
-// provider.small_model when set — the same preference session titles
-// (sessions.go) and compaction (server.go) already have — otherwise the
-// session model itself. A small non-thinking model makes the guard's strict
-// "reply exactly PASS" contract actually satisfiable and keeps the extra call
-// cheap; running the verdict on a deep/thinking session model tripled turn
-// latency and fail-closed nearly every passing answer in the P25.3 live eval.
+// guardModel picks the model output-guard verdict calls run on. In order:
+// an explicit output_guard.model, then — on a *cloud* provider — the configured
+// provider.small_model, the same preference session titles (sessions.go) and
+// compaction (server.go) have; otherwise the session model itself.
+//
+// The small-model preference exists because a small non-thinking model makes
+// the guard's strict "reply exactly PASS" contract actually satisfiable and
+// keeps the extra call cheap; running the verdict on a deep/thinking session
+// model tripled turn latency and fail-closed nearly every passing answer in the
+// P25.3 live eval. That reasoning holds on Anthropic/OpenAI, where the two
+// models are separate remote capacity.
+//
+// It inverts on a single local Ollama server (P59.5). The guard fires on every
+// final answer plus its corrective retries, and each call naming a model other
+// than the resident one can evict that resident model and force a full cold
+// reload on the next turn — on a 16GB-VRAM box, every post-guard turn. That is
+// precisely the churn the bounded keep_alive default
+// (providerfactory.defaultOllamaKeepAlive) and the P33.9 load_duration
+// telemetry were built to eliminate, and a cold reload costs far more than the
+// verdict call saves. So locally the guard runs on the model already loaded,
+// and an operator with the VRAM to hold two picks the second one deliberately
+// via output_guard.model rather than inheriting it from a key meant for
+// compaction and titles.
 func (s *Server) guardModel(sessionModel string) string {
+	if m := strings.TrimSpace(s.cfg.OutputGuard.Model); m != "" {
+		return m
+	}
+	if s.isOllamaProvider() {
+		return sessionModel
+	}
 	if s.cfg.Provider.SmallModel != "" {
 		return s.cfg.Provider.SmallModel
 	}
@@ -288,6 +312,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 
 	var guardFn guard.Func
 	var guardRetries int
+	var guardFormat json.RawMessage
 	if guardEnabled {
 		// The guard verdict runs on its own model (usually provider.small_model),
 		// so it gets that model's window too rather than the run model's (P52.4).
@@ -296,36 +321,48 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		if gm != model {
 			guardWin, _ = s.effectiveContextWindowFor(context.Background(), gm)
 		}
-		guardFn, guardRetries = guard.Resolve(s.outputGuardConfig(p), s.modelAdapter(guardWin), gm)
+		gc := s.outputGuardConfig(p)
+		guardFn, guardRetries = guard.Resolve(gc, s.modelAdapter(guardWin), gm)
+		// P59.8: a schema guard's requirement is expressible to the backend
+		// ahead of generation, so the corrective retry is decoded under it
+		// instead of being asked in prose and checked afterwards. Only schema
+		// mode has a machine-checkable shape — an llm-mode rubric is prose, and
+		// there is nothing to compile.
+		if guardFn != nil && gc.Mode == "schema" {
+			guardFormat = guard.SchemaFormat(gc.Schema)
+		}
 	}
 
 	if tracker == nil {
 		tracker = cost.NewTracker()
 	}
 	eng, err := engine.New(engine.Options{
-		Adapter:                 s.modelAdapter(ctxWin),
-		Tools:                   tools,
-		Gate:                    gate,
-		Compactor:               s.compactor,
-		Hooks:                   engineHooks,
-		Cost:                    tracker,
-		BudgetUSD:               s.cfg.Cost.BudgetUSD,
-		MaxTokensPerRun:         s.cfg.Cost.MaxTokensPerRun,
-		MaxWallClockPerRun:      s.cfg.Cost.MaxWallClockPerRun(),
-		Model:                   model,
-		MaxTokens:               s.cfg.Provider.MaxTokens,
-		MaxIterations:           s.cfg.Provider.MaxIterations,
-		LoopThreshold:           s.cfg.Provider.LoopThreshold,
-		ContextWindowTokens:     ctxWin,
-		SteerChan:               steerCh,
-		OutputGuard:             guardFn,
-		OutputGuardMaxRetries:   guardRetries,
-		ZeroToolNudgeMaxRetries: s.cfg.Provider.ZeroToolNudge,
-		ToolCallShim:            s.cfg.Provider.ToolCallShimEnabled(),
-		RedactSecrets:           s.cfg.Security.RedactSecrets,
-		Logger:                  s.logger,
-		Workdir:                 workdir,
-		ExtraRoots:              s.workspaceRootsFor(workdir),
+		Adapter:                  s.modelAdapter(ctxWin),
+		Tools:                    tools,
+		Gate:                     gate,
+		Compactor:                s.compactor,
+		Hooks:                    engineHooks,
+		Cost:                     tracker,
+		BudgetUSD:                s.cfg.Cost.BudgetUSD,
+		MaxTokensPerRun:          s.cfg.Cost.MaxTokensPerRun,
+		MaxGeneratedTokensPerRun: s.cfg.Cost.MaxGeneratedTokensPerRun,
+		MaxWallClockPerRun:       s.cfg.Cost.MaxWallClockPerRun(),
+		Model:                    model,
+		MaxTokens:                s.cfg.Provider.MaxTokens,
+		MaxIterations:            s.cfg.Provider.MaxIterations,
+		LoopThreshold:            s.cfg.Provider.LoopThreshold,
+		ContextWindowTokens:      ctxWin,
+		ContextWindowFloor:       func() int { return provider.RaisedContextWindow(s.adapter) },
+		SteerChan:                steerCh,
+		OutputGuard:              guardFn,
+		OutputGuardMaxRetries:    guardRetries,
+		OutputGuardFormat:        guardFormat,
+		ZeroToolNudgeMaxRetries:  s.cfg.Provider.ZeroToolNudge,
+		ToolCallShim:             s.cfg.Provider.ToolCallShimEnabled(),
+		RedactSecrets:            s.cfg.Security.RedactSecrets,
+		Logger:                   s.logger,
+		Workdir:                  workdir,
+		ExtraRoots:               s.workspaceRootsFor(workdir),
 	})
 	if err != nil {
 		return nil, "", err

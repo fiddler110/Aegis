@@ -23,6 +23,7 @@ func (r *raiserAdapter) RaiseContextWindow(n int) bool {
 	}
 	return false
 }
+func (r *raiserAdapter) RaisedContextWindow() int { return r.numCtx }
 
 // plainAdapter implements Adapter but not ContextWindowRaiser and cannot be
 // unwrapped — RaiseContextWindow must report false for it.
@@ -74,5 +75,35 @@ func TestRaiseContextWindow_UnwrapsDecorators(t *testing.T) {
 	}
 	if RaiseContextWindow(WithRetry(plainAdapter{}, DefaultRetryPolicy(), logger), 65536) {
 		t.Error("wrapping a non-raiser must still report false")
+	}
+}
+
+// TestRaisedContextWindow_UnwrapsDecorators is the P59.7 half of the same
+// plumbing: the escalation is written through the decorator chain, so the
+// engine's compaction trigger has to be able to *read* it back through the same
+// chain. A reader that stopped at the retry decorator would report 0 forever and
+// the trigger would keep measuring against the pre-escalation window — which is
+// precisely the bug, only silent.
+func TestRaisedContextWindow_UnwrapsDecorators(t *testing.T) {
+	logger := slog.Default()
+
+	base := &raiserAdapter{}
+	if got := RaisedContextWindow(base); got != 0 {
+		t.Errorf("RaisedContextWindow before any escalation = %d, want 0", got)
+	}
+	wrapped := WithRetry(base, DefaultRetryPolicy(), logger)
+	fo := WithFailover(wrapped, "primary-model",
+		[]FallbackTarget{{Adapter: plainAdapter{}, Model: "fallback"}}, logger)
+	if !RaiseContextWindow(fo, 32768) {
+		t.Fatal("setup: escalation must reach the base through failover→retry")
+	}
+	if got := RaisedContextWindow(fo); got != 32768 {
+		t.Errorf("RaisedContextWindow through failover→retry = %d, want 32768", got)
+	}
+
+	// No reporter anywhere in the chain: 0 means "no floor to honor", which is
+	// what every non-escalating backend must look like to the engine.
+	if got := RaisedContextWindow(WithRetry(plainAdapter{}, DefaultRetryPolicy(), logger)); got != 0 {
+		t.Errorf("RaisedContextWindow on a non-raiser = %d, want 0", got)
 	}
 }

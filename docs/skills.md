@@ -156,7 +156,7 @@ A project skill shadows a same-named user skill, which shadows a same-named buil
 
 ## Built-in skills
 
-Aegis ships several skills embedded in the binary (`content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation`, `redteam-engagement`, `threat-modeling`, `latex-report`, `deep-research`, `structured-build`). Unlike a project/user skill file, nobody chose to author these for this project, so they stay **dormant by default** — zero system-prompt cost — until named explicitly:
+Aegis ships several skills embedded in the binary (`content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation`, `redteam-engagement`, `threat-modeling`, `latex-report`, `deep-research`, `structured-build`, `documentation-as-code`, `document-codebase`). Unlike a project/user skill file, nobody chose to author these for this project, so they stay **dormant by default** — zero system-prompt cost — until named explicitly:
 
 ```bash
 aegis skills list                           # every built-in + on/off status

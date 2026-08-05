@@ -442,6 +442,11 @@ type CronJobInfo struct {
 	LastRun     time.Time `json:"last_run"`
 	Created     time.Time `json:"created"`
 	Workdir     string    `json:"workdir,omitempty"`
+	// Notify reports whether this job delivers its outcome out-of-band
+	// (P58.1) — part of the same review view as AutoApprove, since a job that
+	// fires unattended *and* notifies is the one an operator most wants to be
+	// able to identify.
+	Notify bool `json:"notify"`
 }
 
 // SteerRequest injects a mid-run instruction into an active session run.

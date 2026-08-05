@@ -148,7 +148,11 @@ func (t *Tracker) addTokensLocked(u provider.Usage) {
 // parent computes its remaining budget. The token count is lumped into
 // InputTokens since the input/output/cache breakdown isn't preserved across
 // the process boundary; TotalTokens() is unaffected by how the total is
-// distributed.
+// distributed. TotalGeneratedTokens (P59.4) *is* affected — a subprocess
+// worker's generated tokens are not recoverable from a single lumped total, so
+// they count toward the parent's context budget and not toward its generation
+// budget. Under-counting there is the safe direction: the worker enforced its
+// own inherited generation cap in its own process.
 func (t *Tracker) AddWorkerCost(costUSD float64, tokens int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -172,6 +176,25 @@ func (t *Tracker) TotalTokens() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.usage.InputTokens + t.usage.OutputTokens + t.usage.CacheCreationTokens + t.usage.CacheReadTokens
+}
+
+// TotalGeneratedTokens returns the cumulative *output* token count across every
+// turn recorded via Add or AddTokens — i.e. tokens the model actually produced,
+// with no input, cache-read or cache-creation tokens folded in (P59.4).
+//
+// It exists because TotalTokens answers a billing question and users on a local
+// backend ask a work question with the same words. On Ollama, prompt_eval_count
+// is the *full* prompt every turn rather than a per-turn delta (see
+// ollama.go's translate doc), so TotalTokens over an N-turn run is ~O(N²) in
+// conversation length: a 20-turn run on an 8k window reports ~160k tokens while
+// the model may have generated a few thousand. Summing the full prompt is
+// exactly right when you are billed on it and misleading when you are not, so
+// the two quantities get two accessors and two budget keys rather than one key
+// whose meaning depends on the provider.
+func (t *Tracker) TotalGeneratedTokens() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.usage.OutputTokens
 }
 
 // Snapshot is a point-in-time view of accumulated spend.

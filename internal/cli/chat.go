@@ -265,18 +265,28 @@ func newChatCmd() *cobra.Command {
 			compactor, ctxWin := driveCompaction(context.Background(), cfg, adapter, logger)
 
 			eng, err := engine.New(engine.Options{
-				Adapter:             adapter,
-				Tools:               reg,
-				Gate:                gate,
-				Compactor:           compactor,
-				Cost:                tracker,
-				BudgetUSD:           cfg.Cost.BudgetUSD,
-				MaxWallClockPerRun:  cfg.Cost.MaxWallClockPerRun(),
-				Model:               cfg.Provider.Model,
-				MaxTokens:           cfg.Provider.MaxTokens,
-				ContextWindowTokens: ctxWin,
-				ToolCallShim:        cfg.Provider.ToolCallShimEnabled(),
-				Logger:              logger,
+				Adapter:   adapter,
+				Tools:     reg,
+				Gate:      gate,
+				Compactor: compactor,
+				Cost:      tracker,
+				BudgetUSD: cfg.Cost.BudgetUSD,
+				// P59.4: the generation budget rides the same path as the
+				// wall-clock one. MaxTokensPerRun is deliberately still not set
+				// here — this is the phased drive, whose whole design is a fresh
+				// context per phase, and a context-denominated cap is the wrong
+				// instrument for it.
+				MaxGeneratedTokensPerRun: cfg.Cost.MaxGeneratedTokensPerRun,
+				MaxWallClockPerRun:       cfg.Cost.MaxWallClockPerRun(),
+				Model:                    cfg.Provider.Model,
+				MaxTokens:                cfg.Provider.MaxTokens,
+				ContextWindowTokens:      ctxWin,
+				// P59.7: the phased drive is the one caller that actually
+				// escalates the serving window mid-run, so it is the caller
+				// whose engine most needs to see the escalation.
+				ContextWindowFloor: func() int { return provider.RaisedContextWindow(adapter) },
+				ToolCallShim:       cfg.Provider.ToolCallShimEnabled(),
+				Logger:             logger,
 				// The CLI drive runs in cwd, so its registry is already rooted
 				// there; additional roots are the only thing it can't derive
 				// on its own (P52.13). This is the surface the cross-repo
@@ -446,9 +456,16 @@ func newChatCmd() *cobra.Command {
 				// which the next Stream picks up — no engine rebuild. Nil/no-op
 				// when the provider can't escalate (non-Ollama, or already at the
 				// ceiling); the drive then falls back to the P47.2/P47.7
-				// fresh-context reset alone. The compaction budget stays at the
-				// sized window (deliberately conservative — a larger num_ctx only
-				// buys physical headroom against a transient overshoot).
+				// fresh-context reset alone.
+				//
+				// P59.7 connects the escalation to the engine's compaction
+				// *trigger* (via ContextWindowFloor above), so a phase that just
+				// gained room stops compacting as if it hadn't. The summarizer's
+				// own *budget* still stays at the sized window, which is a
+				// deliberate choice rather than the same oversight: a larger
+				// num_ctx only buys physical headroom against a transient
+				// overshoot, and sizing the summary request to it would spend
+				// the new room on the recovery rather than on the work.
 				var escalateWindow func() (int, bool)
 				if driveModelMax > 0 {
 					curWin := cfg.Provider.ContextWindow

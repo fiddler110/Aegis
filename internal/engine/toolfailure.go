@@ -31,6 +31,17 @@ const (
 	// the third identical failure the model has demonstrably stopped learning
 	// from the error text on its own.
 	toolFailureNudgeThreshold = 3
+	// toolFailureNudgeMax bounds how many corrective nudges one run may inject.
+	// The original bound was one per run, to stop the engine nagging on every
+	// subsequent failing round — but that job is now done by the "outstanding"
+	// gate at the injection site (P59.11): while an un-retracted nudge is still
+	// in the conversation no second one is ever added, so a run that keeps
+	// failing sees exactly one, then the abort threshold. A second nudge is
+	// reachable only after the failures demonstrably *cleared* (which retracts
+	// the first) and a fresh threshold-length failure streak began — a new
+	// episode, not nagging. Three bounds the pathological oscillation without
+	// letting nudge text consume the iteration budget.
+	toolFailureNudgeMax = 3
 	// toolFailureAbortThreshold is how many consecutive rounds in which *every*
 	// tool result was an error end the run outright. Set to twice the nudge
 	// threshold so the model gets a full three further rounds to act on the
@@ -143,6 +154,16 @@ func (t *toolFailureTracker) rounds() int {
 // warrant a corrective nudge, by either signal.
 func (t *toolFailureTracker) shouldNudge() bool {
 	return t.allErrorRounds >= toolFailureNudgeThreshold || t.sameErrorRounds >= toolFailureNudgeThreshold
+}
+
+// cleared reports that no failure streak is currently running — i.e. the last
+// recorded round produced no errors at all and reset both counters. Any failing
+// round leaves sameErrorRounds >= 1, so this is false for the whole of a streak
+// and true the moment one ends. It is the signal P59.11 retracts an outstanding
+// corrective on: the failures the nudge was correcting have actually stopped,
+// which is the only observation that makes it *spent* rather than merely old.
+func (t *toolFailureTracker) cleared() bool {
+	return t.allErrorRounds == 0 && t.sameErrorRounds == 0
 }
 
 // shouldAbort reports whether the run should be terminated. Only the strict

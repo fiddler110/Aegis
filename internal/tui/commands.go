@@ -195,6 +195,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdThreatModel,
 		},
 		{
+			name: "document", argHint: "[what to document]",
+			shortDesc:    "Write or update repo documentation (README, architecture doc, module docs)",
+			detailedHelp: "/document [what to document]\n  Loads the document-codebase skill and starts writing documentation that lives in the repository — a README, an ARCHITECTURE or design doc, a package/module overview, an API reference, or an onboarding guide.\n  No args: asks what to document and which document type fits.\n  With args: documents the named target, e.g. /document the internal/engine package.\n  Grounds every claim in code it actually read, runs the commands it documents (or flags them unverified), and edits an existing doc surgically rather than rewriting it.\n  For a standalone report about the code rather than a maintained repo file, use /report instead.\n  Needs the document-codebase built-in skill enabled (/skills enable document-codebase) and spends model turns, same as /research and /report.",
+			handler:      (*SlashDispatcher).cmdDocument,
+		},
+		{
 			name: "drive", argHint: "<skill> <task…>",
 			shortDesc:    "Drive a phased skill to completion unattended",
 			detailedHelp: "/drive <skill> <task…>\n  Runs a skill's phased build to completion without stopping between phases: each phase gets its own fresh context, the suite is verified and quality-passed automatically, a crashed local model server is waited out and resumed from disk, and a phase that stalls is re-opened rather than abandoned.\n  The skill must declare a phase plan — threat-modeling has a built-in one, and any skill can opt in with a `phases:` list in its own frontmatter. A skill without one is refused rather than quietly run as a single growing conversation, which is the failure the phased drive exists to avoid.\n  e.g. /drive threat-modeling threat model this repository\n  /threat-model … unattended is the shorthand for the threat-modeling case.\n  The run lives in the daemon, not in this TUI: Esc/Ctrl+C/quit stop it explicitly, but a dropped connection doesn't — against a separately-running `aegis serve` the build keeps going and the daemon's own resume-from-disk picks it up. Re-issuing the same drive is always safe: phases whose files are already complete cost nothing.",

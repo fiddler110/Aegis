@@ -356,6 +356,7 @@ func Run(ctx context.Context, st *State, phases []Phase) error {
 
 		noProgress := 0
 		toolFailResets := 0
+		loopResets := 0 // P57.1, per phase — one phase's loop must not spend another's budget
 		var prevPending []string
 		for {
 			*st.IterToolCalls = 0
@@ -423,6 +424,27 @@ func Run(ctx context.Context, st *State, phases []Phase) error {
 						return nil
 					}
 					conv = st.freshPhaseConv(ph, runDir, pending, "")
+					continue
+				case overflowStop:
+					return nil
+				}
+				// P57.1: an engine loop-guard abort is resumable here too. A
+				// content phase still has its `<!-- PENDING -->` markers on disk,
+				// so the reset resumes exactly as the overflow path does; the
+				// nudge tells the fresh context not to rebuild the theory it was
+				// looping on. Observed in the phase-6 re-entry rather than here,
+				// but nothing about the loop guard is specific to phase 6, and a
+				// content phase dying on it would waste strictly more work.
+				switch st.recoverReasoningLoop(err, ph.label()+" phase", &loopResets) {
+				case loopRetry:
+					runDir = st.runDir()
+					pending := ph.pending(runDir)
+					totalTurns++
+					if totalTurns >= st.MaxTurns {
+						st.stopMaxTurns(ph, pending)
+						return nil
+					}
+					conv = st.freshPhaseConv(ph, runDir, pending, StuckLoopDirective(false))
 					continue
 				case overflowStop:
 					return nil
@@ -542,6 +564,12 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *State) error {
 	verifyRounds := 0
 	overflowResets := 0
 	toolFailResets := 0 // P52.3 breaker's own budget, separate from overflowResets
+	loopResets := 0     // P57.1 loop guard's own budget, separate again
+	// stuck carries the P57.1 escalation across one loop iteration: set when the
+	// previous phase-6 turn was aborted by the engine's loop guard, consumed by
+	// the next turn's prompt so the fresh context is told the verifier report is
+	// authoritative rather than left to re-derive the mismatch.
+	stuck := false
 	qualityReviewed := false
 	reopened := map[string]bool{} // P47.9: content phases already re-opened this session
 	// preQuality holds a snapshot of the suite taken at the moment the mechanical
@@ -603,16 +631,21 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *State) error {
 				preQuality = snap
 			}
 			st.Logger.Info("phased drive: mechanical checks clean, running final quality pass (P38.1)")
-			if err := st.runPhase6Turn(ctx, runDir, QualityReviewPrompt()); err != nil {
-				switch st.recoverPhase6Error(ctx, err, "phase-6 quality pass", &overflowResets, &toolFailResets) {
+			if err := st.runPhase6Turn(ctx, runDir, QualityReviewPrompt(), stuck); err != nil {
+				switch st.recoverPhase6Error(ctx, err, "phase-6 quality pass", &overflowResets, &toolFailResets, &loopResets) {
 				case overflowRetry:
+					stuck = false
 					continue // reset to a fresh context and re-run the quality pass
+				case loopRetry:
+					stuck = true // P57.1: escalate the retry's prompt, don't just reset
+					continue
 				case overflowStop:
 					return nil // resumable stop already announced — end the drive cleanly
 				default:
 					return err // a non-overflow engine error is still terminal
 				}
 			}
+			stuck = false // the turn completed — the next one starts unescalated
 			// Mark reviewed only after the pass actually completed — a turn that
 			// overflowed (handled above) did not finish the review, so it must not
 			// be treated as done (P47.7). Otherwise the next clean re-verify would
@@ -677,17 +710,23 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *State) error {
 			return nil
 		}
 		st.Logger.Info("phased drive: verification failed, feeding back for fix", "round", verifyRounds)
-		if err := st.runPhase6Turn(ctx, runDir, VerifyFixPrompt(failures)); err != nil {
-			switch st.recoverPhase6Error(ctx, err, "phase-6 verify fix", &overflowResets, &toolFailResets) {
+		if err := st.runPhase6Turn(ctx, runDir, VerifyFixPrompt(failures), stuck); err != nil {
+			switch st.recoverPhase6Error(ctx, err, "phase-6 verify fix", &overflowResets, &toolFailResets, &loopResets) {
 			case overflowRetry:
+				stuck = false
 				verifyRounds-- // an overflow/backend-reset is not a spent fix attempt — don't burn the round on it
 				continue       // reset to a fresh context and re-run verify + fix from disk
+			case loopRetry:
+				stuck = true   // P57.1: escalate the retry's prompt, don't just reset
+				verifyRounds-- // a loop abort made no fix either — don't burn the round on it
+				continue
 			case overflowStop:
 				return nil // resumable stop already announced — end the drive cleanly
 			default:
 				return err
 			}
 		}
+		stuck = false
 	}
 }
 
@@ -714,6 +753,14 @@ const (
 	// overflowStop: the reset budget is exhausted — a resumable stop notice was
 	// printed and the caller ends the drive cleanly (returns nil).
 	overflowStop
+	// loopRetry: a recoverable reasoning-loop abort within budget (P57.1). Like
+	// overflowRetry the caller resets to a fresh context and loops again, but it
+	// additionally escalates the next prompt with StuckLoopDirective — the reset
+	// alone drops the wrong theory, the directive keeps the model from
+	// re-deriving it. Call sites must handle it alongside overflowRetry; it is
+	// deliberately a distinct value so a site that forgets fails loudly (its
+	// `default: return err`) instead of silently losing the escalation.
+	loopRetry
 )
 
 // recoverPhase6Overflow classifies a phase-6 turn error (P47.7). A context
@@ -786,16 +833,81 @@ func (st *State) recoverToolFailureStall(err error, where string, resets *int) p
 	return overflowRetry
 }
 
+// maxReasoningLoopResets bounds how many times one phase (or the phase-6 loop)
+// may be reset after the engine's loop guard aborts a turn (P57.1). Sized like
+// maxToolFailureResets rather than maxPhase6OverflowResets, and for the same
+// reason: an overflow is a mechanical limit a fresh context genuinely clears,
+// whereas a model looping on its own reasoning may be looping on something real
+// (a check it cannot satisfy), and re-entering indefinitely would burn the hours
+// the abort exists to save. Two fresh attempts, then a resumable stop.
+const maxReasoningLoopResets = 2
+
+// recoverReasoningLoop classifies an engine loop-guard abort (P57.1) the way the
+// drive already classifies a context overflow and a tool-failure stall: terminal
+// to the engine, resumable at the phase level.
+//
+// Before this, a loop abort was the one remaining engine error that killed an
+// otherwise-working unattended drive outright. That is what ended the 2026-08-03
+// P38.1 re-confirmation run: phase 6 correctly caught real cross-file defects and
+// correctly re-opened the owning content phase (P47.9), but the re-opened phase
+// convinced itself of a T0-vs-T01 zero-padding offset that did not exist,
+// re-derived it identically five turns running, and the engine's single
+// corrective nudge did not break the cycle — so the whole drive aborted with the
+// suite still verify-failing. A second manual invocation with a fresh context
+// resolved every defect immediately, which is the evidence that the *context* is
+// the defect, not the model and not the checks.
+//
+// A fresh context is therefore the right remedy, not merely a compatible one:
+// the loop is the model reasoning from a context that now contains four
+// restatements of its own wrong theory, and nothing in that context contradicts
+// it. Dropping it and re-reading the verifier's report from disk starts from
+// evidence instead. The caller pairs the reset with StuckLoopDirective so the
+// fresh turn is told the report is authoritative rather than invited to
+// re-derive the mismatch — the same "here is what is wrong" shift scaffold.py
+// (P38.4) made for structure.
+//
+// It keeps its own reset budget, separate from the overflow and tool-failure
+// ones, so a run that hits two failure modes cannot spend one budget on the
+// other. Unlike the overflow path it does not escalate the serving window — the
+// window is not the problem.
+func (st *State) recoverReasoningLoop(err error, where string, resets *int) phase6OverflowAction {
+	if !errors.Is(err, engine.ErrLoopDetected) {
+		return overflowNotHandled
+	}
+	if *resets++; *resets > maxReasoningLoopResets {
+		st.Logger.Warn("phased drive: model kept looping after max resets", "where", where, "resets", maxReasoningLoopResets, "err", err)
+		fmt.Fprintf(st.ErrOut, "\n[notice: the model kept repeating the same tool calls during %s after %d fresh-context reset(s); stopping — the suite on disk is intact, so re-run to resume]\n", where, maxReasoningLoopResets)
+		return overflowStop
+	}
+	st.Logger.Warn("phased drive: model looped on its own reasoning, resetting to a fresh context and retrying", "where", where, "reset", *resets, "err", err)
+	fmt.Fprintf(st.ErrOut, "\n[notice: the model repeated the same tool calls during %s without making progress; resetting to a fresh context and re-reading from disk with the verifier's report as ground truth (reset %d/%d)]\n", where, *resets, maxReasoningLoopResets)
+	return loopRetry
+}
+
 // runPhase6Turn runs one phase-6 turn (a verify fix or the quality pass) in its
 // own fresh conversation, prefixed with an orientation preamble naming the run
 // directory — the fresh context has no memory of building the suite, so it must
-// be told where the files are and to read them first.
-func (st *State) runPhase6Turn(ctx context.Context, runDir, instruction string) error {
+// be told where the files are and to read them first. stuck (P57.1) prefixes the
+// StuckLoopDirective when the previous attempt was aborted by the engine's loop
+// guard.
+func (st *State) runPhase6Turn(ctx context.Context, runDir, instruction string, stuck bool) error {
 	conv := &engine.Conversation{System: st.System}
-	conv.Append(userMessage(phase6Preamble(runDir, st.SkillDir) + instruction))
+	conv.Append(userMessage(phase6TurnPrompt(runDir, st.SkillDir, instruction, stuck)))
 	*st.IterToolCalls = 0
 	*st.IterMutations = 0
 	return st.Engine.Run(ctx, conv, st.OnEvent)
+}
+
+// phase6TurnPrompt assembles one phase-6 turn's single message: the P57.1 stuck
+// directive (only after a loop-guard abort), then the orientation preamble, then
+// the turn's own instruction. Split out of runPhase6Turn so the assembly is
+// testable without an engine.
+func phase6TurnPrompt(runDir, skillDir, instruction string, stuck bool) string {
+	prefix := ""
+	if stuck {
+		prefix = StuckLoopDirective(true)
+	}
+	return prefix + phase6Preamble(runDir, skillDir) + instruction
 }
 
 // --- P47.9: route hollow-body / content-substance failures to the owning phase ---
@@ -1106,6 +1218,7 @@ func (st *State) runReopenedContentPhase(ctx context.Context, ph Phase) error {
 	turns := 0
 	overflowResets := 0
 	toolFailResets := 0 // P52.3 breaker's own budget, separate from overflowResets
+	loopResets := 0     // P57.1 loop guard's own budget, separate again
 	noProgress := 0
 	for {
 		*st.IterToolCalls = 0
@@ -1144,6 +1257,22 @@ func (st *State) runReopenedContentPhase(ctx context.Context, ph Phase) error {
 				runDir = st.runDir()
 				failures, _ = VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
 				conv = st.hollowReentryConv(ph, runDir, failures, "")
+				continue
+			case overflowStop:
+				return nil
+			}
+			// P57.1: and the same again for a loop-guard abort — the failure
+			// this whole re-entry path exists to survive. This is where the
+			// 2026-08-03 run died: a terminal error here killed the drive even
+			// though the suite on disk was intact and the verifier's report
+			// still named exactly what to fix. The retry additionally carries
+			// StuckLoopDirective so the fresh context is handed the report as
+			// ground truth instead of being invited to re-derive it.
+			switch st.recoverReasoningLoop(err, ph.label()+" re-entry", &loopResets) {
+			case loopRetry:
+				runDir = st.runDir()
+				failures, _ = VerifySkillOutputs(st.SkillName, st.SkillDir, st.Cwd)
+				conv = st.hollowReentryConv(ph, runDir, failures, StuckLoopDirective(true))
 				continue
 			case overflowStop:
 				return nil

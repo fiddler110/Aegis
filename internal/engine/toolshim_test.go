@@ -340,3 +340,84 @@ func TestToolShimSuppressedOnStepLimitTurn(t *testing.T) {
 		t.Error("shim catalog was sent on the tools-suppressed summary turn")
 	}
 }
+
+// TestToolShimMixedRoundDeclinesAndCorrects is the shim half of P59.6. The shim
+// parse was reached only on a zero-call turn, so a reply carrying both a native
+// tool call and a tagged one had its tagged call silently dropped — the model
+// then reasoned as if it had run. The mixed round now resolves the ambiguity the
+// way the parser already resolves a malformed attempt: decline rather than
+// guess, and say so. The native call still runs (it is unambiguous), the tagged
+// one does not, and the correction lands *after* the tool results so the
+// transcript never has a user message wedged between tool_use blocks and their
+// tool_result blocks.
+func TestToolShimMixedRoundDeclinesAndCorrects(t *testing.T) {
+	adapter := &recordingAdapter{turns: [][]provider.Event{
+		{
+			{Type: provider.EventTextDelta, Text: "And also " + shimCall("echo", `{"msg":"printed"}`)},
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
+				ID: "tu_1", Name: "echo", Input: json.RawMessage(`{"msg":"native"}`),
+			}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{IsEstimated: true}},
+		},
+		shimTurn("Done.", provider.StopEndTurn),
+	}}
+	reg, echo := newShimRegistry(t)
+
+	eng, err := New(Options{Adapter: adapter, Tools: reg, Model: "test", ToolCallShim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := userConv("echo twice")
+
+	var corrected bool
+	if err := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindNotice && strings.Contains(ev.Text, "printed a tool call in its prose alongside a real one") {
+			corrected = true
+		}
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if echo.called != 1 {
+		t.Errorf("echo ran %d times, want 1 — the native call only, never the printed one", echo.called)
+	}
+	if !corrected {
+		t.Error("a mixed round produced no correction notice")
+	}
+
+	// Well-formedness: no user message may sit between an assistant's tool_use
+	// blocks and the tool_result message answering them.
+	for i, m := range conv.Messages {
+		if m.Role == provider.RoleAssistant && hasToolUse(m) {
+			if i+1 >= len(conv.Messages) {
+				t.Fatal("a tool_use turn was left unanswered")
+			}
+			// Results arrive either as native tool_result blocks or, on the
+			// shim path, as the rendered <tool_result> text the model was
+			// taught to read. Either is the results; a correction is not.
+			next := conv.Messages[i+1]
+			var isResult bool
+			for _, b := range next.Content {
+				switch v := b.(type) {
+				case provider.ToolResultBlock:
+					isResult = true
+				case provider.TextBlock:
+					if strings.Contains(v.Text, "<tool_result") {
+						isResult = true
+					}
+				}
+			}
+			if !isResult {
+				t.Errorf("message %d after a tool_use turn is not tool results: %+v", i+1, next)
+			}
+		}
+	}
+	// And the correction is scaffolding, retracted once the run settles.
+	for _, m := range conv.Messages {
+		for _, b := range m.Content {
+			if tb, ok := b.(provider.TextBlock); ok && strings.Contains(tb.Text, shimFormatNudgePrefix) {
+				t.Errorf("mixed-round correction survived into the transcript: %q", tb.Text)
+			}
+		}
+	}
+}

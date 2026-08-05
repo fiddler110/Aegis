@@ -38,6 +38,21 @@ const (
 	// provider.response_header_timeout, P35.5) pass it explicitly to
 	// NewStreamingClient instead of relying on this default.
 	DefaultResponseHeaderTimeout = 30 * time.Minute
+
+	// DefaultStreamIdleTimeout bounds the gap between two consecutive streamed
+	// chunks (P59.2) — not the stream as a whole, which must stay unbounded for
+	// the reasons NewStreamingClient documents. Once headers arrive nothing else
+	// is watching: a local runner that wedges mid-generation leaves the consumer
+	// blocked on a read forever, and MaxWallClockPerRun is polled between turns,
+	// never inside one.
+	//
+	// It is deliberately generous. Prefill happens *before* the headers on
+	// Ollama, so every gap this bound sees is an inter-token gap; even a ~7 tok/s
+	// local model on a large context emits something every few seconds. A tight
+	// bound would guillotine a legitimately slow run, which is the regression
+	// shape P52.15 avoided by leaving the wall clock off by default — so the
+	// number is set where "nothing at all for this long" cannot be healthy.
+	DefaultStreamIdleTimeout = 10 * time.Minute
 )
 
 // NewStreamingClient returns the http.Client an adapter uses for its streamed

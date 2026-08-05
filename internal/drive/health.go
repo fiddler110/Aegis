@@ -107,8 +107,10 @@ func (st *State) recoverBackendDown(ctx context.Context, err error, where string
 //
 // toolFailResets is the P52.3 breaker's own reset budget, kept separate from
 // overflowResets so the two failure modes cannot spend each other's allowance —
-// see recoverToolFailureStall.
-func (st *State) recoverPhase6Error(ctx context.Context, err error, where string, overflowResets, toolFailResets *int) phase6OverflowAction {
+// see recoverToolFailureStall. loopResets is the P57.1 loop guard's, kept
+// separate for the same reason; a loop abort returns loopRetry rather than
+// overflowRetry so the caller also escalates the retry's prompt.
+func (st *State) recoverPhase6Error(ctx context.Context, err error, where string, overflowResets, toolFailResets, loopResets *int) phase6OverflowAction {
 	switch st.recoverBackendDown(ctx, err, where) {
 	case backendRecovered:
 		return overflowRetry
@@ -118,7 +120,10 @@ func (st *State) recoverPhase6Error(ctx context.Context, err error, where string
 	if a := st.recoverPhase6Overflow(err, where, overflowResets); a != overflowNotHandled {
 		return a
 	}
-	return st.recoverToolFailureStall(err, where, toolFailResets)
+	if a := st.recoverToolFailureStall(err, where, toolFailResets); a != overflowNotHandled {
+		return a
+	}
+	return st.recoverReasoningLoop(err, where, loopResets)
 }
 
 // waitForBackend polls the liveness probe until the backend answers or the

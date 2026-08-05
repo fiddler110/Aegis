@@ -273,6 +273,7 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 		doctorWorkspaceTrustCheck(cfg),
 		doctorProviderCheck(ctx, cfg),
 		doctorProviderAdapterCheck(ctx, cfg),
+		doctorGenerationBudgetCheck(ctx, cfg),
 		doctorToolCallCheck(ctx, cfg),
 		doctorSandboxCheck(cfg),
 		doctorScannerCheck(ctx, cfg),
@@ -394,6 +395,95 @@ func doctorProviderAdapterCheck(ctx context.Context, cfg *config.Config) doctorC
 		Detail: providerfactory.LegacyOllamaCompatDetail(cfg.Provider),
 		Fix:    providerfactory.LegacyOllamaCompatFix(cfg.Provider, modelMax),
 	}
+}
+
+// doctorGenerationBudgetCheck (P59.1) compares provider.max_tokens against the
+// context window the model will actually be served with.
+//
+// On Ollama those are one budget — num_ctx covers prompt *and* completion — so
+// a max_tokens at or above the window is not a generous cap, it is a request
+// for more output than the whole conversation is allowed to occupy. The shipped
+// default (32768) against a detected 4096 window is that case, and it is
+// reachable from a stock install with no config at all. Nothing else reports
+// it: config validation doesn't know the window (it is detected at runtime), and
+// the failure it produces is silent — the model hits the ceiling mid-generation
+// and the engine's continuation retry burns iterations while the answer quietly
+// degrades. The adapter clamps the request so the run survives; this is the row
+// that tells the user why their answers are short.
+//
+// Only meaningful on a shared-budget backend. Cloud providers bill max_tokens
+// against a separate output allowance, so a large value there is correct.
+func doctorGenerationBudgetCheck(ctx context.Context, cfg *config.Config) doctorCheck {
+	const name = "generation budget"
+	if !isOllamaTarget(cfg.Provider) {
+		return doctorCheck{
+			Name: name, Severity: doctorPass,
+			Detail: "provider bills max_tokens against a separate output budget",
+		}
+	}
+
+	window, source := doctorServedWindow(ctx, cfg.Provider)
+	maxTokens := cfg.Provider.MaxTokens
+	if window <= 0 {
+		return doctorCheck{
+			Name: name, Severity: doctorPass,
+			Detail: fmt.Sprintf("provider.max_tokens is %d; the served context window could not be determined", maxTokens),
+		}
+	}
+	if maxTokens <= 0 {
+		return doctorCheck{
+			Name: name, Severity: doctorPass,
+			Detail: fmt.Sprintf("provider.max_tokens is unset; the model's own default applies within the %d-token window", window),
+		}
+	}
+
+	// Half the window is the same line internal/engine's compaction trigger
+	// draws: past it, more space is reserved for one answer than for the whole
+	// conversation that produced it.
+	if maxTokens*2 > window {
+		sev := doctorWarn
+		detail := fmt.Sprintf("provider.max_tokens (%d) claims most of the %d-token context window (%s) — on Ollama that window covers the prompt *and* the completion",
+			maxTokens, window, source)
+		if maxTokens >= window {
+			detail = fmt.Sprintf("provider.max_tokens (%d) is >= the whole %d-token context window (%s) — on Ollama that window covers the prompt *and* the completion, so the model can be cut off mid-answer on its very first turn",
+				maxTokens, window, source)
+		}
+		return doctorCheck{
+			Name: name, Severity: sev, Detail: detail,
+			Fix: fmt.Sprintf("set provider.max_tokens to at most %d, or raise provider.context_window", window/4),
+		}
+	}
+	return doctorCheck{
+		Name: name, Severity: doctorPass,
+		Detail: fmt.Sprintf("provider.max_tokens (%d) fits inside the %d-token context window (%s)", maxTokens, window, source),
+	}
+}
+
+// isOllamaTarget reports whether requests go to an Ollama server, by either
+// adapter — the native one or the legacy OpenAI-compat path, which has the same
+// shared prompt+completion budget underneath.
+func isOllamaTarget(p config.ProviderConfig) bool {
+	return p.Default == "ollama" || providerfactory.IsLegacyOllamaCompat(p)
+}
+
+// doctorServedWindow returns the context window a request will actually carry
+// and a short word for where the number came from. An explicit
+// provider.context_window wins because that is exactly what the adapter sends
+// as num_ctx; otherwise it is detected from the server, and 0 means unknown.
+func doctorServedWindow(ctx context.Context, p config.ProviderConfig) (int, string) {
+	if p.ContextWindow > 0 {
+		return p.ContextWindow, "provider.context_window"
+	}
+	if p.Model == "" || p.Model == "auto" {
+		return 0, ""
+	}
+	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	res, ok := detectOllamaInfo(dctx, ollamainfo.NativeBase(p.BaseURL), p.Model)
+	if !ok || res.ContextWindow <= 0 {
+		return 0, ""
+	}
+	return res.ContextWindow, "detected"
 }
 
 // detectOllamaInfo is a seam over ollamainfo.Detect so a test can supply a

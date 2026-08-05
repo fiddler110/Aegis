@@ -165,6 +165,10 @@ func newSandboxTestCmd() *cobra.Command {
 				Image:    image,
 				Network:  network || cfg.Sandbox.Network,
 				Priority: sandbox.ParseRuntimes(cfg.Sandbox.Priority),
+				// P60.1: test the sandbox an agent would actually get, limits
+				// included — a test that passes under no cap and a real run
+				// that dies at one is the failure this command exists to catch.
+				Limits: cfg.Sandbox.Limits.Sandbox(),
 			}
 			if backend == "container" {
 				opts.Prefer = sandbox.ContainerRuntime(cfg.Sandbox.Runtime)

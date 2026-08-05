@@ -113,6 +113,23 @@ type Request struct {
 	// provider.WithNumCtx, and the CLI drive leaves it unset entirely. Adapters
 	// whose window is fixed by the remote model — the cloud providers — ignore it.
 	NumCtx int
+	// Format, when non-empty, is a JSON Schema the reply must conform to, and
+	// asks the backend to *constrain decoding* to it rather than merely being
+	// told to comply (P59.8). The native Ollama adapter passes it through as
+	// `format`, where llama.cpp compiles it into a grammar — so a
+	// schema-conforming reply stops being something to hope for and check
+	// afterwards, on the backend where free-generation compliance is worst.
+	//
+	// Every other adapter ignores it, deliberately and for now: the OpenAI
+	// adapter's response_format wants a *named* schema plus a decision about
+	// strict mode (which rejects the open-ended `{}` property schemas this
+	// carries today), and Anthropic has no equivalent at all. Ignoring it is
+	// safe because it is an optimization, never a correctness requirement —
+	// the caller that sets it still validates the reply afterwards, and that
+	// check is what actually decides. Nothing about tool calls is settled
+	// here; a request that constrains its output should not also be offering
+	// tools, and the one caller that sets Format suppresses them.
+	Format json.RawMessage
 }
 
 // StopReason explains why the model stopped generating.
@@ -241,6 +258,41 @@ func RaiseContextWindow(a Adapter, n int) bool {
 		a = u.Unwrap()
 	}
 	return false
+}
+
+// ContextWindowFloorReporter is the read side of ContextWindowRaiser: it
+// reports the window an escalation has raised the adapter to, or 0 when none
+// has. The native Ollama adapter implements it. Reach it through
+// RaisedContextWindow, which unwraps the retry / failover decorators.
+//
+// It exists because the escalation is a *runtime* change to a number three
+// components reason about independently (P59.7): the adapter serves it, the
+// engine's proactive-compaction trigger measures against it, and the
+// summarizer sizes its budget from it. The latter two capture it once at
+// construction, so without a reading seam an escalation silently leaves them
+// compacting against the pre-escalation window — burning summarizer calls, on a
+// local model, in the middle of the overflow recovery that raised it.
+type ContextWindowFloorReporter interface {
+	RaisedContextWindow() int
+}
+
+// RaisedContextWindow reports the escalated serving window of a — or of a base
+// adapter it wraps — unwrapping the retry / failover decorators exactly as
+// RaiseContextWindow does. Returns 0 for an adapter that cannot escalate, and
+// for one that simply hasn't: both mean "no floor to honor", which is what
+// every caller does with it.
+func RaisedContextWindow(a Adapter) int {
+	for a != nil {
+		if r, ok := a.(ContextWindowFloorReporter); ok {
+			return r.RaisedContextWindow()
+		}
+		u, ok := a.(interface{ Unwrap() Adapter })
+		if !ok {
+			return 0
+		}
+		a = u.Unwrap()
+	}
+	return 0
 }
 
 // HealthChecker is an optional Adapter capability: a cheap liveness probe

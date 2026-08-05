@@ -134,3 +134,58 @@ func TestLooksLikeToolCallJSON(t *testing.T) {
 		})
 	}
 }
+
+// TestToolCallAsTextNoticeOnMixedRound is the P59.6 regression. The notice used
+// to sit inside the zero-tool-calls branch, so the most informative shape of all
+// — one real call plus one printed into the prose in the same reply, which is
+// characteristic of the 14-27B class — produced no notice at all. That turn is
+// not a model quoting JSON in a settled answer: the printed call was written to
+// be executed and silently wasn't, so the user hears about it even though the
+// model has proven it speaks the protocol.
+func TestToolCallAsTextNoticeOnMixedRound(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		// One real tool call and one written out as prose, same turn.
+		{
+			{Type: provider.EventTextDelta, Text: "Also running: " + proseToolCall},
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
+				ID: "tu_1", Name: "echo", Input: json.RawMessage(`{"msg":"real"}`),
+			}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{IsEstimated: true}},
+		},
+		{
+			{Type: provider.EventTextDelta, Text: "Done."},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{IsEstimated: true}},
+		},
+	}}
+
+	reg := tool.NewRegistry()
+	echo := &echoTool{}
+	if err := reg.Register(echo); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(Options{Adapter: adapter, Tools: reg, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+		provider.TextBlock{Text: "list the files in this directory"},
+	}})
+
+	var mixed int
+	if err := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindNotice && strings.Contains(ev.Text, "alongside 1 real tool call") {
+			mixed++
+		}
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if mixed != 1 {
+		t.Errorf("expected exactly one mixed-round notice, got %d", mixed)
+	}
+	// The real call still runs — the notice reports, it does not gate.
+	if echo.called != 1 {
+		t.Errorf("the real tool call must still execute, called %d times", echo.called)
+	}
+}

@@ -18,12 +18,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/sse"
+	"github.com/fiddler110/aegis/internal/tokenest"
 )
 
 const defaultBaseURL = "http://localhost:11434"
@@ -36,6 +40,13 @@ type Adapter struct {
 	think     *bool  // nil = omit; false = disable extended thinking
 	keepAlive string // "" = omit, let Ollama use its own default (5m)
 	logger    *slog.Logger
+
+	// streamIdleTimeout (P59.2) bounds the gap *between* streamed chunks, which
+	// is the one window nothing else covers: the streaming client deliberately
+	// leaves Client.Timeout at zero (it would cap the whole turn) and
+	// ResponseHeaderTimeout stops applying the moment headers arrive. 0 selects
+	// DefaultStreamIdleTimeout; negative disables the bound entirely.
+	streamIdleTimeout time.Duration
 
 	// numCtx (0 = omit, let Ollama use its own default) is the adapter-wide
 	// *fallback* serving context window, used only for requests that carry no
@@ -161,6 +172,23 @@ func (a *Adapter) RaiseContextWindow(n int) bool {
 	return false
 }
 
+// RaisedContextWindow implements provider.ContextWindowFloorReporter: the
+// window an escalation has raised this adapter to, or 0 when none has happened.
+//
+// It reports numCtxRaised rather than numCtx deliberately (P59.7). numCtx is the
+// adapter-wide *fallback* for requests that carry none of their own, so a
+// consumer reading it would mistake a configured default for an escalation and
+// override a correctly-detected per-model window with a server-wide one.
+// numCtxRaised is only ever non-zero because RaiseContextWindow made it so, and
+// resolveNumCtx already treats it as a floor outranking a per-request value —
+// so this is exactly the number the engine and the compactor have to agree with
+// to stop compacting against a window the adapter no longer serves.
+func (a *Adapter) RaisedContextWindow() int {
+	a.numCtxMu.RLock()
+	defer a.numCtxMu.RUnlock()
+	return a.numCtxRaised
+}
+
 // contextWindow reads the current adapter-wide num_ctx under the lock that
 // RaiseContextWindow writes it under (P52.6).
 func (a *Adapter) contextWindow() int {
@@ -252,6 +280,26 @@ func WithResponseHeaderTimeout(d time.Duration) Option {
 	return func(a *Adapter) { a.client = sse.NewStreamingClient(d) }
 }
 
+// WithStreamIdleTimeout overrides how long the adapter waits between two
+// streamed chunks before giving up on the response
+// (provider.stream_idle_timeout, P59.2). <= 0 selects
+// sse.DefaultStreamIdleTimeout; pass a negative duration to disable the bound.
+func WithStreamIdleTimeout(d time.Duration) Option {
+	return func(a *Adapter) { a.streamIdleTimeout = d }
+}
+
+// resolveStreamIdleTimeout maps the configured value onto the bound consume
+// applies: 0 (unset) takes the default, negative disables.
+func (a *Adapter) resolveStreamIdleTimeout() time.Duration {
+	if a.streamIdleTimeout == 0 {
+		return sse.DefaultStreamIdleTimeout
+	}
+	if a.streamIdleTimeout < 0 {
+		return 0
+	}
+	return a.streamIdleTimeout
+}
+
 // WithLogger sets the logger used to warn about degraded behavior (e.g. a
 // think-rejected request retried without it — P38.5). Defaults to
 // slog.Default() when unset.
@@ -320,6 +368,12 @@ type wireRequest struct {
 	Think     *bool         `json:"think,omitempty"`
 	KeepAlive string        `json:"keep_alive,omitempty"`
 	Options   *wireOptions  `json:"options,omitempty"`
+	// Format carries a JSON Schema for Ollama's structured outputs (P59.8).
+	// Ollama compiles it to a llama.cpp grammar and constrains sampling to it,
+	// which is a decode-time guarantee rather than an instruction the model may
+	// ignore. Omitted when empty, which is every request but the one the schema
+	// output guard constrains.
+	Format json.RawMessage `json:"format,omitempty"`
 }
 
 // translate converts harness messages to native chat-message wire format.
@@ -336,6 +390,7 @@ type wireRequest struct {
 // mixed-tool runs (P35.9).
 func translate(system string, msgs []provider.Message) []wireMessage {
 	names := make(map[string]string)
+	args := make(map[string]json.RawMessage)
 	out := make([]wireMessage, 0, len(msgs)+1)
 	if system != "" {
 		out = append(out, wireMessage{Role: "system", Content: system})
@@ -351,12 +406,13 @@ func translate(system string, msgs []provider.Message) []wireMessage {
 					text += v.Text
 				case provider.ToolUseBlock:
 					names[v.ID] = v.Name
-					args := v.Input
-					if len(bytes.TrimSpace(args)) == 0 {
-						args = json.RawMessage("{}")
+					callArgs := v.Input
+					if len(bytes.TrimSpace(callArgs)) == 0 {
+						callArgs = json.RawMessage("{}")
 					}
+					args[v.ID] = callArgs
 					wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
-						Function: wireToolCallFunc{Name: v.Name, Arguments: args},
+						Function: wireToolCallFunc{Name: v.Name, Arguments: callArgs},
 					})
 				}
 			}
@@ -368,6 +424,7 @@ func translate(system string, msgs []provider.Message) []wireMessage {
 		case provider.RoleUser:
 			var text string
 			var images []string
+			echo := ambiguousRound(m, names)
 			for _, b := range m.Content {
 				switch v := b.(type) {
 				case provider.TextBlock:
@@ -375,7 +432,11 @@ func translate(system string, msgs []provider.Message) []wireMessage {
 				case provider.ImageBlock:
 					images = append(images, v.Data)
 				case provider.ToolResultBlock:
-					out = append(out, wireMessage{Role: "tool", Content: v.Content, ToolName: names[v.ToolUseID]})
+					content := v.Content
+					if echo {
+						content = toolResultEcho(names[v.ToolUseID], args[v.ToolUseID]) + "\n" + content
+					}
+					out = append(out, wireMessage{Role: "tool", Content: content, ToolName: names[v.ToolUseID]})
 				}
 			}
 			if text != "" || len(images) > 0 {
@@ -384,6 +445,108 @@ func translate(system string, msgs []provider.Message) []wireMessage {
 		}
 	}
 	return out
+}
+
+// ambiguousRound reports whether a tool-results message carries two or more
+// results for the *same* tool — the one case where Ollama's native correlation
+// cannot tell them apart (P52.16).
+//
+// Native tool calls carry no ID (see wireToolCall), so translate emits every
+// result as role:"tool" keyed only on tool_name. Three parallel read_file calls
+// — which the engine explicitly permits, since read-capability tools run
+// concurrently in runTools — therefore produce three wire messages identical in
+// their correlation metadata, leaving position as the only signal. Rounds that
+// call each tool once are unambiguous and are left byte-for-byte as they were,
+// so the common case pays nothing: no extra tokens, and no prefix-cache churn
+// from a changed encoding.
+func ambiguousRound(m provider.Message, names map[string]string) bool {
+	var seen map[string]bool
+	for _, b := range m.Content {
+		v, ok := b.(provider.ToolResultBlock)
+		if !ok {
+			continue
+		}
+		name := names[v.ToolUseID]
+		if seen[name] {
+			return true
+		}
+		if seen == nil {
+			seen = make(map[string]bool, len(m.Content))
+		}
+		seen[name] = true
+	}
+	return false
+}
+
+// toolResultEcho renders the compact echo of an originating call that P52.16
+// prefixes onto an ambiguous round's results — "[read_file path=internal/x.go]"
+// — carrying the association in content where the protocol cannot carry it in
+// metadata.
+//
+// Measured on Ollama 0.30.10 with a 3-parallel-read_file attribution task, paired
+// trials, results graded on naming the file a fact came from:
+//
+//	qwen2.5-coder:1.5b   32/40 bare -> 38/40 echoed   (+15pp)
+//	qwen3:14b             9/10 bare -> 10/10 echoed
+//	gemma4:12b           20/20 bare -> 20/20 echoed
+//
+// So the conflation is real on a small model and the echo never hurt a capable
+// one, which was the stated risk of shipping it.
+//
+// Keys are sorted and values truncated so the rendering is deterministic and
+// bounded: an echo that varied run-to-run would break the very prefix cache
+// translate's ordering rationale above exists to protect.
+func toolResultEcho(name string, rawArgs json.RawMessage) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	if name == "" {
+		b.WriteString("tool")
+	} else {
+		b.WriteString(name)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(rawArgs, &fields); err == nil && len(fields) > 0 {
+		keys := make([]string, 0, len(fields))
+		for k := range fields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v, ok := scalarArg(fields[k])
+			if !ok {
+				continue // objects/arrays add bulk without disambiguating
+			}
+			b.WriteByte(' ')
+			b.WriteString(k)
+			b.WriteByte('=')
+			b.WriteString(v)
+		}
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// maxEchoValueLen bounds one echoed argument value. A path or a query is what
+// disambiguates a call; a 4KB inline file body is not, and echoing it would
+// duplicate the payload the result already carries.
+const maxEchoValueLen = 96
+
+func scalarArg(v any) (string, bool) {
+	var s string
+	switch t := v.(type) {
+	case string:
+		s = t
+	case bool:
+		s = strconv.FormatBool(t)
+	case float64:
+		s = strconv.FormatFloat(t, 'g', -1, 64)
+	default:
+		return "", false
+	}
+	if len(s) > maxEchoValueLen {
+		s = s[:maxEchoValueLen] + "..."
+	}
+	return s, true
 }
 
 func translateTools(tools []provider.ToolSchema) []wireTool {
@@ -447,7 +610,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	}
 
 	out := make(chan provider.Event)
-	go consume(ctx, resp.Body, out)
+	go consume(ctx, resp.Body, out, a.resolveStreamIdleTimeout())
 	return out, nil
 }
 
@@ -491,6 +654,56 @@ func isThinkRejected(err error) bool {
 		strings.Contains(apiErr.Message, "does not support thinking")
 }
 
+// minNumPredict is the floor the P59.1 clamp never goes below. A prompt that
+// has already eaten its whole window is a situation compaction was supposed to
+// prevent, and the honest num_predict there is a negative number — which Ollama
+// reads as "generate until the context is full", the exact behavior being
+// avoided. Asking for a short answer instead at least leaves the model able to
+// say something (typically "I can't fit this"), which is more recoverable than
+// a generation that truncates mid-sentence.
+const minNumPredict = 512
+
+// clampNumPredict bounds the requested completion length by the room actually
+// left in the served window (P59.1).
+//
+// On Ollama num_ctx is one budget covering prompt *and* completion, but
+// provider.max_tokens rides through from config (default 32768) with nothing
+// reconciling the pair — no check in internal/config, none in `aegis doctor`.
+// Against a 4096 window, which is Ollama's own server default and a routinely
+// detected one, the request asks for 8x the whole window in output. The model
+// then runs into the ceiling mid-generation, which comes back as
+// done_reason "length" → StopMaxTokens → the engine's "continue from where you
+// left off" retry, growing the context and shrinking the next turn's headroom
+// until the run burns to its iteration cap. Front-truncation reached through
+// generation instead of through prompt growth, which is the one direction the
+// context subsystem was not watching.
+//
+// The estimate is the same script-aware one the engine compacts against
+// (internal/tokenest), so the two agree about how full a window is. It is only
+// an estimate, hence the 5% margin; the clamp is deliberately one-directional —
+// it never *raises* a caller's max_tokens, so a caller asking for a short answer
+// keeps getting one.
+func (a *Adapter) clampNumPredict(maxTokens, numCtx int, system string, msgs []provider.Message) int {
+	if maxTokens <= 0 || numCtx <= 0 {
+		return maxTokens
+	}
+	headroom := numCtx - tokenest.Messages(system, msgs) - numCtx/20
+	if headroom >= maxTokens {
+		return maxTokens
+	}
+	if headroom < minNumPredict {
+		headroom = minNumPredict
+	}
+	if headroom > numCtx {
+		headroom = numCtx
+	}
+	// Debug, not Warn: this fires per request on a misconfigured pair, and the
+	// place to tell a user about the misconfiguration once is `aegis doctor`.
+	a.logger.Debug("ollama: clamped num_predict to the context window's remaining headroom",
+		"requested", maxTokens, "sent", headroom, "num_ctx", numCtx)
+	return headroom
+}
+
 // doChat sends one /api/chat request with the given think override (nil
 // omits the field) and returns the raw response on success. The caller owns
 // closing resp.Body.
@@ -502,15 +715,17 @@ func (a *Adapter) doChat(ctx context.Context, req provider.Request, think *bool)
 		Stream:    true,
 		Think:     think,
 		KeepAlive: a.keepAlive,
+		Format:    req.Format,
 	}
 	var opts wireOptions
 	var hasOpts bool
-	if n := a.resolveNumCtx(req.NumCtx); n > 0 {
-		opts.NumCtx = n
+	numCtx := a.resolveNumCtx(req.NumCtx)
+	if numCtx > 0 {
+		opts.NumCtx = numCtx
 		hasOpts = true
 	}
 	if req.MaxTokens > 0 {
-		opts.NumPredict = req.MaxTokens
+		opts.NumPredict = a.clampNumPredict(req.MaxTokens, numCtx, req.System, req.Messages)
 		hasOpts = true
 	}
 	if req.Temperature != nil {
@@ -615,19 +830,44 @@ type wireChunk struct {
 	Error              json.RawMessage `json:"error"`
 }
 
-func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event) {
+// consume reads the NDJSON stream and translates it into provider events.
+// idleTimeout bounds the gap between chunks (P59.2); <= 0 disables that bound.
+func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event, idleTimeout time.Duration) {
 	defer close(out)
 	defer body.Close()
 
 	emit := sse.NewEmitter(ctx, out).Emit
 
+	// P59.2: the idle watchdog. Closing the body is what breaks the blocked
+	// read — there is no way to interrupt a bufio.Scanner otherwise — and the
+	// resulting scanner error lands on the P50.1 branch below, which already
+	// classifies it as a transport failure and therefore routes into the
+	// waitForBackend/resume-from-disk path built for a crashed server. A wedged
+	// runner and a dead one are the same problem from the harness's side, so
+	// they get the same recovery; idleFired only sharpens the message.
+	var idleFired atomic.Bool
+	resetIdle := func() {}
+	if idleTimeout > 0 {
+		timer := time.AfterFunc(idleTimeout, func() {
+			idleFired.Store(true)
+			_ = body.Close()
+		})
+		defer timer.Stop()
+		resetIdle = func() { timer.Reset(idleTimeout) }
+	}
+
 	usage := &provider.Usage{}
 	stop := provider.StopEndTurn
 	toolIndex := 0
 	sawLength := false // a chunk reported done_reason "length" (context ceiling hit)
+	sawDone := false   // P59.3: a chunk reported done:true — the turn really finished
 
 	scanner := sse.NewScanner(body)
 	for scanner.Scan() {
+		// Reset per delivered line, not per parsed chunk: the bound is on the
+		// server sending *anything*, and a line we skip below (blank, or JSON we
+		// can't unmarshal) is still evidence the runner is alive.
+		resetIdle()
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -697,6 +937,7 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		}
 
 		if chunk.Done {
+			sawDone = true
 			// P35.13: prompt_eval_count is the FULL prompt/context token count
 			// this turn, not a cache-hit delta. Live-verified on Ollama 0.30.10
 			// (P35.10's "a P35.7 live run saw 37 after turn 1's 3944" was a
@@ -725,6 +966,18 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		// P59.2: our own watchdog closed the body. Say so plainly — the raw
+		// error is "http: read on closed response body", which reads like a
+		// harness bug rather than a stalled runner. Still a transport error, so
+		// it takes the same recovery path as a crashed server (see the watchdog
+		// comment above).
+		if idleFired.Load() {
+			emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("ollama", fmt.Errorf(
+				"read stream: no output for %s — the model runner appears to have stalled mid-generation "+
+					"(raise or disable provider.stream_idle_timeout if this was a legitimately slow run): %w",
+				idleTimeout, err))})
+			return
+		}
 		// P35.12: the native path delivers each tool call whole on one NDJSON
 		// line, so a tool-call argument payload over the 4MiB scanner cap
 		// (sse.maxBufSize) trips bufio.ErrTooLong. The generic wrap surfaces it
@@ -746,6 +999,29 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		// this closes the mid-stream counterpart, which is the more common one on a
 		// slow local model whose per-turn stream is long.
 		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("ollama", fmt.Errorf("read stream: %w", err))})
+		return
+	}
+
+	// P59.3: the stream ended with no read error and no completion chunk. That
+	// is not a finished turn — /api/chat always terminates with done:true, so a
+	// clean EOF before one means the body was closed mid-generation (a runner
+	// that exited, a proxy that cut the response, a server shutting down between
+	// chunks). Neither the P50.1 mid-stream-read-failure path nor the P35.12
+	// line-limit path fires here, because scanner.Err() is nil.
+	//
+	// Emitting EventDone regardless was the bug: usage stays zeroed, so the
+	// engine substitutes estimates and flags IsEstimated exactly as it does for
+	// a legitimately usage-free provider, and stop stays StopEndTurn — so a
+	// truncated response was surfaced as a complete short answer whose stop
+	// reason claims the model chose to end its turn. Classify it as a transport
+	// error instead: it is the same failure P50.1 handles, minus the read error,
+	// so IsBackendUnavailableError routes it into the existing
+	// waitForBackend/resume-from-disk path rather than into a silent wrong
+	// answer.
+	if !sawDone {
+		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("ollama", errors.New(
+			"read stream: the response ended without a completion chunk — the generation was cut off "+
+				"mid-stream (the server closed the connection or the model runner exited)"))})
 		return
 	}
 

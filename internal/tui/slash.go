@@ -1110,6 +1110,25 @@ func (d *SlashDispatcher) cmdResearch(args []string) SlashResult {
 	return SlashResult{Output: warn, Message: skillTaskMessage("deep-research", body, prompt)}
 }
 
+// cmdDocument sends a message that directly invokes the document-codebase
+// skill, so writing or updating in-repo documentation is a discoverable entry
+// point instead of relying on the model noticing a trigger phrase in free
+// text — the same rationale as cmdReport and cmdResearch. Distinct from
+// /report on purpose: that consolidates sources into a standalone deliverable,
+// this maintains a file that lives next to the code.
+func (d *SlashDispatcher) cmdDocument(args []string) SlashResult {
+	target := strings.TrimSpace(strings.Join(args, " "))
+	prompt := "Load the document-codebase skill and write or update documentation in this repository"
+	if target != "" {
+		prompt += " for: " + target
+	} else {
+		prompt += ". Ask me what to document and which document type fits before writing anything."
+	}
+	prompt += " Follow the skill: settle the audience and document type, check what already exists, ground every claim in code you actually read, write incrementally one section per edit, and verify paths and commands before delivering."
+	body, warn := d.activateSkill("document-codebase")
+	return SlashResult{Output: warn, Message: skillTaskMessage("document-codebase", body, prompt)}
+}
+
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

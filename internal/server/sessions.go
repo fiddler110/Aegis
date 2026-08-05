@@ -246,7 +246,7 @@ func (s *Server) handleListCronJobs(w http.ResponseWriter, r *http.Request) {
 			out = append(out, api.CronJobInfo{
 				ID: j.ID, Schedule: j.Schedule, Command: j.Command, Title: j.Title,
 				Enabled: j.Enabled, AutoApprove: j.AutoApprove, LastRun: j.LastRun,
-				Created: j.Created, Workdir: j.Workdir,
+				Created: j.Created, Workdir: j.Workdir, Notify: j.Notify,
 			})
 		}
 	}

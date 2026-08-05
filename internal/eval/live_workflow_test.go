@@ -69,7 +69,14 @@ func TestLiveWorkflow(t *testing.T) {
 		model = "llama3.2"
 	}
 
-	fixtureDir := writeSeededBugFixture(t)
+	// The task itself — fixture, prompt and outcome check — lives in
+	// workflowtask.go, harness-independent (P60.4), so the cross-harness
+	// control group in live_workflow_baseline_test.go measures *this* task
+	// rather than a second copy of it that could drift. What stays here is the
+	// half that is only meaningful for Aegis: the assertions on our own SSE
+	// stream.
+	task := SeededBugTask()
+	fixtureDir := writeSeededBugFixture(t, task)
 
 	// Root the daemon's own default workspace at the fixture project, mirroring
 	// the harness recipe's `cd <target-project> && aegis serve` — the exact
@@ -96,7 +103,7 @@ func TestLiveWorkflow(t *testing.T) {
 		}
 		guardOff := false
 		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
-			Text:         seededBugTask(pythonExe),
+			Text:         task.Prompt(pythonExe),
 			GuardEnabled: &guardOff,
 		})
 		if err != nil {
@@ -113,11 +120,13 @@ func TestLiveWorkflow(t *testing.T) {
 			t.Errorf("engine reported an error: %s", summary.errText)
 		}
 
-		// File actually fixed on disk: re-run the script ourselves rather than
-		// trusting the model's claim of success.
-		out, runErr := exec.Command(pythonExe, "temps.py").CombinedOutput()
-		if runErr != nil {
-			t.Errorf("temps.py still fails after the run: %v\n%s", runErr, out)
+		// File actually fixed on disk: the task's own portable outcome check
+		// re-runs the script rather than trusting the model's claim of success,
+		// and is the same check the baseline harness is scored by.
+		if outcome := task.Outcome(fixtureDir, pythonExe); !outcome.Passed {
+			for _, f := range outcome.Failures {
+				t.Errorf("outcome: %s", f)
+			}
 		}
 
 		// Re-run tool call observed: the task needs at least "run it", "fix
@@ -188,7 +197,7 @@ func TestLiveWorkflow(t *testing.T) {
 		}
 		guardOn := true
 		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
-			Text:         seededBugTask(pythonExe),
+			Text:         task.Prompt(pythonExe),
 			GuardEnabled: &guardOn,
 		})
 		if err != nil {
@@ -292,10 +301,10 @@ func findPython(t *testing.T) string {
 	return ""
 }
 
-// writeSeededBugFixture writes the two-file temps.py/temps.csv project from
-// the P25 live-eval writeup: temps.csv's "temp" column comes back as a
-// string from csv.DictReader-equivalent parsing, and temps.py naively adds
-// it to an int accumulator without converting first.
+// writeSeededBugFixture materializes task into a fresh directory. The content
+// itself is SeededBugTask's (workflowtask.go) — the two-file temps.py/temps.csv
+// project from the P25 live-eval writeup, where the "temp" column comes back as
+// a string and is added to an int accumulator without converting first.
 //
 // Deliberately not t.TempDir(): this directory becomes the daemon's own
 // default workspace (the test chdir's into it), and server.New opens a
@@ -304,7 +313,7 @@ func findPython(t *testing.T) string {
 // failure (fails on Windows, where an open handle blocks deletion outright),
 // not a log line. Match dataDir's self-managed, best-effort-cleanup pattern
 // in newLiveWorkflowDaemon instead.
-func writeSeededBugFixture(t *testing.T) string {
+func writeSeededBugFixture(t *testing.T, task WorkflowTask) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "aegis-live-workflow-fixture-")
 	if err != nil {
@@ -315,28 +324,7 @@ func writeSeededBugFixture(t *testing.T) string {
 			t.Logf("cleanup: could not remove fixture dir %s: %v", dir, rmErr)
 		}
 	})
-	const csvContent = "city,temp\nNYC,72\nLA,85\nChicago,68\n"
-	const pyContent = `import csv
-
-
-def main():
-    total = 0
-    count = 0
-    with open("temps.csv", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            total += row["temp"]
-            count += 1
-    print(f"Average temp: {total / count}")
-
-
-if __name__ == "__main__":
-    main()
-`
-	if err := os.WriteFile(filepath.Join(dir, "temps.csv"), []byte(csvContent), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "temps.py"), []byte(pyContent), 0o644); err != nil {
+	if err := task.Materialize(dir); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -395,10 +383,6 @@ func writeBigRepoMapFixture(t *testing.T) string {
 		t.Fatalf("fixture repo map too small to trigger the local-profile cap: rendered block is %d bytes, want > %d", got, bigRepoMapCapBytes)
 	}
 	return dir
-}
-
-func seededBugTask(pythonExe string) string {
-	return "Run `" + pythonExe + " temps.py`, diagnose and fix the bug, then re-run it to confirm the fix works."
 }
 
 // newLiveWorkflowDaemon builds a real daemon (server.New — full production

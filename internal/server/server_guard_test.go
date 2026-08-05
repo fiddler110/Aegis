@@ -156,6 +156,43 @@ func TestGuardModelPrefersSmallModel(t *testing.T) {
 	}
 }
 
+// TestGuardModelStaysResidentOnLocalBackend is the P59.5 regression, and it is
+// the inverse of the case above rather than a contradiction of it. On a cloud
+// provider the small model is separate remote capacity, so routing the verdict
+// to it is a pure win. On one local Ollama server it is the same GPU: naming a
+// model other than the resident one on every final answer evicts it and buys a
+// full cold reload on the next turn — the exact churn the bounded keep_alive
+// default was built to eliminate. Locally the guard must run on the model that
+// is already loaded, no matter what small_model says.
+func TestGuardModelStaysResidentOnLocalBackend(t *testing.T) {
+	for _, p := range []config.ProviderConfig{
+		{Default: "ollama", SmallModel: "small-fast"},
+		{BaseURL: "http://127.0.0.1:11434", SmallModel: "small-fast"},
+	} {
+		s := &Server{cfg: &config.Config{Provider: p}}
+		if m := s.guardModel("qwen3.6:35b-a3b"); m != "qwen3.6:35b-a3b" {
+			t.Errorf("guardModel on a local backend (%+v) = %q, want the resident session model", p, m)
+		}
+	}
+
+	// An explicit output_guard.model is the operator saying they have the VRAM
+	// for both, and outranks every default — local or cloud.
+	s := &Server{cfg: &config.Config{
+		Provider:    config.ProviderConfig{Default: "ollama", SmallModel: "small-fast"},
+		OutputGuard: config.OutputGuardConfig{Model: "llama3.2:1b"},
+	}}
+	if m := s.guardModel("qwen3.6:35b-a3b"); m != "llama3.2:1b" {
+		t.Errorf("explicit output_guard.model = %q, want llama3.2:1b", m)
+	}
+	s = &Server{cfg: &config.Config{
+		Provider:    config.ProviderConfig{SmallModel: "small-fast"},
+		OutputGuard: config.OutputGuardConfig{Model: "claude-haiku-4-5-20251001"},
+	}}
+	if m := s.guardModel("claude-opus-4-8"); m != "claude-haiku-4-5-20251001" {
+		t.Errorf("explicit output_guard.model must outrank small_model, got %q", m)
+	}
+}
+
 // TestResolveModelSessionOverrideWins is the P14.7 regression: a per-session
 // /model override must outrank everything personaModel would otherwise
 // resolve, including a persona's own config-level pin — the same precedence
