@@ -713,7 +713,11 @@ provider:
   stream_idle_timeout: 600   # seconds; 0 or missing = default (10 minutes), negative disables
 ```
 
+It applies to **all three adapters** — anthropic, openai and the native ollama one. Until P61.1 it reached only the last of those, which mattered more than the name suggests: the openai adapter is also a local path (it is what talks to Ollama's OpenAI-compat `/v1` endpoint), so the backend most likely to wedge was only half covered by a key that reads as global.
+
 The bound **resets on every chunk**, so it measures "the server has sent nothing at all for this long" rather than the length of the response — a model emitting at 7 tok/s never approaches it. Prefill happens before the headers on Ollama, so every gap this sees is an inter-token gap. A trip is surfaced as a transport error, which means the phased drive's existing wait-for-backend/resume-from-disk path (built for a *crashed* server) handles a *wedged* one too, with no separate recovery machinery.
+
+That recovery has a second requirement beyond classifying the error: the drive has to be able to ask the backend "are you back yet?", so the adapter needs a liveness probe. **Both local paths have one** — the native Ollama adapter probes `GET /api/version`, and the openai adapter probes `GET <base_url>/models`, the OpenAI-compatible equivalent (side-effect-free on either: nothing is loaded, unloaded or billed). The openai one matters because that adapter is also what talks to Ollama's `/v1` endpoint; without it a `/v1` backend that died was correctly *classified* and the drive still aborted instead of waiting. Because the question is liveness rather than usability, any answer from the server counts as alive — a `401` from a gateway that wants a key, or a `404` from a backend that routes completions but not `/models`, both prove a server is there; only `502`/`503`/`504`, where a proxy is reporting that the *upstream* model server is gone, count as down. The cloud (anthropic) adapter deliberately has no probe: there is no local server to wait for, and a transient remote outage is already the retry decorator's job.
 
 Two related behaviors close the same gap from the other side:
 
