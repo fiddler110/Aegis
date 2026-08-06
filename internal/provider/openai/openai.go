@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -359,7 +360,8 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 	tools := map[int]*toolAccum{}
 	usage := &provider.Usage{}
 	stop := provider.StopEndTurn
-	sawLength := false // a choice reported finish_reason "length" (context ceiling hit)
+	sawLength := false   // a choice reported finish_reason "length" (context ceiling hit)
+	sawTerminal := false // P61.2: the stream reached a real end (see the check below)
 
 	scanner := sse.NewScanner(body)
 	for scanner.Scan() {
@@ -370,6 +372,7 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 		}
 		data = strings.TrimSpace(data)
 		if data == "[DONE]" {
+			sawTerminal = true
 			break
 		}
 		var chunk struct {
@@ -459,6 +462,12 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 				}
 				acc.args.WriteString(tc.Function.Arguments)
 			}
+			if ch.FinishReason != "" {
+				// P61.2: the choice reported why it ended, which is the wire's
+				// own statement that this generation completed. Accepted as a
+				// terminator alongside "[DONE]" — see the check after the loop.
+				sawTerminal = true
+			}
 			switch ch.FinishReason {
 			case "tool_calls":
 				stop = provider.StopToolUse
@@ -478,6 +487,32 @@ func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event)
 	}
 	if err := scanner.Err(); err != nil {
 		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("openai: read stream: %w", err)})
+		return
+	}
+
+	// P61.2: the stream ended with no read error and no terminator. That is not
+	// a finished turn — the body was closed mid-generation (a runner that
+	// exited, a proxy that cut the response, a server shutting down between
+	// chunks). Emitting EventDone regardless was the bug: usage stays zeroed,
+	// so the engine substitutes estimates and flags IsEstimated exactly as it
+	// does for a legitimately usage-free provider, and stop stays StopEndTurn —
+	// so a truncated response was surfaced as a complete short answer whose
+	// stop reason claims the model chose to end its turn. This mirrors P59.3 on
+	// the native Ollama path; classifying it as a transport error routes it into
+	// the existing waitForBackend/resume-from-disk path via
+	// IsBackendUnavailableError rather than into a silent wrong answer.
+	//
+	// Two terminators are accepted, not one. "[DONE]" is the OpenAI sentinel,
+	// but it is a convention of the reference server rather than a guarantee of
+	// the wire format, and compat backends vary on whether they send it. What
+	// every conformant server does send is a final chunk carrying a
+	// finish_reason for the choice — that is the response stating why it ended.
+	// Requiring "[DONE]" alone would report legitimate streams from those
+	// servers as transport failures, a worse regression than the bug.
+	if !sawTerminal {
+		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("openai", errors.New(
+			"read stream: the response ended without a finish_reason or [DONE] — the generation was cut off "+
+				"mid-stream (the server closed the connection or the model runner exited)"))})
 		return
 	}
 

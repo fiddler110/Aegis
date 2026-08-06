@@ -510,3 +510,124 @@ func TestStreamingClientHasNoWholeRequestTimeout(t *testing.T) {
 		t.Errorf("ResponseHeaderTimeout = %v, want a bound on a server that never replies", tr.ResponseHeaderTimeout)
 	}
 }
+
+// streamEvents runs body through the adapter and collects every event.
+func streamEvents(t *testing.T, body string) []provider.Event {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	stream, err := New("k", WithBaseURL(srv.URL)).Stream(context.Background(), provider.Request{
+		Model:     "m",
+		MaxTokens: 50,
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var out []provider.Event
+	for ev := range stream {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// TestStreamWithoutTerminalEventIsAnError (P61.2): a body that closes cleanly
+// mid-generation produces no read error, so before this fix the adapter emitted
+// EventDone with a zeroed output-token count and whatever partial text had
+// arrived — a truncated answer presented as a complete one. It must be
+// classified as a transport failure instead, so the existing
+// backend-unavailable resume path handles it. Mirrors P59.3 on the native
+// Ollama adapter.
+func TestStreamWithoutTerminalEventIsAnError(t *testing.T) {
+	const truncated = `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}
+
+`
+	var gotErr error
+	sawDone := false
+	for _, ev := range streamEvents(t, truncated) {
+		switch ev.Type {
+		case provider.EventError:
+			gotErr = ev.Err
+		case provider.EventDone:
+			sawDone = true
+		}
+	}
+	if sawDone {
+		t.Error("emitted EventDone for a stream that never reached a terminal event")
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error event for a stream truncated before message_stop")
+	}
+	if !provider.IsBackendUnavailableError(gotErr) {
+		t.Errorf("truncated stream = %v, want it classified backend-unavailable so the P50.1 resume path handles it", gotErr)
+	}
+}
+
+// TestStreamTerminalEventsStillComplete guards the other side of P61.2: a
+// stream that does end properly must still finish with EventDone and no error
+// event. message_delta counts as terminal on its own — it carries the final
+// stop_reason and output-token count, so a stream that lost only the
+// message_stop envelope is complete and failing it would be a worse regression
+// than the bug.
+func TestStreamTerminalEventsStillComplete(t *testing.T) {
+	const delta = `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}
+
+`
+	for _, tc := range []struct {
+		name string
+		body string
+		want provider.StopReason
+	}{
+		{name: "message_delta then message_stop", body: delta + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", want: provider.StopEndTurn},
+		{name: "message_delta alone", body: delta, want: provider.StopEndTurn},
+		{name: "message_stop alone", body: "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", want: provider.StopOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var done *provider.Event
+			for _, ev := range streamEvents(t, tc.body) {
+				if ev.Type == provider.EventError {
+					t.Fatalf("unexpected error event: %v", ev.Err)
+				}
+				if ev.Type == provider.EventDone {
+					e := ev
+					done = &e
+				}
+			}
+			if done == nil {
+				t.Fatal("expected EventDone")
+			}
+			if done.Stop != tc.want {
+				t.Errorf("Stop = %q, want %q", done.Stop, tc.want)
+			}
+		})
+	}
+}

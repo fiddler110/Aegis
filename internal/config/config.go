@@ -1081,8 +1081,10 @@ type MultiscannerConfig struct {
 	// "docker", ...), recorded because a locally-built image exists only in
 	// the storage of the runtime that built it. Without it, resolution would
 	// fall back to auto-detection and could pick a different runtime than the
-	// build did — on Windows, DetectBest prefers wslc, so a podman-built image
-	// would be reported missing even though it exists. Empty falls back to
+	// build did — DetectBest returns the first available engine in priority
+	// order, not the one that built anything, so on a machine with both
+	// installed a docker-built image would be reported missing even though it
+	// exists, because podman answered first. Empty falls back to
 	// auto-detection (the pre-multiscanner behavior).
 	Runtime string `koanf:"runtime"`
 	// ImageID is the full "sha256:..." ID of the image as built, recorded by

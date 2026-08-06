@@ -205,14 +205,29 @@ func countSBOMComponents(sbom []byte) (int, error) {
 // canarySuffix marks a fixture file that must not exist under its real name
 // inside this repository, and is renamed on materialization.
 //
-// It exists for gosec's canary and nothing else so far. The fixture needs a
-// go.mod and a .go file, and both are hostile to the tree they live in: a
-// nested go.mod excludes its directory from the parent module (and from the
-// embed pattern that has to reach it), and a .go file full of deliberate
-// vulnerabilities would otherwise be compiled — and scanned — as part of Aegis
-// itself. Storing them under a suffix the Go tool ignores and restoring the
-// real name here keeps both problems out of the repo without giving gosec a
-// fixture that differs from a real module.
+// Two unrelated reasons put files here, and both come down to the same thing: a
+// manifest under its real name is read by tooling that has no idea this
+// directory is a fixture.
+//
+//   - The Go toolchain (gosec's canary). The fixture needs a go.mod and a .go
+//     file, and both are hostile to the tree they live in: a nested go.mod
+//     excludes its directory from the parent module (and from the embed pattern
+//     that has to reach it), and a .go file full of deliberate vulnerabilities
+//     would otherwise be compiled — and scanned — as part of Aegis itself.
+//
+//   - GitHub's dependency graph (requirements.txt, package-lock.json). Those
+//     are pinned to long-published advisories on purpose, so the graph reads
+//     them as real dependencies and files a Dependabot alert per advisory —
+//     eighteen of them, none actionable, since nothing ever installs from this
+//     directory. Alerts are repo-wide advisory scanning and ignore
+//     .github/dependabot.yml's `updates:` scoping, so excluding the path there
+//     does not help; the manifest simply must not be recognizable. Bumping the
+//     pins is the one fix that is actually wrong — it would leave the SCA
+//     scanners finding nothing in the fixture built to prove they find things.
+//
+// Storing them under a suffix nothing recognizes and restoring the real name
+// here keeps every one of those problems out of the repo without giving any
+// scanner a fixture that differs from the real thing.
 const canarySuffix = ".canary"
 
 // MaterializeCanaryFixture writes the embedded canary tree into dir.

@@ -672,3 +672,88 @@ func TestStreamMapsFinishReasonToStopReason(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamWithoutTerminatorIsAnError (P61.2): a body that closes cleanly
+// mid-generation produces no read error, so before this fix the adapter emitted
+// EventDone with zeroed usage and StopEndTurn — a truncated answer presented as
+// a complete one. It must be classified as a transport failure instead, so the
+// existing backend-unavailable resume path handles it. Mirrors P59.3 on the
+// native Ollama adapter.
+func TestStreamWithoutTerminatorIsAnError(t *testing.T) {
+	// Well-formed content chunks, then a clean EOF — no finish_reason, no [DONE].
+	body := `data: {"choices":[{"delta":{"content":"partial "}}]}
+
+data: {"choices":[{"delta":{"content":"answer"}}]}
+
+`
+	var gotErr error
+	sawDone := false
+	for _, ev := range streamEvents(t, body) {
+		switch ev.Type {
+		case provider.EventError:
+			gotErr = ev.Err
+		case provider.EventDone:
+			sawDone = true
+		}
+	}
+	if sawDone {
+		t.Error("emitted EventDone for a stream that never sent a terminator")
+	}
+	if gotErr == nil {
+		t.Fatal("expected an error event for a stream truncated before its terminator")
+	}
+	if !provider.IsBackendUnavailableError(gotErr) {
+		t.Errorf("truncated stream = %v, want it classified backend-unavailable so the P50.1 resume path handles it", gotErr)
+	}
+}
+
+// TestStreamTerminatorsStillComplete guards the other side of P61.2: a stream
+// that does end properly must still finish with EventDone and no error event.
+// Both accepted terminators are covered — "[DONE]" is the OpenAI sentinel, but
+// compat backends (Ollama's /v1 among them) can close after the final chunk
+// carrying finish_reason without sending it, and failing those would be a worse
+// regression than the bug.
+func TestStreamTerminatorsStillComplete(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "finish_reason and [DONE]",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+		},
+		{
+			name: "[DONE] alone",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+		},
+		{
+			name: "finish_reason alone",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var text string
+			var done *provider.Event
+			for _, ev := range streamEvents(t, tc.body) {
+				switch ev.Type {
+				case provider.EventTextDelta:
+					text += ev.Text
+				case provider.EventError:
+					t.Fatalf("unexpected error event: %v", ev.Err)
+				case provider.EventDone:
+					e := ev
+					done = &e
+				}
+			}
+			if text != "hi" {
+				t.Errorf("text = %q", text)
+			}
+			if done == nil {
+				t.Fatal("expected EventDone")
+			}
+			if done.Stop != provider.StopEndTurn {
+				t.Errorf("Stop = %q, want %q", done.Stop, provider.StopEndTurn)
+			}
+		})
+	}
+}
