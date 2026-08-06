@@ -753,8 +753,11 @@ func (d *SlashDispatcher) cmdStatus(_ []string) SlashResult {
 	fmt.Fprintf(&b, "Provider: %s · Model: %s\n", info.Provider, info.Model)
 	if info.ContextWindow > 0 {
 		fmt.Fprintf(&b, "Context window: %d tokens (%s)\n", info.ContextWindow, describeCtxWinSource(info.ContextWindowSource))
-		if info.ContextWindowSource == "ollama:default" {
+		switch info.ContextWindowSource {
+		case "ollama:default":
 			b.WriteString("  ⚠ Ollama is serving its default context; raise OLLAMA_CONTEXT_LENGTH (or a modelfile num_ctx) for long agent tasks\n")
+		case "ollama:compat-default":
+			b.WriteString("  ⚠ the /v1 compat path never sends context_window, so Ollama is serving its default; switch to provider.default: ollama, or raise OLLAMA_CONTEXT_LENGTH (see `aegis doctor`)\n")
 		}
 	}
 
@@ -806,6 +809,8 @@ func describeCtxWinSource(src string) string {
 		return "Ollama modelfile num_ctx"
 	case "ollama:default":
 		return "Ollama server default, assumed"
+	case "ollama:compat-default":
+		return "Ollama server default — the /v1 compat path cannot send context_window"
 	default:
 		return src
 	}

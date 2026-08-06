@@ -1,6 +1,7 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-06 (eighth pass — P61.5, P61.6, P61.1, P61.3 and P61.4 shipped, closing the
+**Last updated:** 2026-08-06 (ninth pass — P61.8 shipped, the day it was filed; eighth pass: P61.5,
+P61.6, P61.1, P61.3 and P61.4 shipped, closing the
 P61.x batch except its parked item, and P61.8 filed; seventh pass: P61.2 shipped, the batch's
 silent-wrong-answer item; sixth pass: the P61.x cross-adapter drift batch filed, 7 items; fifth pass:
 P59.11 shipped; fourth pass: P59.10 and P52.16 measured, promoted and shipped, and the P59.9 loose
@@ -48,7 +49,8 @@ regression (`errors.As` stops at the first match, so the stale terminal 400 woul
 retryable failure unretryable), and P61.3's "no retry" claim and its unmentioned second precondition
 both turned out to be wrong, the latter leaving recovery inert on the `/v1` path until an openai
 liveness probe was added. **P61.8** was filed off P61.4 and is the daemon-side counterpart of the
-doctor bug it fixed. Write-ups in [releases.md](releases.md). Full batch origin under Tier 1.
+doctor bug it fixed; it **shipped 2026-08-06**, the same day, closing the batch's Tier-2 half a
+second time. Write-ups in [releases.md](releases.md). Full batch origin under Tier 1.
 
 **P59.11 shipped 2026-08-05**, the fifth batch that day and a direct follow-on: P59.10 had fixed the
 zero-tool nudge's 51x prefill regression and left the **tool-failure nudge at a measured 25.9x**,
@@ -60,8 +62,8 @@ mattered (never nag on consecutive failing rounds) is preserved by an outstandin
 than by the count. Write-up in [releases.md](releases.md); no tier held an item for it, since P59.10
 had recorded it as a deliberate non-fix rather than filing it.
 
-**Open items (7)** — 5 carried, plus **P61.7** (the P61.x batch's only survivor) and **P61.8**, filed
-2026-08-06 off P61.4. **P59.10 and P52.16 shipped
+**Open items (6)** — 5 carried, plus **P61.7** (the P61.x batch's only survivor); **P61.8** was filed
+2026-08-06 off P61.4 and shipped the same day. **P59.10 and P52.16 shipped
 2026-08-05** — the fourth batch that day, and the
 first assembled by *taking the measurements* Tier 4 items had been parked behind rather than by
 picking work off a tier. Both promotion triggers fired, and in both cases the measurement also
@@ -349,10 +351,17 @@ section above for what P55.7 and P55.8 changed, and [releases.md](releases.md) f
 
 ## Open Work — Tier 2
 
-**Status:** 2 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
-tracking rather than independent build work, plus **P61.8**, filed 2026-08-06 off P61.4 and the only
-open item of the P61.x batch outside Tier 4. **There is no unbuilt Tier-2 item left from any earlier
-batch.** **P61.4** and **P61.5** (the batch's Tier-2 half, origin under Tier 1) **shipped 2026-08-06**;
+**Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
+tracking rather than independent build work. **There is no unbuilt Tier-2 item left from any batch.**
+**P61.8 shipped 2026-08-06**, the day it was filed off P61.4 and the same day: it mirrors
+`doctorServedWindow`'s rule inside `applyDetectedWindowFor`, so the daemon and the diagnostic stop
+answering "what window is served?" two different ways for the same compat config. The item's fix was
+taken as prescribed, with one implementation note worth keeping — the rule splits across *two*
+predicates rather than one: detection beats config on the broad `IsLegacyOllamaCompat` (reaching that
+code at all means a native Ollama API answered, so the ambiguity is already resolved), while the
+stand-in default rides the strict `IsOllamaPortBaseURL`, since inventing Ollama's 4096 for an LM
+Studio or liteLLM server behind a bare `/v1` would be a new wrong answer rather than a fix. See
+[releases.md](releases.md). **P61.4** and **P61.5** (the batch's Tier-2 half, origin under Tier 1) **shipped 2026-08-06**;
 see [releases.md](releases.md), and note that P61.4 took **both** halves of the either/or its item
 posed rather than choosing between them, because they cover different populations — the compat-path
 `max_tokens` clamp only fires when a window was actually resolved, and `aegis doctor`'s
@@ -554,52 +563,6 @@ shape, and it was already interpreted by P34.12** — so osv-scanner is to the S
 brakeman was to the language-targeted half: the only one. No gate added; the measurements are now
 recorded in the `runJSON` doc comment (`internal/security/scanners.go`) so the sweep isn't re-run
 from scratch. Write-up in [releases.md](releases.md).
-
-### P61.8 — The daemon resolves the effective window from `provider.context_window` on the one path that never sends it
-
-`applyDetectedWindowFor` (`internal/server/contextwindow.go:167-188`) reconciles a detection result
-against config with one rule: an *authoritative* reading (`/api/ps`, i.e. the model is loaded) below
-`cfgWin` wins, and otherwise `case cfgWin > 0` wins. That is right on the native adapter, where
-`buildOne` passes the resolved window through `ollama.WithNumCtx` and the server really is asked to
-serve it. On the OpenAI-compat `/v1` path it is the same blind spot P61.4 just closed one layer up in
-`aegis doctor`: that endpoint cannot carry `num_ctx`, so a configured `context_window: 32768` is a
-statement of intent the server never hears — and the number the daemon derives from it is what every
-consumer of `effectiveContextWindowFor` then reasons with (the compaction trigger, the engine's
-proactive-compaction check, `/status` and the TUI usage bar, and — since P61.4 — `Request.NumCtx` and
-therefore the compat adapter's own `max_tokens` clamp).
-
-The evidence is that the two halves of the system now disagree about the same question for the same
-config, and the diagnostic is the half that is right: `doctorServedWindow` refuses a configured window
-on this path and states why ("that endpoint cannot carry num_ctx, so a configured window there is a
-statement of intent the server never hears"), while `applyDetectedWindowFor` still accepts it. The
-detection needed to do better is already in hand on this path — `ollamainfo.NativeBase` maps the `/v1`
-base back to the native API, which is how `initContextWindow` probes an `openai` provider at all.
-
-**Why this is Tier 2 and not Tier 1.** The exposure is narrow in two independent ways. The `cfgWin`
-branch only wins over a **non-authoritative** reading (modelfile/default, because the model is not
-loaded yet), and such an entry stays `final: false`, so `maybeRefreshContextWindowFor` re-detects
-after the first run and the authoritative reading downgrades it — the overstatement survives at most
-the first turn on each model rather than persisting. And the P61.4 clamp cannot *misfire* from it: an
-overstated window computes more headroom than exists, so the clamp lands above the real ceiling and
-merely fails to help, which is the pre-P61.4 status quo rather than a new truncation. What is
-genuinely wrong is that first turn — the one carrying the full system prompt plus any skill body —
-which is spent believing the engine has 8x the room Ollama is serving, so nothing compacts and Ollama
-truncates from the front (P39.9's shape, bounded to one turn per model). Against that, `aegis doctor`
-now names the misconfiguration outright, so the user is not without a signal.
-
-Fix is to mirror doctor's rule rather than to change the reconciliation: on an `IsLegacyOllamaCompat`
-provider a configured `context_window` is not evidence of what is served, so any detection should win
-regardless of authority, and Ollama's documented default should stand in when nothing was detected and
-the base URL is unambiguously Ollama (`IsOllamaPortBaseURL`, promoted by P61.4). Config still has to
-mean something — it is how a user tells a *native* daemon what to ask for — so this is a compat-path
-carve-out, not a relaxation of the rule everywhere.
-
-Promote to Tier 1 if any consumer starts treating the effective window as a **ceiling** rather than a
-trigger on this path (the P61.4 clamp becoming load-bearing there, or a P47.5b-style escalation
-reaching it), or if a first-turn front-truncation is actually observed on a compat backend.
-
-Priority: Tier 2 — small, self-contained and dependency-free; real, but self-correcting after one turn
-and already named by `aegis doctor`, so it is not the emergency the doctor half was.
 
 ## Open Work — Tier 3
 

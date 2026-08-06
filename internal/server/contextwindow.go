@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/ollamainfo"
+	"github.com/fiddler110/aegis/internal/providerfactory"
 )
 
 // Context-window resolution (P23.1): the daemon needs one number — the
@@ -99,10 +100,41 @@ func (s *Server) setWindowLocked(model string, e ctxWinEntry) {
 	s.ctxWinByModel[model] = e
 }
 
+// legacyCompatPath reports whether requests reach Ollama through the
+// OpenAI-compat (/v1) adapter, which cannot carry num_ctx. On that path a
+// configured provider.context_window is a statement of intent the server never
+// hears (P61.8), so it is not evidence of what is actually served.
+func (s *Server) legacyCompatPath() bool {
+	return providerfactory.IsLegacyOllamaCompat(s.cfg.Provider)
+}
+
+// compatDefaultApplies reports whether Ollama's documented out-of-the-box
+// window should stand in for an unservable configured one. It needs the
+// stricter of the two predicates: IsLegacyOllamaCompat deliberately
+// over-matches so its *advice* reaches a proxied server, but its bare-/v1 half
+// also matches LM Studio and liteLLM, which have their own serving defaults —
+// substituting Ollama's 4096 there would invent a number for a server that
+// isn't Ollama. This is doctorServedWindow's rule exactly (P61.4), which is the
+// point: the daemon and the diagnostic must not answer the same question two
+// different ways for the same config.
+func (s *Server) compatDefaultApplies() bool {
+	return s.legacyCompatPath() && providerfactory.IsOllamaPortBaseURL(s.cfg.Provider.BaseURL)
+}
+
 // configEntry is the pre-detection entry for any model: the configured window,
 // or nothing at all when context_window is unset. final says whether there is
 // anything left to detect (false keeps the model in the re-detect path).
+//
+// P61.8: on the compat path with an unambiguously-Ollama base URL, config is
+// not what will be served and Ollama's default stands in for it. That matters
+// most for the first turn on a model — the one carrying the full system prompt
+// plus any skill body — which would otherwise be spent believing there is 8x
+// the room Ollama is actually serving, so nothing compacts and Ollama truncates
+// from the front (P39.9's shape).
 func (s *Server) configEntry(final bool) ctxWinEntry {
+	if s.compatDefaultApplies() {
+		return ctxWinEntry{win: ollamainfo.DefaultServeContext, src: "ollama:compat-default", final: final}
+	}
 	e := ctxWinEntry{win: s.cfg.Provider.ContextWindow, final: final}
 	if e.win > 0 {
 		e.src = "config"
@@ -143,9 +175,13 @@ func (s *Server) initContextWindow(ctx context.Context) {
 	base := ollamainfo.NativeBase(p.BaseURL)
 	res, ok := ollamainfo.Detect(ctx, base, p.Model)
 	if !ok {
-		if p.Default == "ollama" {
+		if p.Default == "ollama" || s.compatDefaultApplies() {
 			// Ollama not answering yet (daemon may start first) — keep the
-			// base around and retry at run time.
+			// base around and retry at run time. The compat path takes this
+			// branch too (P61.8): letting config stand final there would pin
+			// an unservable number for the daemon's lifetime, where the seeded
+			// configEntry above already holds Ollama's default until a real
+			// reading replaces it.
 			s.ollamaBase = base
 		} else {
 			// A non-Ollama OpenAI-compatible server (LM Studio, liteLLM, real
@@ -166,6 +202,22 @@ func (s *Server) initContextWindow(ctx context.Context) {
 // entry is compared against config on its own.
 func (s *Server) applyDetectedWindowFor(model string, res ollamainfo.Result) {
 	cfgWin := s.cfg.Provider.ContextWindow
+	// P61.8: on the /v1 compat path config is not a promise the server ever
+	// received, so any reading beats it regardless of authority — a modelfile
+	// or default reading there *is* what will be served, because nothing
+	// overrides it on the wire. Neutralizing cfgWin rather than adding a branch
+	// keeps one reconciliation rule: whatever the server says, wins. Gated on
+	// the broad predicate, not compatDefaultApplies, because arriving here at
+	// all means ollamainfo reached a native Ollama API — the ambiguity that
+	// predicate guards against is already resolved by the successful probe.
+	if cfgWin > 0 && s.legacyCompatPath() {
+		if res.ContextWindow != cfgWin {
+			s.logger.Warn("configured context_window is not what the OpenAI-compat endpoint serves; using the detected value",
+				"model", model, "configured", cfgWin, "served", res.ContextWindow, "source", string(res.Source),
+				"hint", "the /v1 path never sends num_ctx — switch to provider.default: ollama, raise OLLAMA_CONTEXT_LENGTH, or pin num_ctx in a modelfile")
+		}
+		cfgWin = 0
+	}
 	// A loaded-model reading is the ground truth; anything else is worth
 	// re-checking once the first run has actually loaded the model.
 	e := ctxWinEntry{final: res.Authoritative(), max: res.ModelMax}
@@ -188,8 +240,9 @@ func (s *Server) applyDetectedWindowFor(model string, res ollamainfo.Result) {
 }
 
 // effectiveContextWindow returns the current effective window and its source
-// ("config", "ollama:loaded", "ollama:modelfile", "ollama:default", or ""
-// when unknown) for the globally configured model — what /status reports and
+// ("config", "ollama:loaded", "ollama:modelfile", "ollama:default",
+// "ollama:compat-default", or "" when unknown) for the globally configured
+// model — what /status reports and
 // what the daemon-wide compactor is tuned to.
 func (s *Server) effectiveContextWindow() (int, string) {
 	s.ctxWinMu.Lock()
