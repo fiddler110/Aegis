@@ -133,10 +133,17 @@ func (a *admissionAdapter) Unwrap() Adapter { return a.base }
 // the base stream ends, releasing the slot exactly once when it does.
 func (a *admissionAdapter) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	start := time.Now()
+	// P61.5: check cancellation *before* the acquire, not as one case of a
+	// select that also has a default. A select picks uniformly among its ready
+	// cases, so with a free slot and an already-cancelled context the acquire
+	// won half the time and a dead request took a slot and a full backend turn.
+	// The two-phase select below keeps the same shape for the *blocking* wait,
+	// where ctx.Done() genuinely races the slot and either outcome is correct.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case a.sem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	default:
 		// Full: log before blocking, so a queued request is visible while it
 		// waits rather than only in hindsight.

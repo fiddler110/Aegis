@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 )
 
@@ -55,6 +56,17 @@ func (f *failoverAdapter) Unwrap() Adapter { return f.targets[0].Adapter }
 func (f *failoverAdapter) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	var lastErr error
 	for i, t := range f.targets {
+		// P61.5: stop at the first target once the caller has gone away. Without
+		// this a cancelled run walked the whole chain, taking a (guaranteed to
+		// fail) request and a WARN per hop before surfacing the cancellation.
+		// Reported as the context's error rather than the last target's, since
+		// that is what actually ended the attempt.
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return nil, errors.Join(err, lastErr)
+			}
+			return nil, err
+		}
 		r := req
 		if t.Model != "" {
 			r.Model = t.Model

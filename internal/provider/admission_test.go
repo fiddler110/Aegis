@@ -244,6 +244,33 @@ func TestAdmissionQueueRespectsContext(t *testing.T) {
 	drain(first)
 }
 
+// TestAdmissionCancelledContextNeverAcquiresASlot is the P61.5 regression. The
+// acquire used to be a three-way select — sem-send, ctx.Done(), default — and a
+// select picks *uniformly at random* among its ready cases, so with a free slot
+// and an already-cancelled context the dead request won a slot (and a full
+// backend turn) roughly half the time. It read as a cancellation check and was
+// not one.
+//
+// The loop is what makes the test deterministic: a single iteration would pass
+// against the buggy code half the time, and 200 consecutive wins is not a thing
+// a uniform choice does.
+func TestAdmissionCancelledContextNeverAcquiresASlot(t *testing.T) {
+	base := newGatedAdapter()
+	a := WithAdmissionControl(base, 4, quietLogger()) // depth > 1: a slot is always free
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for i := 0; i < 200; i++ {
+		if _, err := a.Stream(ctx, Request{}); !errors.Is(err, context.Canceled) {
+			t.Fatalf("iteration %d: Stream error = %v, want context.Canceled", i, err)
+		}
+	}
+	if n := base.started.Load(); n != 0 {
+		t.Errorf("a cancelled request reached the backend %d time(s)", n)
+	}
+}
+
 // TestAdmissionUnboundedAddsNoLayer: "unbounded" must be the literal base
 // adapter, so a cloud provider pays nothing — not even a forwarding goroutine
 // per stream — for a knob that only means something locally.
