@@ -134,8 +134,40 @@ def natkey(s):
 # --------------------------------------------------------------------------- #
 
 def split_row(line):
-    """Split a `| a | b | c |` row into stripped cells."""
-    return [c.strip() for c in line.strip().strip("|").split("|")]
+    """Split a `| a | b | c |` row into stripped cells. A `|` inside a
+    backtick-quoted code span (e.g. an Evidence cell citing `` `a || b` ``)
+    or escaped as `\\|` is literal cell content, not a delimiter — content
+    phases routinely cite JS/shell snippets with `||` in this column."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    cells = []
+    cur = []
+    in_code = False
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\\" and i + 1 < n and s[i + 1] == "|":
+            cur.append("|")
+            i += 2
+            continue
+        if ch == "`":
+            in_code = not in_code
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "|" and not in_code:
+            cells.append("".join(cur).strip())
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    cells.append("".join(cur).strip())
+    return cells
 
 
 def is_table_row(line):

@@ -219,13 +219,41 @@ def read_lines(path):
 
 
 def split_row(line):
-    """Split a markdown table row on unescaped pipes, dropping the outer pipes."""
+    """Split a markdown table row on unescaped pipes, dropping the outer
+    pipes. A `|` inside a backtick-quoted code span (e.g. an Evidence cell
+    citing `` `a || b` ``) or escaped as `\\|` is literal cell content, not
+    a delimiter — content phases routinely cite JS/shell snippets with `||`
+    in this column."""
     s = line.strip()
     if s.startswith("|"):
         s = s[1:]
     if s.endswith("|"):
         s = s[:-1]
-    return [c.strip() for c in s.split("|")]
+    cells = []
+    cur = []
+    in_code = False
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\\" and i + 1 < n and s[i + 1] == "|":
+            cur.append("|")
+            i += 2
+            continue
+        if ch == "`":
+            in_code = not in_code
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "|" and not in_code:
+            cells.append("".join(cur).strip())
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    cells.append("".join(cur).strip())
+    return cells
 
 
 HTML_COMMENT_LINE_RE = re.compile(r"^<!--.*-->$")
