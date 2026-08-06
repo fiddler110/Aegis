@@ -7,9 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -31,6 +29,22 @@ type Adapter struct {
 	cache    bool // emit prompt-cache breakpoints
 	headers  map[string]string
 	thinking *provider.ThinkingConfig // non-nil enables extended thinking
+
+	// headerTimeout remembers an explicitly configured response-header timeout
+	// (P61.5) so a WithHTTPClient applied *after* WithResponseHeaderTimeout can
+	// re-apply it to the client it installs. 0 means the option was never used;
+	// WithResponseHeaderTimeout normalizes its own "<= 0 means default" case
+	// before storing, so a stored value is always a real duration.
+	headerTimeout time.Duration
+
+	// streamIdleTimeout (P59.2/P61.1) bounds the gap *between* streamed chunks.
+	// Same field, semantics and default as the native Ollama adapter's — see
+	// sse.DefaultStreamIdleTimeout for why that window is otherwise unwatched
+	// once headers arrive. Unlike headerTimeout above it is not client state:
+	// sse.Run reads it per stream, so no option can clobber it and it needs no
+	// re-application dance. 0 selects sse.DefaultStreamIdleTimeout; negative
+	// disables the bound entirely.
+	streamIdleTimeout time.Duration
 }
 
 // Option configures the adapter.
@@ -50,17 +64,61 @@ func WithBaseURL(u string) Option {
 	}
 }
 
-// WithHTTPClient overrides the HTTP client.
+// WithHTTPClient overrides the HTTP client. A response-header timeout already
+// set by WithResponseHeaderTimeout is re-applied onto the supplied client, so
+// the two options compose in either order (P61.5).
 func WithHTTPClient(c *http.Client) Option {
-	return func(a *Adapter) { a.client = c }
+	return func(a *Adapter) {
+		a.client = c
+		if a.headerTimeout > 0 {
+			a.client = sse.ApplyResponseHeaderTimeout(a.client, a.headerTimeout)
+		}
+	}
 }
 
 // WithResponseHeaderTimeout overrides how long the streamed request waits for
 // response headers (provider.response_header_timeout, P35.5). <= 0 falls back
-// to sse.DefaultResponseHeaderTimeout. Applied after any WithHTTPClient in
-// option order, since both set a.client.
+// to sse.DefaultResponseHeaderTimeout.
+//
+// It composes onto whatever client the adapter already has rather than
+// replacing it (P61.5). This one used to be order-dependent in practice, not
+// just in theory: it and WithHTTPClient both assigned a.client, so whichever
+// came second won and the other was silently discarded. The remembered
+// headerTimeout is what lets a later WithHTTPClient re-apply it.
 func WithResponseHeaderTimeout(d time.Duration) Option {
-	return func(a *Adapter) { a.client = sse.NewStreamingClient(d) }
+	return func(a *Adapter) {
+		if d <= 0 {
+			d = sse.DefaultResponseHeaderTimeout
+		}
+		a.headerTimeout = d
+		a.client = sse.ApplyResponseHeaderTimeout(a.client, d)
+	}
+}
+
+// WithStreamIdleTimeout overrides how long the adapter waits between two
+// streamed chunks before giving up on the response
+// (provider.stream_idle_timeout, P59.2; wired to this adapter by P61.1). 0
+// selects sse.DefaultStreamIdleTimeout; pass a negative duration to disable the
+// bound. Deliberately identical to ollama.WithStreamIdleTimeout: the config key
+// is one key, so it must mean one thing on every backend.
+//
+// It stores a plain field rather than touching a.client, so it does not join
+// the WithHTTPClient/WithResponseHeaderTimeout ordering problem P61.5 fixed and
+// needs no remembered-value counterpart of its own.
+func WithStreamIdleTimeout(d time.Duration) Option {
+	return func(a *Adapter) { a.streamIdleTimeout = d }
+}
+
+// resolveStreamIdleTimeout maps the configured value onto the bound sse.Run
+// applies: 0 (unset) takes the default, negative disables.
+func (a *Adapter) resolveStreamIdleTimeout() time.Duration {
+	if a.streamIdleTimeout == 0 {
+		return sse.DefaultStreamIdleTimeout
+	}
+	if a.streamIdleTimeout < 0 {
+		return 0
+	}
+	return a.streamIdleTimeout
 }
 
 // WithHeaders adds extra HTTP headers to every request (e.g. gateway auth).
@@ -306,7 +364,11 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	}
 
 	out := make(chan provider.Event)
-	go a.consume(ctx, resp.Body, out)
+	go sse.Run(ctx, resp.Body, out, sse.Options{
+		Provider:        a.Name(),
+		IdleTimeout:     a.resolveStreamIdleTimeout(),
+		MissingTerminal: missingMessageStop,
+	}, newEventDecoder())
 	return out, nil
 }
 
@@ -320,74 +382,66 @@ type blockState struct {
 	signature strings.Builder // accumulated thinking signature
 }
 
-func (a *Adapter) consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event) {
-	defer close(out)
-	defer body.Close()
+// missingMessageStop is reported when the SSE stream ends cleanly without any
+// terminal event (P61.2) — see eventDecoder.handleData for the two that count,
+// and sse.Run, which enforces the requirement.
+const missingMessageStop = "read stream: the response ended without a message_stop — " +
+	"the generation was cut off mid-stream (the server closed the connection)"
 
-	emit := sse.NewEmitter(ctx, out).Emit
+// eventDecoder translates the Messages API SSE stream into provider events. It
+// owns only the per-event decode and the content-block accumulation that
+// decode implies (P61.6); the read loop, the idle watchdog, the terminal-event
+// requirement, scanner-error classification and the final EventDone all live in
+// sse.Run, shared with the other adapters.
+//
+// Framing is why it also implements sse.Flusher: an event is dispatched on the
+// blank line that ends it, so the last event of a stream that does not end with
+// one exists only in dataBuf until Flush runs.
+type eventDecoder struct {
+	blocks  map[int]*blockState
+	usage   *provider.Usage
+	stop    provider.StopReason
+	dataBuf strings.Builder
+}
 
-	blocks := map[int]*blockState{}
-	usage := &provider.Usage{}
-	stop := provider.StopOther
-	sawTerminal := false // P61.2: the stream reached a real end (see the check below)
-
-	scanner := sse.NewScanner(body)
-
-	var dataBuf strings.Builder
-	dispatch := func() bool {
-		if dataBuf.Len() == 0 {
-			return true
-		}
-		data := dataBuf.String()
-		dataBuf.Reset()
-		return a.handleData(data, blocks, usage, &stop, &sawTerminal, emit)
+func newEventDecoder() *eventDecoder {
+	return &eventDecoder{
+		blocks: map[int]*blockState{},
+		usage:  &provider.Usage{},
+		stop:   provider.StopOther,
 	}
+}
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			if !dispatch() {
-				return
-			}
-			continue
-		}
-		if rest, ok := strings.CutPrefix(line, "data:"); ok {
-			dataBuf.WriteString(strings.TrimSpace(rest))
-		}
-		// "event:" lines are ignored; the JSON payload carries its own "type".
+func (d *eventDecoder) Line(line string, emit func(provider.Event) bool) sse.Status {
+	if line == "" {
+		return d.dispatch(emit)
 	}
-	if !dispatch() {
-		return
+	if rest, ok := strings.CutPrefix(line, "data:"); ok {
+		d.dataBuf.WriteString(strings.TrimSpace(rest))
 	}
-	if err := scanner.Err(); err != nil {
-		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("anthropic: read stream: %w", err)})
-		return
-	}
+	// "event:" lines are ignored; the JSON payload carries its own "type".
+	return sse.StatusContinue
+}
 
-	// P61.2: the stream ended with no read error and no terminal event. That is
-	// not a finished turn — the body was closed mid-generation (a proxy that cut
-	// the response, a gateway shutting down between events). Emitting EventDone
-	// regardless was the bug: usage keeps only whatever message_start reported
-	// and output_tokens stays zero, so the engine substitutes estimates and
-	// flags IsEstimated exactly as it does for a legitimately usage-free
-	// provider, and the caller sees a truncated answer with no signal that it
-	// was cut off. This mirrors P59.3 on the native Ollama path; classifying it
-	// as a transport error routes it into the existing
-	// waitForBackend/resume-from-disk path via IsBackendUnavailableError rather
-	// than into a silent wrong answer.
-	//
-	// message_stop is the protocol's terminator, but message_delta is where the
-	// completion semantics actually land (the final stop_reason and the output
-	// token count), so a stream that reached message_delta and lost only the
-	// envelope's last event is complete and must not be failed — see handleData.
-	if !sawTerminal {
-		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError(a.Name(), errors.New(
-			"read stream: the response ended without a message_stop — the generation was cut off "+
-				"mid-stream (the server closed the connection)"))})
-		return
-	}
+// Flush decodes a final event left unterminated by the end of the stream. It
+// runs before sse.Run classifies a read error, matching the order this adapter
+// used before the lifecycle moved: a buffered final message_delta is what makes
+// an otherwise-complete stream count as terminal.
+func (d *eventDecoder) Flush(emit func(provider.Event) bool) sse.Status {
+	return d.dispatch(emit)
+}
 
-	emit(provider.Event{Type: provider.EventDone, Stop: stop, Usage: usage})
+func (d *eventDecoder) Finish(func(provider.Event) bool) (provider.StopReason, *provider.Usage, bool) {
+	return d.stop, d.usage, true
+}
+
+func (d *eventDecoder) dispatch(emit func(provider.Event) bool) sse.Status {
+	if d.dataBuf.Len() == 0 {
+		return sse.StatusContinue
+	}
+	data := d.dataBuf.String()
+	d.dataBuf.Reset()
+	return d.handleData(data, emit)
 }
 
 // sseEvent is the decoded JSON of a single SSE data payload.
@@ -425,13 +479,15 @@ type sseEvent struct {
 	} `json:"error"`
 }
 
-func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *provider.Usage, stop *provider.StopReason, sawTerminal *bool, emit func(provider.Event) bool) bool {
+func (d *eventDecoder) handleData(data string, emit func(provider.Event) bool) sse.Status {
+	blocks, usage := d.blocks, d.usage
 	var ev sseEvent
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		// Ignore malformed keepalive lines rather than aborting the stream.
-		return true
+		return sse.StatusContinue
 	}
 
+	terminal := false
 	switch ev.Type {
 	case "message_start":
 		usage.InputTokens = ev.Message.Usage.InputTokens
@@ -448,7 +504,7 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 				ID:   ev.ContentBlock.ID,
 				Name: ev.ContentBlock.Name,
 			}}) {
-				return false
+				return sse.StatusAbort
 			}
 		}
 	case "content_block_delta":
@@ -457,7 +513,7 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 		case "text_delta":
 			if ev.Delta.Text != "" {
 				if !emit(provider.Event{Type: provider.EventTextDelta, Text: ev.Delta.Text}) {
-					return false
+					return sse.StatusAbort
 				}
 			}
 		case "input_json_delta":
@@ -470,7 +526,7 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 			}
 			if ev.Delta.Thinking != "" {
 				if !emit(provider.Event{Type: provider.EventThinkingDelta, Text: ev.Delta.Thinking}) {
-					return false
+					return sse.StatusAbort
 				}
 			}
 		case "signature_delta":
@@ -492,14 +548,14 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 				Name:  bs.toolName,
 				Input: json.RawMessage(input),
 			}}) {
-				return false
+				return sse.StatusAbort
 			}
 		case bs.typ == "thinking":
 			if !emit(provider.Event{Type: provider.EventThinking, Thinking: &provider.ThinkingBlock{
 				Text:      bs.thinking.String(),
 				Signature: bs.signature.String(),
 			}}) {
-				return false
+				return sse.StatusAbort
 			}
 		}
 		delete(blocks, ev.Index)
@@ -509,19 +565,22 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 			// usage — everything message_stop adds is envelope. Counting it as
 			// terminal keeps a stream whose last event was dropped from being
 			// reported as a transport failure.
-			*sawTerminal = true
-			*stop = mapStopReason(ev.Delta.StopReason)
+			terminal = true
+			d.stop = mapStopReason(ev.Delta.StopReason)
 		}
 		if ev.Usage.OutputTokens > 0 {
 			usage.OutputTokens = ev.Usage.OutputTokens
 		}
 	case "message_stop":
-		*sawTerminal = true // P61.2: the protocol's own end-of-stream event
+		terminal = true // P61.2: the protocol's own end-of-stream event
 	case "error":
 		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("anthropic: %s: %s", ev.Error.Type, ev.Error.Message)})
-		return false
+		return sse.StatusAbort
 	}
-	return true
+	if terminal {
+		return sse.StatusTerminal
+	}
+	return sse.StatusContinue
 }
 
 func mapStopReason(s string) provider.StopReason {

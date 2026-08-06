@@ -112,3 +112,27 @@ func TestLegacyOllamaModelfileRecipe(t *testing.T) {
 		}
 	}
 }
+
+// TestIsOllamaPortBaseURL pins the predicate P61.4's max_tokens clamp is gated
+// on. It must stay strictly narrower than IsLegacyOllamaCompat: that rule
+// deliberately over-matches so its advice reaches a proxied server, but a clamp
+// firing against LM Studio or a cloud gateway would truncate a legitimate long
+// generation, which is worse than the bug it fixes.
+func TestIsOllamaPortBaseURL(t *testing.T) {
+	for _, tc := range []struct {
+		baseURL string
+		want    bool
+	}{
+		{"http://localhost:11434/v1", true},
+		{"http://127.0.0.1:11434/v1", true},
+		{"http://ollama.lan:11434", true},
+		{"http://localhost:1234/v1", false},  // LM Studio
+		{"http://localhost:4000/v1", false},  // liteLLM / a gateway fronting a cloud model
+		{"https://api.openai.com/v1", false}, // real OpenAI
+		{"", false},
+	} {
+		if got := IsOllamaPortBaseURL(tc.baseURL); got != tc.want {
+			t.Errorf("IsOllamaPortBaseURL(%q) = %v, want %v", tc.baseURL, got, tc.want)
+		}
+	}
+}
