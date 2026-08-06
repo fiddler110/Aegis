@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider/anthropic"
+	"github.com/fiddler110/aegis/internal/provider/openai"
 )
 
 // backendState builds a State wired for the P50.1 backend-recovery
@@ -263,4 +267,70 @@ func withShrunkBackendBudget(t *testing.T, budget, interval time.Duration) func(
 	restore := func() { backendRecoverBudget, backendProbeInterval = oldBudget, oldInterval }
 	t.Cleanup(restore)
 	return restore
+}
+
+// TestRecoverBackendDownReachesTheOpenAIAdapter is the end of the P61.3/P61.6
+// chain, asserted against the real adapters rather than a stub probe. P61.6 made
+// a mid-stream death on the OpenAI-compat path classify as backend-unavailable,
+// but recoverBackendDown has a *second* precondition — the adapter must answer
+// provider.CheckBackendHealth — and only ollama.Adapter did, so a killed
+// `ollama serve` behind Ollama's /v1 endpoint was classified and then aborted
+// anyway. With the openai adapter's own liveness probe wired, the same error now
+// reaches waitForBackend and yields backendRecovered.
+//
+// The anthropic case is the control: it has no probe by design (no local server
+// to wait for), so the identical error must still fall through to the caller's
+// terminal path instead of spinning on a wait that can never end.
+func TestRecoverBackendDownReachesTheOpenAIAdapter(t *testing.T) {
+	// A live OpenAI-compatible server: only its reachability matters, so the
+	// handler answers everything.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	// The error a backend death on this path actually produces (sse.Run wraps
+	// scanner.Err() as a transport APIError since P61.6).
+	down := provider.NewTransportError("openai", errors.New("read tcp: connection reset by peer"))
+	if !provider.IsBackendUnavailableError(down) {
+		t.Fatal("test premise: a mid-stream read failure must classify as backend-unavailable")
+	}
+
+	// Wired exactly as server/drive.go and cli/chat.go wire it, through the
+	// retry decorator, so this exercises the reach the real drive has.
+	adapter := provider.WithRetry(openai.New("k", openai.WithBaseURL(srv.URL)), provider.DefaultRetryPolicy(), nil)
+	st := backendState(func(hctx context.Context) (bool, bool) {
+		return provider.CheckBackendHealth(hctx, adapter)
+	})
+	if got := st.recoverBackendDown(ctx, down, "phase-3 content"); got != backendRecovered {
+		t.Errorf("openai adapter + live server = %v, want backendRecovered — P50.1's wait-and-resume is "+
+			"inert on the OpenAI-compat /v1 path without a liveness probe", got)
+	}
+
+	// The same adapter pointed at a server that is gone must reach the *wait*
+	// and time out there (backendGaveUp = a resumable stop), not skip it: that
+	// is what distinguishes a wired probe from an unwired one, since both
+	// end the phase but only one keeps the suite resumable.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	restore := withShrunkBackendBudget(t, 20*time.Millisecond, 2*time.Millisecond)
+	defer restore()
+	deadAdapter := openai.New("k", openai.WithBaseURL(deadURL))
+	st = backendState(func(hctx context.Context) (bool, bool) {
+		return provider.CheckBackendHealth(hctx, deadAdapter)
+	})
+	if got := st.recoverBackendDown(ctx, down, "phase-3 content"); got != backendGaveUp {
+		t.Errorf("openai adapter + dead server = %v, want backendGaveUp (the wait ran and expired)", got)
+	}
+
+	// Control: no probe on the cloud adapter → the drive must not wait.
+	cloud := provider.WithRetry(anthropic.New("k"), provider.DefaultRetryPolicy(), nil)
+	st = backendState(func(hctx context.Context) (bool, bool) {
+		return provider.CheckBackendHealth(hctx, cloud)
+	})
+	if got := st.recoverBackendDown(ctx, provider.NewTransportError("anthropic", errors.New("connection reset by peer")), "phase-3 content"); got != backendNotDown {
+		t.Errorf("anthropic adapter = %v, want backendNotDown — there is no local server to wait for", got)
+	}
 }

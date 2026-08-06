@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider/sse"
 )
 
 // sampleStream is a minimal but representative Anthropic SSE response that
@@ -511,6 +514,41 @@ func TestStreamingClientHasNoWholeRequestTimeout(t *testing.T) {
 	}
 }
 
+// TestClientOptionsComposeInEitherOrder is the P61.5 regression:
+// WithResponseHeaderTimeout used to assign a freshly built client to a.client,
+// so it and WithHTTPClient — the only two options that touch the client today —
+// silently clobbered each other and whichever was listed second won. Option
+// order must carry no meaning: both settings have to survive either order.
+func TestClientOptionsComposeInEitherOrder(t *testing.T) {
+	// A caller-supplied client carrying a setting of its own (a jar stands in
+	// for any per-client configuration a proxy/gateway setup would bring).
+	newSupplied := func() *http.Client {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.MaxIdleConnsPerHost = 23
+		return &http.Client{Transport: tr}
+	}
+
+	orders := map[string][]Option{
+		"client-then-timeout": {WithHTTPClient(newSupplied()), WithResponseHeaderTimeout(7 * time.Minute)},
+		"timeout-then-client": {WithResponseHeaderTimeout(7 * time.Minute), WithHTTPClient(newSupplied())},
+	}
+	for name, opts := range orders {
+		t.Run(name, func(t *testing.T) {
+			a := New("k", opts...)
+			tr, ok := a.client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("client.Transport = %T, want *http.Transport", a.client.Transport)
+			}
+			if tr.ResponseHeaderTimeout != 7*time.Minute {
+				t.Errorf("ResponseHeaderTimeout = %v, want 7m (WithResponseHeaderTimeout was discarded)", tr.ResponseHeaderTimeout)
+			}
+			if tr.MaxIdleConnsPerHost != 23 {
+				t.Errorf("MaxIdleConnsPerHost = %d, want 23 (WithHTTPClient was discarded)", tr.MaxIdleConnsPerHost)
+			}
+		})
+	}
+}
+
 // streamEvents runs body through the adapter and collects every event.
 func streamEvents(t *testing.T, body string) []provider.Event {
 	t.Helper()
@@ -629,5 +667,101 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
 				t.Errorf("Stop = %q, want %q", done.Stop, tc.want)
 			}
 		})
+	}
+}
+
+// TestStreamIdleTimeoutWiring (P61.1) covers this adapter's half of the idle
+// bound: the resolution semantics, that they match ollama's exactly (one config
+// key must mean one thing on every backend), and — the P61.5 hazard — that the
+// option survives a WithHTTPClient applied after it. It does so for a duller
+// reason than headerTimeout does: it stores a plain field instead of rebuilding
+// a.client, so there is nothing for a client-touching option to clobber and no
+// remembered-value counterpart is needed. The test pins that, since making it
+// client state later would silently reintroduce the ordering bug.
+//
+// The watchdog mechanism itself is owned and tested once in
+// internal/provider/sse (P61.6); what needs covering here is only the wiring.
+func TestStreamIdleTimeoutWiring(t *testing.T) {
+	if got := New("k").resolveStreamIdleTimeout(); got != sse.DefaultStreamIdleTimeout {
+		t.Errorf("unset = %v, want the %v default", got, sse.DefaultStreamIdleTimeout)
+	}
+	if got := New("k", WithStreamIdleTimeout(-1)).resolveStreamIdleTimeout(); got != 0 {
+		t.Errorf("negative config = %v, want 0 (bound disabled)", got)
+	}
+	orders := map[string][]Option{
+		"idle-then-client": {WithStreamIdleTimeout(90 * time.Second), WithHTTPClient(&http.Client{})},
+		"client-then-idle": {WithHTTPClient(&http.Client{}), WithStreamIdleTimeout(90 * time.Second)},
+	}
+	for name, opts := range orders {
+		t.Run(name, func(t *testing.T) {
+			if got := New("k", opts...).resolveStreamIdleTimeout(); got != 90*time.Second {
+				t.Errorf("%s = %v, want 90s — option order must carry no meaning", name, got)
+			}
+		})
+	}
+}
+
+// TestStreamIdleTimeoutAbortsAStalledRunner is the end-to-end half: headers
+// arrive, one event streams, then the server wedges. Nothing else bounds that
+// window (Client.Timeout is deliberately zero and ResponseHeaderTimeout stopped
+// applying when the headers landed), so it must end as a transport error — the
+// classification a crashed server gets — and never as EventDone.
+func TestStreamIdleTimeoutAbortsAStalledRunner(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	stream, err := New("k", WithBaseURL(srv.URL), WithStreamIdleTimeout(100*time.Millisecond)).
+		Stream(context.Background(), provider.Request{
+			Model:    "m",
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+		})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	type outcome struct {
+		err  error
+		done bool
+	}
+	res := make(chan outcome, 1)
+	go func() {
+		var o outcome
+		for ev := range stream {
+			switch ev.Type {
+			case provider.EventError:
+				o.err = ev.Err
+			case provider.EventDone:
+				o.done = true
+			}
+		}
+		res <- o
+	}()
+
+	select {
+	case o := <-res:
+		if o.done {
+			t.Error("a stalled stream must not produce EventDone")
+		}
+		if o.err == nil {
+			t.Fatal("expected an error event once the idle bound elapsed")
+		}
+		if !provider.IsBackendUnavailableError(o.err) {
+			t.Errorf("stalled stream = %v, want it classified backend-unavailable so the resume path handles it", o.err)
+		}
+		if !strings.Contains(o.err.Error(), "stream_idle_timeout") {
+			t.Errorf("error should name the knob that relaxes it, got %q", o.err.Error())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream never ended — the idle bound did not reach sse.Run")
 	}
 }

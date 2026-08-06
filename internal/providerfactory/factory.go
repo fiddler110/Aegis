@@ -217,6 +217,7 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 			anthropic.WithBaseURL(baseURL),
 			anthropic.WithHeaders(headers),
 			anthropic.WithResponseHeaderTimeout(responseHeaderTimeout),
+			anthropic.WithStreamIdleTimeout(streamIdleTimeout),
 		}
 		// Enable extended thinking when explicitly requested, budgeting half of
 		// max_tokens for reasoning (clamped to the API's 1024 minimum).
@@ -277,11 +278,26 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 			openai.WithBaseURL(baseURL),
 			openai.WithHeaders(headers),
 			openai.WithResponseHeaderTimeout(responseHeaderTimeout),
+			openai.WithStreamIdleTimeout(streamIdleTimeout),
 		}
 		// Only send the Ollama-specific `think` field when targeting an
 		// OpenAI-compatible local server, not the real openai.com API.
 		if baseURL != "" && think != nil {
 			opts = append(opts, openai.WithThink(think))
+		}
+		// P61.4: the compat endpoint cannot carry num_ctx and cannot report the
+		// served window, so the adapter can only reconcile max_tokens against
+		// the window the daemon resolved for it (Request.NumCtx) — and only
+		// when the backend actually spends one budget on prompt+completion.
+		// Gated on the :11434 half of the legacy-compat rule alone, because
+		// that is the only half that is *certainly* Ollama: the bare-/v1 half
+		// also matches LM Studio, liteLLM and any gateway fronting a cloud
+		// model, where max_tokens is a separate output allowance and clamping
+		// it would truncate a legitimate long generation. Missing a proxied
+		// Ollama here costs the clamp, not correctness — `aegis doctor`'s
+		// generation-budget row still names the unreconciled pair.
+		if IsOllamaPortBaseURL(baseURL) {
+			opts = append(opts, openai.WithSharedContextWindow(true))
 		}
 		if reasoningEffort != "" {
 			opts = append(opts, openai.WithReasoningEffort(reasoningEffort))

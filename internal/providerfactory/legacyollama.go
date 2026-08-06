@@ -47,10 +47,20 @@ func IsLegacyOllamaCompat(p config.ProviderConfig) bool {
 	return strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/v1")
 }
 
-// isCertainOllama distinguishes the two halves of IsLegacyOllamaCompat's rule:
-// an :11434 base_url is Ollama, a bare /v1 base only might be.
+// IsOllamaPortBaseURL distinguishes the two halves of IsLegacyOllamaCompat's
+// rule: an :11434 base_url is Ollama, a bare /v1 base only might be. It is the
+// one predicate in this package that is allowed to mean "certainly Ollama",
+// which is why P61.4's max_tokens clamp on the compat adapter is gated on it
+// and not on IsLegacyOllamaCompat — the latter deliberately over-matches so its
+// *advice* reaches a proxied server, and advice can be dismissed where a clamp
+// cannot.
+func IsOllamaPortBaseURL(baseURL string) bool {
+	return strings.Contains(baseURL, ":11434")
+}
+
+// isCertainOllama is IsOllamaPortBaseURL for a whole provider config.
 func isCertainOllama(p config.ProviderConfig) bool {
-	return strings.Contains(p.BaseURL, ":11434")
+	return IsOllamaPortBaseURL(p.BaseURL)
 }
 
 // LegacyOllamaCompatDetail describes what the config is costing, or "" when

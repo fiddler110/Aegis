@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider/sse"
 )
 
 func TestTranslateImage(t *testing.T) {
@@ -755,5 +756,416 @@ func TestStreamTerminatorsStillComplete(t *testing.T) {
 				t.Errorf("Stop = %q, want %q", done.Stop, provider.StopEndTurn)
 			}
 		})
+	}
+}
+
+// TestStreamIdleTimeoutWiring (P61.1) covers this adapter's half of the idle
+// bound: the resolution semantics and that the resolved value actually reaches
+// sse.Run. The watchdog *mechanism* — reset-per-line, the message, the
+// transport classification — is owned and tested once in internal/provider/sse
+// since P61.6, so re-testing it here would only duplicate it.
+//
+// The semantics must match ollama.resolveStreamIdleTimeout exactly:
+// provider.stream_idle_timeout is one config key, so it cannot mean one thing
+// on the native path and another on the compat path — which is the same
+// endpoint on the same machine for a local user.
+func TestStreamIdleTimeoutWiring(t *testing.T) {
+	if got := New("k").resolveStreamIdleTimeout(); got != sse.DefaultStreamIdleTimeout {
+		t.Errorf("unset = %v, want the %v default", got, sse.DefaultStreamIdleTimeout)
+	}
+	if got := New("k", WithStreamIdleTimeout(-1)).resolveStreamIdleTimeout(); got != 0 {
+		t.Errorf("negative config = %v, want 0 (bound disabled)", got)
+	}
+	if got := New("k", WithStreamIdleTimeout(90*time.Second)).resolveStreamIdleTimeout(); got != 90*time.Second {
+		t.Errorf("explicit config = %v, want 90s", got)
+	}
+}
+
+// TestStreamIdleTimeoutAbortsAStalledRunner is the end-to-end half: headers
+// arrive, one chunk streams, then the server wedges. This adapter is what talks
+// to Ollama's OpenAI-compat /v1 endpoint, so the stall P59.2 was filed for
+// reaches it as readily as the native path. It must end as a transport error —
+// the classification a crashed server gets, so the existing wait-and-resume
+// path handles a wedged one too — and never as EventDone.
+func TestStreamIdleTimeoutAbortsAStalledRunner(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"thinking\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	stream, err := New("k", WithBaseURL(srv.URL), WithStreamIdleTimeout(100*time.Millisecond)).
+		Stream(context.Background(), provider.Request{
+			Model:    "m",
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+		})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	type outcome struct {
+		err  error
+		done bool
+	}
+	res := make(chan outcome, 1)
+	go func() {
+		var o outcome
+		for ev := range stream {
+			switch ev.Type {
+			case provider.EventError:
+				o.err = ev.Err
+			case provider.EventDone:
+				o.done = true
+			}
+		}
+		res <- o
+	}()
+
+	select {
+	case o := <-res:
+		if o.done {
+			t.Error("a stalled stream must not produce EventDone")
+		}
+		if o.err == nil {
+			t.Fatal("expected an error event once the idle bound elapsed")
+		}
+		if !provider.IsBackendUnavailableError(o.err) {
+			t.Errorf("stalled stream = %v, want it classified backend-unavailable so the resume path handles it", o.err)
+		}
+		if !strings.Contains(o.err.Error(), "stream_idle_timeout") {
+			t.Errorf("error should name the knob that relaxes it, got %q", o.err.Error())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream never ended — the idle bound did not reach sse.Run")
+	}
+}
+
+// clampCapture streams one request through a stub server and returns the
+// max_tokens (or max_completion_tokens) that reached the wire.
+func clampCapture(t *testing.T, req provider.Request, opts ...Option) map[string]any {
+	t.Helper()
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	stream, err := New("k", append([]Option{WithBaseURL(srv.URL)}, opts...)...).Stream(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+	return body
+}
+
+// TestStreamClampsMaxTokensToHeadroom (P61.4) is the compat-path counterpart of
+// the native adapter's TestStreamClampsNumPredictToHeadroom: when the backend
+// spends one budget on prompt and completion, a max_tokens larger than what the
+// prompt leaves is a request to be cut off mid-answer. Same arithmetic, same
+// floor, same one-directionality — the two adapters can be aimed at the same
+// server, so they must not disagree.
+func TestStreamClampsMaxTokensToHeadroom(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		numCtx    int
+		maxTokens int
+		prompt    string
+		check     func(t *testing.T, sent int)
+	}{
+		{
+			// The shipped default pair on a stock Ollama window: 8x the whole
+			// window asked for in output.
+			name: "default max_tokens against a stock window", numCtx: 4096, maxTokens: 32768, prompt: "hi",
+			check: func(t *testing.T, sent int) {
+				if sent >= 4096 || sent <= 0 {
+					t.Errorf("max_tokens = %d, want a positive value below the 4096 window", sent)
+				}
+			},
+		},
+		{
+			name: "room to spare passes through untouched", numCtx: 131072, maxTokens: 8192, prompt: "hi",
+			check: func(t *testing.T, sent int) {
+				if sent != 8192 {
+					t.Errorf("max_tokens = %d, want the requested 8192 — the clamp must never lower a request that fits", sent)
+				}
+			},
+		},
+		{
+			name: "a caller asking for little still gets little", numCtx: 131072, maxTokens: 64, prompt: "hi",
+			check: func(t *testing.T, sent int) {
+				if sent != 64 {
+					t.Errorf("max_tokens = %d, want the requested 64 — the clamp is one-directional", sent)
+				}
+			},
+		},
+		{
+			// The prompt has already eaten the window; the floor is what keeps
+			// the model able to say anything at all.
+			name:   "prompt already over the window floors rather than going negative",
+			numCtx: 512, maxTokens: 32768, prompt: strings.Repeat("token ", 4000),
+			check: func(t *testing.T, sent int) {
+				if sent != minCompletionTokens {
+					t.Errorf("max_tokens = %d, want the %d floor", sent, minCompletionTokens)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := clampCapture(t, provider.Request{
+				Model:     "llama3.2",
+				MaxTokens: tc.maxTokens,
+				NumCtx:    tc.numCtx,
+				Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: tc.prompt}}}},
+			}, WithSharedContextWindow(true))
+			v, ok := body["max_tokens"].(float64)
+			if !ok {
+				t.Fatalf("max_tokens absent from the request body: %v", body)
+			}
+			tc.check(t, int(v))
+		})
+	}
+}
+
+// TestStreamMaxTokensUnclampedWithoutAWindow: NumCtx is how a genuinely
+// resolved window reaches this adapter, and the compat endpoint cannot report
+// one on its own. With no window the adapter must send the caller's max_tokens
+// untouched rather than invent a bound — a wrong clamp truncates a legitimate
+// long generation, which is worse than the bug being fixed.
+func TestStreamMaxTokensUnclampedWithoutAWindow(t *testing.T) {
+	body := clampCapture(t, provider.Request{
+		Model:     "llama3.2",
+		MaxTokens: 32768,
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	}, WithSharedContextWindow(true))
+	if v, _ := body["max_tokens"].(float64); int(v) != 32768 {
+		t.Errorf("max_tokens = %v, want the unclamped 32768 when no window is known", body["max_tokens"])
+	}
+}
+
+// TestStreamMaxTokensUnclampedOnANonSharedBudgetBackend is the correctness
+// constraint that matters most here: real OpenAI, LM Studio, liteLLM and any
+// gateway fronting a cloud model bill max_tokens against a *separate* output
+// allowance, so the window in NumCtx says nothing about how long a completion
+// may be. Without the explicit declaration — the zero value, and therefore what
+// every such config gets — nothing is clamped no matter how full the window is.
+func TestStreamMaxTokensUnclampedOnANonSharedBudgetBackend(t *testing.T) {
+	req := provider.Request{
+		Model:     "gpt-4o",
+		MaxTokens: 32768,
+		NumCtx:    4096, // a window the daemon resolved and stamped on every request
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: strings.Repeat("token ", 2000)}}}},
+	}
+	body := clampCapture(t, req)
+	if v, _ := body["max_tokens"].(float64); int(v) != 32768 {
+		t.Errorf("max_tokens = %v, want the unclamped 32768 — a non-shared-budget backend must never be clamped", body["max_tokens"])
+	}
+}
+
+// TestClampRefusesTheRealOpenAIEndpoint: the option is the gate, but
+// api.openai.com is never a shared-budget backend whatever a caller declares,
+// so the adapter refuses structurally too. This is the belt to the factory's
+// braces — a miswired option must not be able to truncate cloud generations.
+func TestClampRefusesTheRealOpenAIEndpoint(t *testing.T) {
+	a := New("k", WithSharedContextWindow(true))
+	msgs := []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: strings.Repeat("token ", 4000)}}}}
+	if got := a.clampMaxTokens(32768, 4096, "", msgs); got != 32768 {
+		t.Errorf("clampMaxTokens against %s = %d, want the request untouched", defaultBaseURL, got)
+	}
+}
+
+// TestClampAppliesToReasoningModelsField: the clamp is computed before the
+// max_tokens / max_completion_tokens split, so an o1/o3-named model served by
+// Ollama gets the same reconciled number in its own field rather than slipping
+// past the clamp because of where the value lands on the wire.
+func TestClampAppliesToReasoningModelsField(t *testing.T) {
+	body := clampCapture(t, provider.Request{
+		Model:     "o3-mini",
+		MaxTokens: 32768,
+		NumCtx:    4096,
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	}, WithSharedContextWindow(true))
+	v, ok := body["max_completion_tokens"].(float64)
+	if !ok {
+		t.Fatalf("max_completion_tokens absent: %v", body)
+	}
+	if int(v) >= 4096 || int(v) <= 0 {
+		t.Errorf("max_completion_tokens = %d, want a positive value below the 4096 window", int(v))
+	}
+}
+
+// --- P50.1 liveness probe (added when the OpenAI-compat path was found to have none) ---
+
+// TestHealthy is the probe's verdict guard. A reachable server is healthy and
+// must be asked with a side-effect-free GET <base>/models — never a completion,
+// which would cost money on a metered backend and load a model on a local one —
+// and an unreachable server is not healthy.
+func TestHealthy(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer srv.Close()
+
+	a := New("", WithBaseURL(srv.URL+"/v1"))
+	if !a.Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server answering /v1/models")
+	}
+	if gotMethod != http.MethodGet || gotPath != "/v1/models" {
+		t.Errorf("probe hit %s %s, want GET /v1/models", gotMethod, gotPath)
+	}
+
+	// An unreachable server (closed listener) is not healthy — the case the
+	// whole mechanism exists for.
+	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	downURL := down.URL
+	down.Close()
+	if New("", WithBaseURL(downURL)).Healthy(context.Background()) {
+		t.Error("Healthy() = true against an unreachable server")
+	}
+}
+
+// TestHealthyTreatsAnAnsweringServerAsAlive pins the deliberate difference from
+// the native adapter's "200 or nothing": the probe asks about *liveness*, not
+// usability. recoverBackendDown already knows the turn failed; the only thing
+// it needs from the probe is whether a server is there again. A 401 from a
+// gateway that wants a key, or a 404 from a backend that routes
+// /chat/completions but not /models, both prove one is — and calling those
+// unhealthy would be worse than having no probe, because the drive would then
+// burn the entire recovery budget waiting for a server that never left.
+func TestHealthyTreatsAnAnsweringServerAsAlive(t *testing.T) {
+	for _, code := range []int{
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusTooManyRequests, http.StatusInternalServerError,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		if !New("k", WithBaseURL(srv.URL)).Healthy(context.Background()) {
+			t.Errorf("Healthy() = false for status %d, want true — a server that answers at all is reachable", code)
+		}
+		srv.Close()
+	}
+}
+
+// TestHealthyRejectsGatewayUpstreamFailures is the carve-out to the rule above:
+// on 502/503/504 the thing answering is a proxy explicitly reporting that the
+// upstream model server — the thing the drive is waiting for — is not there.
+// Reporting healthy would resume the phase straight back into the same failure.
+func TestHealthyRejectsGatewayUpstreamFailures(t *testing.T) {
+	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		if New("k", WithBaseURL(srv.URL)).Healthy(context.Background()) {
+			t.Errorf("Healthy() = true for status %d, want false — the upstream model server is down", code)
+		}
+		srv.Close()
+	}
+}
+
+// TestHealthySendsConfiguredHeaders: a gateway may need its auth/routing headers
+// to answer at all, so the probe carries the same headers Stream does. The
+// bearer is sent only when a key was configured, so an unauthenticated local
+// server is not handed an empty one.
+func TestHealthySendsConfiguredHeaders(t *testing.T) {
+	var gotHeader, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader, gotAuth = r.Header.Get("X-Gateway"), r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	if !New("sk-test", WithBaseURL(srv.URL), WithHeaders(map[string]string{"X-Gateway": "tenant-a"})).Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server")
+	}
+	if gotHeader != "tenant-a" {
+		t.Errorf("X-Gateway = %q, want the configured header forwarded", gotHeader)
+	}
+	if gotAuth != "Bearer sk-test" {
+		t.Errorf("Authorization = %q, want the configured key", gotAuth)
+	}
+
+	if !New("", WithBaseURL(srv.URL)).Healthy(context.Background()) {
+		t.Fatal("Healthy() = false with no API key configured")
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q with no key configured, want it omitted", gotAuth)
+	}
+}
+
+// TestHealthProbeUsesTheAdapterTransport mirrors the native adapter's P61.5
+// guard: the probe must run on the adapter's own transport, so a user's
+// proxy/TLS/dialer configuration reaches the probe that gates P50.1 recovery —
+// while keeping its own short timeout, since the streaming client's is
+// deliberately unbounded so a long prefill isn't cut off (P59.2).
+func TestHealthProbeUsesTheAdapterTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	var probes int
+	a := New("k", WithBaseURL(srv.URL))
+	inner := a.client.Transport
+	a.client = &http.Client{Transport: probeCounter{n: &probes, inner: inner}}
+
+	if !a.Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server")
+	}
+	if probes != 1 {
+		t.Errorf("the probe went through the adapter's transport %d time(s), want 1", probes)
+	}
+
+	hc := a.healthClient()
+	if hc.Transport != a.client.Transport {
+		t.Error("probe client does not share the adapter's transport")
+	}
+	if hc.Timeout != healthProbeTimeout {
+		t.Errorf("probe Client.Timeout = %v, want %v — it must not inherit the streaming client's unbounded one",
+			hc.Timeout, healthProbeTimeout)
+	}
+	if a.client.Timeout != 0 {
+		t.Errorf("streaming client's Timeout = %v, want 0 (P59.2)", a.client.Timeout)
+	}
+}
+
+// probeCounter counts requests and delegates, standing in for whatever
+// transport a user's proxy/TLS configuration produced.
+type probeCounter struct {
+	n     *int
+	inner http.RoundTripper
+}
+
+func (c probeCounter) RoundTrip(r *http.Request) (*http.Response, error) {
+	*c.n++
+	return c.inner.RoundTrip(r)
+}
+
+// TestHealthyReachableThroughDecorators: the drive never holds a bare adapter —
+// it asks provider.CheckBackendHealth, which unwraps the retry/failover
+// decorators. A probe the helper cannot reach is a probe P50.1 does not have.
+func TestHealthyReachableThroughDecorators(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	wrapped := provider.WithRetry(New("k", WithBaseURL(srv.URL)), provider.DefaultRetryPolicy(), nil)
+	healthy, supported := provider.CheckBackendHealth(context.Background(), wrapped)
+	if !supported {
+		t.Fatal("CheckBackendHealth could not reach the openai adapter through the retry decorator")
+	}
+	if !healthy {
+		t.Error("CheckBackendHealth = unhealthy against a live server")
 	}
 }

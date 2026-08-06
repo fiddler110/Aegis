@@ -983,6 +983,113 @@ func TestStreamDoesNotRetryOtherBadRequests(t *testing.T) {
 	}
 }
 
+// TestStreamThinkRetryFailureKeepsBothErrors is the P61.5 regression: when the
+// think-omitted retry *also* fails, the retry's error used to overwrite the
+// original 400 outright, so the "does not support thinking" signal — the thing
+// that explains why a second request was sent at all — vanished. Both must
+// survive.
+//
+// The joined order is asserted too, and it is not cosmetic: errors.As stops at
+// the first match, so the retry's error has to come first or every downstream
+// classifier (retryable, IsBackendUnavailableError) would read the stale
+// terminal 400 and refuse to retry a plainly retryable failure.
+func TestStreamThinkRetryFailureKeepsBothErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &raw)
+		if _, hasThink := raw["think"]; hasThink {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"\"m\" does not support thinking"}`))
+			return
+		}
+		// The retry fails too — a transient 503, which must stay retryable.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"server busy"}`))
+	}))
+	defer srv.Close()
+
+	falseVal := false
+	a := New(WithBaseURL(srv.URL), WithThink(&falseVal))
+	_, err := a.Stream(context.Background(), provider.Request{
+		Model:    "m",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "does not support thinking") {
+		t.Errorf("the original think rejection was lost: %v", err)
+	}
+	if !strings.Contains(err.Error(), "server busy") {
+		t.Errorf("the retry's own failure was lost: %v", err)
+	}
+
+	var apiErr *provider.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *provider.APIError: %T", err)
+	}
+	if apiErr.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("errors.As found status %d, want the retry's 503 first", apiErr.StatusCode)
+	}
+	if !apiErr.Retryable() {
+		t.Error("a 503 from the retry must stay retryable through the join")
+	}
+
+	// The latch must not fire: nothing proved think-omitted works for this model.
+	if _, latched := a.thinkRejected.Load("m"); latched {
+		t.Error("think rejection latched on a retry that never succeeded")
+	}
+}
+
+// TestHealthProbeUsesTheAdapterTransport is the P61.5 regression: the liveness
+// probe ran on a package-level http.Client with its own default transport, so a
+// user's proxy/TLS/dialer configuration did not reach the probe that gates P50.1
+// recovery. It must share the adapter's transport — while keeping its own short
+// timeout, since the streaming client deliberately has none (P59.2).
+func TestHealthProbeUsesTheAdapterTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"x"}`))
+	}))
+	defer srv.Close()
+
+	var probes int
+	a := New(WithBaseURL(srv.URL))
+	inner := a.client.Transport
+	a.client = &http.Client{Transport: roundTripCounter{n: &probes, inner: inner}}
+
+	if !a.Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server")
+	}
+	if probes != 1 {
+		t.Errorf("the probe went through the adapter's transport %d time(s), want 1", probes)
+	}
+
+	hc := a.healthClient()
+	if hc.Transport != a.client.Transport {
+		t.Error("probe client does not share the adapter's transport")
+	}
+	if hc.Timeout != healthProbeTimeout {
+		t.Errorf("probe Client.Timeout = %v, want %v — it must not inherit the streaming client's unbounded one",
+			hc.Timeout, healthProbeTimeout)
+	}
+	if a.client.Timeout != 0 {
+		t.Errorf("streaming client's Timeout = %v, want 0 (P59.2)", a.client.Timeout)
+	}
+}
+
+// roundTripCounter counts requests and delegates, standing in for whatever
+// transport a user's proxy/TLS configuration produced.
+type roundTripCounter struct {
+	n     *int
+	inner http.RoundTripper
+}
+
+func (c roundTripCounter) RoundTrip(r *http.Request) (*http.Response, error) {
+	*c.n++
+	return c.inner.RoundTrip(r)
+}
+
 // TestHealthy is the P50.1 liveness-probe guard: a reachable server answering
 // /api/version with 200 is healthy; a non-200, a wrong path, and an unreachable
 // server are all "not healthy". It also confirms the probe uses GET /api/version

@@ -9,7 +9,6 @@
 package ollama
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
@@ -232,9 +230,10 @@ func (a *Adapter) resolveNumCtx(reqNumCtx int) int {
 // crashed/restarting local server to come back before resuming a phase from
 // disk. It is side-effect-free — /api/version neither loads nor unloads a model
 // — so it answers only "is the server reachable right now?". Any transport
-// error or non-2xx status is treated as "not healthy". It uses a short-timeout
-// client independent of the streaming client so a probe can't block on the long
-// prefill budget the streaming client allows.
+// error or non-2xx status is treated as "not healthy". It runs on the adapter's
+// own transport (so proxy/TLS configuration applies) under a short timeout of
+// its own, so a probe can't block on the long prefill budget the streaming
+// client allows — see healthClient.
 func (a *Adapter) Healthy(ctx context.Context) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/api/version", nil)
 	if err != nil {
@@ -243,7 +242,7 @@ func (a *Adapter) Healthy(ctx context.Context) bool {
 	for k, v := range a.headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := healthClient.Do(req)
+	resp, err := a.healthClient().Do(req)
 	if err != nil {
 		return false
 	}
@@ -252,10 +251,35 @@ func (a *Adapter) Healthy(ctx context.Context) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// healthClient is a short-timeout HTTP client for the liveness probe, separate
-// from the streaming client (which withholds any timeout so a long prefill
-// isn't cut off). A probe must fail fast when the server is down, not hang.
-var healthClient = &http.Client{Timeout: 3 * time.Second}
+// healthProbeTimeout is the whole-request bound on the liveness probe. A probe
+// must fail fast when the server is down, not hang — which is why it cannot
+// simply reuse the streaming client, whose Client.Timeout is deliberately zero
+// so a long prefill isn't cut off (P59.2).
+const healthProbeTimeout = 3 * time.Second
+
+// healthClient builds the probe's HTTP client: the *transport* is the streaming
+// client's, so any proxy, TLS or dialer configuration the adapter was given
+// applies to the probe too and the two share a connection pool — but the
+// timeout is the probe's own, since inheriting the streaming client's unbounded
+// one would defeat the point of a liveness check (P61.5). It used to be a
+// package-level client with its own default transport, which quietly meant the
+// probe gating P50.1 recovery ignored the user's transport configuration
+// entirely.
+//
+// Built per call rather than cached: an http.Client is a small value, the probe
+// is not a hot path, and the transport — the part that holds state worth
+// reusing — is shared, not rebuilt.
+func (a *Adapter) healthClient() *http.Client {
+	if a.client == nil {
+		return &http.Client{Timeout: healthProbeTimeout}
+	}
+	return &http.Client{
+		Transport:     a.client.Transport,
+		CheckRedirect: a.client.CheckRedirect,
+		Jar:           a.client.Jar,
+		Timeout:       healthProbeTimeout,
+	}
+}
 
 // WithKeepAlive sets how long Ollama keeps the model loaded after this
 // request (e.g. "10m", "-1" to pin forever, "0" to unload immediately).
@@ -276,14 +300,19 @@ func WithKeepAlive(v string) Option {
 // withholds the response header until prompt-eval (prefill) finishes, so a
 // large local context can legitimately need longer than the default. <= 0
 // falls back to sse.DefaultResponseHeaderTimeout.
+//
+// It composes onto whatever client the adapter already has rather than
+// replacing it (P61.5), so it commutes with any other option that touches the
+// client and option order carries no meaning.
 func WithResponseHeaderTimeout(d time.Duration) Option {
-	return func(a *Adapter) { a.client = sse.NewStreamingClient(d) }
+	return func(a *Adapter) { a.client = sse.ApplyResponseHeaderTimeout(a.client, d) }
 }
 
 // WithStreamIdleTimeout overrides how long the adapter waits between two
 // streamed chunks before giving up on the response
-// (provider.stream_idle_timeout, P59.2). <= 0 selects
+// (provider.stream_idle_timeout, P59.2). 0 selects
 // sse.DefaultStreamIdleTimeout; pass a negative duration to disable the bound.
+// The anthropic and openai adapters carry an identical option (P61.1).
 func WithStreamIdleTimeout(d time.Duration) Option {
 	return func(a *Adapter) { a.streamIdleTimeout = d }
 }
@@ -602,6 +631,21 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 						a.caps.SetThinkRejected(req.Model, true)
 					}
 				}
+			} else {
+				// P61.5: the retry's failure used to overwrite `err` outright,
+				// so a caller facing two failures saw only the second and lost
+				// the "does not support thinking" signal that explains why a
+				// second request was sent at all. Join them so both survive.
+				//
+				// The order is load-bearing: errors.As/Is walk a joined error
+				// in order and stop at the first match, so the retry's error —
+				// the operative failure — must come first. Putting the rejection
+				// first would hand every downstream classifier (retryable,
+				// IsBackendUnavailableError, IsContextOverflowError) the stale
+				// terminal 400 instead of the failure that actually ended the
+				// request, turning e.g. a retryable 503 or a dead backend into an
+				// unretryable, unrecoverable one.
+				err = errors.Join(err, rejection)
 			}
 		}
 		if err != nil {
@@ -610,7 +654,11 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	}
 
 	out := make(chan provider.Event)
-	go consume(ctx, resp.Body, out, a.resolveStreamIdleTimeout())
+	go sse.Run(ctx, resp.Body, out, sse.Options{
+		Provider:        "ollama",
+		IdleTimeout:     a.resolveStreamIdleTimeout(),
+		MissingTerminal: missingCompletionChunk,
+	}, newChunkDecoder())
 	return out, nil
 }
 
@@ -830,200 +878,134 @@ type wireChunk struct {
 	Error              json.RawMessage `json:"error"`
 }
 
-// consume reads the NDJSON stream and translates it into provider events.
-// idleTimeout bounds the gap between chunks (P59.2); <= 0 disables that bound.
-func consume(ctx context.Context, body io.ReadCloser, out chan<- provider.Event, idleTimeout time.Duration) {
-	defer close(out)
-	defer body.Close()
+// missingCompletionChunk is reported when the NDJSON stream ends cleanly
+// without a done:true chunk (P59.3) — see sse.Run, which enforces it.
+const missingCompletionChunk = "read stream: the response ended without a completion chunk — " +
+	"the generation was cut off mid-stream (the server closed the connection or the model runner exited)"
 
-	emit := sse.NewEmitter(ctx, out).Emit
+// chunkDecoder translates the native /api/chat NDJSON stream into provider
+// events. It owns only the per-chunk decode (P61.6): the read loop, the idle
+// watchdog (P59.2), the done:true requirement (P59.3), scanner-error
+// classification (P50.1/P35.12) and the final EventDone all live in sse.Run,
+// shared with the two SSE adapters.
+type chunkDecoder struct {
+	usage     *provider.Usage
+	stop      provider.StopReason
+	toolIndex int
+	sawLength bool // a chunk reported done_reason "length" (context ceiling hit)
+}
 
-	// P59.2: the idle watchdog. Closing the body is what breaks the blocked
-	// read — there is no way to interrupt a bufio.Scanner otherwise — and the
-	// resulting scanner error lands on the P50.1 branch below, which already
-	// classifies it as a transport failure and therefore routes into the
-	// waitForBackend/resume-from-disk path built for a crashed server. A wedged
-	// runner and a dead one are the same problem from the harness's side, so
-	// they get the same recovery; idleFired only sharpens the message.
-	var idleFired atomic.Bool
-	resetIdle := func() {}
-	if idleTimeout > 0 {
-		timer := time.AfterFunc(idleTimeout, func() {
-			idleFired.Store(true)
-			_ = body.Close()
-		})
-		defer timer.Stop()
-		resetIdle = func() { timer.Reset(idleTimeout) }
+func newChunkDecoder() *chunkDecoder {
+	return &chunkDecoder{usage: &provider.Usage{}, stop: provider.StopEndTurn}
+}
+
+// Finish reports the stop reason and usage accumulated across the stream.
+// Native tool calls arrive whole, so there is nothing buffered to flush.
+func (d *chunkDecoder) Finish(func(provider.Event) bool) (provider.StopReason, *provider.Usage, bool) {
+	return d.stop, d.usage, true
+}
+
+func (d *chunkDecoder) Line(raw string, emit func(provider.Event) bool) sse.Status {
+	usage := d.usage
+	line := strings.TrimSpace(raw)
+	if line == "" {
+		return sse.StatusContinue
+	}
+	var chunk wireChunk
+	if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+		return sse.StatusContinue
+	}
+	if chunk.DoneReason == "length" {
+		d.sawLength = true
+	}
+	if msg := errorMessage(chunk.Error); msg != "" {
+		// P35.2: a generation cut off at the context ceiling mid-tool-call
+		// surfaces here as the server's opaque "invalid tool call arguments
+		// ... unexpected end of JSON input" — the native adapter never parses
+		// tool arguments itself (it passes them through as RawMessage), so
+		// that message is entirely server-side and the only truncation signal
+		// available is a done_reason "length" on this/a prior chunk or the
+		// truncated-tool-call shape of the message. Detect it before the
+		// generic path so the discoverable fix (raise context_window) is
+		// named instead of the opaque parse error.
+		if d.sawLength || provider.IsTruncatedToolCallError(msg) {
+			emit(provider.Event{Type: provider.EventError, Err: provider.NewContextTruncationError("ollama", msg)})
+			return sse.StatusAbort
+		}
+		// P33.16: classify the {"error":...} envelope so a transient failure
+		// (worker crash, model-load failure, OOM) carries a retryable verdict
+		// while a deterministic one (context overflow, invalid request) stays
+		// terminal — retrying the latter only burns another prompt-eval.
+		emit(provider.Event{Type: provider.EventError, Err: provider.NewStreamError("ollama", msg)})
+		return sse.StatusAbort
 	}
 
-	usage := &provider.Usage{}
-	stop := provider.StopEndTurn
-	toolIndex := 0
-	sawLength := false // a chunk reported done_reason "length" (context ceiling hit)
-	sawDone := false   // P59.3: a chunk reported done:true — the turn really finished
-
-	scanner := sse.NewScanner(body)
-	for scanner.Scan() {
-		// Reset per delivered line, not per parsed chunk: the bound is on the
-		// server sending *anything*, and a line we skip below (blank, or JSON we
-		// can't unmarshal) is still evidence the runner is alive.
-		resetIdle()
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var chunk wireChunk
-		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-			continue
-		}
-		if chunk.DoneReason == "length" {
-			sawLength = true
-		}
-		if msg := errorMessage(chunk.Error); msg != "" {
-			// P35.2: a generation cut off at the context ceiling mid-tool-call
-			// surfaces here as the server's opaque "invalid tool call arguments
-			// ... unexpected end of JSON input" — the native adapter never parses
-			// tool arguments itself (it passes them through as RawMessage), so
-			// that message is entirely server-side and the only truncation signal
-			// available is a done_reason "length" on this/a prior chunk or the
-			// truncated-tool-call shape of the message. Detect it before the
-			// generic path so the discoverable fix (raise context_window) is
-			// named instead of the opaque parse error.
-			if sawLength || provider.IsTruncatedToolCallError(msg) {
-				emit(provider.Event{Type: provider.EventError, Err: provider.NewContextTruncationError("ollama", msg)})
-				return
-			}
-			// P33.16: classify the {"error":...} envelope so a transient failure
-			// (worker crash, model-load failure, OOM) carries a retryable verdict
-			// while a deterministic one (context overflow, invalid request) stays
-			// terminal — retrying the latter only burns another prompt-eval.
-			emit(provider.Event{Type: provider.EventError, Err: provider.NewStreamError("ollama", msg)})
-			return
-		}
-
-		if chunk.Message.Thinking != "" {
-			if !emit(provider.Event{Type: provider.EventThinkingDelta, Text: chunk.Message.Thinking}) {
-				return
-			}
-		}
-		if chunk.Message.Content != "" {
-			if !emit(provider.Event{Type: provider.EventTextDelta, Text: chunk.Message.Content}) {
-				return
-			}
-		}
-		for _, tc := range chunk.Message.ToolCalls {
-			args := tc.Function.Arguments
-			if len(bytes.TrimSpace(args)) == 0 {
-				args = json.RawMessage("{}")
-			}
-			id := fmt.Sprintf("tu_%d", toolIndex)
-			toolIndex++
-			// Native tool calls arrive whole (no incremental-argument
-			// streaming), so the start and fully-assembled events fire back
-			// to back — still worth emitting both so a consumer keyed on
-			// EventToolUseStart (P33.3's provisional tool card) behaves
-			// identically to the openai-adapter path.
-			if !emit(provider.Event{Type: provider.EventToolUseStart, ToolUse: &provider.ToolUseBlock{
-				ID: id, Name: tc.Function.Name,
-			}}) {
-				return
-			}
-			stop = provider.StopToolUse
-			if !emit(provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
-				ID: id, Name: tc.Function.Name, Input: args,
-			}}) {
-				return
-			}
-		}
-
-		if chunk.Done {
-			sawDone = true
-			// P35.13: prompt_eval_count is the FULL prompt/context token count
-			// this turn, not a cache-hit delta. Live-verified on Ollama 0.30.10
-			// (P35.10's "a P35.7 live run saw 37 after turn 1's 3944" was a
-			// misread: 3981-3944=37 is the growth in the count, but the field
-			// itself reported the full 3981): sending an identical prompt twice
-			// returns the same full prompt_eval_count both times while
-			// prompt_eval_duration collapses (84ms->24ms), and a warm Aegis turn
-			// reported prompt_eval_count=7195 in 86ms — 7195 real prefill tokens
-			// in 86ms is impossible, so the prefix was a cache hit yet the full
-			// count was still reported. So on this Ollama, prompt_eval_duration
-			// (not the count) is the only cache-hit signal; the count tracks
-			// context size. Mapped straight through as usage.InputTokens. Older
-			// Ollama versions may have reported deltas, so this stays
-			// version-dependent — compaction must keep using an estimate (the
-			// engine's estimateTokens / conv.estimatedTokens) rather than trust
-			// InputTokens for context size across backends. See the
-			// PromptEvalDurationMS comment and the InputTokens doc in
-			// internal/provider/provider.go.
-			usage.InputTokens = chunk.PromptEvalCount
-			usage.OutputTokens = chunk.EvalCount
-			usage.LoadDurationMS = chunk.LoadDuration / 1e6
-			usage.PromptEvalDurationMS = chunk.PromptEvalDuration / 1e6
-			if stop != provider.StopToolUse && chunk.DoneReason == "length" {
-				stop = provider.StopMaxTokens
-			}
+	if chunk.Message.Thinking != "" {
+		if !emit(provider.Event{Type: provider.EventThinkingDelta, Text: chunk.Message.Thinking}) {
+			return sse.StatusAbort
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		// P59.2: our own watchdog closed the body. Say so plainly — the raw
-		// error is "http: read on closed response body", which reads like a
-		// harness bug rather than a stalled runner. Still a transport error, so
-		// it takes the same recovery path as a crashed server (see the watchdog
-		// comment above).
-		if idleFired.Load() {
-			emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("ollama", fmt.Errorf(
-				"read stream: no output for %s — the model runner appears to have stalled mid-generation "+
-					"(raise or disable provider.stream_idle_timeout if this was a legitimately slow run): %w",
-				idleTimeout, err))})
-			return
+	if chunk.Message.Content != "" {
+		if !emit(provider.Event{Type: provider.EventTextDelta, Text: chunk.Message.Content}) {
+			return sse.StatusAbort
 		}
-		// P35.12: the native path delivers each tool call whole on one NDJSON
-		// line, so a tool-call argument payload over the 4MiB scanner cap
-		// (sse.maxBufSize) trips bufio.ErrTooLong. The generic wrap surfaces it
-		// as the opaque "token too long"; name the actual cause instead so the
-		// reader can act on it (a runaway/oversized tool-call argument).
-		if errors.Is(err, bufio.ErrTooLong) {
-			emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf(
-				"ollama: read stream: a single stream line exceeded the 4MiB line limit "+
-					"(most likely a tool-call argument payload the model emitted is too large): %w", err)})
-			return
+	}
+	for _, tc := range chunk.Message.ToolCalls {
+		args := tc.Function.Arguments
+		if len(bytes.TrimSpace(args)) == 0 {
+			args = json.RawMessage("{}")
 		}
-		// P50.1: a mid-stream read failure — connection reset / unexpected EOF —
-		// is the signature of the server going away *while streaming*, exactly
-		// what happens when `ollama serve` is killed or crashes mid-response. Wrap
-		// it as a transport APIError (not a bare error) so IsBackendUnavailableError
-		// classifies it and the phased drive waits for the backend to return and
-		// resumes from disk, rather than aborting on an unclassifiable error. A
-		// synchronous connection failure (doChat) is already a NewTransportError;
-		// this closes the mid-stream counterpart, which is the more common one on a
-		// slow local model whose per-turn stream is long.
-		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("ollama", fmt.Errorf("read stream: %w", err))})
-		return
+		id := fmt.Sprintf("tu_%d", d.toolIndex)
+		d.toolIndex++
+		// Native tool calls arrive whole (no incremental-argument
+		// streaming), so the start and fully-assembled events fire back
+		// to back — still worth emitting both so a consumer keyed on
+		// EventToolUseStart (P33.3's provisional tool card) behaves
+		// identically to the openai-adapter path.
+		if !emit(provider.Event{Type: provider.EventToolUseStart, ToolUse: &provider.ToolUseBlock{
+			ID: id, Name: tc.Function.Name,
+		}}) {
+			return sse.StatusAbort
+		}
+		d.stop = provider.StopToolUse
+		if !emit(provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
+			ID: id, Name: tc.Function.Name, Input: args,
+		}}) {
+			return sse.StatusAbort
+		}
 	}
 
-	// P59.3: the stream ended with no read error and no completion chunk. That
-	// is not a finished turn — /api/chat always terminates with done:true, so a
-	// clean EOF before one means the body was closed mid-generation (a runner
-	// that exited, a proxy that cut the response, a server shutting down between
-	// chunks). Neither the P50.1 mid-stream-read-failure path nor the P35.12
-	// line-limit path fires here, because scanner.Err() is nil.
-	//
-	// Emitting EventDone regardless was the bug: usage stays zeroed, so the
-	// engine substitutes estimates and flags IsEstimated exactly as it does for
-	// a legitimately usage-free provider, and stop stays StopEndTurn — so a
-	// truncated response was surfaced as a complete short answer whose stop
-	// reason claims the model chose to end its turn. Classify it as a transport
-	// error instead: it is the same failure P50.1 handles, minus the read error,
-	// so IsBackendUnavailableError routes it into the existing
-	// waitForBackend/resume-from-disk path rather than into a silent wrong
-	// answer.
-	if !sawDone {
-		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError("ollama", errors.New(
-			"read stream: the response ended without a completion chunk — the generation was cut off "+
-				"mid-stream (the server closed the connection or the model runner exited)"))})
-		return
+	if chunk.Done {
+		// P35.13: prompt_eval_count is the FULL prompt/context token count
+		// this turn, not a cache-hit delta. Live-verified on Ollama 0.30.10
+		// (P35.10's "a P35.7 live run saw 37 after turn 1's 3944" was a
+		// misread: 3981-3944=37 is the growth in the count, but the field
+		// itself reported the full 3981): sending an identical prompt twice
+		// returns the same full prompt_eval_count both times while
+		// prompt_eval_duration collapses (84ms->24ms), and a warm Aegis turn
+		// reported prompt_eval_count=7195 in 86ms — 7195 real prefill tokens
+		// in 86ms is impossible, so the prefix was a cache hit yet the full
+		// count was still reported. So on this Ollama, prompt_eval_duration
+		// (not the count) is the only cache-hit signal; the count tracks
+		// context size. Mapped straight through as usage.InputTokens. Older
+		// Ollama versions may have reported deltas, so this stays
+		// version-dependent — compaction must keep using an estimate (the
+		// engine's estimateTokens / conv.estimatedTokens) rather than trust
+		// InputTokens for context size across backends. See the
+		// PromptEvalDurationMS comment and the InputTokens doc in
+		// internal/provider/provider.go.
+		usage.InputTokens = chunk.PromptEvalCount
+		usage.OutputTokens = chunk.EvalCount
+		usage.LoadDurationMS = chunk.LoadDuration / 1e6
+		usage.PromptEvalDurationMS = chunk.PromptEvalDuration / 1e6
+		if d.stop != provider.StopToolUse && chunk.DoneReason == "length" {
+			d.stop = provider.StopMaxTokens
+		}
+		// P59.3: /api/chat always terminates with done:true, so this is
+		// the turn really finishing. sse.Run keeps reading — a stream that
+		// carried on past it is still well-formed — but the requirement it
+		// enforces is now satisfied.
+		return sse.StatusTerminal
 	}
-
-	emit(provider.Event{Type: provider.EventDone, Stop: stop, Usage: usage})
+	return sse.StatusContinue
 }

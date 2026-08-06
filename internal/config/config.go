@@ -562,8 +562,10 @@ type ProviderConfig struct {
 	// could not help, because it is checked between turns, never inside one.
 	// 0 (unset) keeps the default (sse.DefaultStreamIdleTimeout, 10 minutes);
 	// a negative value disables the bound. Read via StreamIdleTimeout(), never
-	// this field directly. Honored by the native ollama adapter, where the
-	// stall this catches actually happens.
+	// this field directly. Honored by every adapter: it reached only the native
+	// ollama one until P61.1, which is worse than it sounds — the openai adapter
+	// is a local path too (Ollama's /v1 compat endpoint), so the backend most
+	// likely to wedge was half unprotected by a key users read as global.
 	StreamIdleTimeoutSec int `koanf:"stream_idle_timeout"`
 	// TaskRouting opts a session's user-facing turns into per-turn model
 	// routing (P9.4): a local heuristic classifies each turn as "simple" or
