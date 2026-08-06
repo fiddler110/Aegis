@@ -181,7 +181,7 @@ type model struct {
 	tokensEstimated     bool // true when token counts are derived from heuristic
 	costUSD             float64
 	srvCtxWin           int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
-	srvCtxWinSrc        string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default"
+	srvCtxWinSrc        string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default", "ollama:compat-default"
 
 	// Connection/model-health indicator (P28.7): last known daemon /status
 	// result, refreshed periodically (see statusTickMsg) rather than only at

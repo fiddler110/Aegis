@@ -81,7 +81,9 @@ type StatusInfo struct {
 	// uses for compaction thresholds — from config, or auto-detected from the
 	// local Ollama server when unset. 0 when unknown. ContextWindowSource says
 	// where the value came from: "config", "ollama:loaded", "ollama:modelfile",
-	// or "ollama:default".
+	// "ollama:default", or "ollama:compat-default" (Ollama's out-of-the-box
+	// window standing in for a configured one the /v1 compat path never sends,
+	// P61.8).
 	ContextWindow       int    `json:"context_window,omitempty"`
 	ContextWindowSource string `json:"context_window_source,omitempty"`
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -365,6 +366,84 @@ func TestInitContextWindowNativeOllamaUnreachableKeepsConfigAndRetries(t *testin
 	win, src := s.effectiveContextWindow()
 	if win != 32768 || src != "config" {
 		t.Errorf("got %d/%q, want 32768/config", win, src)
+	}
+	if s.ctxWinFinal {
+		t.Error("an unreachable Ollama should stay non-final so it re-detects at run time")
+	}
+	if s.ollamaBase == "" {
+		t.Error("the native base should be stashed for a run-time retry")
+	}
+}
+
+// TestApplyDetectedWindowCompatPathTakesGuessOverConfig is P61.8's core, and
+// the deliberate inverse of TestApplyDetectedWindowConfigWinsOverGuess above:
+// the same non-authoritative reading that must lose to config on the native
+// adapter must *win* on the OpenAI-compat path. There, config is never sent as
+// num_ctx, so a modelfile/default reading is not a guess about what will be
+// served — it is what will be served.
+func TestApplyDetectedWindowCompatPathTakesGuessOverConfig(t *testing.T) {
+	s := ctxWinServer(32768, "openai", "http://127.0.0.1:9/v1")
+	s.applyDetectedWindowFor(s.cfg.Provider.Model, ollamainfo.Result{ContextWindow: 4096, Source: ollamainfo.SourceDefault})
+	win, src := s.effectiveContextWindow()
+	if win != 4096 || src != "ollama:default" {
+		t.Errorf("got %d/%q, want 4096/ollama:default — a configured window the /v1 path never sends is not evidence", win, src)
+	}
+	if s.ctxWinFinal {
+		t.Error("a non-authoritative reading should still stay non-final so a loaded reading can refine it")
+	}
+}
+
+// TestApplyDetectedWindowNativePathUnaffectedByCompatRule guards the carve-out's
+// boundary: config still has to mean something on the adapter that actually
+// sends it. Same inputs as the test above, native provider.
+func TestApplyDetectedWindowNativePathUnaffectedByCompatRule(t *testing.T) {
+	s := ctxWinServer(32768, "ollama", "http://127.0.0.1:9")
+	s.applyDetectedWindowFor(s.cfg.Provider.Model, ollamainfo.Result{ContextWindow: 4096, Source: ollamainfo.SourceDefault})
+	if win, src := s.effectiveContextWindow(); win != 32768 || src != "config" {
+		t.Errorf("got %d/%q, want 32768/config", win, src)
+	}
+}
+
+// TestConfigEntryCompatSubstitutesOllamaDefault: with nothing detected, a
+// configured window on an unambiguously-Ollama compat base is replaced by
+// Ollama's documented out-of-the-box window rather than trusted. This is the
+// first-turn exposure P61.8 is about — the turn carrying the full system prompt
+// is otherwise spent believing there is 8x the room Ollama is serving.
+func TestConfigEntryCompatSubstitutesOllamaDefault(t *testing.T) {
+	s := ctxWinServer(32768, "openai", "http://127.0.0.1:11434/v1")
+	e := s.configEntry(false)
+	if e.win != ollamainfo.DefaultServeContext || e.src != "ollama:compat-default" {
+		t.Errorf("got %d/%q, want %d/ollama:compat-default", e.win, e.src, ollamainfo.DefaultServeContext)
+	}
+}
+
+// TestConfigEntryAmbiguousCompatBaseKeepsConfig: the substitution rides the
+// stricter of the two predicates. A bare /v1 base also matches LM Studio and
+// liteLLM, which have their own serving defaults — inventing Ollama's 4096 for
+// a server that isn't Ollama would be a new wrong answer, not a fix.
+func TestConfigEntryAmbiguousCompatBaseKeepsConfig(t *testing.T) {
+	s := ctxWinServer(32768, "openai", "http://127.0.0.1:1234/v1")
+	if e := s.configEntry(true); e.win != 32768 || e.src != "config" {
+		t.Errorf("got %d/%q, want 32768/config", e.win, e.src)
+	}
+}
+
+// TestInitContextWindowCompatUnreachableSubstitutesAndRetries: the compat
+// counterpart of TestInitContextWindowNativeOllamaUnreachableKeepsConfigAndRetries.
+// Before P61.8 an unreachable server on this path pinned the configured window
+// *final*, so the overstatement outlived every re-detection opportunity.
+func TestInitContextWindowCompatUnreachableSubstitutesAndRetries(t *testing.T) {
+	if c, err := net.DialTimeout("tcp", "127.0.0.1:11434", 200*time.Millisecond); err == nil {
+		c.Close()
+		t.Skip("an Ollama server is answering on :11434; this test needs the server-not-up branch")
+	}
+	s := ctxWinServer(32768, "openai", "http://127.0.0.1:11434/v1")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	s.initContextWindow(ctx)
+	win, src := s.effectiveContextWindow()
+	if win != ollamainfo.DefaultServeContext || src != "ollama:compat-default" {
+		t.Errorf("got %d/%q, want %d/ollama:compat-default", win, src, ollamainfo.DefaultServeContext)
 	}
 	if s.ctxWinFinal {
 		t.Error("an unreachable Ollama should stay non-final so it re-detects at run time")

@@ -8,11 +8,63 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-06 — **P61.5 + P61.6 + P61.1 + P61.3 + P61.4 and the openai liveness
+**Last updated:** 2026-08-06 — **P61.8 shipped**, the same day it was filed off P61.4, leaving the
+P61.x batch at **one open item (P61.7, Tier 4, measure-first)**. Write-up immediately below; the
+batch's main write-up follows it.
+
+**P61.8 — the daemon and the diagnostic stop giving two answers to one question (SHIPPED
+2026-08-06).** P61.4 fixed `aegis doctor`'s belief that `provider.context_window` is what the server
+serves; the daemon still held it, one layer down, in the function every consumer of the effective
+window reads from. `applyDetectedWindowFor` (`internal/server/contextwindow.go`) reconciled a
+detection against config with a rule that is exactly right natively — a *loaded-model* reading below
+`cfgWin` wins, otherwise config wins — and exactly wrong on the OpenAI-compat `/v1` path, which
+cannot carry `num_ctx`. There, config is a statement of intent the server never hears, so "otherwise
+config wins" meant a `context_window: 32768` beat a real modelfile/default reading of 4096, and that
+number went on to drive the compaction trigger, the engine's proactive-compaction check, `/status`,
+the TUI usage bar, and — since P61.4 — `Request.NumCtx` and therefore the compat adapter's own
+`max_tokens` clamp.
+
+The exposure was narrow and the item said so: the `cfgWin` branch only beats a *non-authoritative*
+reading, such an entry stays `final: false`, and `maybeRefreshContextWindowFor` downgrades it after
+the first run. What that leaves is the first turn on each model — the one carrying the full system
+prompt plus any skill body — spent believing there is 8x the room Ollama is serving, so nothing
+compacts and Ollama truncates from the front (P39.9's shape, bounded to one turn).
+
+Built as the item prescribed: mirror `doctorServedWindow`'s rule rather than rewrite the
+reconciliation. On an `IsLegacyOllamaCompat` provider `cfgWin` is neutralized to zero before the
+existing switch runs, so **any** reading wins regardless of authority — which is not a relaxation but
+a truth about that path, where a modelfile or default reading is not a guess about what will be
+served, it *is* what will be served, because nothing overrides it on the wire. Neutralizing rather
+than adding a branch keeps one reconciliation rule ("whatever the server says, wins") and one warn
+when the two disagree. When nothing was detected at all, `configEntry` substitutes
+`ollamainfo.DefaultServeContext`, and `initContextWindow` now takes the same
+keep-the-base-and-retry branch on this path as the native one, since letting config stand `final`
+there would pin an unservable number for the daemon's lifetime.
+
+Two boundaries are deliberate and each is pinned by its own test. The **stand-in default** rides
+`IsOllamaPortBaseURL`, not `IsLegacyOllamaCompat`: the latter's bare-`/v1` half also matches LM Studio
+and liteLLM, which have their own serving defaults, and inventing Ollama's 4096 for a server that
+isn't Ollama would be a new wrong answer rather than a fix. The **detection-wins rule** rides the
+broad predicate instead, and can afford to: reaching `applyDetectedWindowFor` at all means
+`ollamainfo` got an answer out of a native Ollama API, so the ambiguity the stricter predicate guards
+against is already resolved by the successful probe. Config still means what it always meant on the
+native adapter — this is a compat-path carve-out, not a general demotion — and the new
+`ollama:compat-default` provenance is rendered in `/status` and `/doctor`-adjacent TUI output with
+the reason attached, rather than hiding behind the existing `ollama:default`.
+
+Tests: `TestApplyDetectedWindowCompatPathTakesGuessOverConfig` (the deliberate inverse of the
+pre-existing `TestApplyDetectedWindowConfigWinsOverGuess` — same reading, opposite correct answer,
+which is the whole item in two tests), `TestApplyDetectedWindowNativePathUnaffectedByCompatRule`,
+`TestConfigEntryCompatSubstitutesOllamaDefault`, `TestConfigEntryAmbiguousCompatBaseKeepsConfig`, and
+`TestInitContextWindowCompatUnreachableSubstitutesAndRetries`.
+
+---
+
+**P61.5 + P61.6 + P61.1 + P61.3 + P61.4 and the openai liveness
 probe: the P61.x cross-adapter drift batch closes except its parked item.** Filed 2026-08-05 as seven
 items on one theme — every piece of stream hardening lived in `internal/provider/ollama` and had
-never been ported to the two adapters that also serve local backends — the batch now stands at
-**one open (P61.7, Tier 4, measure-first)** plus one newly filed successor, **P61.8**.
+never been ported to the two adapters that also serve local backends — the batch stood at
+**one open (P61.7, Tier 4, measure-first)** plus one newly filed successor, **P61.8** (shipped above).
 
 Its shape is the one the filing's sequencing note predicted and then under-sold. Doing the
 *structural* item second rather than last did not merely make the Tier-1 fixes "nearly free": it
