@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -81,6 +82,69 @@ func TestFailover_AllTargetsFailReturnsLastError(t *testing.T) {
 	if !ok || apiErr.Provider != "fallback" {
 		t.Fatalf("expected the last target's error, got %v", err)
 	}
+}
+
+// TestFailover_CancelledContextStopsAtFirstTarget is the P61.5 regression: a
+// cancelled context used to walk the entire chain, sending a request and
+// logging a WARN per hop before surfacing the cancellation. Failover must
+// notice the caller has gone away and stop.
+func TestFailover_CancelledContextStopsAtFirstTarget(t *testing.T) {
+	primary := &namedFakeAdapter{name: "primary", err: NewHTTPError("primary", 500, "", "down")}
+	fb1 := &namedFakeAdapter{name: "fb1"}
+	fb2 := &namedFakeAdapter{name: "fb2"}
+	a := WithFailover(primary, "", []FallbackTarget{{Adapter: fb1}, {Adapter: fb2}}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := a.Stream(ctx, Request{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if primary.callCount != 0 || fb1.callCount != 0 || fb2.callCount != 0 {
+		t.Fatalf("a cancelled context still reached the chain: primary=%d fb1=%d fb2=%d",
+			primary.callCount, fb1.callCount, fb2.callCount)
+	}
+}
+
+// TestFailover_CancelledMidChainKeepsTheTargetError covers cancellation arriving
+// after a target has already failed: the caller gets the cancellation (that is
+// what ended the attempt) without losing the backend failure that preceded it.
+func TestFailover_CancelledMidChainKeepsTheTargetError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	primary := &cancellingAdapter{name: "primary", cancel: cancel, err: NewHTTPError("primary", 500, "", "down")}
+	fallback := &namedFakeAdapter{name: "fallback"}
+	a := WithFailover(primary, "", []FallbackTarget{{Adapter: fallback}}, nil)
+	defer cancel()
+
+	_, err := a.Stream(ctx, Request{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Provider != "primary" {
+		t.Errorf("the failed target's error was lost: %v", err)
+	}
+	if fallback.callCount != 0 {
+		t.Errorf("fallback was tried after cancellation, callCount=%d", fallback.callCount)
+	}
+}
+
+// cancellingAdapter fails like namedFakeAdapter but cancels the run's context on
+// the way out, standing in for a caller that aborts mid-chain.
+type cancellingAdapter struct {
+	name      string
+	cancel    context.CancelFunc
+	err       error
+	callCount int
+}
+
+func (c *cancellingAdapter) Name() string { return c.name }
+
+func (c *cancellingAdapter) Stream(ctx context.Context, req Request) (<-chan Event, error) {
+	c.callCount++
+	c.cancel()
+	return nil, c.err
 }
 
 func TestFailover_ChainsThroughMultipleFallbacks(t *testing.T) {

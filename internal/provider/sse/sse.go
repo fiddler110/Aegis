@@ -74,6 +74,47 @@ func NewStreamingClient(headerTimeout time.Duration) *http.Client {
 	return &http.Client{Timeout: 0, Transport: tr}
 }
 
+// ApplyResponseHeaderTimeout returns a client that behaves exactly like c but
+// whose transport waits at most headerTimeout for response headers. It
+// *composes* rather than replaces (P61.5): every adapter's
+// WithResponseHeaderTimeout used to assign a freshly built streaming client to
+// a.client, which silently discarded anything an earlier option had put there
+// (anthropic.WithHTTPClient already, and the P61.1 idle-watchdog work next), so
+// option order decided which of two independent settings survived. Building on
+// top of whatever client is present keeps the two orders equivalent.
+//
+// The transport is cloned, never mutated in place: a caller-supplied client
+// (anthropic.WithHTTPClient) may share its transport with the rest of that
+// caller's program, and a shared connection pool is not ours to reconfigure.
+// A client whose Transport is a custom RoundTripper rather than an
+// *http.Transport (a test stub, an instrumented wrapper) is returned with that
+// RoundTripper intact and no header timeout applied — there is no field to set,
+// and dropping the caller's RoundTripper to gain a timeout is the wholesale
+// replacement this function exists to stop.
+//
+// headerTimeout <= 0 substitutes DefaultResponseHeaderTimeout, matching
+// NewStreamingClient. A nil c yields NewStreamingClient(headerTimeout).
+func ApplyResponseHeaderTimeout(c *http.Client, headerTimeout time.Duration) *http.Client {
+	if headerTimeout <= 0 {
+		headerTimeout = DefaultResponseHeaderTimeout
+	}
+	if c == nil {
+		return NewStreamingClient(headerTimeout)
+	}
+	clone := *c // copy Timeout/Jar/CheckRedirect as-is; only the transport changes
+	switch tr := c.Transport.(type) {
+	case nil:
+		base := http.DefaultTransport.(*http.Transport).Clone()
+		base.ResponseHeaderTimeout = headerTimeout
+		clone.Transport = base
+	case *http.Transport:
+		t := tr.Clone()
+		t.ResponseHeaderTimeout = headerTimeout
+		clone.Transport = t
+	}
+	return &clone
+}
+
 // NewScanner returns a bufio.Scanner over body, pre-sized the way both
 // adapters need it: a 64KiB initial buffer growing up to 4MiB so a single
 // large SSE line (e.g. a big tool-call JSON payload) doesn't hit the
