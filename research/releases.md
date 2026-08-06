@@ -8,6 +8,313 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-08-06 — **P61.5 + P61.6 + P61.1 + P61.3 + P61.4 and the openai liveness
+probe: the P61.x cross-adapter drift batch closes except its parked item.** Filed 2026-08-05 as seven
+items on one theme — every piece of stream hardening lived in `internal/provider/ollama` and had
+never been ported to the two adapters that also serve local backends — the batch now stands at
+**one open (P61.7, Tier 4, measure-first)** plus one newly filed successor, **P61.8**.
+
+Its shape is the one the filing's sequencing note predicted and then under-sold. Doing the
+*structural* item second rather than last did not merely make the Tier-1 fixes "nearly free": it
+turned **P61.1** into option wiring and closed **P61.3** with **no production code at all**, since
+the classification P61.3 asked for is a line inside the lifted skeleton. The order actually built
+was P61.5's prerequisite bullet → P61.6 → P61.1 → P61.3 → P61.4, and each item after the refactor
+cost a fraction of what writing the same fix three times and deleting two copies would have.
+
+Two of the five write-ups below exist mainly to record a **correction to the filed item**, and in
+both cases building from the roadmap text alone would have shipped something wrong: P61.5 prescribed
+an `errors.Join` argument order that would have made retryable failures unretryable, and P61.3's
+stated fix ("the fix is a constructor swap") was both larger and smaller than the item thought — it
+needed no swap in the end, and classification alone would still have left the recovery it was filed
+to restore completely inert.
+
+**P61.5 — five papercuts in the adapter and decorator chain, one of them prescribed backwards.** All
+five are a few lines each and none warranted its own item; what makes the group worth a write-up is
+that the smallest of them was the one the roadmap got wrong.
+
+The **`think`-rejection retry** (`ollama.go`) captured the original 400 into `rejection` and then
+overwrote `err` with the retry's failure, so a caller facing two failures saw only the second and
+lost the "does not support thinking" signal that explains why a second request was sent at all. The
+item prescribed `errors.Join(rejection, err)`. **That order is wrong and would have shipped a
+regression.** `errors.As`/`errors.Is` walk a joined error in order and stop at the first match, so
+putting the stale terminal 400 first hands every downstream classifier — `retryable()`,
+`IsBackendUnavailableError`, `IsContextOverflowError` — the think rejection instead of the failure
+that actually ended the request. A retryable 503 or a dead backend on the retry would have been read
+as an unretryable, unrecoverable 400, silently disabling P50.1 recovery for exactly the models that
+need the retry path at all. Shipped as `errors.Join(err, rejection)`, with the order asserted rather
+than commented.
+
+The other four: **`failoverAdapter.Stream`** now checks `ctx` before each target, so a cancelled run
+stops at the first instead of walking the whole chain with a guaranteed-to-fail request and a `WARN`
+per hop (the context's error is reported, joined with the last target's when one exists, since the
+context is what ended the attempt). **`admissionAdapter.Stream`'s first `select`** read as a
+cancellation check and was not one — Go picks uniformly among ready cases, so with a free slot and an
+already-cancelled context the acquire won about half the time and a dead request took a slot and a
+full backend turn; the check is now a plain `ctx.Err()` before the select, which keeps the original
+shape for the *blocking* wait, where `ctx.Done()` genuinely races the slot and either outcome is
+correct. **`healthClient`** was a package-level `http.Client` with its own default transport, so a
+user's proxy or TLS configuration did not reach the liveness probe that gates P50.1 recovery; it now
+shares the adapter's transport (and its connection pool) while keeping its own 3s timeout, since
+inheriting the streaming client's deliberately-unbounded one would defeat the point of a liveness
+check.
+
+The fifth was the prerequisite for everything else in this batch, which is why it was built first.
+**`WithResponseHeaderTimeout` replaced `a.client` wholesale** in all three adapters, so option order
+decided which of two independent client settings survived — a latent hazard on ollama/openai and an
+actual one on anthropic, where `WithHTTPClient` and `WithResponseHeaderTimeout` both assigned
+`a.client` and whichever came second silently discarded the other. New `sse.ApplyResponseHeaderTimeout`
+*composes* onto whatever client is present: it clones the transport rather than mutating it (a
+caller-supplied client may share its pool with the rest of that caller's program), and a client whose
+`Transport` is a custom `RoundTripper` rather than an `*http.Transport` is returned intact with no
+timeout applied, because dropping the caller's RoundTripper to gain a timeout is the wholesale
+replacement this function exists to stop. Anthropic additionally remembers the configured
+`headerTimeout` so a later `WithHTTPClient` can re-apply it, which is what makes the two options
+commute in *either* order rather than only one.
+
+Tests: `TestStreamThinkRetryFailureKeepsBothErrors` (both errors survive **and** `errors.As` finds
+the retry's 503 first, still retryable — the assertion that holds the argument order),
+`TestHealthProbeUsesTheAdapterTransport` (the probe goes through the adapter's transport exactly
+once, keeps its own timeout, and does not disturb the streaming client's zero),
+`TestFailover_CancelledContextStopsAtFirstTarget` and `TestFailover_CancelledMidChainKeepsTheTargetError`,
+`TestAdmissionCancelledContextNeverAcquiresASlot`, and three `sse` tests around
+`ApplyResponseHeaderTimeout` plus `TestClientOptionsComposeInEitherOrder` on anthropic.
+
+**P61.6 — the stream lifecycle now has one home, and the item's own sketch of it was not expressive
+enough.** `internal/provider/sse` owned everything identical across adapters *except the part that
+kept breaking*: the client, the sized scanner, the cancellation-aware `Emitter`, `HandleErrorResponse`
+— and then each adapter wrote its own `consume`, independently re-deriving the idle watchdog, the
+terminal-chunk requirement, the `scanner.Err()` classification, the `bufio.ErrTooLong` naming and the
+final `EventDone`. All five had drifted, in the same direction, toward whichever adapter was in front
+of whoever was last debugging a local model.
+
+New `internal/provider/sse/run.go` — `sse.Run(ctx, body, out, opts, dec)` — owns all five. It closes
+the body and the channel, drives the watchdog, reads the body line by line through the decoder,
+classifies a read failure, enforces the terminal requirement and emits the final `EventDone`. Each
+adapter is reduced to per-chunk decode, which is the part that legitimately differs (NDJSON with
+native tool calls, SSE with `[DONE]`, SSE with indexed content blocks): `ollama.chunkDecoder`,
+`openai.chunkDecoder`, `anthropic.eventDecoder`.
+
+**The roadmap sketched a single `decodeChunk` func value, and that cannot express this lifecycle.**
+Two adapters need a post-loop hook and those hooks sit on **opposite sides of the terminal check**:
+anthropic must flush a buffered final event *before* `scanner.Err()` is classified (its SSE framing
+dispatches an event on the blank line that ends it, so a stream not ending in one holds its last
+`message_delta` — the very event that makes the stream count as terminal — only in the buffer),
+while openai must flush accumulated tool-call arguments *after* the terminal check, which is P61.2's
+deliberate ordering and the reason a cut stream cannot emit a half-assembled tool call. One callback
+cannot be on both sides of a check. Hence a `Decoder` interface (`Line`/`Finish`) plus an **optional**
+`Flusher` for the one adapter whose framing needs it, and a `Status` enum
+(`Continue`/`Terminal`/`End`/`Abort`) as the decoder's only vocabulary for lifecycle decisions —
+`Continue` is the zero value, so a decoder falling off the end of its switch keeps the stream alive
+rather than ending it. `End` exists solely because OpenAI's `[DONE]` is the one terminator that also
+promises no further lines; everything else may legitimately be followed by a usage-only trailer.
+
+The second thing the item did not anticipate: by the time this was built, **P61.2 had converged the
+three adapters on deliberately *different* terminal conditions**, so the requirement could not simply
+be lifted. A naive reading — "the terminal check drifted, so unify it" — would have hard-coded one
+terminator and broken Ollama's `/v1` compat path, which omits `[DONE]` and ends on a `finish_reason`
+chunk. So `Options.MissingTerminal` parameterises the *message* while the *condition* stays in the
+decoder, which is where the wire-format knowledge belongs; an empty `MissingTerminal` disables the
+requirement entirely, which no shipped adapter does — it exists so a future format with no terminator
+at all need not lie about one.
+
+Two behavior changes arrived with the refactor rather than as separate fixes, which is the point of
+having done it: `scanner.Err()` is now `provider.NewTransportError` on openai and anthropic (this is
+**P61.3**'s entire production fix — see below), and `bufio.ErrTooLong` is named as a 4MiB line-limit
+problem on all three instead of surfacing as bufio's opaque "token too long" on two.
+
+Tests: `internal/provider/sse/run_test.go` covers the skeleton in isolation (14 cases: terminal
+present/absent, the optional requirement, `StatusEnd` stopping the read, abort emitting nothing
+further, `Flush` running and being able to terminate, `Flush`'s abort winning, `Finish` ending the
+stream itself, transport classification, the named oversized line, the watchdog firing/disabled/
+resetting per line, and context cancellation). Each adapter's existing suite is unchanged and still
+passes, which is the check that the decoders preserved their wire behavior rather than being
+rewritten around the new shape.
+
+**P61.1 — `provider.stream_idle_timeout` finally means the same thing on every backend.** With
+P61.6 landed this is wiring, not mechanism: `WithStreamIdleTimeout` and `resolveStreamIdleTimeout()`
+on the openai and anthropic adapters with semantics **identical** to ollama's (0 → the 10-minute
+default, negative → disabled), and `buildOne` passing the configured value to all three. The
+mechanism itself — the watchdog that closes the body, which is the only way to break a blocked
+`bufio.Scanner`, and the transport classification that routes a wedged runner into the same
+`waitForBackend`/resume-from-disk path a crashed one takes — is `sse.Run`'s, written once and tested
+once.
+
+The user-facing half of the item was the untruth, and it is corrected in three places.
+`internal/config/config.go`'s doc comment said the key was "honored by the native ollama adapter,
+where the stall this catches actually happens" — which was both the documentation *and* the
+rationalisation of the gap, and false on its own terms: the openai adapter is a local path too (it is
+what talks to Ollama's `/v1` compat endpoint), so the backend most likely to wedge was the one only
+half covered by a key users reasonably read as global. `docs/providers.md` now states the key applies
+to all three adapters, and ollama's own option doc no longer says `<= 0` selects the default while
+also saying a negative value disables the bound.
+
+Tests: `TestStreamIdleTimeoutWiring` and `TestStreamIdleTimeoutAbortsAStalledRunner` on both
+adapters, plus the structural guard described at the end of this section, which is the one that
+matters — per-adapter tests cannot catch "the *fourth* adapter forgot".
+
+**P61.3 — closed by P61.6 with no production code, and two corrections to what the item claimed.**
+The fix the item asked for ("the fix is a constructor swap") is a single line of `sse.Run`:
+`scanner.Err()` is wrapped in `provider.NewTransportError` rather than a bare `fmt.Errorf`, so
+`IsBackendUnavailableError` and `retryable()` — both of which begin with `errors.As(err, &APIError)`
+and return false otherwise — can see it at all. P35.12's `bufio.ErrTooLong` naming, the item's second
+half, is likewise now shared. Since nothing new was written for this item, closure was verified by
+**mutation**: reverting `run.go`'s transport wrap to a bare `fmt.Errorf` fails the new tests on all
+three adapters.
+
+**Correction 1: "no retry" was never about this error.** The item states a killed `ollama serve`
+mid-stream on the compat path gets "no retry, no `waitForBackend`, no resume-from-disk". The middle
+and last are right; the first is not, and it is not a property of the classification.
+`retryAdapter.Stream` only retries errors returned **synchronously** from `Stream`, deliberately, so
+that partial output already emitted to the caller is never replayed. A mid-stream `EventError` is not
+retried on **any** adapter, ollama included, and no constructor swap could have changed that. What
+the swap actually buys is the recovery path, which is a different mechanism and the one that
+mattered.
+
+**Correction 2: `waitForBackend` had a second precondition the item never mentioned, and
+classification alone left recovery inert.** `drive/health.go` returns `backendNotDown` unless the
+adapter answers `provider.CheckBackendHealth` — there has to be something to wait *on* — and only
+`ollama.Adapter` implemented `provider.HealthChecker`. So a correctly-classified backend death on
+the `/v1` path still aborted the drive, and P61.3 as filed would have shipped as a half fix that
+looked complete and tested green. That residual is the next entry.
+
+**The openai liveness probe — P61.3's residual, and a deliberate divergence from the native one.**
+`openai.Adapter.Healthy` probes `GET <base_url>/models`, so `provider.HealthChecker` is satisfied and
+`recoverBackendDown` returns `backendRecovered` rather than `backendNotDown` on the OpenAI-compat
+path. The endpoint is `/models` and emphatically not Ollama's `/api/version`: that path is not part of
+the OpenAI API, and this adapter also serves real OpenAI, LM Studio, liteLLM and assorted gateways.
+`/models` is the one liveness endpoint every OpenAI-compatible server implements, and it is
+side-effect-free — it lists what is configured, loads and unloads nothing, and is not a metered
+completion, so probing a paid backend costs nothing.
+
+What counts as healthy is **looser** than the native probe's "200 or nothing", and the difference is
+the whole design. The question here is **liveness, not usability**: `recoverBackendDown` already knows
+the request failed, and all it needs to learn is whether there is a server on the other end again. A
+401 from a gateway that wants a key, a 403, a 404 from a backend that routes `/chat/completions` but
+not `/models`, a 429, a 500 — every one of those proves an HTTP server answered. Treating them as
+unhealthy would be **worse than having no probe at all**: the drive would burn its full 10-minute
+recovery budget waiting for a server that never left. The carve-out is the gateway trio — 502, 503,
+504 — where the responder is a proxy explicitly saying the *upstream* model server, the thing being
+waited for, is gone. The probe client mirrors P61.5: the adapter's transport, its own 3s timeout, and
+configured headers sent (a gateway may need them to route at all) with `Authorization` only when a
+key was configured, so an unauthenticated local server is not handed an empty bearer.
+
+Anthropic deliberately gets no probe, and the reason is about the *backend* rather than about which
+adapter is "native": there is no local server to wait for, a transient remote outage is already the
+retry decorator's job, a longer one outlasts any bounded wait, and probing is a billable round-trip
+against someone else's quota. P50.1's `supported == false` means "don't wait on this backend", which
+is the honest answer.
+
+Tests: `TestHealthyTreatsAnAnsweringServerAsAlive`, `TestHealthyRejectsGatewayUpstreamFailures`,
+`TestHealthySendsConfiguredHeaders`, `TestHealthyReachableThroughDecorators` (the probe must survive
+the decorator chain a real session is wrapped in), and — the one that asserts the *point* rather than
+the mechanism — `drive.TestRecoverBackendDownReachesTheOpenAIAdapter`, which drives the real
+`recoverBackendDown` with the real adapters: a live compat server yields `backendRecovered`, a dead
+one yields `backendGaveUp` (the wait actually ran and expired, which is what distinguishes a wired
+probe from an unwired one, since both end the phase but only one keeps the suite resumable), and
+anthropic still yields `backendNotDown` as the control.
+
+**P61.4 — both halves of the item's either/or, and the second half turned out to be a repair rather
+than an addition.** The item offered (a) plumb the resolved window onto the request so the compat
+adapter can clamp, or (b) leave the clamp Ollama-native and have `aegis doctor` refuse the
+unreconciled pair. Both shipped, because they cover different populations: the clamp only fires when
+a window was actually resolved, and the diagnostic is what covers every case where one was not.
+
+**(a)** `openai.clampMaxTokens` mirrors `ollama.clampNumPredict` exactly — same reserve arithmetic,
+same 512 floor, and never raising the caller's request — deliberately, because the two adapters can
+be pointed at the *same* Ollama server and a user must not get a different completion budget
+depending on which one the config happened to select. No new plumbing was needed at all:
+`Request.NumCtx` already reached the adapter via `provider.WithNumCtx` and was simply being ignored.
+What differs from the native clamp is the gate, and it is three conditions that all fail closed.
+`WithSharedContextWindow` is set by `buildOne` **only** for a `:11434` base URL, via a promoted
+`IsOllamaPortBaseURL` — deliberately narrower than `IsLegacyOllamaCompat`, whose bare-`/v1` half also
+matches LM Studio, liteLLM and any gateway fronting a cloud model, where `max_tokens` is a *separate*
+output allowance and clamping it would truncate a legitimate long generation. That predicate exists
+to make *advice* over-reach, and advice can be dismissed where a clamp cannot; missing a proxied
+Ollama costs the clamp, not correctness. On top of that sits a structural refusal of
+`api.openai.com` regardless of the option, and `req.NumCtx > 0` — no invented default, because the
+compat endpoint cannot report the served window and there is no honest number to guess.
+
+**(b)** was not a new check. `doctorGenerationBudgetCheck` has existed since P59.1 and was **silently
+useless for exactly the configuration it was built for**: `doctorServedWindow` trusted
+`provider.context_window` on the stated grounds that "that is exactly what the adapter sends as
+num_ctx" — true natively, and **false on `/v1`, which never sends it**. So `max_tokens: 32768` against
+`context_window: 32768` reported PASS while Ollama served its 4096 default, which is the 8x-the-window
+shape P59.1 exists to catch, reported clean by the row built to catch it. On the compat path the check
+now judges against the *detected* reading, falls back to Ollama's documented default window when the
+server can't be reached but the base URL is unambiguously Ollama, and no longer names a knob that path
+ignores: the remedy says `provider.context_window` cannot help here and points at
+`OLLAMA_CONTEXT_LENGTH` or the adapter switch the "provider adapter" row already spells out. The
+fallback is honest for a diagnostic in a way it would not be for a clamp — it costs a line of advice
+if wrong, not a truncated generation.
+
+Tests: `TestStreamClampsMaxTokensToHeadroom`, `TestStreamMaxTokensUnclampedWithoutAWindow`,
+`TestStreamMaxTokensUnclampedOnANonSharedBudgetBackend`, `TestClampRefusesTheRealOpenAIEndpoint`,
+`TestClampAppliesToReasoningModelsField` (the clamp must land on `max_completion_tokens` too),
+`TestIsOllamaPortBaseURL`, and `TestDoctorGenerationBudgetFixNamesTheKnobThatMoves`.
+
+**The structural guards, which are as much of this batch's value as any single fix.** P61.6's own
+statement of the problem is "the failure mode is *the next adapter forgets*, not *an adapter is
+wrong*", and per-adapter tests cannot see that. `internal/providerfactory/idlebound_test.go` drives
+every adapter `buildOne` can construct against a server that sends headers and then goes silent, and
+requires each to bound the stall *and* classify it as backend-unavailable; a second test parses the
+supported-provider list out of `buildOne`'s own unknown-provider error, so a **fourth** adapter
+cannot be added without appearing in the table. `internal/providerfactory/streamdeath_test.go` is the
+same idea for the death rather than the stall: it kills the connection by **hijacking** it, which is
+load-bearing rather than incidental — without the hijack, `net/http` completes the response framing
+on handler return and the client sees a clean EOF, which is the P61.2 case and would have passed the
+test while proving nothing about P61.3. It asserts the read failure survived into the message (so the
+right branch of `sse.Run` is under test), that the error is a `*provider.APIError`, that
+`IsBackendUnavailableError` and `Retryable()` both see it, that an oversized line is named on every
+adapter and is deliberately *not* backend-unavailable (the backend is alive and re-running would
+reproduce it), and — via `livenessProbeWired` — that each adapter's position on P50.1's second
+precondition is a checked fact rather than a belief.
+
+---
+
+**P61.2 — a cut-off stream was reported as a completed answer on openai and anthropic (SHIPPED
+2026-08-05).** The first item built out of the P61.x cross-adapter drift batch, filed the same day,
+and the one the batch's own sequencing note said should not wait behind P61.6's refactor: it is the
+only Tier-1 member that produces a *silently wrong answer* rather than a degraded recovery. The
+defect is P59.3's, unported. Both adapters' `consume` loops emitted `EventDone` unconditionally once
+the scan loop ended, and a body closed mid-generation — a proxy cutting the response, a gateway or
+model runner exiting between chunks — leaves `scanner.Err()` nil, so no read-failure path fired.
+`usage` stayed zeroed, which `engine.go` silently replaces with `tokenest` estimates flagged
+`IsEstimated`, exactly the treatment a legitimately usage-free provider gets. The result was a
+plausible short answer with correct-looking accounting and no error on any surface.
+
+Both loops now track whether a terminal chunk arrived and return `provider.NewTransportError` on a
+clean EOF without one, so the failure takes the same `IsBackendUnavailableError` recovery path —
+`waitForBackend`/resume-from-disk, P50.1 — that ollama's has taken since P59.3. No new recovery
+machinery, which is what kept this cheap, and the same argument P59.3 made for classifying it as
+transport rather than inventing a category.
+
+The terminal condition is deliberately **loose in both adapters**, because a check strict enough to
+reject a legitimate stream would be a worse regression than the bug it fixes. openai accepts
+`[DONE]` **or** any chunk carrying a `finish_reason`: `[DONE]` is a convention of OpenAI's reference
+server rather than a guarantee of the compat wire format, and compat backends — Ollama's `/v1`
+endpoint among them, which is the live local path this item exists for — close after the final
+`finish_reason` chunk without sending it. anthropic accepts `message_stop` **or** a `message_delta`
+carrying a `stop_reason`; `message_delta` is where the completion semantics actually land (final stop
+reason and output-token count), so a stream that lost only the envelope's last event is complete and
+none of the harm above applies to it. `handleData` had no `message_stop` case at all before this.
+Either way the real failure — neither arriving — is still caught. The check sits **before** the
+accumulated-tool-call flush, so a cut stream cannot emit a half-assembled tool call.
+
+One correction to the filed item, recorded because the roadmap text overstated the anthropic half:
+it describes the truncation as surfacing with a stop reason claiming the model chose to end its turn.
+That holds on openai, whose `stop` defaults to `StopEndTurn`; anthropic defaults to `StopOther`, so
+there only the zeroed-usage half applied.
+
+Tests: `TestStreamWithoutTerminatorIsAnError` (openai) and `TestStreamWithoutTerminalEventIsAnError`
+(anthropic) feed a body that closes cleanly mid-generation and assert the result is classified
+backend-unavailable so the P50.1 resume path handles it. Their converses —
+`TestStreamTerminatorsStillComplete` and `TestStreamTerminalEventsStillComplete` — are the ones that
+matter more, holding the looseness above: every accepted terminator, including the envelope-less
+`finish_reason` and `message_delta` cases, must still finish with `EventDone`, the right stop reason
+and no error event.
+
+---
+
 **P59.11 — the tool-failure nudge's 25.9x, closed by finding the missing observation (SHIPPED
 2026-08-05).** P59.10 fixed the zero-tool nudge's 51x prefill cost and deliberately left the
 tool-failure nudge (P52.3) at **25.9x** (67ms → 1745ms of next-run prefill), for a stated reason:

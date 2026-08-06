@@ -1,8 +1,10 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-05 (sixth pass — the P61.x cross-adapter drift batch filed, 7 items;
-fifth pass: P59.11 shipped; fourth pass: P59.10 and P52.16 measured, promoted and shipped, and the
-P59.9 loose end measured and closed)
+**Last updated:** 2026-08-06 (eighth pass — P61.5, P61.6, P61.1, P61.3 and P61.4 shipped, closing the
+P61.x batch except its parked item, and P61.8 filed; seventh pass: P61.2 shipped, the batch's
+silent-wrong-answer item; sixth pass: the P61.x cross-adapter drift batch filed, 7 items; fifth pass:
+P59.11 shipped; fourth pass: P59.10 and P52.16 measured, promoted and shipped, and the P59.9 loose
+end measured and closed)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -34,7 +36,19 @@ the *pieces* of an SSE consumer (client, scanner, emitter, error-response) but n
 lifecycle*, so there is no shared place for a lifecycle fix to land and each adapter's `consume` has
 drifted independently. **P61.1**-**P61.3** are the three live gaps (Tier 1), **P61.6** is the
 structural fix that stops the next one (Tier 3), and the batch should be sequenced with that
-dependency in mind — see P61.6 for which order is cheaper. Full batch origin under Tier 1.
+dependency in mind — P61.6 recorded which order was cheaper. **P61.2 shipped 2026-08-05**, the day it
+was filed and ahead of P61.6 as that sequencing recommended, since it was the batch's only silent
+wrong answer. **P61.5, P61.6, P61.1, P61.3 and P61.4 shipped 2026-08-06, closing the batch except
+P61.7** (Tier 4, measure-first, untouched). The sequencing bet paid better than the item predicted:
+building the structural fix *second* rather than last turned P61.1 into option wiring and closed
+P61.3 with **no production code at all**, since the classification it asked for is one line inside
+the lifted skeleton. Two of the five also corrected the filed item in ways that changed what was
+built — P61.5's prescribed `errors.Join(rejection, err)` argument order would have shipped a
+regression (`errors.As` stops at the first match, so the stale terminal 400 would have made every
+retryable failure unretryable), and P61.3's "no retry" claim and its unmentioned second precondition
+both turned out to be wrong, the latter leaving recovery inert on the `/v1` path until an openai
+liveness probe was added. **P61.8** was filed off P61.4 and is the daemon-side counterpart of the
+doctor bug it fixed. Write-ups in [releases.md](releases.md). Full batch origin under Tier 1.
 
 **P59.11 shipped 2026-08-05**, the fifth batch that day and a direct follow-on: P59.10 had fixed the
 zero-tool nudge's 51x prefill regression and left the **tool-failure nudge at a measured 25.9x**,
@@ -46,7 +60,8 @@ mattered (never nag on consecutive failing rounds) is preserved by an outstandin
 than by the count. Write-up in [releases.md](releases.md); no tier held an item for it, since P59.10
 had recorded it as a deliberate non-fix rather than filing it.
 
-**Open items (12)** — 5 carried, plus the 7 filed by P61.x above. **P59.10 and P52.16 shipped
+**Open items (7)** — 5 carried, plus **P61.7** (the P61.x batch's only survivor) and **P61.8**, filed
+2026-08-06 off P61.4. **P59.10 and P52.16 shipped
 2026-08-05** — the fourth batch that day, and the
 first assembled by *taking the measurements* Tier 4 items had been parked behind rather than by
 picking work off a tier. Both promotion triggers fired, and in both cases the measurement also
@@ -262,14 +277,22 @@ to track.
 
 ## Open Work — Tier 1
 
-**Status:** 3 open — **P61.2**, **P61.1** and **P61.3**, the Tier-1 half of the P61.x cross-adapter
-drift batch filed 2026-08-05 (origin below). All three are the same defect wearing three faces: a
-hardening measure that exists only in `internal/provider/ollama` and was never ported to the openai
-and anthropic adapters. Each is small and independent; **P61.6** (Tier 3) is the structural fix that
-makes the fourth one impossible, and the sequencing question between them is recorded there. They are
-listed **P61.2 first**, out of numeric order and deliberately: it is the only one that produces a
-silently wrong answer rather than a degraded recovery, and it is the one that should not wait behind
-P61.6's refactor.
+**Status:** 0 open. The tier's last three were the Tier-1 half of the P61.x cross-adapter drift batch
+filed 2026-08-05 (origin below) — one defect wearing three faces, a hardening measure that existed
+only in `internal/provider/ollama` and was never ported to the openai and anthropic adapters.
+**P61.2 shipped 2026-08-05**, the day the batch was filed and deliberately first, out of numeric
+order, because it was the only member producing a silently wrong answer rather than a degraded
+recovery and the one that should not have waited behind P61.6's refactor. **P61.1 and P61.3 shipped
+2026-08-06**, both as consequences of P61.6 (Tier 3) landing before them exactly as the sequencing
+note argued: P61.1 became option wiring around a watchdog written once in `sse.Run`, and P61.3 needed
+**no production code at all** — its fix is a single `provider.NewTransportError` inside the lifted
+skeleton, and closure was verified by mutation rather than by new code. P61.3 also carried two
+corrections worth remembering when reading a filed item as a build plan: its "no retry" claim was
+never about that error (the retry decorator only retries *synchronous* `Stream` failures, by design,
+so partial output is never replayed — that is true on every adapter), and `waitForBackend` had a
+second, unmentioned precondition (`drive/health.go`: the adapter must answer
+`provider.CheckBackendHealth`), so classification alone left recovery inert on the `/v1` path until
+an openai liveness probe was added alongside. See [releases.md](releases.md) for the write-ups.
 
 **P59.1**, **P59.2** and **P59.3** — the Tier-1 half of the P59.x
 local-execution review batch (origin below) — shipped 2026-08-04, the day after the batch was filed;
@@ -324,67 +347,22 @@ The batch's strategic driver was a decision to make the container the **only** w
 user installs one image instead of 17 tools. All eight built items have shipped; see the Status
 section above for what P55.7 and P55.8 changed, and [releases.md](releases.md) for the write-ups.
 
-### P61.2 — A truncated stream is reported as a completed answer on openai/anthropic
-
-`ollama.go:1021` (P59.3) treats a clean EOF with no `done:true` chunk as a transport error, for a
-reason its comment states plainly: emitting `EventDone` there leaves usage zeroed and `stop` at
-`StopEndTurn`, so "a truncated response was surfaced as a complete short answer whose stop reason
-claims the model chose to end its turn." Neither other adapter has the check — `openai.go:515` and
-`anthropic.go:365` emit `EventDone` unconditionally once the scan loop ends.
-
-The downstream consequence is at `engine.go:1812`: zeroed usage is silently replaced with
-`tokenest` estimates and flagged `IsEstimated`, which is indistinguishable from a legitimately
-usage-free provider. A cut-off generation therefore produces a plausible short answer, correct-looking
-usage, and no error on any surface. This is the batch's only *silent wrong answer* — the other two
-Tier-1 items degrade recovery, this one degrades output.
-
-Fix mirrors P59.3: require a terminal chunk (`[DONE]` / `message_stop`) before `EventDone`, and
-classify its absence as `provider.NewTransportError` so it takes the same recovery path.
-
-Priority: Tier 1 — silent incorrect output, on a live local path, with a shipped precedent to copy.
-
-### P61.1 — The stream idle watchdog exists only on the native Ollama path
-
-`provider.stream_idle_timeout` (P59.2) is a documented config key that applies to **one of three
-adapters**. `providerfactory/factory.go:248` passes `ollama.WithStreamIdleTimeout`; lines 219 and 279
-(anthropic, openai) pass only `WithResponseHeaderTimeout`, and no `WithStreamIdleTimeout` option
-exists on either adapter to pass. `openai.consume` (`openai.go:353`) and `anthropic.consume`
-(`anthropic.go:321`) take no timeout parameter at all.
-
-P59.2's own reasoning is what makes this a Tier-1 gap rather than a missing feature: the streaming
-client deliberately leaves `Client.Timeout` at zero, `ResponseHeaderTimeout` stops applying the moment
-headers arrive, and `cost.max_wall_clock_per_run` is polled between turns and is off by default. So on
-those two adapters **nothing bounds a wedged runner** — the consumer blocks on a read forever, which is
-precisely the state P59.2 was filed to end. And the openai adapter is a local path: it is what talks to
-Ollama's OpenAI-compat `/v1` endpoint.
-
-Fix is to give both adapters the option and wire it in `buildOne` — but see **P61.6**, which would
-supply the watchdog once instead of three times.
-
-Priority: Tier 1 — a config key users will reasonably believe is global silently protects one backend.
-
-### P61.3 — Mid-stream read failures on openai/anthropic are unclassifiable, so backend recovery never fires
-
-`openai.go:480` and `anthropic.go:361` wrap `scanner.Err()` with a bare `fmt.Errorf`. `ollama.go:1001`
-wraps the identical condition in `provider.NewTransportError`, deliberately (P50.1): "wrap it as a
-transport APIError (not a bare error) so `IsBackendUnavailableError` classifies it and the phased drive
-waits for the backend to return and resumes from disk."
-
-Because both `IsBackendUnavailableError` and `retryable()` begin with `errors.As(err, &APIError)` and
-return false otherwise, a killed `ollama serve` mid-stream on the compat path is classified by
-**nothing**: no retry, no `waitForBackend`, no resume-from-disk. It aborts the drive on an
-unclassifiable error — the exact failure P50.1 exists to prevent, on a sibling code path. The openai
-adapter also lacks P35.12's `bufio.ErrTooLong` naming, so an oversized tool-call payload there still
-surfaces as the opaque "token too long".
-
-Priority: Tier 1 — a shipped recovery mechanism is inert on two of three adapters; the fix is a
-constructor swap.
-
 ## Open Work — Tier 2
 
-**Status:** 3 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
-tracking rather than independent build work, plus **P61.4** and **P61.5** from the P61.x batch (origin
-under Tier 1). **There is no unbuilt Tier-2 item left from any earlier batch.** **P59.7** (the
+**Status:** 2 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
+tracking rather than independent build work, plus **P61.8**, filed 2026-08-06 off P61.4 and the only
+open item of the P61.x batch outside Tier 4. **There is no unbuilt Tier-2 item left from any earlier
+batch.** **P61.4** and **P61.5** (the batch's Tier-2 half, origin under Tier 1) **shipped 2026-08-06**;
+see [releases.md](releases.md), and note that P61.4 took **both** halves of the either/or its item
+posed rather than choosing between them, because they cover different populations — the compat-path
+`max_tokens` clamp only fires when a window was actually resolved, and `aegis doctor`'s
+generation-budget row is what covers every case where one was not. That second half turned out to be
+a **repair rather than an addition**: the check has existed since P59.1 and was silently useless for
+exactly the configuration it was built for, because `doctorServedWindow` trusted
+`provider.context_window` as "what the adapter sends as num_ctx" — true natively, false on `/v1`,
+which never sends it. P61.5's own correction is recorded in the batch note in the Status section: the
+`errors.Join` argument order the item prescribed was backwards and would have shipped a regression.
+**P59.7** (the
 last Tier-2 item of the P59.x local-execution review batch, origin under Tier 1) and **P60.1** (the
 Tier-2 head of the P60.x sandbox-and-eval batch, origin below) both shipped 2026-08-05; see
 [releases.md](releases.md), and note that P59.7 connected the escalated window to the engine's
@@ -577,58 +555,69 @@ brakeman was to the language-targeted half: the only one. No gate added; the mea
 recorded in the `runJSON` doc comment (`internal/security/scanners.go`) so the sweep isn't re-run
 from scratch. Write-up in [releases.md](releases.md).
 
-### P61.4 — The `num_predict` clamp has no counterpart on the OpenAI-compat path
+### P61.8 — The daemon resolves the effective window from `provider.context_window` on the one path that never sends it
 
-`ollama.clampNumPredict` (`ollama.go:686`, P59.1) reconciles `provider.max_tokens` — default **32768**
-(`config.go:1302`) — against the room actually left in the served window. `openai.go:259-263` assigns
-`req.MaxTokens` straight to `MaxTokens`/`MaxCompletionTokens` with nothing reconciling the pair. Against
-Ollama's own 4096 default window over `/v1`, that is the same request-8x-the-window shape P59.1
-describes, with the same consequence: a ceiling hit mid-generation returns `finish_reason "length"` →
-`StopMaxTokens` → the engine's continue-from-where-you-left-off retry → context growth until the run
-burns to its iteration cap.
+`applyDetectedWindowFor` (`internal/server/contextwindow.go:167-188`) reconciles a detection result
+against config with one rule: an *authoritative* reading (`/api/ps`, i.e. the model is loaded) below
+`cfgWin` wins, and otherwise `case cfgWin > 0` wins. That is right on the native adapter, where
+`buildOne` passes the resolved window through `ollama.WithNumCtx` and the server really is asked to
+serve it. On the OpenAI-compat `/v1` path it is the same blind spot P61.4 just closed one layer up in
+`aegis doctor`: that endpoint cannot carry `num_ctx`, so a configured `context_window: 32768` is a
+statement of intent the server never hears — and the number the daemon derives from it is what every
+consumer of `effectiveContextWindowFor` then reasons with (the compaction trigger, the engine's
+proactive-compaction check, `/status` and the TUI usage bar, and — since P61.4 — `Request.NumCtx` and
+therefore the compat adapter's own `max_tokens` clamp).
 
-This is Tier 2 rather than Tier 1 because the fix is genuinely harder here and partly out of reach: the
-compat endpoint cannot carry `num_ctx` and does not report the served window, so the adapter has no
-honest number to clamp against — which is the same structural limitation P53.x's comparative review
-already identified as the root cause of crush's "local models won't call tools" discussion #1828. The
-options worth weighing are (a) plumb the server-resolved window (`internal/ollamainfo` already detects
-it per model) onto the request so the openai adapter can clamp when one is present, or (b) leave the
-clamp Ollama-native and instead have `aegis doctor` refuse the unreconciled `max_tokens`/window pair,
-which is where P59.1's own comment says the user should be told once.
+The evidence is that the two halves of the system now disagree about the same question for the same
+config, and the diagnostic is the half that is right: `doctorServedWindow` refuses a configured window
+on this path and states why ("that endpoint cannot carry num_ctx, so a configured window there is a
+statement of intent the server never hears"), while `applyDetectedWindowFor` still accepts it. The
+detection needed to do better is already in hand on this path — `ollamainfo.NativeBase` maps the `/v1`
+base back to the native API, which is how `initContextWindow` probes an `openai` provider at all.
 
-Priority: Tier 2 — real and live, but the cheap fix is a diagnostic and the correct fix needs a design
-decision about whether the compat path gets window awareness at all.
+**Why this is Tier 2 and not Tier 1.** The exposure is narrow in two independent ways. The `cfgWin`
+branch only wins over a **non-authoritative** reading (modelfile/default, because the model is not
+loaded yet), and such an entry stays `final: false`, so `maybeRefreshContextWindowFor` re-detects
+after the first run and the authoritative reading downgrades it — the overstatement survives at most
+the first turn on each model rather than persisting. And the P61.4 clamp cannot *misfire* from it: an
+overstated window computes more headroom than exists, so the clamp lands above the real ceiling and
+merely fails to help, which is the pre-P61.4 status quo rather than a new truncation. What is
+genuinely wrong is that first turn — the one carrying the full system prompt plus any skill body —
+which is spent believing the engine has 8x the room Ollama is serving, so nothing compacts and Ollama
+truncates from the front (P39.9's shape, bounded to one turn per model). Against that, `aegis doctor`
+now names the misconfiguration outright, so the user is not without a signal.
 
-### P61.5 — Five small correctness and fidelity papercuts in the adapter and decorator chain
+Fix is to mirror doctor's rule rather than to change the reconciliation: on an `IsLegacyOllamaCompat`
+provider a configured `context_window` is not evidence of what is served, so any detection should win
+regardless of authority, and Ollama's documented default should stand in when nothing was detected and
+the base URL is unambiguously Ollama (`IsOllamaPortBaseURL`, promoted by P61.4). Config still has to
+mean something — it is how a user tells a *native* daemon what to ask for — so this is a compat-path
+carve-out, not a relaxation of the rule everywhere.
 
-Grouped because each is a few lines and none warrants its own item, but all are in the same layer and
-all are real:
+Promote to Tier 1 if any consumer starts treating the effective window as a **ceiling** rather than a
+trigger on this path (the P61.4 clamp becoming load-bearing there, or a P47.5b-style escalation
+reaching it), or if a first-turn front-truncation is actually observed on a compat backend.
 
-- **The `think`-rejection retry discards the original 400.** `ollama.go:587-590` captures `rejection`,
-  then overwrites `err` with the retry's error. If the retry also fails, the caller sees only the
-  second failure and the "does not support thinking" signal — the thing that explains the whole
-  sequence — is gone. `errors.Join(rejection, err)`.
-- **`failoverAdapter.Stream` never checks `ctx` between targets** (`failover.go`). A cancelled context
-  walks the entire chain, logging a `WARN` per hop.
-- **`admissionAdapter.Stream`'s first `select`** (`admission.go`) offers `ctx.Done()` alongside a
-  `default:`; when a slot is free Go picks uniformly among ready cases, so an already-cancelled request
-  can still acquire a slot and proceed. It reads as a cancellation check and is not one.
-- **`healthClient` bypasses the adapter's transport entirely** (`ollama.go:258`). It is a package-level
-  `http.Client`, so a user's proxy or TLS configuration does not apply to the liveness probe that gates
-  P50.1 recovery. Harmless only because the probe targets loopback today.
-- **`WithResponseHeaderTimeout` replaces `a.client` wholesale** in all three adapters, making option
-  order significant the moment a second option touches the client — which **P61.1** would be.
-
-Also recorded, deliberately not filed: the idle watchdog's `timer.Reset` races the `AfterFunc` firing
-(`ollama.go:851-856`). `idleFired` latches and the consequence is only a sharper message on a stream
-that delivered a line at the exact deadline, so it is a comment, not a bug.
-
-Priority: Tier 2 — each is a small self-contained fix; the last one is a prerequisite hazard for P61.1.
+Priority: Tier 2 — small, self-contained and dependency-free; real, but self-correcting after one turn
+and already named by `aegis doctor`, so it is not the emergency the doctor half was.
 
 ## Open Work — Tier 3
 
-**Status:** 1 open — **P61.6** (origin under Tier 1), which is sequence-dependent with the batch's
-Tier-1 half by construction. **P59.9**, **P60.2** and **P60.4** all shipped 2026-08-05, closing the tier and
+**Status:** 0 open. **P61.6 shipped 2026-08-06** (origin under Tier 1) — the structural fix the rest
+of the P61.x batch was three symptoms of, and the one whose sequencing was the reason it sat here
+rather than in Tier 1. Built **second** in the batch rather than last, and that ordering is the
+finding worth keeping: it turned P61.1 into option wiring and closed P61.3 with no production code,
+so the "write each fix twice and delete one copy" cost the item worried about was never paid.
+`sse.Run` now owns the watchdog, the read loop, the terminal-chunk requirement, the `scanner.Err()`
+classification, the `bufio.ErrTooLong` naming and the final `EventDone`, leaving each adapter with
+per-chunk decode only. Two things the item's own sketch got wrong are recorded in the write-up: a
+single `decodeChunk` func value cannot express the lifecycle (two adapters need a post-loop hook and
+those hooks sit on *opposite* sides of the terminal check), and by build time P61.2 had converged the
+adapters on deliberately *different* terminal conditions, so the requirement had to be parameterised
+rather than unified — hard-coding one terminator would have broken Ollama's `/v1` path, which omits
+`[DONE]`. The structural regression guard the item asked for shipped with it
+(`internal/providerfactory/idlebound_test.go`, `streamdeath_test.go`). See
+[releases.md](releases.md) for the write-up. **P59.9**, **P60.2** and **P60.4** all shipped 2026-08-05, closing the tier and
 with it the P59.x batch's last Tier-3 item and the P60.x batch's two standalone ones — see
 [releases.md](releases.md) for the write-ups. **P59.9** put a semaphore in front of local backends
 (`provider.max_concurrent_requests`, auto-bounding a local server to one in-flight request since it
@@ -701,38 +690,6 @@ phases, the phase-6 loop, the P47.9 re-entry). The recovered retry additionally 
 `scaffold.py` (P38.4) made for structure. Write-up in [releases.md](releases.md). **The live re-test
 against the same failure shape is still owed** and is tracked as part of P38.1's closure condition —
 this is a fix aimed at a failure observed once.
-
-### P61.6 — `sse` abstracts the pieces of a stream consumer but not its lifecycle
-
-This is the root cause **P61.1**, **P61.2** and **P61.3** are three symptoms of, and the reason to
-expect a fourth. `internal/provider/sse` already owns everything that is identical across adapters
-*except the part that keeps breaking*: it supplies the HTTP client, the sized scanner, the
-cancellation-aware `Emitter` and `HandleErrorResponse`, and then each adapter writes its own `consume`
-loop. Those three loops independently re-derive the idle watchdog, the terminal-chunk requirement, the
-`scanner.Err()` classification, the `bufio.ErrTooLong` naming and the final `EventDone` — and every one
-of those five has now drifted, in the same direction, toward whichever adapter was in front of whoever
-was fixing a local-model bug.
-
-The fix is to lift the *skeleton* into `sse` — roughly `sse.Run(ctx, body, out, opts, decodeChunk)`,
-owning the watchdog, the loop, the terminal-chunk requirement and the error classification — and leave
-each adapter owning only per-chunk decode, which is the part that legitimately differs (NDJSON with
-native tool calls, SSE with `[DONE]`, SSE with indexed content blocks). Anthropic's `dispatch`/
-`handleData` split already has close to the right shape for the callback.
-
-**Sequencing, which is the whole reason this is Tier 3 rather than Tier 1.** Doing P61.6 first makes
-P61.1-P61.3 nearly free but puts a refactor of all three adapters ahead of three live bugs; doing the
-three first means writing each fix twice and then deleting one copy. The recommendation is
-**P61.2 first** (it is the silent-wrong-answer one and should not wait on a refactor), then P61.6,
-then P61.1 and P61.3 as consequences of it — which also means the watchdog gets tested once, in `sse`,
-rather than at one adapter's worth of coverage. Note that P61.5's last bullet
-(`WithResponseHeaderTimeout` replacing `a.client`) should land before any of it.
-
-A structural regression guard belongs with this: a test that enumerates the constructed adapters and
-asserts each carries an idle bound, since the failure mode here is "the next adapter forgets", not
-"an adapter is wrong".
-
-Priority: Tier 3 — real value and it is the only fix that stops recurrence, but it is sequence-
-dependent with three Tier-1 items and should not block them.
 
 ## Open Work — Tier 4
 
