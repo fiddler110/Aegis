@@ -697,11 +697,35 @@ func TestDoctorGenerationBudget(t *testing.T) {
 		},
 		{
 			// The legacy OpenAI-compat path talks to the same server, so it has
-			// the same shared budget underneath.
+			// the same shared budget underneath. P61.4: the configured 8192 is
+			// *not* the served window there — that endpoint never sends
+			// num_ctx — so with the server unreachable the row reports Ollama's
+			// own default rather than the number the user hoped for.
 			name:       "legacy ollama compat is still ollama",
 			cfg:        config.ProviderConfig{Default: "openai", BaseURL: "http://localhost:11434/v1", Model: "llama3.2", MaxTokens: 32768, ContextWindow: 8192},
 			wantSev:    doctorWarn,
-			wantDetail: "8192-token context window",
+			wantDetail: "4096-token context window",
+		},
+		{
+			// P61.4, the case that used to PASS and is exactly the one this row
+			// exists for: on the compat path a configured context_window is a
+			// statement of intent the server never hears, so max_tokens must be
+			// judged against what Ollama actually serves (detected 4096), not
+			// against the 32768 the config asks for.
+			name:       "compat path judges max_tokens against the detected window, not the configured one",
+			cfg:        config.ProviderConfig{Default: "openai", BaseURL: "http://localhost:11434/v1", Model: "llama3.2", MaxTokens: 32768, ContextWindow: 32768},
+			detected:   4096,
+			wantSev:    doctorWarn,
+			wantDetail: "4096-token context window (detected)",
+		},
+		{
+			// The same configured pair on the *native* adapter is fine: there
+			// context_window really is sent as num_ctx, so it is the served
+			// window and max_tokens fits inside it.
+			name:       "native adapter still trusts a configured context_window",
+			cfg:        config.ProviderConfig{Default: "ollama", Model: "llama3.2", MaxTokens: 8000, ContextWindow: 32768},
+			wantSev:    doctorPass,
+			wantDetail: "provider.context_window",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -723,5 +747,29 @@ func TestDoctorGenerationBudget(t *testing.T) {
 				t.Error("a warn row must name the corrective knob")
 			}
 		})
+	}
+}
+
+// TestDoctorGenerationBudgetFixNamesTheKnobThatMoves (P61.4): "raise
+// provider.context_window" is correct advice on the native adapter and useless
+// on the /v1 compat path, which never sends that value — a user who follows it
+// there changes nothing and sees the same short answers.
+func TestDoctorGenerationBudgetFixNamesTheKnobThatMoves(t *testing.T) {
+	native := doctorGenerationBudgetFix(config.ProviderConfig{Default: "ollama", Model: "llama3.2"}, 4096)
+	if !strings.Contains(native, "raise provider.context_window") {
+		t.Errorf("native fix = %q, want it to point at provider.context_window", native)
+	}
+	if !strings.Contains(native, "1024") {
+		t.Errorf("native fix = %q, want the quartered window spelled out", native)
+	}
+
+	compat := doctorGenerationBudgetFix(config.ProviderConfig{Default: "openai", BaseURL: "http://localhost:11434/v1", Model: "llama3.2"}, 4096)
+	if strings.Contains(compat, "raise provider.context_window") {
+		t.Errorf("compat fix = %q, must not suggest a knob that endpoint ignores", compat)
+	}
+	for _, want := range []string{"1024", "OLLAMA_CONTEXT_LENGTH", "provider.default: ollama"} {
+		if !strings.Contains(compat, want) {
+			t.Errorf("compat fix = %q, want it to mention %q", compat, want)
+		}
 	}
 }

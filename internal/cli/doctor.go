@@ -413,6 +413,15 @@ func doctorProviderAdapterCheck(ctx context.Context, cfg *config.Config) doctorC
 //
 // Only meaningful on a shared-budget backend. Cloud providers bill max_tokens
 // against a separate output allowance, so a large value there is correct.
+//
+// P61.4 sharpened it for the OpenAI-compat path, where it matters most: the
+// native adapter always clamps, but the compat adapter can only clamp when the
+// daemon managed to resolve a window for the model (see
+// openai.clampMaxTokens) — a proxied Ollama, an unreachable server at startup,
+// or any embedder that never sets Request.NumCtx leaves the pair unreconciled
+// with nothing but this row to report it. That is also why a configured
+// context_window is not accepted as the served window on that path — see
+// doctorServedWindow.
 func doctorGenerationBudgetCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 	const name = "generation budget"
 	if !isOllamaTarget(cfg.Provider) {
@@ -450,7 +459,7 @@ func doctorGenerationBudgetCheck(ctx context.Context, cfg *config.Config) doctor
 		}
 		return doctorCheck{
 			Name: name, Severity: sev, Detail: detail,
-			Fix: fmt.Sprintf("set provider.max_tokens to at most %d, or raise provider.context_window", window/4),
+			Fix: doctorGenerationBudgetFix(cfg.Provider, window),
 		}
 	}
 	return doctorCheck{
@@ -466,24 +475,56 @@ func isOllamaTarget(p config.ProviderConfig) bool {
 	return p.Default == "ollama" || providerfactory.IsLegacyOllamaCompat(p)
 }
 
+// doctorGenerationBudgetFix names the knob that actually moves, which is not
+// the same knob on both adapters (P61.4). Quartering the window is the
+// max_tokens half either way — it leaves three quarters for the conversation
+// that produced the answer — but "raise provider.context_window" is advice the
+// /v1 compat path cannot act on: that endpoint never sends num_ctx, so the
+// value changes nothing about what Ollama serves. There the window moves on the
+// server or by switching adapters, and the "provider adapter" row already
+// spells the switch out in full.
+func doctorGenerationBudgetFix(p config.ProviderConfig, window int) string {
+	if providerfactory.IsLegacyOllamaCompat(p) {
+		return fmt.Sprintf("set provider.max_tokens to at most %d — provider.context_window cannot help here, "+
+			"the /v1 compat path never sends it; raise OLLAMA_CONTEXT_LENGTH on the server or switch to "+
+			"provider.default: ollama (see the provider adapter row)", window/4)
+	}
+	return fmt.Sprintf("set provider.max_tokens to at most %d, or raise provider.context_window", window/4)
+}
+
 // doctorServedWindow returns the context window a request will actually carry
-// and a short word for where the number came from. An explicit
-// provider.context_window wins because that is exactly what the adapter sends
-// as num_ctx; otherwise it is detected from the server, and 0 means unknown.
+// and a short word for where the number came from; 0 means unknown.
+//
+// On the native adapter an explicit provider.context_window wins, because that
+// is exactly what the adapter sends as num_ctx. On the OpenAI-compat path it
+// deliberately does not (P61.4): that endpoint cannot carry num_ctx, so a
+// configured window there is a statement of intent the server never hears.
+// Trusting it would report a PASS for precisely the config that most needs this
+// row — max_tokens 32768 against a configured 32768 window while Ollama serves
+// its 4096 default — so the server's own reading is preferred, and when the
+// server can't be reached but base_url is unambiguously Ollama, its documented
+// out-of-the-box window stands in. That fallback is honest for a diagnostic in
+// a way it would not be for a clamp: it costs a line of advice if wrong, not a
+// truncated generation.
 func doctorServedWindow(ctx context.Context, p config.ProviderConfig) (int, string) {
+	compat := providerfactory.IsLegacyOllamaCompat(p)
+	if p.ContextWindow > 0 && !compat {
+		return p.ContextWindow, "provider.context_window"
+	}
+	if p.Model != "" && p.Model != "auto" {
+		dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if res, ok := detectOllamaInfo(dctx, ollamainfo.NativeBase(p.BaseURL), p.Model); ok && res.ContextWindow > 0 {
+			return res.ContextWindow, "detected"
+		}
+	}
+	if compat && providerfactory.IsOllamaPortBaseURL(p.BaseURL) {
+		return ollamainfo.DefaultServeContext, "Ollama's default; the /v1 compat path never sends context_window"
+	}
 	if p.ContextWindow > 0 {
 		return p.ContextWindow, "provider.context_window"
 	}
-	if p.Model == "" || p.Model == "auto" {
-		return 0, ""
-	}
-	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	res, ok := detectOllamaInfo(dctx, ollamainfo.NativeBase(p.BaseURL), p.Model)
-	if !ok || res.ContextWindow <= 0 {
-		return 0, ""
-	}
-	return res.ContextWindow, "detected"
+	return 0, ""
 }
 
 // detectOllamaInfo is a seam over ollamainfo.Detect so a test can supply a
