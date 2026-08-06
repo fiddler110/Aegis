@@ -2791,6 +2791,368 @@ trivy's silent npm dev-dependency skip. Earlier still: **P34.5-P34.8**, the prev
 
 ---
 
+## Migrated from roadmap.md — batch origins, refutation records, and closed-batch status notes (2026-08-06)
+
+Moved here 2026-08-06 during a roadmap cleanup, the second of its kind after 2026-08-01 and for the
+same reason: roadmap.md holds only open work, per its own stated contract, and shipped-batch
+narrative had accumulated in its Status and per-tier headers instead. No content was changed, only
+relocated and grouped. Three kinds of record live here, and the middle one is the reason this
+section is worth reading rather than archiving:
+
+1. **Batch origins** — what each review actually read and what it concluded, including the parts it
+   judged already correct.
+2. **Refutation records** — candidate findings checked and deliberately *not* filed. These exist so
+   a later review does not re-file them; check them before opening an item against
+   `internal/provider`, `internal/ollamainfo`, `internal/repomap` or scanner method resolution.
+3. **Closed-batch status notes** — the roadmap's running commentary on what shipped when, which is
+   duplicate detail now that every item has its own write-up above.
+
+---
+
+### Batch origins
+
+**P61.x — cross-adapter drift (filed 2026-08-05, 7 items + P61.8 filed 2026-08-06).** From a review
+of the LLM-interaction surface (`internal/provider` and its three adapters, the decorator chain, and
+`engine.turn`'s stream consumption) commissioned as a general Go/architecture/AppSec review. As with
+P59.x it changed **no structural judgement** — the `Adapter` seam, the decorator chain and its
+`Unwrap()` traversal, `sse.Emitter`'s cancellation-aware sends, and the absence of prompt/PII logging
+are all right, and `go vet ./...` plus the provider and engine suites were clean. Four premises of
+the review brief were checked and found already satisfied (a single LLM abstraction, `context`
+propagation, request-body caps via `http.MaxBytesReader`, loopback validation of `server.addr` and
+`provider.base_url` — FIND-08 and FIND-03), and are recorded so they are not re-filed.
+
+What it found instead is a single theme, and it is the mirror image of P59.x's: **every piece of
+stream hardening was fixed in the native Ollama adapter and never ported to the other two.** P59.2's
+idle watchdog, P59.3's missing-completion-chunk check, P50.1's transport-error classification and
+P59.1's `num_predict` clamp all existed exactly once, in `internal/provider/ollama`. The openai
+adapter is not a cloud-only path — it is what serves Ollama's OpenAI-compat `/v1` endpoint, which
+`docs/installation.md` still configures via `OPENAI_API_KEY="ollama"` — so each gap was live on a
+local backend. The root cause was structural rather than three oversights: `internal/provider/sse`
+abstracted the *pieces* of an SSE consumer (client, scanner, emitter, error-response) but not the
+*stream lifecycle*, so there was no shared place for a lifecycle fix to land and each adapter's
+`consume` had drifted independently. P61.1-P61.3 were the three live gaps (Tier 1), P61.6 the
+structural fix that stops the next one (Tier 3), and the batch was filed with a sequencing note about
+that dependency. **P61.2 shipped 2026-08-05**, the day it was filed and ahead of P61.6 as the
+sequencing recommended, since it was the batch's only silent wrong answer. **P61.5, P61.6, P61.1,
+P61.3 and P61.4 shipped 2026-08-06**, and **P61.8 the same day**, closing the batch except **P61.7**
+(Tier 4, measure-first, untouched).
+
+The sequencing bet paid better than the item predicted: building the structural fix *second* rather
+than last turned P61.1 into option wiring and closed P61.3 with **no production code at all**, since
+the classification it asked for is one line inside the lifted skeleton. Three members also corrected
+the filed item in ways that changed what was built — P61.5's prescribed `errors.Join(rejection, err)`
+argument order would have shipped a regression (`errors.As` stops at the first match, so the stale
+terminal 400 would have made every retryable failure unretryable); P61.3's "no retry" claim and its
+unmentioned second precondition both turned out to be wrong, the latter leaving recovery inert on the
+`/v1` path until an openai liveness probe was added; and P61.8's single rule turned out to need *two*
+predicates, one broad and one strict.
+
+**P59.x — local-execution review (filed 2026-08-04, 10 items + P59.11).** An architecture and design
+review of the harness as a *local-execution* system specifically: prompt/context management, the
+Ollama request path, error handling and output parsing, read end-to-end across `internal/engine`,
+`internal/provider/ollama`, `internal/provider/sse`, `internal/compaction`, `internal/tokenest`,
+`internal/server` (`engine_build.go`, `contextwindow.go`, `messages.go`), `internal/guard` and
+`internal/drive`, cross-checked against `docs/`. Most of the obvious local-model traps were already
+closed and the seams are right — the review changed no structural judgement (the adapter seam,
+capability-tagged tools, per-model context resolution and the phased drive are all the right answers
+and none was touched).
+
+What it found clusters on one theme none of the prior batches covered: **the context subsystem
+reasons about the prompt, and nothing reasons about the generation.** `num_ctx` is prompt+completion
+on Ollama, but `num_predict` rode through unclamped from a 32768 default (P59.1), the compaction
+trigger was a flat 85% that predated any generation reserve (P59.1), no budget or timeout could fire
+*during* a turn so a wedged runner had no valve (P59.2), and a stream that ended without a `done`
+chunk was surfaced as a finished answer (P59.3). Tier 2 covered the accounting and detection edges
+around that theme — token-budget semantics on unpriced backends (P59.4), the `small_model` guard
+recommendation causing model thrash on VRAM-constrained hosts (P59.5), prose tool-call detection
+gated on zero-call turns (P59.6), and the engine's immutable window versus the adapter's escalation
+floor (P59.7). Tier 3 took up the grammar-constrained-decoding lead P53.6 left unfiled, narrowed to
+the schema guard where it has no open design question (P59.8), and filed local-backend admission
+control (P59.9). P59.10 (retraction versus the KV prefix cache) was Tier 4, measure-first.
+P59.1-P59.3 shipped 2026-08-04, P59.4-P59.9 on 2026-08-05, P59.10 later the same day once its
+measurement was taken, and P59.11 followed it. **The batch closed at 10 of 10 plus its follow-on.**
+
+**P60.x — sandbox and eval (filed 2026-08-04, 4 items).** A read of Microsoft's
+[Orchard](https://github.com/microsoft/Orchard) — an open agentic-modeling framework whose three
+layers are domain recipes (Orchard-SWE/GUI/Claw), **Orchard Env** (a Kubernetes-native sandbox
+service plus a Modal-style Python SDK spinning up ~1000 isolated containers on demand), and an RL
+trainer on a vendored `slime` fork — assessed for what an RL-training substrate built on Kubernetes
+has to offer a single-user local harness. Most of it does not transfer, and the non-adoption is the
+more useful half of the record: the trainer, slime, Redis-backed multi-replica orchestration, Calico
+NetworkPolicies, k8s itself and the in-pod HTTP agent are all answers to a scale question Aegis does
+not have.
+
+Four things survived that filter, each checked against the code rather than taken from the README:
+per-sandbox resource limits (P60.1), a session-lifetime sandbox instead of a container per command
+(P60.2), sandbox snapshot/branch as the basis for a truthful rewind (P60.3, Tier 4), and
+harness-portable evaluation as a control group for the live-workflow tier (P60.4). The batch's centre
+of gravity is that **`internal/sandbox`'s `Backend` was stateless per command** — container runs got
+privilege hardening but no resource limits, every tool call was a fresh `docker run --rm` so nothing
+an agent did to its environment survived the call that did it, and checkpoints therefore snapshotted
+files only. P60.4 is separate: the live-workflow eval measures Aegis and the model fused together, so
+a failure cannot distinguish a weak model from a scaffolding regression, and Orchard's one genuinely
+portable idea is holding the environment fixed and swapping the harness for a baseline. **P60.1,
+P60.2 and P60.4 shipped 2026-08-05**, leaving P60.3 — no longer blocked, since P60.2 gave a session a
+container to snapshot, but still Tier 4 while the container backend is not a realistic default and
+while Orchard's own version is roadmap rather than shipped code.
+
+**P55.x — container-only scanning (filed 2026-08-02, 9 items, 8 built).** A full functional test of
+the multiscanner container against a purpose-built multi-language vulnerable fixture, plus a review of
+`internal/security`'s method resolution across all 17 registered scanners. The container's *scanning*
+was sound — 14/14 bundled tools execute offline and detection is good. What the test found instead was
+a cluster of **provisioning** failures, three sharing one shape: *the scanner silently or loudly
+stopped working and no layer of the system noticed*. That shape was Tier 1 because
+`internal/security/multiscanner.go` already names it as the thing this design most fears — "a silent
+all-clear from a scanner that never looked at a database." Four defects found alongside (kubescape
+fatal in container mode, kubescape's SARIF unparseable, njsscan broken by the semgrep removal, grype
+absent from the pinned image) are the evidence base; two of the four survived a green `go test ./...`,
+a successful image build, and a scan that reported findings.
+
+The batch's strategic driver was a decision to make the container the **only** way Aegis scans, so a
+user installs **one image instead of 17 tools** — and that goal is met. P55.1-P55.6 made the
+*existing* container trustworthy and preferred; P55.7 and P55.8 extended containerization to the six
+tools that had no container path at all, by recognizing that the split those tools needed was **mount
+posture** rather than tool category (a second image with network on and no workspace, ever) and that
+the one genuine exception — gosec, which needs both — is solved by the two-phase split `update-db`
+already uses rather than by relaxing the hardening. Two tools stay host-only by explicit decision,
+each with its reason stated in code: zap (already runs from its own official image) and dockle (needs
+the container engine socket, a privilege axis that deserves its own decision — see the parked lead
+still carried in roadmap.md's Tier 3).
+
+**P53.x — local-LLM comparative review (filed 2026-08-01, 6 items).** A comparative review of how six
+frontier harnesses — opencode, crush, pi, aider, OpenHands, goose — drive local models, cross-checked
+line-by-line against Aegis. The review's headline is that Aegis is **ahead** on the four things that
+dominate local-model bug trackers elsewhere: native `/api/chat` transport (opencode/crush/pi are all
+on OpenAI-compat `/v1`, which structurally cannot carry `num_ctx` — the root cause of crush's flagship
+"local models won't call tools" discussion #1828), `/api/show`-based proactive context detection
+(`internal/ollamainfo`, vs goose's blind 128k default for unknown models), a bounded resident
+`keep_alive` default (`providerfactory/factory.go:31`), and P25.6's `LocalProfile` tool-schema
+deferral (goose #6883 reports Qwen3-coder silently degrading to XML-in-content past ~5 tools). The
+batch closed at 6 of 6 on 2026-08-01/02, P53.6 (the non-native tool-calling shim) last and highest
+value.
+
+**P58.x — daily-copilot review (filed and shipped 2026-08-04, 2 items).** The first time this project
+explicitly evaluated Aegis as an everyday assistant for research, documentation and code analysis
+rather than as a security/threat-modeling task runner; a search of `research/` confirmed the framing
+was genuinely new, not a revisited decision. Most of the review's answer was that the capability is
+already there and already good: `deep-research` is a real structured-research workflow, the
+report/diagram skills produce real deliverables, sessions are daemon-backed with a picker and no
+git-repo requirement, and `workspacetrust` gates *project config* rather than plain chat, so a general
+question asked outside any repo has no friction. Two gaps were real, both narrow, and both shipped the
+same day. Neither opened follow-on work.
+
+---
+
+### Refutation records — candidate findings checked and deliberately not filed
+
+**From the P59.x review (2026-08-04), two refuted by code reading.** **SSE backpressure**: `emit` is
+called synchronously per token from the stream goroutine and looked like it could stall a turn behind
+a slow consumer — P21.5 already solved it (`messages.go:132-147`, `newSSEWriter` drops oldest on a
+full buffer rather than blocking the run). **Native tool-result correlation for parallel same-tool
+calls**: real, and already filed as **P52.16** — this review independently reached the same mitigation
+(prefixing each result with a compact echo of the originating call). The dedicated A/B was run
+2026-08-05 and P52.16 shipped: the conflation is real on a small model and absent on capable ones, so
+the echo is applied only to rounds that call the same tool more than once. **Note for future
+reviews:** the first A/B scored a false 10/10 in *both* arms because the fixture's file bodies named
+their own paths — a content-attribution shortcut that never exercises the missing wire metadata.
+
+**From the P53.x review (2026-08-01), five refuted by direct code reading.** Proactive `num_ctx`
+(`ollamainfo.go:135-162`), config-driven `keep_alive` (`factory.go:44,215`), ID-based tool-result
+correlation (`ollama.go:605` — the wire-level name-only limitation was separately tracked as P52.16),
+`<think>`-before-tool-parse ordering (structurally impossible to break on the native path — reasoning
+and tool calls arrive in separate NDJSON fields, `ollama.go:590-600`), and tool-set shrinking for weak
+models (P25.6, `builtin.go:170-180`).
+
+**From the P61.x review (2026-08-05), four brief premises found already satisfied** — listed in the
+batch origin above; they are review-brief premises rather than candidate findings, but they belong to
+the same "do not re-file" set.
+
+---
+
+### Closed and dropped leads
+
+**P54.2 — SCA/secrets scanner exit codes, closed 2026-08-02, no gap found.** The "accurate refusal,
+error-shaped" exit-code question for the SCA/secrets scanners (P34.6 checked only the *language*-
+targeted tools) was answered by running all six at their pinned versions against an empty tree and a
+docs/C/shell tree with no dependency manifests. trivy, grype and syft exit 0 with valid output;
+gitleaks forces `--exit-code 0` and its report file is read independently of the run's error;
+trufflehog exits 0 with empty stdout, which is the success branch. **osv-scanner's exit 128 is the
+only refusal of this shape, and it was already interpreted by P34.12** — so osv-scanner is to the
+SCA/secrets half what brakeman was to the language-targeted half: the only one. No gate added; the
+measurements are recorded in the `runJSON` doc comment (`internal/security/scanners.go`) so the sweep
+isn't re-run from scratch. Full write-up above.
+
+**P55.9 — relevance gating for the always-on scanners, dropped 2026-08-03.** P54.2 had already shown
+no correctness gap exists (the dependency scanners exit 0 with valid empty output on a manifest-free
+tree), so this was a pure latency optimization with no measured complaint behind it, and its own
+write-up noted a naive manifest check risks trading a slow-correct scan for a fast-wrong one. Dropped
+rather than parked: not worth tracking speculatively.
+
+**P49.4 — LLM-summarized concept nodes, dropped 2026-08-03.** graft's second pass has an LLM summarize
+files into ~20–50 plain-English "concept nodes" with typed links; the analog here would have been an
+opt-in `aegis index --semantic` pass. Dropped rather than parked because it carries two unresolved
+problems at once rather than one: it costs an LLM pass per file (real latency/token cost,
+cache-invalidation surface) where every other P49 item is deterministic and free, and it overlaps
+`internal/knowledge`/`internal/memory`, which already carry project-level prose context — so before it
+could even be a measure-first candidate it needs a decision on whether it's a new store or belongs in
+one of those. **Re-file only if** the deterministic structural tiers (P49.1–P49.3) demonstrably fail
+to close the re-discovery gap *and* that store question has an answer.
+
+**The Tier-4 lesson from P59.10 and P52.16, measured and closed 2026-08-05.** Both were measure-first
+items whose promotion triggers fired, and in each case **the measurement contradicted part of the
+filed item**, so building either from its write-up alone would have produced the wrong fix. P59.10's
+write-up assumed the prefill damage was bounded to the tail and proposed retracting from the persisted
+transcript only; the damage was not tail-bounded (51x — 3604ms of prefill against 71ms unretracted,
+indistinguishable from a cold reprocess, because the zero-tool nudge is injected as early in a run as
+it is possible to be), and that fix would have traded the prefill cost for the P25.3 context leak.
+P52.16's write-up worried the echo might hurt; it did not hurt, but it also did nothing for the two
+capable models (qwen2.5-coder:1.5b 32/40 → 38/40 with the echo; qwen3:14b and gemma4:12b at ceiling
+either way), so shipping it unconditionally would have taxed every round for a small-model-only
+benefit. **The P59.9 loose end closed the same day** and is the one that did *not* become a behavior
+change: the local default of 1 is right, but for latency (~40% more throughput at ~70% worse turn
+latency), not for the correctness hazard it was justified by — four concurrent 12k-token requests were
+not truncated at all.
+
+---
+
+### P38.1 re-test log, 2026-07-21 through 2026-07-27
+
+Relocated from the open P38.1 item, which keeps its mechanism/conformance summary, the current
+blocker (the 2026-08-03 run) and its reproduce/closure condition. Every fix these runs root-caused has
+shipped; the value here is the record of *how the blocker moved* — each stall landed further from the
+harness and closer to raw model throughput.
+
+- **2026-07-21, qwen3:14b / qwen3.6:35b / gpt-oss:20b:** the ~9K-token SKILL.md preload re-sent every
+  turn starved the fill of context before the model could `edit_file` (root cause → shipped **P39.5**);
+  the autonomous verify pass missed structural defects a mechanical check should catch (→ **P39.6**);
+  models stalled announcing work instead of doing it (→ **P39.7**); a broken LLM summarizer looped
+  silently (→ **P39.8**); the `/v1` compat path could overflow un-warned (→ **P39.9**, native-adapter
+  half exonerated). All shipped.
+- **2026-07-23, gpt-oss:20b vs AiGateway:** with P39.5-P39.9 in place, the drive died *before* model
+  capability was even tested, on two `chat --skill`-CLI bugs: skill scripts materialized only under the
+  data dir, outside the sandboxed workspace root, so the model couldn't reach `recon.py` (**P39.10**);
+  and the drive's PENDING-marker oracle walked the materialized skeleton templates themselves, so it
+  could never reach zero (**P39.11**). Both shipped and verified live end-to-end, with regression
+  tests. With the scripts reachable, gpt-oss:20b itself then failed to converge from small-model
+  path/argument brittleness: mangled script paths, drifting to a typo'd run-dir (`.aegit`) mid-build so
+  its fills landed outside the real suite, calls to a non-existent `search` tool, and the wrong
+  `--framework` flag.
+- **2026-07-24, qwen3.6:35b-a3b-fast vs FirewallRuleAnalyzer:** harness and model-competence questions
+  cleared — the drive ran recon → scaffold → fill, held the run-dir path across every `edit_file` (the
+  gpt-oss:20b mangling did not recur), produced grounded file:line-cited content, and its DFD passed
+  `lint_dfd.py` 5/5. What blocked closure was throughput/write robustness, not orchestration: a
+  5-minute response-header timeout that a 2845-line file read could blow past at ~7 tok/s (**P39.12**),
+  unbounded whole-file reads ballooning cumulative session input to 3.47M tokens (**P39.13**), a
+  monolithic ~5,700-token single-file write that truncated into a malformed tool call (**P39.14**), and
+  mechanical verify catching structural errors but not substance like a Tier-2 threat with a Tier-1
+  prerequisite (**P39.15**). All four shipped 2026-07-24 with regression tests.
+- **2026-07-24, in-harness phased drive (P38.8's mechanism, brought inside `chat --skill`):** the root
+  cause the P39.x fixes kept circling was structural — the drive ran the *whole* six-phase build in
+  **one ever-growing conversation** (`internal/cli/chat.go`), so even with pruning the peak context
+  climbed until a local window stalled. The parked P38.8 wrapper never hit that because it runs a
+  **fresh, skill-free context per phase**. That per-phase reset was implemented *inside* the built-in
+  path: architecture → DFD → framework-analysis → findings → assessment each in its **own fresh
+  conversation** seeded with a compact phase prompt (prior phases grounded from disk, not from history),
+  then the phase-6 verify+quality round in its own context too. All existing guards reused (the PENDING
+  oracle, the P39.7 no-progress "act now" nudge, `--max-turns`, the P39.6 verify loop, the P38.1 quality
+  pass) — only the context lifetime changed. Originally `internal/cli/chat_phased.go`; lifted into
+  `internal/drive` by P52.12 so every client reaches it.
+- **2026-07-24, qwen3.6:35b-a3b-fast vs FirewallRuleAnalyzer (phased drive, stability):** the phased
+  drive **reached a verify-clean suite** — 23 threats / 22 findings across 9 components, all
+  `verify.py`/`lint_dfd.py`/`inventory.py --check` passing, content grounded in real file:line evidence
+  and its own quality pass catching genuine inaccuracies — i.e. the mechanism/conformance closure
+  condition was **met**. But it took **three manual re-invocations**: the CLI `chat --skill` drive
+  engine wired no proactive compaction, so each phase's context grew — the model re-reading files and
+  recomputing STRIDE counts by hand — until Ollama hard-rejected the request and the drive aborted on a
+  terminal `NewContextTruncationError` rather than a resumable stop. Root-caused into the **P47.x
+  phased-drive stability batch** (P47.1-P47.6, all shipped): single-invocation stability was the bar,
+  distinct from the mechanism closure already demonstrated.
+- **2026-07-27, qwen3.6:35b-a3b-fast vs FirewallRiskRater (hollow-report checks + self-heal, validated;
+  phase-6 gap found):** first live run of the ec0127c hollow-report checks + afd6764 self-heal, against
+  a resumed suite whose `<!-- PENDING -->` markers were already deleted but whose finding bodies were
+  empty. **Confirmed working:** self-heal auto-refreshed the stale project `verify.py` on launch, the
+  three new checks turned the previously false-passing hollow suite (`11 passed, 0 failed` on the old
+  verifier) into `12 passed, 2 failed` with exact file:line, and the drive fixed the
+  `no-duplicate-header-rows` failure live. **New gap found and fixed:** the phase-6 verify/quality
+  remediation loop lacked the overflow-reset and anti-monolithic-write guardrails the content phases
+  carry — fixed by **P47.7**/**P47.8**, with **P47.9** (route hollow-body failures to the owning content
+  phase) as the Tier-3 follow-up, shipped 2026-07-30.
+
+---
+
+### Closed-batch status notes
+
+The roadmap's running commentary, kept for the dates and for the two or three judgements that are not
+restated in the per-item write-ups above.
+
+**P59.11 (2026-08-05)** was a direct follow-on rather than a filed item: P59.10 had fixed the zero-tool
+nudge's 51x prefill regression and left the **tool-failure nudge at a measured 25.9x**, because that
+one was only *bounded* to one per run rather than genuinely spent, so retracting it early would have
+removed a correction whose failures could recur. P59.11 supplies the missing observation instead of
+assuming it — the failure streak actually clearing — and pairs early retraction with
+**re-injectability**, so a relapse earns a fresh nudge by append. The one-per-run behavior that
+mattered (never nag on consecutive failing rounds) is preserved by an outstanding-nudge gate rather
+than by the count. No tier held an item for it, since P59.10 had recorded it as a deliberate non-fix.
+
+**P59.9, P60.2 and P60.4 (2026-08-05)** closed Tier 3 entirely, and their shared shape is worth
+keeping: not a fact that failed to reach the component needing it, but a **policy nobody owned** for
+something the system was doing anyway. Nothing bounded how many requests reached one local model
+server, so every concurrent request was built believing it owned the whole GPU (P59.9). Nothing owned a
+sandboxed container's lifetime, so it had none, and no state survived the tool call that created it
+(P60.2). And nothing separated the harness from the model when a live run failed (P60.4).
+
+**P59.7, P60.1 and P59.8 (2026-08-05, earlier the same day)** share a shape rather than a subsystem: in
+each, something the system already knew was not reaching the component whose behavior depended on it —
+the adapter's escalated context window never reached the engine's compaction trigger (P59.7), the
+operator's intent to bound a sandboxed command had nowhere to be expressed at all (P60.1), and the
+schema guard's requirement was expressible to the backend ahead of generation and wasn't being
+expressed (P59.8). P59.8's one implicit design question — *which* turn gets constrained — was answered
+"only the schema-guard corrective retry, with tools suppressed": a first turn is where the model does
+the work, and a grammar forcing a JSON object out of it forbids exactly that. P59.7 connected the
+escalated window to the engine's compaction *trigger* only — the summarizer's own budget stays pinned
+at the sized window, which was already a deliberate choice and is now labelled as one rather than
+reading like the same oversight.
+
+**P59.4, P59.5 and P59.6 (2026-08-05)** all take a mechanism built for a cloud provider and ask what it
+means on one local GPU: a token budget that answered a billing question when the local user was asking
+a work question (P59.4 — resolved with a second, separately-named `cost.max_generated_tokens_per_run`
+rather than by splitting one key's meaning across provider classes, which is **neither** of the two
+fixes the item proposed), a documentation recommendation that re-introduced the model-eviction churn
+`keep_alive` exists to prevent (P59.5 — the guard now runs on the resident model locally, with a new
+explicit `output_guard.model` for operators who want the split anyway), and a pair of prose-tool-call
+checks gated on zero-call turns, which made the commonest partial-protocol shape invisible (P59.6 — a
+mixed round is now declined and corrected, the safer of the two readings the item named).
+
+**P61.4 and P61.5 (2026-08-06)** were the P61.x batch's Tier-2 half. P61.4 took **both** halves of the
+either/or its item posed rather than choosing between them, because they cover different populations —
+the compat-path `max_tokens` clamp only fires when a window was actually resolved, and `aegis doctor`'s
+generation-budget row is what covers every case where one was not. That second half turned out to be a
+**repair rather than an addition**: the check had existed since P59.1 and was silently useless for
+exactly the configuration it was built for, because `doctorServedWindow` trusted
+`provider.context_window` as "what the adapter sends as num_ctx" — true natively, false on `/v1`, which
+never sends it. **P61.8 (2026-08-06)** is the daemon-side counterpart of that same blind spot, filed
+off P61.4 and shipped the same day.
+
+**P52.x (filed 2026-07-30)** closed 15 of its 17 items between 2026-07-30 and 2026-08-01 — P52.15
+(wall-clock run budget) shipped and P52.17 (auto tool-calling probe on model switch) closed as
+already-implemented were the last two, leaving P52.14 and P52.16; **P52.16 shipped 2026-08-05** once its
+A/B was run, so P52.14 is the batch's last one standing. Also shipped or closed across the same window:
+**P51.1** (macOS seatbelt profile), the **P50.x** phased-drive determinism batch, the **P49.x** repo-map
+batch head (P49.1/P49.2 — P49.3 stays Tier 4, P49.4 was dropped, above), the entire **P47.x**
+phased-drive stability batch, **P48.1** (config-test hermeticity), and **P38.8** (external per-phase
+threat-model wrapper — superseded once its mechanism shipped in-harness for P38.1).
+
+**The 2026-08-01 cleanup note**, kept because it is the precedent this one follows. roadmap.md had
+drifted from its own stated contract — full SHIPPED/CLOSED write-ups for the P52.x/P51.1/P50.x/P47.6/
+P47.10 items had accumulated there instead of here. Moved out; no content changed, only relocated.
+While auditing, one stale note was caught and corrected: a "content-substance check routing" follow-up
+mentioned alongside the P52.7/P52.8 write-ups (never given its own `P<n>.<m>` number) was still being
+described as outstanding. It isn't — file-aware routing (`perFile`, `fileOwnerPhase`) shipped as part of
+P52.12's move into `internal/drive` (`internal/drive/drive.go:837-878`); there was no separate gap to
+track.
+
+---
+
 ## Migrated from roadmap.md — P52.x full-stack review batch, P51.1, P50.x (shipped/closed items)
 
 Moved here 2026-08-01 during a roadmap cleanup so roadmap.md holds only open work, per its own

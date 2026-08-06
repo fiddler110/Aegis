@@ -33,10 +33,13 @@ It prints, in one shot:
 3. Take the suggested next item unless the user directs otherwise.
 4. If the only remaining items are all `[NOT BLOCKING]`, do not start one speculatively — ask the
    user which one they want, per roadmap.md's own instruction.
-5. After shipping an item: update `research/roadmap.md` (remove or mark shipped) and
-   `research/releases.md` (add a shipped entry with rationale), matching this repo's existing
-   convention — check recent commits/releases.md entries for the expected shape before writing
-   the new one.
+5. After shipping an item: **delete** it from `research/roadmap.md` and write the entry in
+   `research/releases.md` (with rationale), matching this repo's existing convention — check recent
+   commits/releases.md entries for the expected shape before writing the new one. Roadmap.md holds
+   only open work; leaving a shipped write-up there is the drift the 2026-08-01 and 2026-08-06
+   cleanups both had to undo. A line or two of *forward-looking* residue is fine and belongs in the
+   tier header (what the fix corrected about the filed item, what it unblocked); the write-up itself
+   does not.
 
 If `research/roadmap.md`'s structure ever changes (new heading levels, a track that isn't titled
 `## Open Work — ...`), the script's parsing may silently miss items — spot-check its output
