@@ -33,7 +33,20 @@ run — without touching any judgment-bound content:
       still remapped to the first occurrence's new id and flagged in the
       report rather than silently guessed.
 
-Both canonicalizations run in one pass and edit the two ID-bearing files
+  (C) Zero-padded threat-ID tokens. The analysis file defines `T1..Tn`
+      (never padded), but the model sometimes writes `T01`, `T004` etc. in
+      the findings file's coverage table or a `Related Threats` cell — a
+      string-format mismatch, not a content error, but `verify.py` compares
+      ID tokens literally, so a padded reference reads as "threat T01 not
+      covered" even though `T1` is defined and covered. This is the exact
+      failure shape a live P38.1 run once turned into an unbreakable model
+      reasoning loop (P57.1) before the model learned to diagnose it by
+      hand; stripping it here removes the defect before the model ever sees
+      it. Every zero-padded `T0<n>` token is rewritten to its bare `T<n>`
+      form, everywhere in both files. Already-bare `T<n>` has no leading
+      zero to strip, so the sub is a no-op on a clean suite.
+
+All three canonicalizations run in one pass and edit the two ID-bearing files
 (`2-<framework>-analysis.md`, `3-findings.md`) in place. The other suite
 files carry no threat/finding IDs and are never touched.
 
@@ -87,6 +100,13 @@ except Exception as exc:  # pragma: no cover - defensive; can't run without it
 # canonical bare id.
 STRIP_RE = re.compile(r"(?<![A-Za-z0-9])(T\d+)\.[A-Za-z0-9]+")
 
+# A zero-padded threat-ID token: `T01`, `T004` — but not already-bare `T1`
+# (no leading zero, no match). Same boundary guards as STRIP_RE so a padded
+# id is never sliced out of a longer alnum token (`DT01` does not match).
+# Runs AFTER suffix stripping so a padded id that also carried an invented
+# suffix (`T04.S`) is fully canonicalized by the two passes together.
+PAD_RE = re.compile(r"(?<![A-Za-z0-9])T0+(\d+)(?![A-Za-z0-9])")
+
 # A finding reference token (heading token, coverage Finding-ID cell, or an
 # inline cross-reference). Same shape verify.FIND_HEADING_RE anchors.
 FIND_REF_RE = re.compile(r"FIND-\d+")
@@ -123,18 +143,39 @@ def strip_suffixes(line):
     return STRIP_RE.sub(repl, line), subs
 
 
+def strip_padding(line):
+    """Rewrite every zero-padded `T0<n>` token in `line` to bare `T<n>`.
+
+    Returns (new_line, [(old_token, new_token), ...]) — empty (line
+    unchanged) when already canonical, same idempotence contract as
+    `strip_suffixes`.
+    """
+    subs = []
+
+    def repl(m):
+        old = m.group(0)
+        new = "T" + m.group(1)
+        subs.append((old, new))
+        return new
+
+    return PAD_RE.sub(repl, line), subs
+
+
 def process_analysis(lines):
-    """Strip invented threat suffixes across the analysis file.
+    """Strip invented threat suffixes and zero-padding across the analysis file.
 
     Returns (new_lines, [(lineno, old, new), ...]).
     """
     out = []
     changes = []
     for i, line in enumerate(lines, 1):
-        new_line, subs = strip_suffixes(line)
+        line, subs = strip_suffixes(line)
         for old, new in subs:
             changes.append((i, old, new))
-        out.append(new_line)
+        line, pad_subs = strip_padding(line)
+        for old, new in pad_subs:
+            changes.append((i, old, new))
+        out.append(line)
     return out, changes
 
 
@@ -182,6 +223,11 @@ def process_findings(lines):
         # (A) strip threat suffixes first (Threat-ID column / Related Threats).
         line, subs = strip_suffixes(line)
         for old, new in subs:
+            changes.append((i, old, new))
+
+        # (C) strip zero-padding on whatever T<n> token remains.
+        line, pad_subs = strip_padding(line)
+        for old, new in pad_subs:
             changes.append((i, old, new))
 
         m = verify.FIND_HEADING_RE.match(line.strip())
@@ -321,8 +367,9 @@ _SELFTEST_ANALYSIS = "\n".join([
     "",
 ]) + "\n"
 
-# Exercises BOTH defects: an invented `T3.S` suffix (Related Threats + coverage
-# Threat-ID column) and a duplicate `### FIND-07` heading.
+# Exercises ALL THREE defects: an invented `T3.S` suffix (Related Threats +
+# coverage Threat-ID column), a zero-padded `T02` reference, and a duplicate
+# `### FIND-07` heading.
 _SELFTEST_FINDINGS = "\n".join([
     "# Findings",
     "",
@@ -338,13 +385,13 @@ _SELFTEST_FINDINGS = "\n".join([
     "| Attribute | Value |",
     "|-----------|-------|",
     "| Component | Widget |",
-    "| Related Threats | T2 |",
+    "| Related Threats | T02 |",
     "",
     "## Threat Coverage Verification",
     "| Threat ID | Finding ID | Status |",
     "|-----------|------------|--------|",
     "| T1 | FIND-07 | Covered (FIND-07) |",
-    "| T2 | FIND-07 | Covered (FIND-07) |",
+    "| T02 | FIND-07 | Covered (FIND-07) |",
     "| T3.S | FIND-07 | Covered (FIND-07) |",
     "",
 ]) + "\n"
@@ -381,6 +428,12 @@ def selftest():
         # (A) no invented threat suffix survives anywhere.
         assert not STRIP_RE.search(ana_text), "T<n>.<suffix> left in analysis"
         assert not STRIP_RE.search(fnd_text), "T<n>.<suffix> left in findings"
+
+        # (C) no zero-padded threat id survives, and it collapsed to the same
+        # bare id the analysis file and coverage table already use for T2 —
+        # not a fresh, still-mismatched token.
+        assert not PAD_RE.search(fnd_text), "zero-padded T0<n> left in findings"
+        assert "T2" in fnd_text, "T02 did not canonicalize down to T2"
 
         # (B) headings are a gapless FIND-01.. sequence in document order.
         headings = re.findall(r"^###\s+(FIND-\d+)", fnd_text, re.M)

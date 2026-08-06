@@ -139,6 +139,9 @@ def table(headers, key, guidance=None):
     lines = [head, sep]
     if guidance:
         lines.append("<!-- guidance: %s -->" % guidance)
+    lines.append("<!-- guidance: the header and separator rows above are "
+                  "already written -- add data rows directly below this "
+                  "marker, do not repeat them -->")
     lines.append(pending(key))
     return "\n".join(lines)
 
@@ -199,9 +202,11 @@ def build_architecture():
               "that is 1.1-model.mmd/1-model.md); see diagram-conventions.md"),
         "",
         "## Top Scenarios",
-        prose("top-scenarios",
-              "3-5 key workflows; scenario 1 MUST include a Mermaid "
-              "sequenceDiagram naming real components; the rest may be prose"),
+        "<!-- guidance: 3-5 key workflows, one \"### Scenario N\" subsection "
+        "each; scenario 1 MUST include a Mermaid sequenceDiagram naming real "
+        "components, the rest may be prose. This heading is a section label "
+        "only -- do not restate scenario content here, the numbered "
+        "subsections below are the only place it goes. -->",
         "",
         "### Scenario 1",
         prose("scenario-1", "name + 2-3 sentence description + a sequenceDiagram"),
