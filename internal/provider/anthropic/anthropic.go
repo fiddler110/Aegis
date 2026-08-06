@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -328,6 +329,7 @@ func (a *Adapter) consume(ctx context.Context, body io.ReadCloser, out chan<- pr
 	blocks := map[int]*blockState{}
 	usage := &provider.Usage{}
 	stop := provider.StopOther
+	sawTerminal := false // P61.2: the stream reached a real end (see the check below)
 
 	scanner := sse.NewScanner(body)
 
@@ -338,7 +340,7 @@ func (a *Adapter) consume(ctx context.Context, body io.ReadCloser, out chan<- pr
 		}
 		data := dataBuf.String()
 		dataBuf.Reset()
-		return a.handleData(data, blocks, usage, &stop, emit)
+		return a.handleData(data, blocks, usage, &stop, &sawTerminal, emit)
 	}
 
 	for scanner.Scan() {
@@ -359,6 +361,29 @@ func (a *Adapter) consume(ctx context.Context, body io.ReadCloser, out chan<- pr
 	}
 	if err := scanner.Err(); err != nil {
 		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("anthropic: read stream: %w", err)})
+		return
+	}
+
+	// P61.2: the stream ended with no read error and no terminal event. That is
+	// not a finished turn — the body was closed mid-generation (a proxy that cut
+	// the response, a gateway shutting down between events). Emitting EventDone
+	// regardless was the bug: usage keeps only whatever message_start reported
+	// and output_tokens stays zero, so the engine substitutes estimates and
+	// flags IsEstimated exactly as it does for a legitimately usage-free
+	// provider, and the caller sees a truncated answer with no signal that it
+	// was cut off. This mirrors P59.3 on the native Ollama path; classifying it
+	// as a transport error routes it into the existing
+	// waitForBackend/resume-from-disk path via IsBackendUnavailableError rather
+	// than into a silent wrong answer.
+	//
+	// message_stop is the protocol's terminator, but message_delta is where the
+	// completion semantics actually land (the final stop_reason and the output
+	// token count), so a stream that reached message_delta and lost only the
+	// envelope's last event is complete and must not be failed — see handleData.
+	if !sawTerminal {
+		emit(provider.Event{Type: provider.EventError, Err: provider.NewTransportError(a.Name(), errors.New(
+			"read stream: the response ended without a message_stop — the generation was cut off "+
+				"mid-stream (the server closed the connection)"))})
 		return
 	}
 
@@ -400,7 +425,7 @@ type sseEvent struct {
 	} `json:"error"`
 }
 
-func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *provider.Usage, stop *provider.StopReason, emit func(provider.Event) bool) bool {
+func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *provider.Usage, stop *provider.StopReason, sawTerminal *bool, emit func(provider.Event) bool) bool {
 	var ev sseEvent
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		// Ignore malformed keepalive lines rather than aborting the stream.
@@ -480,11 +505,18 @@ func (a *Adapter) handleData(data string, blocks map[int]*blockState, usage *pro
 		delete(blocks, ev.Index)
 	case "message_delta":
 		if ev.Delta.StopReason != "" {
+			// P61.2: the message stated why it ended and carried its final
+			// usage — everything message_stop adds is envelope. Counting it as
+			// terminal keeps a stream whose last event was dropped from being
+			// reported as a transport failure.
+			*sawTerminal = true
 			*stop = mapStopReason(ev.Delta.StopReason)
 		}
 		if ev.Usage.OutputTokens > 0 {
 			usage.OutputTokens = ev.Usage.OutputTokens
 		}
+	case "message_stop":
+		*sawTerminal = true // P61.2: the protocol's own end-of-stream event
 	case "error":
 		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("anthropic: %s: %s", ev.Error.Type, ev.Error.Message)})
 		return false

@@ -86,7 +86,8 @@ func newSecurityBuildImageCmd() *cobra.Command {
 			"3-4GB for full, and a long first build — vulnerability databases are NOT in the image: " +
 			"they live in the shared aegis-scanner-cache volume, so run `aegis security update-db` " +
 			"after this or the database-backed scanners will be refused.\n\n" +
-			"--netscanner builds the second, much smaller image instead (~250MB): nmap, nuclei, and " +
+			"--netscanner builds the second, much smaller image instead (~570MB, most of it the " +
+			"pinned nuclei template set): nmap, nuclei, and " +
 			"image-reference scanning with trivy/grype. It is separate for one reason — mount posture. " +
 			"Every tool in it needs network egress and none needs your source, so it runs with network " +
 			"ON and no workspace mounted, ever, while this image keeps --network none with the workspace " +
@@ -351,10 +352,12 @@ func recordMultiscannerPin(res security.MultiscannerBuildResult, project bool) (
 // stickyBuildRuntime returns the container runtime a rebuild should reuse: the
 // one already recorded in config, or "" to let BuildMultiscanner auto-detect.
 //
-// A rebuild with no --runtime used to auto-detect from scratch, and on Windows
-// that is not a no-op — sandbox.DetectBest prefers wslc, so an operator with a
-// working podman setup who simply re-ran `build-image` got the image rebuilt
-// into *wslc's* storage instead. Everything that makes the setup work is
+// A rebuild with no --runtime used to auto-detect from scratch, and on a
+// machine with two engines installed that is not a no-op — sandbox.DetectBest
+// returns the first *available* one in priority order, not the one that built
+// anything, so an operator with a working docker setup who simply re-ran
+// `build-image` got the image rebuilt into *podman's* storage instead (podman
+// leads the Windows order). Everything that makes the setup work is
 // per-runtime: the image lives in one engine's store, and so do the
 // aegis-scanner-cache and aegis-scanner-gocache volumes. So the rebuild
 // succeeded, the pin was rewritten to the new engine, and the operator's

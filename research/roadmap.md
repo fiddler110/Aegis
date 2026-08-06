@@ -1,7 +1,8 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-05 (fifth pass — P59.11 shipped; fourth pass: P59.10 and P52.16 measured,
-promoted and shipped, and the P59.9 loose end measured and closed)
+**Last updated:** 2026-08-05 (sixth pass — the P61.x cross-adapter drift batch filed, 7 items;
+fifth pass: P59.11 shipped; fourth pass: P59.10 and P52.16 measured, promoted and shipped, and the
+P59.9 loose end measured and closed)
 
 This document tracks only **open** work and what's next. For shipped-feature history and full
 design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading
@@ -11,6 +12,29 @@ keep it when adding items.
 ---
 
 ## Status
+
+**Seven filed 2026-08-05: the P61.x cross-adapter drift batch**, from a review of the LLM-interaction
+surface (`internal/provider` and its three adapters, the decorator chain, and `engine.turn`'s stream
+consumption) commissioned as a general Go/architecture/AppSec review. As with P59.x it changed **no
+structural judgement** — the `Adapter` seam, the decorator chain and its `Unwrap()` traversal,
+`sse.Emitter`'s cancellation-aware sends, and the absence of prompt/PII logging are all right, and
+`go vet ./...` plus the provider and engine suites are clean. Four premises of the review brief were
+checked and found already satisfied (a single LLM abstraction, `context` propagation, request-body
+caps via `http.MaxBytesReader`, loopback validation of `server.addr` and `provider.base_url` — FIND-08
+and FIND-03), and are recorded here so they are not re-filed.
+
+What it found instead is a single theme, and it is the mirror image of P59.x's: **every piece of
+stream hardening was fixed in the native Ollama adapter and never ported to the other two.** P59.2's
+idle watchdog, P59.3's missing-completion-chunk check, P50.1's transport-error classification and
+P59.1's `num_predict` clamp all exist exactly once, in `internal/provider/ollama`. The openai adapter
+is not a cloud-only path — it is what serves Ollama's OpenAI-compat `/v1` endpoint, which
+`docs/installation.md` still configures via `OPENAI_API_KEY="ollama"` — so each gap is live on a local
+backend. The root cause is structural rather than three oversights: `internal/provider/sse` abstracts
+the *pieces* of an SSE consumer (client, scanner, emitter, error-response) but not the *stream
+lifecycle*, so there is no shared place for a lifecycle fix to land and each adapter's `consume` has
+drifted independently. **P61.1**-**P61.3** are the three live gaps (Tier 1), **P61.6** is the
+structural fix that stops the next one (Tier 3), and the batch should be sequenced with that
+dependency in mind — see P61.6 for which order is cheaper. Full batch origin under Tier 1.
 
 **P59.11 shipped 2026-08-05**, the fifth batch that day and a direct follow-on: P59.10 had fixed the
 zero-tool nudge's 51x prefill regression and left the **tool-failure nudge at a measured 25.9x**,
@@ -22,7 +46,8 @@ mattered (never nag on consecutive failing rounds) is preserved by an outstandin
 than by the count. Write-up in [releases.md](releases.md); no tier held an item for it, since P59.10
 had recorded it as a deliberate non-fix rather than filing it.
 
-**Open items (5).** **P59.10 and P52.16 shipped 2026-08-05** — the fourth batch that day, and the
+**Open items (12)** — 5 carried, plus the 7 filed by P61.x above. **P59.10 and P52.16 shipped
+2026-08-05** — the fourth batch that day, and the
 first assembled by *taking the measurements* Tier 4 items had been parked behind rather than by
 picking work off a tier. Both promotion triggers fired, and in both cases the measurement also
 corrected the filed hypothesis. **P59.10**: retraction does break Ollama's prefix cache (51x — 3604ms
@@ -237,7 +262,16 @@ to track.
 
 ## Open Work — Tier 1
 
-**Status:** 0 open. **P59.1**, **P59.2** and **P59.3** — the Tier-1 half of the P59.x
+**Status:** 3 open — **P61.2**, **P61.1** and **P61.3**, the Tier-1 half of the P61.x cross-adapter
+drift batch filed 2026-08-05 (origin below). All three are the same defect wearing three faces: a
+hardening measure that exists only in `internal/provider/ollama` and was never ported to the openai
+and anthropic adapters. Each is small and independent; **P61.6** (Tier 3) is the structural fix that
+makes the fourth one impossible, and the sequencing question between them is recorded there. They are
+listed **P61.2 first**, out of numeric order and deliberately: it is the only one that produces a
+silently wrong answer rather than a degraded recovery, and it is the one that should not wait behind
+P61.6's refactor.
+
+**P59.1**, **P59.2** and **P59.3** — the Tier-1 half of the P59.x
 local-execution review batch (origin below) — shipped 2026-08-04, the day after the batch was filed;
 see [releases.md](releases.md) for the write-ups. The P55.x container-only-scanning batch's Tier-1 half — **P55.1**
 (image/source drift), **P55.2** (all-or-nothing `update-db`) and **P55.3** (`verify-image` smoke
@@ -290,10 +324,67 @@ The batch's strategic driver was a decision to make the container the **only** w
 user installs one image instead of 17 tools. All eight built items have shipped; see the Status
 section above for what P55.7 and P55.8 changed, and [releases.md](releases.md) for the write-ups.
 
+### P61.2 — A truncated stream is reported as a completed answer on openai/anthropic
+
+`ollama.go:1021` (P59.3) treats a clean EOF with no `done:true` chunk as a transport error, for a
+reason its comment states plainly: emitting `EventDone` there leaves usage zeroed and `stop` at
+`StopEndTurn`, so "a truncated response was surfaced as a complete short answer whose stop reason
+claims the model chose to end its turn." Neither other adapter has the check — `openai.go:515` and
+`anthropic.go:365` emit `EventDone` unconditionally once the scan loop ends.
+
+The downstream consequence is at `engine.go:1812`: zeroed usage is silently replaced with
+`tokenest` estimates and flagged `IsEstimated`, which is indistinguishable from a legitimately
+usage-free provider. A cut-off generation therefore produces a plausible short answer, correct-looking
+usage, and no error on any surface. This is the batch's only *silent wrong answer* — the other two
+Tier-1 items degrade recovery, this one degrades output.
+
+Fix mirrors P59.3: require a terminal chunk (`[DONE]` / `message_stop`) before `EventDone`, and
+classify its absence as `provider.NewTransportError` so it takes the same recovery path.
+
+Priority: Tier 1 — silent incorrect output, on a live local path, with a shipped precedent to copy.
+
+### P61.1 — The stream idle watchdog exists only on the native Ollama path
+
+`provider.stream_idle_timeout` (P59.2) is a documented config key that applies to **one of three
+adapters**. `providerfactory/factory.go:248` passes `ollama.WithStreamIdleTimeout`; lines 219 and 279
+(anthropic, openai) pass only `WithResponseHeaderTimeout`, and no `WithStreamIdleTimeout` option
+exists on either adapter to pass. `openai.consume` (`openai.go:353`) and `anthropic.consume`
+(`anthropic.go:321`) take no timeout parameter at all.
+
+P59.2's own reasoning is what makes this a Tier-1 gap rather than a missing feature: the streaming
+client deliberately leaves `Client.Timeout` at zero, `ResponseHeaderTimeout` stops applying the moment
+headers arrive, and `cost.max_wall_clock_per_run` is polled between turns and is off by default. So on
+those two adapters **nothing bounds a wedged runner** — the consumer blocks on a read forever, which is
+precisely the state P59.2 was filed to end. And the openai adapter is a local path: it is what talks to
+Ollama's OpenAI-compat `/v1` endpoint.
+
+Fix is to give both adapters the option and wire it in `buildOne` — but see **P61.6**, which would
+supply the watchdog once instead of three times.
+
+Priority: Tier 1 — a config key users will reasonably believe is global silently protects one backend.
+
+### P61.3 — Mid-stream read failures on openai/anthropic are unclassifiable, so backend recovery never fires
+
+`openai.go:480` and `anthropic.go:361` wrap `scanner.Err()` with a bare `fmt.Errorf`. `ollama.go:1001`
+wraps the identical condition in `provider.NewTransportError`, deliberately (P50.1): "wrap it as a
+transport APIError (not a bare error) so `IsBackendUnavailableError` classifies it and the phased drive
+waits for the backend to return and resumes from disk."
+
+Because both `IsBackendUnavailableError` and `retryable()` begin with `errors.As(err, &APIError)` and
+return false otherwise, a killed `ollama serve` mid-stream on the compat path is classified by
+**nothing**: no retry, no `waitForBackend`, no resume-from-disk. It aborts the drive on an
+unclassifiable error — the exact failure P50.1 exists to prevent, on a sibling code path. The openai
+adapter also lacks P35.12's `bufio.ErrTooLong` naming, so an oversized tool-call payload there still
+surfaces as the opaque "token too long".
+
+Priority: Tier 1 — a shipped recovery mechanism is inert on two of three adapters; the fix is a
+constructor swap.
+
 ## Open Work — Tier 2
 
-**Status:** 1 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
-tracking rather than independent build work. **There is no unbuilt Tier-2 item left.** **P59.7** (the
+**Status:** 3 open — **P38.1** (threat-model conformance umbrella), which is live-run verification
+tracking rather than independent build work, plus **P61.4** and **P61.5** from the P61.x batch (origin
+under Tier 1). **There is no unbuilt Tier-2 item left from any earlier batch.** **P59.7** (the
 last Tier-2 item of the P59.x local-execution review batch, origin under Tier 1) and **P60.1** (the
 Tier-2 head of the P60.x sandbox-and-eval batch, origin below) both shipped 2026-08-05; see
 [releases.md](releases.md), and note that P59.7 connected the escalated window to the engine's
@@ -486,9 +577,58 @@ brakeman was to the language-targeted half: the only one. No gate added; the mea
 recorded in the `runJSON` doc comment (`internal/security/scanners.go`) so the sweep isn't re-run
 from scratch. Write-up in [releases.md](releases.md).
 
+### P61.4 — The `num_predict` clamp has no counterpart on the OpenAI-compat path
+
+`ollama.clampNumPredict` (`ollama.go:686`, P59.1) reconciles `provider.max_tokens` — default **32768**
+(`config.go:1302`) — against the room actually left in the served window. `openai.go:259-263` assigns
+`req.MaxTokens` straight to `MaxTokens`/`MaxCompletionTokens` with nothing reconciling the pair. Against
+Ollama's own 4096 default window over `/v1`, that is the same request-8x-the-window shape P59.1
+describes, with the same consequence: a ceiling hit mid-generation returns `finish_reason "length"` →
+`StopMaxTokens` → the engine's continue-from-where-you-left-off retry → context growth until the run
+burns to its iteration cap.
+
+This is Tier 2 rather than Tier 1 because the fix is genuinely harder here and partly out of reach: the
+compat endpoint cannot carry `num_ctx` and does not report the served window, so the adapter has no
+honest number to clamp against — which is the same structural limitation P53.x's comparative review
+already identified as the root cause of crush's "local models won't call tools" discussion #1828. The
+options worth weighing are (a) plumb the server-resolved window (`internal/ollamainfo` already detects
+it per model) onto the request so the openai adapter can clamp when one is present, or (b) leave the
+clamp Ollama-native and instead have `aegis doctor` refuse the unreconciled `max_tokens`/window pair,
+which is where P59.1's own comment says the user should be told once.
+
+Priority: Tier 2 — real and live, but the cheap fix is a diagnostic and the correct fix needs a design
+decision about whether the compat path gets window awareness at all.
+
+### P61.5 — Five small correctness and fidelity papercuts in the adapter and decorator chain
+
+Grouped because each is a few lines and none warrants its own item, but all are in the same layer and
+all are real:
+
+- **The `think`-rejection retry discards the original 400.** `ollama.go:587-590` captures `rejection`,
+  then overwrites `err` with the retry's error. If the retry also fails, the caller sees only the
+  second failure and the "does not support thinking" signal — the thing that explains the whole
+  sequence — is gone. `errors.Join(rejection, err)`.
+- **`failoverAdapter.Stream` never checks `ctx` between targets** (`failover.go`). A cancelled context
+  walks the entire chain, logging a `WARN` per hop.
+- **`admissionAdapter.Stream`'s first `select`** (`admission.go`) offers `ctx.Done()` alongside a
+  `default:`; when a slot is free Go picks uniformly among ready cases, so an already-cancelled request
+  can still acquire a slot and proceed. It reads as a cancellation check and is not one.
+- **`healthClient` bypasses the adapter's transport entirely** (`ollama.go:258`). It is a package-level
+  `http.Client`, so a user's proxy or TLS configuration does not apply to the liveness probe that gates
+  P50.1 recovery. Harmless only because the probe targets loopback today.
+- **`WithResponseHeaderTimeout` replaces `a.client` wholesale** in all three adapters, making option
+  order significant the moment a second option touches the client — which **P61.1** would be.
+
+Also recorded, deliberately not filed: the idle watchdog's `timer.Reset` races the `AfterFunc` firing
+(`ollama.go:851-856`). `idleFired` latches and the consequence is only a sharper message on a stream
+that delivered a line at the exact deadline, so it is a comment, not a bug.
+
+Priority: Tier 2 — each is a small self-contained fix; the last one is a prerequisite hazard for P61.1.
+
 ## Open Work — Tier 3
 
-**Status:** 0 open. **P59.9**, **P60.2** and **P60.4** all shipped 2026-08-05, closing the tier and
+**Status:** 1 open — **P61.6** (origin under Tier 1), which is sequence-dependent with the batch's
+Tier-1 half by construction. **P59.9**, **P60.2** and **P60.4** all shipped 2026-08-05, closing the tier and
 with it the P59.x batch's last Tier-3 item and the P60.x batch's two standalone ones — see
 [releases.md](releases.md) for the write-ups. **P59.9** put a semaphore in front of local backends
 (`provider.max_concurrent_requests`, auto-bounding a local server to one in-flight request since it
@@ -562,9 +702,43 @@ phases, the phase-6 loop, the P47.9 re-entry). The recovered retry additionally 
 against the same failure shape is still owed** and is tracked as part of P38.1's closure condition —
 this is a fix aimed at a failure observed once.
 
+### P61.6 — `sse` abstracts the pieces of a stream consumer but not its lifecycle
+
+This is the root cause **P61.1**, **P61.2** and **P61.3** are three symptoms of, and the reason to
+expect a fourth. `internal/provider/sse` already owns everything that is identical across adapters
+*except the part that keeps breaking*: it supplies the HTTP client, the sized scanner, the
+cancellation-aware `Emitter` and `HandleErrorResponse`, and then each adapter writes its own `consume`
+loop. Those three loops independently re-derive the idle watchdog, the terminal-chunk requirement, the
+`scanner.Err()` classification, the `bufio.ErrTooLong` naming and the final `EventDone` — and every one
+of those five has now drifted, in the same direction, toward whichever adapter was in front of whoever
+was fixing a local-model bug.
+
+The fix is to lift the *skeleton* into `sse` — roughly `sse.Run(ctx, body, out, opts, decodeChunk)`,
+owning the watchdog, the loop, the terminal-chunk requirement and the error classification — and leave
+each adapter owning only per-chunk decode, which is the part that legitimately differs (NDJSON with
+native tool calls, SSE with `[DONE]`, SSE with indexed content blocks). Anthropic's `dispatch`/
+`handleData` split already has close to the right shape for the callback.
+
+**Sequencing, which is the whole reason this is Tier 3 rather than Tier 1.** Doing P61.6 first makes
+P61.1-P61.3 nearly free but puts a refactor of all three adapters ahead of three live bugs; doing the
+three first means writing each fix twice and then deleting one copy. The recommendation is
+**P61.2 first** (it is the silent-wrong-answer one and should not wait on a refactor), then P61.6,
+then P61.1 and P61.3 as consequences of it — which also means the watchdog gets tested once, in `sse`,
+rather than at one adapter's worth of coverage. Note that P61.5's last bullet
+(`WithResponseHeaderTimeout` replacing `a.client`) should land before any of it.
+
+A structural regression guard belongs with this: a test that enumerates the constructed adapters and
+asserts each carries an idle bound, since the failure mode here is "the next adapter forgets", not
+"an adapter is wrong".
+
+Priority: Tier 3 — real value and it is the only fix that stops recurrence, but it is sequence-
+dependent with three Tier-1 items and should not block them.
+
 ## Open Work — Tier 4
 
-**Status:** 4 open, all measure-first, blocked, or explicitly parked; none has a build trigger yet.
+**Status:** 5 open, all measure-first, blocked, or explicitly parked; none has a build trigger yet.
+**P61.7** was added 2026-08-05 by the P61.x batch (origin under Tier 1) and is measure-first: the
+concern is real but its likelihood is unquantified, and the batch declined to guess.
 
 **Two of this tier's measure-first items were measured and closed 2026-08-05: P59.10 and P52.16.**
 Both had promotion triggers rather than build plans, both triggers fired, and both shipped — see the
@@ -584,6 +758,35 @@ rather than shipped code, so only the idea transfers. **P55.9**
 (relevance gating for the always-on scanners) and **P49.4** (LLM-summarized concept nodes) were
 reviewed and dropped 2026-08-03 rather than left parked — see the Status section and the P49.x note
 above for why.
+
+### P61.7 — Retry/terminal classification is substring matching over model-influenceable text
+
+`classifyStreamError` (`errors.go`) decides whether a mid-stream failure is retried or is fatal by
+case-insensitive substring match against a free-form server error string. `terminalStreamSignals`
+includes tokens as broad as `"does not support"`, `"unsupported"`, `"malformed"` and
+`"invalid request"`; `retryableStreamSignals` includes `"crash"`, `"timed out"` and `"out of memory"`.
+`IsResponseHeaderTimeoutError` likewise matches Go's internal transport string, which no compile-time
+check protects.
+
+The concern is not that the heuristics are wrong — they are well-chosen and terminal-wins-over-retryable
+is the right default. It is that **a control-flow decision is made on text the model can influence**.
+Some backends and proxies echo request or generation fragments into the error envelope; a generation
+containing "unsupported" that reaches an error message flips a retryable infrastructure failure to
+terminal, and the reverse direction (a terminal failure re-classified as retryable) burns a full
+prompt-eval per attempt on a slow local model. This is the AI-specific injection surface the review was
+asked to look for, and it is the only one it found — prompt/system isolation, tool-schema handling and
+PII logging all came back clean.
+
+It is Tier 4 because the likelihood is genuinely unknown: it depends on whether any backend in real use
+echoes generated text into an error envelope, which nobody has measured, and the harness has no
+reported incident of a misclassification. Filing a fix now would mean guessing at a structural signal
+(status code, an error `type` field) that most local backends do not supply.
+
+**Promote when:** a misclassification is actually observed, or a backend is found that demonstrably
+echoes generation content into `{"error":...}`. The cheap first step is a table-driven test that runs a
+model-authored string containing each signal through the classifier — not to fix it, but to make the
+blast radius explicit and reviewable.
+Priority: Tier 4 — real surface, unquantified likelihood, no incident; do not build speculatively.
 
 ### P60.3 — Checkpoints capture files only, so `/rewind` is silent about everything else
 

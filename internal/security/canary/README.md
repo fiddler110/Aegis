@@ -23,8 +23,8 @@ Each file is kept to a few lines, and exists to trip specific tools:
 |------|----------------|
 | `Dockerfile` | hadolint, trivy (misconfig) |
 | `k8s-deployment.yaml` | kubescape, trivy (misconfig) |
-| `package-lock.json` | trivy (vuln), grype, osv-scanner, syft |
-| `requirements.txt` | trivy (vuln), grype, osv-scanner, syft |
+| `package-lock.json.canary` | trivy (vuln), grype, osv-scanner, syft |
+| `requirements.txt.canary` | trivy (vuln), grype, osv-scanner, syft |
 | `credentials.env` | gitleaks, trufflehog, trivy (secret) |
 | `app.py` | bandit, opengrep |
 | `server.js` | njsscan, opengrep |
@@ -33,3 +33,23 @@ Each file is kept to a few lines, and exists to trip specific tools:
 Adding a tool to the image means adding whatever trips it here **and** an entry
 in `canaryExpectations` (`internal/security/verify.go`), or `verify-image` will
 report it as unverifiable rather than passing it silently.
+
+## The `.canary` suffix
+
+Four files are stored under a `.canary` suffix and renamed back by
+`MaterializeCanaryFixture`. The reason is always the same: under its real name,
+the file is read by tooling that has no idea this directory is a fixture.
+
+| file | what would read it |
+|------|--------------------|
+| `go.mod.canary`, `vuln.go.canary` | the Go toolchain — a nested `go.mod` excludes this directory from the parent module *and* from the embed pattern that has to reach it, and the `.go` file would be compiled into Aegis |
+| `requirements.txt.canary`, `package-lock.json.canary` | GitHub's dependency graph — it reads the deliberate pins as real dependencies and files a Dependabot alert per advisory (eighteen of them, none actionable, since nothing ever installs from here) |
+
+Dependabot **alerts** are repo-wide advisory scanning and ignore
+`.github/dependabot.yml`'s `updates:` scoping, so excluding the path there does
+not work — the manifest simply must not be recognizable.
+
+**Do not "fix" those alerts by bumping the pins.** The advisories are the point:
+raise the versions and trivy, grype and osv-scanner find nothing in the fixture
+built to prove they find things. `TestSCACanaryManifestsAreSuffixed` and
+`TestCanaryFixtureMaterializesUnderRealNames` guard both directions.

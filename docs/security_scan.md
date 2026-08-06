@@ -1005,7 +1005,7 @@ Shell commands (`shell` tool) can run inside containers instead of directly on t
 | `local` | Run directly on the host (default) |
 | `docker` | Docker containers |
 | `podman` | Podman containers (rootless) |
-| `wslc` | WSL containers (Windows; preferred on Windows when available) |
+| `wslc` | WSL containers (Windows). Last in the Windows auto-detect order — no hardening flags, no persistent-container surface, and it cannot build the scanner images; pick it explicitly if it's all you have |
 | `container` | Apple Containers (macOS) |
 | `os` | OS-level isolation without a container runtime: macOS `sandbox-exec` (seatbelt) or Linux `bwrap`. Reads are confined to the workspace plus a toolchain allowlist (P27.18/FIND-19) — see the read-exposure caveat below, this is still a materially weaker guarantee than `container`. |
 | `auto` | Auto-detect: probe available runtimes, pick best; fall back to local |
@@ -1022,8 +1022,9 @@ sandbox:
 ```
 
 **Auto-detection priority** (OS-specific defaults):
-- **Windows:** wslc → docker → podman
-- **macOS/Linux:** docker → podman
+- **Windows:** podman → docker → wslc
+- **macOS:** docker → podman → container (Apple Containers)
+- **Linux:** docker → podman
 
 Override with `priority: [podman, docker]`.
 

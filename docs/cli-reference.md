@@ -650,6 +650,10 @@ aegis sandbox detect
 
 Probe for available container runtimes (Docker, Podman, WSL containers, Apple Containers). Shows a table of what is available and which would be chosen by `auto`.
 
+`auto` takes the first available runtime in the OS default order — **Windows:** `podman → docker → wslc`; **macOS:** `docker → podman → container` (Apple Containers); **Linux:** `docker → podman`. Override with `sandbox.priority`.
+
+`wslc` is last on Windows rather than first. Its CLI is Docker-shaped but carries neither the hardening flags (`--cap-drop`/`--security-opt`/`--read-only`) nor the persistent-container detach/exec surface docker and podman do, and it cannot build the scanner images at all — so preferring it on a machine that has a real engine surfaced as broken scanners rather than as a runtime choice. It stays reachable, last, for a machine that has only Windows Containers.
+
 ### `aegis sandbox use`
 
 ```bash

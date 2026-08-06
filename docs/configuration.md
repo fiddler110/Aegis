@@ -676,7 +676,14 @@ sandbox:
   runtime: ""
 
   # Override the auto-detection priority order.
-  # Default (OS-specific): on Windows [wslc, docker, podman]; elsewhere [docker, podman]
+  # Default (OS-specific): on Windows [podman, docker, wslc]; on macOS
+  # [docker, podman, container]; elsewhere [docker, podman].
+  #
+  # wslc is last on Windows rather than first: its Docker-shaped CLI carries
+  # neither the hardening flags (--cap-drop/--security-opt/--read-only) nor the
+  # persistent-container detach/exec surface docker and podman do, and it
+  # cannot build the scanner images at all. It stays reachable for a machine
+  # that has only Windows Containers.
   priority: []
 
   # Container image to use when backend=container or backend=auto selects a container.
@@ -798,8 +805,15 @@ security:
   redact_secrets: true
 
   # Security-scanner availability (P11.11): controls `aegis scan`/security_scan.
-  # "auto" (host binary if present, else a configured container image) |
-  # "host" (never fall back to a container) | "container" (always prefer it).
+  # "auto" | "host" (never fall back to a container) | "container" (always
+  # prefer it).
+  #
+  # Under "auto", a tool the multiscanner image carries resolves to the
+  # CONTAINER in preference to an available host binary (P55.4): host binaries
+  # are unpinned and unconfined, so two machines can silently scan with
+  # different rule sets. A refused container falls back to host rather than
+  # failing the tool, and says so. Tools the image does not carry resolve
+  # container -> host -> WSL as before.
   default_method: auto
 
   # Per-tool overrides, keyed by scanner name (opengrep, trivy, gitleaks).
@@ -833,8 +847,9 @@ security:
     #
     # The runtime that built the image. Recorded because a locally-built image
     # exists only in the storage of the engine that built it — auto-detection
-    # could pick a different one (on Windows it prefers wslc) and report a
-    # perfectly good podman-built image as missing.
+    # could pick a different one — it returns the first *available* engine in
+    # priority order, not the one that built anything — and report a perfectly
+    # good docker-built image as missing because podman answered first.
     # runtime: podman
     #
     # How many scanners run at once (each container-method scanner is one
@@ -845,6 +860,36 @@ security:
     # Which scanners the built image carries; written from the profile that
     # was actually built. Empty assumes the full profile.
     # tools: []
+
+  # The second locally-built image (P55.7), written by
+  # `aegis security build-image --netscanner`. Pinned exactly as the
+  # multiscanner is, and for the same reason.
+  #
+  # What separates them is mount posture, not tool category: nmap, nuclei, and
+  # image-reference scanning with trivy/grype each analyze a REMOTE target, so
+  # every tool here needs network egress and none needs your workspace. This
+  # image therefore runs with network ON and no workspace mounted, ever —
+  # enforced structurally (its runner takes no directory argument), while the
+  # multiscanner keeps --network none with the workspace mounted. The two
+  # resolve through separate resolvers so "container" never means two postures
+  # at one call site.
+  #
+  # It needs no `update-db`: having network, it refreshes its own databases
+  # into a separate volume.
+  netscanner:
+    enabled: false
+    # image: "localhost/aegis-netscanner:v1"
+    # image_id: "sha256:..."   # recorded at build time; re-verified before use
+    # runtime: podman          # the engine that built it — see multiscanner above
+
+  # Both images come out of one embedded build context, so both pins carry the
+  # same source fingerprint and editing either one's stages moves it for both:
+  # rebuilding one leaves the other reported as drifted. `aegis security status`
+  # shows drift; `build-image` warns about the sibling it did not just build.
+  #
+  # Neither image carries dockle (it needs the container engine socket —
+  # effectively host root) or zap (its own official image and mount contract).
+  # Those two are host-only by design.
 
   # Names a specific registered WSL distro (e.g. "kali-linux") to target for
   # every WSL-capable scanner (nmap, nuclei, opengrep, kubescape), instead of
