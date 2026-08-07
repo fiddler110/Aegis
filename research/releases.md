@@ -8,9 +8,114 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-06 — **P61.8 shipped**, the same day it was filed off P61.4, leaving the
-P61.x batch at **one open item (P61.7, Tier 4, measure-first)**. Write-up immediately below; the
-batch's main write-up follows it.
+**Last updated:** 2026-08-06 — off a Tier-4 assessment pass that measured before deciding:
+**P61.7's in-repo half shipped**, **P61.7(b) shipped** (the classifier disagreement the same
+measurement exposed), **P49.3 dropped**, and **P62.1 filed** (repo-map selection, Tier 2) on a
+measurement that reframed the dropped item's successor. Write-ups immediately below.
+
+**P61.7(b) — two classifiers, one string, contradictory verdicts (SHIPPED 2026-08-06).** Measuring
+P61.7 turned up a second defect that needs no injection at all. `Retryable()` and
+`IsBackendUnavailableError` both read the same free-form server string, through different tables in
+different orders: `classifyStreamError` scanned `terminalStreamSignals` first and returned "do not
+retry" on a hit, while `IsBackendUnavailableError` scanned `backendDeadStreamSignals` directly with
+no terminal check. So `"model runner has unexpectedly stopped (last output: … unsupported …)"` came
+back terminal-and-final AND backend-is-dead at once — two verdicts whose recoveries contradict each
+other, produced by any server that appends detail to a crash message.
+
+The defect was already pinned in the suite and nobody had noticed: `"worker crashed: context length
+exceeded"`, a deliberately-authored existing test string, produced `Retryable=false`/`Dead=true`. No
+test had ever asked the two functions the same question.
+
+Replaced with **one ordered ladder** (`classifyStreamMessage`) that all three classifiers read:
+context-overflow → backend-dead → remaining terminal → remaining retryable → unrecognized (terminal,
+P33.16's default, unchanged).
+
+**Backend-dead now outranks generic terminal**, reversing "terminal always wins". The cost that
+justified terminal-wins does not exist on that branch: P33.16 chose terminal-by-default because a
+retry burns another full prompt-eval on a slow local model, and a *dead* backend cannot burn one —
+the attempt fails at connect in milliseconds. The error asymmetry compounds it. A false "dead" costs
+one liveness probe that short-circuits immediately plus a context reset; a false "terminal" aborts
+the whole phased drive on a half-built suite, which is the exact failure P50.1 was filed for. And
+`terminalStreamSignals` is deliberately broad (`malformed`, `unsupported`, `does not support`,
+`invalid request`) — precisely the vocabulary an echoed fragment hits by accident — while
+`backendDeadStreamSignals` name specific mechanical events. The specific claim about machine state
+should beat a broad substring in prose.
+
+**But context-overflow outranks backend-dead**, which is why this is a three-way ladder and not an
+inversion. An oversized prefill plausibly *causes* the runner to die; if a crash-plus-overflow
+message took the wait path, the drive would wait for the corpse, re-send the same oversized prompt
+and kill the server again, while P47.2's fresh-context reset — the recovery that works — never ran.
+Size explains the death; the death does not explain the size. This is also what keeps
+`"worker crashed: context length exceeded"` terminal, as it has always been.
+
+One gap surfaced on review of the first implementation: `IsContextOverflowError` still bypassed the
+ladder via its `IsTruncatedToolCallError` tail, so
+`"invalid tool call arguments: unexpected end of JSON input; connection reset by peer"` returned
+dead AND overflow together — the very double-verdict the ladder exists to prevent. The raw
+truncation signature now sits on the ladder's first rung and all three classifiers answer from one
+classification. `TestStreamClassifiersAgree` asserts the coherence invariants (*dead ⇒ retryable*,
+*dead and overflow mutually exclusive*) independently of its table, so a later row cannot slip past
+them.
+
+**Repo-map truncation notice + a latent cap violation (SHIPPED 2026-08-06,** filed under P62.1's
+measurement**).** `Render`'s truncation notice said only that the map was truncated, so a 10-of-672
+prefix was indistinguishable from a complete map of a small repo. It now reports the omitted count
+and names the P49.2 `repomap` tool that can answer for the rest, converting a silent gap into an
+actionable one. Fixing it exposed a latent bug: the notice was appended *after* the fit loop with no
+budget accounting, so a truncated render could exceed `MaxBytes` by the notice's length. `Render`
+now reserves the notice's worst-case length before filling. This was the one change that is
+policy-independent — true whatever selection order is chosen later — so it shipped ahead of P62.1.
+
+**P61.7 (in-repo half) — Aegis was the backend echoing model text into a classified error message
+(SHIPPED 2026-08-06).** The item was filed Tier 4 on the grounds that its likelihood "depends on
+whether any backend in real use echoes generated text into an error envelope, which nobody has
+measured." The measurement found the echo without leaving the repo: the OpenAI adapter's
+`chunkDecoder.Finish` built its own message with `fmt.Sprintf("invalid tool call arguments for %q:
+…", acc.name)` and handed it to `NewStreamError`, whose signal tables then substring-matched it.
+`acc.name` is the tool name **the model emitted**.
+
+Measured through the real classifiers, a malformed tool call named `crash_report` — not an
+adversarial prompt, just a plausible tool name hitting the `"crash"` signal — came back
+`Retryable()=true` **and** `IsBackendUnavailableError()=true`, against `false`/`false` for the same
+failure named `write_file`. The second verdict is the larger blast radius and is not what the item
+predicted: it routes the phased drive's P50.1 recovery into a liveness probe and wait-and-resume for
+a server that never died. The truncation branch one line up carried the identical defect via
+`NewContextTruncationError`'s `underlying` argument.
+
+Fixed by separating the two jobs the `Message` field was doing. A new `APIError.Detail` field carries
+model-authored text: rendered by `Error()`, ignored by every classifier. `NewMalformedToolCallError`
+gives that failure class a **fixed** message and an explicit terminal verdict, with the tool name in
+`Detail`; the truncation branch does the same. Because `Message` is read nowhere outside the
+classifiers (plus one `does not support thinking` check in the Ollama adapter), nothing else moved.
+
+The regression test asserts **invariance**, not a verdict — every classifier answer must be identical
+across nine tool names whatever signal they collide with, compared against an honest-named control —
+so the underlying policy stays free to change while the injection surface stays closed. One
+observation deliberately left alone: `IsContextOverflowError` answers true on this path for *every*
+name including the control, because P47.x matches the raw truncated-tool-call signature. That is a
+policy question about malformed vs. truncated calls, is not model-influenceable, and was out of
+scope.
+
+**What remains open:** the original external-backend case — a server or proxy echoing generation
+fragments into its own `{"error":…}` envelope. That is still unmeasured and still needs a structural
+signal most local backends do not supply. Measurement confirmed the reverse direction is live there:
+`"model runner has unexpectedly stopped (last output: … unsupported …)"` classifies terminal while
+`IsBackendUnavailableError` independently says the backend is dead — the two classifiers disagreeing
+on one error, which is a defect even with no injection involved.
+
+**P49.3 — LSP-backed symbol extraction for the repo map (DROPPED 2026-08-06).** The item was
+explicitly measure-first: build only once regex extraction, rather than edge coverage, is shown to be
+the limiting factor. Measured on this repo, the map renders **7847 of a 8000-byte budget and
+truncates**, fitting 187 lines out of 673 files and 7208 top-level symbols. LSP's contribution is
+*nested* symbols and reference edges — strictly more content contending for a budget that already
+cannot fit the top-level ones, dropping whole files at the boundary to make room.
+
+So the gate cannot be met by extraction work at all: precision that never reaches the model is not
+precision. The limiting factor is **selection** — which files earn the budget — and that is a
+different item, on ranking or relevance-scoping the map. Dropped rather than parked, on the same
+reasoning as P49.4: a parked item invites a future reviewer to build it from the write-up, and this
+write-up's premise is now known false. **Re-file only if** a budget/selection tier ships and
+extraction fidelity is then shown to be what limits the result.
 
 **P61.8 — the daemon and the diagnostic stop giving two answers to one question (SHIPPED
 2026-08-06).** P61.4 fixed `aegis doctor`'s belief that `provider.context_window` is what the server

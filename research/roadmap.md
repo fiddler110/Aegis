@@ -1,8 +1,8 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-06 (tenth pass — cleanup: shipped write-ups, closed-batch origins and
-review-refutation records relocated to [releases.md](releases.md), per this file's own contract;
-ninth pass: P61.8 shipped, the day it was filed)
+**Last updated:** 2026-08-06 (eleventh pass — Tier-4 assessment: P61.7's in-repo half shipped and its
+remainder re-scoped, P49.3 dropped on its own measurement, P60.3/P52.14/P25.9 re-verified and left
+parked; tenth pass: cleanup, shipped write-ups relocated to [releases.md](releases.md))
 
 This document tracks only **open** work and what's next. For shipped-feature history, batch origins
 and full design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>`
@@ -13,10 +13,23 @@ so keep it when adding items.
 
 ## Status
 
-**6 open items.** One in Tier 2 — **P38.1**, which is live-run verification tracking rather than
-independent build work — and five in Tier 4: **P61.7**, **P60.3**, **P52.14**, **P49.3**, **P25.9**.
-Every Tier-4 item is measure-first, blocked, or explicitly parked, and none has had its promotion
-trigger fire. **Tier 1 and Tier 3 are empty.**
+**6 open items.** Two in Tier 2 — **P62.1**, the only one that is straightforward build work, and
+**P38.1**, which is live-run verification tracking — and four in Tier 4: **P61.7** (remainder),
+**P60.3**, **P52.14**, **P25.9**. **Tier 1 and Tier 3 are empty.**
+
+The 2026-08-06 assessment pass measured all five Tier-4 items rather than re-reading them, and the
+measurements moved three of them plus filed a new Tier-2 item. **P61.7's premise was false** — the
+backend echoing model text into a classified error message was *Aegis itself*, in the OpenAI adapter
+— so its in-repo half shipped the same day, along with **P61.7(b)**, a classifier disagreement the
+same measurement exposed that needed no injection to trigger. **P49.3 was dropped**, refuted by its
+own measure-first gate. Measuring *why* it was refuted then produced **P62.1**: the repo map's
+selection policy turns out to be the alphabet, delivering 10 of 672 files with every
+architecture-table package invisible — a live defect nobody had filed, found only by asking what the
+dropped item's gate was really blocked on. The other three re-verified as accurately filed and
+correctly parked.
+
+All of it repeats the lesson under *How to use this tier* below: every write-up that got measured was
+wrong in some way, and twice the measurement was more valuable than the item that prompted it.
 
 **Every filed batch is closed or down to its parked members.** P61.x (cross-adapter drift, 8 filed)
 → P61.7 only. P60.x (sandbox and eval, 4) → P60.3 only. P59.x (local execution, 10 + the P59.11
@@ -58,8 +71,65 @@ P51.1, P50.1 and the P47.x batch head).
 
 ## Open Work — Tier 2
 
-**Status: 1 open — P38.1**, below. There is no unbuilt Tier-2 item left from any batch; the last
-were P61.4, P61.5 and P61.8 (2026-08-06).
+**Status: 2 open — P62.1 and P38.1**, below. P62.1 is the only straightforward build work open in any
+tier; it was filed 2026-08-06 off the measurement that dropped P49.3. Before it, the last Tier-2
+items were P61.4, P61.5 and P61.8 (2026-08-06).
+
+### P62.1 — The repo map's selection policy is the alphabet (measured, not speculative)
+
+`repomap.Build` ends with `sort.Slice(m.Files, ... Path < Path)` (`repomap.go:398`) — plain
+alphabetical — and `Render` walks that order and **breaks** at the first file that doesn't fit. So
+which files reach the model is decided by filename, and the `break` (not `continue`) makes the cutoff
+a hard wall: a 1-symbol file later in the sort can never fit, even with spare bytes.
+
+Measured on this repo:
+
+| | |
+|---|---|
+| Files surviving into the rendered map | **10 of 672 (1.5%)**, 4 of them test files |
+| Full untruncated render | 462,736 bytes = **57.8× the 8000-byte budget** |
+| 672 path lines with **zero** symbols | 21,714 bytes = **2.71× the budget** |
+| Files that fit at 0 / 1 / 3 / 5 / 10 symbols each | 261 / 106 / 53 / 37 / 21 |
+| Test files | 340 of 672 (50.5%), 3,038 of 7,211 symbols |
+
+What the model actually receives is `cmd/aegis/main.go`, the ACP package, `agentdef`, and a wall of
+60 `internal/api` struct names — 4 of those 10 entries being test files. **Every package in
+CLAUDE.md's architecture table is invisible**: `engine`, `provider`, `tool`, `server`, `config`.
+Cross-checked against the one ranking signal already computed (P49.1 import edges), the top in-degree
+packages are `internal/tool` (109), `internal/provider` (98), `internal/config` (96),
+`internal/sandbox` (55) — not one has a surviving file except `internal/api`, which got in on the
+letter "a". This is live for anyone who has run `aegis index`; the map is opt-in (nothing is injected
+without a `.aegis/repomap.json` cache), which is the only reason it isn't Tier 1.
+
+**Selection alone is not sufficient, and that is the load-bearing finding.** At 57.8× budget, a
+perfect ranking still buys the top ~10-20 files of 672 — and a bare filename listing with no symbols
+at all is still 2.71× budget. Ordering changes *which* 1.5% you see; it cannot change that it is
+1.5%. Any real fix pairs selection with per-file compression (symbol caps, directory rollups) or a
+larger budget. Relatedly, `DefaultMaxBytes = 8000` is **not configurable** — no config key exists and
+every call site passes a bare `repomap.Options{}` — so an operator on a 128k-context model cannot
+spend 1% of it on a better map even though the budget was calibrated as a ~2k-token slice.
+
+Options measured, cheapest first. **(B) demote test files**: one path predicate, zero new
+computation, and it addresses 50.5% of files / 42% of symbols — no theory of "important" needed
+beyond production-before-test. **(A) rank by import in-degree**: data already computed in `Build`, one
+pass, but only 20.7% of edges resolve in-repo and they resolve to package *directories* (65 distinct),
+so it ranks packages and needs a within-package tiebreak. **(C) per-file symbol cap + `continue`
+instead of `break`**: no new data, moves coverage from 10 files to 53 (cap 3) or 106 (cap 1), but a
+truncated symbol list is a *different* failure — the model may conclude a symbol doesn't exist —
+so it needs a per-file "+N more" marker that costs bytes exactly where they are scarce.
+**(D) query-relevant selection reusing `memory.LoadRelevant`** is the right shape and the repo's
+preferred move (extend, don't parallelize), but is **blocked**: the map is injected once at session
+start, before any user query exists, so it needs a per-turn or two-stage map first.
+
+The policy-independent part — a truncation notice that reports the omitted count and points at the
+P49.2 `repomap` tool, plus a fix for the notice being appended outside the byte cap — **shipped
+2026-08-06**. Everything above is still open.
+
+Priority: Tier 2 — measured, currently degrading every indexed session, and (B) is genuinely cheap.
+Recommend B first, then A; treat C as requiring the "+N more" marker, and D as blocked on a
+per-turn map. **This supersedes P49.3** (dropped): the constraint is budget and selection, not
+extraction fidelity — and these numbers strengthen that drop, since LSP would deepen content that
+already cannot fit at the top level.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -169,41 +239,52 @@ answer.
 
 ## Open Work — Tier 4
 
-**Status: 5 open**, all measure-first, blocked, or explicitly parked; none has a build trigger yet.
+**Status: 4 open**, all blocked or explicitly parked; none has a build trigger yet.
 
-**How to use this tier.** P59.10 and P52.16 were measured and closed 2026-08-05, and both taught the
-same lesson: **the measurement contradicted part of the filed item**, so building either one from its
-write-up alone would have produced the wrong fix. Take the measurement first, then re-read the item —
-do not treat a Tier-4 write-up as a build plan. Details in [releases.md](releases.md).
+**How to use this tier.** Four items have now been measured and closed — P59.10 and P52.16
+(2026-08-05), P61.7's in-repo half and P49.3 (2026-08-06) — and every one taught the same lesson:
+**the measurement contradicted part of the filed item.** P61.7 named an unmeasured external
+dependency that turned out to be our own code; P49.3's gate turned out to be unmeetable by the work
+it proposed. Building either from its write-up alone would have produced the wrong fix, or the wrong
+non-decision. Take the measurement first, then re-read the item — do not treat a Tier-4 write-up as a
+build plan. Details in [releases.md](releases.md).
 
-### P61.7 — Retry/terminal classification is substring matching over model-influenceable text
+### P61.7 — Retry/terminal classification over *backend-echoed* text (remainder)
 
 `classifyStreamError` (`errors.go`) decides whether a mid-stream failure is retried or is fatal by
 case-insensitive substring match against a free-form server error string. `terminalStreamSignals`
 includes tokens as broad as `"does not support"`, `"unsupported"`, `"malformed"` and
 `"invalid request"`; `retryableStreamSignals` includes `"crash"`, `"timed out"` and `"out of memory"`.
-`IsResponseHeaderTimeoutError` likewise matches Go's internal transport string, which no compile-time
-check protects.
+The concern is not that the heuristics are wrong — they are well-chosen and
+terminal-wins-over-retryable is the right default. It is that **a control-flow decision is made on
+text the model can influence.**
 
-The concern is not that the heuristics are wrong — they are well-chosen and terminal-wins-over-retryable
-is the right default. It is that **a control-flow decision is made on text the model can influence**.
-Some backends and proxies echo request or generation fragments into the error envelope; a generation
-containing "unsupported" that reaches an error message flips a retryable infrastructure failure to
-terminal, and the reverse direction (a terminal failure re-classified as retryable) burns a full
-prompt-eval per attempt on a slow local model. This is the AI-specific injection surface the P61.x
-review was asked to look for, and it is the only one it found — prompt/system isolation, tool-schema
-handling and PII logging all came back clean.
+**The in-repo half shipped 2026-08-06** and this item is now only its remainder. The measurement that
+closed it also refuted the original filing: the item said likelihood "depends on whether any backend
+in real use echoes generated text into an error envelope," and the answer was that *Aegis* did, in
+the OpenAI adapter, which spliced the model-authored tool name into a message the classifiers then
+matched. A tool named `crash_report` flipped a terminal error to retryable **and** made
+`IsBackendUnavailableError` report a dead backend. Fixed via `APIError.Detail` — rendered, never
+classified — plus `NewMalformedToolCallError`. Write-up in [releases.md](releases.md).
 
-It is Tier 4 because the likelihood is genuinely unknown: it depends on whether any backend in real use
-echoes generated text into an error envelope, which nobody has measured, and the harness has no
-reported incident of a misclassification. Filing a fix now would mean guessing at a structural signal
-(status code, an error `type` field) that most local backends do not supply.
+**What is left is the case originally described:** a server or proxy echoing generation fragments
+into its own `{"error":…}` envelope, where the text is genuinely external and classification is the
+whole point of reading it. Still unmeasured, and a fix still means guessing at a structural signal
+(status code, an error `type` field) most local backends do not supply.
+
+**P61.7(b) — the classifier disagreement the same measurement exposed — also shipped 2026-08-06.**
+`Retryable()` and `IsBackendUnavailableError` read one string through two tables in two orders and
+could return terminal-and-final AND backend-is-dead at once. Replaced with a single ordered ladder
+(context-overflow → backend-dead → terminal → retryable → unrecognized), which reverses
+"terminal always wins" for the backend-dead subset and documents why. Needed no injection to
+reproduce — an existing test string already triggered it. Write-up in [releases.md](releases.md).
 
 **Promote when:** a misclassification is actually observed, or a backend is found that demonstrably
-echoes generation content into `{"error":...}`. The cheap first step is a table-driven test that runs a
-model-authored string containing each signal through the classifier — not to fix it, but to make the
-blast radius explicit and reviewable.
-Priority: Tier 4 — real surface, unquantified likelihood, no incident; do not build speculatively.
+echoes generation content into `{"error":...}`. The regression test the old entry proposed as a first
+step now exists (`TestModelAuthoredTextDoesNotSteerClassification`), asserting invariance across tool
+names; extending it to envelope text is the natural probe.
+Priority: Tier 4 — narrowed to the external case; real surface, unquantified likelihood, no incident.
+The classifier-disagreement sub-defect is separable and closer to Tier 2.
 
 ### P60.3 — Checkpoints capture files only, so `/rewind` is silent about everything else
 
@@ -224,6 +305,10 @@ container to snapshot while every command was `--rm` — and that dependency **c
 when P60.2 shipped. What remains is that it only helps sessions using the container backend, which is
 not the default. And Orchard's version is *roadmap, not shipped code*, so there is
 no implementation to read; only the idea transfers.
+
+**Re-verified 2026-08-06:** `sandbox.backend` still defaults to `"local"` (`config.go:1348`), so the
+one remaining condition is unchanged and the entry above needs no correction. P60.2 clearing the
+dependency did not move it.
 
 **Promote when:** the container backend is a realistic default for real sessions, or a user reports a
 rewind that restored files into an environment that no longer matched them.
@@ -251,37 +336,37 @@ parked** — `newLoopDetector` is unchanged, and the design question above is re
 mechanical port to a wider scope. Not worth building speculatively: without a concrete false-negative
 in hand it would ship a detector tuned against a guess rather than an observed failure mode.
 
+**Re-verified 2026-08-06:** `newLoopDetector` is still constructed inside `Run` (now
+`engine.go:631`), and the design question above is still the blocker rather than the port.
+
 **Promote when:** a live run shows a cross-turn loop that per-`Run` detection missed.
 Priority: Tier 4 — real but unproven, and the false-positive risk is higher than the current
 detector's.
 
-### P49.3 — LSP-backed symbol extraction for the repo map (precision without tree-sitter)
-
-`repomap`'s regex extraction is deliberately "breadth and robustness over perfect parsing"
-(`repomap.go:5`) — it catches top-level declarations only, misses nested/inner symbols, and can't
-produce true call/reference edges (P49.1 gives *import* edges, not call edges). graft's foundation
-is tree-sitter, but bundling tree-sitter grammars into Aegis means CGo + per-language grammar blobs
-— the exact single-static-binary / no-toolchain property CLAUDE.md protects. Aegis already ships an
-alternative: `internal/lsp`. When a language server is available for a file's language, use
-`textDocument/documentSymbol` (real nested symbols) and `textDocument/references` (true
-call/reference edges) to build the map, falling back to the regex extractor when no server is present
-— so precision is opportunistic and the no-runtime default is untouched.
-
-Priority: Tier 4 — larger, and **measure-first**: only worth building once P49.1/P49.2 have shown
-the structural tier matters *and* that regex extraction (not edge coverage) is the limiting factor.
-LSP adds per-language server availability as a dependency and startup cost; don't pay it
-speculatively. The regex path stays the floor regardless.
+*(P49.3, LSP-backed symbol extraction for the repo map, was **dropped 2026-08-06** — refuted by its
+own measure-first gate. Measured on this repo, the map renders 7847 of an 8000-byte budget and
+**truncates**, fitting 187 lines out of 673 files and 7208 top-level symbols; LSP would add *nested*
+symbols and reference edges, i.e. strictly more content contending for a budget that already cannot
+fit the top-level ones. Precision that never reaches the model is not precision, so the gate is
+unmeetable by the work the item proposed. The limiting factor is **selection** — which files earn the
+budget — which is a different item. Dropped rather than parked for the same reason as P49.4: the
+write-up's premise is now known false, and a parked item invites building from it. Re-file only if a
+budget/selection tier ships and extraction fidelity is then shown to be the limit; rationale in
+[releases.md](releases.md).)*
 
 *(P49.4, the LLM-summarized concept-node sibling, was dropped 2026-08-03 rather than parked — it
-carried two unresolved problems at once. Re-file only if P49.1-P49.3 demonstrably fail to close the
-re-discovery gap **and** the "new store vs. extend `knowledge`/`memory`" question has an answer;
-rationale in [releases.md](releases.md).)*
+carried two unresolved problems at once. Re-file only if the deterministic structural tiers
+demonstrably fail to close the re-discovery gap **and** the "new store vs. extend
+`knowledge`/`memory`" question has an answer; rationale in [releases.md](releases.md).)*
 
 ### P25.9 — per-session scoping of `lsp.Manager` (remaining daemon singleton)
 
 Five of the six daemon-singleton services were per-session-scoped when P25.9 first shipped;
 `lsp.Manager` was deliberately left as a shared singleton — its per-session resource-growth
 tradeoff was judged worse than the isolation gap. Parked pending a concrete multi-tenant need.
+
+**Re-verified 2026-08-06:** still one shared `lsp.NewManager(cwd, logger)` at daemon construction
+(`internal/server/server.go:597`). No trigger has fired.
 
 Priority: Tier 4 — no trigger, explicitly parked. Do not build speculatively.
 
