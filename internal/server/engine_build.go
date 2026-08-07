@@ -135,14 +135,30 @@ func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
 	return c
 }
 
-// buildGate assembles the shared permission gate stack — base mode gate →
-// contextual egress/network policy → text allow/deny rules → persona tool
-// advisory (outermost) — used by every engine run the daemon starts, top-level
-// or sub-agent, so a spawned teammate can't bypass an operator's security
-// posture just because it took a different code path to get an engine (P10.1).
-// Mode clamping happens above this call (resolveSessionMode / clampMode); an
-// empty persona.Persona{} skips the persona-specific layers (rules/tools),
-// which is what sub-agent runs pass since they have no persona of their own.
+// buildGate assembles the shared permission gate stack, used by every engine
+// run the daemon starts, top-level or sub-agent, so a spawned teammate can't
+// bypass an operator's security posture just because it took a different code
+// path to get an engine (P10.1).
+//
+// The stack is built inside-out but evaluated outermost-first. In evaluation
+// order:
+//
+//	Scope → PersonaTool → Rules → Contextual → Mode
+//
+// This doc comment is the one place that order is stated (P63.6). The layers
+// below deliberately do not restate their own position relative to each other:
+// three of them once did, each claiming to be "the outermost", and two were
+// wrong — every one had been correct when written and none was updated as a
+// layer was added above it. A wrong ordering claim on a permission stack is
+// worse than no claim, so add new layers to the list here and describe only
+// what each layer *does* at its own site.
+//
+// Every layer except Mode is conditional, so a given run may skip some: the
+// contextual gate needs egress-then-write or a network allowlist configured,
+// the rule and persona-tool layers need rules/tools to exist. Mode clamping
+// happens above this call (resolveSessionMode / clampMode); an empty
+// persona.Persona{} skips the persona-specific layers (rules/tools), which is
+// what sub-agent runs pass since they have no persona of their own.
 func (s *Server) buildGate(mode string, approver permission.Approver, p persona.Persona) (engine.Gate, engine.Hooks) {
 	baseGate := permission.New(permission.ParseMode(mode), approver)
 
@@ -165,10 +181,9 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 		engineHooks = hooks.NewMulti(s.audit, ctxGate)
 	}
 
-	// Apply text-based allow/deny rules as the outermost gate so they are
-	// evaluated before the contextual and mode gates. An explicit deny always
-	// blocks; an explicit allow grants without prompting; otherwise the call
-	// falls through to the gate(s) wrapped above.
+	// Text-based allow/deny rules. An explicit deny always blocks; an explicit
+	// allow grants without prompting; otherwise the call falls through to the
+	// gate(s) wrapped above.
 	s.permMu.Lock()
 	rules := append([]permission.Rule{}, s.permRules...)
 	s.permMu.Unlock()
@@ -188,9 +203,9 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 			}))
 	}
 
-	// A persona's declared Tools list is advisory only (P7.5: never a
-	// security boundary) — wrapped outermost so a call outside the list is
-	// flagged before the real allow/deny rules below run.
+	// A persona's declared Tools list is advisory only (P7.5: never a security
+	// boundary) — it warns or prompts, and the real allow/deny rules it wraps
+	// still decide.
 	if len(p.Tools) > 0 {
 		gate = permission.NewPersonaToolGate(gate, p.Name, p.Tools, approver, s.logger,
 			func(d permission.ContextualDecision) {
@@ -200,11 +215,12 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 			})
 	}
 
-	// Per-task file-write scope (P46.1) is the outermost gate: an out-of-scope
-	// write must be refused even when a text allow-rule below would grant it,
-	// since the scope is a further restriction the model/skill opted into for
-	// one task, not a competing permission. A no-op until a `scope` tool call
-	// activates a scope on the run's context.
+	// Per-task file-write scope (P46.1). It binds hardest: an out-of-scope
+	// write is refused even when a text allow-rule would grant it, since the
+	// scope is a further restriction the model/skill opted into for one task,
+	// not a competing permission. That is why it goes on last — anything added
+	// after it would relax a containment the run asked for. A no-op until a
+	// `scope` tool call activates a scope on the run's context.
 	gate = permission.NewScopeGate(gate, func(d permission.ContextualDecision) {
 		if s.audit != nil {
 			s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
