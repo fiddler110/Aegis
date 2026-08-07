@@ -1,8 +1,9 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-06 (eleventh pass — Tier-4 assessment: P61.7's in-repo half shipped and its
-remainder re-scoped, P49.3 dropped on its own measurement, P60.3/P52.14/P25.9 re-verified and left
-parked; tenth pass: cleanup, shipped write-ups relocated to [releases.md](releases.md))
+**Last updated:** 2026-08-07 (thirteenth pass — **the P63.x batch built**: P63.1-P63.7 shipped in one
+session, 3 new items filed off the work; twelfth pass: P63.x full-stack review, 7 items filed across
+Tiers 1-3; eleventh pass: Tier-4 assessment — P61.7's in-repo half shipped and its remainder
+re-scoped, P49.3 dropped on its own measurement, P60.3/P52.14/P25.9 re-verified and left parked)
 
 This document tracks only **open** work and what's next. For shipped-feature history, batch origins
 and full design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>`
@@ -13,9 +14,52 @@ so keep it when adding items.
 
 ## Status
 
-**6 open items.** Two in Tier 2 — **P62.1**, the only one that is straightforward build work, and
-**P38.1**, which is live-run verification tracking — and four in Tier 4: **P61.7** (remainder),
-**P60.3**, **P52.14**, **P25.9**. **Tier 1 and Tier 3 are empty.**
+**9 open items.** The P63.x review filed 7 on 2026-08-07 and **all 7 were built the same day**
+(P63.1-P63.7; the `Engine.Run` half of P63.7 was split out rather than built — see below). Three new
+items were filed off that work: **P63.8** from the sweep P63.3 asked for, **P63.9** from P63.7's
+deliberate scope cut, **P63.10** from reading every `Update` case in sequence.
+
+**Tier 1 is empty again.** Tier 2 holds three — **P62.1**, **P38.1** and **P63.8**. Tier 3 holds one,
+**P63.9** (`Engine.Run`). Tier 4 is five: **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, and
+**P63.10**.
+
+**What building the batch taught, beyond the fixes.** Three of the seven turned out to be
+larger or differently-shaped than filed, and in each case the item's own write-up is what
+made that visible:
+
+- **P63.4 was filed as "two lines, no design question."** It was neither. Measuring
+  `modernc.org/sqlite` showed a `PRAGMA busy_timeout` **Exec does not survive connection churn** —
+  it is per-connection state, not persisted in the file the way `journal_mode=WAL` is — so the fix is
+  a DSN parameter, `knowledge` had the same omission the item did not name, and `cli/worker.go`, the
+  one site the item praised for getting it right, was using the unreliable mechanism.
+- **P63.5 contained a trap the write-up half-anticipated.** `recordInvalidAuthAttempt` also armed the
+  lockout, so following the item's literal instruction — "call it on each failure branch" — would
+  have produced exactly the self-DoS the same item warned against. It needed a split, not a call.
+- **P63.7 was two items wearing one heading.** The `Update` half was mechanical and shipped; the
+  `Engine.Run` half needs a design answer about per-turn versus run-scoped state, which is why it is
+  now **P63.9** rather than an unbuilt remainder.
+
+That pattern — the filed item is right about the defect and wrong about the size — matches what the
+Tier-4 assessment pass found one day earlier, and is the same argument for measuring before building.
+
+**What the review pass found.** Baseline health is strong and should be recorded as such:
+`go build`, `go vet`, `go test ./...` and `go test -race` over the six concurrent packages are all
+clean; engine coverage is 92.0%; the documented counts (22 personas, 12 built-in skills) match the
+tree exactly; and `webui/dist` is committed in the same commit as its frontend source. The findings
+are about **erosion**, not breakage — and the two sharpest ones are erosion against *already-shipped
+work*, which is why checking releases.md before filing changed both write-ups:
+
+- **P63.3** is not a fresh inconsistency. `ScopeGate` (P46.1) reintroduced the static-`Capability()`
+  pattern that **P32.2, a shipped Tier-1 item, was filed to remove** — in the gate P46.1 itself calls
+  the outermost. Reading the refutation records turned "minor inconsistency" into "regression against
+  a Tier-1 fix, one release later."
+- **P63.7** is not a new complaint about function length. **P40.5 named this exact split** and
+  deferred it as "opportunistic follow-up"; the target has since grown 1,249 → 1,324 lines. P40.6
+  established the safe method (golden-transcript-gated code motion) on the sibling function.
+
+Both are the tier system working as intended — the value came from the history, not the reading.
+The one place the review found the *absence* of a record was P63.4: `busy_timeout` is set in
+`cli/worker.go` and in neither long-lived store, with no comment anywhere arguing for the omission.
 
 The 2026-08-06 assessment pass measured all five Tier-4 items rather than re-reading them, and the
 measurements moved three of them plus filed a new Tier-2 item. **P61.7's premise was false** — the
@@ -31,11 +75,13 @@ correctly parked.
 All of it repeats the lesson under *How to use this tier* below: every write-up that got measured was
 wrong in some way, and twice the measurement was more valuable than the item that prompted it.
 
-**Every filed batch is closed or down to its parked members.** P61.x (cross-adapter drift, 8 filed)
-→ P61.7 only. P60.x (sandbox and eval, 4) → P60.3 only. P59.x (local execution, 10 + the P59.11
-follow-on) → 0. P55.x (container-only scanning, 9 filed / 8 built) → 0. P52.x (full-stack review,
-17) → P52.14 only. P53.x, P57.1, P58.x, P54.2 → 0. Dates, per-item rationale and every write-up are
-in [releases.md](releases.md).
+**No batch is open beyond its parked or follow-on members.** P63.x (full-stack review, 7 filed
+2026-08-07, all 7 built the same day) → **3 open**, and all three were *filed by the build*, not by
+the review: P63.8, P63.9, P63.10. P61.x
+(cross-adapter drift, 8 filed) → P61.7 only. P60.x (sandbox and eval, 4) → P60.3 only. P59.x (local
+execution, 10 + the P59.11 follow-on) → 0. P55.x (container-only scanning, 9 filed / 8 built) → 0.
+P52.x (the previous full-stack review, 17) → P52.14 only. P53.x, P57.1, P58.x, P54.2 → 0. Dates,
+per-item rationale and every write-up are in [releases.md](releases.md).
 
 **Where the history went.** Batch origins (what each review actually read, and what it judged already
 correct), the **refutation records** — candidate findings checked and deliberately *not* filed — and
@@ -45,9 +91,20 @@ against `internal/provider`, `internal/ollamainfo`, `internal/repomap` or scanne
 several obvious-looking gaps there have already been checked and answered, and the point of writing
 them down was to stop the next review re-filing them.
 
-**What to do next, which is not a tier item:** re-run P38.1's live conformance test. It is the only
-open work whose outcome produces new information rather than new code, and it doubles as the
-validation **P57.1** is still owed — a fix aimed at a failure observed exactly once.
+**What to do next: P63.8, then P62.1.** With Tier 1 empty, P63.8 is the cheapest item that closes
+something: one call site and a test, and it retires the last instance of a pattern two shipped items
+have now removed elsewhere — leaving it open means the argument P32.2 and P63.3 both made is still
+only two-thirds applied. P62.1 is the larger Tier-2 win and the one with a live user-visible effect
+(the repo map delivering 10 of 672 files, alphabetically), but it needs a selection policy designed
+rather than a line changed, so it should not be started in the same pass.
+
+**Do not start P63.9 casually.** It is the highest-value structural item open and the easiest to do
+badly: unlike its sibling it cannot be made safe by technique alone, and a botched pass degrades the
+agent loop every other item is measured through. It wants a session of its own.
+
+**What to do next that is not a tier item, unchanged:** re-run P38.1's live conformance test. It is
+still the only open work whose outcome produces new information rather than new code, and it doubles
+as the validation **P57.1** is owed — a fix aimed at a failure observed exactly once.
 
 ---
 
@@ -62,18 +119,23 @@ validation **P57.1** is still owed — a fix aimed at a failure observed exactly
 
 ## Open Work — Tier 1
 
-**Status: 0 open.** The tier's most recent occupants were the Tier-1 half of the P61.x cross-adapter
-drift batch (P61.1-P61.3, shipped 2026-08-05/06); before them, P59.1-P59.3 and the P55.x Tier-1 half.
-See [releases.md](releases.md) for the write-ups and for the full Tier-1 history (P52.1, P52.2,
-P51.1, P50.1 and the P47.x batch head).
+**Status: none open.** P63.1 (a sub-agent panic taking down the daemon) and P63.2 (`govulncheck`
+unable to analyze the module) were filed 2026-08-07 from the P63.x full-stack review and shipped the
+same day. Before them the tier's most recent occupants were the Tier-1 half of the P61.x
+cross-adapter drift batch (P61.1-P61.3, shipped 2026-08-05/06); before those, P59.1-P59.3 and the
+P55.x Tier-1 half. See [releases.md](releases.md) for the write-ups and for the full Tier-1 history
+(P52.1, P52.2, P51.1, P50.1 and the P47.x batch head).
 
 ---
 
 ## Open Work — Tier 2
 
-**Status: 2 open — P62.1 and P38.1**, below. P62.1 is the only straightforward build work open in any
-tier; it was filed 2026-08-06 off the measurement that dropped P49.3. Before it, the last Tier-2
-items were P61.4, P61.5 and P61.8 (2026-08-06).
+**Status: 3 open — P62.1, P38.1 and P63.8**, below. P62.1 was filed 2026-08-06 off the measurement
+that dropped P49.3; the two of them are ranked ahead of P63.8 deliberately, since document order is
+priority order. **P63.8 was filed while landing P63.3**, from the tree-wide sweep that item's fix
+asked for — it is the last remaining instance of the static-capability pattern and is appended last,
+being the least reachable of the set. P63.3-P63.6, filed alongside it by the same review, all shipped
+2026-08-07; before those, the last Tier-2 items were P61.4, P61.5 and P61.8 (2026-08-06).
 
 ### P62.1 — The repo map's selection policy is the alphabet (measured, not speculative)
 
@@ -201,15 +263,96 @@ built-in drive — reachable from any client since P52.12 — is confirmed to re
 unattended, in one invocation, on a local model. Not Tier 1 because it is live-run verification
 tracking, not independent build work.
 
+### P63.8 — `recordWrittenPaths` is gated on the static capability, two lines above a branch that isn't
+
+Found while landing P63.3, from the sweep that item asked for. In `engine.runTools`
+(`engine/engine.go:2221`):
+
+```go
+if !isErr && t.Capability() == tool.CapWrite {
+    ...
+    e.recordWrittenPaths(paths)
+}
+if !isErr && e.redactSecrets && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
+```
+
+Two adjacent branches over the same tool and the same input disagree about which capability to ask
+for. The second is correct by P25.4c; the first is the pattern P32.2 removed from `ContextualGate`
+and P63.3 removed from `ScopeGate`.
+
+The consequence is not a gate bypass — scope and the permission stack still bind — it is a **coverage
+hole in the write bookkeeping**. A tool that reclassifies into `CapWrite` for a specific call via
+`CapabilityFor` has its written paths go unrecorded, so that call gets no output-guard file
+validation and no quarantine-on-fail rollback. That is precisely the silent degradation the P32.6
+warning three lines above exists to make loud, arrived at by a different route.
+
+**Not reachable today, same reason as P63.3:** `shell` is still the only `tool.CapabilityOverrider`
+in the tree and it only narrows (`CapExecute` → `CapRead`). Recording that here so this is not
+re-filed as urgent.
+
+**Why it was split out of P63.3 rather than folded in.** P63.3 is a gate fix with a containment
+argument; this is post-execution bookkeeping, and the change is not purely additive: today the branch
+is skipped for `shell` (static `CapExecute`), and the effective capability makes it a *per-call*
+decision for that tool too. That is a behavior change on the write-recording path and wants its own
+test, not a ride-along under another item's justification.
+
+**Fix:** `tool.EffectiveCapability(t, tu.Input)` at 2221, plus a test asserting that a tool widening
+into `CapWrite` has its paths recorded for output-guard coverage — and an explicit check of what the
+branch now does for `shell` calls that narrow to `CapRead`.
+
+Priority: Tier 2 — one call site and a test, closing the last instance of a pattern two shipped items
+have now removed elsewhere. Not Tier 1: no tool in the tree can reach it, and it degrades a
+verification path rather than opening a gate.
+
 ---
 
 ## Open Work — Tier 3
 
-**Status: 0 open.** P61.6 (2026-08-06) was the last, and the sequencing finding it produced is
+**Status: 1 open — P63.9**, below, split out of P63.7 on 2026-08-07 when that item's `Update` half
+shipped and its `Engine.Run` half proved to be different work. P61.6 (2026-08-06) was the last before
+it, and the sequencing finding it produced is
 recorded with its write-up: built **second** in its batch rather than last, it turned P61.1 into
 option wiring and closed P61.3 with no production code, so the "write each fix twice and delete one
 copy" cost the item worried about was never paid. Before it: P59.9, P60.2, P60.4 and P57.1. See
 [releases.md](releases.md).
+
+### P63.9 — `Engine.Run`: the half of P63.7 that needs a design answer, not code motion
+
+Split out of P63.7 when its `Update` half was built, because the two halves are not the same kind of
+work and bundling them hid that. P63.7 is now closed by the `Update` split alone; this carries the
+part it deliberately deferred.
+
+`engine/engine.go:586` — `Engine.Run`, **725 lines, 119 branch points, 10 levels of nesting**, holding
+budget enforcement, compaction triggers, nudge retraction, loop detection and guard retries in one
+scope where each interacts with the others. The **33 `// Pxx` markers inside it** are the tell: it has
+become the place behavior is added *because* it is already where all the state is, which is
+self-reinforcing.
+
+**Why this is not a second helping of P63.7's method.** The `Update` split was pure code motion —
+per-message-domain files, gated on the eval golden transcripts showing no diff — because each `switch`
+case was already an independent unit and moving one could not change what another did. `Run` has no
+such seams. Extracting anything from a 10-deep scope means first deciding **what is genuinely
+per-turn state and what is run-scoped**, and that is a design question, not a mechanical one. P40.6
+answered it for exactly one narrow slice — folding three parallel nudge counters into a `nudgeState`
+helper — and left the rest open. That pass is the model for shape and for safety technique, but it is
+not a template that can be applied five more times without re-deciding the boundary each time.
+
+**Approach: one concern at a time, not one sweep.** Each pass takes a single interacting concern
+(budget enforcement, compaction, loop detection, guard retries), names the state it actually owns,
+lifts it into a helper with that state as a field, and lands separately — gated on the golden
+transcripts the same way. A sweep would produce a diff no reviewer can check against a function whose
+whole problem is that its parts interact.
+
+The **live tiers matter more here than the unit suite.** `internal/engine` is at 92.0% and green
+throughout the regressions P25.7 was built to catch, which is precisely the coverage profile that
+hides an integration-shaped break — so `TestLiveWorkflow` (and, where attribution is in doubt,
+`TestLiveWorkflowBaseline`) should run over any pass that touches retry, nudge or compaction control
+flow, not just `go test ./...`.
+
+Priority: Tier 3 — no urgency and no trigger, and unlike P63.7's half it cannot be made safe by
+technique alone. Worth doing incrementally and worth *not* doing in a hurry: a botched pass here
+degrades the agent loop itself, which is the one component every other item's behavior is measured
+through.
 
 **Three leads sit here unfiled, each with a stated promotion trigger.** None is a `### P<n>.<m>` item
 yet, deliberately — filing one before its trigger fires would commit to a design question that has no
@@ -239,7 +382,8 @@ answer.
 
 ## Open Work — Tier 4
 
-**Status: 4 open**, all blocked or explicitly parked; none has a build trigger yet.
+**Status: 5 open**, all blocked or explicitly parked; none has a build trigger yet. P63.10 joined
+2026-08-07, filed off the P63.7 refactor rather than by a review.
 
 **How to use this tier.** Four items have now been measured and closed — P59.10 and P52.16
 (2026-08-05), P61.7's in-repo half and P49.3 (2026-08-06) — and every one taught the same lesson:
@@ -369,6 +513,29 @@ tradeoff was judged worse than the isolation gap. Parked pending a concrete mult
 (`internal/server/server.go:597`). No trigger has fired.
 
 Priority: Tier 4 — no trigger, explicitly parked. Do not build speculatively.
+
+### P63.10 — Two small TUI message-handling asymmetries, seen while splitting `Update`
+
+Both were found by reading every `Update` case in sequence during P63.7 and both are **pre-existing**
+— P63.7 was pure code motion and deliberately preserved them, since fixing a bug inside a
+no-behavior-change refactor destroys the property that made the refactor safe. Filed here so the
+observation is not lost with the sub-agent that made it.
+
+**1. The spinner tick chain dies while idle.** `updateSpinnerTick` (`tui/update_tick.go`) drops the
+`tea.Cmd` returned by `m.sp.Update(msg)` when `!m.streaming`; only the streaming branch re-queues.
+This looks intentional — not animating an idle spinner is the obvious reason — but the effect is that
+the chain is *terminated* rather than paused, so it depends on something else re-starting it at the
+next stream. Worth confirming that re-start actually exists on every path, and saying so in a comment
+either way.
+
+**2. A stale toast expiry can retire a newer toast.** `updateToastExpired` clears `m.activeToast`
+unconditionally, without checking that the expiry it received identifies the toast currently shown.
+Two toasts in quick succession therefore cut the second one short by the first one's timer. The fix
+is an identity on the toast and a comparison before clearing.
+
+Priority: Tier 4 — both are cosmetic, neither is reachable as a correctness or security problem, and
+the toast one needs a toast-identity concept that does not exist yet. No trigger; do not build
+speculatively. Fix opportunistically if either file is open for another reason.
 
 ---
 

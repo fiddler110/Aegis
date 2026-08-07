@@ -8,6 +8,234 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-08-07 — **the whole P63.x batch built in one session**: P63.1-P63.7 shipped
+the day after the review filed them, emptying Tier 1 and clearing every Tier-2 item the review
+produced. Three items were filed *by the build* rather than by the review — **P63.8** (the last
+instance of the static-capability pattern, found by the sweep P63.3 asked for), **P63.9**
+(`Engine.Run`, split out of P63.7 because it needs a design answer rather than code motion) and
+**P63.10** (two TUI asymmetries seen while moving every `Update` case). Write-ups immediately below;
+the preceding 2026-08-06 Tier-4 assessment pass follows them.
+
+**What the batch taught, aside from the fixes.** Three of the seven were larger or differently-shaped
+than filed, and in each case the item's own text is what exposed the mismatch:
+
+- **P63.4 was filed as "two lines, no design question"** and was neither — measuring the driver
+  showed the prescribed mechanism does not work, the item named two stores when three had the
+  omission, and the one file it praised for getting this right was the file most in need of the fix.
+- **P63.5's literal instruction would have produced the failure the same item warned against** —
+  "call `recordInvalidAuthAttempt` on each failure branch" also arms the lockout, which is the
+  self-DoS its own write-up ruled out of scope. It needed a split, not a call.
+- **P63.7 was two items under one heading**, and only became visible as such once its safe half was
+  built and the unsafe half had nothing left to hide behind.
+
+The generalization is the same one the 2026-08-06 assessment pass reached from the other direction:
+a filed item is usually right about the defect and unreliable about the size. Both passes now argue
+for measuring first, and this one adds that the measurement is often cheapest *during* the build.
+
+**P63.1 — a sub-agent panic killed the daemon; the identical top-level path survived (SHIPPED
+2026-08-07).** `engine.runTools` already recovered a panicking tool call and already stated why:
+unrecovered, it crosses the goroutine boundary and takes down the whole daemon process, every
+concurrent session and not just the one that triggered it. That reasoning had never been applied to
+the goroutine hosting an *entire engine run*. `InProcessBackend.Spawn` launched a teammate with a
+bare `wg.Go` calling `Server.subAgentRunner` and thence `engine.Run`, with no `recover` on the path.
+
+The blast radius was asymmetric, which is what made it easy to miss: a top-level run is hosted by an
+HTTP handler and gets `net/http`'s recover, so a panic kills one connection; a teammate got nothing,
+so the same panic killed the process. The trigger was any panic in `Run` **outside** `runTools` —
+compaction, the output guard, an adapter, loop detection — i.e. exactly the surfaces `runTools`' own
+recover does not cover. Measured at filing: 3 `recover()` sites against 19 goroutine launch sites,
+with the swarm backends holding none.
+
+`runGuarded` wraps `b.run` with a `defer`/`recover` that logs the panic and its stack and converts it
+into a named-return error, so it flows down the failure route `Spawn`'s closure already used for an
+ordinary `err`: `StatusFailed` in the registry plus a mailbox `MsgResult` carrying the error. No
+second failure path was added — that reuse is the whole point, and it restores parity with the
+tool-call recover one layer down. The stack goes to the log only: `res.Err` feeds an 80-char registry
+summary and the parent's mailbox, where a full stack is noise. `SubprocessBackend` is unaffected by
+construction; a panicking child is a process exit there, already handled.
+
+**P63.2 — the Go vulnerability scanner could not analyze the module (SHIPPED 2026-08-07).** `go.mod`
+pinned `go 1.26.4` — a **patch-level** `go` directive with no `toolchain` line. `govulncheck`
+(x/vuln v1.6.0) declares `go >= 1.25.0`, so the go command built it with go1.25.12, and a 1.25-built
+analyzer refuses the whole module: *"package requires newer Go version go1.26 (application built with
+go1.25)"*, repeated for ~30 packages, exit 1. For a tool whose own remit is security scanning, the
+supply-chain check was silently inoperative.
+
+The pin is now `go 1.26` plus `toolchain go1.26.5`, which expresses the same intent without making
+every third-party analyzer that declares a lower floor unable to load the module. **The patch-level
+directive is the defect, not the version** — it would have broken the next analyzer the same way.
+
+Forcing the analyzer's own toolchain surfaced two advisories with call-path evidence, both closed
+here: **GO-2026-5320** (goldmark v1.7.13 → v1.8.5, indirect via `charm.land/glamour/v2`, reachable
+from `cli/chat_render.go`) and **GO-2026-5856** (stdlib `crypto/tls` ECH privacy leak, go1.26.4 →
+go1.26.5, reachable from `server.go`, both provider adapters and `security/method.go`).
+
+**Neither is meaningfully exploitable here, and the item was filed knowing that**: goldmark's is an
+HTML-XSS in a renderer whose output goes to a terminal, and the ECH leak needs Encrypted Client Hello
+in play. The Tier-1 case rested on the **blindness** — an inoperative scanner reports nothing about
+the advisory that *does* matter, and reports it just as quietly. The goldmark path is still worth
+noting on its own: `chat_render.go` renders model output, the same prompt-injection-carrying text the
+web UI deliberately routes through DOMPurify, so one path was rigorously sanitized while the other
+fed a parser with a known advisory.
+
+The CI job went into `codeql.yml` rather than `ci.yml`, because `ci.yml`'s `push`/`pull_request`
+triggers are commented out — a supply-chain check wired there would only run when someone remembered
+to dispatch it, which is the same blindness in a new shape. It reads `go-version-file: go.mod` so the
+analyzer is built with the module's own toolchain, i.e. against the exact failure mode above.
+`govulncheck ./...` now reports no vulnerabilities found.
+
+**P63.3 — `ScopeGate` re-introduced the static-capability pattern P32.2 removed (SHIPPED
+2026-08-07).** `ScopeGate.Check` tested `t.Capability()`. Every other gate tests
+`tool.EffectiveCapability(t, input)`, and not incidentally: **P32.2 was a shipped Tier-1 item** that
+changed `ContextualGate.Check` for exactly this reason. `ScopeGate` shipped later, as P46.1, and
+reintroduced the pattern — in the gate that binds hardest of the five.
+
+Not exploitable, and the reason is recorded so it is not re-filed as urgent: `shell` is the only
+`tool.CapabilityOverrider` in the tree and only *narrows* `CapExecute` → `CapRead`, so no tool can
+reach `CapWrite` through `CapabilityFor` and task-scope containment was intact throughout. The gap
+was that *"no override ever widens into `CapWrite`"* was an unwritten, untested invariant holding up
+a security boundary — the same shape of assumption P32.2 declined to keep one release earlier.
+
+`TestScopeGateUsesEffectiveCapability` mirrors `TestNetworkAllowListUsesEffectiveCapability`: a tool
+with static `CapRead` that widens to `CapWrite`, asserted scope-blocked outside the scope and still
+allowed inside it, so the widening restricts rather than blanket-denies. It fails against the pre-fix
+code, which is what made this worth landing rather than commenting.
+
+The tree-wide sweep the item asked for is the part worth keeping. It found three categories, not one:
+sites where the static capability is **deliberate and tested** (`rules.go` — rule matching keys off
+the tool's static shape so a `deny shell(...)` rule cannot be dodged by a call that looks read-only,
+recorded in `TestRuleGateDenyStillBlocksReadClassifiedShellCall`; converting those would be the
+opposite bug), sites where it is **structurally forced** (`isNetworkCapable` is a by-name post-hoc
+lookup for the egress latch), and exactly one genuine remaining instance, filed as **P63.8**.
+
+**P63.4 — every SQLite store now has a `busy_timeout`, set on the DSN (SHIPPED 2026-08-07).**
+`PRAGMA busy_timeout` was set in exactly one place — `cli/worker.go`, at 5000ms. The long-lived
+stores did not set it: `session`, `longmem` and **`knowledge`** (which the filed item did not name)
+each paired `SetMaxOpenConns(1)` with `PRAGMA journal_mode=WAL` and stopped.
+
+`SetMaxOpenConns(1)` serializes writers *within* one process, which is why this was invisible in
+ordinary single-daemon use and why the suite never saw it. It bites *across* processes — an
+`aegis chat` CLI against a session DB while `aegis serve` holds it — where SQLite's default is to
+fail a contended write with `SQLITE_BUSY` **immediately** rather than wait. WAL widens the window in
+which that is survivable, so the missing timeout gave back the reader/writer concurrency WAL buys.
+
+**The item was filed as "two lines, no design question" and the measurement contradicted it.**
+Against `modernc.org/sqlite` v1.54.0, the driver in use: the default `busy_timeout` is 0, confirming
+the premise — and a `db.Exec("PRAGMA busy_timeout=5000")` **does not survive connection churn**, with
+fresh connections reading back 0. Unlike `journal_mode=WAL`, `busy_timeout` is per-connection state
+and is *not* persisted in the database file, so an `Exec` configures only whichever pooled connection
+served it; `SetMaxOpenConns(1)` caps concurrency but does not pin connection *identity*, and the pool
+reopens on idle close or connection error. The driver's `applyQueryParams` runs `_pragma=` params on
+every connection it opens, so the DSN form is the only reliable one.
+
+That inverts the item's own framing: `cli/worker.go`, cited as the one place written with
+cross-process contention in mind, was the site using the mechanism that does not work. It was
+converted rather than copied. `checkpoint`, `task` and `cron` open no database — they take a
+`*sql.DB` from the caller, in production the session store's — and inherit the fix; a sweep found
+exactly four non-test `sql.Open` sites with a sqlite driver, all now covered.
+
+The tests set `SetMaxIdleConns(0)` to force a fresh connection per query and assert the pragma reads
+back across several of them; **the churn is the load-bearing part**, since it is precisely what an
+`Exec`-configured store fails. They also assert `journal_mode` still reads `wal`, proving the
+appended query string did not mangle a Windows path. No cross-process contention test was written:
+parking a write lock long enough to observe the wait needs a second process and a timing window,
+which is a flake source rather than a regression guard.
+
+**P63.5 — `POST /auth/exchange` is in the audit trail, and deliberately still outside the lockout
+(SHIPPED 2026-08-07).** `authMiddleware` exempts `/auth/exchange` — necessarily, since the frontend
+holds only a page token at that point and has no daemon token to present. The consequence was that
+page-token failures never reached `recordInvalidAuthAttempt`, leaving that endpoint with neither the
+FIND-11 logging cadence nor the P27.12/FIND-14 lockout every other authenticated route carries.
+
+**The brute-force angle was never the concern**: page tokens are 256 bits from `crypto/rand` with a
+60s TTL, single-use, deleted on redemption whether or not the exchange succeeds, and bound to a
+double-submit CSRF nonce. The gap was **observability**, inverted from where it would be useful — a
+process probing `/sessions` produced a `slog.Warn` with a remote address and a cumulative count,
+while the same process probing the one auth endpoint a browser can actually reach produced no log
+line at all. FIND-01 already names a local process driving this flow as accepted residual risk;
+accepted risk should still be observable.
+
+**Following the item's literal instruction would have produced the failure the same item warned
+against.** `recordInvalidAuthAttempt` did two jobs — the counter and the log line, *then*
+`registerAuthFailure`. Calling it from `handleAuthExchange` would have armed the lockout from the one
+endpoint a browser must reach with no daemon token in hand, letting any local process wedge the
+operator's own UI out of loading. So it was split: `logInvalidAuthAttempt` is the logging half, and
+`recordInvalidAuthAttempt` is that plus `registerAuthFailure`. The exchange handler calls the logging
+half on each of its four rejection branches — page token missing, CSRF cookie missing, CSRF header
+missing or mismatched, page token invalid/expired/already-redeemed. Whether the lockout should ever
+engage here is a real question, deliberately left open.
+
+The `invalidAuthAttempts` counter stays shared so the cadence and `cumulative_count` remain coherent
+across both routes; it cannot influence the lockout, which lives in separate
+`authLockMu`/`authConsecutiveFailures` state. The new `reason` attribute was added to the
+middleware's existing lines too — without it all six branches share one message string and are
+indistinguishable in the log, which undercuts the point — and is always a fixed handler-side string,
+never attacker data. The invalid/expired/already-redeemed branch names all three causes rather than
+distinguishing them: `exchangePageToken` returns a bare bool, and a finer split would leak redemption
+state into the log for no observability gain.
+
+`TestAuthExchangeFailuresDoNotArmLockout` fires `authLockThreshold*3` failed exchanges and asserts the
+streak is still zero, no lock deadline is set, and a subsequent correctly-authenticated request
+returns 200 rather than 429. That test is the item, not a supplement to it.
+
+**P63.6 — the permission stack's order is stated once, where it stays correct (SHIPPED 2026-08-07).**
+Three consecutive comments in `Server.buildGate` each claimed the outermost position. The real
+evaluation order is `Scope → PersonaTool → Rules → Contextual → Mode`, so only the scope one was
+right: rules were third and claimed first, persona tools second and claimed first. Each had been
+correct when written; none was updated as a layer landed above it. `CLAUDE.md` carried the same rot,
+describing `PersonaToolGate` as *"wrapped outermost in `server.newEngine`"* — wrong on both counts.
+
+Filed and fixed because of **what the comments were doing**. They did not describe the code, they
+justified security ordering — the rules comment argued they are "evaluated before the contextual and
+mode gates," which is the kind of statement a future reader reorders against. A wrong ordering claim
+on a permission stack is worse than no claim, and the stack had two.
+
+The order now lives in `buildGate`'s doc comment, which already listed the stack and is the one place
+that stays correct as layers are added, together with an instruction to extend *that list* rather
+than restate a position at each site — the restating is what rotted. Each site now describes only
+what its layer does. The scope site keeps its argument, being the one that was right, but reframed
+from a position claim to **why it must go on last**: it binds hardest, so anything added after it
+would relax a containment the run opted into. That claim survives a reorder; "it is the outermost"
+is the one that does not.
+
+**P63.7 — the TUI `Update` switch is split into per-message-domain files (SHIPPED 2026-08-07,
+`Engine.Run` half split out as P63.9).** P40.5 decomposed `tui.go` from 4,731 to 2,285 lines and
+closed with one sentence: *"The finer per-message-domain split of the `Update` switch is left as
+opportunistic follow-up."* The opportunity was not taken and the target grew — `update.go` was 1,344
+lines containing exactly one function, `model.Update` at 1,324, up from the 1,249 P40.5 recorded, and
+the largest function in the tree by nearly a factor of two.
+
+`update.go` is now **181 lines** and does nothing but dispatch: the modal overlays get first refusal
+in the order they stack on screen, then the per-domain handlers own the work, then anything unclaimed
+falls through to the composer. Twelve files — overlay, dialog, key, slash, stream, session, shell,
+status, clipboard, layout, tick, compose — grouped by what a message *is*, not by line count.
+
+Pure code motion by the P40.5/P40.6 method: nothing renamed, no control flow changed, no bug fixed in
+passing, and gated on the eval golden transcripts showing no diff (`tool_round_trip.golden.json`
+byte-identical; the suite was never run with `AEGIS_EVAL_UPDATE`, which would have destroyed the
+entire safety property). The +330 lines over the original are package blocks, doc comments and
+signatures.
+
+Two handler shapes appear, forced by the original control flow rather than chosen: a case that always
+returns became `(tea.Model, tea.Cmd)`; a case that falls through to the composer returns a trailing
+`bool`, and the dispatcher re-adopts the model it hands back. **That second shape is load-bearing**
+— several fall-through paths call pointer-receiver helpers (`resizePane`, `diagnoseLastFailureCmd`,
+`toggleTerminal`) that mutate `m`, so a moved block that dropped the returned model would have been a
+silent behavior change on a value receiver.
+
+`internal/tui` coverage moved **58.2% → 58.1%**, i.e. slightly down, and that is the honest reading
+rather than a disappointment: the split adds dispatcher statements no existing test exercises. The
+item's argument was that a 1,324-line function is not unit-testable at any reasonable effort and the
+split is the *precondition* for moving the number, not the thing that moves it.
+
+`Engine.Run` was left untouched and is now **P63.9**. Building the safe half is what made the
+distinction concrete: `Update`'s switch cases were already independent units, so moving one could not
+change what another did, while `Run` has no such seams and extracting from a 10-deep scope requires
+first deciding what is genuinely per-turn state and what is run-scoped. That is a design question,
+not code motion, and it does not belong under a heading whose other half was mechanical.
+
+---
+
 **Last updated:** 2026-08-06 — off a Tier-4 assessment pass that measured before deciding:
 **P61.7's in-repo half shipped**, **P61.7(b) shipped** (the classifier disagreement the same
 measurement exposed), **P49.3 dropped**, and **P62.1 filed** (repo-map selection, Tier 2) on a
