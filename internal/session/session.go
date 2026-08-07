@@ -85,9 +85,24 @@ func (s *Store) SetCheckpointCleaner(c CheckpointCleaner) {
 	s.checkpoints = c
 }
 
+// busyTimeoutDSN makes every connection the pool opens wait up to 5s for a
+// contended lock instead of failing with SQLITE_BUSY immediately (P63.4).
+// SetMaxOpenConns(1) only serializes writers inside *this* process; an
+// `aegis chat` CLI and a running `aegis serve` contend across processes, which
+// is exactly the case WAL is meant to survive.
+//
+// It is a DSN parameter rather than a `db.Exec("PRAGMA busy_timeout=...")`
+// because busy_timeout is per-connection state, not persisted in the database
+// file the way journal_mode=WAL is: an Exec sets it on whichever pooled
+// connection happens to serve it, and any connection the pool opens later
+// (after an idle close or a connection error) silently reverts to the default.
+// modernc.org/sqlite applies `_pragma=` params in newConn, so every connection
+// gets it.
+const busyTimeoutDSN = "?_pragma=busy_timeout(5000)"
+
 // Open opens (and migrates) the session store at path.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+busyTimeoutDSN)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}

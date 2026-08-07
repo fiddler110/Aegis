@@ -55,6 +55,14 @@ type Store struct {
 	embedder embed.Embedder // nil = BM25-only (default)
 }
 
+// busyTimeoutDSN makes every connection the pool opens wait up to 5s for a
+// contended lock instead of failing with SQLITE_BUSY immediately (P63.4). It is
+// a DSN parameter rather than a `PRAGMA busy_timeout` Exec because the setting
+// is per-connection and is not persisted in the database file the way
+// journal_mode=WAL is — an Exec would cover only whichever pooled connection
+// served it. See internal/session for the longer note.
+const busyTimeoutDSN = "?_pragma=busy_timeout(5000)"
+
 // Open opens (or creates) the long-term memory store at dbPath. project is a
 // short name that scopes entity lookups (typically the workspace directory base
 // name, e.g. "myrepo"). embedder is optional (nil disables semantic recall).
@@ -62,7 +70,7 @@ func Open(project, dbPath string, embedder embed.Embedder) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+busyTimeoutDSN)
 	if err != nil {
 		return nil, fmt.Errorf("open longmem db: %w", err)
 	}

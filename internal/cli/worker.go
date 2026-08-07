@@ -256,16 +256,18 @@ func openCheckpointSnapshotter(spec swarm.WorkerSpec) (*checkpoint.Snapshotter, 
 	if spec.Config.CheckpointID == "" || spec.SessionDBPath == "" {
 		return nil, func() {}
 	}
-	db, err := sql.Open("sqlite", spec.SessionDBPath)
+	// busy_timeout rides on the DSN, not a `PRAGMA busy_timeout` Exec (P63.4):
+	// unlike journal_mode=WAL it is per-connection state that is not persisted
+	// in the database file, so an Exec covers only whichever pooled connection
+	// served it and any connection opened later reverts to the immediate-fail
+	// default. modernc.org/sqlite applies `_pragma=` params to every new
+	// connection. Same value and mechanism as session/longmem/knowledge.
+	db, err := sql.Open("sqlite", spec.SessionDBPath+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, func() {}
 	}
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		_ = db.Close()
-		return nil, func() {}
-	}
-	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
 		_ = db.Close()
 		return nil, func() {}
 	}
