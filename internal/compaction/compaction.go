@@ -49,6 +49,17 @@ const (
 	// toolResultRuneLimit is the long-standing per-tool-result cap applied when
 	// rendering a transcript, independent of any fit-driven shrinking.
 	toolResultRuneLimit = 800
+
+	// prunePrefixCacheBuffer / prunePrefixCacheRatio gate the pre-pass when
+	// PreservePrefixCache is set. They deliberately mirror the compaction
+	// trigger constants above but one step earlier — an absolute 40k floor for
+	// large windows, a 25%-free ratio for small ones, against compaction's 20k
+	// and 20% — so the pre-pass still gets its chance to bring the conversation
+	// back under budget *before* the LLM summarizer is reached, which is the
+	// whole point of running it as a pre-pass. See shouldPrune for why the gate
+	// exists at all.
+	prunePrefixCacheBuffer = 2 * largeContextWindowBuffer
+	prunePrefixCacheRatio  = 0.25
 )
 
 // blockTruncationLadder is the descending ladder of per-block rune caps tried,
@@ -67,6 +78,9 @@ type Summarizer struct {
 	contextWindow atomic.Int64 // model context window in tokens; 0 = use maxBudget. Atomic: updatable after construction (late Ollama detection) while Compact runs concurrently.
 	keepRecent    int          // minimum number of trailing messages kept verbatim
 	summaryTokens int
+	// preservePrefixCache makes the deterministic pre-pass headroom-gated
+	// instead of unconditional; see shouldPrune.
+	preservePrefixCache bool
 }
 
 // Options configures a Summarizer.
@@ -83,6 +97,21 @@ type Options struct {
 	MaxBudget     int
 	KeepRecent    int // default 8
 	SummaryTokens int // default 1024
+	// PreservePrefixCache tells the summarizer it is talking to a backend that
+	// caches the KV of the longest common prefix of each request — a local
+	// llama.cpp/Ollama server — where rewriting a message in the middle of the
+	// conversation is not free the way it is against a cloud API. When set, the
+	// deterministic pre-pass stops running unconditionally and only fires once
+	// the conversation is close enough to the window for the space it frees to
+	// be worth a prefill recompute (see shouldPrune). Off by default: for a
+	// per-token-billed cloud provider the pre-pass really is free and the
+	// existing unconditional behaviour is correct.
+	//
+	// Callers set this from config.LocalBackend(provider, base URL). It is a
+	// plain bool rather than a config type on purpose — internal/compaction
+	// answers a question about the *transport's* cost model and has no other
+	// reason to know what a Config is.
+	PreservePrefixCache bool
 }
 
 // New constructs a Summarizer.
@@ -98,11 +127,12 @@ func New(opts Options) *Summarizer {
 		opts.SummaryTokens = 1024
 	}
 	s := &Summarizer{
-		adapter:       opts.Adapter,
-		model:         opts.Model,
-		maxBudget:     opts.MaxBudget,
-		keepRecent:    opts.KeepRecent,
-		summaryTokens: opts.SummaryTokens,
+		adapter:             opts.Adapter,
+		model:               opts.Model,
+		maxBudget:           opts.MaxBudget,
+		keepRecent:          opts.KeepRecent,
+		summaryTokens:       opts.SummaryTokens,
+		preservePrefixCache: opts.PreservePrefixCache,
 	}
 	s.contextWindow.Store(int64(opts.ContextWindow))
 	return s
@@ -141,6 +171,62 @@ func (s *Summarizer) shouldCompact(estimated int) bool {
 	return estimated > s.maxBudget
 }
 
+// shouldPrune reports whether the deterministic pre-pass is worth running on
+// this call, given the current estimated token count.
+//
+// Without preservePrefixCache the answer is always yes, which is the behaviour
+// this package has always had and the right one for a cloud API: the pass costs
+// no LLM call and no I/O, only a scan over messages already in memory, so
+// deferring it until the conversation is near the window would keep resending
+// every already-committed write payload for however many turns it takes to
+// first cross the threshold.
+//
+// That accounting inverts on a local backend. llama.cpp/Ollama cache the KV of
+// the longest common prefix of a request, so an append-only conversation is
+// nearly free to prefill, but rewriting anything in the middle discards every
+// cached token after that point. The pre-pass rewrites the middle by
+// construction — it edits tool results and tool_use inputs in the *prefix*,
+// ahead of the keepRecent tail. Instrumenting a 142-minute unattended drive
+// against a local Ollama model made the price concrete: of 238 turns, 163 hit
+// the prefix cache and prefilled in under 3 seconds (~70-100k tok/s implied),
+// and the only two turns whose context *shrank* were also the two slowest
+// prefills in the run —
+//
+//	turn 119: 60,471 -> 57,518 tokens (-2,953), 186.4s prefill (~309 tok/s)
+//	turn 171: 82,577 -> 79,751 tokens (-2,826), 312.2s prefill (~255 tok/s)
+//
+// 8.3 minutes, ~6% of total wall clock, to reclaim ~3.5% of a context that had
+// plenty of room left. Every other slow prefill in that run had a large
+// *positive* delta, i.e. real new tokens to compute.
+//
+// So when preservePrefixCache is set the pass is gated on headroom: skip it
+// while the conversation is comfortably below the window, run it once the space
+// it frees actually buys something. The gate is set one step ahead of the
+// compaction trigger (25% free vs 20% free; 40k vs 20k on a large window) so
+// pruning still gets its chance to avoid an LLM summarization call rather than
+// landing at the same moment. That ordering matters — the same run did hit a
+// genuine context overflow later on, and the goal here is "prune when it buys
+// real headroom", not "stop pruning".
+//
+// A Summarizer with no known context window returns true (prune) even under
+// preservePrefixCache: with no window there is no headroom to measure, and
+// guessing wrong in that direction only costs a prefill, while guessing wrong
+// in the other costs an overflow.
+func (s *Summarizer) shouldPrune(estimated int) bool {
+	if !s.preservePrefixCache {
+		return true
+	}
+	win := int(s.contextWindow.Load())
+	if win <= 0 {
+		return true
+	}
+	remaining := win - estimated
+	if win > largeContextWindowThreshold {
+		return remaining < prunePrefixCacheBuffer
+	}
+	return remaining < int(float64(win)*prunePrefixCacheRatio)
+}
+
 // EstimateTokens approximates token count using the shared script-aware
 // heuristic (tokenest). It previously maintained a separate flat chars/4
 // estimate, which undercounted CJK/non-ASCII-heavy conversations and could
@@ -150,12 +236,14 @@ func EstimateTokens(system string, msgs []provider.Message) int {
 	return tokenest.Messages(system, msgs)
 }
 
-// Compact always runs the cheap deterministic prune pass (stale tool
-// results, already-committed write/edit payloads — see pruneStaleToolResults)
-// and additionally summarizes the older prefix of the conversation with an
-// LLM call if it still exceeds the budget after that pass, returning the
-// rewritten message list. It chooses a boundary that preserves
-// tool_use/tool_result pairing by cutting only before an assistant message.
+// Compact runs the cheap deterministic prune pass (stale tool results,
+// already-committed write/edit payloads — see pruneStaleToolResults) and
+// additionally summarizes the older prefix of the conversation with an LLM call
+// if it still exceeds the budget after that pass, returning the rewritten
+// message list. It chooses a boundary that preserves tool_use/tool_result
+// pairing by cutting only before an assistant message. The prune pass runs on
+// every call unless Options.PreservePrefixCache is set, in which case it is
+// gated on headroom — see shouldPrune.
 func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider.Message) ([]provider.Message, bool, error) {
 	return s.compact(ctx, system, msgs, false)
 }
@@ -170,18 +258,26 @@ func (s *Summarizer) ForceCompact(ctx context.Context, system string, msgs []pro
 }
 
 func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider.Message, force bool) ([]provider.Message, bool, error) {
-	// Deterministic pre-pass — drop stale tool results (superseded file
-	// reads, old search dumps, already-committed write/edit payloads) on
-	// every call, independent of the budget gate below. It costs no LLM call
-	// and no I/O, only a scan over messages already in memory, so there is no
-	// reason to defer it until the conversation is already near the context
-	// window: a long tool-heavy run (many files written/edited in one
-	// session — e.g. a skill driving a multi-file build to completion) would
-	// otherwise keep resending every already-committed payload verbatim for
-	// however many turns it takes to first cross the threshold, which is
-	// exactly the peak-context pressure this pass exists to relieve.
-	msgs, prunedChars := pruneStaleToolResults(msgs, s.keepRecent)
-	changedByPrune := prunedChars > 0
+	// Deterministic pre-pass — drop stale tool results (superseded file reads,
+	// old search dumps, already-committed write/edit payloads) ahead of the
+	// budget gate below, so a long tool-heavy run does not keep resending every
+	// already-committed payload verbatim for however many turns it takes to
+	// first cross the threshold. By default it runs on every call; under
+	// PreservePrefixCache it runs only when it buys real headroom, because on a
+	// prefix-caching local backend rewriting the middle of the conversation
+	// costs a full prefill recompute. shouldPrune carries the reasoning and the
+	// measurements. A forced compaction always prunes: the caller has asked for
+	// space explicitly and is paying for a summarization call anyway.
+	//
+	// Note the ordering of the || — under the default (cloud) configuration the
+	// short-circuit means EstimateTokens is not computed here at all, exactly as
+	// before.
+	var changedByPrune bool
+	if force || !s.preservePrefixCache || s.shouldPrune(EstimateTokens(system, msgs)) {
+		var prunedChars int
+		msgs, prunedChars = pruneStaleToolResults(msgs, s.keepRecent)
+		changedByPrune = prunedChars > 0
+	}
 
 	if !force && !s.shouldCompact(EstimateTokens(system, msgs)) {
 		return msgs, changedByPrune, nil

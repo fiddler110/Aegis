@@ -193,6 +193,51 @@ per-turn map. **This supersedes P49.3** (dropped): the constraint is budget and 
 extraction fidelity — and these numbers strengthen that drop, since LSP would deepen content that
 already cannot fit at the top level.
 
+### P62.2 — Validate the prefix-cache pruning gate against an adversarial fixture (it shipped unmeasured)
+
+`compaction.Options.PreservePrefixCache` (shipped 2026-08-07) makes the deterministic prune pre-pass
+headroom-gated instead of unconditional on a local backend, because rewriting the middle of a
+conversation discards the llama.cpp/Ollama prefix KV cache. The **motivating** measurement is solid —
+on a 2026-08-07 drive against an external repo, 163 of 238 turns prefilled in under 3s, and the only two turns
+whose context *shrank* were also the two slowest prefills in the run:
+
+| turn | context | delta | prefill | implied |
+|---|---|---|---|---|
+| 119 | 60,471 → 57,518 | −2,953 | 186.4s | ~309 tok/s |
+| 171 | 82,577 → 79,751 | −2,826 | 312.2s | ~255 tok/s |
+
+8.3 minutes (~6% of a 142-minute run) to reclaim ~3.5% of a context with room to spare.
+
+**What is missing is the after measurement.** Two subsequent drives against that same repo never
+reproduced a prune-induced cache miss — run 2 aborted in the findings phase before reaching the
+turn range where run 1's two events occurred, and run 3 resumed mid-suite and finished in 10 turns.
+So the gate has unit tests (`internal/compaction/prefixcache_test.go`: off ⇒ byte-identical, on with
+headroom ⇒ skipped, on near the window ⇒ prunes, `force` ⇒ always prunes) and **zero live evidence
+either that it saves the 8.3 minutes or that it costs headroom**. The headroom risk is the real one:
+the gate deliberately lets more content sit in context, and the same run *did* hit a genuine overflow
+in its findings phase.
+
+Waiting for the condition to recur by chance is not a plan — three runs produced three different
+workloads, because the model's threat-consolidation strategy varies per invocation (31→19, 40→1:1,
+40→15). **Build an adversarial fixture instead**: a synthetic `2-*-analysis.md` with 60+ threats and
+a pre-scaffolded suite, driven through the findings phase, sized so the conversation reliably crosses
+the prune threshold. Measure with the gate on and off, same fixture, same seed: total wall clock,
+per-turn `prompt_eval_duration_ms`, the count of turns whose context shrank, and whether the on-run
+overflows more. If the gate does not clearly win on wall clock without adding overflows, tighten the
+threshold (currently 25% free / 40k on a large window) or revert it — it is an optimization, and an
+unmeasured optimization that can cost headroom is not worth keeping.
+
+The same fixture validates the **P62.3 overflow-escalation ladder** (`OverflowEscalationDirective` +
+`maxPhaseOverflowResets`, shipped alongside), which is unvalidated for exactly the same reason: it
+never fired live. Note the trap that wasted a validation attempt — restoring identical on-disk state
+does **not** reproduce a local-model failure. Run 2's *within-run* retries were byte-identical, which
+looks like determinism but is not: re-running the same state in a fresh process produced a completely
+different (working) strategy. The fixture has to force the condition structurally, not restore a state
+that once triggered it.
+
+Priority: Tier 2 — no user-visible breakage today, but two shipped behaviors are riding on one
+run's arithmetic, and one of them can plausibly make context overflow *more* likely.
+
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
 The threat-modeling skill's primary build is a single-context linear build the driving model runs

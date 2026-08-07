@@ -827,6 +827,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			Adapter:       provider.WithNumCtx(adapter, win),
 			Model:         compModel,
 			ContextWindow: win,
+			// A local model server caches the KV of each request's longest
+			// common prefix, so rewriting the middle of the conversation costs
+			// a full prefill recompute instead of nothing (P61.x) — make the
+			// deterministic prune pre-pass headroom-gated rather than
+			// unconditional there. Same local/loopback test admission control
+			// uses; cloud providers are unaffected.
+			PreservePrefixCache: config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL),
 		}
 		// A local provider whose window is still unknown (Ollama unreachable at
 		// startup): skip auto-compaction rather than falling back to the 120k

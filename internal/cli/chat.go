@@ -716,6 +716,11 @@ func driveCompaction(ctx context.Context, cfg *config.Config, adapter provider.A
 		Adapter:       adapter,
 		Model:         compModel,
 		ContextWindow: ctxWin,
+		// Mirrors the daemon: on a prefix-caching local backend the prune
+		// pre-pass is gated on headroom rather than run unconditionally, since
+		// rewriting the middle of the conversation there costs a full prefill
+		// recompute. A phased drive is exactly the workload that measured it.
+		PreservePrefixCache: config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL),
 	}
 	// A local provider whose window is still unknown: skip auto-compaction
 	// rather than defaulting to the 120k cloud budget, which on a 4k-32k local

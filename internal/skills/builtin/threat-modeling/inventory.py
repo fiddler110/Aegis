@@ -63,6 +63,80 @@ FIXED_DEPLOY = ["internet-facing", "internal-network", "localhost-service", "loc
 TIER2_PREREQS = {"authenticated-user", "internal-network"}
 TIER3_PREREQS = {"local-process", "host-compromise"}
 
+# The sidecar's fixed component-type axis (skeleton-inventory.md:
+# `type: process / external_interactor / data_store`).
+CANONICAL_TYPES = ("process", "external_interactor", "data_store")
+
+# Synonyms -> that axis. The architecture table asks for
+# `Process / External Interactor / Data Store` (output-formats.md), but every
+# *other* document in this skill teaches the standard DFD vocabulary, so a
+# model writing the table from what it just read writes the textbook word:
+#   * `external entity`   — stride.md ("*External entity*: Spoofing,
+#                           Repudiation"; "external entities, processes, data
+#                           stores, data flows"), diagram-conventions.md
+#                           ("External entity (a user, an external service)"),
+#                           linddun.md ("processes, data stores ... entities")
+#   * `external` / `datastore` — the fixed `classDef` names every diagram in
+#                           this skill applies (diagram-conventions.md:
+#                           "class ComponentId process (or external/datastore)")
+#   * `actor`             — trike.md's Actors ("every distinct class of
+#                           user/system/service that interacts with the
+#                           system") and pasta.md's actors: the same concept
+#   * `service` / `handler` — diagram-conventions.md: "Process (a service, an
+#                           agent, a handler)"
+#   * `database` / `file store` / `cache` — diagram-conventions.md: "Data store
+#                           (a database, a file store, a cache)"
+#   * `external service` / `user` — diagram-conventions.md's two examples of an
+#                           external entity
+# Plus the plain plural/spacing variants of each. That is a *vocabulary*
+# difference, not a disagreement about the model, and it cost a real run a
+# full model round-trip at ~80k context to fix by hand.
+#
+# Deliberately NOT mapped, because their meaning is genuinely distinct:
+#   * `data flow` / `flow` and `trust boundary` — separate DFD element kinds
+#     (stride.md lists all five); a flow that landed in the component table is
+#     a real modeling error and must still fail.
+#   * `agent` — ambiguous: diagram-conventions.md files it under Process, but
+#     an agent this system merely talks to is an external interactor. An
+#     ambiguous word should fail loudly rather than be silently canonicalized.
+TYPE_SYNONYMS = {
+    # -> external_interactor
+    "external_entity": "external_interactor",
+    "external_entities": "external_interactor",
+    "entity": "external_interactor",
+    "entities": "external_interactor",
+    "external": "external_interactor",
+    "external_actor": "external_interactor",
+    "external_actors": "external_interactor",
+    "actor": "external_interactor",
+    "actors": "external_interactor",
+    "interactor": "external_interactor",
+    "interactors": "external_interactor",
+    "external_interactors": "external_interactor",
+    "external_service": "external_interactor",
+    "external_services": "external_interactor",
+    "user": "external_interactor",
+    "users": "external_interactor",
+    # -> process
+    "processes": "process",
+    "service": "process",
+    "services": "process",
+    "handler": "process",
+    "handlers": "process",
+    # -> data_store
+    "data_stores": "data_store",
+    "datastore": "data_store",
+    "datastores": "data_store",
+    "store": "data_store",
+    "stores": "data_store",
+    "database": "data_store",
+    "databases": "data_store",
+    "file_store": "data_store",
+    "file_stores": "data_store",
+    "cache": "data_store",
+    "caches": "data_store",
+}
+
 
 # --------------------------------------------------------------------------- #
 # Cell / id / value normalization
@@ -89,8 +163,44 @@ def extract_id(cell):
 
 def norm_type(s):
     """Component Type -> the sidecar's fixed axis: process / external_interactor
-    / data_store (architecture writes them Title-Cased with a space)."""
-    return clean_cell(s).lower().replace(" ", "_").replace("-", "_")
+    / data_store (architecture writes them Title-Cased with a space).
+
+    Mechanical case/separator folding first, then the DFD-synonym table above
+    (`External Entity` -> `external_interactor`), so a document written in the
+    standard DFD vocabulary agrees with a sidecar written in the skeleton's.
+    Anything unrecognized is returned folded but unchanged — an unknown type is
+    still a real mismatch and must still fail."""
+    t = clean_cell(s).lower().replace(" ", "_").replace("-", "_")
+    t = re.sub(r"_+", "_", t).strip("_")
+    return TYPE_SYNONYMS.get(t, t)
+
+
+# A trailing parenthetical annotation on an Anchor cell: `foo.jsx (active
+# entrypoint per README.md)`. The leading `\s+` is load-bearing — it keeps a
+# method/callable anchor (`NewProxy()`, `Router.handle(req)`) intact, since
+# those parentheses are part of the artifact's own name, not a note about it.
+ANCHOR_NOTE_RE = re.compile(r"\s+\([^()]*\)\s*$")
+
+
+def norm_anchor(s):
+    """Component Anchor -> the bare artifact path/class it names.
+
+    The Anchor is an identity ("the real file/class/manifest this component is
+    named after", skeleton-inventory.md) and is what a future run matches on, so
+    a trailing editorial note — `... (active entrypoint per README.md)`,
+    `... (lines 40-120)` — is annotation, not identity. Stripping it here, at
+    the one place the anchor is extracted, keeps the emitted sidecar canonical
+    and keeps the --check comparison from failing on prose. A *different* path
+    is untouched and still fails."""
+    a = clean_cell(s)
+    while True:
+        m = ANCHOR_NOTE_RE.search(a)
+        if not m:
+            return a
+        head = a[:m.start()].rstrip()
+        if not head:
+            return a      # the cell is nothing but the parenthetical — keep it
+        a = head
 
 
 def norm_prereq(s):
@@ -256,7 +366,8 @@ def find_analysis_file(run_dir):
 def parse_components(arch_text):
     """Key Components table (Component|Type|Anchor|Description) -> component
     entries. The Component cell is the id (matches the diagram and analysis
-    `## <Component>` headings); Type is normalized to the fixed axis."""
+    `## <Component>` headings); Type is normalized to the fixed axis and Anchor
+    to the bare artifact it names (see norm_type / norm_anchor)."""
     comps = []
     for r in find_table_rows(arch_text, {"component", "type", "anchor"}):
         cid = clean_cell(r.get("component", ""))
@@ -264,7 +375,7 @@ def parse_components(arch_text):
             continue
         comps.append({
             "id": cid,
-            "anchor": clean_cell(r.get("anchor", "")),
+            "anchor": norm_anchor(r.get("anchor", "")),
             "type": norm_type(r.get("type", "")),
         })
     comps.sort(key=lambda c: natkey(c["id"]))
@@ -704,6 +815,23 @@ def read_inventory(path):
 # --check: named checks with file evidence
 # --------------------------------------------------------------------------- #
 
+def canon_component(entry):
+    """One component entry, both fields put through the same canonicalizer the
+    docs side already uses. The generated side comes from `parse_components`
+    and is canonical by construction; the on-disk side is whatever the sidecar
+    literally says, and a hand-written sidecar spells the axis in the DFD
+    vocabulary (`External Entity`) or copies the Anchor cell's trailing note
+    just as readily as the architecture document does. Comparing both sides on
+    the canonical form makes the check test *agreement*, not spelling — a
+    genuinely different type or a different anchor path is untouched."""
+    out = dict(entry)
+    if "anchor" in out:
+        out["anchor"] = norm_anchor(str(out["anchor"]))
+    if "type" in out:
+        out["type"] = norm_type(str(out["type"]))
+    return out
+
+
 def _diff_lists(disk, gen):
     """Field-level diff of two id-keyed entry lists, in natural id order."""
     dm = {d.get("id"): d for d in disk}
@@ -773,7 +901,8 @@ def run_checks(run_dir):
     # 4-6. components / flows / threats agree with the documents, field by
     #      field. (0.1-architecture.md, 1-model.md, 2-*-analysis.md +
     #      3-findings.md for status/finding/cwe/owasp.)
-    cp = _diff_lists(disk["components"], gen["components"])
+    cp = _diff_lists([canon_component(c) for c in disk["components"]],
+                     gen["components"])
     results.append(("components match 0.1-architecture.md", not cp, cp))
     fp = _diff_lists(disk["flows"], gen["flows"])
     results.append(("flows match 1-model.md", not fp, fp))

@@ -35,11 +35,22 @@ type verifyScript struct {
 // mismatches, and stale counts that shipped uncaught in the 2026-07-21 P38.1
 // re-test were every one of them flagged by verify.py — they only escaped
 // because nothing ran it.
+//
+// `inventory.py --check` deliberately stays in the triple even though the
+// sidecar it validates is now regenerated from the same documents moments
+// earlier (see regenerateInventorySidecar) — see that function's comment for why
+// the comparison is not entirely tautological.
 var threatModelVerifyScripts = []verifyScript{
 	{file: "verify.py"},
 	{file: "lint_dfd.py"},
-	{file: "inventory.py", args: []string{"--check"}},
+	{file: inventoryScript, args: []string{"--check"}},
 }
+
+// inventoryScript is the bundled builder for the `inventory.yaml` sidecar. It
+// has two modes: bare `<run-dir>` derives and writes the sidecar from the run's
+// markdown, `--check` validates an existing sidecar against that same markdown.
+// The drive runs both, in that order, on every verify round.
+const inventoryScript = "inventory.py"
 
 // VerifySkillOutputs runs a preloaded skill's bundled verification scripts
 // against its completed run directory and returns any failure text. ran is
@@ -47,6 +58,10 @@ var threatModelVerifyScripts = []verifyScript{
 // directory exists yet, or no python interpreter is on PATH — in which case the
 // caller falls back to the pre-P39.6 behaviour of treating "all markers filled"
 // as done. When ran is true and failures is empty, the suite verified clean.
+//
+// Before the checks run it regenerates the derived `inventory.yaml` sidecar
+// (regenerateInventorySidecar), so what the checks read is always what the
+// markdown says — never what the model typed into the sidecar by hand.
 func VerifySkillOutputs(skillName, skillDir, cwd string) (failures string, ran bool) {
 	if skillName == "" || skillDir == "" {
 		return "", false
@@ -67,6 +82,18 @@ func VerifySkillOutputs(skillName, skillDir, cwd string) (failures string, ran b
 	}
 	const maxFailureBytes = 6000
 	var b strings.Builder
+	// Rebuild the derived sidecar first, so every check below reads a sidecar
+	// that provably came from the markdown on disk. This sits
+	// inside VerifySkillOutputs rather than beside normalizeSkillIDs in drive.go
+	// on purpose — see regenerateInventorySidecar. Unlike the ID normalizer, a
+	// failure here is NOT best-effort: it is folded into the failure report so
+	// the drive's bounded fix loop acts on it.
+	if _, regenErr := regenerateInventorySidecar(skillDir, runDir, py); regenErr != nil {
+		// ran=true even if every script below is somehow skipped: we are
+		// returning failure text, and a caller told ran=false discards it.
+		ran = true
+		fmt.Fprintf(&b, "$ %s <run-dir>\n%v\n\n", inventoryScript, regenErr)
+	}
 	for _, s := range threatModelVerifyScripts {
 		script := filepath.Join(skillDir, s.file)
 		if _, err := os.Stat(script); err != nil {
@@ -120,6 +147,106 @@ func normalizeSkillIDs(skillName, skillDir, cwd string) (ran bool, err error) {
 	}
 	if out, e := exec.Command(py, script, runDir).CombinedOutput(); e != nil {
 		return true, fmt.Errorf("normalize_ids.py: %v: %s", e, strings.TrimSpace(string(out)))
+	}
+	return true, nil
+}
+
+// regenerateInventorySidecar rebuilds the run's `inventory.yaml` from the run's
+// own markdown by running the bundled inventory.py in generate mode (no
+// `--check`), immediately before the phase-6 checks read it.
+//
+// Why this exists. `inventory.yaml` is a *derived* artifact: inventory.py's own
+// docstring says it builds the sidecar "directly from the run's own markdown
+// files, never from the model's memory", and phasePromptAssessment already tells
+// the model in bold terms to run inventory.py and to NOT hand-write the sidecar.
+// That prompt-level fix demonstrably failed. In an instrumented 142-minute
+// unattended threat-model drive the model hand-edited inventory.yaml anyway (six
+// `edit_file` calls, alongside three inventory.py runs and seven ad-hoc
+// `python3 -c` sys.path hacks), and the resulting sidecar/doc drift —
+//
+//	FAIL  components match 0.1-architecture.md
+//	  present in inventory, not in docs: Azure
+//
+// — was a large part of a phase-6 verify tail that cost 49 minutes, 35% of the
+// whole run, to clear a purely mechanical inconsistency that should never have
+// been expressible. A prompt cannot make an artifact underivable; regenerating
+// it can. Whatever the model did to the sidecar is now irrelevant: it is
+// overwritten before anything reads it.
+//
+// Where it runs, and why here. Two constraints fix the position:
+//
+//   - After ID normalization. normalize_ids.py canonicalizes threat/finding IDs
+//     *in the markdown*; a sidecar built before it would be derived from
+//     IDs that are about to change. drive.go calls normalizeSkillIDs at the top
+//     of each phase-6 iteration, immediately before VerifySkillOutputs, and this
+//     runs as the first step of VerifySkillOutputs, so normalize-then-regenerate
+//     holds by construction on every round.
+//   - Before every check round, not once. normalizeSkillIDs is called once per
+//     phase-6 iteration from drive.go, but VerifySkillOutputs is called from
+//     seven places as the bounded fix loop and the P47.9 content re-entries
+//     iterate — and each of those rounds is a model turn that just edited the
+//     markdown. Regenerating once would leave the sidecar stale again the moment
+//     the first fix round landed, reintroducing exactly the drift this removes,
+//     only later in the run. Living inside VerifySkillOutputs makes "the checks
+//     never read a stale sidecar" a property of the function rather than of
+//     seven call sites, and needs no drive.go change. The cost is trivial:
+//     inventory.py is a stdlib-only parse of a handful of markdown files, it is
+//     deterministic (every field comes from the docs or from git, none from the
+//     clock) and therefore idempotent, so a regeneration that changes nothing
+//     writes byte-identical bytes and leaves SuiteFingerprint — and the quality
+//     stamp keyed to it — unmoved.
+//
+// On the tautology. Regenerating the sidecar from the docs immediately before
+// `inventory.py --check` compares sidecar to docs does make most of that check
+// unfailable. That is the intent, not an oversight: the drift it was detecting
+// was hand-authoring of a derived file, which is now structurally impossible, so
+// comparing a derivation against its own source is tautological *by design*. The
+// check nonetheless stays in the triple, because two of its ten checks are
+// assertions about the *markdown*, not about the sidecar, and survive
+// regeneration intact:
+//
+//   - "analysis file (2-*-analysis.md) present" — generate mode only writes a
+//     stderr warning and exits 0 when no analysis file parses, so without
+//     --check a suite with an unparseable analysis file would regenerate an
+//     empty threats list and sail through.
+//   - "references resolve to existing ids" — after regeneration this compares
+//     the generated sidecar against itself, which makes it a *cross-document*
+//     consistency check: a flow in 1-model.md naming an endpoint that
+//     0.1-architecture.md's Key Components table does not define still fails.
+//
+// The remaining checks become fast no-ops. Dropping --check to buy that would
+// trade real signal for a few hundred milliseconds.
+//
+// What is not tautological is a regeneration that *fails* — a python error, a
+// table the parser cannot read, a non-zero exit — because then nothing knows
+// what the docs say. That is why err here is surfaced by the caller as a verify
+// failure the bounded fix loop acts on, deliberately unlike normalizeSkillIDs,
+// whose failure is genuinely non-fatal (a suite with un-canonicalized IDs is
+// still a suite, and verify.py still gates it). The returned error carries the
+// script's own output plus a pointer at the real remedy, since the usual cause
+// is a malformed table in the markdown and the usual wrong instinct is to
+// "fix" the sidecar.
+//
+// Degradation matches the rest of this file: an older skill build that bundles
+// no inventory.py, no run directory, and no python interpreter are all silent
+// no-ops (ran=false, err=nil), so this is safe to call unconditionally. It takes
+// runDir and py already resolved rather than re-deriving them like
+// normalizeSkillIDs does, because its only caller has just resolved both and
+// re-probing `python --version` on every verify round would be waste.
+func regenerateInventorySidecar(skillDir, runDir, py string) (ran bool, err error) {
+	if skillDir == "" || runDir == "" || py == "" {
+		return false, nil
+	}
+	script := filepath.Join(skillDir, inventoryScript)
+	if _, e := os.Stat(script); e != nil {
+		return false, nil // not bundled in this skill build
+	}
+	if out, e := exec.Command(py, script, runDir).CombinedOutput(); e != nil {
+		return true, fmt.Errorf("FAIL regenerating inventory.yaml from the documents: %v\n%s\n"+
+			"inventory.yaml is DERIVED from the markdown and is rebuilt automatically before every check — "+
+			"do not hand-write or edit it. This failure means the documents themselves could not be parsed: "+
+			"fix the malformed table or section named above with `edit_file`.",
+			e, strings.TrimSpace(string(out)))
 	}
 	return true, nil
 }

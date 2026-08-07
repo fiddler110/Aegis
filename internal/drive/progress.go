@@ -55,6 +55,47 @@ func StuckLoopDirective(withReport bool) string {
 		"- Act on the FIRST outstanding item: open the named file, make one targeted `edit_file`, then move to the next. If one item defeats you, leave it and fix the others — a partly fixed suite is worth more than another loop.\n\n"
 }
 
+// OverflowEscalationDirective is the nudge prepended to a content phase's
+// conversation after a context overflow forced a reset. Without it a reset is
+// purely mechanical — discard the context, re-read the PENDING files from disk —
+// which fixes an overflow caused by *accumulated context* but not one caused by
+// the model's own *plan* being too large for a single generation. The plan is
+// re-derived from the same inputs after the reset, so it comes out identical and
+// fails identically.
+//
+// That is not hypothetical. On a 2026-08-07 live run against an external repo the analysis phase
+// enumerated 40 threats, the findings phase decided to author one finding per
+// threat (FIND-01…FIND-40) and announced that plan, and its write truncated
+// mid-tool-call into malformed JSON (`unexpected end of JSON input`). Each reset
+// replayed it: the prose preceding the 2nd and 3rd truncations was byte-identical.
+// Five truncations, zero findings written, no possibility of convergence — the
+// drive burned 50 minutes before being killed. The earlier run of the same repo
+// survived the same overflow only because it had consolidated 31 threats into 19
+// findings, which happened to fit.
+//
+// So the reset has to change the *strategy*, not just the context: name the real
+// failure (one generation too long, not too many files), forbid re-announcing a
+// whole-file plan, and shrink the unit of work to a single smallest item. It
+// escalates with the reset count because a model that has already ignored the
+// gentler form needs the harder bound, and by the last reset the only instruction
+// left that can still make progress is "one edit, then stop".
+//
+// It deliberately does not repeat StuckLoopDirective's anti-re-derivation text:
+// the overflowing model is not stuck in a read loop, it is trying to do too much
+// at once, which is a different failure with a different remedy.
+func OverflowEscalationDirective(reset, maxResets int) string {
+	b := "YOUR PREVIOUS ATTEMPT WAS TOO LARGE FOR ONE TURN. It was cut off mid-tool-call, so nothing it tried to write was saved. That context has been discarded; this is a fresh one. The problem was the SIZE OF A SINGLE RESPONSE, not the number of files left — retrying the same approach will fail the same way.\n\n" +
+		"- Do NOT restate a plan for the whole file, do NOT enumerate every item you intend to create, and do NOT announce how many there will be. Planning aloud is what ran the response out of room last time.\n" +
+		"- Write the SINGLE next outstanding item — one section, one finding, or one table row — in one `edit_file` call, using the smallest edit that completes it.\n"
+	if reset >= 2 {
+		b += "- Make exactly ONE `edit_file` call this turn and then end the turn. Do not batch two items, and do not continue to the next one — you will be called again immediately.\n"
+	}
+	if reset >= maxResets {
+		b += "- This is the LAST reset available for this phase. If this turn is also too large the phase stops unfinished, so keep this edit as small as it can possibly be.\n"
+	}
+	return b + "\n"
+}
+
 // SameStrings reports whether two already-sorted slices hold the same elements
 // in the same order. Pending-marker scans return sorted results, so this is a
 // cheap way for the P39.7 guard to tell whether a turn changed the PENDING set.
