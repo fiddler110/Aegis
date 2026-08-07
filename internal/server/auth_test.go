@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,5 +138,172 @@ func TestAuthLockoutMessageDoesNotLeakToken(t *testing.T) {
 	body := string(buf[:n])
 	if strings.Contains(body, "secret-token-123") || strings.Contains(body, "totally-wrong-guess-value") {
 		t.Errorf("lockout response body must never contain a token value, got: %s", body)
+	}
+}
+
+// newLoggingAuthTestServer is newAuthTestServer with a capturing logger, for
+// asserting on the audit lines themselves rather than only on status codes.
+func newLoggingAuthTestServer(t *testing.T) (*Server, *httptest.Server, *bytes.Buffer) {
+	t.Helper()
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	cfg := &config.Config{Provider: config.ProviderConfig{Model: "test"}, Permission: config.PermissionConfig{Mode: "plan"}}
+	srv := newWithDeps(cfg, logger, store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "secret-token-123"
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { ts.Close(); store.Close() })
+	return srv, ts, &logBuf
+}
+
+// exchangeRequest builds a POST /auth/exchange carrying whichever of the
+// three credentials the caller wants present; an empty string omits that
+// piece entirely, which is how each failure branch is reached.
+func exchangeRequest(t *testing.T, url, pageToken, csrfCookie, csrfHeader string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url+"/auth/exchange", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pageToken != "" {
+		req.Header.Set("Authorization", "Bearer "+pageToken)
+	}
+	if csrfCookie != "" {
+		req.AddCookie(&http.Cookie{Name: uiCSRFCookieName, Value: csrfCookie})
+	}
+	if csrfHeader != "" {
+		req.Header.Set(uiCSRFHeaderName, csrfHeader)
+	}
+	return req
+}
+
+// TestAuthExchangeFailuresAreLogged covers P63.5: /auth/exchange is exempt
+// from authMiddleware (the frontend has no daemon token yet), which used to
+// mean every rejection there was invisible while a probe against any
+// authenticated route produced a warn line. Each branch gets its own server
+// so the attempt is the first one and therefore always lands on the
+// invalidAuthLogEvery cadence.
+func TestAuthExchangeFailuresAreLogged(t *testing.T) {
+	cases := []struct {
+		name   string
+		build  func(t *testing.T, srv *Server, url string) *http.Request
+		reason string
+	}{
+		{
+			name: "missing page token",
+			build: func(t *testing.T, _ *Server, url string) *http.Request {
+				return exchangeRequest(t, url, "", "nonce", "nonce")
+			},
+			reason: "page token missing",
+		},
+		{
+			name: "missing csrf cookie",
+			build: func(t *testing.T, _ *Server, url string) *http.Request {
+				return exchangeRequest(t, url, "some-page-token", "", "nonce")
+			},
+			reason: "csrf cookie missing",
+		},
+		{
+			name: "csrf mismatch",
+			build: func(t *testing.T, _ *Server, url string) *http.Request {
+				return exchangeRequest(t, url, "some-page-token", "nonce", "different-nonce")
+			},
+			reason: "csrf header missing or mismatched",
+		},
+		{
+			name: "unknown page token",
+			build: func(t *testing.T, _ *Server, url string) *http.Request {
+				return exchangeRequest(t, url, "never-minted", "nonce", "nonce")
+			},
+			reason: "page token invalid, expired, or already redeemed",
+		},
+		{
+			name: "expired page token",
+			build: func(t *testing.T, srv *Server, url string) *http.Request {
+				token, csrf, err := srv.mintPageToken()
+				if err != nil {
+					t.Fatal(err)
+				}
+				srv.pageTokenMu.Lock()
+				srv.pageTokens[token] = pageTokenEntry{expiry: time.Now().Add(-time.Minute), csrf: csrf}
+				srv.pageTokenMu.Unlock()
+				return exchangeRequest(t, url, token, csrf, csrf)
+			},
+			reason: "page token invalid, expired, or already redeemed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, ts, logBuf := newLoggingAuthTestServer(t)
+			resp, err := http.DefaultClient.Do(tc.build(t, srv, ts.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+			logged := logBuf.String()
+			if !strings.Contains(logged, "rejected request with invalid or missing bearer token") {
+				t.Errorf("no audit line for this branch, got: %s", logged)
+			}
+			// The FIND-11 cadence: remote address, path and a cumulative
+			// count, matching what authMiddleware emits.
+			for _, want := range []string{"remote_addr=", "path=/auth/exchange", "cumulative_count=1", "reason=" + strconv.Quote(tc.reason)} {
+				if !strings.Contains(logged, want) {
+					t.Errorf("log line missing %q, got: %s", want, logged)
+				}
+			}
+			if got := srv.invalidAuthAttempts.Load(); got != 1 {
+				t.Errorf("invalidAuthAttempts = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestAuthExchangeFailuresDoNotArmLockout is the load-bearing half of P63.5:
+// the exchange endpoint logs but must never feed the P27.12/FIND-14 lockout
+// streak. If it did, any local process could hammer /auth/exchange and wedge
+// the operator's own browser out of loading the UI — turning an observability
+// fix into a self-DoS.
+func TestAuthExchangeFailuresDoNotArmLockout(t *testing.T) {
+	srv, ts, _ := newLoggingAuthTestServer(t)
+
+	for i := 0; i < authLockThreshold*3; i++ {
+		resp, err := http.DefaultClient.Do(exchangeRequest(t, ts.URL, "never-minted", "nonce", "nonce"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("exchange %d status = %d, want 401", i, resp.StatusCode)
+		}
+	}
+
+	srv.authLockMu.Lock()
+	streak, until := srv.authConsecutiveFailures, srv.authLockedUntil
+	srv.authLockMu.Unlock()
+	if streak != 0 {
+		t.Errorf("authConsecutiveFailures = %d, want 0 — exchange failures must not feed the lockout streak", streak)
+	}
+	if !until.IsZero() {
+		t.Errorf("authLockedUntil = %v, want zero — exchange failures must not open a lockout window", until)
+	}
+	if _, locked := srv.authLockoutRemaining(); locked {
+		t.Error("lockout engaged after exchange failures alone")
+	}
+
+	// The operator's next real request, with the correct token, still works.
+	resp := doAuthedGet(t, ts.URL+"/sessions", "secret-token-123")
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		t.Fatal("authenticated request locked out by /auth/exchange failures (self-DoS)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated request status = %d, want 200", resp.StatusCode)
 	}
 }

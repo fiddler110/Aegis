@@ -112,23 +112,38 @@ const (
 	authLockMaxDelay  = 60 * time.Second
 )
 
-// recordInvalidAuthAttempt bumps the process-wide invalid-bearer-token
-// counter and, on a coarse cadence, emits a slog.Warn with the cumulative
-// count so a probe against the daemon's auth is auditable. It deliberately
-// never logs the attempted token value itself. Both authMiddleware failure
-// branches (missing "Bearer " prefix, and a token that doesn't match) call
-// this — a probe that never sends a Bearer prefix at all is just as worth
-// surfacing as one that guesses wrong. Also feeds registerAuthFailure, the
-// P27.12/FIND-14 lockout tracker.
-func (s *Server) recordInvalidAuthAttempt(r *http.Request) {
+// logInvalidAuthAttempt bumps the process-wide invalid-auth counter and, on
+// the coarse invalidAuthLogEvery cadence, emits a slog.Warn with the
+// cumulative count so a probe against the daemon's auth is auditable. It
+// deliberately never logs the attempted token value itself. reason names the
+// branch that rejected the request; it is a fixed string from the handler,
+// never attacker-supplied data.
+//
+// This is the logging half only — it does not touch the P27.12/FIND-14
+// lockout streak. Callers that should also arm the lockout use
+// recordInvalidAuthAttempt instead; POST /auth/exchange (P63.5) calls this
+// one directly, because that endpoint is the one route a browser must be
+// able to reach with no daemon token in hand, and a lockout armed from there
+// would let any local process wedge the operator's own UI out of loading.
+func (s *Server) logInvalidAuthAttempt(r *http.Request, reason string) {
 	n := s.invalidAuthAttempts.Add(1)
 	if n == 1 || n%invalidAuthLogEvery == 0 {
 		s.logger.Warn("rejected request with invalid or missing bearer token",
 			"remote_addr", r.RemoteAddr,
 			"path", r.URL.Path,
+			"reason", reason,
 			"cumulative_count", n,
 		)
 	}
+}
+
+// recordInvalidAuthAttempt logs the attempt (see logInvalidAuthAttempt) and
+// additionally feeds registerAuthFailure, the P27.12/FIND-14 lockout tracker.
+// Both authMiddleware failure branches (missing "Bearer " prefix, and a token
+// that doesn't match) call this — a probe that never sends a Bearer prefix at
+// all is just as worth surfacing as one that guesses wrong.
+func (s *Server) recordInvalidAuthAttempt(r *http.Request) {
+	s.logInvalidAuthAttempt(r, "bearer token missing or mismatched")
 	s.registerAuthFailure()
 }
 
@@ -306,24 +321,38 @@ func (s *Server) exchangePageToken(token, csrf string) bool {
 // GET /ui set and via an explicit header only same-origin JS could have
 // constructed — see uiCSRFCookieName's doc comment for why this binds the
 // exchange to the browser that actually loaded the page.
+//
+// Every rejection here is logged through logInvalidAuthAttempt (P63.5).
+// authMiddleware exempts this path — it has to, since the frontend holds only
+// a page token at this point — which previously left it the one route where a
+// failure produced no audit record at all, while a probe against any
+// *authenticated* route produced a warn line with a remote address and a
+// running count. That inversion, not guessing a page token, is what this
+// closes: FIND-01 accepts a local process driving this flow as residual risk,
+// and accepted risk should still be observable. It logs only; arming the
+// lockout from here is deliberately out of scope (see logInvalidAuthAttempt).
 func (s *Server) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(auth, prefix) {
+		s.logInvalidAuthAttempt(r, "page token missing")
 		writeError(w, http.StatusUnauthorized, "missing page token")
 		return
 	}
 	cookie, err := r.Cookie(uiCSRFCookieName)
 	if err != nil || cookie.Value == "" {
+		s.logInvalidAuthAttempt(r, "csrf cookie missing")
 		writeError(w, http.StatusUnauthorized, "missing csrf cookie")
 		return
 	}
 	header := r.Header.Get(uiCSRFHeaderName)
 	if header == "" || subtle.ConstantTimeCompare([]byte(header), []byte(cookie.Value)) != 1 {
+		s.logInvalidAuthAttempt(r, "csrf header missing or mismatched")
 		writeError(w, http.StatusUnauthorized, "csrf token mismatch")
 		return
 	}
 	if !s.exchangePageToken(auth[len(prefix):], header) {
+		s.logInvalidAuthAttempt(r, "page token invalid, expired, or already redeemed")
 		writeError(w, http.StatusUnauthorized, "invalid or expired page token")
 		return
 	}

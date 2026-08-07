@@ -143,7 +143,11 @@ type Server struct {
 	tlsCert *tls.Certificate
 
 	// invalidAuthAttempts counts requests rejected by authMiddleware for a
-	// missing or mismatched bearer token (FIND-11). It is a single
+	// missing or mismatched bearer token, plus rejections from the
+	// authMiddleware-exempt POST /auth/exchange handler (FIND-11, extended by
+	// P63.5 — one cumulative counter keeps the log cadence coherent across
+	// both, while only the middleware's failures feed the lockout streak
+	// below). It is a single
 	// process-wide counter rather than a per-remote-address map so that the
 	// audit fix itself can't be turned into a memory-growth DoS by an
 	// attacker hammering the endpoint with spoofed/varying source data. This
