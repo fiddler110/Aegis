@@ -128,3 +128,36 @@ func TestScopeGateReadsUnrestricted(t *testing.T) {
 		t.Errorf("reads must never be scope-restricted, got %q", reason)
 	}
 }
+
+// TestScopeGateUsesEffectiveCapability is the ScopeGate analogue of
+// TestNetworkAllowListUsesEffectiveCapability (P32.2), covering P63.3:
+// Check must gate on tool.EffectiveCapability, not the tool's static
+// Capability(). A tool whose static capability is CapRead but that
+// reclassifies to CapWrite for this specific call (the CapabilityOverrider
+// seam P25.4c added) must still be confined by the active task scope —
+// before the fix, ScopeGate.Check read t.Capability() directly, so the
+// `== tool.CapWrite` comparison never matched and the outermost containment
+// gate was silently bypassed for that call.
+func TestScopeGateUsesEffectiveCapability(t *testing.T) {
+	base := New(ModeBuild, AutoApprove{})
+	gate := NewScopeGate(base, nil)
+
+	sc := NewTaskScope()
+	sc.Set([]string{"src/**"})
+	ctx := WithTaskScope(context.Background(), sc)
+
+	writeClassified := fakeOverrideTool{
+		fakeTool:    fakeTool{name: "odd_tool", cap: tool.CapRead},
+		overrideCap: tool.CapWrite,
+	}
+
+	if ok, _ := gate.Check(ctx, writeClassified, json.RawMessage(`{"path":"internal/secret.go"}`)); ok {
+		t.Error("an out-of-scope write must be blocked even when the write capability comes from CapabilityFor, not Capability()")
+	}
+
+	// In-scope paths still pass, so the widened classification restricts
+	// rather than blanket-denies.
+	if ok, reason := gate.Check(ctx, writeClassified, json.RawMessage(`{"path":"src/app.go"}`)); !ok {
+		t.Errorf("in-scope write should be allowed, got %q", reason)
+	}
+}
