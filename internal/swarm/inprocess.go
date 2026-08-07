@@ -2,6 +2,9 @@ package swarm
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 )
@@ -75,7 +78,7 @@ func (b *InProcessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle,
 			childCtx = WithBudgetOverride(childCtx, usd, toks)
 		}
 
-		output, err := b.run(childCtx, cfg)
+		output, err := b.runGuarded(childCtx, cfg)
 
 		res := Result{AgentID: id.AgentID, Output: output}
 		status := StatusDone
@@ -102,6 +105,31 @@ func (b *InProcessBackend) Spawn(ctx context.Context, cfg SpawnConfig) (*Handle,
 		h.done <- res
 	})
 	return h, nil
+}
+
+// runGuarded executes the teammate's RunFunc and converts a panic into an
+// ordinary error return.
+//
+// A panic in a teammate run (compaction, the output guard, an adapter, loop
+// detection — anything in engine.Run outside runTools, which has its own
+// recover for the same reason) must not cross the goroutine boundary:
+// unrecovered, it takes down the whole daemon process — every concurrent
+// session, not just the one that spawned this teammate. A top-level run is
+// hosted by an HTTP handler and gets net/http's recover; a teammate is hosted
+// by a bare wg.Go and gets nothing. Recover here so the caller's existing
+// failure route (StatusFailed + a mailbox MsgResult carrying the error) reports
+// it the same way it reports any other run failure. The stack goes to the log,
+// not into the error, so the parent sees a readable one-line reason while the
+// panic stays diagnosable.
+func (b *InProcessBackend) runGuarded(ctx context.Context, cfg SpawnConfig) (output string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Default().Error("recovered panic in in-process sub-agent",
+				"agent", cfg.Name, "team", cfg.Team, "panic", r, "stack", string(debug.Stack()))
+			err = fmt.Errorf("sub-agent panicked: %v", r)
+		}
+	}()
+	return b.run(ctx, cfg)
 }
 
 // Shutdown waits for all in-flight teammates to finish or ctx to cancel.

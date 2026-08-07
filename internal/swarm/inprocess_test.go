@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +94,58 @@ func TestInProcessSpawnFailure(t *testing.T) {
 	m, _ := reg.Get(res.AgentID)
 	if m.Status != StatusFailed {
 		t.Errorf("status = %q, want failed", m.Status)
+	}
+}
+
+// A panicking teammate must not cross the goroutine boundary — unrecovered it
+// would take down the whole daemon, so the test process reaching its assertions
+// at all is half of what this proves. The other half is that the panic lands on
+// the same failure route an ordinary error return uses.
+func TestInProcessSpawnRecoversPanic(t *testing.T) {
+	root := MailboxRoot(t.TempDir())
+	reg := NewRegistry()
+	run := func(ctx context.Context, cfg SpawnConfig) (string, error) {
+		panic("teammate exploded")
+	}
+	b := NewInProcessBackend(run, reg, root, 0, 0)
+
+	stopped := make(chan Result, 1)
+	b.OnStop(func(_ Identity, res Result) { stopped <- res })
+
+	h, err := b.Spawn(context.Background(), SpawnConfig{Name: "w", Prompt: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Failed() || !strings.Contains(res.Err, "teammate exploded") {
+		t.Errorf("expected recorded panic failure, got %+v", res)
+	}
+
+	m, ok := reg.Get(res.AgentID)
+	if !ok || m.Status != StatusFailed {
+		t.Errorf("registry member = %+v ok=%v, want failed", m, ok)
+	}
+
+	// The durable MsgResult carries the error, same as an ordinary failure.
+	mb, _ := OpenMailbox(root, h.Identity)
+	msgs, _ := mb.ReadAll(false)
+	if len(msgs) != 1 || msgs[0].Type != MsgResult {
+		t.Fatalf("mailbox = %+v", msgs)
+	}
+	if e, _ := msgs[0].Payload["error"].(string); !strings.Contains(e, "teammate exploded") {
+		t.Errorf("mailbox result error = %q", e)
+	}
+
+	select {
+	case s := <-stopped:
+		if !s.Failed() {
+			t.Errorf("OnStop result = %+v, want failed", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnStop was not called after a panic")
 	}
 }
 
