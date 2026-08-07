@@ -1566,7 +1566,7 @@ def build(deck_def: dict, *, output_override: str = None, theme_override: str = 
 
     # Resolve logo path.  Priority:
     #   1. meta.logo in the YAML (resolved relative to the input file)
-    #   2. Default bundled logo for the Corp_red theme
+    #   2. Optional bundled logo for the Corp_red theme, if one is present
     _DEFAULT_LOGO = Path(__file__).parent / "assets" / "logo.png"
     logo_path = None
     raw_logo = meta.get("logo")
