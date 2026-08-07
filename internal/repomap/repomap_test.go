@@ -2,6 +2,7 @@ package repomap
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,91 @@ func TestRenderCappedAtMaxBytes(t *testing.T) {
 	}
 	if !strings.Contains(render, "truncated") {
 		t.Errorf("expected truncation notice when capped:\n%s", render)
+	}
+}
+
+// countRenderedFiles counts the file-path lines in a rendered map: every line
+// that is neither the header, an indented symbol/edge line, nor the notice.
+func countRenderedFiles(render string) int {
+	n := 0
+	for _, line := range strings.Split(render, "\n") {
+		if line == "" || strings.HasPrefix(line, " ") ||
+			strings.HasPrefix(line, "#") || strings.HasPrefix(line, "…") {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// TestTruncationNoticeReportsOmittedCount pins the one thing the notice exists
+// to convey: a model reading a truncated map must be able to tell how much of
+// the repository it is *not* seeing. Without the count, a 10-of-672 prefix is
+// indistinguishable from a complete map of a small repo.
+func TestTruncationNoticeReportsOmittedCount(t *testing.T) {
+	dir := t.TempDir()
+	const total = 60
+	for i := 0; i < total; i++ {
+		writeFile(t, dir, fmt.Sprintf("file%02d.go", i), "package main\n\nfunc Alpha() {}\nfunc Beta() {}\n")
+	}
+
+	m, err := Build(dir, Options{MaxBytes: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Files) != total {
+		t.Fatalf("built %d files, want %d", len(m.Files), total)
+	}
+	render := m.Render()
+
+	shown := countRenderedFiles(render)
+	if shown == 0 || shown >= total {
+		t.Fatalf("expected a partial map, got %d of %d files", shown, total)
+	}
+	want := fmt.Sprintf("%d more file(s) not shown", total-shown)
+	if !strings.Contains(render, want) {
+		t.Errorf("notice should report %q; got:\n%s", want, render)
+	}
+	// The notice must point at the escape hatch, or knowing the count is useless.
+	if !strings.Contains(render, "repomap") {
+		t.Errorf("notice should name the repomap tool:\n%s", render)
+	}
+}
+
+// TestRenderStaysWithinBudgetIncludingNotice guards the cap itself: the notice
+// is appended after the fit loop, so its bytes have to be reserved rather than
+// added on top of a budget already spent to the last byte.
+func TestRenderStaysWithinBudgetIncludingNotice(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 40; i++ {
+		writeFile(t, dir, fmt.Sprintf("f%02d.go", i), "package main\n\nfunc Gamma() {}\n")
+	}
+	// Sweep budgets so at least some land where the prefix ends flush against
+	// the cap — the case where an unreserved notice would overflow.
+	for budget := 200; budget <= 900; budget += 7 {
+		m, err := Build(dir, Options{MaxBytes: budget})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if render := m.Render(); len(render) > budget {
+			t.Fatalf("budget %d: render is %d bytes:\n%s", budget, len(render), render)
+		}
+	}
+}
+
+// TestRenderNoNoticeWhenComplete keeps the notice honest in the other
+// direction: a map that fits must not claim omissions.
+func TestRenderNoNoticeWhenComplete(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "only.go", "package main\n\nfunc Delta() {}\n")
+
+	m, err := Build(dir, Options{MaxBytes: 8000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := m.Render()
+	if strings.Contains(render, "truncated") || strings.Contains(render, "not shown") {
+		t.Errorf("complete map should carry no truncation notice:\n%s", render)
 	}
 }
 
@@ -314,6 +400,12 @@ import "example.com/m/b"
 
 func A() { b.Dep() }
 `)
+	// Filler that sorts after the files under test, so the map is long enough
+	// that the tight budget below still truncates once Render has reserved room
+	// for the truncation notice.
+	for i := 0; i < 12; i++ {
+		writeFile(t, dir, fmt.Sprintf("z%02d.go", i), fmt.Sprintf("package main\nfunc Z%02d() {}\n", i))
+	}
 	m, err := Build(dir, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -324,7 +416,11 @@ func A() { b.Dep() }
 	if !strings.Contains(full, edgeLine) {
 		t.Fatalf("precondition: full render should contain edge line:\n%s", full)
 	}
-	tight := &Map{Root: m.Root, Files: m.Files, maxBytes: strings.Index(full, edgeLine) + len("  → b")}
+	// Budget = enough for a.go's symbols but not its edge line, plus the room
+	// Render reserves for the truncation notice (b/dep.go will be dropped, so a
+	// notice is emitted and counts against the cap).
+	tightBytes := strings.Index(full, edgeLine) + len("  → b") + len(truncationNotice(len(m.Files)))
+	tight := &Map{Root: m.Root, Files: m.Files, maxBytes: tightBytes}
 	got := tight.Render()
 	if !strings.Contains(got, "func A()") {
 		t.Errorf("symbols must be preserved under a tight budget:\n%s", got)

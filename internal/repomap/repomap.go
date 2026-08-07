@@ -433,15 +433,37 @@ func signature(line string) string {
 
 // Render produces the compact text map, capped at the configured byte budget.
 // When the cap is hit, output is truncated at a file boundary and a notice is
-// appended.
+// appended naming how many files were omitted.
+//
+// The count is load-bearing, not cosmetic. On a repository large enough to
+// truncate, the surviving prefix can be a tiny fraction of the tree (on Aegis
+// itself: 10 of 672 files), and a bare "truncated" notice leaves the model
+// believing it has seen a whole small repo rather than the first inch of a
+// large one. Naming the omitted count — and the `repomap` tool that can answer
+// for the rest — is what lets it know to ask.
 func (m *Map) Render() string {
 	budget := m.maxBytes
 	if budget <= 0 {
 		budget = DefaultMaxBytes
 	}
+	out, shown := m.renderPrefix(budget)
+	if shown >= len(m.Files) {
+		return out
+	}
+	// Truncating: re-render with room reserved for the notice so the byte cap
+	// holds *including* it. Reserve against the widest possible count so the
+	// second pass's (larger) omitted count can never overflow the reservation.
+	reserve := len(truncationNotice(len(m.Files)))
+	out, shown = m.renderPrefix(budget - reserve)
+	return out + truncationNotice(len(m.Files)-shown)
+}
+
+// renderPrefix writes as many whole file entries as fit in budget, returning the
+// text and how many entries were written.
+func (m *Map) renderPrefix(budget int) (string, int) {
 	var b strings.Builder
 	b.WriteString("# Repository map\n")
-	truncated := false
+	shown := 0
 	for _, f := range m.Files {
 		// Symbols are the load-bearing content and must never be dropped while
 		// this file's entry is kept; render them first and let the whole entry
@@ -455,10 +477,10 @@ func (m *Map) Render() string {
 			fb.WriteString("\n")
 		}
 		if b.Len()+fb.Len() > budget {
-			truncated = true
 			break
 		}
 		b.WriteString(fb.String())
+		shown++
 		// Edges render after symbols so a tight budget drops them first: the
 		// import line is only written when it still fits, otherwise skipped
 		// without truncating the map.
@@ -466,10 +488,13 @@ func (m *Map) Render() string {
 			b.WriteString(edges)
 		}
 	}
-	if truncated {
-		b.WriteString("… [repo map truncated to fit context budget]\n")
-	}
-	return b.String()
+	return b.String(), shown
+}
+
+// truncationNotice formats the closing line for a truncated map. Its length is
+// monotonic in omitted, which Render relies on when reserving budget for it.
+func truncationNotice(omitted int) string {
+	return fmt.Sprintf("… [repo map truncated to fit context budget: %d more file(s) not shown — use the `repomap` tool (action \"map\", \"skeleton\" or \"importers\") to query them]\n", omitted)
 }
 
 // renderEdges formats a file's import edges as a single compact "  → a, b, c"
