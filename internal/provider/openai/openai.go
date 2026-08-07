@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -758,12 +759,19 @@ func (d *chunkDecoder) Finish(emit func(provider.Event) bool) (provider.StopReas
 			// actionable, discoverable fix instead of passing broken JSON
 			// downstream where it fails as an opaque parse error. A genuine
 			// malformed call (no length signal) still yields a plain parse error.
-			detail := fmt.Sprintf("invalid tool call arguments for %q: unexpected end of JSON input", acc.name)
+			// P61.7: the model authors acc.name, so on neither branch may it be
+			// spliced into the message the retry/liveness classifiers
+			// substring-match — a tool named `crash_report` otherwise made
+			// IsBackendUnavailableError report a dead backend (and, on the
+			// malformed branch, flipped a terminal error to retryable). It goes
+			// in Detail on both, where it is displayed but never classified.
 			if d.sawLength {
-				emit(provider.Event{Type: provider.EventError, Err: provider.NewContextTruncationError("openai", detail)})
+				err := provider.NewContextTruncationError("openai", "")
+				err.Detail = "invalid tool call arguments for " + strconv.Quote(acc.name)
+				emit(provider.Event{Type: provider.EventError, Err: err})
 				return d.stop, d.usage, false
 			}
-			emit(provider.Event{Type: provider.EventError, Err: provider.NewStreamError("openai", detail)})
+			emit(provider.Event{Type: provider.EventError, Err: provider.NewMalformedToolCallError("openai", acc.name)})
 			return d.stop, d.usage, false
 		}
 		if !emit(provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
