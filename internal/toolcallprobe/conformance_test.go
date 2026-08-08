@@ -287,9 +287,19 @@ func TestGateWarningCarriesTheRate(t *testing.T) {
 	}
 	g.wait()
 	w2 := g.Warning(context.Background(), a, "m")
-	if w2 == w || !strings.Contains(w2, "0/3") {
+	if !strings.Contains(w2, "0/3") {
 		t.Errorf("refined warning = %q, want it to carry the 0-of-3 conformance sample", w2)
 	}
+
+	// This deliberately does NOT assert w2 != w. Whether the *first* warning
+	// already carries the sample is a race, not a contract: Warning renders the
+	// rate whenever Trials > 1, and the background refinement this same call
+	// kicks off can finish between its own Verdict call and the Conformance read
+	// a few lines later. Under a loaded `go test ./...` that happens, and the
+	// inequality failed roughly one run in ten while the product was behaving
+	// correctly either way — an earlier-than-usual sample is a better warning,
+	// not a worse one. The substring above is what the test was actually for; the
+	// inequality was a proxy for it that could disagree with it.
 }
 
 // blockingAdapter answers the first probe immediately and holds every later

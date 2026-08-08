@@ -439,3 +439,80 @@ func TestNormalizeAndTruncateToolError(t *testing.T) {
 		t.Error("truncation must not split a multi-byte rune")
 	}
 }
+
+// nudgeEatingCompactor stands in for what real compaction does to an old
+// corrective: internal/compaction summarizes everything ahead of its
+// keep-recent tail, so a nudge that has scrolled out of that tail is deleted
+// outright. This drops exactly the tool-failure nudge and leaves the rest of
+// the conversation alone, so the test isolates the deletion from every other
+// effect a summarization pass would have.
+type nudgeEatingCompactor struct{ eaten int }
+
+func (c *nudgeEatingCompactor) Compact(_ context.Context, _ string, msgs []provider.Message) ([]provider.Message, bool, error) {
+	kept := make([]provider.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if isNudge(m, toolFailureNudgePrefix) {
+			c.eaten++
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept, len(kept) != len(msgs), nil
+}
+
+// TestP6312ToolFailureNudgeReinjectedAfterCompactionDeletesIt is the P63.12
+// regression. The P52.3 corrective is the one piece of scaffolding whose whole
+// purpose is to be *visible* to the model, and re-injection used to be gated on
+// a bool set when it was injected. Compaction can delete the message after
+// that, and the bool went on claiming it was present — so the run lost its
+// correction with no notice, no log line, and a counter that still looked
+// healthy.
+//
+// The `sameErrorRounds` path makes this reachable rather than theoretical: it
+// nudges at three rounds but never aborts (only `allErrorRounds` does, at six),
+// so such a run continues to the iteration cap, far past compaction's
+// keep-recent tail.
+//
+// Asking the conversation instead of the flag, a deleted corrective is
+// re-injected — an append, which costs a local runner's prefix cache nothing.
+func TestP6312ToolFailureNudgeReinjectedAfterCompactionDeletesIt(t *testing.T) {
+	var turns [][]provider.Event
+	for i := 0; i < 5; i++ {
+		turns = append(turns, failTurn(fmt.Sprintf("tu-%d", i), fmt.Sprintf(`{"old_string":"v%d"}`, i)))
+	}
+	turns = append(turns, textTurn("giving up"))
+
+	reg := tool.NewRegistry()
+	if err := reg.Register(&failEditTool{}); err != nil {
+		t.Fatal(err)
+	}
+	comp := &nudgeEatingCompactor{}
+	eng, err := New(Options{
+		Adapter: &scriptedAdapter{turns: turns}, Tools: reg, Compactor: comp,
+		Model: "test", MaxTokens: 100, ContextWindowTokens: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var nudgeNotices int
+	err = eng.Run(context.Background(), bigConversation(), func(ev Event) {
+		if ev.Kind == KindNotice && strings.Contains(ev.Text, "in a row failed") {
+			nudgeNotices++
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if comp.eaten == 0 {
+		t.Fatal("the compactor never deleted a nudge — the fixture no longer reproduces the condition")
+	}
+	if nudgeNotices < 2 {
+		t.Errorf("tool-failure nudges injected = %d, want >= 2: compaction deleted the first one and the "+
+			"corrective must be re-sent, not suppressed by a flag that outlived the message", nudgeNotices)
+	}
+	if nudgeNotices > toolFailureNudgeMax {
+		t.Errorf("tool-failure nudges injected = %d, want <= toolFailureNudgeMax (%d)", nudgeNotices, toolFailureNudgeMax)
+	}
+}

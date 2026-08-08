@@ -834,7 +834,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			// deterministic prune pre-pass headroom-gated rather than
 			// unconditional there. Same local/loopback test admission control
 			// uses; cloud providers are unaffected.
-			PreservePrefixCache: config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL),
+			// compaction.preserve_prefix_cache overrides the detection, so the
+			// gate can be A/B'd and reverted without a rebuild (P62.2).
+			PreservePrefixCache: cfg.Compaction.PreservePrefixCacheOr(
+				config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL)),
 		}
 		// A local provider whose window is still unknown (Ollama unreachable at
 		// startup): skip auto-compaction rather than falling back to the 120k

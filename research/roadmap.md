@@ -1,6 +1,9 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-08 (sixteenth pass — **P63.9's second concern, loop detection, extracted
+**Last updated:** 2026-08-08 (eighteenth pass — **P63.9 closed: the fourth and last concern, guard
+retries, extracted from `Engine.Run`**, which is now 497 lines against the original 725, and
+**P63.12 filed and closed** by that pass, emptying Tier 3; seventeenth pass: P63.9's third concern, compaction, extracted;
+sixteenth pass: **P63.9's second concern, loop detection, extracted
 from `Engine.Run`**, and the full live tier ran green over it; fifteenth pass: **P63.11 shipped and
 the live tier now produces a real prompt-profile measurement**, so Tier 2 holds nothing buildable;
 fourteenth pass: P63.8 and P62.1
@@ -19,15 +22,68 @@ so keep it when adding items.
 
 ## Status
 
-**8 open items**, recounted from the headings. **P63.11 shipped 2026-08-08**, the same day it was
-filed off the live-tier run, alongside P63.8 and P62.1 and P63.9's first of four concerns. Before
-them, the P63.x review filed 7 on 2026-08-07 and **all 7 were built the same day** (P63.1-P63.7; the
-`Engine.Run` half of P63.7 was split out rather than built). Write-ups in [releases.md](releases.md).
+**10 open items**, recounted from the headings, and the shape of the list changed more than the
+count. **P63.9 closed 2026-08-08** with its fourth and last concern extracted from `Engine.Run`;
+**P63.12** was filed by that pass and **closed the same day**. Then P62.2's fixture was built and run,
+and **three items came out of running it** — **P62.4** (a live silent-truncation event), **P62.5**
+(the P62.3 ladder, which turns out never to have had a heading of its own), and **P62.6** (the base
+prompt costs 7,119 tokens before any work). None of the three came from a review; all three came from
+one measurement. P63.11, P63.8 and P62.1 also shipped that day. Before them, the P63.x review
+filed 7 on 2026-08-07 and **all 7 were built the same day** (P63.1-P63.7; the `Engine.Run` half of
+P63.7 was split out rather than built). Write-ups in [releases.md](releases.md).
 
-**Tier 1 is empty, and so is Tier 2 of build work.** Tier 2 holds two — **P62.2** and **P38.1** —
-both validation owed against already-shipped behavior, closeable only by a live run. Tier 3 holds one,
-**P63.9** (`Engine.Run`), now **two** concerns from done rather than four. Tier 4 is five: **P61.7**
-(remainder), **P60.3**, **P52.14**, **P25.9**, and **P63.10**.
+**Tier 1 is empty. Tier 2 holds four** — **P62.2** (now answered: the gate loses 2.2x, revert
+recommended pending a large-window check), **P38.1** (still the live conformance re-run), and two the
+fixture produced: **P62.4** and **P62.5**. Tier 2 has buildable work again for the first time in three
+passes. **Tier 3 holds one**, **P62.6**. Tier 4 is unchanged at five: **P61.7** (remainder),
+**P60.3**, **P52.14**, **P25.9**, **P63.10**.
+
+**Every open item is now either a live-run measurement or a parked one.** There is no queued build
+work anywhere in the tiers, which has not been true at any earlier pass — and it puts the weight on
+the adversarial fixture that reliably crosses the compaction trigger. **P62.2** has been owed it
+since it was filed, and P63.9's compaction pass needs it too (its live run never fired compaction at
+all). Built 2026-08-08 as `TestLiveWorkflowCompactionPrefixCacheGate`.
+
+*Correction, 2026-08-08:* an earlier version of this line claimed the same fixture also closes
+**P62.3**. It does not, and building it is what showed why. P62.3's ladder fires on a genuine
+**context overflow** inside the phased drive's findings phase; this fixture crosses the *compaction
+trigger*, which is a different threshold reached by a different route. Forcing an overflow is a
+separate construction and P62.3 stays owed. Two debts, not three.
+
+**What P63.9 taught across all four passes — the catalogue is the durable output, not the line
+count.** Each pass asked one question, *what state does this concern actually own*, and each got a
+**different shape** of answer. That is the reusable result:
+
+| pass | concern | the state was… |
+|---|---|---|
+| 1 | budgets | **owned by nothing** — a bare local (`runStart`) hand-threaded into five call sites |
+| 2 | loop detection | **per-turn, living at run scope** — fixed by returning a value, not storing a variable |
+| 3 | compaction | **run-scoped, living with the wrong owner** — five variables reachable by 600 lines |
+| 4 | guard retries | **inter-turn carry**, whose set / consume / clear were three separate sites |
+
+Pass 4's shape is the one the other three do not cover and the one most likely to recur. `constrainNext`
+lived for exactly one iteration boundary — set at the end of turn N, consumed at the start of turn
+N+1, and required to be cleared in between or it would silently re-shape every later turn. Nothing
+enforced that; two comments ~200 lines apart *described* the discipline. `takeFormat` returns the
+carry and empties it in one expression, so the caller cannot forget the second half because there is
+no second half. **When a comment explains a discipline, look for the API that would make the
+discipline unnecessary.**
+
+**What P63.9's compaction pass taught: mutating shared data is not the same as sharing state.** The
+item filed compaction as half of "the hard pair" precisely because it rewrites `conv` mid-run, which
+pass 2's return-a-value technique cannot encapsulate. True, and not the obstacle it reads as — every
+write compaction makes to `conv.Messages` is its own *output*, not a variable another concern also
+writes, so there was nothing escaping to encapsulate. The two passes now bracket the question P63.9
+exists to ask: pass 2 found **per-turn state at run scope**, pass 3 found **run-scoped state at the
+wrong owner** — five variables declared where 600 lines could reach them and touched by one 70-line
+block. Ask both questions of the last concern, not just pass 2's.
+
+**Its second lesson is about the tests, and it generalizes past this item.** Six mutations were run
+against the extracted code and **three survived** the suite as it stood — including changing the
+P28.4 threshold the test is *named* for from two to three. A short fixture cannot tell adjacent
+thresholds apart, and a count assertion cannot tell *when* something fired. Asserting the **sequence**
+of calls rather than the count killed all three. Where a pass moves code that a green test already
+covers, mutate before believing the green.
 
 **What P63.9's loop-detection pass taught: the extraction is worth doing even where the concern is
 already its own type.** `loopDetector` had lived in its own file since P53.2, so the pass looked like
@@ -35,8 +91,7 @@ it should be a move. It wasn't — the finding was that **two of the concern's v
 wrong scope**, both set by the loop gate and consumed after the same turn's tool round while being
 declared where the whole 685-line function could reach them. Naming the per-turn half and returning
 it as a *value* (`loopVerdict`) is what removed the interaction, not moving the detector. The lesson
-generalizes to the two remaining concerns: **ask where the state's lifetime actually ends, not which
-file the type lives in.**
+generalizes: **ask where the state's lifetime actually ends, not which file the type lives in.**
 
 **What building P63.11 taught: a fix aimed at a test can still be defeated by the product behaving
 correctly.** The item offered two fixes and recommended the cheaper one — pin a `num_ctx` large
@@ -113,8 +168,9 @@ All of it repeats the lesson under *How to use this tier* below: every write-up 
 wrong in some way, and twice the measurement was more valuable than the item that prompted it.
 
 **No batch is open beyond its parked or follow-on members.** P63.x (full-stack review, 7 filed
-2026-08-07, all 7 built the same day) → **2 open**, both *filed by the build* rather than by the
-review: P63.9 and P63.10 (P63.8 and P63.11, the third and fourth, shipped 2026-08-08). P61.x
+2026-08-07, all 7 built the same day) → **1 open**, filed by the build rather than by the
+review: **P63.10 only** (P63.8 and P63.11 shipped 2026-08-08; P63.9 closed the same day after four
+passes, and the P63.12 it filed on its way out was built the same day). P61.x
 (cross-adapter drift, 8 filed) → P61.7 only. P60.x (sandbox and eval, 4) → P60.3 only. P59.x (local
 execution, 10 + the P59.11 follow-on) → 0. P55.x (container-only scanning, 9 filed / 8 built) → 0.
 P52.x (the previous full-stack review, 17) → P52.14 only. P53.x, P57.1, P58.x, P54.2 → 0. Dates,
@@ -128,13 +184,18 @@ against `internal/provider`, `internal/ollamainfo`, `internal/repomap` or scanne
 several obvious-looking gaps there have already been checked and answered, and the point of writing
 them down was to stop the next review re-filing them.
 
-**What to do next: P63.9's third concern — and it is the hard pair, so slow down.** Passes 1
-(budgets) and 2 (loop detection) are done and the method is established; what remains is **compaction
-and guard retries**, which interact with each other *and* with the retry path. Neither has the clean
-ownership that made the first two safe, and compaction genuinely mutates `conv` mid-run, which is the
-one thing pass 2's "return a value instead of storing a variable" technique cannot encapsulate. Take
-them in separate sessions, and run the live tier over each — it is now capable of a clean green
-(P63.11 plus the 2026-08-08 run below), so a red would mean something.
+**What to do next: build the adversarial compaction fixture.** It is the single highest-leverage
+thing open, because it stopped being validation owed and became **an instrument three items are
+blocked on**: **P62.2** (the prefix-cache pruning gate, unmeasured since it shipped), **P62.3** (the
+overflow-escalation ladder, unvalidated because it never fired live), and now P63.9's compaction pass
+— whose live run turned out never to exercise compaction at all. Build it once, use it three times.
+
+The pattern already exists in the tree: `writeBigRepoMapFixture`, reworked during P63.11, sizes
+itself in a dimension that scales, **grows until it actually clears its threshold, and asserts that it
+did**. That last assertion is the only reason the previous fixture's rot was caught. Two cautions
+carry over from P62.2's own write-up: restoring identical on-disk state does **not** reproduce a
+local-model failure, so the fixture must force the condition structurally; and read every result with
+`/api/ps` in view, since a resident model decides the window regardless of config.
 
 One thing is owed rather than optional: **P38.1's live conformance re-run** is still the only open
 work whose outcome produces new information rather than new code, and it doubles as the validation
@@ -150,7 +211,18 @@ It did not pass. Both arms produced byte-identical Aegis-side behavior across tw
 issues `del /F /Q`, a cmd.exe builtin the shell tool does not have, and never attempts an edit), which
 is a model failure signature and not a budget-gate one.
 
-**Three cautions for whoever runs this tier next, all learned the hard way here:**
+**Four cautions for whoever runs this tier next, all learned the hard way here:**
+
+- **The tier was blind to every engine notice until 2026-08-08, and silence looked like data.**
+  `drainWorkflowEvents` did not handle `api.KindNotice`, and the daemon logger it builds is pinned at
+  `LevelWarn`, so compaction, the context-full warning, loop-detector nudges and tool-failure
+  correctives appeared on neither channel. Fixed during P63.9 pass 3. The general form is the same as
+  the fixture-rot entry below: **a tier that cannot observe the subsystem under test reports every
+  result as being about something else.** Before grading a pass on this tier, check that the tier can
+  see the thing the pass changed.
+- **`FixSeededBug` is flaky on qwen3:14b — it has now failed and passed on unchanged code.** Do not
+  read a single red as a regression; re-run the subtest alone, and use `TestLiveWorkflowBaseline`
+  (P60.4) when attribution actually matters.
 
 - **`gpt-oss:20b` is not a usable instrument on this hardware.** 13.8GB of weights against 16GB VRAM
   and 16GB system RAM thrashes: all three subtests hit their context timeouts with **0 tool calls and
@@ -171,9 +243,14 @@ is a model failure signature and not a budget-gate one.
   P63.11's subtest now unloads and waits for `/api/ps` to confirm eviction before measuring; **any
   other subtest whose result depends on prompt size should be read with `/api/ps` in view.**
 
-**Do not start P63.9 casually.** It is the highest-value structural item open and the easiest to do
-badly: unlike its sibling it cannot be made safe by technique alone, and a botched pass degrades the
-agent loop every other item is measured through. It wants a session of its own.
+**What P63.9 cost, for the next item that proposes decomposing a hot function.** Four passes, four
+separate landings, ~1,035 lines of new files against 228 removed from `Run`. The warning it carried
+throughout — that it could not be made safe by technique alone and a botched pass degrades the agent
+loop every other item is measured through — held: no pass was mechanical, and each had to re-decide
+the boundary. What made it safe was not care but **gating**: every pass ran the golden transcripts,
+and every pass mutation-checked the tests over the code it moved. That second habit is what earned
+its keep — passes 3 and 4 each found surviving mutations against *pre-existing* tests, five in total,
+including two thresholds the tests were named for.
 
 **What to do next that is not a tier item, unchanged:** re-run P38.1's live conformance test. It is
 still the only open work whose outcome produces new information rather than new code, and it doubles
@@ -215,7 +292,131 @@ header count read 9. Both omitted **P62.2**, which has carried a `Priority: Tier
 section since it was filed on 2026-08-07. The counts below are recounted from the headings rather
 than carried forward.
 
-### P62.2 — Validate the prefix-cache pruning gate against an adversarial fixture (it shipped unmeasured)
+### P62.5 — Validate the P62.3 overflow-escalation ladder (it has never had a heading of its own)
+
+Filed 2026-08-08 because this debt was about to be lost, not because it is new. `P62.3`
+(`OverflowEscalationDirective` + `maxPhaseOverflowResets`, shipped alongside the prefix-cache gate)
+has never had a `### P<n>.<m>` heading — its only record is a paragraph inside **P62.2** saying "the
+same fixture validates it". That paragraph is now known to be wrong, and P62.2 is answered, so when
+P62.2 closes the ladder's validation would disappear with it.
+
+**Why the P62.2 fixture does not cover it.** Measured while building that fixture: it crosses the
+*compaction trigger*, which the ladder does not key on. The ladder fires on a genuine **context
+overflow** inside the phased drive's findings phase — a different threshold reached by a different
+route. Forcing an overflow is a separate construction.
+
+**What makes it buildable now.** Two things exist that did not when P62.3 shipped. The compaction
+fixture establishes the technique (force the condition structurally; a chained workspace makes turn
+count a property of the fixture rather than a request — see `writeCompactionFixture`). And **P62.4**
+means an overflow is currently *easy* to provoke: the estimate runs at 67-80% of the real prompt, so
+a run can be driven past the real window while the engine still believes it has headroom. Note the
+order dependency — if P62.4 is fixed first, overflows get harder to reach and this fixture has to
+force one deliberately rather than riding the estimate's error.
+
+**Trap, recorded by P62.2 and still applying:** restoring identical on-disk state does not reproduce
+a local-model failure. Run 2 of the original investigation replayed byte-identical within-run
+retries, which looks like determinism and is not — a fresh process ran the same state to a completely
+different, working strategy.
+
+Priority: Tier 2 — same standing P62.2 had: a shipped behavior riding on one run's arithmetic, with
+no live evidence it ever fires correctly. Cheap now that the technique and the harness exist.
+
+### P62.4 — Proactive compaction never fired while Ollama silently dropped tokens (measured)
+
+Found 2026-08-08 by P62.2's new fixture, which was built to measure something else. This is the
+failure P2.7's proactive compaction exists to prevent, observed with the guard armed and silent.
+
+**The measurement.** `TestLiveWorkflowCompactionPrefixCacheGate`, qwen3:14b, context window pinned to
+24,576 and confirmed resolved as such by the daemon (`context window 24576 (from config)` — so this
+is *not* a config-vs-served mismatch). The conversation grew one file-read per turn:
+
+| turn | prompt (provider-reported) | prefill |
+|---|---|---|
+| 0 | 7,119 | 5,980ms (cold) |
+| 1-9 | 8,925 → 23,733 | 1,859 → 3,493ms (prefix-cache hits) |
+| 10 | 23,637 — **shrinks** | **23,353ms** |
+| 11-14 | ~23,757 | ~23,700ms every turn |
+
+**Zero notices fired in the entire run** — no compaction, no fallback, and not the 95%-full warning
+either, at 96.7% of the window. Turn 10's shrink-with-10x-prefill is Ollama context-shifting: dropping
+the oldest tokens and reprocessing from scratch, every turn thereafter.
+
+**The mechanism.** The engine triggers on `conv.estimatedTokens()` (tokenest), not on what the
+provider reports, and the two are far apart.
+
+A second run with a lower trigger *did* fire compaction, and its notices quote the estimate as a
+percentage — which pins the gap directly. Gate-off compacted announcing **"context ~64% full"**
+(est ≈ 15,729) on a turn the provider reported at **23,637** tokens; gate-on announced
+**"~77% full"** (est ≈ 18,923) against ~23,760. **The estimate is running at 67-80% of the provider's
+count** — a 20-33% undercount, not the ≥12% lower bound the first run could establish.
+
+That is enough to matter at every window size, and it explains both symptoms: with the trigger set at
+85% of the window, a 33% undercount means the real prompt is at ~128% of the window before the
+estimate says 85%. The 95%-full notice is gated on the same estimate, which is why the one thing
+designed to speak up when compaction *cannot* help was also silent. Even in the run where compaction
+did fire, Ollama had already begun context-shifting a turn earlier.
+
+The content here is structured numeric records; P41.1 unified this estimator precisely because it
+undercounted CJK/non-ASCII, so code or other scripts may be worse.
+
+Note this is the same estimate that P53.6's shim-catalog addend and P59.1's completion reserve are
+corrections to — both of which exist because the estimate was known to be off in a *known direction*.
+This is the same class of error with no correction applied.
+
+**What to decide, and measure first.** Three candidate directions, in preference order: (a) calibrate
+tokenest against provider-reported `prompt_eval_count` — the daemon already receives that number every
+turn and could learn a per-model correction factor rather than guessing; (b) apply a safety margin to
+the trigger sized from the observed undercount; (c) treat a provider-reported count that exceeds the
+estimate as authoritative and re-trigger on it. (a) is the only one that fixes the 95% notice too.
+Do not build from this write-up without re-measuring — the undercount's size is a lower bound from one
+content type, and the tiering criteria's own lesson is that a filed item is usually wrong about scale.
+
+Priority: Tier 2 — a live, reproducible silent-truncation event on a local model, which is the exact
+class of failure P52.1/P2.7/P59.1 were built to close, and the fixture that reproduces it is now in
+the tree. Not Tier 1 only because it needs a small window to reach and the default local window is
+larger; the estimate error is proportional, so a big-window run should be measured before assuming it
+is safe.
+
+### P62.2 — MEASURED 2026-08-08: the gate loses 2.2x on wall clock; recommend revert
+
+**Result, and it reverses the item's premise.** `TestLiveWorkflowCompactionPrefixCacheGate`,
+qwen3:14b, window 24,576 (confirmed resolved), 14-file chained read, same fixture both arms:
+
+| | gate **off** | gate **on** |
+|---|---|---|
+| wall clock | **1m32s** | 3m19s |
+| total prefill | **64,958ms** | 128,005ms |
+| turns whose context shrank | 2 | 2 |
+| overflows | none | none |
+
+Both arms are byte-identical through turn 10. Then gate-off prunes (23,637 -> 14,977, one 9,286ms
+hit) and its next three turns cost 2.6-3.0s each. Gate-on defers, and its next three turns cost
+**~23,750ms each** at a prompt pinned to ~23,758 — before pruning at turn 14 anyway.
+
+**The mechanism is structural, not incidental.** The gate defers pruning until the conversation is
+near the window, which is exactly where Ollama begins context-shifting — so every turn in the
+deferral window is already a full reprocess. **The gate protects the prefix cache in the one regime
+where the prefix cache is already gone**, pays ~23.7s/turn to wait, and then pays the prune's cost
+regardless. Pruning early is what keeps the conversation small enough for the cache to survive at all.
+
+That argument does not depend on this workload: the gate's threshold (25% free) *by construction*
+places the prune next to the window, which is the saturation regime. Tightening the threshold means
+pruning earlier, which is what turning the gate off already does — so "tighten" and "revert" converge.
+
+**Recommendation: revert `PreservePrefixCache` to unconditional pruning**, per this item's own stated
+criterion ("if the gate does not clearly win on wall clock without adding overflows... revert it").
+Keep `compaction.preserve_prefix_cache` as the escape hatch and the A/B harness.
+
+**What would change the recommendation, and should be checked before ripping code out.** This is n=1
+per arm, one model, one workload, at a 24,576 window; the motivating measurement was a 40k+ window
+over a 142-minute drive with a very different shape. On a **large** window the gate uses a fixed 40k
+buffer rather than a ratio, so the deferral may end well short of saturation and the original
+arithmetic could still hold. Re-run the same fixture with the window raised past
+`largeContextWindowThreshold` before deciding. The harness now makes that one command.
+
+*Original filing follows, for the reasoning the measurement was testing.*
+
+**P62.2 as originally filed**, kept because it is the reasoning the measurement was testing:
 
 `compaction.Options.PreservePrefixCache` (shipped 2026-08-07) makes the deterministic prune pre-pass
 headroom-gated instead of unconditional on a local backend, because rewriting the middle of a
@@ -334,98 +535,72 @@ tracking, not independent build work.
 
 ## Open Work — Tier 3
 
-**Status: 1 open — P63.9**, below, split out of P63.7 on 2026-08-07 when that item's `Update` half
-shipped and its `Engine.Run` half proved to be different work. **Two of its four concerns are
-extracted** (budgets and loop detection, both 2026-08-08); the remaining two are the hard pair. P61.6 (2026-08-06) was the last before
+**Status: 1 open — P62.6**, below, filed 2026-08-08 off P62.2's fixture. **P63.12 was filed and
+closed the same day** (2026-08-08) — filed by P63.9's
+last pass, then built once its premise was checked rather than assumed. That check is the part worth
+keeping: the item as written blamed "compaction rewrites the transcript" in general, and measuring
+narrowed it twice. `pruneStaleToolResults` only touches tool_use/tool_result blocks, so **pruning is
+not a vector at all** — summarization is, since everything before the keep-recent tail (default 8) is
+replaced outright. And of the six nudge families, only **one** is actually harmed: the counts
+(`guardRetries`, `loopNudges`, `zeroToolNudges`, …) record what this run injected and remain true
+whatever happens to the transcript. `toolFailureOutstanding` was the sole flag making a claim *about
+the transcript's current contents*, and the sole one that suppresses re-injection of a message whose
+entire purpose is to be visible to the model.
+
+What made it reachable rather than theoretical is a detail neither the filing nor the original P52.3
+work names: `shouldNudge` fires on `allErrorRounds >= 3` **or** `sameErrorRounds >= 3`, while
+`shouldAbort` fires only on `allErrorRounds >= 6`. So a model whose rounds are partly succeeding
+nudges at three and **never aborts** — it runs to the iteration cap, far past the keep-recent tail.
+The fix deletes the flag and asks `hasNudge(conv, prefix)` instead, which is the rule
+`retractGuardCorrectives` already documents ("identified by content rather than by indices... so a
+compaction or prepare-step rewrite mid-run can't shift the bookkeeping"). Write-up in
+[releases.md](releases.md).
+
+**P63.9 closed 2026-08-08, all four concerns extracted.** `Engine.Run` went **725 → 497 lines**
+(-31%), max nesting 10 → 6 levels, and its `// Pxx` marker count 29 → 21 — the metric the item cared
+about most, since those markers were the evidence that behavior was being added to `Run` *because*
+that is where all the state already was. The four concerns now live in `budget.go` (172),
+`loopdetect.go` (386), `compact.go` (266) and `guardretry.go` (211). Each pass landed separately,
+gated on the golden transcripts, and each found the state in a **different shape** — that catalogue is
+the item's durable output and is recorded with the write-ups in [releases.md](releases.md). P61.6
+(2026-08-06) was the last Tier-3 item before
 it, and the sequencing finding it produced is
 recorded with its write-up: built **second** in its batch rather than last, it turned P61.1 into
 option wiring and closed P61.3 with no production code, so the "write each fix twice and delete one
 copy" cost the item worried about was never paid. Before it: P59.9, P60.2, P60.4 and P57.1. See
 [releases.md](releases.md).
 
-### P63.9 — `Engine.Run`: the half of P63.7 that needs a design answer, not code motion
 
-Split out of P63.7 when its `Update` half was built, because the two halves are not the same kind of
-work and bundling them hid that. P63.7 is now closed by the `Update` split alone; this carries the
-part it deliberately deferred.
+### P62.6 — The base prompt is 7,119 tokens before any work, on the *trimmed* local profile
 
-`engine/engine.go:518` — `Engine.Run`, originally **725 lines, 119 branch points, 10 levels of
-nesting** (now 654 after two passes), holding budget enforcement, compaction triggers, nudge
-retraction, loop detection and guard retries in one scope where each interacts with the others. The **33 `// Pxx` markers inside it** are
-the tell: it has become the place behavior is added *because* it is already where all the state is,
-which is self-reinforcing.
+Measured 2026-08-08 while sizing P62.2's fixture, and the number is larger than anything in the tree
+assumes. On qwen3:14b against a temp workspace of 14 `.txt` files — no repo to map, no memory, no
+skills enabled — the first turn's provider-reported prompt was **7,119 tokens**.
 
-**Pass 1 of 4 landed 2026-08-08: the run budgets** (`internal/engine/budget.go`). Budgets went first
-because the ownership question had an unusually clean answer — three of the four bounds are pure
-reads of the cost tracker and own nothing, and the fourth owned exactly one thing, the run's start
-instant, previously a bare local threaded by hand into five calls across 600 lines. Once that is a
-field on a `runBudget`, the concern has nothing left in `Run` to interact with. The two gates
-collapsed from three duplicated inline checks each into one `budget.exceeded()` call; check order
-(cost → tokens → time) is observable and was preserved. `Run` is now **685 lines** — a number that
-undersells the change, since the point was deleting the hand-threaded `runStart`, not the line count.
-Gated on `go test ./...` and the eval golden transcripts (`TestScenario_BudgetAbortsSecondTurn`
-included). Write-up in [releases.md](releases.md).
+**That is the trimmed profile, not the default one.** The fixture passes `PromptProfile: ""` against
+`http://localhost:11434`, and `LocalPromptProfile()` auto-detects loopback as local — so P25.6's
+reduced system prompt and deferred network/security tool schemas were already applied. 7,119 is what
+is left after the trimming.
 
-**Pass 2 of 4 landed 2026-08-08: loop detection** (`loopGuard` in `internal/engine/loopdetect.go`).
-`Run` is now **654 lines**. The ownership question here had a different answer from budgets', and
-finding it *was* the pass: **two of the concern's variables were at the wrong scope.**
-`loopNudgePending` was declared among `Run`'s run-scoped flags and `loopRecorded` was re-declared each
-iteration, but both are set by the loop gate and consumed after that same turn's tool round, with no
-path between them that continues the loop. They are **per-turn state in a run-scoped scope** — which
-is exactly how this function accumulates interactions it does not really have, since anything else in
-`Run` could read or write them and nothing said it shouldn't.
+**Why it matters here specifically.** Aegis's stated target is local models on consumer hardware, and
+the recorded constraint for this machine is 16GB VRAM — which in practice means an 8k-16k served
+window. At 8,192 the base prompt is **87% of the window before the first tool call**, which is not a
+tuning problem but a "the agent cannot do multi-turn work" problem. It is also what made P62.2's
+fixture fail twice: the model got four reads in and ran out of room.
 
-So the split is not "move the detector": the guard owns what genuinely survives a turn (the window,
-the outcomes, the threshold the messages quote), and the gate returns a **`loopVerdict` value** the
-caller holds for the rest of one iteration. Per-turn state can no longer outlive the turn because it
-is a value, not a variable. The nudge *count* deliberately stayed in `nudgeState`, matching the split
-already in the tree for the sibling concern — `toolFailureTracker` owns the failure counters while
-`nudgeState` owns `toolFailureNudges`/`toolFailureOutstanding` — so it is passed in rather than
-duplicated. A disabled detector is a nil `*loopGuard` whose methods tolerate a nil receiver, so `Run`
-lost its nil checks too.
+**Measure before building, and measure the composition first.** The single number does not say where
+it goes. Split it — system prompt, tool schemas (50+ builtins, and the schema block is the obvious
+suspect), `<skills_available>`, `<repo_map>`, memory — before proposing anything. Candidate
+directions only after that: progressive tool disclosure (the pattern `internal/skills` already uses
+for skills, applied to tool schemas), a smaller default exposure under the local profile, or a
+tool-schema budget analogous to `repomap.max_bytes`. `TestEffectiveSystem_localProfileTrimsPrompt`
+already asserts the local profile is *smaller*; nothing asserts it is small enough, and a byte
+assertion on the assembled prompt would make this a default-suite regression rather than a thing
+rediscovered by a live run.
 
-Gated on `go test ./...`, `-race`, the eval golden transcripts, **and the full live tier** (all three
-subtests passed, 2026-08-08 — see below). Two mutation checks confirmed the gate's tests are not
-vacuous. Write-up in [releases.md](releases.md).
-
-**Two concerns remain: compaction and guard retries** — the hard pair, and they should go last and
-separately. They interact with each other and with retry, so neither has the clean-ownership shape
-that made passes 1 and 2 safe. Pass 2's method (find the state at the wrong scope, return it as a
-value instead of storing it) is worth trying on them, but neither is expected to yield as cleanly:
-compaction genuinely mutates `conv` mid-run, which no value can encapsulate.
-
-**Why this is not a second helping of P63.7's method.** The `Update` split was pure code motion —
-per-message-domain files, gated on the eval golden transcripts showing no diff — because each `switch`
-case was already an independent unit and moving one could not change what another did. `Run` has no
-such seams. Extracting anything from a 10-deep scope means first deciding **what is genuinely
-per-turn state and what is run-scoped**, and that is a design question, not a mechanical one. P40.6
-answered it for exactly one narrow slice — folding three parallel nudge counters into a `nudgeState`
-helper — and left the rest open. That pass is the model for shape and for safety technique, but it is
-not a template that can be applied five more times without re-deciding the boundary each time.
-
-**Approach: one concern at a time, not one sweep.** Each pass takes a single interacting concern
-(budget enforcement, compaction, loop detection, guard retries), names the state it actually owns,
-lifts it into a helper with that state as a field, and lands separately — gated on the golden
-transcripts the same way. A sweep would produce a diff no reviewer can check against a function whose
-whole problem is that its parts interact.
-
-The **live tiers matter more here than the unit suite.** `internal/engine` is at 92.0% and green
-throughout the regressions P25.7 was built to catch, which is precisely the coverage profile that
-hides an integration-shaped break — so `TestLiveWorkflow` (and, where attribution is in doubt,
-`TestLiveWorkflowBaseline`) should run over any pass that touches retry, nudge or compaction control
-flow, not just `go test ./...`.
-
-**Pass 2 ran it, and the tier is now worth running** (qwen3:14b, 2026-08-08, after P63.11): all three
-subtests passed, including `FixSeededBug`, which had failed on the pass-1 run. That is **not** evidence
-this pass fixed anything — P60.4's control group had already attributed the earlier failure to the
-model, and the model this time simply ran the script, made the correct `int(row["temp"])` edit and
-re-ran it. What it does show is that the tier can now produce a clean green, so a future red over a
-P63.9 pass is informative rather than expected.
-
-Priority: Tier 3 — no urgency and no trigger, and unlike P63.7's half it cannot be made safe by
-technique alone. Worth doing incrementally and worth *not* doing in a hurry: a botched pass here
-degrades the agent loop itself, which is the one component every other item's behavior is measured
-through.
+Priority: Tier 3 — real, measured and squarely on the primary use case, but the fix is a design
+question (what does the agent stop being able to do?) rather than a defect with a known repair, and
+no user has reported it. Promote to Tier 2 if the composition split shows one component dominating.
 
 **Three leads sit here unfiled, each with a stated promotion trigger.** None is a `### P<n>.<m>` item
 yet, deliberately — filing one before its trigger fires would commit to a design question that has no

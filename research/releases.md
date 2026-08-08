@@ -8,11 +8,217 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-08 — **P63.9's second concern extracted from `Engine.Run`**, and before it
-**P63.11 shipped and the live tier produced its first real prompt-profile measurement**. Earlier the
-same day: Tier 2 emptied of buildable work and the first `Engine.Run` pass landed — P63.8 and P62.1
-shipped, and P63.9's first concern (the run budgets) was extracted. Write-ups immediately below; the
-2026-08-07 P63.x batch follows them.
+**Last updated:** 2026-08-08 — **P63.9 CLOSED: the fourth and last concern, guard retries, extracted
+from `Engine.Run`**, which finishes a four-pass decomposition that took the function from 725 to 497
+lines. Before it, the third concern (compaction) was extracted — the pass that corrects the item's own
+framing of what made it hard — and before that the second (loop detection), and **P63.11 shipped and the live tier produced its
+first real prompt-profile measurement**. Earlier the same day: Tier 2 emptied of buildable work and
+the first `Engine.Run` pass landed — P63.8 and P62.1 shipped, and P63.9's first concern (the run
+budgets) was extracted. Write-ups immediately below; the 2026-08-07 P63.x batch follows them.
+
+**P62.2's adversarial fixture — built 2026-08-08, and what building it cost to get right.**
+`TestLiveWorkflowCompactionPrefixCacheGate` (`internal/eval`, `live_workflow` tag) runs one
+forced-compaction workload twice, changing only `compaction.preserve_prefix_cache`, and reports wall
+clock, per-turn prompt size and prefill, and the count of turns whose context shrank. It needed a
+small product change to exist at all: `PreservePrefixCache` was derived from `config.LocalBackend()`
+with no override, so both arms would have been identical. `compaction.preserve_prefix_cache` is now a
+tri-state (`nil` = auto-detect, behavior unchanged) — independently justified, since P62.2 says the
+gate may need tightening or reverting and **an optimization that cannot be switched off cannot be
+A/B'd or reverted without a rebuild**, which is the corner it shipped into.
+
+Three runs were needed, and each failure was a different kind of instrument defect worth recording:
+
+- **Run 1 passed and measured nothing — because of its own guard.** The subtest asserts "compaction
+  actually ran" precisely to avoid a vacuous green, and matched on the substring `"context ~"`. The
+  *failure* notice — `context ~129% full and nothing left to compact` — contains it. A guard that can
+  be satisfied by the failure it guards against is not a guard. It now matches `"compacted"` for
+  success and fails explicitly on `"nothing left to compact"`.
+- **"Read them one at a time" is not enforceable by asking.** `read_file` declares `CapRead`, so
+  `engine.runTools` dispatches the round concurrently; qwen3:14b emitted all 8 reads in a single
+  turn, producing a 2-turn run with everything still inside the keepRecent tail. The fixture is now a
+  **chain** — each file's last line names the next, in a non-guessable order — so one read per turn is
+  a property of the workspace rather than a request. Confirmed working on run 2
+  (`data_01 → 09 → 04 → 12`, sequential).
+- **The base prompt is 7,119 tokens, and that is the number the fixture has to be sized from.**
+  Measured on qwen3:14b: system prompt + tool schemas + repo map, before a single file is read. At
+  the 8192-token window run 2 used, that is **87% of the window gone at turn zero** — the model got
+  four reads in, ran out of room, and abandoned the chain, and compaction never fired because nothing
+  ever accumulated ahead of the tail. Two useful corollaries: `compactionTrigger` is
+  `min(85% of window, window − maxTokens − margin)`, so a large completion reserve against a small
+  window drags the trigger *below the base prompt* and asks for compaction on turn one; and a
+  compaction attempt that finds nothing to do is **silent** unless the estimate is also over 95%, so
+  "no notice" does not mean "no attempt".
+
+Run 2 did produce a clean prefix-cache signature worth keeping even though the run failed its
+assertions: turn 0 prefilled in 6,050ms (cold), turns 1-2 in ~500ms (cache hits on an append-only
+conversation), turns 3-4 in ~1,030ms. That is the mechanism P62.2 is arguing about, visible.
+
+**P63.12 — a flag that made a claim about the transcript, and the transcript could disagree
+(FILED AND SHIPPED 2026-08-08).** Filed by P63.9's pass 4 and built the same day, but only after
+checking its own premise — which narrowed it twice, and the narrowing is the useful part.
+
+The filing blamed "compaction rewrites the middle of `conv.Messages`" in general. Measuring found
+that **pruning is not a vector at all**: `pruneStaleToolResults` keys on tool_use/tool_result blocks
+and never touches a plain user text message, so only *summarization* can delete a corrective — which
+it does wholesale, replacing everything ahead of the keep-recent tail (default 8).
+
+Second narrowing: of the six nudge families, **exactly one is harmed**. The counts —
+`guardRetries`, `loopNudges`, `zeroToolNudges`, `emptyAnswerNudges`, `shimFormatNudges` — record what
+*this run injected*, which stays true no matter what happens to the transcript afterwards, and they
+gate retry budgets rather than visibility. `toolFailureOutstanding` was the only field asserting
+something about **the transcript's current contents**, and the only one whose falsity suppresses
+re-injection of a message whose entire purpose is to be seen by the model. So the fix is one field,
+not a redesign of `nudgeState`, and the item's own "should nudgeState track message identity?"
+framing was bigger than the defect.
+
+**What makes it reachable rather than theoretical** is a threshold asymmetry neither the filing nor
+the original P52.3 work names: `shouldNudge` fires on `allErrorRounds >= 3` **or**
+`sameErrorRounds >= 3`, while `shouldAbort` fires only on `allErrorRounds >= 6`. A model whose rounds
+are partly succeeding therefore nudges at three and **never aborts** — it runs to the iteration cap,
+which is far more than the eight messages of keep-recent tail. That is the P38.1 drive's shape
+exactly: a long local-model run, a small window, and a stall the model keeps half-recovering from.
+
+The fix deletes the flag and asks `hasNudge(conv, toolFailureNudgePrefix)`. That is not a new idea in
+this file — `retractGuardCorrectives` already documents the rule ("identified by content rather than
+by indices recorded at retry time so a compaction or prepare-step rewrite mid-run can't shift the
+bookkeeping onto the wrong messages"). Retraction followed it; the injection gate did not. Linear in
+conversation length, once per tool round, on conversations that by definition are long enough to have
+been compacted — not a cost worth trading correctness for.
+
+Regression: `TestP6312ToolFailureNudgeReinjectedAfterCompactionDeletesIt`, driving a compactor that
+deletes exactly the nudge so the deletion is isolated from everything else a summarization pass does.
+It asserts the fixture actually reproduced the condition, so it fails loudly rather than vacuously if
+the mechanism moves. Four mutations, all caught, including restoring the old once-per-run semantics.
+
+**A flaky test was found and fixed on the way** (`internal/toolcallprobe`,
+`TestGateWarningCarriesTheRate`). It asserted `w2 != w` — that the *first* warning is not yet refined
+with the conformance sample — which is a race, not a contract: `Warning` renders the rate whenever
+`Trials > 1`, and the background refinement the same call starts can land between its own `Verdict`
+call and the `Conformance` read a few lines below. It failed roughly one full-suite run in ten while
+the product behaved correctly either way (an earlier sample is a better warning, not a worse one).
+The substring check it sat next to already tested the real contract. This matters beyond one test:
+these passes are gated on mutation checks, and **in a non-deterministic suite a surviving mutation
+and a flake are indistinguishable.**
+
+**P63.9 pass 4 and closure — guard retries, and the state shape the other three passes did not cover
+(2026-08-08).** `Run` went from 551 to **497 lines**, closing the item. Totals across the four passes:
+**725 → 497 lines (-31%)**, max nesting **10 → 6** levels, and the `// Pxx` marker count inside the
+function **29 → 21** — that last one being the metric the item actually cared about, since those
+markers were its evidence that behavior was being added to `Run` *because* that is where all the state
+already was.
+
+**The catalogue of state shapes is the item's durable output**, more than the line count. Each pass
+asked one question — *what state does this concern actually own* — and each got a different kind of
+answer: pass 1 found state **owned by nothing** (a bare `runStart` hand-threaded into five call
+sites); pass 2 found **per-turn state at run scope**; pass 3 found **run-scoped state with the wrong
+owner**; pass 4 found **inter-turn carry**.
+
+That fourth shape is the one the others do not cover. `constrainNext` lived for exactly one iteration
+boundary: the guard set it at the *end* of turn N, the turn setup consumed it at the *start* of turn
+N+1, and it had to be cleared in between or the P59.8 schema would silently re-shape every later turn
+of the run — with tools suppressed, since a non-nil format also means "tools off". Nothing enforced
+any of that. It was declared among `Run`'s run-scoped variables, read at one site to decide
+`suppressTools`, read again ~200 lines later and manually set back to nil, with a comment at *each*
+site explaining the discipline the code did not encode. `guardGate.takeFormat` returns the carry and
+empties it in the same expression, so a caller cannot forget the second half because there is no
+second half. The generalizable form: **when a comment explains a discipline, look for the API that
+makes the discipline unnecessary.**
+
+`guardGate` (`internal/engine/guardretry.go`) also takes the verdict handling, the bounded corrective,
+the corrective text builder, and the P27.16 rollback-on-exhausted-retries. The retry **count** stays
+in `nudgeState` and is passed in — the same boundary passes 2 and 3 held, because `retractAll` reads
+that table. A nil `*guardGate` is a run with no output guard. Two constants moved to the concerns that
+own them: `guardCorrectivePrefix` here (matching `loopNudgePrefix` in `loopdetect.go`) and
+`summarizerGiveUpThreshold` to `compact.go`, which also fixes a pre-existing mangle where
+`guardCorrectivePrefix`'s doc comment was attached to `summarizerGiveUpThreshold`.
+
+**Seven mutations, two survived, and both survivors were assertions the suite believed it already
+made.** `TestSchemaGuardFormatIsPerRetry` states in its own doc comment that "a turn that is not a
+guard retry never carries it" — and never constructs such a turn, so deleting the clear from
+`takeFormat` failed nothing. Building that case needs a turn following a retry without being one; an
+empty retry supplies it, because the P34.1 empty-answer nudge fires before the guard is reached. The
+second survivor: nothing asserted the `final == ""` gate, so the guard would happily judge an empty
+answer, spend a retry on a turn already corrected once, and emit a `KindGuard` verdict about text that
+does not exist. Both now covered; all seven mutations fail the suite.
+
+**Gated without the live tier, deliberately** (the machine was needed for other work): `go build`,
+`go vet`, `go test ./...`, `go test -race` over engine/eval/server/drive/swarm, and the eval golden
+transcripts. The live tier's value for this concern is in any case limited — pass 3's run established
+that a green there is evidence the surrounding loop works, not that the extracted concern does.
+
+**P63.12 was filed by this pass** — compaction can summarize away a corrective that `nudgeState` still
+counts as present, and guard correctives are now the second consumer of that
+marker-in-the-transcript assumption. Two consumers is what makes it worth fixing once rather than
+noting in two files. The `toolFailureOutstanding` case is the one with teeth: it stays latched, so the
+P52.3 corrective is suppressed for the rest of the run with no notice and a healthy-looking counter.
+
+**P63.9 pass 3 — compaction, and the difference between mutating shared data and sharing state
+(2026-08-08).** `Run` went from 654 to **551 lines**, the largest single drop of the three passes so
+far, and the finding is a correction to P63.9's own framing.
+
+The item filed compaction as half of "the hard pair" on a specific ground: pass 2's technique — name
+the per-turn state and return it as a value rather than storing it — **cannot** encapsulate a concern
+that mutates `conv` mid-run. That is true, and it turned out not to be the obstacle it reads as.
+Mutating shared data is not the same as sharing state. Every write compaction makes to
+`conv.Messages` is its own output, not a variable another concern also writes, so there was nothing
+to return as a value because nothing was escaping in the first place: `pct` and `compacted` were
+already block-scoped, and the five variables sitting in `Run`'s preamble all genuinely live for the
+whole run.
+
+**So the defect was ownership, not scope** — the opposite of pass 2's finding, and worth recording as
+such, because the two passes now bracket the question P63.9 exists to ask. Pass 2 found per-turn
+state at run scope. Pass 3 found run-scoped state at the wrong *owner*: the shim's prompt cost, the
+consecutive-failure count, the cumulative LLM-failure count, the summarizer latch and the
+context-full warned flag were declared where 600 lines could reach them and touched by one 70-line
+block. Naming the owner is the whole fix; the `conv` rewriting travels with it as a method parameter
+because the rewriting **is** the concern.
+
+`compactionGuard` (`internal/engine/compact.go`) therefore owns all five, plus both call sites — the
+unconditional run-entry pass and the per-turn headroom gate — and `Run` is left with two calls and a
+comment. Unlike `loopGuard` there is no nil form: the 95%-full notice is emitted by exactly this
+concern and fires whether or not anything can be compacted, which is the local-server
+silent-truncation case it exists for, so the nil check is on the compactor field, inside.
+
+**One coupling is real and was deliberately left alone.** Compaction rewrites the middle of
+`conv.Messages`; nudge retraction finds its correctives by scanning that same list for a marker
+prefix. A pass that summarizes away an outstanding nudge leaves retraction a no-op while `nudgeState`
+still believes the corrective is in the transcript — `toolFailureOutstanding` in particular stays
+latched, suppressing re-injection for the rest of the run. It is benign today (worst case: one
+corrective not re-sent) and closing it is a behavior change, which this pass is gated against. It is
+documented at the seam because it is the coupling to think about before the **guard-retry pass**, the
+one remaining concern, which keys on the same marker-in-the-transcript mechanism.
+
+A second asymmetry is now written down rather than merely true: the run-entry pass shares the
+compactor with the proactive path but **none** of its failure bookkeeping, so a run whose entry pass
+fails still pays `summarizerGiveUpThreshold` further LLM calls before the P39.8 latch fires.
+Preserved, not fixed, for the same reason.
+
+**The mutation checks found a coverage gap, and it was pre-existing.** Six mutations were run against
+the extracted code; **three survived** the suite as it stood. The sharpest is that
+`TestProactiveCompactionFallsBackAfterTwoFailures` — named for the threshold — does not detect
+changing that threshold from two to three, because its three-turn script cannot tell the two apart;
+nor did anything detect deleting the counter's reset, or dropping the shim catalog from the headroom
+estimate entirely. Two new tests close all three by asserting the *sequence* of compactor calls
+rather than a count (`compact, compact, compact, fallback, compact` pins the entry pass being outside
+the bookkeeping, the fallback firing on the second consecutive failure, and the reset after it) and
+by running one fixture twice with the shim as the only difference. All six mutations now fail the
+suite, including deleting the run-entry pass outright.
+
+Gated on `go build`, `go vet`, `go test ./...`, `go test -race` over engine/eval/server/swarm/drive,
+and the eval golden transcripts. Live-tier result recorded with the pass in roadmap.md.
+
+**A third finding about the live tier itself, in the same family as the two the pass-1 and pass-2 runs
+produced: `TestLiveWorkflow` was structurally blind to every engine notice.** `drainWorkflowEvents`
+switched on `KindText`/`KindToolCall`/`KindToolResult`/`KindApprovalRequest`/`KindError`/`KindDone`
+and let `api.KindNotice` fall through unhandled, while the daemon logger the same test builds is
+pinned at `LevelWarn` — so compaction, the context-full warning, loop-detector nudges, tool-failure
+correctives and shim warnings were invisible on both channels at once. This surfaced while trying to
+attribute this pass's `FixSeededBug` failure: the log could not answer *did compaction even run*,
+which is the first question to ask of a compaction pass, and the absence of compaction lines looked
+like evidence when it was only silence. Notices are now logged in the timeline and collected on
+`workflowSummary.notices`. The general shape is the one the fixture-rot finding already made:
+**a tier that cannot observe the subsystem under test reports every result as being about something
+else.**
 
 **P63.9 pass 2 — loop detection, and the state that was at the wrong scope (2026-08-08).** `Run` went
 from 685 to **654 lines**, but the line count is again the least of it. `loopDetector` has had its own

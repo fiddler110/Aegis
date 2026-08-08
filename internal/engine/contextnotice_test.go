@@ -249,3 +249,109 @@ func TestProactiveCompactionLatchesOffSummarizer(t *testing.T) {
 		t.Error("expected a notice announcing the summarizer was disabled for the run")
 	}
 }
+
+// sequenceCompactor logs every call it receives, so a test can assert *when*
+// the deterministic fallback fired rather than only how often. Compact always
+// fails; FallbackCompact reports a change without shortening anything, so the
+// estimate stays over the trigger and compaction is attempted every turn.
+type sequenceCompactor struct{ log []string }
+
+func (c *sequenceCompactor) Compact(_ context.Context, _ string, msgs []provider.Message) ([]provider.Message, bool, error) {
+	c.log = append(c.log, "compact")
+	return msgs, false, errors.New("summarizer returned empty output")
+}
+
+func (c *sequenceCompactor) FallbackCompact(msgs []provider.Message) ([]provider.Message, bool) {
+	c.log = append(c.log, "fallback")
+	return msgs, true
+}
+
+// TestProactiveCompactionFallbackCounterIsConsecutiveAndResets pins the two
+// halves of P28.4's counter that TestProactiveCompactionFallsBackAfterTwoFailures
+// leaves unspecified — it asserts only that the fallback ran *once* in a run
+// short enough that a threshold of 2 and a threshold of 3 are indistinguishable,
+// and it never gets far enough for the reset to matter. Mutating either
+// (`failures >= 2` → `>= 3`, or deleting `failures = 0`) leaves that test green.
+//
+// Asserting the exact call sequence pins three things at once:
+//   - the run-start pass is not part of this bookkeeping (its failure is the
+//     first "compact" and does not push the counter to the trigger),
+//   - the fallback fires on the *second consecutive* proactive failure,
+//   - a fired fallback resets the counter, so the failure after it is the first
+//     of a new streak and must not fall back again.
+func TestProactiveCompactionFallbackCounterIsConsecutiveAndResets(t *testing.T) {
+	var turns [][]provider.Event
+	for i := 0; i < 2; i++ {
+		turns = append(turns, []provider.Event{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: fmt.Sprintf("tu-%d", i), Name: "echo", Input: json.RawMessage(fmt.Sprintf(`{"msg":"hi-%d"}`, i))}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 1}},
+		})
+	}
+	turns = append(turns, []provider.Event{
+		{Type: provider.EventTextDelta, Text: "done"},
+		{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 1}},
+	})
+	reg := tool.NewRegistry()
+	if err := reg.Register(&echoTool{}); err != nil {
+		t.Fatal(err)
+	}
+	comp := &sequenceCompactor{}
+	eng, err := New(Options{Adapter: &scriptedAdapter{turns: turns}, Tools: reg, Compactor: comp, Model: "test", MaxTokens: 100, ContextWindowTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Run(context.Background(), bigConversation(), func(Event) {}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// entry pass, then one proactive attempt per turn: fail, fail+fallback, fail.
+	want := []string{"compact", "compact", "compact", "fallback", "compact"}
+	if got := strings.Join(comp.log, ","); got != strings.Join(want, ",") {
+		t.Errorf("compactor call sequence = [%s], want [%s]", got, strings.Join(want, ","))
+	}
+}
+
+// TestShimCatalogCountsTowardCompactionTrigger is the P53.6 half of the headroom
+// estimate: the shim's tool catalog rides every request but is appended inside
+// turn(), outside conv.System, so a conversation measured without it undercounts
+// the real prompt by exactly what the shim adds — the wrong direction for a
+// check whose job is to compact *before* a local server silently truncates.
+//
+// The same conversation and window are run twice; only the shim differs. Without
+// it nothing crosses the trigger and no compaction happens; with it, it does.
+func TestShimCatalogCountsTowardCompactionTrigger(t *testing.T) {
+	compactedWith := func(shim bool) bool {
+		reg := tool.NewRegistry()
+		if err := reg.Register(&echoTool{}); err != nil {
+			t.Fatal(err)
+		}
+		adapter := &scriptedAdapter{turns: [][]provider.Event{{
+			{Type: provider.EventTextDelta, Text: "ok"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 1}},
+		}}}
+		// Declines the run-start pass (call 1) and compacts on any later call, so
+		// calls > 1 means a *proactive* attempt was made — i.e. the estimate
+		// crossed the trigger.
+		comp := &noticeCompactor{}
+		eng, err := New(Options{Adapter: adapter, Tools: reg, Compactor: comp, Model: "test",
+			MaxTokens: 100, ContextWindowTokens: 400, ToolCallShim: shim})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conv := &Conversation{System: "sys"}
+		conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+			provider.TextBlock{Text: strings.Repeat("filler words here ", 30)},
+		}})
+		if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return comp.calls > 1
+	}
+
+	if compactedWith(false) {
+		t.Fatal("conversation crossed the trigger without the shim — the fixture no longer isolates the catalog's contribution")
+	}
+	if !compactedWith(true) {
+		t.Error("the shim's tool catalog did not count toward the compaction trigger")
+	}
+}

@@ -488,6 +488,14 @@ func newLiveWorkflowDaemon(t *testing.T, baseURL, model, promptProfile string) *
 // prompt_eval_count is meaningful at all (P63.11).
 func newLiveWorkflowDaemonWithWindow(t *testing.T, baseURL, model, promptProfile string, contextWindow int) *client.Client {
 	t.Helper()
+	return newLiveWorkflowDaemonTweaked(t, baseURL, model, promptProfile, contextWindow, nil)
+}
+
+// newLiveWorkflowDaemonTweaked is newLiveWorkflowDaemonWithWindow with a hook
+// to adjust the assembled config before server.New sees it, for the one
+// subtest that needs two daemons differing in a single setting (P62.2).
+func newLiveWorkflowDaemonTweaked(t *testing.T, baseURL, model, promptProfile string, contextWindow int, tweak func(*config.Config)) *client.Client {
+	t.Helper()
 
 	// A self-managed temp dir with best-effort (non-fatal) cleanup: server.New
 	// never gets a chance to close its own sqlite handle here (there's no
@@ -528,6 +536,10 @@ func newLiveWorkflowDaemonWithWindow(t *testing.T, baseURL, model, promptProfile
 			Mode:   "llm",
 			Rubric: config.DefaultGuardRubric,
 		},
+	}
+
+	if tweak != nil {
+		tweak(cfg)
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -663,8 +675,24 @@ type workflowSummary struct {
 	writtenPaths  []string // path argument of every write_file/edit_file call
 	rememberCalls int
 	approvals     int
-	inputTokens   int
-	outputTokens  int
+	// notices is every engine advisory the run emitted, in order — the record
+	// that says whether compaction, the loop detector or a nudge actually fired,
+	// without which a failed subtest cannot be attributed.
+	notices []string
+	// turns is one entry per model turn, carrying the prompt size the provider
+	// actually saw and how long it spent prefilling it (P62.2). The pair is the
+	// whole measurement: a prefix-cache hit is a large prompt with a tiny
+	// prefill; a mid-history rewrite is a similar prompt an order of magnitude
+	// slower.
+	turns        []turnMetric
+	inputTokens  int
+	outputTokens int
+}
+
+// turnMetric is one model turn's prompt size and prefill cost.
+type turnMetric struct {
+	inputTokens  int
+	promptEvalMS int64
 }
 
 // drainWorkflowEvents consumes a message run's event channel to completion
@@ -706,12 +734,25 @@ func drainWorkflowEvents(t *testing.T, events <-chan api.Event) workflowSummary 
 				status = "ERR"
 			}
 			t.Logf("[%7.1fs] tool_result %s (%d chars)", elapsed.Seconds(), status, len(ev.ToolResult))
+		case api.KindNotice:
+			// Notices were dropped on the floor until 2026-08-08, which made the
+			// tier structurally blind to the engine's own advisories: compaction,
+			// the context-full warning, loop-detector nudges, tool-failure
+			// correctives, shim warnings. That is exactly the evidence needed to
+			// attribute a subtest failure — a P63.9 pass over compaction could
+			// not be told apart from a model failure, because the log could not
+			// say whether compaction ran at all. The daemon logger here is at
+			// WARN, so this is the only place they surface.
+			s.notices = append(s.notices, ev.Text)
+			t.Logf("[%7.1fs] notice %s", elapsed.Seconds(), truncateForLog(ev.Text, 200))
 		case api.KindApprovalRequest:
 			s.approvals++
 			t.Logf("[%7.1fs] APPROVAL_REQUEST %s — auto-approve should have handled this", elapsed.Seconds(), ev.Tool)
 		case api.KindError:
 			s.errText = ev.Error
 			t.Logf("[%7.1fs] ERROR %s", elapsed.Seconds(), ev.Error)
+		case api.KindTurnDone:
+			s.turns = append(s.turns, turnMetric{inputTokens: ev.InputTokens, promptEvalMS: ev.PromptEvalDurationMS})
 		case api.KindDone:
 			s.inputTokens = ev.InputTokens
 			s.outputTokens = ev.OutputTokens
@@ -726,4 +767,271 @@ func truncateForLog(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// The P62.2 measurement fixture. Three numbers, sized together so that
+// compaction fires with real history behind it rather than at a conversation
+// too short to have anything to summarize.
+const (
+	// compactionNumCtx has to leave room for the conversation to *grow*, which
+	// is a stronger constraint than "small". Measured on qwen3:14b, the base
+	// prompt — system prompt, tool schemas, repo map — is **7,119 tokens** before
+	// a single file is read. At the 8192 this fixture first used, that is 87% of
+	// the window gone at turn zero: the chain got four reads in before the model
+	// was squeezed out of room and abandoned it, and compaction never fired
+	// because nothing ever accumulated ahead of the keepRecent tail.
+	//
+	// So the window is sized as base + enough growth to cross the trigger with
+	// history to spare, not as small as possible.
+	compactionNumCtx = 24576
+	// compactionMaxTokens bounds the completion reserve. compactionTrigger is
+	// min(85% of window, window - maxTokens - margin), so a large reserve against
+	// a small window drags the trigger below the base prompt and makes the engine
+	// ask for compaction on turn one, before any history exists — one of the two
+	// defects that made this fixture's first version measure nothing. At this
+	// window the 85% cap binds instead, putting the trigger at ~20.9k.
+	// It must also stay **above 20% of the window**, which is the non-obvious
+	// half. The prune gate this test exists to measure fires at est > 75% of the
+	// window, while the engine only *calls* Compact() at
+	// min(85%, window - maxTokens - 5%). If maxTokens is small, that min resolves
+	// to 85% — above the gate — so by the time compaction is invoked the gate is
+	// always already satisfied and both arms prune identically. Measured: at
+	// maxTokens 2048 against this window (8%), the two arms came out at 141,611ms
+	// vs 142,156ms of prefill, i.e. the A/B was inoperative by construction.
+	// Above 20% the trigger drops below the gate and there is a real span where
+	// they differ — which is the shape of the default config (32,768 against a
+	// ~41k local window, 80%) that P62.2's original drive measured.
+	compactionMaxTokens = 8192
+	// compactionChainLen is how many files the chain walks. Each read is its own
+	// turn (see writeCompactionFixture), so this also bounds the message count
+	// the summarizer gets to work with — it must comfortably exceed compaction's
+	// keepRecent tail of 8, or there is nothing ahead of the tail to summarize.
+	compactionChainLen = 14
+)
+
+// writeCompactionFixture builds the adversarial fixture P62.2 has been owed
+// since it shipped: a workspace whose tool output reliably grows the
+// conversation past the compaction trigger, across enough *turns* that there is
+// history to compact when it does.
+//
+// The chain is the point. The obvious fixture — N files and "read them one at a
+// time" — does not work, and measuring is how that surfaced: read_file declares
+// CapRead, so engine.runTools dispatches the whole round concurrently, and
+// qwen3:14b duly emitted all 8 reads in a single turn. The result was a 2-turn
+// run at 129% of the window reporting "nothing left to compact", because
+// everything there was still inside the keepRecent tail. Sequencing is not
+// something a prompt can ask for here; it has to be impossible to batch.
+//
+// So each file's last line names the next one, and the order is not guessable
+// from the current filename. The model cannot read file N+1 until file N comes
+// back, which makes one read per turn a property of the fixture rather than a
+// request.
+//
+// P62.2's write-up rules out the alternatives: waiting for the condition on a
+// real drive (three drives produced three different workloads) and restoring
+// on-disk state that once triggered it (a fresh process ran the same state to a
+// completely different, working strategy). Forcing it structurally is what is
+// left.
+func writeCompactionFixture(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "aegis-live-workflow-compaction-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("cleanup: could not remove compaction fixture dir %s: %v", dir, err)
+		}
+	})
+
+	// A fixed, non-sequential visiting order so the next filename cannot be
+	// guessed from the current one. Deterministic (no rand) so both arms of the
+	// A/B walk an identical chain.
+	order := []int{1, 9, 4, 12, 7, 2, 14, 5, 11, 3, 13, 6, 10, 8}
+	if len(order) != compactionChainLen {
+		t.Fatalf("chain order has %d entries, want compactionChainLen (%d)", len(order), compactionChainLen)
+	}
+	for pos, n := range order {
+		var b strings.Builder
+		fmt.Fprintf(&b, "# Record %02d (step %d of %d)\n\n", n, pos+1, len(order))
+		// ~60 lines of distinct prose, about 1,950 tokens per file. Sized from the
+		// measured base (7,119) and trigger (~20,889): the chain crosses the
+		// trigger around its eighth read, leaving six more reads to happen *after*
+		// compaction has run, and well over keepRecent's 8 messages of history
+		// ahead of the tail by the time it does.
+		for line := 1; line <= 60; line++ {
+			fmt.Fprintf(&b, "record %02d line %02d: measurement %d at station %d, tolerance %d.%d\n",
+				n, line, n*1000+line, line*7%13, n, line)
+		}
+		if pos+1 < len(order) {
+			fmt.Fprintf(&b, "\nnext: data_%02d.txt\n", order[pos+1])
+		} else {
+			b.WriteString("\nnext: END\n")
+		}
+		name := filepath.Join(dir, fmt.Sprintf("data_%02d.txt", n))
+		if err := os.WriteFile(name, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func compactionPrompt() string {
+	return "Read the file data_01.txt with the read_file tool. The last line of every file names the " +
+		"next file to read. Follow that chain one file at a time, reading each file as you reach it, " +
+		"until you reach a file whose last line is 'next: END'. Do not guess filenames and do not read " +
+		"a file before the chain leads you to it. When the chain ends, reply with the single word DONE."
+}
+
+// TestLiveWorkflowCompactionPrefixCacheGate is the P62.2 measurement: run the
+// same forced-compaction workload twice, changing only
+// compaction.preserve_prefix_cache, and report what the gate costs and buys.
+//
+// **It asserts mechanism and reports measurement.** The assertions are that
+// both arms completed and that compaction *actually ran*, because a run where
+// it never ran measures nothing — which is how P63.9's compaction pass came to
+// be "validated" by a tier that never exercised compaction, and how this
+// fixture's own first version came back green and empty. The wall-clock and
+// prefill comparison is logged, not asserted: one A/B against a local model is
+// a sample of one, and a test that failed on a timing delta would be flaky in
+// both directions. The decision P62.2 asks for is a judgement made from this
+// output, not something a green tick can stand in for.
+func TestLiveWorkflowCompactionPrefixCacheGate(t *testing.T) {
+	baseURL := os.Getenv("AEGIS_EVAL_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+	model := os.Getenv("AEGIS_EVAL_MODEL")
+	if model == "" {
+		model = "llama3.2"
+	}
+
+	fixtureDir := writeCompactionFixture(t)
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(fixtureDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	type arm struct {
+		name     string
+		gate     bool
+		wall     time.Duration
+		summary  workflowSummary
+		shrank   int
+		prefillM int64
+	}
+	run := func(name string, gate bool) arm {
+		// Same reason as the prompt-profile subtest: a resident instance's
+		// window wins over config, so the pin only takes with nothing loaded
+		// (P63.11). Per arm, not once — the first arm leaves the model resident
+		// for the second.
+		unloadOllamaModel(t, baseURL, model)
+		cl := newLiveWorkflowDaemonTweaked(t, baseURL, model, "", compactionNumCtx, func(cfg *config.Config) {
+			cfg.Compaction.PreservePrefixCache = &gate
+			cfg.Provider.MaxTokens = compactionMaxTokens
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+		if err != nil {
+			t.Fatalf("%s: CreateSession: %v", name, err)
+		}
+		guardOff := false
+		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
+			Text:         compactionPrompt(),
+			GuardEnabled: &guardOff,
+		})
+		if err != nil {
+			t.Fatalf("%s: PostMessage: %v", name, err)
+		}
+		// Log the window the daemon actually resolved. Without it, a trigger that
+		// never fires has two indistinguishable explanations — the estimate
+		// undercounting the real prompt, or the engine measuring against a
+		// different window than Ollama is serving — and run 3 could not tell them
+		// apart.
+		if win, src := servedContextWindow(t, cl); win != compactionNumCtx {
+			t.Logf("%s: WARNING daemon resolved context window %d (from %s), not the pinned %d",
+				name, win, src, compactionNumCtx)
+		} else {
+			t.Logf("%s: context window %d (from %s)", name, win, src)
+		}
+		start := time.Now()
+		s := drainWorkflowEvents(t, events)
+		a := arm{name: name, gate: gate, wall: time.Since(start), summary: s}
+		// A turn whose prompt shrank against the previous one is a turn whose
+		// history was rewritten — the event the gate exists to make rare.
+		for i := 1; i < len(s.turns); i++ {
+			if s.turns[i].inputTokens < s.turns[i-1].inputTokens {
+				a.shrank++
+			}
+			a.prefillM += s.turns[i].promptEvalMS
+		}
+		return a
+	}
+
+	on := run("gate-on", true)
+	off := run("gate-off", false)
+
+	for _, a := range []arm{on, off} {
+		t.Logf("--- %s (preserve_prefix_cache=%v): wall=%s turns=%d shrinking-turns=%d prefill-total=%dms reads=%d",
+			a.name, a.gate, a.wall.Round(time.Second), len(a.summary.turns), a.shrank, a.prefillM,
+			countToolCalls(a.summary.toolCalls, "read_file"))
+		for i, tm := range a.summary.turns {
+			t.Logf("      turn %2d: prompt=%6d prefill=%6dms", i, tm.inputTokens, tm.promptEvalMS)
+		}
+		for _, n := range a.summary.notices {
+			t.Logf("      notice: %s", n)
+		}
+	}
+	t.Logf("=== P62.2: wall %s (gate on) vs %s (gate off); shrinking turns %d vs %d; prefill %dms vs %dms",
+		on.wall.Round(time.Second), off.wall.Round(time.Second), on.shrank, off.shrank, on.prefillM, off.prefillM)
+
+	for _, a := range []arm{on, off} {
+		if a.summary.errText != "" {
+			t.Errorf("%s: engine reported an error: %s", a.name, a.summary.errText)
+		}
+		// The instrument check. "nothing left to compact" is the notice this
+		// fixture's first version accepted as proof that compaction had run; it
+		// says the opposite, and matching it explicitly stops a future edit from
+		// re-earning a green that measures nothing.
+		compacted, starved := false, false
+		for _, n := range a.summary.notices {
+			switch {
+			case strings.Contains(n, "nothing left to compact"):
+				starved = true
+			case strings.Contains(n, "compacted"):
+				compacted = true
+			}
+		}
+		if starved {
+			t.Errorf("%s: the run hit the window with nothing to summarize — the conversation crossed the "+
+				"trigger before it had history past compaction's keepRecent tail; lengthen the chain or "+
+				"shrink the per-file payload", a.name)
+		}
+		if !compacted {
+			t.Errorf("%s: no compaction actually ran, so this run measures nothing about the gate "+
+				"(turns=%d, reads=%d)", a.name, len(a.summary.turns),
+				countToolCalls(a.summary.toolCalls, "read_file"))
+		}
+		// The chain is what forces one read per turn; if the model bailed early
+		// there was never enough growth to matter.
+		if got := countToolCalls(a.summary.toolCalls, "read_file"); got < compactionChainLen/2 {
+			t.Errorf("%s: only %d read_file calls of a %d-file chain — the model abandoned the chain, so the "+
+				"conversation never grew as designed", a.name, got, compactionChainLen)
+		}
+	}
+}
+
+func countToolCalls(calls []string, name string) int {
+	n := 0
+	for _, c := range calls {
+		if c == name {
+			n++
+		}
+	}
+	return n
 }

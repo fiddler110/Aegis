@@ -6,6 +6,7 @@ package compaction
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync/atomic"
 
@@ -81,6 +82,15 @@ type Summarizer struct {
 	// preservePrefixCache makes the deterministic pre-pass headroom-gated
 	// instead of unconditional; see shouldPrune.
 	preservePrefixCache bool
+
+	// estimateOverhead and estimateScale carry the engine's learned correction
+	// for the shared token estimate (P62.4). Atomic for the same reason
+	// contextWindow is: they are updated turn by turn while Compact may be
+	// running. estimateScale is a float64 held as its IEEE-754 bits, since
+	// sync/atomic has no float type; zero means "never set" and leaves the raw
+	// estimate untouched, which is this package's pre-P62.4 behaviour.
+	estimateOverhead atomic.Int64
+	estimateScale    atomic.Uint64
 }
 
 // Options configures a Summarizer.
@@ -153,6 +163,48 @@ func (s *Summarizer) SetContextWindow(tokens int) {
 // which is not necessarily the global one (P52.1).
 func (s *Summarizer) ContextWindow() int {
 	return int(s.contextWindow.Load())
+}
+
+// SetEstimateCorrection applies the caller's learned correction for this
+// package's token estimate: an additive overhead for prompt content the
+// transcript does not contain (the tool schemas, which ride the request
+// alongside it) and a multiplicative scale for the heuristic's residual error.
+// Safe to call while Compact is running.
+//
+// It implements engine.CalibratedCompactor, and the reason that interface
+// exists is worth keeping next to the setter: the engine and this package run
+// two separate gates over the same messages, so a correction applied to only
+// one of them puts them back into the disagreement P41.1 unified them to end.
+// A scale <= 0 clears the correction rather than being stored, so a caller
+// cannot accidentally zero out every estimate.
+func (s *Summarizer) SetEstimateCorrection(overhead int, scale float64) {
+	if overhead < 0 {
+		overhead = 0
+	}
+	s.estimateOverhead.Store(int64(overhead))
+	if scale <= 0 {
+		s.estimateScale.Store(0)
+		return
+	}
+	s.estimateScale.Store(math.Float64bits(scale))
+}
+
+// estimate prices system+msgs the way the backend will: the raw heuristic, plus
+// the request overhead, times the learned scale. With no correction set it is
+// exactly EstimateTokens, so every caller below reads the same number it always
+// did until the engine has evidence to the contrary.
+func (s *Summarizer) estimate(system string, msgs []provider.Message) int {
+	n := EstimateTokens(system, msgs) + int(s.estimateOverhead.Load())
+	bits := s.estimateScale.Load()
+	if bits == 0 {
+		return n
+	}
+	scaled := float64(n) * math.Float64frombits(bits)
+	out := int(scaled)
+	if float64(out) < scaled {
+		out++ // round up; see tokenest.Calibrator.Apply
+	}
+	return out
 }
 
 // shouldCompact reports whether the current estimated token count warrants
@@ -273,13 +325,13 @@ func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider
 	// short-circuit means EstimateTokens is not computed here at all, exactly as
 	// before.
 	var changedByPrune bool
-	if force || !s.preservePrefixCache || s.shouldPrune(EstimateTokens(system, msgs)) {
+	if force || !s.preservePrefixCache || s.shouldPrune(s.estimate(system, msgs)) {
 		var prunedChars int
 		msgs, prunedChars = pruneStaleToolResults(msgs, s.keepRecent)
 		changedByPrune = prunedChars > 0
 	}
 
-	if !force && !s.shouldCompact(EstimateTokens(system, msgs)) {
+	if !force && !s.shouldCompact(s.estimate(system, msgs)) {
 		return msgs, changedByPrune, nil
 	}
 
@@ -409,6 +461,15 @@ func (s *Summarizer) summarizeFitBudget() int {
 // summarizeRequestTokens estimates the full summarization request — system
 // prompt and preamble included, not just the transcript — using the shared
 // tokenest estimator (the single token heuristic in this repo).
+//
+// Deliberately *not* run through the P62.4 correction, which is about the
+// conversation request rather than this one. The additive half would be plainly
+// wrong: that overhead is the tool schemas, and a summarization request carries
+// no tools. The multiplicative half would be defensible, but this path already
+// holds back an explicit reserve (summarizeReserveBuffer / summarizeReserveRatio)
+// whose stated job is to absorb how wrong tokenest can be about text in hand —
+// so correcting here would be double-counting the same error, and would shrink
+// the transcript the summary is built from for no measured reason.
 func summarizeRequestTokens(transcript string) int {
 	return tokenest.Messages(summarizeSystemPrompt, []provider.Message{
 		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: summarizePreamble + transcript}}},

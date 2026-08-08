@@ -171,3 +171,88 @@ func TestSchemaFormatMatchesGuardContract(t *testing.T) {
 		t.Error("no requirable keys must yield nil (don't constrain)")
 	}
 }
+
+// TestSchemaGuardFormatDoesNotLatchOntoALaterTurn is the half of the
+// per-retry contract TestSchemaGuardFormatIsPerRetry states in its doc comment
+// but never constructs: "a turn that is not a guard retry never carries it."
+// That test's three turns are all either the first turn or a retry, so it stays
+// green even if the constraint is never cleared — mutating the clear out of
+// takeFormat fails nothing without this.
+//
+// The case needs a turn that follows a retry without being one. A retry that
+// comes back empty gives exactly that: the P34.1 empty-answer nudge fires before
+// the guard is reached, so the turn after it is an ordinary unconstrained turn.
+// If the carry latched, that turn would arrive with a grammar *and* with tools
+// suppressed, which is the failure P59.8 sized the per-retry lifetime to avoid.
+func TestSchemaGuardFormatDoesNotLatchOntoALaterTurn(t *testing.T) {
+	adapter := &recordingAdapter{turns: [][]provider.Event{
+		textTurn("still prose"),     // guard rejects → retry, constraint armed
+		textTurn(""),                // empty → P34.1 nudge, guard never reached
+		textTurn(`{"summary":"s"}`), // ordinary turn: must NOT be constrained
+	}}
+	required := []string{"summary"}
+	eng, err := New(Options{
+		Adapter: adapter, Tools: tool.NewRegistry(), Model: "test", MaxTokens: 100,
+		OutputGuard: guard.SchemaGuard(required), OutputGuardMaxRetries: 2,
+		OutputGuardFormat: guard.SchemaFormat(required),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "report"}}})
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(adapter.reqs) != 3 {
+		t.Fatalf("adapter calls = %d, want 3", len(adapter.reqs))
+	}
+	if adapter.reqs[0].Format != nil {
+		t.Error("first turn must be unconstrained")
+	}
+	if adapter.reqs[1].Format == nil {
+		t.Error("the guard retry must be constrained")
+	}
+	if adapter.reqs[2].Format != nil {
+		t.Error("the turn after the retry is not a retry and must be unconstrained — the constraint latched")
+	}
+}
+
+// TestGuardSkippedOnEmptyFinalAnswer pins the emptiness check that gates the
+// whole guard block. An empty final answer is not something a rubric can judge:
+// running the guard on "" would fail nearly any rubric, spend a retry on a turn
+// the P34.1 nudge has already corrected once, and emit a KindGuard verdict about
+// text that does not exist. Nothing asserted this — removing the `final == ""`
+// condition left the suite green.
+func TestGuardSkippedOnEmptyFinalAnswer(t *testing.T) {
+	adapter := &recordingAdapter{turns: [][]provider.Event{
+		textTurn(""), // P34.1 nudge fires, guard not reached
+		textTurn(""), // nudge already spent: falls through to the guard block
+		textTurn(`{"summary":"s"}`),
+	}}
+	required := []string{"summary"}
+	eng, err := New(Options{
+		Adapter: adapter, Tools: tool.NewRegistry(), Model: "test", MaxTokens: 100,
+		OutputGuard: guard.SchemaGuard(required), OutputGuardMaxRetries: 2,
+		OutputGuardFormat: guard.SchemaFormat(required),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var guardEvents int
+	conv := &Conversation{System: "sys"}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "report"}}})
+	if err := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindGuard {
+			guardEvents++
+		}
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if guardEvents != 0 {
+		t.Errorf("KindGuard events = %d, want 0 — the guard judged an empty final answer", guardEvents)
+	}
+	if len(adapter.reqs) != 2 {
+		t.Errorf("adapter calls = %d, want 2 — the run should end on the second empty answer", len(adapter.reqs))
+	}
+}

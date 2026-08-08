@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
@@ -177,6 +176,28 @@ type Compactor interface {
 // warn-and-skip behavior on repeated failure.
 type FallbackCompactor interface {
 	FallbackCompact(msgs []provider.Message) (out []provider.Message, changed bool)
+}
+
+// CalibratedCompactor is an optional capability of a Compactor: it accepts the
+// correction the engine has learned for the shared token estimate (P62.4), as
+// an additive overhead plus a multiplicative scale.
+//
+// It exists because the engine and the Compactor run *two* gates against the
+// same conversation, and a correction applied to only one of them re-creates
+// P41.1 in a new form. Before that fix the engine estimated script-aware while
+// compaction estimated chars/4, so a conversation the engine had decided to
+// compact could be silently no-op'd by the cruder gate; they were unified on
+// tokenest to close it. A calibration the engine applied alone would split them
+// again — the engine would call Compact() believing the conversation is over
+// budget, the summarizer would price the same messages uncorrected, decide it
+// is not, and return changed=false. The engine would read that as "nothing left
+// to compact" and emit the context-full notice, which is precisely the symptom
+// P62.4 was filed about.
+//
+// The engine type-asserts for this, so a Compactor that only implements Compact
+// keeps its uncorrected estimate and today's behavior.
+type CalibratedCompactor interface {
+	SetEstimateCorrection(overhead int, scale float64)
 }
 
 // Hooks observe and can veto tool calls. PreToolUse runs after the permission
@@ -536,15 +557,19 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		conv.invalidate()
 	}
 
-	if e.compactor != nil {
-		if out, changed, err := e.compactor.Compact(ctx, conv.System, conv.Messages); err != nil {
-			e.logger.Warn("context compaction failed", "err", err)
-		} else if changed {
-			e.logger.Info("compacted conversation", "before", len(conv.Messages), "after", len(out))
-			conv.Messages = out
-			conv.invalidate()
-		}
-	}
+	// compact is the P2.7/P28.4/P39.8 compaction concern (P63.9): the headroom
+	// trigger, the summarizer's failure and latch bookkeeping, the shim's prompt
+	// cost, and the one context-full notice a run may emit. Never nil — the
+	// no-compactor case is still its business. See compact.go.
+	compact := e.newCompactionGuard()
+	compact.compactOnEntry(ctx, conv)
+
+	// guardRetry is the output guard's verdict handling and its bounded
+	// corrective retry (P63.9), including the P59.8 schema the retry re-asks
+	// under — carried across exactly one turn boundary by the gate rather than by
+	// a variable here. nil when no guard is configured; every method tolerates
+	// that. See guardretry.go.
+	guardRetry := e.newGuardGate()
 
 	// loop is the P53.2 loop gate plus the window it decides on (P63.9). nil when
 	// loop detection is disabled; every method tolerates that, so the gate below
@@ -552,17 +577,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// returns, declared inside the turn loop.
 	loop := e.newLoopGuard()
 
-	// P53.6: the shim's tool catalog rides every request but is appended in
-	// turn(), outside conv.System, so the proactive-compaction check below would
-	// undercount the real prompt by exactly what the shim adds — the wrong
-	// direction for a check whose whole job is to compact *before* a local
-	// server silently truncates. Estimated once per run rather than per turn:
-	// rendering the full catalog just to measure it every turn would cost more
-	// than the precision is worth, and a mid-run exposure change moves it by
-	// less than the estimate's own error.
-	shimPromptTokens := 0
+	// P53.6: announce the shim once per run. What the catalog *costs* the
+	// headroom estimate is the compaction guard's business and is measured
+	// there; this is only the user-facing notice.
 	if e.toolShim && e.tools != nil {
-		shimPromptTokens = tokenest.Estimate(toolshim.Prompt(e.tools.Schemas()))
 		emit(Event{Kind: KindNotice, Text: "tool-call shim active (provider.tool_call_shim) — tools are described in the prompt and called as tagged JSON, not via the provider's tool protocol"})
 	}
 
@@ -583,31 +601,9 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// Per-Run by construction, like every other counter here.
 	var toolFailures toolFailureTracker
 	toolRoundsCompleted := 0
-	ctxFullWarned := false // one context-nearly-full notice per run, not one per turn
 	// toolCallAsTextWarned bounds the P34.2 notice to one per run: the check
 	// sits on a path a guard retry can re-enter.
 	toolCallAsTextWarned := false
-	// constrainNext carries the JSON Schema the *next* turn is decoded under
-	// (P59.8). Only the schema-guard corrective retry sets it, and only for the
-	// one turn that answers the correction.
-	var constrainNext json.RawMessage
-	// compactionFailures counts consecutive proactive-compaction failures
-	// within this run (P28.4). Reset to 0 on any successful compaction
-	// (LLM-summarized or deterministic-fallback); never carries across runs,
-	// since a single Run already loops through every tool round of a long
-	// local-model task (the failure mode this guards against).
-	compactionFailures := 0
-	// compactionLLMFailuresTotal is the cumulative (non-reset) count of LLM
-	// summarizer failures this run, and summarizerLatchedOff records that we have
-	// given up on the LLM summarizer for the rest of the run (P39.8). A weak local
-	// model that reliably returns empty output from the summarization prompt would
-	// otherwise be re-tried on every compaction cycle — two wasted LLM calls each
-	// time before the deterministic fallback fires (42× "summarizer returned empty
-	// output" in one observed run). Once the total crosses the threshold, later
-	// compactions skip straight to the deterministic fallback.
-	compactionLLMFailuresTotal := 0
-	summarizerLatchedOff := false
-
 	// runUsage accumulates token counts across every turn of this run so the
 	// terminal KindDone event can carry a total (P25.5) — previously it was
 	// emitted bare, so API/eval-harness clients that only look at the final
@@ -647,88 +643,6 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			}
 		}
 
-		// P2.7: Proactive per-turn compaction — check token headroom before every
-		// turn so context-limit errors never interrupt a run mid-flight. Cloud
-		// providers reject an oversized prompt loudly; local servers (Ollama)
-		// silently drop the oldest tokens instead — including the system prompt —
-		// so when nothing can be compacted the user gets an explicit notice
-		// rather than a model that quietly forgot its instructions.
-		// P59.7: re-read the window every turn rather than trusting the value
-		// captured at New — a mid-run escalation has to reach the trigger, or
-		// the recovery it is part of pays for compaction it no longer needs.
-		if win := e.effectiveContextWindow(); win > 0 {
-			est := conv.estimatedTokens() + shimPromptTokens
-			// P59.1: the trigger reserves room for the *completion* as well as
-			// for prompt growth — on a shared prompt+completion budget (Ollama's
-			// num_ctx) a prompt that merely fits is not a prompt that can be
-			// answered.
-			if est > compactionTrigger(win, e.maxTokens) {
-				pct := est * 100 / win
-				compacted := false
-				if e.compactor != nil {
-					// P39.8: once the LLM summarizer has proven unreliable this run,
-					// stop calling it — go straight to the deterministic fallback so
-					// we don't burn two empty summary calls per compaction cycle on a
-					// model that will only ever return empty. The latch is per-run.
-					if summarizerLatchedOff {
-						if fc, ok := e.compactor.(FallbackCompactor); ok {
-							if out, changed := fc.FallbackCompact(conv.Messages); changed {
-								e.logger.Info("proactive compaction: summarizer latched off, using deterministic fallback",
-									"before", len(conv.Messages), "after", len(out))
-								emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — compacted %d→%d messages (deterministic; summarizer disabled for this run)", pct, len(conv.Messages), len(out))})
-								conv.Messages = out
-								conv.invalidate()
-								compacted = true
-							}
-						}
-					} else if out, changed, compErr := e.compactor.Compact(ctx, conv.System, conv.Messages); compErr != nil {
-						e.logger.Warn("proactive compaction failed", "err", compErr)
-						compactionFailures++
-						compactionLLMFailuresTotal++
-						// P39.8: after enough cumulative LLM-summarizer failures this
-						// run (not just consecutive), give up on it entirely — a weak
-						// local model that reliably returns empty output would otherwise
-						// be re-tried every compaction cycle (42× in one observed run).
-						if compactionLLMFailuresTotal >= summarizerGiveUpThreshold && !summarizerLatchedOff {
-							summarizerLatchedOff = true
-							e.logger.Warn("proactive compaction: disabling LLM summarizer for the rest of this run after repeated failures", "failures", compactionLLMFailuresTotal)
-						}
-						// P28.4: the LLM summarizer has now failed twice in a row for
-						// this run — a local model unreliably returning empty output
-						// (the observed live-eval failure mode) would otherwise skip
-						// compaction indefinitely and drift toward the hard
-						// context-window ceiling with no safety valve. Fall back to a
-						// deterministic, non-LLM shortening pass instead, if the
-						// configured Compactor supports one.
-						if compactionFailures >= 2 {
-							if fc, ok := e.compactor.(FallbackCompactor); ok {
-								if out, changed := fc.FallbackCompact(conv.Messages); changed {
-									e.logger.Warn("proactive compaction: summarizer failed twice in a row, applied deterministic fallback",
-										"before", len(conv.Messages), "after", len(out))
-									emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — summarizer unavailable, applied deterministic fallback compaction (%d→%d messages)", pct, len(conv.Messages), len(out))})
-									conv.Messages = out
-									conv.invalidate()
-									compacted = true
-									compactionFailures = 0
-								}
-							}
-						}
-					} else if changed {
-						e.logger.Info("proactive compaction", "before", len(conv.Messages), "after", len(out))
-						emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — compacted %d→%d messages", pct, len(conv.Messages), len(out))})
-						conv.Messages = out
-						conv.invalidate()
-						compacted = true
-						compactionFailures = 0
-					}
-				}
-				if !compacted && !ctxFullWarned && pct >= 95 {
-					ctxFullWarned = true
-					emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full and nothing left to compact — the model server may silently drop older turns; consider /compact or a fresh session", pct)})
-				}
-			}
-		}
-
 		// P2.6: On the final iteration, if any tool rounds have already completed,
 		// inject a step-limit summary instruction and suppress tool schemas so the
 		// model produces a plain-text progress summary rather than aborting with an
@@ -737,12 +651,29 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// P59.8: a schema-guard corrective retry is sent with decoding
 		// constrained to the required shape, and with tools off — the remaining
 		// task at that point is "emit this object", and a grammar plus a tool
-		// schema pull the same turn in two directions. constrainNext is consumed
-		// by this turn and cleared, so a *second* failure re-asks under the
-		// constraint again rather than latching it on for the rest of the run.
-		suppressTools := constrainNext != nil
-		if iter == e.maxIterations-1 && toolRoundsCompleted > 0 {
+		// schema pull the same turn in two directions. takeFormat empties the
+		// carry as it reads it, so a *second* failure re-asks under the constraint
+		// again rather than latching it on for the rest of the run.
+		//
+		// Decided before the compaction gate below purely so the gate can be told
+		// whether this turn carries tool schemas — that changes the prompt size it
+		// is estimating, and a turn without them is not a valid calibration sample
+		// (P62.4). The step-limit *injection* still happens after the gate, so the
+		// order of side effects on conv is unchanged.
+		format := guardRetry.takeFormat()
+		suppressTools := format != nil
+		stepLimited := iter == e.maxIterations-1 && toolRoundsCompleted > 0
+		if stepLimited {
 			suppressTools = true
+		}
+
+		// Compaction gate: measure headroom and shorten the conversation before
+		// spending a turn on a prompt that will not fit. Every decision this
+		// concern makes — trigger, summarizer latch, deterministic fallback, the
+		// once-per-run context-full notice — is inside. See compact.go.
+		compact.beforeTurn(ctx, conv, emit, suppressTools)
+
+		if stepLimited {
 			emit(Event{Kind: KindNotice, Text: fmt.Sprintf("step limit reached (%d tool rounds) — asking the model to summarize; raise provider.max_iterations for longer tasks", e.maxIterations)})
 			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 				provider.TextBlock{Text: "[Step limit reached. Summarize what you have accomplished, what constraints were met, and what work remains. Do not call any tools.]"},
@@ -750,8 +681,6 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		turnStart := time.Now()
-		format := constrainNext
-		constrainNext = nil
 		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit, suppressTools, format)
 		if err != nil {
 			// P59.2: when the run deadline above is what killed the turn, the
@@ -766,6 +695,12 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return err
 		}
 		conv.Append(assistant)
+
+		// P62.4: the provider just reported how many prompt tokens that request
+		// really was. Fold it into the estimate's correction before the next
+		// turn's headroom check, which is the only thing standing between a long
+		// run and a local server silently dropping its oldest turns.
+		compact.afterTurn(usage, e.effectiveContextWindow())
 
 		var runCost float64
 		if e.cost != nil && usage != nil {
@@ -951,68 +886,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			// The P34.2 prose-tool-call notice used to live here, gated on a
 			// zero-call turn; P59.6 hoisted it above so a mixed round reaches it
 			// too.
-			if e.outputGuard != nil {
-				maxRetries := e.outputGuardMax
-				if maxRetries <= 0 {
-					maxRetries = 1
-				}
-				if final := assistantText(assistant); final != "" {
-					ok, reason, status := e.outputGuard(ctx, guard.Input{Text: final, Files: e.collectWrittenFiles(ctx)})
-					e.logger.Debug("output guard result", "passed", ok, "guard_status", string(status))
-					if !ok && nudges.guardRetries < maxRetries {
-						nudges.guardRetries++
-						// P59.8: re-ask under the schema rather than merely
-						// asking again. Set per retry, not once per run, so it
-						// cannot leak onto an unrelated later turn.
-						constrainNext = e.outputGuardFmt
-						emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason, GuardStatus: string(status), GuardRetrying: true})
-						corrective := guardCorrectivePrefix + reason +
-							". This means the actual deliverable is incomplete or unpolished, not just its" +
-							" description. Do not reply with only an acknowledgment, a plan, or a promise to" +
-							" fix it later — that will fail validation again."
-						if toolRoundsCompleted > 0 {
-							corrective += " If you already wrote or edited a file for this task, call your file" +
-								" tools now (e.g. edit_file/write_file) to fix the real content directly."
-						}
-						corrective += " Finish the work now, then give a corrected final answer that reflects" +
-							" the fixed result. Address the original request only — never mention this" +
-							" validation step or include verdict words like PASS or FAIL in your answer.]"
-						conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-							provider.TextBlock{Text: corrective},
-						}})
-						continue
-					}
-					if !ok {
-						finalReason := "surfacing the response after " + itoa(maxRetries) + " failed validation attempt(s): " + reason
-						// P27.16 (FIND-15): retries are exhausted and the failing
-						// response is about to be surfaced anyway — quarantine any
-						// file(s) this turn wrote rather than leaving the bad write
-						// on disk. Reuses the same per-turn checkpoint Snapshotter
-						// write_file/edit_file already capture pre-write content
-						// into (internal/checkpoint), so this is a plain restore,
-						// not a new mechanism. A nil Snapshotter (no checkpoint
-						// store wired in, e.g. tests or an embedded engine without
-						// one) makes RestoreFiles a no-op — skip rollback rather
-						// than error, preserving today's retry-then-surface
-						// behavior in that case.
-						restored, rerr := checkpoint.SnapshotterFrom(ctx).RestoreFiles(ctx)
-						if rerr != nil {
-							e.logger.Warn("guard fail: rollback of files written this turn failed", "err", rerr)
-						} else if restored > 0 {
-							e.logger.Warn("guard fail: rolled back files written this turn", "files_restored", restored)
-							finalReason += fmt.Sprintf(" — rolled back %d file(s) written this turn", restored)
-						}
-						emit(Event{Kind: KindGuard, GuardPassed: false, GuardStatus: string(status),
-							GuardReason: finalReason, GuardFilesRestored: restored})
-					} else {
-						// Genuine pass and fail-open-skip both set ok=true, but the
-						// caller can now tell them apart via GuardStatus — without
-						// this, "the guard validated and passed" and "the guard
-						// silently never ran" were byte-for-byte indistinguishable
-						// (FIND-16).
-						emit(Event{Kind: KindGuard, GuardPassed: true, GuardStatus: string(status)})
-					}
-				}
+			// Guard gate: validate the final answer and, if it fails with retries
+			// left, append a corrective and arm the next turn's schema. The
+			// retry count stays here in nudgeState — retractAll reads it — and is
+			// passed in rather than duplicated. See guardretry.go.
+			if guardRetry.review(ctx, conv, emit, assistantText(assistant), toolRoundsCompleted, nudges.guardRetries) {
+				nudges.guardRetries++
+				continue
 			}
 			nudges.retractAll(conv)
 			doneEv := Event{Kind: KindDone}
@@ -1136,10 +1016,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		if toolFailures.cleared() {
 			nudges.retractSpentToolFailure(conv)
 		}
-		if toolFailures.shouldNudge() && !nudges.toolFailureOutstanding &&
+		// P63.12: ask the conversation whether a corrective is still standing
+		// rather than a flag set when one was injected. Compaction can have
+		// deleted it since, and suppressing re-injection on the strength of a
+		// message that is no longer there loses the correction silently — no
+		// notice, no log line, and a counter that still looks healthy.
+		if toolFailures.shouldNudge() && !hasNudge(conv, toolFailureNudgePrefix) &&
 			nudges.toolFailureNudges < toolFailureNudgeMax {
 			nudges.toolFailureNudges++
-			nudges.toolFailureOutstanding = true
 			emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
 				"%d tool round(s) in a row failed (%s: %s) — asking the model to re-inspect state instead of retrying",
 				toolFailures.rounds(), toolFailures.toolLabel(), toolFailures.lastErrorText)})
@@ -1170,19 +1054,6 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	return err
 }
 
-// guardCorrectivePrefix opens every guard corrective message; besides framing
-// the retry prompt, it is the marker retractGuardCorrectives keys on to strip
-// retry scaffolding from the durable transcript once the run settles.
-// summarizerGiveUpThreshold is the cumulative number of LLM-summarizer failures
-// in one run after which the engine stops calling the summarizer and compacts
-// deterministically for the rest of the run (P39.8). Set above the P28.4
-// consecutive-failure fallback trigger (2) so a run gets a couple of real
-// attempts — enough to ride out a transient error — before concluding the model
-// simply can't summarize and latching the LLM call off.
-const summarizerGiveUpThreshold = 4
-
-const guardCorrectivePrefix = "[Your previous response did not pass output validation: "
-
 // nudgeState counts the corrective/nudge scaffolding a single engine.Run
 // injected into the conversation: guard-retry correctives, the P28.3 zero-tool
 // nudge, and the P34.1 empty-answer nudge. It exists so the terminal-turn
@@ -1200,13 +1071,16 @@ type nudgeState struct {
 	// toolFailureNudges counts the P52.3 consecutive-tool-failure nudge, bounded
 	// at toolFailureNudgeMax. A model that ignores it is handled by the abort
 	// threshold, not by nagging it every subsequent failing round — that job
-	// belongs to toolFailureOutstanding below, not to the count.
+	// belongs to the outstanding check, not to the count.
+	//
+	// P63.12: "is one still outstanding" used to be a bool set here at injection
+	// time. It is now asked of the conversation (hasNudge), because the two could
+	// disagree: compaction deletes anything before its keep-recent tail, so a
+	// corrective could be summarized away while the flag went on claiming it was
+	// present — suppressing re-injection of the one nudge whose entire purpose is
+	// to be *visible* to the model. The count stays, because a count of what this
+	// run has injected is not a claim about the transcript's current contents.
 	toolFailureNudges int
-	// toolFailureOutstanding records that a tool-failure nudge is currently in
-	// conv un-retracted. It is what stops a second one being injected while the
-	// first is still doing its work (the old "one per run" bound), and what
-	// tells retractAll whether there is anything left to strip (P59.11).
-	toolFailureOutstanding bool
 	// loopNudges counts the P53.2 recoverable-loop nudge, also bounded to one per
 	// run: a second trigger means the corrective didn't work, and the run is
 	// aborted instead of nudged again.
@@ -1267,10 +1141,9 @@ func (n *nudgeState) retractSpentZeroTool(conv *Conversation) {
 // Idempotent, and retractAll still runs at the end for a nudge outstanding when
 // the run finished mid-streak.
 func (n *nudgeState) retractSpentToolFailure(conv *Conversation) {
-	if !n.toolFailureOutstanding {
+	if n.toolFailureNudges == 0 {
 		return
 	}
-	n.toolFailureOutstanding = false
 	retractNudges(conv, toolFailureNudgePrefix)
 }
 
@@ -1284,8 +1157,7 @@ func (n *nudgeState) retractAll(conv *Conversation) {
 	if n.emptyAnswerNudges > 0 {
 		retractNudges(conv, emptyAnswerNudgePrefix)
 	}
-	if n.toolFailureOutstanding {
-		n.toolFailureOutstanding = false
+	if n.toolFailureNudges > 0 {
 		retractNudges(conv, toolFailureNudgePrefix)
 	}
 	if n.loopNudges > 0 {
@@ -1430,6 +1302,31 @@ func isNudge(m provider.Message, prefix string) bool {
 	}
 	tb, ok := m.Content[0].(provider.TextBlock)
 	return ok && strings.HasPrefix(tb.Text, prefix)
+}
+
+// hasNudge reports whether a corrective with this prefix is *actually* still in
+// the conversation (P63.12).
+//
+// It exists because a stored "I injected one" flag and the transcript can
+// disagree: compaction summarizes everything before its keep-recent tail, so a
+// corrective older than that tail is deleted outright, and a flag set at
+// injection time keeps claiming it is there. retractGuardCorrectives and
+// retractNudges already avoid the equivalent trap by identifying messages by
+// content rather than by indices recorded at injection time — this is the same
+// rule applied to the one place that was still asking a variable instead of the
+// conversation.
+//
+// Linear in conversation length, called at most once per tool round. The
+// conversations where this matters are the ones long enough to have been
+// compacted, and a scan of a few hundred messages against a tool round that
+// just made a model call is not a cost worth trading correctness for.
+func hasNudge(conv *Conversation, prefix string) bool {
+	for _, m := range conv.Messages {
+		if isNudge(m, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // leadingPolitenessRe strips a leading politeness/indirection wrapper so the

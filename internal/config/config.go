@@ -47,6 +47,7 @@ type Config struct {
 	Security    SecurityConfig    `koanf:"security"`
 	Git         GitConfig         `koanf:"git"`
 	OutputGuard OutputGuardConfig `koanf:"output_guard"`
+	Compaction  CompactionConfig  `koanf:"compaction"`
 	// DefaultPersona names the persona new sessions start with when the
 	// caller doesn't pass --persona. Set at the project level
 	// (.aegis/config.yaml) to give a repo its own default focus; unset falls
@@ -791,6 +792,35 @@ func (p ProviderConfig) ToolCallShimEnabled() bool {
 // shimmed anything.
 func (p ProviderConfig) ToolCallShimValid() bool {
 	return toolshim.ValidMode(p.ToolCallShim)
+}
+
+// CompactionConfig tunes context compaction. Everything here is an override of
+// an auto-detected default, not a switch that has to be set.
+type CompactionConfig struct {
+	// PreservePrefixCache overrides the P62.2 headroom gate on the
+	// deterministic prune pre-pass. Unset (nil) auto-detects: on a local
+	// backend the gate is on, because rewriting the middle of a conversation
+	// discards the llama.cpp/Ollama prefix KV cache and costs a full prefill
+	// recompute; against a cloud provider there is no such cache and the gate
+	// is off.
+	//
+	// It is settable at all because the gate is an *optimization* measured on
+	// one run's arithmetic, and P62.2 exists to decide whether it earns its
+	// keep. An optimization that cannot be switched off cannot be A/B'd, and
+	// cannot be reverted without a rebuild — which is the position P62.2 was
+	// stuck in: it shipped with unit tests proving the gate does what it says
+	// and no way to ask whether what it says is worth doing.
+	PreservePrefixCache *bool `koanf:"preserve_prefix_cache"`
+}
+
+// PreservePrefixCacheOr resolves the tri-state against an auto-detected
+// default, which is what the caller would have used before the override
+// existed.
+func (c CompactionConfig) PreservePrefixCacheOr(auto bool) bool {
+	if c.PreservePrefixCache == nil {
+		return auto
+	}
+	return *c.PreservePrefixCache
 }
 
 // LocalPromptProfile reports whether the "local" prompt profile (P25.6)

@@ -630,6 +630,35 @@ repomap:
   max_symbols_per_file: 3
 
 
+# ── Context compaction ────────────────────────────────────────────────────────
+# Compaction keeps a conversation inside the model's context window by
+# summarizing older turns; recent turns are always preserved verbatim. It is
+# automatic and needs no configuration — this block exists only to override an
+# auto-detected default.
+compaction:
+  # Whether the deterministic prune pre-pass is gated on headroom instead of
+  # running on every compaction call.
+  #
+  # Unset (the default) auto-detects: on a local backend the gate is ON, because
+  # llama.cpp/Ollama cache the KV of a request's longest common prefix and the
+  # pre-pass rewrites the *middle* of the conversation, discarding every cached
+  # token after that point. Against a cloud provider there is no such cache and
+  # the gate is off.
+  #
+  # Set it explicitly to measure or override that. It exists as a key because an
+  # optimization that cannot be switched off cannot be A/B'd or reverted without
+  # a rebuild — see internal/eval's TestLiveWorkflowCompactionPrefixCacheGate,
+  # which runs one workload twice with only this value changed.
+  #
+  # Measured 2026-08-08 (qwen3:14b, 24,576-token window): the gate was 2.2x
+  # SLOWER on wall clock (3m19s vs 1m32s) and used 2x the prefill. Deferring the
+  # prune until the conversation is near the window defers it to exactly where
+  # Ollama begins context-shifting, so those turns are full reprocesses anyway —
+  # the gate protects a prefix cache that is already gone. If you are on a local
+  # model with a small window and long tool-heavy runs, `false` is worth trying.
+  # preserve_prefix_cache: false
+
+
 # ── External host commands ────────────────────────────────────────────────────
 # Overrides how Aegis locates optional host binaries. Every one has a working
 # fallback, so this block is entirely optional — see docs/host-tools.md for what

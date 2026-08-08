@@ -53,10 +53,49 @@ func Message(m provider.Message) int {
 // Messages estimates the token count of a system prompt plus a full message
 // list — the whole-conversation estimate compaction's should-compact gate runs
 // against.
+//
+// Note what this does *not* cover: a request also carries the tool schemas, and
+// the backend counts them in the prompt just like the transcript. See Tools.
 func Messages(system string, msgs []provider.Message) int {
 	n := Estimate(system)
 	for _, m := range msgs {
 		n += Message(m)
+	}
+	return n
+}
+
+// toolSchemaEnvelope prices the JSON scaffolding each tool schema is wrapped in
+// on the wire — the key names, quotes, braces and separators around the four
+// fields below. Each adapter serializes that envelope slightly differently
+// (Anthropic nests input_schema, OpenAI wraps the whole thing in a "function"
+// object), so this is deliberately a small flat constant rather than an attempt
+// to model any one of them: the fields themselves dominate by two orders of
+// magnitude, and a per-adapter renderer would be precision the surrounding
+// estimate cannot use.
+const toolSchemaEnvelope = 8
+
+// Tools estimates the token cost of the tool schemas a request carries.
+//
+// This exists because leaving it out was a measured defect, not a rounding
+// error (P62.4). The engine sets Request.Tools from the registry on every
+// native-tool-calling turn, and a local backend counts those schemas in
+// prompt_eval_count exactly like transcript text — but Messages above only ever
+// sees System and Messages, so the estimate driving proactive compaction
+// omitted the schemas entirely. With 50+ builtin tools that is thousands of
+// tokens present in every single request and invisible to the one check whose
+// job is to compact *before* the server silently drops the oldest turns.
+//
+// The tool-shim path (P53.6) never had this hole: under the shim the schemas
+// are rendered into the system prompt, so Messages counted them all along, and
+// the engine measured toolshim.Prompt separately on top. The native path had no
+// equivalent — which is why the gap only showed up on a backend using native
+// tool calls.
+func Tools(schemas []provider.ToolSchema) int {
+	n := 0
+	for _, s := range schemas {
+		n += Estimate(s.Name) + Estimate(s.Description)
+		n += Estimate(string(s.InputSchema)) + Estimate(string(s.OutputSchema))
+		n += toolSchemaEnvelope
 	}
 	return n
 }
