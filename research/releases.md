@@ -8,6 +8,235 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-08-08 — **P63.9's second concern extracted from `Engine.Run`**, and before it
+**P63.11 shipped and the live tier produced its first real prompt-profile measurement**. Earlier the
+same day: Tier 2 emptied of buildable work and the first `Engine.Run` pass landed — P63.8 and P62.1
+shipped, and P63.9's first concern (the run budgets) was extracted. Write-ups immediately below; the
+2026-08-07 P63.x batch follows them.
+
+**P63.9 pass 2 — loop detection, and the state that was at the wrong scope (2026-08-08).** `Run` went
+from 685 to **654 lines**, but the line count is again the least of it. `loopDetector` has had its own
+file and its own type since P53.2, so this pass looked like it should be a move; the actual finding
+was that **two of the concern's variables were declared at the wrong scope**:
+
+- `loopNudgePending` sat among `Run`'s run-scoped flags, carrying the recoverable-loop corrective from
+  the gate (which fires *before* a tool round) to just after that round.
+- `loopRecorded` was re-declared each iteration, saying whether this turn entered the detector's
+  window and therefore whether its results are the outcome that classifies a future cycle.
+
+Both are set by the gate and consumed after that same turn's tool round, and **no path between them
+continues the loop** — the only exits are terminal. So both are per-turn state living where a
+685-line function could reach them, which is precisely the mechanism by which `Run` accumulates
+interactions it does not really have.
+
+The extraction follows from that: `loopGuard` owns what genuinely survives a turn (the detector's
+window and outcomes, the threshold the messages quote, the poll-exemption predicate), and `check`
+returns a **`loopVerdict` value** the caller holds for exactly one iteration. Per-turn state can no
+longer outlive the turn, because it is a value rather than a variable. The gate in `Run` collapsed
+from a 22-line nested block to four lines of decision handling.
+
+Two boundaries were deliberately *not* crossed. The loop-nudge **count** stays in `nudgeState` and is
+passed in, mirroring the split already in the tree for the sibling concern — `toolFailureTracker` owns
+the failure counters while `nudgeState` owns `toolFailureNudges`/`toolFailureOutstanding` — because
+`retractAll` reads that table and duplicating a row invites the two copies to disagree. And a disabled
+detector is a **nil `*loopGuard`** whose methods tolerate a nil receiver, so `Run` lost its
+`if loop != nil` checks rather than trading them for a different conditional.
+
+Gated on `go test ./...`, `go test -race`, the eval golden transcripts, and the **full live tier**
+(qwen3:14b — all three subtests passed). `loopguard_test.go` adds six assertions at the new seam,
+including the two the extraction makes statable: that the triggering turn is *not* recorded (its
+window was just reset, so an outcome would misattribute), and that a nil guard is inert. Both were
+**mutation-checked** rather than assumed — removing the `recorded` guard from `noteOutcome` fails the
+new unit test, and removing the spent-corrective condition from `check` fails the existing end-to-end
+`TestEngineAbortsOnSecondSucceedingLoop`.
+
+One note against over-reading the live run: `FixSeededBug` passed this time having failed over pass 1,
+and that is **not** attributable to this change. P60.4's control group had already pinned the earlier
+failure on the model, and this run's model simply ran the script, made the correct
+`int(row["temp"])` edit and re-ran it. What the green does establish is that the tier can produce one,
+so a future red over a P63.9 pass carries information.
+
+**P63.11 — a live subtest that could not pass, and blamed the wrong thing when it didn't
+(SHIPPED 2026-08-08).** `TestLiveWorkflow/LocalPromptProfileReducesFirstTurnTokens` asserts the
+`local` prompt profile (P25.6) produces fewer first-turn input tokens than `default`, measured
+through the model's reported `prompt_eval_count`. On qwen3:14b at Ollama's default 4096 window both
+profiles reported exactly **4095** — `num_ctx - 1` — and the subtest failed saying the local profile
+"did not reduce first-turn input tokens". P25.6 was working the whole time; the *instrument* had
+saturated, because both prompts exceeded the window and the server reports the clamp for each.
+
+Fixed by making the measurement possible and the failure honest, and the item's two options turned
+out not to be alternatives at all:
+
+- **Pin the window.** The test daemon set only `MaxTokens: 4096` and never a `context_window`, so it
+  inherited whatever Ollama happened to be serving. It now pins `promptProfileNumCtx` (16384) — via a
+  new `newLiveWorkflowDaemonWithWindow`, so the two workflow subtests keep an auto-detected window and
+  do not pay VRAM for a pin they don't need.
+- **The pin alone does not work, which only running it showed.** With the model already resident at
+  4096, `applyDetectedWindowFor` correctly refuses to promise more than Ollama is *currently serving*
+  — "configured context_window exceeds what Ollama is serving; using the served value ...
+  configured=16384 served=4096" — and the measurement saturated exactly as before. So the subtest now
+  unloads the model first (`keep_alive: 0`), making detection non-authoritative so config wins and the
+  model reloads at the requested window.
+- **Eviction is not complete when the unload response returns.** A daemon built ~100ms later still
+  detected the old instance and pinned itself to the window that was supposed to be gone. The helper
+  polls `/api/ps` — the same signal `internal/ollamainfo` treats as authoritative — until the model
+  actually stops being listed, rather than sleeping a guessed interval.
+- **Saturation is now named as saturation.** `saturationReason` reports a count sitting at the served
+  window (Ollama reports `num_ctx-1`), or two identical counts with no window known, and the subtest
+  `Skip`s with the served windows and their sources rather than failing with P25.6's name on it. A
+  SKIP still reads as "asserted nothing", which is the property that matters.
+
+**The item proposed replacing the live measurement with a byte comparison of `effectiveSystem`;
+that assertion already exists** — `TestEffectiveSystem_localProfileTrimsPrompt` covers it in the
+default suite, without a model. What only the live path can show is that the smaller prompt actually
+*reaches the provider*, so the end-to-end measurement was kept rather than replaced.
+
+`saturationReason` is deliberately in an **untagged** file with its own unit test. The live tier's
+guard assertions only run under `-tags live_workflow`, which is how P62.1 silently rotted a live-tier
+fixture through a green `go test ./...` two days earlier; the decision logic belongs where the default
+suite can cover it even though its caller cannot be.
+
+**Validated live, and it produced the measurement the subtest was always supposed to produce**
+(qwen3:14b, 2026-08-08): **local=7039, default=9283 input tokens at a 16384 window sourced from
+config** — a real 2,244-token reduction, and the first end-to-end confirmation that P25.6's trim
+reaches the provider rather than merely shortening a string. The run also got faster (74s → 33s),
+since neither prompt is being truncated any more.
+
+**P62.1 confirmed the roadmap's own warning about itself.** Its write-up said, in bold, that
+*selection alone is not sufficient* — at 57.8× budget a perfect ranking still buys the top ~10-20
+files of 672. Building only the recommended (B) and (A) would have produced a correctly-ordered map
+that still showed 1.5% of the repository, and the item would have read as closed. Ranking and
+per-file compression turn out to be answers to different questions: (B)+(A) decide *which* files, (C)
+decides *how many*, and only together do they move coverage 10 → 37 files with every
+architecture-table package present. This is the third consecutive pass where the filed item was right
+about the defect and wrong about the sufficiency of its own recommendation.
+
+**P63.8 — write bookkeeping was gated on the static capability (SHIPPED 2026-08-08).** In
+`engine.runTools`, two adjacent branches over the same tool and the same input disagreed about which
+capability to ask for: the write-recording branch read `t.Capability()` while the secret-redaction
+branch three lines below read `tool.EffectiveCapability(t, tu.Input)` (P25.4c). The first is the
+pattern P32.2 removed from `ContextualGate` and P63.3 removed from `ScopeGate`; this was its last
+instance in the tree, found by the sweep P63.3 asked for.
+
+The consequence was never a gate bypass — scope and the permission stack still bind — it was a
+**coverage hole in the write bookkeeping**. A tool reclassifying into `CapWrite` for a specific call
+via `CapabilityFor` had its written paths go unrecorded, so that call got no output-guard file
+validation and no quarantine-on-fail rollback: precisely the silent degradation the P32.6 warning
+three lines above exists to make loud, arrived at by a different route.
+
+Fixed by reading the effective capability at the call site. The change is **not purely additive**,
+which is why the item was split out of P63.3 rather than folded in: the branch was previously skipped
+for `shell` on its static `CapExecute`, and the effective capability makes it a per-call decision for
+that tool too. `TestExecuteToolRecordsWrittenPathsByEffectiveCapability` covers all five shapes — a
+tool widening into `CapWrite` (the defect), the same tool on a read call, a statically-`CapWrite` tool
+narrowing out (the behavior change), the same tool on a write call, and the `CapExecute`→`CapRead`
+narrowing `shell` actually performs today, which is unaffected because neither capability is
+`CapWrite`. Still not reachable in production — `shell` remains the only `CapabilityOverrider` in the
+tree and it only narrows — which is why this stayed Tier 2 rather than being re-filed as urgent.
+
+Writing the test surfaced one adjacent defect: `recordWrittenPaths` wrote to a map that only `Run`
+initializes, so a tool call outside a run panicked on a nil map write. Unreachable in production, but
+a nil-map panic on the engine's tool path is the P63.1 failure class, so it got a lazy init.
+
+**P62.1 — the repo map's selection policy was the alphabet (SHIPPED 2026-08-08).** `repomap.Build`
+ended in `sort.Slice(m.Files, ... Path < Path)` and `Render` walked that order and **broke** at the
+first file that didn't fit, so which files reached the model was decided by filename and the cutoff
+was a hard wall — a one-symbol file later in the sort could never fit even with spare bytes. Measured
+on this repo before the fix: **10 of 672 files** survived into the rendered map, 4 of them test files,
+and every package in CLAUDE.md's architecture table (`engine`, `provider`, `tool`, `server`,
+`config`) was invisible while `internal/api` got in on the letter "a".
+
+All three buildable options shipped together, plus the configurability the item flagged separately:
+
+- **(B) demote test files.** `isTestPath` is a cross-language name heuristic — Go's `_test.go`,
+  Python's `test_*.py`/`*_test.py`, JS/TS's `*.test.*`/`*.spec.*`, Ruby's `*_spec.rb`, and any file
+  under a conventionally-named test directory. It needs no theory of "important" beyond
+  production-before-test, and it addresses 351 of 696 files. A false positive costs a production file
+  some rank, never its presence, since demotion only reorders.
+- **(A) rank by import in-degree**, reusing the edges P49.1 already computes — no new extraction pass.
+  `packageInDegree` counts only edges resolving to a package directory the map contains (bare
+  third-party and stdlib tokens carry no signal about *this* repository) and counts distinct importing
+  *packages*, so a package of many small files can't out-vote one of few large ones. Because edges
+  resolve to directories, in-degree ranks packages and needs a within-package tiebreak: symbol count,
+  then path — without it the alphabet would silently decide the order again inside each package.
+- **(C) per-file symbol cap, and `continue` instead of `break`.** `DefaultMaxSymbolsPerFile = 3`.
+  A file whose list is cut carries an explicit `… +N more` marker, because a silently shortened list
+  is a worse failure than a shallow one — the model can only conclude the missing symbols do not
+  exist. The `break` → `continue` change lets a small file fill budget a large one couldn't use.
+- **The budget is now configurable**: `repomap.max_bytes` and `repomap.max_symbols_per_file` (plus
+  `AEGIS_REPOMAP_*` and `aegis index --max-bytes/--max-symbols-per-file`, which override config only
+  when actually passed, so `--max-symbols-per-file=-1` for "uncapped" isn't read as absent). The 8000
+  default was calibrated as a ~2k-token slice of a small window; an operator on a 128k-context model
+  could not previously spend 1% of it on a better map.
+
+Measured after, same repo: **37 of 696 files**, **zero** of them test files, and the top of the map is
+`internal/provider`, `internal/sandbox`, `internal/tool`, `internal/config` — the set the architecture
+documentation also names. `schemaVersion` went 2 → 3 since file ordering and per-file caps change the
+cached render without changing what `Build` extracts.
+
+Making the budget configurable introduced a footgun that had to be closed in the same change: neither
+knob affects extraction, so a cache whose fingerprint still matched would be reused and the operator
+would see no effect from raising `max_bytes` until some unrelated source file happened to change.
+Both knobs are now mixed into the fingerprint (`TestRenderOptionsInvalidateTheCache`).
+
+**(D) query-relevant selection reusing `memory.LoadRelevant` stays blocked** on a per-turn or
+two-stage map, unchanged. One observation for whoever takes it: in-degree ranking is per-*package*,
+so the rendered map now leads with seven consecutive `internal/provider` files and nine
+`internal/sandbox` ones. Depth-within-package may be the wrong trade against breadth-across-packages,
+but that is a further selection question and was deliberately not answered here.
+
+**P63.9 — first concern extracted from `Engine.Run`: the run budgets (PARTIAL, 2026-08-08; item
+stays open).** P63.9 asks for one concern at a time, each naming the state it actually owns, each
+landing separately — explicitly *not* one sweep, because a sweep produces a diff no reviewer can check
+against a function whose whole problem is that its parts interact.
+
+Budgets went first because the ownership question has an unusually clean answer. Three of the four
+bounds (`budgetUSD`, the two token caps) are pure reads of the cost tracker and own nothing. The
+fourth owned exactly one thing — the run's start instant, previously a bare local named `runStart`
+threaded by hand into five calls across 600 lines. Once that is a field on a `runBudget` struct
+(`internal/engine/budget.go`), the concern has nothing left in `Run` to interact with.
+
+`Engine.wallClockExceeded`, `tokenBudgetExceeded`, `wallClockOverride` and `clock` moved off `Engine`
+onto `runBudget`; the two gates collapsed from three duplicated inline checks each into one
+`budget.exceeded()` call, which is the property the inline form kept losing. Check order is
+observable and preserved: cost, then tokens, then time. `Run` is 725 → 685 lines — a small number that
+undersells the change, since the point was removing the hand-threaded `runStart`, not the line count.
+
+**Three concerns remain** — compaction, loop detection, guard retries — and they are the harder ones:
+compaction and guard retries interact with each other and with the retry path, so neither has the
+"owns exactly one field" shape that made this pass safe. The item stays Tier 3 and stays worth not
+doing in a hurry.
+
+**Live-tier validation (2026-08-08), including two findings about the tier itself.** P63.9 argues the
+live tiers matter more here than the unit suite, since `internal/engine` at 92.0% coverage is exactly
+the profile that hides an integration-shaped break — so `TestLiveWorkflow` ran over this pass on
+qwen3:14b (the recommended qwen3.6:35b-a3b-deep is not pulled on this box). `GuardNoMetaLeak` passed.
+`FixSeededBug` failed, and **P60.4's control group did the job it was built for**: `claude -p` on the
+same task failed too, in 27s against Aegis's 54s, so the verdict is *model*, not scaffolding. Worth
+recording that this **refuted the objection raised before the run** — that a cloud model in the
+baseline arm would trivially pass and mislabel any Aegis failure as ours. It did not pass. The
+Aegis-side behavior was byte-identical across two independent runs: the model issues `del /F /Q`, a
+cmd.exe builtin the shell tool does not have, and never attempts an edit. That is a model failure
+signature, not a budget-gate one.
+
+Two things about the tier came out of the run and are worth more than the pass/fail:
+
+- **`gpt-oss:20b` cannot be used as an instrument on 16GB VRAM / 16GB RAM.** All three subtests hit
+  their context timeouts with **0 tool calls and 0 tokens** — and `GuardNoMetaLeak` "passed"
+  *vacuously*, because a run that emits nothing leaks nothing. A green subtest inside a timed-out run
+  is not evidence.
+- **P62.1 silently invalidated a live-tier fixture, and only running the tier found it.** The
+  per-file symbol cap shrank `writeBigRepoMapFixture`'s rendered map from over `bigRepoMapCapBytes`
+  (4000) to 2154, which would have made `LocalPromptProfileReducesFirstTurnTokens` compare two
+  identical prompts and assert nothing. Its own guard caught it — but that guard only builds under
+  `-tags live_workflow`, so `go test ./...` could never have seen it. **A change to rendered prompt
+  content can rot a live-tier fixture with the default suite fully green.** The fixture now sizes
+  itself in files rather than functions-per-file, grows until it actually clears the threshold instead
+  of trusting a hand-computed count, and asserts the map is un-truncated as well as large enough —
+  the property the byte comparison alone cannot see.
+
+---
+
 **Last updated:** 2026-08-07 — **the whole P63.x batch built in one session**: P63.1-P63.7 shipped
 the day after the review filed them, emptying Tier 1 and clearing every Tier-2 item the review
 produced. Three items were filed *by the build* rather than by the review — **P63.8** (the last

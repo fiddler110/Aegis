@@ -25,14 +25,30 @@ import (
 )
 
 // DefaultMaxBytes caps the rendered map at roughly 2000 tokens (~4 chars/token).
+// It is a default, not a limit: `repomap.max_bytes` overrides it (P62.1), since
+// the figure was calibrated for a small context window and an operator running a
+// 128k-context model could not previously spend 1% of it on a better map.
 const DefaultMaxBytes = 8000
+
+// DefaultMaxSymbolsPerFile caps how many symbols any one file contributes to the
+// rendered map (P62.1). Measured on this repo, the untruncated render is 57.8×
+// the default byte budget, so an uncapped render spends the whole budget on the
+// first handful of files — 10 of 672 reached the model, and *which* 10 was
+// decided by the alphabet. Capping per file is what converts the budget from
+// depth on a few files into breadth across many: at 3 symbols each, ~53 files
+// fit rather than 10. Files whose symbol list is cut carry an explicit "+N more"
+// marker, because a silently shortened list is a worse failure than a shallow
+// one — the model may conclude a symbol does not exist.
+const DefaultMaxSymbolsPerFile = 3
 
 // schemaVersion is mixed into the repository fingerprint so a change to what
 // Build extracts or how Render formats it invalidates on-disk caches from an
 // older binary. Bump it whenever the cached shape changes. v2 (P49.1) adds
 // per-file import edges — a v1 cache has none, so it must rebuild rather than
-// load edge-less.
-const schemaVersion = 2
+// load edge-less. v3 (P62.1) changes file *ordering* (rank, not alphabet) and
+// adds per-file symbol caps, so a v2 cache's rendered text is stale even though
+// its extracted content is not.
+const schemaVersion = 3
 
 // Map is a structural overview of a repository.
 type Map struct {
@@ -41,6 +57,7 @@ type Map struct {
 	Fingerprint string      `json:"fingerprint"`
 	GeneratedAt time.Time   `json:"generated_at"`
 	maxBytes    int
+	maxSymbols  int
 }
 
 // FileEntry is one source file and the symbols extracted from it.
@@ -52,8 +69,9 @@ type FileEntry struct {
 
 // Options configures a build.
 type Options struct {
-	MaxBytes int      // rendered-output cap; 0 = DefaultMaxBytes
-	Ignore   []string // extra directory names to skip (in addition to defaults)
+	MaxBytes          int      // rendered-output cap; 0 = DefaultMaxBytes
+	MaxSymbolsPerFile int      // per-file symbol cap; 0 = DefaultMaxSymbolsPerFile, negative = uncapped
+	Ignore            []string // extra directory names to skip (in addition to defaults)
 }
 
 func (o Options) maxBytes() int {
@@ -61,6 +79,25 @@ func (o Options) maxBytes() int {
 		return DefaultMaxBytes
 	}
 	return o.MaxBytes
+}
+
+func (o Options) maxSymbolsPerFile() int {
+	if o.MaxSymbolsPerFile == 0 {
+		return DefaultMaxSymbolsPerFile
+	}
+	if o.MaxSymbolsPerFile < 0 {
+		return 0 // sentinel: uncapped
+	}
+	return o.MaxSymbolsPerFile
+}
+
+// renderOptionsLine is mixed into the repository fingerprint alongside the file
+// stats. Both render knobs are configurable as of P62.1, and neither changes
+// what Build *extracts* — so without this a config change would leave a cache
+// whose fingerprint still matches, and the operator would see no effect from
+// raising the budget until some source file happened to change.
+func (o Options) renderOptionsLine() string {
+	return fmt.Sprintf("render:%d:%d", o.maxBytes(), o.maxSymbolsPerFile())
 }
 
 // ignoredDirs are directory names never descended into.
@@ -346,14 +383,14 @@ func goModulePath(root string) string {
 // Map. Files in ignored directories are skipped. Symbol order follows source
 // order; file order is sorted for deterministic output and fingerprinting.
 func Build(root string, opts Options) (*Map, error) {
-	m := &Map{Root: root, GeneratedAt: time.Now(), maxBytes: opts.maxBytes()}
+	m := &Map{Root: root, GeneratedAt: time.Now(), maxBytes: opts.maxBytes(), maxSymbols: opts.maxSymbolsPerFile()}
 	extraIgnore := make(map[string]bool, len(opts.Ignore))
 	for _, d := range opts.Ignore {
 		extraIgnore[d] = true
 	}
 	goModule := goModulePath(root)
 
-	fpLines := []string{fmt.Sprintf("schema:%d", schemaVersion)}
+	fpLines := []string{fmt.Sprintf("schema:%d", schemaVersion), opts.renderOptionsLine()}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries rather than aborting the walk
@@ -395,11 +432,132 @@ func Build(root string, opts Options) (*Map, error) {
 		return nil, err
 	}
 
-	sort.Slice(m.Files, func(i, j int) bool { return m.Files[i].Path < m.Files[j].Path })
+	rankFiles(m.Files)
 	sort.Strings(fpLines)
 	sum := sha256.Sum256([]byte(strings.Join(fpLines, "\n")))
 	m.Fingerprint = hex.EncodeToString(sum[:])
 	return m, nil
+}
+
+// rankFiles orders entries by how likely they are to be worth the model's
+// budget, replacing the plain alphabetical sort that used to end Build (P62.1).
+// Ordering was the *entire* selection policy: Render walks this slice in order,
+// so on a repository that truncates, the first byte of a filename decided what
+// the model saw. Measured on Aegis, the ten surviving files were main.go, the
+// ACP package and a wall of internal/api struct names, while every package in
+// the architecture documentation — engine, provider, tool, server, config — was
+// invisible, and internal/api got in on the letter "a".
+//
+// The order is, in precedence:
+//
+//  1. Production files before test files. This needs no theory of "important"
+//     beyond production-before-test, costs one path predicate, and on this repo
+//     addresses 340 of 672 files (50.5%) carrying 42% of all symbols.
+//  2. Higher package in-degree first, reusing the import edges P49.1 already
+//     computes — no new extraction pass. Edges resolve to package *directories*,
+//     so this ranks packages rather than files; on this repo the top of that
+//     ranking is internal/tool (109), internal/provider (98), internal/config
+//     (96), internal/sandbox (55), which is the set the architecture docs also
+//     name.
+//  3. More symbols first, as the within-package tiebreak in-degree cannot
+//     supply — every file in a package shares its score, so without this the
+//     alphabet would silently decide the order again inside each package.
+//  4. Path, so the result is fully deterministic (the cache fingerprint does not
+//     depend on this order, but the rendered text does).
+//
+// Ranking alone does not fix the budget problem and is not claimed to: at 57.8×
+// budget it changes *which* ~1.5% of files are shown, not that it is 1.5%. The
+// per-file symbol cap in renderPrefix is the half that buys breadth.
+func rankFiles(files []FileEntry) {
+	indeg := packageInDegree(files)
+	isTest := make(map[string]bool, len(files))
+	for _, f := range files {
+		isTest[f.Path] = isTestPath(f.Path)
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		a, b := files[i], files[j]
+		if isTest[a.Path] != isTest[b.Path] {
+			return !isTest[a.Path]
+		}
+		da, db := indeg[path.Dir(a.Path)], indeg[path.Dir(b.Path)]
+		if da != db {
+			return da > db
+		}
+		if len(a.Symbols) != len(b.Symbols) {
+			return len(a.Symbols) > len(b.Symbols)
+		}
+		return a.Path < b.Path
+	})
+}
+
+// packageInDegree counts, per package directory present in the map, how many
+// *other* packages import it. Only edges that resolve to a directory the map
+// actually contains are counted — extractImports deliberately keeps unresolved
+// third-party and stdlib specifiers as bare tokens, and those carry no ranking
+// signal about this repository. Counting distinct importing packages rather than
+// importing files keeps a package with many small files from out-voting one with
+// few large ones.
+func packageInDegree(files []FileEntry) map[string]int {
+	dirs := make(map[string]bool, len(files))
+	for _, f := range files {
+		dirs[path.Dir(f.Path)] = true
+	}
+	// importer package -> set of imported packages, deduplicated before counting.
+	seen := make(map[string]map[string]bool)
+	for _, f := range files {
+		from := path.Dir(f.Path)
+		for _, imp := range f.Imports {
+			target := path.Clean(imp)
+			if !dirs[target] || target == from {
+				continue
+			}
+			if seen[from] == nil {
+				seen[from] = make(map[string]bool)
+			}
+			seen[from][target] = true
+		}
+	}
+	indeg := make(map[string]int, len(dirs))
+	for _, targets := range seen {
+		for target := range targets {
+			indeg[target]++
+		}
+	}
+	return indeg
+}
+
+// testDirNames are directory names whose contents are treated as tests whatever
+// the filename looks like (Rust and Python put tests in a directory rather than
+// encoding it in the name).
+var testDirNames = map[string]bool{
+	"test": true, "tests": true, "spec": true, "specs": true,
+	"__tests__": true, "testdata": true, "e2e": true,
+}
+
+// isTestPath reports whether rel looks like test code, across the languages
+// langPatterns recognizes: Go's _test.go, Python's test_*.py / *_test.py,
+// JS/TS's *.test.* and *.spec.*, Ruby's *_spec.rb / *_test.rb, and any file
+// under a conventionally-named test directory. It is deliberately a name
+// heuristic — a false positive costs a production file some rank, not its
+// presence, since demotion only reorders.
+func isTestPath(rel string) bool {
+	for _, seg := range strings.Split(path.Dir(rel), "/") {
+		if testDirNames[strings.ToLower(seg)] {
+			return true
+		}
+	}
+	base := strings.ToLower(path.Base(rel))
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	switch {
+	case strings.HasSuffix(stem, "_test"), strings.HasSuffix(stem, "_spec"):
+		return true
+	case strings.HasPrefix(stem, "test_"):
+		return true
+	case strings.HasSuffix(stem, ".test"), strings.HasSuffix(stem, ".spec"):
+		return true
+	}
+	return false
 }
 
 // extractSymbols returns the trimmed declaration lines in src matching any of
@@ -458,26 +616,49 @@ func (m *Map) Render() string {
 	return out + truncationNotice(len(m.Files)-shown)
 }
 
-// renderPrefix writes as many whole file entries as fit in budget, returning the
-// text and how many entries were written.
+// renderPrefix writes as many file entries as fit in budget, in rank order,
+// returning the text and how many entries were written.
+//
+// Two P62.1 changes live here. Each file contributes at most maxSymbols symbols,
+// followed by a "+N more" marker when its list was cut — an explicitly partial
+// list, because a silently shortened one invites the model to conclude a symbol
+// does not exist. And a file that does not fit is *skipped* rather than ending
+// the walk: the old `break` made the cutoff a hard wall, so a one-symbol file
+// later in the order could never be shown even with plenty of budget left.
 func (m *Map) renderPrefix(budget int) (string, int) {
+	maxSymbols := m.maxSymbols
+	if maxSymbols == 0 && m.maxBytes == 0 {
+		// A Map decoded straight from JSON (LoadOrBuild's cache hit path sets
+		// these, but a caller may not) gets the documented defaults rather than
+		// a zero cap that would render paths with no symbols at all.
+		maxSymbols = DefaultMaxSymbolsPerFile
+	}
 	var b strings.Builder
 	b.WriteString("# Repository map\n")
 	shown := 0
 	for _, f := range m.Files {
 		// Symbols are the load-bearing content and must never be dropped while
 		// this file's entry is kept; render them first and let the whole entry
-		// truncate at the file boundary if they don't fit.
+		// be skipped if they don't fit.
+		symbols := f.Symbols
+		omittedSymbols := 0
+		if maxSymbols > 0 && len(symbols) > maxSymbols {
+			omittedSymbols = len(symbols) - maxSymbols
+			symbols = symbols[:maxSymbols]
+		}
 		var fb strings.Builder
 		fb.WriteString(f.Path)
 		fb.WriteString("\n")
-		for _, s := range f.Symbols {
+		for _, s := range symbols {
 			fb.WriteString("  ")
 			fb.WriteString(s)
 			fb.WriteString("\n")
 		}
+		if omittedSymbols > 0 {
+			fmt.Fprintf(&fb, "  … +%d more\n", omittedSymbols)
+		}
 		if b.Len()+fb.Len() > budget {
-			break
+			continue
 		}
 		b.WriteString(fb.String())
 		shown++
@@ -570,6 +751,7 @@ func LoadOrBuild(root, cachePath string, opts Options) (*Map, error) {
 		if json.Unmarshal(data, &cached) == nil && cached.Fingerprint != "" {
 			if current, fpErr := fingerprint(root, opts); fpErr == nil && current == cached.Fingerprint {
 				cached.maxBytes = opts.maxBytes()
+				cached.maxSymbols = opts.maxSymbolsPerFile()
 				return &cached, nil
 			}
 		}
@@ -589,7 +771,7 @@ func fingerprint(root string, opts Options) (string, error) {
 	for _, d := range opts.Ignore {
 		extraIgnore[d] = true
 	}
-	lines := []string{fmt.Sprintf("schema:%d", schemaVersion)}
+	lines := []string{fmt.Sprintf("schema:%d", schemaVersion), opts.renderOptionsLine()}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil

@@ -97,3 +97,70 @@ func TestNonexistentFileRead(t *testing.T) {
 		t.Error("reading nonexistent file should not track it")
 	}
 }
+
+// TestPartialReadGatesFullOverwrite covers the readState.partial flag: the
+// mtime guard cannot distinguish a capped read from a complete one, so
+// CheckWrite stays silent in both cases while CheckFullOverwrite refuses only
+// the partial one.
+func TestPartialReadGatesFullOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := New()
+	tr.RecordPartialRead(p)
+	if err := tr.CheckWrite(p); err != nil {
+		t.Errorf("CheckWrite must not fire on an unmodified file: %v", err)
+	}
+	if err := tr.CheckFullOverwrite(p); err == nil {
+		t.Error("CheckFullOverwrite must refuse after a partial read")
+	}
+
+	// An anchored edit records a write but leaves the flag standing.
+	tr.RecordWrite(p)
+	if err := tr.CheckFullOverwrite(p); err == nil {
+		t.Error("RecordWrite must not clear the partial-read flag")
+	}
+
+	// A whole-file write does clear it: every byte is now the agent's own.
+	tr.RecordOverwrite(p)
+	if err := tr.CheckFullOverwrite(p); err != nil {
+		t.Errorf("RecordOverwrite should clear the flag: %v", err)
+	}
+
+	// So does a complete re-read.
+	tr.RecordPartialRead(p)
+	tr.RecordRead(p)
+	if err := tr.CheckFullOverwrite(p); err != nil {
+		t.Errorf("a complete read should clear the flag: %v", err)
+	}
+}
+
+// TestFullOverwriteUntrackedAndMissing keeps the guard narrow: it must not
+// disturb the "first write to a file the agent never read" allowance, nor a
+// path that no longer exists (a write there re-creates rather than overwrites).
+func TestFullOverwriteUntrackedAndMissing(t *testing.T) {
+	dir := t.TempDir()
+	tr := New()
+	unread := filepath.Join(dir, "unread.txt")
+	if err := os.WriteFile(unread, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.CheckFullOverwrite(unread); err != nil {
+		t.Errorf("untracked file must be writable: %v", err)
+	}
+
+	gone := filepath.Join(dir, "gone.txt")
+	if err := os.WriteFile(gone, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.RecordPartialRead(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.CheckFullOverwrite(gone); err != nil {
+		t.Errorf("a deleted file must be re-creatable: %v", err)
+	}
+}

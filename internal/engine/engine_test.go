@@ -111,6 +111,139 @@ func TestExecuteToolWarnsOnZeroPathWriteCall(t *testing.T) {
 	}
 }
 
+// capOverrideTool is a tool.CapabilityOverrider whose per-call capability is
+// chosen by a caller-supplied function, so a test can build the reclassifying
+// shapes no builtin currently has (only `shell` implements the interface in
+// tree, and it only narrows).
+type capOverrideTool struct {
+	name     string
+	static   tool.Capability
+	perCall  func(json.RawMessage) tool.Capability
+	executed int
+}
+
+func (c *capOverrideTool) Name() string                 { return c.name }
+func (c *capOverrideTool) Description() string          { return "" }
+func (c *capOverrideTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (c *capOverrideTool) Capability() tool.Capability  { return c.static }
+func (c *capOverrideTool) CapabilityFor(input json.RawMessage) tool.Capability {
+	return c.perCall(input)
+}
+func (c *capOverrideTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	c.executed++
+	return tool.Result{Content: "ok"}, nil
+}
+
+// TestExecuteToolRecordsWrittenPathsByEffectiveCapability covers P63.8: the
+// write-bookkeeping branch in executeTool reads tool.EffectiveCapability
+// (P25.4c), not the static Capability(). A tool that reclassifies *into*
+// CapWrite for a specific call must have that call's paths recorded, or the
+// call silently loses output-guard file validation and quarantine-on-fail
+// rollback; a tool that reclassifies *out of* CapWrite must not.
+func TestExecuteToolRecordsWrittenPathsByEffectiveCapability(t *testing.T) {
+	// A per-call rule shared by the widening and narrowing tools below: the
+	// call is a write iff its input says so, regardless of the static
+	// capability the tool declares.
+	byMode := func(input json.RawMessage) tool.Capability {
+		var args struct {
+			Mode string `json:"mode"`
+		}
+		if json.Unmarshal(input, &args) == nil && args.Mode == "write" {
+			return tool.CapWrite
+		}
+		return tool.CapRead
+	}
+
+	cases := []struct {
+		name   string
+		static tool.Capability
+		// perCall defaults to byMode when nil.
+		perCall func(json.RawMessage) tool.Capability
+		input   string
+		want    []string
+	}{
+		{
+			// The defect: static CapRead, effective CapWrite. Before P63.8
+			// this recorded nothing.
+			name:   "widens into write",
+			static: tool.CapRead,
+			input:  `{"mode":"write","path":"widened.txt"}`,
+			want:   []string{"widened.txt"},
+		},
+		{
+			name:   "widening tool on a read call",
+			static: tool.CapRead,
+			input:  `{"mode":"read","path":"widened.txt"}`,
+			want:   nil,
+		},
+		{
+			// The behavior change P63.8 was split out of P63.3 for: a
+			// statically-CapWrite tool that narrows for this call is now
+			// skipped where it previously recorded.
+			name:   "narrows out of write",
+			static: tool.CapWrite,
+			input:  `{"mode":"read","path":"narrowed.txt"}`,
+			want:   nil,
+		},
+		{
+			name:   "narrowing tool on a write call",
+			static: tool.CapWrite,
+			input:  `{"mode":"write","path":"narrowed.txt"}`,
+			want:   []string{"narrowed.txt"},
+		},
+		{
+			// The shape `shell` actually has today (CapExecute narrowing to
+			// CapRead): unaffected either way, since neither capability is
+			// CapWrite. Asserted explicitly so the one reachable overrider in
+			// the tree is covered rather than assumed.
+			name:    "shell-shaped execute narrowing to read",
+			static:  tool.CapExecute,
+			perCall: func(json.RawMessage) tool.Capability { return tool.CapRead },
+			input:   `{"command":"git status","path":"shell.txt"}`,
+			want:    nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			perCall := tc.perCall
+			if perCall == nil {
+				perCall = byMode
+			}
+			ct := &capOverrideTool{name: "reclassify", static: tc.static, perCall: perCall}
+			reg := tool.NewRegistry()
+			if err := reg.Register(ct); err != nil {
+				t.Fatal(err)
+			}
+			eng, err := New(Options{Adapter: &scriptedAdapter{}, Tools: reg, Model: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+				ID: "tu_1", Name: "reclassify", Input: json.RawMessage(tc.input),
+			}); isErr {
+				t.Fatalf("tool call reported an error")
+			}
+			if ct.executed != 1 {
+				t.Fatalf("tool executed %d times, want 1", ct.executed)
+			}
+
+			eng.writtenFilesMu.Lock()
+			got := make([]string, 0, len(eng.writtenFiles))
+			for p := range eng.writtenFiles {
+				got = append(got, p)
+			}
+			eng.writtenFilesMu.Unlock()
+			slices.Sort(got)
+
+			if len(got) != len(tc.want) || (len(tc.want) > 0 && !slices.Equal(got, tc.want)) {
+				t.Errorf("recorded written paths = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunToolRoundTrip(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
 		// Turn 1: assistant asks to call the echo tool.

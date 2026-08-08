@@ -60,13 +60,22 @@ type Config struct {
 	Skills         SkillsConfig               `koanf:"skills"`
 	LSP            []LSPServerConfig          `koanf:"lsp"`
 	Plugins        []ProcessToolConfig        `koanf:"plugins"`
+	RepoMap        RepoMapConfig              `koanf:"repomap"`
 	MCP            []MCPServerConfig          `koanf:"mcp"`
 	MCPServer      MCPServerModeConfig        `koanf:"mcp_server"`
 	Hooks          []HookConfig               `koanf:"hooks"`
 	Search         SearchConfig               `koanf:"search"`
-	Notify         NotifyConfig               `koanf:"notify"`
-	Embeddings     EmbeddingsConfig           `koanf:"embeddings"`
-	Workspace      WorkspaceConfig            `koanf:"workspace"`
+	// Commands overrides how external host binaries are located, keyed by the
+	// names in internal/toolpath.Registry (ripgrep, git, gh, mmdc, plantuml).
+	// A value may be an absolute path, a bare command name resolved on PATH, or
+	// a disable keyword ("off"/"false"/"none") that forces Aegis's built-in
+	// fallback. Aegis execs binaries directly rather than through a shell, so a
+	// shell alias is never visible to it — this is how you point Aegis at a
+	// binary that isn't on PATH under its usual name. Unset means PATH lookup.
+	Commands   map[string]string `koanf:"commands"`
+	Notify     NotifyConfig      `koanf:"notify"`
+	Embeddings EmbeddingsConfig  `koanf:"embeddings"`
+	Workspace  WorkspaceConfig   `koanf:"workspace"`
 
 	// WorkspaceTrust reports the P27.1 workspace-trust gate's outcome for
 	// this load. It is never read from a config file (computed by Load()
@@ -155,6 +164,31 @@ type SearchConfig struct {
 	// status quo. The untrusted-content provenance marker on fetched/search
 	// output is always applied regardless of this setting.
 	ScanOutput bool `koanf:"scan_output"`
+}
+
+// RepoMapConfig sizes the structural repository map injected as <repo_map>
+// (P62.1). Both knobs were previously compile-time constants in
+// internal/repomap, which made the map's shape a property of the binary rather
+// than of the model it feeds — the byte budget in particular was calibrated as
+// a ~2000-token slice of a small context window, so an operator running a
+// 128k-context model had no way to spend 1% of it on a better map.
+//
+// The two knobs trade against each other: MaxBytes is the total spend and
+// MaxSymbolsPerFile decides whether that spend buys depth on a few files or
+// breadth across many.
+type RepoMapConfig struct {
+	// MaxBytes caps the rendered map; 0 falls back to repomap.DefaultMaxBytes
+	// (8000, ~2k tokens). Spelled as a plain int rather than resolved here so
+	// the fallback stays in one place — internal/repomap owns what "unset"
+	// means, and this package deliberately carries no dependency on it.
+	MaxBytes int `koanf:"max_bytes"`
+	// MaxSymbolsPerFile caps how many symbols any one file contributes; 0 falls
+	// back to repomap.DefaultMaxSymbolsPerFile (3) and a *negative* value means
+	// uncapped. The negative sentinel is why nothing clamps this to a
+	// non-negative range on load: "render every symbol you found and let
+	// MaxBytes do the truncating" is a legitimate setting for a large-context
+	// model, and clamping it to 0 would silently reinstate the default instead.
+	MaxSymbolsPerFile int `koanf:"max_symbols_per_file"`
 }
 
 // NotifyConfig configures notifications when a background session finishes or
@@ -1390,6 +1424,15 @@ func defaults() map[string]any {
 		// web_fetch/web_search output on by default (P27.13/FIND-12) — see
 		// SearchConfig.ScanOutput's doc comment.
 		"search.scan_output": true,
+		// The repo-map budget (P62.1). Both values mirror internal/repomap's
+		// DefaultMaxBytes/DefaultMaxSymbolsPerFile, spelled as literals here for
+		// the same reason provider.tool_call_probe_trials is — so the config
+		// package needs no dependency on the package it sizes. They are stated
+		// rather than left at zero so `aegis config` shows the real budget an
+		// operator is about to change, not a bare 0 meaning "whatever the binary
+		// decides".
+		"repomap.max_bytes":            8000,
+		"repomap.max_symbols_per_file": 3,
 	}
 }
 
@@ -1520,7 +1563,7 @@ var envSections = map[string]bool{
 	"provider": true, "server": true, "permission": true,
 	"diagram": true, "cost": true, "swarm": true,
 	"sandbox": true, "security": true, "output_guard": true,
-	"embeddings": true,
+	"embeddings": true, "repomap": true,
 }
 
 func envKeyCallback(s string) string {

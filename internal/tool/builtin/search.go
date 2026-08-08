@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,15 +14,113 @@ import (
 	"sort"
 	"strings"
 
+	"strconv"
+
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/toolpath"
 )
 
-// rgPath is set once at startup; empty string means fall back to WalkDir.
-var rgPath, _ = exec.LookPath("rg")
+// Result caps, shared by both backends so a query's output size does not depend
+// on which one ran. The grep cap is a total across all files, applied while
+// parsing; ripgrep is additionally given --max-count (which is per *file*) at
+// the same value, so one enormous generated file cannot produce megabytes of
+// output that we then throw away.
+const (
+	globMaxResults = 1000
+	grepMaxMatches = 500
+	// maxGrepLineBytes bounds one match line while streaming ripgrep's output.
+	// A minified bundle or a generated data file can be one enormous line, and
+	// the default bufio.Scanner buffer (64KB) would abort the whole search on
+	// it rather than return the matches found so far.
+	maxGrepLineBytes = 1 << 20
+)
+
+// truncNotice labels a capped result set. Both backends used to hit their cap
+// and return the truncated list with nothing to distinguish it from a complete
+// one, so a model could not tell "these are all the matches" from "these are
+// the first 500 of an unknown number" — and would reason from the partial list
+// as though it were exhaustive.
+//
+// It also names the ordering caveat. Which subset you get when capped depends
+// on traversal order, and ripgrep's parallel walk does not visit files in the
+// same order as the Go walker (nor necessarily the same order twice). Forcing
+// ripgrep's --sort path would make it deterministic but costs ~4x on this repo
+// (220ms -> 900ms measured), which is more than the whole speed advantage, so
+// the honest fix is to say the set is partial rather than to pay for an
+// ordering the caller did not ask for.
+func truncNotice(kind string, n int) string {
+	return fmt.Sprintf("\n\n[%s: capped at %d results; more exist. This is a partial, unordered subset — narrow the pattern or add a glob filter to see the rest.]", kind, n)
+}
+
+// rgArgsCommon are the flags every ripgrep invocation carries, and they are the
+// parity contract between the two search backends. Without them the same query
+// returns different results depending on whether ripgrep happens to be
+// installed — the "two machines, different answers" failure this codebase
+// avoids elsewhere (see the scanner method decision in CLAUDE.md).
+//
+//   - --no-ignore-vcs: ripgrep honors .gitignore by default, the Go walker does
+//     not. Committed-but-conventionally-ignored trees (this repo ships a built
+//     web UI in internal/server/webui/dist) were searched by one backend and
+//     not the other. Turning VCS-ignore off and applying skipDir explicitly
+//     below makes the exclusion set identical.
+//   - --hidden: the Go walker descends into dotted directories, so ripgrep must
+//     too; skipDir still removes .git and friends.
+//
+// The excludes are generated from skipDir rather than written out twice, so a
+// directory added to one backend's skip set cannot be forgotten in the other.
+func rgArgsCommon() []string {
+	args := []string{"--hidden", "--no-ignore-vcs"}
+	for _, d := range skipDirNames {
+		args = append(args, "-g", "!"+d+"/")
+	}
+	return args
+}
+
+// runRg executes ripgrep rooted at dir. Two details matter and both were bugs:
+//
+// cmd.Dir was never set, so ripgrep inherited the daemon's working directory
+// while being handed an absolute search root. Its -g globs are matched against
+// the path as walked, so a multi-segment pattern like "internal/**/*_test.go"
+// matched nothing at all (measured: 0 files via the tool, 348 via the Go
+// fallback) whenever the daemon's cwd was not the workspace root — which for a
+// daemon serving a session elsewhere is the normal case.
+//
+// Rooting at dir and searching "." also makes ripgrep emit workspace-relative
+// paths, which is what the tool's output contract wants anyway and what the
+// absolute-path form could not produce on Windows: the old parser split each
+// line on ":" to find the path, and "D:\repo\f.go:12:text" splits at the drive
+// letter, so every result came back as an unmodified absolute path.
+func runRg(ctx context.Context, rg, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, rg, args...)
+	cmd.Dir = dir
+	return cmd.Output()
+}
+
+// relFromRg normalizes one path as ripgrep prints it when searching ".":
+// strips the leading "./" (or ".\" on Windows) and converts separators, so
+// output is byte-identical to the Go walker's.
+func relFromRg(p string) string {
+	p = filepath.ToSlash(p)
+	return strings.TrimPrefix(p, "./")
+}
 
 // --- glob ---
 
-type globTool struct{ root string }
+type globTool struct {
+	root string
+	cmds *toolpath.Resolver
+}
+
+// rgPath returns the configured ripgrep binary, or "" to use the Go fallback.
+// A nil resolver (tools constructed in tests without one) means fallback.
+func (t *globTool) rgPath() string { return resolverPath(t.cmds, toolpath.Ripgrep) }
+
+func resolverPath(r *toolpath.Resolver, key string) string {
+	if r == nil {
+		return ""
+	}
+	return r.Path(key)
+}
 
 func (t *globTool) Name() string                { return "glob" }
 func (t *globTool) Capability() tool.Capability { return tool.CapRead }
@@ -43,8 +142,13 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	root := effectiveRoot(ctx, t.root)
 
-	if rgPath != "" {
-		return t.executeRg(ctx, root, args.Pattern)
+	if rg := t.rgPath(); rg != "" {
+		if res, ok := t.executeRg(ctx, rg, root, args.Pattern); ok {
+			return res, nil
+		}
+		// Fall through to the Go walker rather than reporting "no files
+		// matched": a ripgrep that failed to start or died mid-walk must not be
+		// indistinguishable from an empty result set.
 	}
 
 	var matches []string
@@ -72,37 +176,46 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if len(matches) == 0 {
 		return tool.Result{Content: "no files matched"}, nil
 	}
-	if len(matches) > 1000 {
-		matches = matches[:1000]
-	}
-	return tool.Result{Content: strings.Join(matches, "\n")}, nil
+	return tool.Result{Content: capGlob(matches)}, nil
 }
 
-func (t *globTool) executeRg(ctx context.Context, root, pattern string) (tool.Result, error) {
-	cmd := exec.CommandContext(ctx, rgPath, "--files", "--hidden", "-g", pattern, "--", root)
-	out, _ := cmd.Output() // exit 1 = no matches, not an error
+// capGlob joins matches, appending a truncation notice when the cap bites.
+func capGlob(matches []string) string {
+	if len(matches) <= globMaxResults {
+		return strings.Join(matches, "\n")
+	}
+	return strings.Join(matches[:globMaxResults], "\n") + truncNotice("glob", globMaxResults)
+}
+
+// executeRg lists files with ripgrep. The bool reports whether ripgrep ran to a
+// usable conclusion; false means the caller should use the Go walker instead.
+// An empty result is a legitimate conclusion (ok=true) — only a failure to run
+// is not.
+func (t *globTool) executeRg(ctx context.Context, rg, root, pattern string) (tool.Result, bool) {
+	args := append([]string{"--files"}, rgArgsCommon()...)
+	args = append(args, "-g", pattern, "--", ".")
+	out, err := runRg(ctx, rg, root, args...)
+	if err != nil && len(out) == 0 {
+		// Exit 1 with no output is ripgrep's "no matches", not a failure.
+		if ee, isExit := err.(*exec.ExitError); !isExit || ee.ExitCode() != 1 {
+			return tool.Result{}, false
+		}
+	}
 	if len(bytes.TrimSpace(out)) == 0 {
-		return tool.Result{Content: "no files matched"}, nil
+		return tool.Result{Content: "no files matched"}, true
 	}
 	var matches []string
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		rel, err := filepath.Rel(root, line)
-		if err != nil {
-			rel = line
-		}
-		matches = append(matches, filepath.ToSlash(rel))
+		matches = append(matches, relFromRg(line))
 	}
 	sort.Strings(matches)
-	if len(matches) > 1000 {
-		matches = matches[:1000]
-	}
 	if len(matches) == 0 {
-		return tool.Result{Content: "no files matched"}, nil
+		return tool.Result{Content: "no files matched"}, true
 	}
-	return tool.Result{Content: strings.Join(matches, "\n")}, nil
+	return tool.Result{Content: capGlob(matches)}, true
 }
 
 // matchGlob supports ** (any depth) in addition to standard path.Match syntax.
@@ -155,7 +268,12 @@ func globToRegexp(pattern string) *regexp.Regexp {
 
 // --- grep ---
 
-type grepTool struct{ root string }
+type grepTool struct {
+	root string
+	cmds *toolpath.Resolver
+}
+
+func (t *grepTool) rgPath() string { return resolverPath(t.cmds, toolpath.Ripgrep) }
 
 func (t *grepTool) Name() string                { return "grep" }
 func (t *grepTool) Capability() tool.Capability { return tool.CapRead }
@@ -177,8 +295,12 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 
 	root := effectiveRoot(ctx, t.root)
 
-	if rgPath != "" {
-		return t.executeRg(ctx, root, args.Pattern, args.Glob, args.IgnoreCase)
+	if rg := t.rgPath(); rg != "" {
+		if res, ok := t.executeRg(ctx, rg, root, args.Pattern, args.Glob, args.IgnoreCase); ok {
+			return res, nil
+		}
+		// See globTool.Execute: a ripgrep that could not run falls back to the
+		// walker rather than masquerading as an empty result.
 	}
 
 	pat := args.Pattern
@@ -191,7 +313,6 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 
 	var out []string
-	const maxMatches = 500
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -219,7 +340,7 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		for i, line := range strings.Split(string(data), "\n") {
 			if re.MatchString(line) {
 				out = append(out, fmt.Sprintf("%s:%d:%s", rel, i+1, strings.TrimRight(line, "\r")))
-				if len(out) >= maxMatches {
+				if len(out) >= grepMaxMatches {
 					return filepath.SkipAll
 				}
 			}
@@ -232,54 +353,108 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if len(out) == 0 {
 		return tool.Result{Content: "no matches"}, nil
 	}
-	return tool.Result{Content: strings.Join(out, "\n")}, nil
+	content := strings.Join(out, "\n")
+	if len(out) >= grepMaxMatches {
+		content += truncNotice("grep", grepMaxMatches)
+	}
+	return tool.Result{Content: content}, nil
 }
 
-func (t *grepTool) executeRg(ctx context.Context, root, pattern, glob string, ignoreCase bool) (tool.Result, error) {
-	argv := []string{"--line-number", "--no-heading", "--color=never", "--hidden", "-e", pattern}
+// executeRg searches with ripgrep. The bool reports whether it ran to a usable
+// conclusion; false means fall back to the Go walker.
+//
+// --null makes ripgrep terminate the file name with a NUL instead of a colon,
+// which is what makes the output parseable at all. Splitting on ":" — the old
+// approach — cannot distinguish the path from the match on any line, and broke
+// outright on Windows, where "D:\repo\f.go:12:text" splits at the drive letter
+// and the path came back unmodified and absolute.
+func (t *grepTool) executeRg(ctx context.Context, rg, root, pattern, glob string, ignoreCase bool) (tool.Result, bool) {
+	argv := []string{"--null", "--line-number", "--no-heading", "--color=never"}
+	argv = append(argv, rgArgsCommon()...)
+	argv = append(argv, "--max-count", strconv.Itoa(grepMaxMatches), "-e", pattern)
 	if ignoreCase {
 		argv = append(argv, "-i")
 	}
 	if glob != "" {
 		argv = append(argv, "-g", glob)
 	}
-	argv = append(argv, "--", root)
+	argv = append(argv, "--", ".")
 
-	cmd := exec.CommandContext(ctx, rgPath, argv...)
-	raw, _ := cmd.Output() // exit 1 = no matches
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return tool.Result{Content: "no matches"}, nil
+	// Stream ripgrep's output and stop it as soon as the cap is reached, rather
+	// than buffering a whole run and discarding the tail. ripgrep has no global
+	// match limit (--max-count is per file), so on a large tree a common pattern
+	// made it walk everything to produce output we then threw away: on a
+	// 40k-file tree, a query capped at 500 measured 964ms buffered against 42ms
+	// for the Go walker, which stops early via SkipAll. Cancelling the context
+	// closes that gap while keeping ripgrep's large win on queries that are not
+	// capped (no-match over the same tree: 845ms vs the walker's 3.3s).
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, rg, argv...)
+	cmd.Dir = root
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return tool.Result{}, false
+	}
+	if err := cmd.Start(); err != nil {
+		return tool.Result{}, false
 	}
 
 	var results []string
-	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+	capped := false
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), maxGrepLineBytes)
+	for sc.Scan() {
+		line := sc.Text()
 		if line == "" {
 			continue
 		}
-		// rg outputs: /abs/path/file:lineno:content — strip root prefix
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) == 3 {
-			rel, err := filepath.Rel(root, parts[0])
-			if err != nil {
-				rel = parts[0]
-			}
-			line = filepath.ToSlash(rel) + ":" + parts[1] + ":" + parts[2]
+		// rg --null emits: <path>\0<lineno>:<content>
+		if path, rest, found := strings.Cut(line, "\x00"); found {
+			line = relFromRg(path) + ":" + rest
 		}
 		results = append(results, line)
-		if len(results) >= 500 {
+		if len(results) >= grepMaxMatches {
+			capped = true
 			break
 		}
 	}
-	if len(results) == 0 {
-		return tool.Result{Content: "no matches"}, nil
+	scanErr := sc.Err()
+	cancel()
+	waitErr := cmd.Wait()
+
+	// A run we cut short reports a kill, and a scanner we stopped reading from
+	// can report a broken pipe; neither is a failure when we already have
+	// results. Only a genuine failure with nothing to show falls back.
+	if !capped && len(results) == 0 {
+		if scanErr != nil {
+			return tool.Result{}, false
+		}
+		if ee, isExit := waitErr.(*exec.ExitError); waitErr != nil && (!isExit || ee.ExitCode() != 1) {
+			return tool.Result{}, false
+		}
+		return tool.Result{Content: "no matches"}, true
 	}
-	return tool.Result{Content: strings.Join(results, "\n")}, nil
+
+	content := strings.Join(results, "\n")
+	if capped {
+		content += truncNotice("grep", grepMaxMatches)
+	}
+	return tool.Result{Content: content}, true
 }
 
+// skipDirNames are directories neither search backend descends into. Kept as
+// data rather than a switch so rgArgsCommon can translate the same list into
+// ripgrep excludes — the two backends previously disagreed about this set,
+// which is how the same grep returned different results on two machines.
+var skipDirNames = []string{".git", "node_modules", "vendor", ".idea", ".vscode", "dist", "build", ".aegis"}
+
 func skipDir(name string) bool {
-	switch name {
-	case ".git", "node_modules", "vendor", ".idea", ".vscode", "dist", "build", ".aegis":
-		return true
+	for _, d := range skipDirNames {
+		if name == d {
+			return true
+		}
 	}
 	return false
 }

@@ -64,6 +64,8 @@ Any config key can be overridden with an environment variable by converting the 
 | `AEGIS_SERVER_MAX_RUN_DURATION_SEC` | `server.max_run_duration_sec` | `1800` |
 | `AEGIS_SERVER_SSE_BUFFER_SIZE` | `server.sse_buffer_size` | `256` |
 | `AEGIS_SERVER_TLS_ENABLED` | `server.tls.enabled` | `true` |
+| `AEGIS_REPOMAP_MAX_BYTES` | `repomap.max_bytes` | `24000` |
+| `AEGIS_REPOMAP_MAX_SYMBOLS_PER_FILE` | `repomap.max_symbols_per_file` | `6` |
 
 API keys use their native names (not the `AEGIS_` prefix):
 
@@ -598,6 +600,59 @@ search:
   # marker is always applied to fetched/searched content regardless of this
   # setting — see docs/mcp-trust-boundary.md.
   scan_output: true
+
+
+# ── Repository map ────────────────────────────────────────────────────────────
+# Sizes the structural repo overview (files, top-level symbols, import edges)
+# injected into the system prompt as <repo_map>, built by `aegis index` and
+# refreshed automatically when the cache goes stale.
+repomap:
+  # Cap on the rendered map, in bytes. The 8000 default is roughly 2000 tokens
+  # (~4 chars/token) — a figure calibrated when a small context window was the
+  # constraint, and it is why this is a config key rather than a constant: on a
+  # 128k-context model, 8000 bytes is 1.5% of the window spent on the single
+  # cheapest orientation the agent gets, and doubling or quadrupling it usually
+  # buys more than the same tokens spent re-reading files. Raise it on a
+  # large-context model; lower it if you are squeezing a 4k/8k local model.
+  max_bytes: 8000
+
+  # Cap on how many symbols any one file contributes. This decides what
+  # max_bytes buys: breadth across files or depth within a few. Measured on this
+  # repo the untruncated render is ~58x the default byte budget, so uncapped the
+  # budget is exhausted by the first handful of files — 10 of 672 reached the
+  # model, and which 10 was decided by the alphabet. At 3 symbols each, 37 files
+  # fit instead (measured, same repo). Files whose list is cut carry an explicit
+  # "+N more" marker, so a shortened list never reads as "this file has no other
+  # symbols".
+  #
+  # A negative value means uncapped — render every symbol found and let max_bytes
+  # do the truncating. Sensible only with a generous max_bytes.
+  max_symbols_per_file: 3
+
+
+# ── External host commands ────────────────────────────────────────────────────
+# Overrides how Aegis locates optional host binaries. Every one has a working
+# fallback, so this block is entirely optional — see docs/host-tools.md for what
+# each tool is worth and the measurements behind that.
+#
+# A value may be a bare name (resolved on PATH), a path (used as-is, verified
+# executable), or a disable keyword ("off"/"false"/"no"/"none"/"disabled"/"0")
+# that forces Aegis's built-in fallback even when the binary is installed.
+#
+# Aegis execs binaries directly rather than through a shell, so a shell alias is
+# never visible to it — if your binary is not on PATH under its usual name, give
+# the real path here. `aegis doctor` prints what each key resolved to.
+#
+# A configured binary that cannot be found is a hard failure, not a silent
+# fallback: naming a specific binary and quietly getting another defeats the
+# point of setting the key. An unset key that is simply not installed is only a
+# warning.
+commands:
+  ripgrep: rg        # grep/glob tools; markedly faster than the built-in walker
+  git: git           # git tool, commit/diff/log, checkpoints
+  gh: gh             # git_pr tool
+  mmdc: mmdc         # local Mermaid rendering (else remote Kroki)
+  plantuml: plantuml # local PlantUML rendering (else remote Kroki)
 
 
 # ── Out-of-band notifications ─────────────────────────────────────────────────
@@ -1423,6 +1478,16 @@ skills:
 ```
 
 Or from the CLI: `aegis skills enable security-audit` (add `--global` for the user-wide default instead), or `/skills enable security-audit` in the TUI.
+
+### Spend more of a large context window on the repo map
+
+```yaml
+repomap:
+  max_bytes: 32000            # ~8k tokens: 6% of a 128k window
+  max_symbols_per_file: 8     # deeper per file, since there is room for both
+```
+
+The defaults (8000 / 3) are sized for a small window. Re-index after changing them — `aegis index` writes the cache the prompt renders from — or just start a session, which rebuilds a stale cache on its own.
 
 ### Configure lifecycle hooks
 

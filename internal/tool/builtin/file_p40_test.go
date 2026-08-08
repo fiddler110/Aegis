@@ -69,23 +69,34 @@ func statMode(t *testing.T, path string) os.FileMode {
 // read must produce byte-identical output to the previous whole-file
 // strings.Split approach across the tricky cases (trailing newline, CRLF,
 // empty file, offset past EOF, offset+limit windows).
+//
+// Two cases produce a diagnostic notice instead of line-numbered text, because
+// an empty successful result is unreadable to a model — a zero-byte file and an
+// overshot offset both used to come back as "" (or a bare "1\t"), which reads as
+// "there is nothing here" rather than naming which of the two happened. Those
+// carry wantExact; every other case must still match the reference render byte
+// for byte, which is the invariant this test exists to hold.
 func TestReadBoundedMatchesFullSplit(t *testing.T) {
 	cases := []struct {
-		name    string
-		content string
-		offset  int
-		limit   int
+		name      string
+		content   string
+		offset    int
+		limit     int
+		wantExact string // when set, replaces the reference render entirely
 	}{
-		{"trailing-newline", "a\nb\nc\n", 0, 0},
-		{"no-trailing-newline", "a\nb\nc", 0, 0},
-		{"empty", "", 0, 0},
-		{"single-line", "only", 0, 0},
-		{"crlf", "a\r\nb\r\nc\r\n", 0, 0},
-		{"offset-mid", "l1\nl2\nl3\nl4\nl5\n", 3, 0},
-		{"offset-and-limit", "l1\nl2\nl3\nl4\nl5\n", 2, 2},
-		{"limit-only", "l1\nl2\nl3\nl4\n", 0, 2},
-		{"offset-past-eof", "l1\nl2\n", 10, 0},
-		{"blank-lines", "\n\n\n", 0, 0},
+		{name: "trailing-newline", content: "a\nb\nc\n"},
+		{name: "no-trailing-newline", content: "a\nb\nc"},
+		{name: "empty", content: "", wantExact: "[read_file: f is empty (0 bytes).]\n"},
+		{name: "single-line", content: "only"},
+		{name: "crlf", content: "a\r\nb\r\nc\r\n"},
+		{name: "offset-mid", content: "l1\nl2\nl3\nl4\nl5\n", offset: 3},
+		{name: "offset-and-limit", content: "l1\nl2\nl3\nl4\nl5\n", offset: 2, limit: 2},
+		{name: "limit-only", content: "l1\nl2\nl3\nl4\n", limit: 2},
+		{
+			name: "offset-past-eof", content: "l1\nl2\n", offset: 10,
+			wantExact: "[read_file: offset 10 is past the end of f, which has 3 line(s). Re-read with a smaller offset.]\n",
+		},
+		{name: "blank-lines", content: "\n\n\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,7 +116,10 @@ func TestReadBoundedMatchesFullSplit(t *testing.T) {
 			if err != nil || res.IsError {
 				t.Fatalf("read: %v %+v", err, res)
 			}
-			want := referenceRender(tc.content, tc.offset, tc.limit)
+			want := tc.wantExact
+			if want == "" {
+				want = referenceRender(tc.content, tc.offset, tc.limit)
+			}
 			if res.Content != want {
 				t.Errorf("bounded read mismatch\n got: %q\nwant: %q", res.Content, want)
 			}

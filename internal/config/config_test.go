@@ -524,3 +524,71 @@ func TestToolCallShimDefaultsOff(t *testing.T) {
 		t.Errorf("the built-in default %q is not a value the shim recognizes", s)
 	}
 }
+
+// TestRepoMapDefaults pins the P62.1 budget to the numbers internal/repomap
+// documents (DefaultMaxBytes 8000, DefaultMaxSymbolsPerFile 3). The two are
+// spelled independently — as literals in defaults() and as constants in
+// repomap, so the config package needs no dependency on the package it sizes —
+// which is exactly the arrangement that can drift silently, since a mismatch
+// changes the injected map's shape without failing anything.
+func TestRepoMapDefaults(t *testing.T) {
+	redirectConfigDir(t) // hermetic: a real ~/.config/aegis/config.yaml must not decide this
+	clearEnv(t, "AEGIS_REPOMAP_MAX_BYTES", "AEGIS_REPOMAP_MAX_SYMBOLS_PER_FILE")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RepoMap.MaxBytes != 8000 {
+		t.Errorf("repomap.max_bytes = %d, want 8000 (repomap.DefaultMaxBytes)", cfg.RepoMap.MaxBytes)
+	}
+	if cfg.RepoMap.MaxSymbolsPerFile != 3 {
+		t.Errorf("repomap.max_symbols_per_file = %d, want 3 (repomap.DefaultMaxSymbolsPerFile)", cfg.RepoMap.MaxSymbolsPerFile)
+	}
+}
+
+// TestRepoMapFromYAML covers the project-config path and, with it, the one
+// value that must survive untouched: a negative max_symbols_per_file is the
+// documented "uncapped" sentinel, so any clamp to a non-negative range would
+// silently reinstate the default instead of removing the cap.
+func TestRepoMapFromYAML(t *testing.T) {
+	redirectConfigDir(t)
+	chdirTemp(t)
+	writeProjectConfig(t, `
+repomap:
+  max_bytes: 32000
+  max_symbols_per_file: -1
+`)
+	clearEnv(t, "AEGIS_REPOMAP_MAX_BYTES", "AEGIS_REPOMAP_MAX_SYMBOLS_PER_FILE")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RepoMap.MaxBytes != 32000 {
+		t.Errorf("repomap.max_bytes = %d, want 32000", cfg.RepoMap.MaxBytes)
+	}
+	if cfg.RepoMap.MaxSymbolsPerFile != -1 {
+		t.Errorf("repomap.max_symbols_per_file = %d, want -1 (the uncapped sentinel must survive load)", cfg.RepoMap.MaxSymbolsPerFile)
+	}
+}
+
+// TestEnvOverrideRepoMap is the env-layer counterpart: repomap is a new
+// envSections entry, and without it AEGIS_REPOMAP_MAX_BYTES lands on the
+// unsplit key "repomap_max_bytes" and is discarded with no error.
+func TestEnvOverrideRepoMap(t *testing.T) {
+	redirectConfigDir(t)
+	t.Setenv("AEGIS_REPOMAP_MAX_BYTES", "24000")
+	t.Setenv("AEGIS_REPOMAP_MAX_SYMBOLS_PER_FILE", "6")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RepoMap.MaxBytes != 24000 {
+		t.Errorf("repomap.max_bytes = %d, want 24000", cfg.RepoMap.MaxBytes)
+	}
+	if cfg.RepoMap.MaxSymbolsPerFile != 6 {
+		t.Errorf("repomap.max_symbols_per_file = %d, want 6", cfg.RepoMap.MaxSymbolsPerFile)
+	}
+}

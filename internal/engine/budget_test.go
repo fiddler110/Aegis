@@ -266,7 +266,7 @@ func TestTokenBudgetErrorNamesTheOtherKey(t *testing.T) {
 	tracker.AddTokens(provider.Usage{InputTokens: 50_000, OutputTokens: 100, IsEstimated: true})
 
 	e := &Engine{cost: tracker, maxTokensPerRun: 10_000}
-	err := e.tokenBudgetExceeded()
+	err := e.newRunBudget().tokensExceeded()
 	if err == nil {
 		t.Fatal("expected the context-token budget to fire")
 	}
@@ -279,7 +279,7 @@ func TestTokenBudgetErrorNamesTheOtherKey(t *testing.T) {
 	// The generation budget is checked first, so a run that has blown both is
 	// told the more specific thing rather than the misleading one.
 	e = &Engine{cost: tracker, maxTokensPerRun: 10_000, maxGenTokens: 50}
-	err = e.tokenBudgetExceeded()
+	err = e.newRunBudget().tokensExceeded()
 	if err == nil || !strings.Contains(err.Error(), "generation budget") {
 		t.Errorf("expected the generation budget to take precedence, got %v", err)
 	}

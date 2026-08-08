@@ -127,19 +127,35 @@ func deferredToolsBlock(reg *tool.Registry) string {
 	return sb.String()
 }
 
+// repoMapOptions renders the `repomap:` config section as build options
+// (P62.1). Every daemon-side repo-map call has to pass the same pair, and the
+// cached render is keyed on it — a load that reads with one budget and a
+// rebuild that writes with another would flip the injected block's size
+// depending on which path ran, so the translation lives here rather than being
+// spelled out per call site.
+func repoMapOptions(cfg *config.Config) repomap.Options {
+	if cfg == nil {
+		return repomap.Options{}
+	}
+	return repomap.Options{
+		MaxBytes:          cfg.RepoMap.MaxBytes,
+		MaxSymbolsPerFile: cfg.RepoMap.MaxSymbolsPerFile,
+	}
+}
+
 // loadRepoMap loads the cached repository map for cwd, rebuilding it when the
 // cache is stale (a source file changed since the last `aegis index`). The map
 // is opt-in: when no cache exists, this returns an empty string and nothing is
 // injected. Returns a ready-to-inject <repo_map> block, or "" on any failure.
-func loadRepoMap(cwd string, logger *slog.Logger) string {
+func loadRepoMap(cwd string, opts repomap.Options, logger *slog.Logger) string {
 	cache := filepath.Join(cwd, ".aegis", "repomap.json")
-	rendered, fresh, err := repomap.Load(cwd, cache, repomap.Options{})
+	rendered, fresh, err := repomap.Load(cwd, cache, opts)
 	if err != nil || rendered == "" {
 		return "" // not indexed, or unreadable cache
 	}
 	if !fresh {
 		// The repo changed since indexing; rebuild so the prompt isn't stale.
-		if m, buildErr := repomap.Build(cwd, repomap.Options{}); buildErr == nil {
+		if m, buildErr := repomap.Build(cwd, opts); buildErr == nil {
 			if saveErr := m.Save(cache); saveErr != nil {
 				logger.Warn("repo map rebuilt but cache not saved", "err", saveErr)
 			}

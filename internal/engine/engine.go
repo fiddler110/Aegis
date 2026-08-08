@@ -392,74 +392,6 @@ var ErrWallClockLimit = errors.New("engine: wall-clock budget reached")
 // invocation with a fresh context is what resolved the 2026-08-03 stall by hand.
 var ErrLoopDetected = errors.New("engine: aborting suspected loop")
 
-// clock returns the time source the wall-clock budget reads — time.Now unless
-// a test injected one. See the note on Engine.now.
-func (e *Engine) clock() func() time.Time {
-	if e.now != nil {
-		return e.now
-	}
-	return time.Now
-}
-
-// wallClockExceeded reports whether this run has outlived maxWallClock, and
-// returns the abort error if so. start is the run's own start time, so the
-// bound is per-Run — which in the phased drive means per phase turn, the unit
-// the drive actually resets around, rather than one global cap that would
-// guillotine a long build mid-phase.
-func (e *Engine) wallClockExceeded(start time.Time) error {
-	if e.maxWallClock <= 0 {
-		return nil
-	}
-	elapsed := e.clock()().Sub(start)
-	if elapsed < e.maxWallClock {
-		return nil
-	}
-	return fmt.Errorf("%w: ran %s of a %s limit — raise cost.max_wall_clock_per_run for longer tasks",
-		ErrWallClockLimit, elapsed.Round(time.Second), e.maxWallClock)
-}
-
-// tokenBudgetExceeded reports whether this run has crossed either token budget,
-// and returns the abort error if so. Both are checked in one place because both
-// are checked at both gates (before each model turn and before each tool round)
-// and because the message for the first only makes sense alongside the second
-// (P59.4): a user who set max_tokens_per_run as a work budget needs to be told,
-// at the moment it fires, that the number it reports is not the quantity they
-// were thinking of and which key is.
-func (e *Engine) tokenBudgetExceeded() error {
-	if e.cost == nil {
-		return nil
-	}
-	if e.maxGenTokens > 0 {
-		if gen := e.cost.TotalGeneratedTokens(); gen >= e.maxGenTokens {
-			return fmt.Errorf("engine: generation budget reached: the model generated %d of %d tokens (cost.max_generated_tokens_per_run)",
-				gen, e.maxGenTokens)
-		}
-	}
-	if e.maxTokensPerRun > 0 {
-		if total := e.cost.TotalTokens(); total >= e.maxTokensPerRun {
-			return fmt.Errorf("engine: token budget reached: counted %d of %d tokens (cost.max_tokens_per_run). "+
-				"That count includes the whole prompt on every turn, so it grows with conversation length as well as with work done — "+
-				"to bound generated output instead, set cost.max_generated_tokens_per_run",
-				total, e.maxTokensPerRun)
-		}
-	}
-	return nil
-}
-
-// wallClockOverride re-attributes an error produced by cancellation when the
-// run's own deadline (P59.2) is what fired. Without it the budget abort would
-// surface as whatever the cancelled call happened to return — a bare
-// ErrInterrupted, or an adapter transport error a caller classifies as
-// backend-unavailable and would then wait for and resume, turning a deliberate
-// budget stop into a retry loop. err is returned unchanged when the run is
-// still inside its budget, so an ordinary interrupt keeps its own identity.
-func (e *Engine) wallClockOverride(runStart time.Time, err error) error {
-	if wcErr := e.wallClockExceeded(runStart); wcErr != nil {
-		return wcErr
-	}
-	return err
-}
-
 // compactionTrigger returns the estimated prompt size at which proactive
 // compaction fires (P59.1).
 //
@@ -588,24 +520,12 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		emit = func(Event) {}
 	}
 
-	// P52.15 wall-clock budget baseline. Taken before compaction rather than at
-	// the loop, since a compaction pass is a model call that can itself take
-	// real time on a local backend — time the operator's bound should cover.
-	runStart := e.clock()()
-
-	// P59.2: make the budget a deadline on the run's context, not only a value
-	// polled between turns. The two gates below (before each model turn, before
-	// each tool round) cannot fire *during* a turn, which is exactly where a
-	// local backend hangs — so "don't spend more than N minutes on this" was
-	// structurally unable to hold on the one class of stall it was asked to
-	// cover. The polls stay: they produce the explanatory abort error, and they
-	// are what a fake clock in tests drives. This only ensures a wedged call
-	// actually returns so a poll can run.
-	if e.maxWallClock > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, e.maxWallClock)
-		defer cancel()
-	}
+	// P63.9: the four run budgets — cost, context tokens, generated tokens,
+	// wall clock — and the run-start instant they share. See budget.go for why
+	// this concern was the one lifted first.
+	budget := e.newRunBudget()
+	ctx, cancelBudget := budget.deadline(ctx)
+	defer cancelBudget()
 
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the
@@ -626,10 +546,11 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 	}
 
-	var loop *loopDetector
-	if e.loopThreshold > 0 {
-		loop = newLoopDetector(e.loopThreshold)
-	}
+	// loop is the P53.2 loop gate plus the window it decides on (P63.9). nil when
+	// loop detection is disabled; every method tolerates that, so the gate below
+	// carries no nil check. The per-turn half of the concern is the loopVerdict it
+	// returns, declared inside the turn loop.
+	loop := e.newLoopGuard()
 
 	// P53.6: the shim's tool catalog rides every request but is appended in
 	// turn(), outside conv.System, so the proactive-compaction check below would
@@ -655,11 +576,6 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// it can all be retracted before Run returns — see nudgeState.retractAll
 	// (P40.6).
 	var nudges nudgeState
-	// loopNudgePending carries the P53.2 recoverable-loop corrective from the
-	// loop gate (which fires before a tool round) to just after that round, so
-	// it is never appended between an assistant's tool_use blocks and their
-	// results.
-	loopNudgePending := false
 	// toolFailures is the P52.3 circuit breaker: it aggregates the per-round
 	// IsError signal (previously emitted and then dropped on the floor) so a run
 	// whose every tool call fails gets a corrective nudge and, if it keeps
@@ -710,33 +626,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	for iter := 0; iter < e.maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
-			return e.wallClockOverride(runStart, ErrInterrupted)
+			return budget.override(ErrInterrupted)
 		default:
 		}
 
-		// Budget gate: stop before spending on another paid model call. This
-		// must run before every turn, not just before a tool round (P9 dead
-		// zone) — a guard corrective retry, a max-token continuation, and a
-		// plain text-only turn are all billed the same as any other turn via
-		// cost.Add below, so gating only the tool-round path let a run cycling
-		// through guard failures or token-limit continuations burn all the way
-		// to the iteration cap without the budget ever aborting it. The
-		// tool-round path also re-checks just before runTools further down,
-		// so a turn that itself pushes spend over the cap still stops before
-		// its tool calls (and their side effects) run, not one iteration late.
-		if e.budgetUSD > 0 && e.cost != nil && e.cost.TotalUSD() >= e.budgetUSD {
-			err := fmt.Errorf("engine: cost budget reached: spent $%.4f of $%.2f limit", e.cost.TotalUSD(), e.budgetUSD)
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-		if err := e.tokenBudgetExceeded(); err != nil {
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-		// P52.15: same gate, the time dimension. Placed with the other two for
-		// the same P9 dead-zone reason — a guard corrective retry or a
-		// max-token continuation is just as much elapsed time as a tool round.
-		if err := e.wallClockExceeded(runStart); err != nil {
+		// Budget gate: stop before spending on another paid model call. See
+		// runBudget.exceeded for why this gate exists separately from the
+		// pre-tool-round one below.
+		if err := budget.exceeded(); err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -864,7 +761,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			// deliberate budget abort into a retry loop. Re-derive the real
 			// reason first so the wall-clock error (fatal by design, unlike a
 			// context overflow or a tool-failure trip) is what propagates.
-			err = e.wallClockOverride(runStart, err)
+			err = budget.override(err)
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -941,7 +838,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// on any turn whose reply text carries the shape.
 		//
 		// shimMixedPending carries the mixed-round correction past the tool
-		// round, for the same reason loopNudgePending does: the native calls
+		// round, for the same reason loopVerdict.nudge does: the native calls
 		// this turn made are real and must still be answered with tool_result
 		// blocks, so nothing may be appended between them and their results.
 		shimMixedPending := false
@@ -1129,56 +1026,23 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		// Loop guard: stop if the model keeps requesting the same tool calls.
-		//
-		// P53.2(a): calls a tool declares poll-exempt are dropped from the
-		// signature, and a turn made up entirely of polls is not recorded at all
-		// — an agent waiting on a background job or a teammate's reply is
-		// indistinguishable from a stuck one otherwise, and canonicalizeToolInput
-		// erases the very fields that would tell them apart.
-		//
-		// P53.2(b): the outcome decides the ending. A cycle whose rounds errored
-		// is fatal, exactly as before. A cycle that keeps *succeeding* earns one
-		// corrective nudge and a window reset; only a second trigger in the same
-		// run ends it. The nudge is injected after this turn's tool round rather
-		// than here, so the assistant's tool_use blocks are never left without
-		// matching tool_result blocks.
-		loopRecorded := false
-		if loop != nil {
-			sig, shouldRecord := turnSignatureExcludingPolls(toolUses, e.pollExempt)
-			if shouldRecord && loop.record(sig) {
-				recoverable := !loop.cycleHadError() && nudges.loopNudges == 0
-				if !recoverable {
-					err := fmt.Errorf("%w: identical tool calls repeated %d turns", ErrLoopDetected, e.loopThreshold)
-					if nudges.loopNudges > 0 {
-						err = fmt.Errorf("%w — the corrective prompt did not break the cycle", err)
-					}
-					emit(Event{Kind: KindError, Err: err})
-					return err
-				}
-				nudges.loopNudges++
-				loopNudgePending = true
-				loop.reset()
-				emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
-					"model repeated the same succeeding tool calls %d turns running — asking it to change approach or answer",
-					e.loopThreshold)})
-			} else if shouldRecord {
-				loopRecorded = true
-			}
+		// The decision (abort / nudge / neither) and whether this turn entered the
+		// detector's window are the verdict's, not Run's — see loopGuard.check for
+		// P53.2(a)'s poll exemption and P53.2(b)'s outcome-decides-the-ending rule.
+		// loopVerdict is per-turn state and is scoped to exactly this iteration.
+		loopV := loop.check(toolUses, nudges.loopNudges)
+		if loopV.abort != nil {
+			emit(Event{Kind: KindError, Err: loopV.abort})
+			return loopV.abort
+		}
+		if loopV.notice != "" {
+			nudges.loopNudges++
+			emit(Event{Kind: KindNotice, Text: loopV.notice})
 		}
 
-		// Budget gate: stop before launching another (paid) tool round.
-		if e.budgetUSD > 0 && e.cost != nil && e.cost.TotalUSD() >= e.budgetUSD {
-			err := fmt.Errorf("engine: cost budget reached: spent $%.4f of $%.2f limit", e.cost.TotalUSD(), e.budgetUSD)
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-		if err := e.tokenBudgetExceeded(); err != nil {
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-		// P52.15: stop before launching a tool round (and its side effects) once
-		// the time bound is spent, not one iteration later.
-		if err := e.wallClockExceeded(runStart); err != nil {
+		// Budget gate: stop before launching another (paid) tool round, and
+		// before its side effects, rather than one iteration later.
+		if err := budget.exceeded(); err != nil {
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -1187,7 +1051,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		if err != nil {
 			// P59.2: the run deadline cancels tool execution too, so the same
 			// re-attribution the model turn needs applies here.
-			err = e.wallClockOverride(runStart, err)
+			err = budget.override(err)
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -1220,18 +1084,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 
 		// P53.2(b): the loop gate records a turn *before* its tools run, so the
 		// outcome that classifies a cycle as recoverable or fatal is only knowable
-		// here. Skipped when the turn was not recorded (all calls poll-exempt, or
-		// the window was just reset), so an outcome is never misattributed.
-		if loop != nil && loopRecorded {
-			loop.noteOutcome(resultsHadError(results))
-		}
+		// here.
+		loop.noteOutcome(loopV, results)
 		// Inject the recoverable-loop corrective now that the round's tool_result
 		// blocks are in place, keeping the transcript well-formed — the same
 		// injection point the P52.3 nudge below uses.
-		if loopNudgePending {
-			loopNudgePending = false
+		if loopV.nudge != "" {
 			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-				provider.TextBlock{Text: loopNudgeText(e.loopThreshold)},
+				provider.TextBlock{Text: loopV.nudge},
 			}})
 		}
 		// P59.6: the same injection point, for the mixed-round correction. The
@@ -2218,7 +2078,14 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
 		content, isErr = fmt.Sprintf("tool error: %v", err), true
 	}
-	if !isErr && t.Capability() == tool.CapWrite {
+	// P63.8: effective capability (P25.4c), not the static one — a tool that
+	// reclassifies into CapWrite for a specific call would otherwise have its
+	// written paths go unrecorded, costing that call its output-guard file
+	// validation and its quarantine-on-fail rollback. Same reasoning that moved
+	// ContextualGate (P32.2) and ScopeGate (P63.3) off the static capability,
+	// and it makes this branch agree with the redaction branch below, which
+	// reads the same tool and the same input.
+	if !isErr && tool.EffectiveCapability(t, tu.Input) == tool.CapWrite {
 		paths := writtenPathsFromInput(tu.Input)
 		if len(paths) == 0 {
 			// P32.6: writtenPathsFromInput only recognizes "path"/"file_path"/
@@ -2290,6 +2157,11 @@ func (e *Engine) recordWrittenPaths(paths []string) {
 	}
 	e.writtenFilesMu.Lock()
 	defer e.writtenFilesMu.Unlock()
+	if e.writtenFiles == nil {
+		// Run resets this per run; the lazy init keeps a tool call outside a
+		// Run (or before its reset) from panicking on a nil map write.
+		e.writtenFiles = make(map[string]struct{})
+	}
 	for _, p := range paths {
 		e.writtenFiles[p] = struct{}{}
 	}

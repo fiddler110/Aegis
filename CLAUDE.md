@@ -108,6 +108,43 @@ Two traps when changing this:
   fetch; osv-scanner calls api.osv.dev per run. See `multiscannerExcludedTools`
   for what no profile will ever carry, and why.
 
+## Search backends
+
+`glob` and `grep` have two interchangeable backends — ripgrep when
+`internal/toolpath` resolves it, otherwise a pure-Go `WalkDir`. They are
+required to return the **same answer**, and a regression test asserts it, because
+"is ripgrep installed" is not something a query's results should depend on. Three
+things enforce that parity, each of which was once broken:
+
+- `rgArgsCommon` passes `--no-ignore-vcs` plus an explicit `-g !dir/` per
+  `skipDirNames` entry. ripgrep honors `.gitignore` and the walker does not, so a
+  committed-but-conventionally-ignored tree (this repo's `internal/server/webui/dist`)
+  was searched by one backend only. The excludes are generated from the same
+  slice the walker uses, so the sets cannot drift.
+- Every invocation sets `cmd.Dir` to the workspace root and searches `.`. It used
+  to inherit the daemon's cwd while being handed an absolute root, and ripgrep
+  matches `-g` globs against the path as walked — so `internal/**/*_test.go`
+  returned **0 files** under ripgrep against 348 via the walker, whenever the
+  daemon's cwd was not the workspace root (i.e. normally).
+- Output is parsed on `--null`'s NUL separator, not `":"`. Splitting on a colon
+  cannot tell the path from the match, and on Windows `D:\repo\f.go:12:text`
+  splits at the drive letter, so every result came back absolute and unmodified.
+
+Two behaviours are deliberate rather than accidental. A capped result set (500
+grep matches, 1000 glob paths) ends with a notice saying so — silently returning
+a truncated list let a model reason from the first 500 matches as though they
+were all of them. And the capped subset is *unordered*: ripgrep's parallel walk
+visits files in a different order from the walker, and `--sort path` costs ~4x
+(220ms → 900ms measured), more than ripgrep's entire advantage — so the notice
+says the set is partial instead of paying for an ordering nobody asked for.
+
+The grep path streams ripgrep's stdout and cancels the process once the cap is
+reached. ripgrep has no *global* match limit (`--max-count` is per file), so a
+common pattern made it walk a whole tree to produce output thrown away at 500
+matches: 964ms on a 40k-file tree against the walker's 43ms. Streaming brings
+that to 46ms while keeping ripgrep's win where it matters (no-match over the
+same tree: 879ms vs 3326ms). See [docs/host-tools.md](docs/host-tools.md).
+
 The embedded web UI (`aegis ui`, served at `/ui`) is built from
 `internal/server/webui/frontend` (Vite + Preact + TypeScript); its output
 (`internal/server/webui/dist/`) is committed to git and embedded via
@@ -234,12 +271,13 @@ TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (int
 | `internal/checkpoint` | Per-turn restore points for `/rewind` |
 | `internal/memory` | Project-level and user-level persistent memory; relevance scoring for context injection |
 | `internal/knowledge` | Project-level knowledge base (distinct from `internal/memory`'s relevance-scored recall) surfaced to personas/skills as grounding context |
-| `internal/repomap` | Builds a compact structural overview of the repo — files, top-level symbols, import edges — injected as `<repo_map>`; regex-based extraction (no tree-sitter/CGo), capped to a byte budget, mtime-cached |
+| `internal/repomap` | Builds a compact structural overview of the repo — files, top-level symbols, import edges — injected as `<repo_map>`; regex-based extraction (no tree-sitter/CGo), capped to a byte budget (`repomap.max_bytes`), mtime-cached. On any repo large enough to truncate, **what gets cut matters more than what gets extracted**: the full render of this repo is ~58× the default 8000-byte budget, so the map is a ranked selection, not a listing. Files are ordered production-before-test, then by package import in-degree, then by symbol count (P62.1) — it used to be plain alphabetical, which delivered 10 of 672 files and hid every package in the table above. Each file contributes at most `repomap.max_symbols_per_file` symbols with a `… +N more` marker when cut, because a silently shortened symbol list reads to the model as "this symbol does not exist". Both knobs are mixed into the cache fingerprint, or changing them would have no effect until a source file happened to change |
 | `internal/lsp` | Minimal LSP client managing language-server subprocesses over stdio JSON-RPC, for diagnostics and reference resolution (`LSP` tool, `aegis doctor`) |
 | `internal/cost` | Tracks token spend per run/session and converts it to an estimated USD cost; backs the budget knobs (`cost.*` config: USD, token, wall-clock, iteration limits) enforced in `internal/engine` |
 | `internal/tui` | Bubbletea TUI: timeline, streaming, dialog, persona/session pickers, slash commands, cost display |
 | `internal/termsafe` | The one home for ANSI/OSC control-sequence stripping — `StripControlSeqs` for model prose (strips everything, including SGR) and `StripDangerousSeqs` for raw tool output (keeps SGR colour, drops cursor/OSC/DCS). Lifted out of `internal/tui` when the CLI renderer needed the same two policies; the TUI keeps thin aliases |
 | `internal/config` | Layered config (defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` → `AEGIS_*` env vars) |
+| `internal/toolpath` | Resolves optional external host binaries (ripgrep, git, gh, mmdc, plantuml) through the `commands:` config before falling back to a PATH lookup. Replaces scattered `exec.LookPath` calls — notably a package-level `var rgPath, _ = exec.LookPath("rg")` resolved at process init, which was unconfigurable, invisible, and impossible to force off. A value may be a path, a bare name, or a disable keyword; a *configured* binary that is missing fails loudly, while an uninstalled one only warns, since every tool has a fallback. Shell aliases are deliberately never consulted — Aegis execs binaries directly, so the config key is the supported way to point at a binary that isn't on PATH under its usual name. `aegis doctor` renders one row per tool. Container runtimes and security scanners stay out: their resolution (`internal/sandbox`, `internal/security`) carries OS-specific and security-relevant rules this must not override |
 | `internal/mcp` | MCP client (stdio + HTTP/SSE) — Aegis calling *out* to external MCP servers; registered tools appear alongside builtins |
 | `internal/mcpserver` | MCP server (`aegis mcp-serve`) — the reverse direction: exposes Aegis sessions as MCP tools (`aegis_prompt`, `aegis_new_session`, `aegis_list_sessions`) to other MCP-speaking harnesses |
 | `internal/acp` | ACP JSON-RPC server for editor integrations (Zed, Neovim) |

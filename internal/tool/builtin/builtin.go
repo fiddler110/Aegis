@@ -21,6 +21,7 @@ import (
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/toolpath"
 )
 
 // Options configures the built-in tool set.
@@ -47,6 +48,12 @@ type Options struct {
 	// FileTracker, when set, enables file staleness detection. Write/edit
 	// tools reject edits to files modified externally since last read.
 	FileTracker *filetracker.Tracker
+	// Commands resolves optional external host binaries (ripgrep and friends)
+	// honoring the user's `commands:` config. Nil means every such tool is
+	// treated as absent and the built-in fallbacks are used — which is what
+	// tests want, and keeps a missing resolver from silently reaching for
+	// whatever happens to be on the host's PATH.
+	Commands *toolpath.Resolver
 	// LSP, when set, enables code intelligence tools (diagnostics, references).
 	LSP *lsp.Manager
 	// TodoList, when set, enables planning tools (todo_add, todo_update, todo_list).
@@ -139,8 +146,8 @@ func Register(reg *tool.Registry, opts Options) error {
 		&editTool{root: root, tracker: ft},
 		&multieditTool{root: root, tracker: ft},
 		&lsTool{root: root},
-		&globTool{root: root},
-		&grepTool{root: root},
+		&globTool{root: root, cmds: opts.Commands},
+		&grepTool{root: root, cmds: opts.Commands},
 		&gitTool{root: root},
 		&gitCommitTool{root: root, preCommitTest: opts.GitPreCommitTestCommand, preCommitTestTimeout: opts.GitPreCommitTestTimeout},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),

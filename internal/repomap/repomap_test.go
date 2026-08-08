@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -102,14 +103,18 @@ func TestBuildIgnoresVendorAndHidden(t *testing.T) {
 
 func TestRenderCappedAtMaxBytes(t *testing.T) {
 	dir := t.TempDir()
-	var sb strings.Builder
-	sb.WriteString("package main\n")
-	for i := 0; i < 500; i++ {
-		sb.WriteString("func F")
-		sb.WriteString(strings.Repeat("x", 20))
-		sb.WriteString("() {}\n")
+	// Many files rather than one huge one: since P62.1 a single file can no
+	// longer consume the budget (its symbol list is capped), so file-level
+	// truncation is reached by file count. Each file is padded to be wide
+	// enough that 500 bytes cannot hold them all.
+	for i := 0; i < 40; i++ {
+		var sb strings.Builder
+		sb.WriteString("package main\n")
+		for j := 0; j < 5; j++ {
+			sb.WriteString("func F" + strings.Repeat("x", 20) + "() {}\n")
+		}
+		writeFile(t, dir, fmt.Sprintf("pkg%02d/file.go", i), sb.String())
 	}
-	writeFile(t, dir, "big.go", sb.String())
 
 	m, err := Build(dir, Options{MaxBytes: 500})
 	if err != nil {
@@ -121,6 +126,196 @@ func TestRenderCappedAtMaxBytes(t *testing.T) {
 	}
 	if !strings.Contains(render, "truncated") {
 		t.Errorf("expected truncation notice when capped:\n%s", render)
+	}
+}
+
+// TestRenderCapsSymbolsPerFile covers the P62.1 compression half: no single
+// file may spend the whole budget, and a file whose symbol list was cut must
+// say so rather than presenting a shortened list as complete — the model
+// reading a silently truncated list can only conclude the missing symbols do
+// not exist.
+func TestRenderCapsSymbolsPerFile(t *testing.T) {
+	dir := t.TempDir()
+	var sb strings.Builder
+	sb.WriteString("package main\n")
+	for i := 0; i < 500; i++ {
+		fmt.Fprintf(&sb, "func F%03d() {}\n", i)
+	}
+	writeFile(t, dir, "big.go", sb.String())
+
+	m, err := Build(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := m.Render()
+
+	if got := strings.Count(render, "func F"); got != DefaultMaxSymbolsPerFile {
+		t.Errorf("rendered %d symbols for one file, want the cap of %d:\n%s", got, DefaultMaxSymbolsPerFile, render)
+	}
+	want := fmt.Sprintf("… +%d more", 500-DefaultMaxSymbolsPerFile)
+	if !strings.Contains(render, want) {
+		t.Errorf("expected the capped-symbol marker %q, got:\n%s", want, render)
+	}
+	// The whole repo is one file, so nothing is omitted at the *file* level and
+	// the file-level notice must not appear — the two truncations are distinct
+	// and conflating them would misreport coverage.
+	if strings.Contains(render, "truncated") {
+		t.Errorf("file-level truncation notice on a fully-shown map:\n%s", render)
+	}
+
+	// A negative cap is the documented escape hatch for a caller that wants
+	// every symbol (e.g. a large explicit budget).
+	full, err := Build(dir, Options{MaxBytes: 1 << 20, MaxSymbolsPerFile: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(full.Render(), "func F"); got != 500 {
+		t.Errorf("uncapped render produced %d symbols, want 500", got)
+	}
+}
+
+// TestRenderSkipsRatherThanStopsAtTheFirstOversizeFile covers the `break` →
+// `continue` half of P62.1: the old cutoff was a hard wall, so a small file
+// ranked after a large one could never be shown even with budget to spare.
+func TestRenderSkipsRatherThanStopsAtTheFirstOversizeFile(t *testing.T) {
+	dir := t.TempDir()
+	// A wide file first in rank order (more symbols wins the tiebreak), then a
+	// narrow one that comfortably fits in what the wide file leaves behind.
+	var wide strings.Builder
+	wide.WriteString("package a\n")
+	for i := 0; i < 3; i++ {
+		wide.WriteString("func A" + strings.Repeat("y", 120) + fmt.Sprint(i) + "() {}\n")
+	}
+	writeFile(t, dir, "a/wide.go", wide.String())
+	writeFile(t, dir, "b/narrow.go", "package b\nfunc B() {}\n")
+
+	// 300 bytes: enough for the header, the truncation notice Render reserves,
+	// and the narrow file — but nowhere near the ~400-byte wide one.
+	m, err := Build(dir, Options{MaxBytes: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := m.Render()
+	if !strings.Contains(render, "b/narrow.go") {
+		t.Errorf("small file was skipped over entirely instead of filling spare budget:\n%s", render)
+	}
+	if strings.Contains(render, "a/wide.go") {
+		t.Errorf("oversize file should not have fit in a 300-byte budget:\n%s", render)
+	}
+}
+
+// TestRankFilesOrdersByProductionThenInDegree covers the P62.1 selection half.
+// Before it, Build ended in a plain alphabetical sort and Render walked that
+// order, so the first byte of a filename was the entire selection policy.
+func TestRankFilesOrdersByProductionThenInDegree(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "go.mod", "module example.com/m\n")
+
+	// hub is imported by three other packages; lonely by none. Alphabetically
+	// hub sorts after both "aaa" and "lonely", so any surviving hub-first
+	// ordering can only come from in-degree.
+	writeFile(t, dir, "hub/hub.go", "package hub\nfunc Hub() {}\n")
+	writeFile(t, dir, "lonely/lonely.go", "package lonely\nfunc Lonely() {}\n")
+	for _, p := range []string{"aaa", "bbb", "ccc"} {
+		writeFile(t, dir, p+"/"+p+".go",
+			"package "+p+"\nimport \"example.com/m/hub\"\nfunc "+p+"() {}\n")
+	}
+	// A test file in the highest-in-degree package: rank 1 (production before
+	// test) must outrank rank 2 (in-degree), so this loses to every production
+	// file including lonely's.
+	writeFile(t, dir, "hub/hub_test.go", "package hub\nfunc TestHub() {}\n")
+
+	m, err := Build(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, f := range m.Files {
+		order = append(order, f.Path)
+	}
+
+	if order[0] != "hub/hub.go" {
+		t.Errorf("highest in-degree package should rank first, got order %v", order)
+	}
+	testIdx, lonelyIdx := slices.Index(order, "hub/hub_test.go"), slices.Index(order, "lonely/lonely.go")
+	if testIdx < lonelyIdx {
+		t.Errorf("test file outranked a zero-in-degree production file: %v", order)
+	}
+	if testIdx != len(order)-1 {
+		t.Errorf("the only test file should rank last, got %v", order)
+	}
+}
+
+// TestIsTestPath pins the cross-language test-file heuristic that rank 1 leans
+// on. It is name-based by design; a miss costs rank, never presence.
+func TestIsTestPath(t *testing.T) {
+	tests := map[string]bool{
+		"internal/engine/engine_test.go":     true,
+		"internal/engine/engine.go":          false,
+		"pkg/tests/helper.go":                true,
+		"src/__tests__/thing.ts":             true,
+		"src/thing.test.ts":                  true,
+		"src/thing.spec.tsx":                 true,
+		"src/thing.ts":                       false,
+		"app/test_models.py":                 true,
+		"app/models_test.py":                 true,
+		"app/models.py":                      false,
+		"lib/user_spec.rb":                   true,
+		"lib/user.rb":                        false,
+		"testdata/fixture.go":                true,
+		"internal/contest/contest.go":        false, // "test" as a substring, not a segment
+		"internal/latest/latest.go":          false,
+		"internal/protester/protester_go.go": false,
+	}
+	for p, want := range tests {
+		if got := isTestPath(p); got != want {
+			t.Errorf("isTestPath(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+// TestPackageInDegreeIgnoresUnresolvedAndSelfEdges pins what the ranking signal
+// counts. extractImports keeps third-party and stdlib specifiers as bare
+// tokens; those say nothing about *this* repository's structure, and counting
+// them would let a package rank on how many libraries it depends on.
+func TestPackageInDegreeIgnoresUnresolvedAndSelfEdges(t *testing.T) {
+	files := []FileEntry{
+		{Path: "hub/a.go", Symbols: []string{"x"}, Imports: []string{"hub", "fmt", "github.com/x/y"}},
+		{Path: "one/a.go", Symbols: []string{"x"}, Imports: []string{"hub", "fmt"}},
+		// Two files in the same package importing hub count once between them,
+		// so a package with many small files can't out-vote one with few.
+		{Path: "two/a.go", Symbols: []string{"x"}, Imports: []string{"hub"}},
+		{Path: "two/b.go", Symbols: []string{"x"}, Imports: []string{"hub"}},
+	}
+	indeg := packageInDegree(files)
+	if indeg["hub"] != 2 {
+		t.Errorf("hub in-degree = %d, want 2 (one and two, each counted once)", indeg["hub"])
+	}
+	if indeg["fmt"] != 0 || indeg["github.com/x/y"] != 0 {
+		t.Errorf("unresolved specifiers scored: %v", indeg)
+	}
+}
+
+// TestRenderOptionsInvalidateTheCache covers the footgun that making the budget
+// configurable introduces: neither knob changes what Build extracts, so without
+// them in the fingerprint an operator could raise repomap.max_bytes and see no
+// effect until some unrelated source file changed.
+func TestRenderOptionsInvalidateTheCache(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.go", "package a\nfunc A() {}\n")
+
+	base, err := Build(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, opts := range []Options{{MaxBytes: 16000}, {MaxSymbolsPerFile: 10}} {
+		other, err := Build(dir, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if other.Fingerprint == base.Fingerprint {
+			t.Errorf("fingerprint unchanged for %+v; a cached render would be reused", opts)
+		}
 	}
 }
 
@@ -281,6 +476,7 @@ func TestBuildExtractsGoImportEdges(t *testing.T) {
 
 import (
 	"fmt"
+	"slices"
 	"github.com/acme/proj/internal/store"
 	_ "github.com/acme/proj/internal/driver"
 )

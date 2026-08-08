@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -247,8 +249,34 @@ func TestLiveWorkflow(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chdir(origWD) })
 
-		localCl := newLiveWorkflowDaemon(t, baseURL, model, "local")
-		defaultCl := newLiveWorkflowDaemon(t, baseURL, model, "default")
+		// P63.11: this subtest measures prompt size through the model's reported
+		// prompt_eval_count, and that number is clamped at the served num_ctx. On
+		// qwen3:14b at Ollama's default 4096 window both profiles reported exactly
+		// 4095 and the comparison below failed while naming P25.6 as the cause —
+		// but P25.6 was working; the *instrument* had saturated, because both
+		// prompts exceeded the window. Pin a window large enough that neither
+		// prompt reaches it, and verify below that the pin actually took.
+		//
+		// The byte-level property (local omits an oversized repo map and assembles
+		// a shorter prompt) is already asserted without a live model in
+		// TestEffectiveSystem_localProfileTrimsPrompt; what only this subtest can
+		// show is that the smaller prompt reaches the provider, which is why the
+		// measurement stays end-to-end rather than moving to a byte comparison.
+		//
+		// Unloading first is what makes the pin take. The daemon deliberately
+		// refuses to promise more window than Ollama is *currently serving*
+		// (applyDetectedWindowFor: a loaded-model reading is authoritative and
+		// wins over config, since trusting config there is the silent-truncation
+		// failure), so a resident 4096 instance defeats the pin — measured, that
+		// is exactly what happened: "configured context_window exceeds what
+		// Ollama is serving; using the served value ... configured=16384
+		// served=4096". With no instance loaded, detection is non-authoritative,
+		// config wins, and the model reloads at the requested window on the first
+		// request. The cost is evicting whatever the developer had resident.
+		unloadOllamaModel(t, baseURL, model)
+
+		localCl := newLiveWorkflowDaemonWithWindow(t, baseURL, model, "local", promptProfileNumCtx)
+		defaultCl := newLiveWorkflowDaemonWithWindow(t, baseURL, model, "default", promptProfileNumCtx)
 
 		firstTurnTokens := func(cl *client.Client) int {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -267,12 +295,36 @@ func TestLiveWorkflow(t *testing.T) {
 
 		localTokens := firstTurnTokens(localCl)
 		defaultTokens := firstTurnTokens(defaultCl)
-		t.Logf("first-turn input tokens: local=%d default=%d", localTokens, defaultTokens)
+		localWin, localWinSrc := servedContextWindow(t, localCl)
+		defaultWin, defaultWinSrc := servedContextWindow(t, defaultCl)
+		t.Logf("first-turn input tokens: local=%d (window %d from %s) default=%d (window %d from %s)",
+			localTokens, localWin, localWinSrc, defaultTokens, defaultWin, defaultWinSrc)
 		if localTokens == 0 || defaultTokens == 0 {
 			t.Fatal("expected non-zero input token counts from both profiles")
 		}
+
+		// Saturation must be reported as saturation. A count pinned at the served
+		// window says the server truncated the prompt and reported the clamp, so
+		// the two profiles are indistinguishable no matter how differently sized
+		// they really are — a fact about the instrument, not about P25.6.
+		//
+		// Skipped rather than failed, matching how findPython treats a missing
+		// interpreter in this same on-demand suite: everything this test can do to
+		// get a measurable window (pin it, unload the blocking instance) has
+		// already been done, so what is left is a server that will not serve the
+		// window, which is an environment gap. A SKIP still reads as "asserted
+		// nothing" in the output, which is the property that matters — the failure
+		// mode this replaces was a red naming P25.6 for a saturated instrument.
+		if why := saturationReason(localTokens, localWin, defaultTokens, defaultWin); why != "" {
+			t.Skipf("measurement saturated, so this subtest cannot say anything about the local prompt profile: %s\n"+
+				"local=%d (window %d from %s), default=%d (window %d from %s)\n"+
+				"the daemon asked for num_ctx=%d and unloaded the model first; a smaller served window means the server caps it — "+
+				"raise OLLAMA_CONTEXT_LENGTH on the Ollama server or pin num_ctx in a modelfile",
+				why, localTokens, localWin, localWinSrc, defaultTokens, defaultWin, defaultWinSrc, promptProfileNumCtx)
+		}
+
 		if localTokens >= defaultTokens {
-			t.Errorf("local prompt profile did not reduce first-turn input tokens: local=%d, default=%d", localTokens, defaultTokens)
+			t.Errorf("local prompt profile did not reduce first-turn input tokens: local=%d, default=%d (neither count is clamped, so this is a real difference in prompt size)", localTokens, defaultTokens)
 		}
 	})
 }
@@ -355,32 +407,59 @@ func writeBigRepoMapFixture(t *testing.T) string {
 		}
 	})
 
-	// 15 files x 10 functions each: comfortably clears bigRepoMapCapBytes
-	// (4000) while staying under repomap's own internal render budget
-	// (repomap.DefaultMaxBytes, 8000) so the map isn't itself truncated —
-	// the two profiles end up genuinely "full map" vs. "no map", not "full
-	// map" vs. "truncated map".
-	for i := 0; i < 15; i++ {
-		var b strings.Builder
-		for j := 0; j < 10; j++ {
-			fmt.Fprintf(&b, "def handler_%02d_%02d(request, context):\n    pass\n\n", i, j)
+	// The fixture must clear bigRepoMapCapBytes (4000) while staying under
+	// repomap's own render budget (repomap.DefaultMaxBytes, 8000), so the two
+	// profiles end up genuinely "full map" vs. "no map" rather than "full map"
+	// vs. "truncated map".
+	//
+	// It used to be a fixed 15 files x 10 functions, and P62.1 silently
+	// invalidated that: each file now contributes at most
+	// repomap.DefaultMaxSymbolsPerFile symbols, so the same fixture rendered to
+	// 2154 bytes — under the cap, with the subtest asserting nothing. Size in
+	// *files* rather than in functions-per-file, give each file exactly the
+	// per-file cap so no symbol list is cut (a "+N more" marker would make this
+	// the truncated map the paragraph above rules out), and grow until the
+	// rendered block actually clears the threshold rather than trusting a
+	// hand-computed count to survive the next render change.
+	perFile := repomap.DefaultMaxSymbolsPerFile
+	var m *repomap.Map
+	for files := 40; ; files += 10 {
+		if files > 200 {
+			t.Fatalf("could not size a fixture above %d bytes without exceeding repomap's own %d-byte budget", bigRepoMapCapBytes, repomap.DefaultMaxBytes)
 		}
-		path := filepath.Join(dir, fmt.Sprintf("module_%02d.py", i))
-		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
-			t.Fatal(err)
+		for i := range files {
+			var b strings.Builder
+			for j := range perFile {
+				fmt.Fprintf(&b, "def handler_%02d_%02d(request, context):\n    pass\n\n", i, j)
+			}
+			path := filepath.Join(dir, fmt.Sprintf("module_%03d.py", i))
+			if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		built, err := repomap.Build(dir, repomap.Options{})
+		if err != nil {
+			t.Fatalf("repomap.Build: %v", err)
+		}
+		m = built
+		if len(repomap.Block(m.Render())) > bigRepoMapCapBytes {
+			break
 		}
 	}
 
-	m, err := repomap.Build(dir, repomap.Options{})
-	if err != nil {
-		t.Fatalf("repomap.Build: %v", err)
-	}
 	cache := filepath.Join(dir, ".aegis", "repomap.json")
 	if err := m.Save(cache); err != nil {
 		t.Fatalf("repomap.Save: %v", err)
 	}
-	if got := len(repomap.Block(m.Render())); got <= bigRepoMapCapBytes {
+	rendered := m.Render()
+	if got := len(repomap.Block(rendered)); got <= bigRepoMapCapBytes {
 		t.Fatalf("fixture repo map too small to trigger the local-profile cap: rendered block is %d bytes, want > %d", got, bigRepoMapCapBytes)
+	}
+	// The "not truncated" half of the requirement, which the byte assertion
+	// above cannot see: a map that hit either truncation is a different
+	// comparison from the one this subtest claims to make.
+	if strings.Contains(rendered, "truncated") || strings.Contains(rendered, "more") {
+		t.Fatalf("fixture repo map is truncated, so the profiles differ by more than presence/absence:\n%s", rendered)
 	}
 	return dir
 }
@@ -392,7 +471,22 @@ func writeBigRepoMapFixture(t *testing.T) string {
 // SSE, bearer-token authenticated. promptProfile forces provider.prompt_profile
 // ("local"/"default"); "" leaves it on auto-detect (loopback baseURL implies
 // "local", matching a real Ollama setup with no explicit override).
+//
+// The context window is left unpinned (auto-detected from the server), which is
+// what the workflow subtests want: they measure model behavior, and a pinned
+// window would only cost VRAM on the box running them. Only the token-accounting
+// subtest needs a specific window — see newLiveWorkflowDaemonWithWindow.
 func newLiveWorkflowDaemon(t *testing.T, baseURL, model, promptProfile string) *client.Client {
+	t.Helper()
+	return newLiveWorkflowDaemonWithWindow(t, baseURL, model, promptProfile, 0)
+}
+
+// newLiveWorkflowDaemonWithWindow is newLiveWorkflowDaemon with an explicit
+// provider.context_window (0 = auto-detect). The daemon sends it to Ollama as
+// num_ctx, so it decides how much prompt the server will actually accept — and
+// therefore whether a prompt-size measurement taken through the model's own
+// prompt_eval_count is meaningful at all (P63.11).
+func newLiveWorkflowDaemonWithWindow(t *testing.T, baseURL, model, promptProfile string, contextWindow int) *client.Client {
 	t.Helper()
 
 	// A self-managed temp dir with best-effort (non-fatal) cleanup: server.New
@@ -418,6 +512,7 @@ func newLiveWorkflowDaemon(t *testing.T, baseURL, model, promptProfile string) *
 			BaseURL:       baseURL,
 			Model:         model,
 			MaxTokens:     4096,
+			ContextWindow: contextWindow,
 			PromptProfile: promptProfile,
 		},
 		Permission: config.PermissionConfig{
@@ -444,6 +539,118 @@ func newLiveWorkflowDaemon(t *testing.T, baseURL, model, promptProfile string) *
 	t.Cleanup(ts.Close)
 
 	return client.New(ts.URL).WithTokenFile(cfg.AuthTokenPath())
+}
+
+// unloadOllamaModel asks Ollama to evict model from memory (`keep_alive: 0` on
+// an empty generate request), so the next request reloads it at whatever num_ctx
+// that request carries. It exists for P63.11: a resident instance's window is
+// authoritative and overrides the daemon's configured one, so a model left
+// loaded at 4096 by an earlier run makes a prompt-size measurement impossible.
+//
+// Best-effort by design — a non-Ollama backend has no such endpoint and a
+// failure here only means the pin may not take, which the saturation check
+// downstream reports far more precisely than a guess at this layer could.
+func unloadOllamaModel(t *testing.T, baseURL, model string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	body := fmt.Sprintf(`{"model":%q,"keep_alive":0}`, model)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(baseURL, "/")+"/api/generate", strings.NewReader(body))
+	if err != nil {
+		t.Logf("could not build unload request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Logf("could not unload %s (the configured context window may not take): %v", model, err)
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Logf("unload of %s returned %s (the configured context window may not take)", model, resp.Status)
+		return
+	}
+
+	// Eviction is not complete when the response returns, and the gap is large
+	// enough to matter: measured, a daemon built ~100ms later still detected the
+	// old instance ("configured=16384 served=4096" from source ollama:loaded)
+	// and pinned itself to the window that was supposed to have gone away. Wait
+	// for /api/ps to actually stop listing it rather than sleeping a guessed
+	// interval.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		loaded, ok := ollamaModelLoaded(baseURL, model)
+		if ok && !loaded {
+			t.Logf("unloaded %s so it reloads at the requested num_ctx", model)
+			return
+		}
+		if !ok || time.Now().After(deadline) {
+			t.Logf("could not confirm %s was unloaded (the configured context window may not take)", model)
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// ollamaModelLoaded reports whether /api/ps currently lists model — the same
+// signal internal/ollamainfo treats as the authoritative context window, which
+// is what makes it the right thing to wait on. ok is false when /api/ps could
+// not be read at all, so a caller can tell "not loaded" from "don't know".
+func ollamaModelLoaded(baseURL, model string) (loaded, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+"/api/ps", nil)
+	if err != nil {
+		return false, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return false, false
+	}
+	var out struct {
+		Models []struct {
+			Model string `json:"model"`
+			Name  string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, false
+	}
+	for _, m := range out.Models {
+		if m.Model == model || m.Name == model {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// servedContextWindow reports the context window the daemon actually resolved
+// for its model, and where that value came from ("config" when the pin took,
+// "ollama:loaded" and friends when the server's own reading won). It is what
+// tells a saturated prompt-size measurement apart from a real one (P63.11); an
+// unreachable or silent /status is not worth failing the test over, so it
+// degrades to an unknown window (0) and the caller's weaker heuristic.
+func servedContextWindow(t *testing.T, cl *client.Client) (int, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	st, err := cl.StatusInfo(ctx)
+	if err != nil {
+		t.Logf("could not read served context window: %v", err)
+		return 0, "unknown"
+	}
+	src := st.ContextWindowSource
+	if src == "" {
+		src = "unknown"
+	}
+	return st.ContextWindow, src
 }
 
 // workflowSummary is the reduction of one message run's SSE events into the

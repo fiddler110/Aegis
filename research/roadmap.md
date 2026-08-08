@@ -1,9 +1,14 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-07 (thirteenth pass — **the P63.x batch built**: P63.1-P63.7 shipped in one
-session, 3 new items filed off the work; twelfth pass: P63.x full-stack review, 7 items filed across
-Tiers 1-3; eleventh pass: Tier-4 assessment — P61.7's in-repo half shipped and its remainder
-re-scoped, P49.3 dropped on its own measurement, P60.3/P52.14/P25.9 re-verified and left parked)
+**Last updated:** 2026-08-08 (sixteenth pass — **P63.9's second concern, loop detection, extracted
+from `Engine.Run`**, and the full live tier ran green over it; fifteenth pass: **P63.11 shipped and
+the live tier now produces a real prompt-profile measurement**, so Tier 2 holds nothing buildable;
+fourteenth pass: P63.8 and P62.1
+shipped, and P63.9's first of four concerns extracted from `Engine.Run`; thirteenth pass: **the P63.x
+batch built**: P63.1-P63.7 shipped in one session, 3 new items filed off the work; twelfth pass:
+P63.x full-stack review, 7 items filed across Tiers 1-3; eleventh pass: Tier-4 assessment — P61.7's
+in-repo half shipped and its remainder re-scoped, P49.3 dropped on its own measurement,
+P60.3/P52.14/P25.9 re-verified and left parked)
 
 This document tracks only **open** work and what's next. For shipped-feature history, batch origins
 and full design rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>`
@@ -14,14 +19,46 @@ so keep it when adding items.
 
 ## Status
 
-**9 open items.** The P63.x review filed 7 on 2026-08-07 and **all 7 were built the same day**
-(P63.1-P63.7; the `Engine.Run` half of P63.7 was split out rather than built — see below). Three new
-items were filed off that work: **P63.8** from the sweep P63.3 asked for, **P63.9** from P63.7's
-deliberate scope cut, **P63.10** from reading every `Update` case in sequence.
+**8 open items**, recounted from the headings. **P63.11 shipped 2026-08-08**, the same day it was
+filed off the live-tier run, alongside P63.8 and P62.1 and P63.9's first of four concerns. Before
+them, the P63.x review filed 7 on 2026-08-07 and **all 7 were built the same day** (P63.1-P63.7; the
+`Engine.Run` half of P63.7 was split out rather than built). Write-ups in [releases.md](releases.md).
 
-**Tier 1 is empty again.** Tier 2 holds three — **P62.1**, **P38.1** and **P63.8**. Tier 3 holds one,
-**P63.9** (`Engine.Run`). Tier 4 is five: **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, and
-**P63.10**.
+**Tier 1 is empty, and so is Tier 2 of build work.** Tier 2 holds two — **P62.2** and **P38.1** —
+both validation owed against already-shipped behavior, closeable only by a live run. Tier 3 holds one,
+**P63.9** (`Engine.Run`), now **two** concerns from done rather than four. Tier 4 is five: **P61.7**
+(remainder), **P60.3**, **P52.14**, **P25.9**, and **P63.10**.
+
+**What P63.9's loop-detection pass taught: the extraction is worth doing even where the concern is
+already its own type.** `loopDetector` had lived in its own file since P53.2, so the pass looked like
+it should be a move. It wasn't — the finding was that **two of the concern's variables were at the
+wrong scope**, both set by the loop gate and consumed after the same turn's tool round while being
+declared where the whole 685-line function could reach them. Naming the per-turn half and returning
+it as a *value* (`loopVerdict`) is what removed the interaction, not moving the detector. The lesson
+generalizes to the two remaining concerns: **ask where the state's lifetime actually ends, not which
+file the type lives in.**
+
+**What building P63.11 taught: a fix aimed at a test can still be defeated by the product behaving
+correctly.** The item offered two fixes and recommended the cheaper one — pin a `num_ctx` large
+enough that the measurement stops saturating. Pinning it changed nothing, because
+`applyDetectedWindowFor` refuses to promise more window than Ollama is *currently serving*, and a
+model left resident at 4096 by the previous run is exactly that case. That refusal is right (it is the
+silent-truncation guard P52.1 built), so the fix had to move: unload the model first, then wait for
+`/api/ps` to stop listing it, because eviction is not complete when the unload call returns. Three
+layers, none of them the one the item named, and **only running it after each layer revealed the
+next**. The item's other option — a byte comparison in the default suite — turned out to be already
+shipped as `TestEffectiveSystem_localProfileTrimsPrompt`, which is the second time in three passes
+that checking what exists before building changed the work.
+
+**What building P62.1 taught: an item can be right about the defect and wrong about the sufficiency
+of its own recommendation.** P62.1 recommended (B) then (A) — demote tests, rank by in-degree — while
+its own body warned in bold that *selection alone is not sufficient*. Both are true, and following the
+recommendation alone would have produced a correctly-ordered map still showing 1.5% of the repository,
+with the item reading as closed. Ranking and compression answer different questions: (B)+(A) decide
+*which* files, (C) decides *how many*. Built together they moved coverage from 10 of 672 files to 37
+of 696 with every architecture-table package present; built apart, either would have looked like a
+fix and delivered a third of one. **When an item's measurements contradict its own recommendation
+list, the measurements are the finding.**
 
 **What building the batch taught, beyond the fixes.** Three of the seven turned out to be
 larger or differently-shaped than filed, and in each case the item's own write-up is what
@@ -76,8 +113,8 @@ All of it repeats the lesson under *How to use this tier* below: every write-up 
 wrong in some way, and twice the measurement was more valuable than the item that prompted it.
 
 **No batch is open beyond its parked or follow-on members.** P63.x (full-stack review, 7 filed
-2026-08-07, all 7 built the same day) → **3 open**, and all three were *filed by the build*, not by
-the review: P63.8, P63.9, P63.10. P61.x
+2026-08-07, all 7 built the same day) → **2 open**, both *filed by the build* rather than by the
+review: P63.9 and P63.10 (P63.8 and P63.11, the third and fourth, shipped 2026-08-08). P61.x
 (cross-adapter drift, 8 filed) → P61.7 only. P60.x (sandbox and eval, 4) → P60.3 only. P59.x (local
 execution, 10 + the P59.11 follow-on) → 0. P55.x (container-only scanning, 9 filed / 8 built) → 0.
 P52.x (the previous full-stack review, 17) → P52.14 only. P53.x, P57.1, P58.x, P54.2 → 0. Dates,
@@ -91,12 +128,48 @@ against `internal/provider`, `internal/ollamainfo`, `internal/repomap` or scanne
 several obvious-looking gaps there have already been checked and answered, and the point of writing
 them down was to stop the next review re-filing them.
 
-**What to do next: P63.8, then P62.1.** With Tier 1 empty, P63.8 is the cheapest item that closes
-something: one call site and a test, and it retires the last instance of a pattern two shipped items
-have now removed elsewhere — leaving it open means the argument P32.2 and P63.3 both made is still
-only two-thirds applied. P62.1 is the larger Tier-2 win and the one with a live user-visible effect
-(the repo map delivering 10 of 672 files, alphabetically), but it needs a selection policy designed
-rather than a line changed, so it should not be started in the same pass.
+**What to do next: P63.9's third concern — and it is the hard pair, so slow down.** Passes 1
+(budgets) and 2 (loop detection) are done and the method is established; what remains is **compaction
+and guard retries**, which interact with each other *and* with the retry path. Neither has the clean
+ownership that made the first two safe, and compaction genuinely mutates `conv` mid-run, which is the
+one thing pass 2's "return a value instead of storing a variable" technique cannot encapsulate. Take
+them in separate sessions, and run the live tier over each — it is now capable of a clean green
+(P63.11 plus the 2026-08-08 run below), so a red would mean something.
+
+One thing is owed rather than optional: **P38.1's live conformance re-run** is still the only open
+work whose outcome produces new information rather than new code, and it doubles as the validation
+**P57.1** is owed.
+
+**P63.9's budget pass did go through the live tier, and the run is worth reading before the next
+pass** (2026-08-08, qwen3:14b on the 16GB-VRAM box — not the recommended qwen3.6:35b-a3b-deep, which
+is not pulled here). `GuardNoMetaLeak` passed. `FixSeededBug` failed, and **P60.4's control group
+attributed it to the model, not to us**: `claude -p` was pointed at the same task and failed it too,
+in 27s against Aegis's 54s. That result also refutes the objection raised before running it — that a
+cloud model in the baseline arm would trivially pass and mislabel any Aegis failure as scaffolding.
+It did not pass. Both arms produced byte-identical Aegis-side behavior across two runs (the model
+issues `del /F /Q`, a cmd.exe builtin the shell tool does not have, and never attempts an edit), which
+is a model failure signature and not a budget-gate one.
+
+**Three cautions for whoever runs this tier next, all learned the hard way here:**
+
+- **`gpt-oss:20b` is not a usable instrument on this hardware.** 13.8GB of weights against 16GB VRAM
+  and 16GB system RAM thrashes: all three subtests hit their context timeouts with **0 tool calls and
+  0 tokens**, and `GuardNoMetaLeak` "passed" *vacuously* — there was no output to leak. A green
+  subtest in a timed-out run means nothing.
+- **A live-tier fixture rotted silently, and only running the tier found it.** P62.1's per-file
+  symbol cap shrank `writeBigRepoMapFixture`'s rendered map from over `bigRepoMapCapBytes` (4000) to
+  2154, so `LocalPromptProfileReducesFirstTurnTokens` would have compared two *identical* prompts and
+  asserted nothing. Its own guard assertion caught it — but that guard only runs under
+  `-tags live_workflow`, which `go test ./...` never builds. **A product change that alters rendered
+  prompt content can invalidate a live-tier fixture without any part of the default suite noticing.**
+  The fixture is now sized in files rather than functions-per-file, grows until it actually clears the
+  threshold, and asserts it is un-truncated as well as large enough.
+- **A resident model decides the window, not your config, and it silently changes what a run
+  measures.** Ollama serves whatever `num_ctx` the instance was loaded with, and Aegis deliberately
+  defers to that over a configured `context_window` — so a model left loaded at 4096 by an earlier run
+  caps everything that follows, and any measurement taken through `prompt_eval_count` clamps with it.
+  P63.11's subtest now unloads and waits for `/api/ps` to confirm eviction before measuring; **any
+  other subtest whose result depends on prompt size should be read with `/api/ps` in view.**
 
 **Do not start P63.9 casually.** It is the highest-value structural item open and the easiest to do
 badly: unlike its sibling it cannot be made safe by technique alone, and a botched pass degrades the
@@ -130,68 +203,17 @@ P55.x Tier-1 half. See [releases.md](releases.md) for the write-ups and for the 
 
 ## Open Work — Tier 2
 
-**Status: 3 open — P62.1, P38.1 and P63.8**, below. P62.1 was filed 2026-08-06 off the measurement
-that dropped P49.3; the two of them are ranked ahead of P63.8 deliberately, since document order is
-priority order. **P63.8 was filed while landing P63.3**, from the tree-wide sweep that item's fix
-asked for — it is the last remaining instance of the static-capability pattern and is appended last,
-being the least reachable of the set. P63.3-P63.6, filed alongside it by the same review, all shipped
-2026-08-07; before those, the last Tier-2 items were P61.4, P61.5 and P61.8 (2026-08-06).
+**Status: 2 open — P62.2 and P38.1**, below, and **neither is build work**: both are validation owed
+against already-shipped behavior, closeable only by a live run. **P63.11, P62.1 and P63.8 shipped
+2026-08-08**; P63.11 last, which is what makes the other two's live evidence trustworthy — the tier no
+longer reports a saturated measurement as a product regression. P63.3-P63.6 shipped 2026-08-07;
+before those, P61.4, P61.5 and P61.8 (2026-08-06). Write-ups for all of them are in
+[releases.md](releases.md).
 
-### P62.1 — The repo map's selection policy is the alphabet (measured, not speculative)
-
-`repomap.Build` ends with `sort.Slice(m.Files, ... Path < Path)` (`repomap.go:398`) — plain
-alphabetical — and `Render` walks that order and **breaks** at the first file that doesn't fit. So
-which files reach the model is decided by filename, and the `break` (not `continue`) makes the cutoff
-a hard wall: a 1-symbol file later in the sort can never fit, even with spare bytes.
-
-Measured on this repo:
-
-| | |
-|---|---|
-| Files surviving into the rendered map | **10 of 672 (1.5%)**, 4 of them test files |
-| Full untruncated render | 462,736 bytes = **57.8× the 8000-byte budget** |
-| 672 path lines with **zero** symbols | 21,714 bytes = **2.71× the budget** |
-| Files that fit at 0 / 1 / 3 / 5 / 10 symbols each | 261 / 106 / 53 / 37 / 21 |
-| Test files | 340 of 672 (50.5%), 3,038 of 7,211 symbols |
-
-What the model actually receives is `cmd/aegis/main.go`, the ACP package, `agentdef`, and a wall of
-60 `internal/api` struct names — 4 of those 10 entries being test files. **Every package in
-CLAUDE.md's architecture table is invisible**: `engine`, `provider`, `tool`, `server`, `config`.
-Cross-checked against the one ranking signal already computed (P49.1 import edges), the top in-degree
-packages are `internal/tool` (109), `internal/provider` (98), `internal/config` (96),
-`internal/sandbox` (55) — not one has a surviving file except `internal/api`, which got in on the
-letter "a". This is live for anyone who has run `aegis index`; the map is opt-in (nothing is injected
-without a `.aegis/repomap.json` cache), which is the only reason it isn't Tier 1.
-
-**Selection alone is not sufficient, and that is the load-bearing finding.** At 57.8× budget, a
-perfect ranking still buys the top ~10-20 files of 672 — and a bare filename listing with no symbols
-at all is still 2.71× budget. Ordering changes *which* 1.5% you see; it cannot change that it is
-1.5%. Any real fix pairs selection with per-file compression (symbol caps, directory rollups) or a
-larger budget. Relatedly, `DefaultMaxBytes = 8000` is **not configurable** — no config key exists and
-every call site passes a bare `repomap.Options{}` — so an operator on a 128k-context model cannot
-spend 1% of it on a better map even though the budget was calibrated as a ~2k-token slice.
-
-Options measured, cheapest first. **(B) demote test files**: one path predicate, zero new
-computation, and it addresses 50.5% of files / 42% of symbols — no theory of "important" needed
-beyond production-before-test. **(A) rank by import in-degree**: data already computed in `Build`, one
-pass, but only 20.7% of edges resolve in-repo and they resolve to package *directories* (65 distinct),
-so it ranks packages and needs a within-package tiebreak. **(C) per-file symbol cap + `continue`
-instead of `break`**: no new data, moves coverage from 10 files to 53 (cap 3) or 106 (cap 1), but a
-truncated symbol list is a *different* failure — the model may conclude a symbol doesn't exist —
-so it needs a per-file "+N more" marker that costs bytes exactly where they are scarce.
-**(D) query-relevant selection reusing `memory.LoadRelevant`** is the right shape and the repo's
-preferred move (extend, don't parallelize), but is **blocked**: the map is injected once at session
-start, before any user query exists, so it needs a per-turn or two-stage map first.
-
-The policy-independent part — a truncation notice that reports the omitted count and points at the
-P49.2 `repomap` tool, plus a fix for the notice being appended outside the byte cap — **shipped
-2026-08-06**. Everything above is still open.
-
-Priority: Tier 2 — measured, currently degrading every indexed session, and (B) is genuinely cheap.
-Recommend B first, then A; treat C as requiring the "+N more" marker, and D as blocked on a
-per-turn map. **This supersedes P49.3** (dropped): the constraint is budget and selection, not
-extraction fidelity — and these numbers strengthen that drop, since LSP would deepen content that
-already cannot fit at the top level.
+*Correction, 2026-08-08:* the previous status line read "3 open — P62.1, P38.1 and P63.8" and the
+header count read 9. Both omitted **P62.2**, which has carried a `Priority: Tier 2` line in this
+section since it was filed on 2026-08-07. The counts below are recounted from the headings rather
+than carried forward.
 
 ### P62.2 — Validate the prefix-cache pruning gate against an adversarial fixture (it shipped unmeasured)
 
@@ -308,53 +330,13 @@ built-in drive — reachable from any client since P52.12 — is confirmed to re
 unattended, in one invocation, on a local model. Not Tier 1 because it is live-run verification
 tracking, not independent build work.
 
-### P63.8 — `recordWrittenPaths` is gated on the static capability, two lines above a branch that isn't
-
-Found while landing P63.3, from the sweep that item asked for. In `engine.runTools`
-(`engine/engine.go:2221`):
-
-```go
-if !isErr && t.Capability() == tool.CapWrite {
-    ...
-    e.recordWrittenPaths(paths)
-}
-if !isErr && e.redactSecrets && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
-```
-
-Two adjacent branches over the same tool and the same input disagree about which capability to ask
-for. The second is correct by P25.4c; the first is the pattern P32.2 removed from `ContextualGate`
-and P63.3 removed from `ScopeGate`.
-
-The consequence is not a gate bypass — scope and the permission stack still bind — it is a **coverage
-hole in the write bookkeeping**. A tool that reclassifies into `CapWrite` for a specific call via
-`CapabilityFor` has its written paths go unrecorded, so that call gets no output-guard file
-validation and no quarantine-on-fail rollback. That is precisely the silent degradation the P32.6
-warning three lines above exists to make loud, arrived at by a different route.
-
-**Not reachable today, same reason as P63.3:** `shell` is still the only `tool.CapabilityOverrider`
-in the tree and it only narrows (`CapExecute` → `CapRead`). Recording that here so this is not
-re-filed as urgent.
-
-**Why it was split out of P63.3 rather than folded in.** P63.3 is a gate fix with a containment
-argument; this is post-execution bookkeeping, and the change is not purely additive: today the branch
-is skipped for `shell` (static `CapExecute`), and the effective capability makes it a *per-call*
-decision for that tool too. That is a behavior change on the write-recording path and wants its own
-test, not a ride-along under another item's justification.
-
-**Fix:** `tool.EffectiveCapability(t, tu.Input)` at 2221, plus a test asserting that a tool widening
-into `CapWrite` has its paths recorded for output-guard coverage — and an explicit check of what the
-branch now does for `shell` calls that narrow to `CapRead`.
-
-Priority: Tier 2 — one call site and a test, closing the last instance of a pattern two shipped items
-have now removed elsewhere. Not Tier 1: no tool in the tree can reach it, and it degrades a
-verification path rather than opening a gate.
-
 ---
 
 ## Open Work — Tier 3
 
 **Status: 1 open — P63.9**, below, split out of P63.7 on 2026-08-07 when that item's `Update` half
-shipped and its `Engine.Run` half proved to be different work. P61.6 (2026-08-06) was the last before
+shipped and its `Engine.Run` half proved to be different work. **Two of its four concerns are
+extracted** (budgets and loop detection, both 2026-08-08); the remaining two are the hard pair. P61.6 (2026-08-06) was the last before
 it, and the sequencing finding it produced is
 recorded with its write-up: built **second** in its batch rather than last, it turned P61.1 into
 option wiring and closed P61.3 with no production code, so the "write each fix twice and delete one
@@ -367,11 +349,50 @@ Split out of P63.7 when its `Update` half was built, because the two halves are 
 work and bundling them hid that. P63.7 is now closed by the `Update` split alone; this carries the
 part it deliberately deferred.
 
-`engine/engine.go:586` — `Engine.Run`, **725 lines, 119 branch points, 10 levels of nesting**, holding
-budget enforcement, compaction triggers, nudge retraction, loop detection and guard retries in one
-scope where each interacts with the others. The **33 `// Pxx` markers inside it** are the tell: it has
-become the place behavior is added *because* it is already where all the state is, which is
-self-reinforcing.
+`engine/engine.go:518` — `Engine.Run`, originally **725 lines, 119 branch points, 10 levels of
+nesting** (now 654 after two passes), holding budget enforcement, compaction triggers, nudge
+retraction, loop detection and guard retries in one scope where each interacts with the others. The **33 `// Pxx` markers inside it** are
+the tell: it has become the place behavior is added *because* it is already where all the state is,
+which is self-reinforcing.
+
+**Pass 1 of 4 landed 2026-08-08: the run budgets** (`internal/engine/budget.go`). Budgets went first
+because the ownership question had an unusually clean answer — three of the four bounds are pure
+reads of the cost tracker and own nothing, and the fourth owned exactly one thing, the run's start
+instant, previously a bare local threaded by hand into five calls across 600 lines. Once that is a
+field on a `runBudget`, the concern has nothing left in `Run` to interact with. The two gates
+collapsed from three duplicated inline checks each into one `budget.exceeded()` call; check order
+(cost → tokens → time) is observable and was preserved. `Run` is now **685 lines** — a number that
+undersells the change, since the point was deleting the hand-threaded `runStart`, not the line count.
+Gated on `go test ./...` and the eval golden transcripts (`TestScenario_BudgetAbortsSecondTurn`
+included). Write-up in [releases.md](releases.md).
+
+**Pass 2 of 4 landed 2026-08-08: loop detection** (`loopGuard` in `internal/engine/loopdetect.go`).
+`Run` is now **654 lines**. The ownership question here had a different answer from budgets', and
+finding it *was* the pass: **two of the concern's variables were at the wrong scope.**
+`loopNudgePending` was declared among `Run`'s run-scoped flags and `loopRecorded` was re-declared each
+iteration, but both are set by the loop gate and consumed after that same turn's tool round, with no
+path between them that continues the loop. They are **per-turn state in a run-scoped scope** — which
+is exactly how this function accumulates interactions it does not really have, since anything else in
+`Run` could read or write them and nothing said it shouldn't.
+
+So the split is not "move the detector": the guard owns what genuinely survives a turn (the window,
+the outcomes, the threshold the messages quote), and the gate returns a **`loopVerdict` value** the
+caller holds for the rest of one iteration. Per-turn state can no longer outlive the turn because it
+is a value, not a variable. The nudge *count* deliberately stayed in `nudgeState`, matching the split
+already in the tree for the sibling concern — `toolFailureTracker` owns the failure counters while
+`nudgeState` owns `toolFailureNudges`/`toolFailureOutstanding` — so it is passed in rather than
+duplicated. A disabled detector is a nil `*loopGuard` whose methods tolerate a nil receiver, so `Run`
+lost its nil checks too.
+
+Gated on `go test ./...`, `-race`, the eval golden transcripts, **and the full live tier** (all three
+subtests passed, 2026-08-08 — see below). Two mutation checks confirmed the gate's tests are not
+vacuous. Write-up in [releases.md](releases.md).
+
+**Two concerns remain: compaction and guard retries** — the hard pair, and they should go last and
+separately. They interact with each other and with retry, so neither has the clean-ownership shape
+that made passes 1 and 2 safe. Pass 2's method (find the state at the wrong scope, return it as a
+value instead of storing it) is worth trying on them, but neither is expected to yield as cleanly:
+compaction genuinely mutates `conv` mid-run, which no value can encapsulate.
 
 **Why this is not a second helping of P63.7's method.** The `Update` split was pure code motion —
 per-message-domain files, gated on the eval golden transcripts showing no diff — because each `switch`
@@ -393,6 +414,13 @@ throughout the regressions P25.7 was built to catch, which is precisely the cove
 hides an integration-shaped break — so `TestLiveWorkflow` (and, where attribution is in doubt,
 `TestLiveWorkflowBaseline`) should run over any pass that touches retry, nudge or compaction control
 flow, not just `go test ./...`.
+
+**Pass 2 ran it, and the tier is now worth running** (qwen3:14b, 2026-08-08, after P63.11): all three
+subtests passed, including `FixSeededBug`, which had failed on the pass-1 run. That is **not** evidence
+this pass fixed anything — P60.4's control group had already attributed the earlier failure to the
+model, and the model this time simply ran the script, made the correct `int(row["temp"])` edit and
+re-ran it. What it does show is that the tier can now produce a clean green, so a future red over a
+P63.9 pass is informative rather than expected.
 
 Priority: Tier 3 — no urgency and no trigger, and unlike P63.7's half it cannot be made safe by
 technique alone. Worth doing incrementally and worth *not* doing in a hurry: a botched pass here

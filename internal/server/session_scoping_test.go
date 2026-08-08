@@ -121,7 +121,7 @@ func TestRepoMapForDiffersPerRoot(t *testing.T) {
 	srv, cl := newScopingTestServer(t, daemonWS)
 	// newScopingTestServer doesn't go through New(), so prime the daemon's
 	// own fast-path repoMap field the way New() would at startup.
-	srv.repoMap = loadRepoMap(daemonWS, srv.logger)
+	srv.repoMap = loadRepoMap(daemonWS, repoMapOptions(srv.cfg), srv.logger)
 
 	sessionRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(sessionRoot, "session_only.go"), []byte("package sessionpkg\n\nfunc SessionOnly() {}\n"), 0o644); err != nil {

@@ -838,7 +838,12 @@ func buildChatSystem(cfg *config.Config, cwd string, enabledBuiltins []string, s
 		resolvedSystem = resolvedSystem + "\n\n" + sk
 	}
 	// Inject the cached repository map when present (built via `aegis index`).
-	if rm, fresh, _ := repomap.Load(cwd, repoMapCachePath(cwd), repomap.Options{}); rm != "" && fresh {
+	// Read with the configured budget (P62.1), not repomap's built-in default:
+	// the cached map holds every symbol extracted, so the render size is decided
+	// here — a CLI reading with defaults would hand the model a smaller map than
+	// the daemon does for the same repo and the same config.
+	rmOpts := repomap.Options{MaxBytes: cfg.RepoMap.MaxBytes, MaxSymbolsPerFile: cfg.RepoMap.MaxSymbolsPerFile}
+	if rm, fresh, _ := repomap.Load(cwd, repoMapCachePath(cwd), rmOpts); rm != "" && fresh {
 		if block := repomap.Block(rm); block != "" {
 			resolvedSystem = resolvedSystem + "\n\n" + block
 		}

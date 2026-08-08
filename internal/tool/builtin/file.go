@@ -34,6 +34,36 @@ const (
 	newFileMode = 0o644
 )
 
+// binarySniffBytes is how much of a file's head is inspected for NUL bytes
+// before deciding it is not text. Matches the window grep already uses
+// (isBinary in search.go), so the two tools agree on what "binary" means.
+const binarySniffBytes = 8000
+
+// looksBinary reports whether the file at abs appears to be binary, by sniffing
+// its first binarySniffBytes bytes for a NUL. It is best-effort: an unreadable
+// file reports false and the caller's own open/read surfaces the real error.
+//
+// This exists because a numbered dump of PNG or ELF bytes is worse than an
+// error — the model reasons over mojibake instead of stopping, and raw control
+// bytes reach the transcript.
+func looksBinary(abs string) (bool, int64) {
+	f, err := os.Open(abs)
+	if err != nil {
+		return false, 0
+	}
+	defer f.Close()
+	var size int64
+	if info, err := f.Stat(); err == nil {
+		size = info.Size()
+	}
+	buf := make([]byte, binarySniffBytes)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, size
+	}
+	return isBinary(buf[:n]), size
+}
+
 // writePreservingMode writes data to abs. When abs already exists its current
 // permission bits are preserved (so overwriting a 0o700 script or a
 // mode-sensitive key/token file doesn't silently drop the exec bit or widen to
@@ -77,14 +107,23 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err != nil {
 		return tool.Result{}, err
 	}
+	binary, size := looksBinary(abs)
+	if binary {
+		return tool.Result{Content: fmt.Sprintf("%s appears to be a binary file (%d bytes); read_file returns UTF-8 text only. Use grep or a shell tool if you need to inspect it.", args.Path, size), IsError: true}, nil
+	}
+	if size == 0 {
+		// A zero-byte file otherwise scans as one empty numbered line ("1\t"),
+		// which is indistinguishable from a failed or truncated read. Say so.
+		if t.tracker != nil {
+			t.tracker.RecordRead(abs)
+		}
+		return tool.Result{Content: fmt.Sprintf("[read_file: %s is empty (0 bytes).]\n", args.Path)}, nil
+	}
 	f, err := os.Open(abs)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
 	}
 	defer f.Close()
-	if t.tracker != nil {
-		t.tracker.RecordRead(abs)
-	}
 	start := 1
 	if args.Offset > 0 {
 		start = args.Offset
@@ -128,10 +167,34 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err := sc.Err(); err != nil {
 		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
 	}
-	if capped && truncated {
+	// The agent has seen the whole file only when the window started at line 1,
+	// ran off the end, and the byte cap never bit. Anything else — a capped
+	// default read, an explicit offset/limit range, or a file past maxReadBytes
+	// where the LimitReader simply stops without tripping `truncated` — leaves
+	// content unseen, which write_file must know about before it replaces the
+	// lot (see filetracker.CheckFullOverwrite).
+	complete := start == 1 && !truncated && size <= maxReadBytes
+	if t.tracker != nil {
+		if complete {
+			t.tracker.RecordRead(abs)
+		} else {
+			t.tracker.RecordPartialRead(abs)
+		}
+	}
+	switch {
+	case size > maxReadBytes:
+		fmt.Fprintf(&b, "\n[read_file: %s is %d bytes; only the first %d were read. Use grep to locate what you need in a file this size.]\n",
+			args.Path, size, maxReadBytes)
+	case capped && truncated:
 		next := start + count
 		fmt.Fprintf(&b, "\n[read_file: showing lines %d-%d; the file continues past line %d. This default %d-line window bounds context — call read_file again with offset=%d (and a limit) to read more, or grep for the part you need.]\n",
 			start, start+count-1, start+count-1, defaultReadLines, next)
+	case count == 0 && start > 1:
+		// An empty successful result reads to a model as "there is nothing
+		// here", not "you overshot the end" — say which it is, so the next call
+		// corrects the offset instead of concluding the file is empty.
+		fmt.Fprintf(&b, "[read_file: offset %d is past the end of %s, which has %d line(s). Re-read with a smaller offset.]\n",
+			start, args.Path, lineNo)
 	}
 	return tool.Result{Content: b.String()}, nil
 }
@@ -193,6 +256,13 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		if err := t.tracker.CheckWrite(abs); err != nil {
 			return tool.Result{Content: err.Error(), IsError: true}, nil
 		}
+		// write_file replaces the file wholesale, so unlike an anchored edit it
+		// can destroy content the agent never read. P38.1's line cap made that
+		// reachable: a capped read looks, to the mtime guard alone, exactly like
+		// a complete one.
+		if err := t.tracker.CheckFullOverwrite(abs); err != nil {
+			return tool.Result{Content: err.Error(), IsError: true}, nil
+		}
 		// Capture prior content (empty if the file is new) for hunk attribution.
 		if data, err := os.ReadFile(abs); err == nil {
 			oldContent = string(data)
@@ -208,13 +278,81 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return tool.Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}, nil
 	}
 	if t.tracker != nil {
-		t.tracker.RecordWrite(abs)
+		// RecordOverwrite, not RecordWrite: every byte is now the agent's own,
+		// so any earlier partial-read flag no longer describes reality.
+		t.tracker.RecordOverwrite(abs)
 		t.tracker.RecordAgentWrite(abs, oldContent, args.Content)
 	}
 	return tool.Result{Content: fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)}, nil
 }
 
 // --- edit ---
+
+// readTextForEdit reads abs in full for an in-place edit, returning the content
+// or a caller-facing error message (empty when it succeeded).
+//
+// The size check is the point. The previous io.LimitReader(f, maxReadBytes)
+// path read a prefix, applied the replacement, and wrote that prefix back as
+// the whole file — silently discarding everything past the cap while reporting
+// success. Refusing the edit outright is the only safe answer, since an edit
+// tool has no way to write back bytes it never read. Binary content is refused
+// for the same reason grep skips it: substring replacement over arbitrary bytes
+// is not a meaningful operation, and any write-back would mangle the file.
+func readTextForEdit(abs, display string) (string, string) {
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Sprintf("cannot read %s: %v", display, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Sprintf("%s is a directory, not a file", display)
+	}
+	if info.Size() > maxReadBytes {
+		return "", fmt.Sprintf("%s is %d bytes, over the %d-byte edit limit; editing it in place would truncate the file. Use a shell tool for a file this size.",
+			display, info.Size(), maxReadBytes)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", fmt.Sprintf("cannot read %s: %v", display, err)
+	}
+	if isBinary(data) {
+		return "", fmt.Sprintf("%s appears to be a binary file; string replacement works on UTF-8 text only", display)
+	}
+	return string(data), ""
+}
+
+// applyReplacement performs one anchored replacement against content, returning
+// the new content, how many occurrences were replaced, and a caller-facing
+// error message (empty on success). It is shared by edit_file and multi_edit so
+// the two tools cannot drift apart on what counts as a safe edit — they did:
+// multi_edit used to replace the first of several matches and report success.
+//
+// The happy path scans content once (Index) and builds the result with a single
+// sized allocation; the O(n) Count only runs to populate an error message.
+func applyReplacement(content, oldStr, newStr string, replaceAll bool, display string) (string, int, string) {
+	if oldStr == "" {
+		return "", 0, fmt.Sprintf("old_string is empty; give the exact text to replace in %s (to create a file or replace it wholesale, use write_file)", display)
+	}
+	if oldStr == newStr {
+		return "", 0, fmt.Sprintf("old_string and new_string are identical, so this edit to %s would change nothing", display)
+	}
+	i := strings.Index(content, oldStr)
+	if i < 0 {
+		return "", 0, fmt.Sprintf("old_string not found in %s", display)
+	}
+	if replaceAll {
+		return strings.ReplaceAll(content, oldStr, newStr), strings.Count(content, oldStr), ""
+	}
+	if strings.Contains(content[i+len(oldStr):], oldStr) {
+		return "", 0, fmt.Sprintf("old_string occurs %d times in %s; pass replace_all, or include surrounding lines to make the match unique",
+			strings.Count(content, oldStr), display)
+	}
+	var b strings.Builder
+	b.Grow(len(content) - len(oldStr) + len(newStr))
+	b.WriteString(content[:i])
+	b.WriteString(newStr)
+	b.WriteString(content[i+len(oldStr):])
+	return b.String(), 1, ""
+}
 
 type editTool struct {
 	root    string
@@ -224,10 +362,13 @@ type editTool struct {
 func (t *editTool) Name() string                { return "edit_file" }
 func (t *editTool) Capability() tool.Capability { return tool.CapWrite }
 func (t *editTool) Description() string {
-	return "Replace an exact string in a file. old_string must occur exactly once unless replace_all is true."
+	return "Replace an exact string in an existing text file. old_string must occur exactly once unless replace_all is true; include surrounding lines to make a match unique. To create a file or replace one entirely, use write_file."
 }
 func (t *editTool) InputSchema() json.RawMessage {
-	return schema(`{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}`)
+	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative path to an existing file"},"old_string":{"type":"string","description":"exact text to replace, including whitespace; must be non-empty and differ from new_string"},"new_string":{"type":"string","description":"replacement text"},"replace_all":{"type":"boolean","description":"replace every occurrence instead of requiring a unique match"}},"required":["path","old_string","new_string"]}`)
+}
+func (t *editTool) OutputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"path":{"type":"string"},"replacements":{"type":"integer"}},"required":["path","replacements"]}`)
 }
 func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	var args struct {
@@ -248,28 +389,13 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 			return tool.Result{Content: err.Error(), IsError: true}, nil
 		}
 	}
-	f, err := os.Open(abs)
-	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
+	content, errMsg := readTextForEdit(abs, args.Path)
+	if errMsg != "" {
+		return tool.Result{Content: errMsg, IsError: true}, nil
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes))
-	f.Close()
-	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
-	}
-	content := string(data)
-	n := strings.Count(content, args.OldString)
-	if n == 0 {
-		return tool.Result{Content: "old_string not found in file", IsError: true}, nil
-	}
-	if n > 1 && !args.ReplaceAll {
-		return tool.Result{Content: fmt.Sprintf("old_string occurs %d times; pass replace_all or provide a more specific string", n), IsError: true}, nil
-	}
-	var updated string
-	if args.ReplaceAll {
-		updated = strings.ReplaceAll(content, args.OldString, args.NewString)
-	} else {
-		updated = strings.Replace(content, args.OldString, args.NewString, 1)
+	updated, n, errMsg := applyReplacement(content, args.OldString, args.NewString, args.ReplaceAll, args.Path)
+	if errMsg != "" {
+		return tool.Result{Content: errMsg, IsError: true}, nil
 	}
 	checkpoint.SnapshotterFrom(ctx).Capture(abs)
 	if err := writePreservingMode(abs, []byte(updated)); err != nil {

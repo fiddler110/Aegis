@@ -24,6 +24,7 @@ import (
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/toolcallprobe"
+	"github.com/fiddler110/aegis/internal/toolpath"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
@@ -280,7 +281,66 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 		doctorGuardCheck(cfg),
 		doctorWorkdirCheck(cfg),
 	}
+	checks = append(checks, doctorCommandChecks(cfg)...)
 	return append(checks, doctorDaemonChecks(ctx, cfg)...)
+}
+
+// doctorCommandChecks reports every optional host binary from
+// internal/toolpath: whether it resolved, what Aegis uses it for, and how to
+// install it. These were previously invisible — ripgrep silently backed the
+// grep tool via a package-level exec.LookPath at process init, so a user had no
+// way to learn it was wanted, that it had been found, or where it was found.
+//
+// A missing tool is a WARN, not a FAIL: every one of them has a working
+// fallback. A *misconfigured* one is a FAIL, because the user asked for a
+// specific binary and did not get it — silently falling back there would defeat
+// the point of setting the key.
+func doctorCommandChecks(cfg *config.Config) []doctorCheck {
+	r := toolpath.New(cfg.Commands)
+	var checks []doctorCheck
+	for _, st := range r.Statuses() {
+		name := "command: " + st.Key
+		switch {
+		case st.Disabled:
+			checks = append(checks, doctorCheck{
+				Name: name, Severity: doctorPass,
+				Detail: fmt.Sprintf("disabled in config; using the built-in fallback (%s)", st.Fallback),
+			})
+		case st.Available():
+			detail := st.Path
+			if st.Configured != "" {
+				detail += fmt.Sprintf(" (from commands.%s: %q)", st.Key, st.Configured)
+			}
+			checks = append(checks, doctorCheck{
+				Name: name, Severity: doctorPass,
+				Detail: fmt.Sprintf("%s — %s", detail, st.Purpose),
+			})
+		case st.Configured != "":
+			checks = append(checks, doctorCheck{
+				Name: name, Severity: doctorFail,
+				Detail: st.Err,
+				Fix:    fmt.Sprintf("correct commands.%s in config, or remove it to fall back to a PATH lookup", st.Key),
+			})
+		default:
+			fix := fmt.Sprintf("optional — %s", st.Fallback)
+			if mgr, cmd := st.InstallHint(); cmd != "" {
+				fix = fmt.Sprintf("%s (%s), or set commands.%s to its path", cmd, mgr, st.Key)
+			}
+			checks = append(checks, doctorCheck{
+				Name: name, Severity: doctorWarn,
+				Detail: fmt.Sprintf("%s; %s — %s", st.Err, st.Fallback, st.Purpose),
+				Fix:    fix,
+			})
+		}
+	}
+	if unknown := r.UnknownKeys(); len(unknown) > 0 {
+		checks = append(checks, doctorCheck{
+			Name: "command overrides", Severity: doctorWarn,
+			Detail: fmt.Sprintf("unrecognized commands key(s): %s — these have no effect", strings.Join(unknown, ", ")),
+			Fix:    "remove them, or correct the spelling; `aegis doctor` lists every supported key",
+		})
+	}
+	return checks
 }
 
 // doctorWorkspaceTrustCheck surfaces the P27.1 workspace-trust gate's

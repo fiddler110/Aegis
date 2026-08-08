@@ -52,6 +52,7 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/fiddler110/aegis/internal/toolcallprobe"
+	"github.com/fiddler110/aegis/internal/toolpath"
 	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
@@ -375,7 +376,7 @@ func (s *Server) repoMapFor(root string) string {
 		return s.repoMap
 	}
 	v, _ := s.repoMaps.getOrCreate(root, func() (string, error) {
-		return loadRepoMap(root, s.logger), nil
+		return loadRepoMap(root, repoMapOptions(s.cfg), s.logger), nil
 	})
 	return v
 }
@@ -635,7 +636,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// actual tool-call time sees the fully constructed Server — same pattern
 	// as cronRun/s.cronPermCheck above.
 	knowledgeProvider := builtin.KnowledgeProviderFunc(func(root string) (*knowledge.Store, error) { return s.knowledgeStoreFor(root) })
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, KnowledgeProvider: knowledgeProvider, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile(), GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand, GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second}); err != nil {
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, Commands: toolpath.New(cfg.Commands), KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, KnowledgeProvider: knowledgeProvider, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile(), GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand, GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second}); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -748,7 +749,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.embedder = embedder
 	s.workspace = cwd
 	s.memory = memory.NewSources(cwd, cfg.DataDir)
-	s.repoMap = loadRepoMap(cwd, logger)
+	s.repoMap = loadRepoMap(cwd, repoMapOptions(cfg), logger)
 	_, _ = s.repoMaps.getOrCreate(cwd, func() (string, error) { return s.repoMap, nil })
 
 	// Load custom agent definitions from user/project directories.

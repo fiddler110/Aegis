@@ -13,7 +13,10 @@ import (
 // exposed so `/index` in the TUI (P14.3) can refresh both the on-disk cache
 // and the daemon's cached system-prompt block without a restart.
 func (s *Server) handleRepoMapIndex(w http.ResponseWriter, r *http.Request) {
-	m, err := repomap.Build(s.workspace, repomap.Options{})
+	// Same budget the injector reads with (repoMapOptions): a rebuild triggered
+	// from /index must write the cache the startup path would have written, or
+	// `/index` in the TUI would silently resize the injected block.
+	m, err := repomap.Build(s.workspace, repoMapOptions(s.cfg))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

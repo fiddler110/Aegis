@@ -134,6 +134,126 @@ func (d *loopDetector) reset() {
 	d.detectedSpan = 0
 }
 
+// loopGuard is the second concern lifted out of Engine.Run under P63.9: the
+// loop gate and everything it needs to decide what a detected cycle means.
+//
+// The question P63.9 asks of each concern is *what state does it actually own*,
+// and answering it here found that Run was holding two variables at the wrong
+// scope. `loopNudgePending` and `loopRecorded` were both declared in Run — the
+// first alongside the run's other run-scoped flags — but each is set by the gate
+// and consumed after that same turn's tool round, with no path in between that
+// continues the loop. They are per-turn state living in a run-scoped scope,
+// which is precisely how a 10-deep function accumulates interactions it does not
+// have: anything else in Run could read or write them, and nothing said it
+// shouldn't.
+//
+// So the split is: the guard owns what genuinely survives a turn (the detector's
+// window and outcomes, and the threshold the messages quote), and the gate
+// returns a loopVerdict the caller holds for the rest of *one* iteration. The
+// per-turn state cannot outlive the turn because it is a value, not a variable.
+//
+// What deliberately does **not** move here is the nudge count. `nudgeState`
+// owns "did this run inject a corrective of family X, and has it been
+// retracted" for every family, and retractAll reads it; the loop count is one
+// row of that table. This mirrors the split already in the tree for the sibling
+// concern — toolFailureTracker owns the failure counters while nudgeState owns
+// toolFailureNudges/toolFailureOutstanding — so the count is passed in rather
+// than duplicated.
+//
+// A nil *loopGuard is the disabled detector (LoopThreshold < 0), and every
+// method tolerates it, so Run carries no nil checks of its own.
+type loopGuard struct {
+	threshold  int
+	detector   *loopDetector
+	pollExempt func(provider.ToolUseBlock) bool
+}
+
+// newLoopGuard builds the guard for a run, or returns nil when loop detection is
+// disabled.
+func (e *Engine) newLoopGuard() *loopGuard {
+	if e.loopThreshold <= 0 {
+		return nil
+	}
+	return &loopGuard{
+		threshold:  e.loopThreshold,
+		detector:   newLoopDetector(e.loopThreshold),
+		pollExempt: e.pollExempt,
+	}
+}
+
+// loopVerdict is one turn's worth of loop-gate decision — the per-turn half of
+// the concern, returned rather than stored so it cannot leak into the next
+// iteration.
+//
+// The three outcomes are mutually exclusive by construction: an abort, a
+// recoverable trigger (notice now, nudge after the round), or neither. recorded
+// says whether this turn went into the detector's window, and therefore whether
+// its tool results are the outcome that classifies a future cycle.
+type loopVerdict struct {
+	// abort ends the run: a cycle that errored, or a second cycle after the
+	// corrective already failed to break the first.
+	abort error
+	// notice is emitted immediately, before the tool round.
+	notice string
+	// nudge is appended after the tool round rather than at the gate, so the
+	// assistant's tool_use blocks are never separated from their tool_result
+	// blocks.
+	nudge string
+	// recorded is true only for a turn added to the window that did *not* trip
+	// the detector. A triggering turn is deliberately excluded: the window was
+	// just reset, so attaching its outcome would misattribute it.
+	recorded bool
+}
+
+// check runs the loop gate for one turn, before its tools execute.
+//
+// P53.2(a): calls a tool declares poll-exempt are dropped from the signature,
+// and a turn made up entirely of polls is not recorded at all — an agent waiting
+// on a background job or a teammate's reply is indistinguishable from a stuck
+// one otherwise, and canonicalizeToolInput erases the very fields that would
+// tell them apart.
+//
+// P53.2(b): the outcome decides the ending. A cycle whose rounds errored is
+// fatal. A cycle that keeps *succeeding* earns one corrective nudge and a window
+// reset; only a second trigger in the same run ends it. nudgesSpent is the run's
+// loop-nudge count, held by nudgeState — passing it keeps one owner for the
+// "have we already corrected this" fact rather than two that can disagree.
+func (g *loopGuard) check(toolUses []provider.ToolUseBlock, nudgesSpent int) loopVerdict {
+	if g == nil {
+		return loopVerdict{}
+	}
+	sig, shouldRecord := turnSignatureExcludingPolls(toolUses, g.pollExempt)
+	if !shouldRecord {
+		return loopVerdict{}
+	}
+	if !g.detector.record(sig) {
+		return loopVerdict{recorded: true}
+	}
+	if g.detector.cycleHadError() || nudgesSpent > 0 {
+		err := fmt.Errorf("%w: identical tool calls repeated %d turns", ErrLoopDetected, g.threshold)
+		if nudgesSpent > 0 {
+			err = fmt.Errorf("%w — the corrective prompt did not break the cycle", err)
+		}
+		return loopVerdict{abort: err}
+	}
+	g.detector.reset()
+	return loopVerdict{
+		notice: fmt.Sprintf("model repeated the same succeeding tool calls %d turns running — asking it to change approach or answer", g.threshold),
+		nudge:  loopNudgeText(g.threshold),
+	}
+}
+
+// noteOutcome attaches a completed round's result to the turn v recorded, which
+// is only knowable after the tools have run. A no-op for a turn that was not
+// recorded (all calls poll-exempt, or the window was just reset), so an outcome
+// is never misattributed to an earlier turn.
+func (g *loopGuard) noteOutcome(v loopVerdict, results []provider.Block) {
+	if g == nil || !v.recorded {
+		return
+	}
+	g.detector.noteOutcome(resultsHadError(results))
+}
+
 // isRepeatingCycle reports whether window consists entirely of a repeating
 // block of length period, i.e. window[i] == window[i+period] for every valid
 // i. period == 1 reduces to "every element is identical".
