@@ -247,9 +247,22 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if len(args.Content) > maxWriteContent {
 		return tool.Result{Content: fmt.Sprintf("content too large (%d bytes, max %d)", len(args.Content), maxWriteContent), IsError: true}, nil
 	}
+	// Refuse a directory-shaped path before resolution, which would clean the
+	// trailing separator away. A model reaching for "mkdir" via write_file
+	// otherwise creates an empty *file* exactly where the directory belongs,
+	// and every subsequent write beneath it fails with a MkdirAll error that
+	// names the path but not the cause ("The system cannot find the path
+	// specified" on Windows). Cheap to check, and the failure it prevents is
+	// unrecoverable without out-of-band cleanup.
+	if strings.HasSuffix(args.Path, "/") || strings.HasSuffix(args.Path, `\`) {
+		return tool.Result{Content: fmt.Sprintf("%s is a directory path, not a file: write_file creates files (parent directories are created automatically) — give the full path including the file name", args.Path), IsError: true}, nil
+	}
 	abs, err := resolveWrite(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
+	}
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		return tool.Result{Content: fmt.Sprintf("%s is an existing directory, not a file", args.Path), IsError: true}, nil
 	}
 	var oldContent string
 	if t.tracker != nil {

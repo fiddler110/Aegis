@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/cron"
@@ -250,7 +251,60 @@ func resolveRead(ctx context.Context, root, p string) (string, error) {
 // "read research from A, write the document into B" setup cannot accidentally
 // scribble into A.
 func resolveWrite(ctx context.Context, root, p string) (string, error) {
-	return sandbox.ValidatePathIn(effectiveRoots(ctx, root), p, sandbox.AccessWrite)
+	abs, err := sandbox.ValidatePathIn(effectiveRoots(ctx, root), p, sandbox.AccessWrite)
+	if err != nil {
+		return "", err
+	}
+	if err := denyMaterializedSkillWrite(effectiveRoots(ctx, root), abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// materializedSkillsRel is the workspace-relative directory built-in skills are
+// extracted into (skills.MaterializeBuiltinsToProject). Kept as literal segments
+// rather than importing internal/skills, which would make internal/tool/builtin
+// depend on the skills package purely for a path constant.
+var materializedSkillsRel = []string{".aegis", "builtin-skills"}
+
+// denyMaterializedSkillWrite refuses a write that lands inside a root's
+// <root>/.aegis/builtin-skills tree.
+//
+// That tree is harness-owned: it is an extraction of content compiled into the
+// binary, re-materialized on demand, and nothing in it is meant to be authored
+// in the workspace. It is only inside the workspace root at all so the model's
+// sandboxed *read* tools can reach a skill's scripts and skeletons — which
+// incidentally put it in reach of the write tools too.
+//
+// Observed live (P38.1 re-test, 2026-08-09): a model wrote the command line it
+// meant to *run* into recon.py, replacing the script with 295 bytes of shell
+// text. Every later `python recon.py` then raised SyntaxError, and the agent
+// could see the damage but had no copy to restore from — the phase could not
+// proceed, and no error along the way pointed at the cause. An agent destroying
+// the tooling it was given is a failure mode worth making structurally
+// impossible rather than recoverable.
+//
+// This deliberately does not cover .aegis/skills/ — user- and project-authored
+// skills are ordinary workspace content an agent may legitimately be asked to
+// write. Nor does it cover the shell tool, which can still reach the tree; the
+// per-phase refresh in internal/drive repairs that case instead.
+func denyMaterializedSkillWrite(roots []sandbox.Root, abs string) error {
+	for _, r := range roots {
+		if r.Path == "" {
+			continue
+		}
+		guarded := filepath.Join(append([]string{r.Path}, materializedSkillsRel...)...)
+		rel, err := filepath.Rel(guarded, abs)
+		if err != nil {
+			continue
+		}
+		// Inside the tree, or the tree itself — but not a sibling that merely
+		// shares a prefix (filepath.Rel would yield a leading "..").
+		if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
+			return fmt.Errorf("%s is a built-in skill file: this tree is extracted from the binary and is read-only to tools — copy it elsewhere in the workspace if you need to modify it", filepath.ToSlash(filepath.Join(append(append([]string{}, materializedSkillsRel...), rel)...)))
+		}
+	}
+	return nil
 }
 
 // effectiveRoot returns the working directory a tool call should be confined

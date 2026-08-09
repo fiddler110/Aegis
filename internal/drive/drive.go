@@ -333,6 +333,7 @@ func Run(ctx context.Context, st *State, phases []Phase) error {
 	for pi := range phases {
 		ph := phases[pi]
 		runDir := st.runDir()
+		st.repairSkillAssets()
 		if ph.complete(runDir) {
 			st.Logger.Info("phased drive: phase already complete, skipping", "phase", ph.name)
 			fmt.Fprintf(st.ErrOut, "\n[notice: phase %d/%d (%s) already complete on disk — skipping]\n", pi+1, len(phases), ph.label())
@@ -766,6 +767,39 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *State) error {
 		}
 		stuck = false
 	}
+}
+
+// repairSkillAssets restores any materialized built-in skill file under
+// <cwd>/.aegis/builtin-skills that no longer matches the copy compiled into
+// this binary, at every phase boundary.
+//
+// resolveWrite already refuses the file tools a path in that tree, but the
+// shell tool can still reach it — a model running `python -c`, a redirect, or
+// a stray `>` has no such gate. Observed live (P38.1 re-test, 2026-08-09): a
+// model replaced recon.py with the command line it meant to run, and every
+// later phase inherited a script that raised SyntaxError with nothing pointing
+// at why. Phase boundaries are the natural repair point: the drive already
+// resets context there, and a phase starting against corrupted tooling is
+// exactly the case that cannot recover on its own.
+//
+// Best-effort by design. A failure to repair must not end a drive that might
+// still complete, so this logs and returns; the phase then runs against
+// whatever is on disk, as it did before.
+func (st *State) repairSkillAssets() {
+	if st.Cwd == "" {
+		return
+	}
+	restored, err := skills.RefreshProjectBuiltins(st.Cwd)
+	if err != nil {
+		st.Logger.Warn("phased drive: could not refresh materialized skill assets", "err", err)
+		return
+	}
+	if len(restored) == 0 {
+		return
+	}
+	st.Logger.Warn("phased drive: restored modified built-in skill files", "files", restored)
+	fmt.Fprintf(st.ErrOut, "\n[notice: restored %d built-in skill file(s) modified during the run: %s]\n",
+		len(restored), strings.Join(restored, ", "))
 }
 
 // maxPhase6OverflowResets bounds the P47.7 phase-6 overflow-reset loop: a

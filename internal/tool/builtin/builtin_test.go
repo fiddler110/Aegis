@@ -375,6 +375,95 @@ func TestWriteLargeContentRejected(t *testing.T) {
 	}
 }
 
+// A directory-shaped path must be refused rather than silently cleaned into a
+// file name. Observed live: a model used write_file with a trailing separator
+// as a mkdir, which created an empty file exactly where the run directory
+// belonged and made every later write beneath it fail with an opaque MkdirAll
+// error — unrecoverable without deleting the stray file out of band.
+func TestWriteRejectsDirectoryShapedPath(t *testing.T) {
+	root := t.TempDir()
+	w := &writeTool{root: root}
+
+	for _, p := range []string{"out/rundir/", `out\rundir\`} {
+		res, err := w.Execute(context.Background(), mustJSON(t, map[string]any{"path": p, "content": ""}))
+		if err != nil {
+			t.Fatalf("path %q: unexpected transport error: %v", p, err)
+		}
+		if !res.IsError {
+			t.Errorf("path %q: expected an error result, got %q", p, res.Content)
+		}
+		if _, statErr := os.Stat(filepath.Join(root, "out", "rundir")); statErr == nil {
+			t.Errorf("path %q: write created an entry at the directory path", p)
+		}
+	}
+
+	// An existing directory is refused too, even without a trailing separator.
+	if err := os.MkdirAll(filepath.Join(root, "existing"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	res, err := w.Execute(context.Background(), mustJSON(t, map[string]any{"path": "existing", "content": "x"}))
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("expected an error result for an existing directory, got %q", res.Content)
+	}
+}
+
+// The materialized built-in skill tree is harness-owned: readable so the model
+// can reach a skill's scripts and skeletons, never writable. Observed live
+// (P38.1 re-test, 2026-08-09): a model replaced recon.py with the command line
+// it meant to run, leaving the phase with tooling that could only raise
+// SyntaxError and no copy to restore from.
+func TestSkillAssetsAreReadOnlyToTools(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".aegis", "builtin-skills", "threat-modeling")
+	if err := os.MkdirAll(skillDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	recon := filepath.Join(skillDir, "recon.py")
+	const original = "#!/usr/bin/env python3\nprint('recon')\n"
+	if err := os.WriteFile(recon, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	relRecon := ".aegis/builtin-skills/threat-modeling/recon.py"
+	ctx := context.Background()
+
+	// write_file, edit and multi_edit must all refuse it.
+	if _, err := (&writeTool{root: root}).Execute(ctx, mustJSON(t, map[string]any{
+		"path": relRecon, "content": "clobbered",
+	})); err == nil {
+		t.Error("write_file: expected an error writing a built-in skill file")
+	}
+	if _, err := (&editTool{root: root}).Execute(ctx, mustJSON(t, map[string]any{
+		"path": relRecon, "old_string": "recon", "new_string": "clobbered",
+	})); err == nil {
+		t.Error("edit: expected an error editing a built-in skill file")
+	}
+
+	if got, _ := os.ReadFile(recon); string(got) != original {
+		t.Errorf("recon.py was modified: %q", got)
+	}
+
+	// Reading it must still work — that is why the tree is inside the root.
+	res, err := (&readTool{root: root}).Execute(ctx, mustJSON(t, map[string]any{"path": relRecon}))
+	if err != nil {
+		t.Fatalf("read of a skill asset failed: %v", err)
+	}
+	if res.IsError || !strings.Contains(res.Content, "print('recon')") {
+		t.Errorf("read of a skill asset = %q, want the file content", res.Content)
+	}
+
+	// A sibling that merely shares a path prefix stays writable, and so does
+	// .aegis/skills/ — user-authored skills are ordinary workspace content.
+	for _, p := range []string{".aegis/builtin-skills-notes.md", ".aegis/skills/mine.md", "recon.py"} {
+		res, err := (&writeTool{root: root}).Execute(ctx, mustJSON(t, map[string]any{"path": p, "content": "ok"}))
+		if err != nil || res.IsError {
+			t.Errorf("write to %q was refused (err=%v, res=%q), want it allowed", p, err, res.Content)
+		}
+	}
+}
+
 func TestReadWithLimitAndOffset(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, "lines.txt"), []byte("line1\nline2\nline3\nline4\nline5\n"), 0o644)
