@@ -137,6 +137,22 @@ provider:
   # 0 disables retries.
   max_retries: 4
 
+  # Sampling controls. Both are unset by default, which leaves the backend to
+  # decide — and for a local model that usually means Ollama's default of 0.8,
+  # since most Modelfiles pin no temperature. That is a poor fit for agentic
+  # work: a tool-dispatching run is a decision process, not a creative one, and
+  # two runs of the same prompt visibly diverge. In a measured pair of
+  # threat-model runs (identical prompt, model and repo) one opened by writing
+  # a file and the other by running an unprompted web search.
+  #
+  # Set temperature: 0 when you want a run to behave the same way twice, and
+  # add a seed to pin the sampler's RNG on top of it. A seed alone does not
+  # give determinism — it fixes *which* of many paths is taken, not that there
+  # is only one — so set both or neither.
+  #
+  # temperature: 0
+  # seed: 42
+
   # Maximum agent-loop iterations per run. 0 uses the built-in default (40).
   max_iterations: 0
 
@@ -643,19 +659,31 @@ compaction:
   # llama.cpp/Ollama cache the KV of a request's longest common prefix and the
   # pre-pass rewrites the *middle* of the conversation, discarding every cached
   # token after that point. Against a cloud provider there is no such cache and
-  # the gate is off.
+  # the gate is off. Set it explicitly to override or to A/B it.
   #
-  # Set it explicitly to measure or override that. It exists as a key because an
-  # optimization that cannot be switched off cannot be A/B'd or reverted without
-  # a rebuild — see internal/eval's TestLiveWorkflowCompactionPrefixCacheGate,
-  # which runs one workload twice with only this value changed.
+  # Measured 2026-08-08 (qwen3:14b, 24,576-token window, same fixture both arms,
+  # two runs), the gate is worth keeping:
   #
-  # Measured 2026-08-08 (qwen3:14b, 24,576-token window): the gate was 2.2x
-  # SLOWER on wall clock (3m19s vs 1m32s) and used 2x the prefill. Deferring the
-  # prune until the conversation is near the window defers it to exactly where
-  # Ollama begins context-shifting, so those turns are full reprocesses anyway —
-  # the gate protects a prefix cache that is already gone. If you are on a local
-  # model with a small window and long tool-heavy runs, `false` is worth trying.
+  #     gate on:   1m16s / 1m27s wall,  ~54,287ms total prefill
+  #     gate off:  2m7s  / 2m7s  wall,  ~98,481ms total prefill
+  #
+  # Past the compaction trigger, an ungated pre-pass runs on EVERY turn and
+  # rewrites the middle for a yield too small to drop back under the trigger —
+  # ~9s of prefill per turn, repeatedly. Gated, the conversation stays
+  # append-only at ~2.5s and pays that cost three times.
+  #
+  # An earlier measurement said the opposite (3m19s vs 1m32s) and it is worth
+  # knowing why, because the same trap applies to any timing comparison here: the
+  # compaction trigger was running on a token estimate that undercounted the real
+  # prompt by 20-33%, so compaction fired late enough that BOTH arms were already
+  # in the regime where Ollama silently context-shifts. There the prefix cache is
+  # gone regardless and the gate can only cost. Fixing the estimate moved the
+  # operating point, and the verdict with it.
+  #
+  # Still unmeasured: above a 200,000-token window the gate uses a fixed 40k
+  # buffer rather than a ratio. See internal/eval's
+  # TestLiveWorkflowCompactionPrefixCacheGate, which runs one workload twice with
+  # only this value changed.
   # preserve_prefix_cache: false
 
 

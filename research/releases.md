@@ -8,6 +8,174 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-08-09 — **P62.4, P62.2 and P62.5 all closed in one pass, and the order they
+were built in is the whole story.** P62.4 (the token estimate ran 20-33% under the truth) turned out
+to be the instrument every other measurement in this area was taken with: fixing it **reversed
+P62.2's verdict**, which had already been acted on. Write-ups immediately below; the 2026-08-08
+P63.9/P63.12 entries follow them.
+
+**P39.16 — the small-model tool batch: handle-based editing, per-phase tool surfaces, and pinned sampling (SHIPPED 2026-08-09).**
+
+Filed off a P38.1 re-test on `hf.co/LiquidAI/LFM2.5-2.6B-GGUF` that produced **zero files in two
+runs**, then validated on qwen3:14b. The batch's organizing finding is narrow and repeated ten times:
+**every failure was a tool that knew the answer and did not say it.** The marker list, the PowerShell
+equivalent, the offending filename character, the file's real path, the duplicate heading's index —
+in each case the harness held exactly the information the model needed and returned an error without
+it. Fixing messages beat fixing models, and the one error written that the model *could not act on*
+("rename or disambiguate them") produced an immediate loop until the drive reset it.
+
+*Handle-based editing (`fill_marker`, `edit_section`).* `edit_file` requires `old_string` reproduced
+byte for byte, from memory, through JSON escaping — the single hardest thing to ask of a small local
+model, and the one it fails most reliably. Both new tools select a target by *handle* (marker
+index/key, section heading/index) and take only new text. Measured on the same phase: 12 consecutive
+`edit_file` failures (10 "old_string not found", 2 "occurs 2 times") became 7 `edit_section` calls
+with zero failures. This is not a 2.6B problem — **qwen3:14b fails the exact-match path too**, which
+is why the deep-fill probe was re-cut against `fill_marker` (it was failing models that complete real
+drives).
+
+*Structure guards on `edit_section`.* Selecting by handle means the caller cannot see the extent of
+what it selected, so the tool must describe the blast radius before acting. Two refusals, both found
+live and both destructive when absent: replacing a section that holds a markdown table with prose
+that holds none, and replacing a parent section whose body contains nested subsections (a section
+runs to the next same-or-higher heading — this silently deleted 3.7KB of analysis and reported
+success). `allow_structure_loss` carries the intent when removal is deliberate.
+
+*`mode:"new"`.* A capability gap, not a bug: narrowing a phase's tools must leave a path for every
+operation the phase can legitimately need. Fill phases could edit and fill but not **create**, so a
+model asked to author eleven missing component sections rewrote the one section it could reach until
+the drive reset it. With section creation available it wrote all eleven in one pass (1481 → 6540
+bytes).
+
+*Per-phase tool narrowing (`Registry.ScopeExposed`).* A 2.6B offered 50+ schemas used four, and its
+one wrong choice — an unprompted `web_search` — opened a phase and spent its context on the public
+web. Persona `Tools` could not help: `PersonaToolGate` warns *after* the call while every schema is
+still sent. Narrowing the schema array is the only tool-selection instruction a small model cannot
+ignore. Wired to the CLI drive alone, which owns its registry; the narrowing is registry-wide.
+
+*Sampling knobs (`provider.temperature`, `provider.seed`).* `Temperature` was plumbed end-to-end and
+**never set by anything**, so every local run inherited Ollama's 0.8 default: two runs of one prompt
+against one model took visibly different paths (one opened by writing a file, the other by running a
+web search). Both are pointer-typed so `temperature: 0` stays distinguishable from unset.
+
+*Corrective errors.* `write_file` refuses a directory-shaped path (a trailing separator was cleaned
+away, creating a zero-byte *file* where a run directory belonged and making every later write fail
+with an opaque `MkdirAll` error) and an invalid Windows filename character (a model copied the
+literal `2-<framework>-analysis.md` placeholder from its own skill docs and retried it verbatim).
+Not-found errors now name the file's real location, and treat an unsubstituted `<…>` placeholder as a
+glob — one such hint replaced 40 wasted `read_file` calls and a stalled phase with 4 calls and a
+completed phase. The materialized built-in skill tree is refused to all six write-capable file tools
+after a model overwrote `recon.py` with the command line it meant to run, and the drive
+re-materializes it at every phase boundary to cover the shell tool.
+
+*One pre-existing correctness bug, unrelated to model size.* `read_file` reported a **missing** file
+as `"is empty (0 bytes)"` — `looksBinary` returns size 0 for anything it cannot open, and the
+zero-size branch fired before `os.Open` was reached. Any caller was being told a nonexistent file
+exists and is blank.
+
+*What is not closed.* The verify-clean conformance run itself — see P38.1 and the new P39.17.
+
+**P62.4 — the compaction trigger was measuring the wrong prompt (CLOSED 2026-08-09).**
+
+The defect had two halves and only the second one needed a learning algorithm.
+
+*The structural half.* `tokenest.Messages` prices `System` + `Messages`. A request also carries
+`Request.Tools`, set from the registry on every native-tool-calling turn, and a backend counts those
+schemas in `prompt_eval_count` exactly like transcript text. Nothing ever added them. With 50+
+builtin tools that is thousands of tokens present in every request and invisible to the one check
+whose job is to compact *before* a local server silently drops the oldest turns. The tool-shim path
+(P53.6) never had this hole — under the shim the schemas are rendered into the system prompt, so the
+estimate saw them, and someone had already measured `toolshim.Prompt` separately on top. The native
+path attached the same information to a *different field*, where nothing about the estimate looked
+wrong. New `tokenest.Tools`, and `compactionGuard.requestOverhead` now covers whichever path is live.
+
+*The residual half.* `tokenest.Calibrator` learns a multiplicative correction from the counts the
+provider reports every turn. The correction is `(raw + overhead) * scale` — factoring the known
+additive part out first keeps `scale` near 1.0 and about the *heuristic's* accuracy, instead of
+folding a fixed cost into a multiplier that would over-correct further the longer a conversation ran.
+Three deliberate asymmetries, all pinned by tests: the scale never falls below 1.0 (over-estimating
+costs an early compaction; under-estimating costs a silent truncation, and only one of those is
+recoverable), it rises faster than it falls, and it **discards window-saturated samples** — a
+truncated prompt reports the clamp, which *understates* the true ratio, so learning from it would
+shrink the correction exactly on the turns where the undercount is doing damage.
+
+*The seam that was easy to miss.* The engine and the Compactor run **two** gates over the same
+messages. A correction applied to only one of them re-creates P41.1 in a new form: the engine calls
+`Compact()` believing the conversation is over budget, the summarizer prices the same messages
+uncorrected and declines, and the engine reads `changed=false` as "nothing left to compact" — which
+is the exact symptom P62.4 was filed about. Hence `engine.CalibratedCompactor`, and a test that
+drives a real `compaction.Summarizer` through the band where the two gates disagree.
+
+*Live result (qwen3:14b, 24,576-token window).* The failure P62.4 recorded — the prompt pinned at
+~23,7xx for five straight turns while Ollama context-shifted at ~23.7s/turn, with **zero notices of
+any kind** at 96.7% of the window — is gone. No turn in either arm now exceeds 18,654 tokens,
+compaction fires and announces itself, and the notices' quoted percentages match the provider's real
+counts (a turn reported at "~62% full" measured 14,751/24,576 = 60%).
+
+**P62.2 — the gate is kept, and the first measurement was an instrument artifact (CLOSED 2026-08-09).**
+
+P62.2 measured `PreservePrefixCache` at 3m19s against 1m32s and recommended reverting it. That
+recommendation was followed. Re-running the same fixture after P62.4 landed inverts the result, twice:
+
+| | gate **on** | gate **off** |
+|---|---|---|
+| before P62.4 | 3m19s / 128,005ms prefill | 1m32s / 64,958ms |
+| after P62.4, run 1 | **1m27s / 54,286ms** | 2m7s / 98,332ms |
+| after P62.4, run 2 | **1m16s / 54,288ms** | 2m7s / 98,630ms |
+
+Neither reading was misrecorded. The first was taken on a system whose compaction trigger fired 20-33%
+too late, which put **both arms** inside the regime where Ollama context-shifts — and there the prefix
+cache is already gone, so the gate has nothing left to protect and its deferral is pure cost. Correct
+the estimate and the operating point moves out of that regime, at which point the per-turn trace shows
+the gate doing exactly what it was built for: past the trigger, gate-off prunes on *every* turn for a
+yield too small to drop back under it (message counts unchanged — 11→11, 13→13, 15→15) and pays a full
+~9s prefill each time, while gate-on stays append-only at ~2.5s and takes that hit three times.
+
+**The durable lesson is about method, not about caching: a measurement of an optimization is only as
+good as the instrument the rest of the system was running on.** P62.2's arithmetic was never checked
+against the possibility that the trigger it depended on was wrong, and the item's own "n=1, re-run
+before ripping code out" caution did not help — a second run would have reproduced the same wrong
+answer, because the flaw was systematic rather than noisy.
+
+Two fixes travelled with it. `internal/cli/chat.go` derived `PreservePrefixCache` from
+`config.LocalBackend` directly and so ignored `compaction.preserve_prefix_cache` entirely: the escape
+hatch the daemon honoured did not exist on the CLI path, which is the path phased drives run on and
+the one the gate was originally measured against. And **the live tier was silently cacheable** — a
+"second run" of the A/B returned byte-identical wall-clock and prefill totals for both arms, which
+reads as perfect reproducibility and was Go replaying the first run's verdict. Go's test cache keys on
+the binary, arguments and environment, none of which change when the thing under test is a model
+server. All four documented live commands in CLAUDE.md now carry `-count=1`.
+
+**P62.5 — the overflow-escalation ladder, driven end to end (CLOSED 2026-08-09).**
+
+P62.3 shipped `OverflowEscalationDirective` + `maxPhaseOverflowResets` with no live evidence they ever
+fire, and its unit tests covered each part in isolation: the directive escalates, `freshPhaseConv`
+carries one, the budget constant is bounded, the stop notice reads correctly. What none of them
+covered is that **reset N actually carries rung N** — and no test had ever called `drive.Run` at all.
+A loop that passed `""` on every reset, or froze at rung 1, would have kept every one of those tests
+green, and passing `""` on reset is precisely the bug P62.3 was filed to fix.
+
+`TestOverflowLadderClimbsThenStops` drives the real loop with an adapter that overflows and records
+what the model is asked on each attempt, then asserts the **sequence**: one initial attempt with no
+directive, rungs 1-3 in order each still naming the PENDING file, and a bounded stop attributed to
+phase size rather than `--max-turns`. Mutation-checked — reverting the directive to `""`, freezing it
+at rung 1, and unbinding the budget each fail it.
+
+That test fakes exactly one link: it hands the drive an error it has *declared* to be an overflow.
+`TestLiveWorkflowForcedContextOverflow` was written to cover that link against a real model — and it
+is **scaffolding that has not yet fired**, recorded here as such rather than as a result. Attempted
+against qwen3:14b at an 8,192-token window (sized from the measured 7,119-token base prompt, since
+anything smaller truncates the *prompt* and fails for an unrelated reason), the model did not answer
+with one oversized tool call. It answered in text, hit max_tokens, and took the "continue from where
+you left off" path, regrowing the context and repeating toward `maxIterations` — a real path, but not
+this one, and slow enough that the attempt was abandoned after ~30 minutes with no verdict.
+
+The honest state, therefore: the ladder's *mechanism* is validated deterministically and thoroughly;
+its *classification link* — that a real Ollama truncation is recognised as an overflow rather than as
+a malformed call — remains covered only by unit tests over recorded server text. Forcing a tool call
+structurally (a tool whose schema demands a large argument, rather than a prompt asking for a large
+file) is the obvious next attempt, and is noted in the fixture itself so the next person does not
+re-derive the failure.
+
 **Last updated:** 2026-08-08 — **P63.9 CLOSED: the fourth and last concern, guard retries, extracted
 from `Engine.Run`**, which finishes a four-pass decomposition that took the function from 725 to 497
 lines. Before it, the third concern (compaction) was extracted — the pass that corrects the item's own

@@ -359,6 +359,8 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		Compactor:                s.compactor,
 		Hooks:                    engineHooks,
 		Cost:                     tracker,
+		Temperature:              s.cfg.Provider.Temperature,
+		Seed:                     s.cfg.Provider.Seed,
 		BudgetUSD:                s.cfg.Cost.BudgetUSD,
 		MaxTokensPerRun:          s.cfg.Cost.MaxTokensPerRun,
 		MaxGeneratedTokensPerRun: s.cfg.Cost.MaxGeneratedTokensPerRun,

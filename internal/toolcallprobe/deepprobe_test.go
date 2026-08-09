@@ -3,6 +3,7 @@ package toolcallprobe
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/provider"
@@ -144,5 +145,67 @@ func TestRunDeepFill_TimedOut(t *testing.T) {
 	}
 	if res.FabricatedCompletion || res.ClobberedMarkers {
 		t.Errorf("expected only TimedOut set, got %+v", res)
+	}
+}
+
+// The probe must offer the mechanism the phased drive actually uses. Offering
+// only the exact-match edit_fill under-reported fitness: qwen3:14b aborts that
+// probe on "old_string occurs 3 times" and then fills a complete threat-model
+// suite through fill_marker without one failure.
+func TestMarkerFillToolTargetsOneMarker(t *testing.T) {
+	fx := newFillFixture()
+	mf := &markerFillTool{fx: fx}
+	ctx := context.Background()
+
+	res, err := mf.Execute(ctx, json.RawMessage(`{}`))
+	if err != nil || res.IsError {
+		t.Fatalf("listing failed: %v %q", err, res.Content)
+	}
+	if !strings.Contains(res.Content, "3 marker(s) remain") {
+		t.Errorf("listing = %q, want 3 remaining", res.Content)
+	}
+
+	// Filling the middle marker leaves the others intact.
+	res, err = mf.Execute(ctx, json.RawMessage(`{"index":2,"content":"Beta body."}`))
+	if err != nil || res.IsError {
+		t.Fatalf("fill failed: %v %q", err, res.Content)
+	}
+	fx.mu.Lock()
+	got := fx.content
+	fx.mu.Unlock()
+	if !strings.Contains(got, "Beta body.") {
+		t.Errorf("content not filled:\n%s", got)
+	}
+	if n := strings.Count(got, deepFillMarker); n != 2 {
+		t.Errorf("expected 2 markers left, got %d:\n%s", n, got)
+	}
+	if !strings.Contains(got, "## Section Alpha\n"+deepFillMarker) {
+		t.Errorf("Alpha's marker was disturbed:\n%s", got)
+	}
+
+	// An out-of-range index reports the real count instead of failing blankly.
+	res, _ = mf.Execute(ctx, json.RawMessage(`{"index":9,"content":"x"}`))
+	if !res.IsError || !strings.Contains(res.Content, "2 marker(s) remain") {
+		t.Errorf("out-of-range error should name the real count, got %q", res.Content)
+	}
+
+	// Filling every marker reports completion, which is the probe's done signal.
+	_, _ = mf.Execute(ctx, json.RawMessage(`{"index":1,"content":"Alpha body."}`))
+	res, _ = mf.Execute(ctx, json.RawMessage(`{"index":1,"content":"Gamma body."}`))
+	if !strings.Contains(res.Content, "no markers remain") {
+		t.Errorf("final fill = %q, want a no-markers-remain signal", res.Content)
+	}
+}
+
+// The probe's prompts must steer to fill_marker — the mechanism the drive
+// uses — while edit_fill stays registered so the P38.7 clobber shape remains
+// reachable and still reported.
+func TestDeepProbePromptsSteerToFillMarker(t *testing.T) {
+	all := deepFillSystem + deepFillPrompt + deepFillContinuePrompt
+	if !strings.Contains(all, "fill_marker") {
+		t.Error("probe prompts must name fill_marker")
+	}
+	if strings.Contains(all, "edit_fill") {
+		t.Error("probe prompts should not steer to edit_fill")
 	}
 }

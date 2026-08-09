@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -602,6 +603,39 @@ func TestSSRFBlocksPrivateIPs(t *testing.T) {
 		parsed := net.ParseIP(ip)
 		if isPrivateIP(parsed) {
 			t.Errorf("isPrivateIP(%s) = true, want false", ip)
+		}
+	}
+}
+
+// A template placeholder that reached a real path must be refused with a
+// message naming the problem. Observed live: a model wrote the literal
+// `2-<framework>-analysis.md` from its skill's documentation and retried the
+// identical call, because Windows' own error ("The filename, directory name,
+// or volume label syntax is incorrect") names neither the character nor what
+// to do about it.
+func TestWriteRejectsInvalidWindowsFilename(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only filename rules")
+	}
+	root := t.TempDir()
+	w := &writeTool{root: root}
+	res, err := w.Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "2-<framework>-analysis.md", "content": "x",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected a refusal, got %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "placeholder") {
+		t.Errorf("error should point at the placeholder cause, got %q", res.Content)
+	}
+	// An ordinary name, and an absolute path whose drive colon is legitimate,
+	// must still be accepted.
+	for _, p := range []string{"2-stride-analysis.md", filepath.Join(root, "ok.md")} {
+		if res, err := w.Execute(context.Background(), mustJSON(t, map[string]any{"path": p, "content": "x"})); err != nil || res.IsError {
+			t.Errorf("write to %q refused (err=%v res=%q)", p, err, res.Content)
 		}
 	}
 }

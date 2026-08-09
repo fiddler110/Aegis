@@ -583,4 +583,10 @@ func VerifyFixPrompt(failures string) string {
 // truncate, so the phase-6 loop needs the same discipline the content phases
 // carry. Pairs with the P47.7 overflow-reset: this reduces how often the
 // overflow fires, P47.7 recovers when it still does.
-const phase6IncrementalEditRule = "Make each fix as a small, targeted `edit_file` — one section or one row per edit; never regenerate a whole file in one call and never `write_file` a suite file (a monolithic write is slow and truncates into a malformed tool call)."
+// phase6IncrementalEditRule is appended to every fill/fix prompt. It names
+// fill_marker first on purpose: filling a scaffolded placeholder needs no
+// exact-text match, and reproducing old_string byte for byte is the operation
+// small local models fail at most reliably (P38.1 re-test, 2026-08-09 — six
+// consecutive "old_string not found" rounds from a model that scored 100% on
+// plain tool-calling).
+const phase6IncrementalEditRule = "To fill a `<!-- PENDING -->` placeholder use `fill_marker` (select it by `index` or `key`; call with only `path` first to list them). To rewrite or expand a section that already has content, use `edit_section` (select it by `heading`; call with only `path` first to list them); to add a section the file does not have yet, use `edit_section` with `mode:\"new\"`. Neither needs an exact-text match. Use `edit_file` only for a surgical change to a single line or table row; never regenerate a whole file in one call and never `write_file` a suite file (a monolithic write is slow and truncates into a malformed tool call)."

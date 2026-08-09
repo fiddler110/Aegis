@@ -145,6 +145,8 @@ func Register(reg *tool.Registry, opts Options) error {
 		&readTool{root: root, tracker: ft},
 		&writeTool{root: root, tracker: ft},
 		&editTool{root: root, tracker: ft},
+		&fillMarkerTool{root: root, tracker: ft},
+		&editSectionTool{root: root, tracker: ft},
 		&multieditTool{root: root, tracker: ft},
 		&lsTool{root: root},
 		&globTool{root: root, cmds: opts.Commands},

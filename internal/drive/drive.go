@@ -42,6 +42,16 @@ type Phase struct {
 	globs    []string // run-dir-relative file globs this phase must clear of PENDING
 	setup    bool     // true only for the first phase: the run dir does not exist when it starts
 	promptFn func(p PhaseParams) string
+	// tools narrows the schemas offered to the model for this phase's turns.
+	// Empty means "offer everything", which is what every phase did before
+	// P39.14 and what a large model needs no help with. A small local model
+	// does: offered 50+ schemas it picks a plausible-sounding wrong one, and
+	// no amount of prompt text reliably stops it (the shell tool's description
+	// already spells out that Unix commands do not work, and a 2.6B ran
+	// `ls -la` anyway). Removing the schema is the only instruction it cannot
+	// ignore. Names must match the registry's; an unknown name simply never
+	// matches and is therefore inert.
+	tools []string
 }
 
 // PhaseParams carries everything a per-phase prompt needs to orient a fresh
@@ -70,12 +80,40 @@ const threatModelSkill = "threat-modeling"
 // analysis file is `2-<framework>-analysis.md`, matched by glob because the
 // framework short-name is the model's choice at setup, not known here.
 var ThreatModelPhases = []Phase{
-	{name: "architecture", setup: true, globs: []string{"0.1-architecture.md"}, promptFn: phasePromptArchitecture},
-	{name: "data-flow-diagram", globs: []string{"1.1-model.mmd", "1-model.md"}, promptFn: phasePromptDFD},
-	{name: "framework-analysis", globs: []string{"2-*-analysis.md"}, promptFn: phasePromptAnalysis},
-	{name: "findings", globs: []string{"3-findings.md"}, promptFn: phasePromptFindings},
-	{name: "assessment", globs: []string{"0-assessment.md", "inventory.yaml"}, promptFn: phasePromptAssessment},
+	{name: "architecture", setup: true, globs: []string{"0.1-architecture.md"}, promptFn: phasePromptArchitecture, tools: setupPhaseTools},
+	{name: "data-flow-diagram", globs: []string{"1.1-model.mmd", "1-model.md"}, promptFn: phasePromptDFD, tools: dfdPhaseTools},
+	{name: "framework-analysis", globs: []string{"2-*-analysis.md"}, promptFn: phasePromptAnalysis, tools: fillPhaseTools},
+	{name: "findings", globs: []string{"3-findings.md"}, promptFn: phasePromptFindings, tools: fillPhaseTools},
+	{name: "assessment", globs: []string{"0-assessment.md", "inventory.yaml"}, promptFn: phasePromptAssessment, tools: assessmentPhaseTools},
 }
+
+// setupPhaseTools is the tool surface of the setup phase: it runs recon.py and
+// scaffold.py (shell), reads what they produce, and writes the first file.
+// fillPhaseTools drops shell entirely — once the suite is scaffolded, every
+// remaining phase is "read the evidence, fill the markers", and a shell call
+// during a fill phase has been a detour every time it appeared.
+var (
+	setupPhaseTools = []string{"shell", "read_file", "write_file", "edit_file", "edit_section", "fill_marker", "glob", "grep", "ls"}
+	// Fill phases get no write_file either. Their files already exist — the
+	// setup phase scaffolded them — so a whole-file write can only overwrite
+	// real content with a fresh set of empty markers. The prompt has told the
+	// model "never write_file a suite file" since P39.6 and a 14B model did it
+	// anyway, reconstructing 2-<framework>-analysis.md from the skill's
+	// documentation with the placeholder left unsubstituted (2026-08-09).
+	// Removing the tool is the version of that instruction that holds.
+	fillPhaseTools = []string{"read_file", "edit_file", "edit_section", "fill_marker", "glob", "grep", "ls"}
+	// The DFD phase writes a .mmd diagram; the assessment phase writes
+	// inventory.yaml. Each gets the one extra tool its output format needs
+	// rather than widening the shared fill set.
+	dfdPhaseTools = append(append([]string{}, fillPhaseTools...), "render_diagram")
+	// The assessment phase keeps shell, unlike the other fill phases: its
+	// prompt instructs the model to generate inventory.yaml deterministically
+	// by running the bundled inventory.py, and that sidecar's PENDING marker is
+	// part of the phase's own completion condition. Without shell the phase can
+	// fill 0-assessment.md perfectly and still never complete — which is
+	// exactly what happened when this set was first narrowed (2026-08-09).
+	assessmentPhaseTools = append(append([]string{}, fillPhaseTools...), "yaml_validate", "shell")
+)
 
 // Name returns the phase's log/notice label, for hosts that render progress.
 func (ph Phase) Name() string { return ph.name }
@@ -287,6 +325,13 @@ type State struct {
 	// Progress carries the live per-phase progress the P50.4 heartbeat ticker
 	// reads and each turn updates. Nil disables the heartbeat.
 	Progress *Progress
+	// ScopeTools narrows the tool schemas offered to the model for one phase,
+	// returning a function that restores the previous exposure. Wire it to
+	// tool.Registry.ScopeExposed. Nil disables per-phase narrowing entirely,
+	// which is the pre-P39.14 behaviour and what a host that shares one
+	// registry across concurrent sessions must keep: the narrowing is
+	// registry-wide, so it is only safe where the drive owns the registry.
+	ScopeTools func(allow []string) (restore func())
 	// IterToolCalls and IterMutations are the caller's per-turn counters: the
 	// drive zeroes them before each engine.Run and reads them after to apply
 	// the P39.7 no-progress guard. Pointers because the caller's own event
@@ -330,10 +375,19 @@ func Run(ctx context.Context, st *State, phases []Phase) error {
 	stopHeartbeat := st.startHeartbeat() // P50.4: periodic sign-of-life during long turns
 	defer stopHeartbeat()
 	totalTurns := 0
+	// One restore closure carried across iterations: each phase undoes the
+	// previous phase's narrowing *before* taking its own snapshot, or a phase
+	// would capture the narrowed set as its baseline and restore to that. The
+	// deferred call covers the drive's many early returns.
+	restoreTools := func() {}
+	defer func() { restoreTools() }()
+
 	for pi := range phases {
 		ph := phases[pi]
 		runDir := st.runDir()
 		st.repairSkillAssets()
+		restoreTools()
+		restoreTools = st.scopeTools(ph)
 		if ph.complete(runDir) {
 			st.Logger.Info("phased drive: phase already complete, skipping", "phase", ph.name)
 			fmt.Fprintf(st.ErrOut, "\n[notice: phase %d/%d (%s) already complete on disk — skipping]\n", pi+1, len(phases), ph.label())
@@ -769,6 +823,21 @@ func runPhasedVerifyAndQuality(ctx context.Context, st *State) error {
 	}
 }
 
+// scopeTools narrows the model's tool surface to what this phase needs,
+// returning the restore. A nil hook or an empty allowlist yields a no-op, so
+// callers and phases that don't opt in behave exactly as before.
+func (st *State) scopeTools(ph Phase) func() {
+	if st.ScopeTools == nil || len(ph.tools) == 0 {
+		return func() {}
+	}
+	restore := st.ScopeTools(ph.tools)
+	if restore == nil {
+		return func() {}
+	}
+	st.Logger.Info("phased drive: narrowed tool surface for phase", "phase", ph.name, "tools", ph.tools)
+	return restore
+}
+
 // repairSkillAssets restores any materialized built-in skill file under
 // <cwd>/.aegis/builtin-skills that no longer matches the copy compiled into
 // this binary, at every phase boundary.
@@ -1022,6 +1091,15 @@ type contentSubstanceCheck struct {
 var contentSubstanceChecks = []contentSubstanceCheck{
 	{check: "finding-bodies-nonempty", phase: "findings"},
 	{check: "coverage-matches-related-threats", phase: "findings"},
+	// component-name-consistency is authoring, not patching: when the analysis
+	// file omits components the architecture and DFD both name, closing it means
+	// writing a full STRIDE section per missing component. The bounded
+	// three-round verify-fix loop cannot do that — measured on qwen3:14b
+	// (2026-08-09), eleven components stayed missing through all three rounds
+	// and the drive stopped with an unverified suite. It routes by phase rather
+	// than perFile because verify.py's evidence for this check names components,
+	// not `file:line`, so there is no file for the per-file router to match.
+	{check: "component-name-consistency", phase: "framework-analysis"},
 	{check: "section-bodies-nonempty", perFile: true},
 	{check: "evidence-cells-cited", perFile: true},
 	{check: "no-placeholder-cells", perFile: true},
@@ -1287,6 +1365,12 @@ func (st *State) runReopenedContentPhase(ctx context.Context, ph Phase) error {
 	st.Logger.Info("phased drive: re-opening content phase for a content-substance failure (P47.9)", "phase", ph.name)
 	fmt.Fprintf(st.ErrOut, "\n[notice: the %s file failed a content-substance check the bounded phase-6 fix loop can't author in one pass; re-opening the %s phase to fill it (P47.9)]\n", ph.label(), ph.label())
 
+	// The re-entry is a phase turn and must get the phase's tool surface. It
+	// was left out when per-phase narrowing landed, so a re-opened phase ran
+	// with every tool exposed — including the write_file the narrowing exists
+	// to withhold from a fill phase.
+	defer st.scopeTools(ph)()
+
 	conv := st.hollowReentryConv(ph, runDir, failures, "")
 	turns := 0
 	overflowResets := 0
@@ -1408,7 +1492,7 @@ func hollowBodyReentryPrompt(ph Phase, runDir, skillDir, failures string) string
 	if evidence == "" {
 		evidence = failures
 	}
-	return fmt.Sprintf("You are resuming the %s phase of a threat model in `%s`. This is a fresh context — read the phase's file(s) there first, and the skill's rules in `%s` if you need them. The suite's section markers are gone, but the mechanical verifier found content problems the earlier fill left behind — section headings with no prose beneath them, table cells holding placeholders instead of evidence, and/or coverage rows filed under the wrong finding:\n\n%s\n\nFix each one with real, evidence-grounded content using `edit_file` — one section or one row per edit; never regenerate the whole file in one call and never `write_file` a suite file (a monolithic write is slow and truncates into a malformed tool call). Spend each turn resolving the next flagged item and nothing else — do not recompute STRIDE/threat/coverage counts by hand to double-check your own work; the deterministic verifier re-runs automatically. Keep going until every problem listed above is resolved. This is a non-interactive run: do not stop to ask whether to proceed, and edit only the file(s) this phase owns. %s",
+	return fmt.Sprintf("You are resuming the %s phase of a threat model in `%s`. This is a fresh context — read the phase's file(s) there first, and the skill's rules in `%s` if you need them. The suite's section markers are gone, but the mechanical verifier found content problems the earlier fill left behind — section headings with no prose beneath them, table cells holding placeholders instead of evidence, and/or coverage rows filed under the wrong finding:\n\n%s\n\nFix each one with real, evidence-grounded content. "+hollowReentryEditGuardrail+" Spend each turn resolving the next flagged item and nothing else — do not recompute STRIDE/threat/coverage counts by hand to double-check your own work; the deterministic verifier re-runs automatically. Keep going until every problem listed above is resolved. This is a non-interactive run: do not stop to ask whether to proceed, and edit only the file(s) this phase owns. %s",
 		ph.label(), filepath.ToSlash(runDir), skillAsset(skillDir, "SKILL.md"), evidence, terseOutputInstruction)
 }
 
@@ -1450,7 +1534,24 @@ const noSelfVerifyInstruction = "Do not re-read or re-audit files whose `<!-- PE
 // (findings, assessment) and the shared in-phase continuation prompt (so every
 // content phase's continuation turns carry it, including architecture/DFD); the
 // analysis seed carries its own inline copy.
-const monolithicWriteGuardrail = "Author the file incrementally: one section (or one table row) per `edit_file` call. Never regenerate the whole file in one call and never `write_file` a suite file — on a small context window a monolithic write is slow and truncates mid-tool-call into a malformed edit (`invalid tool call arguments … unexpected end of JSON input`) that aborts the turn."
+// monolithicWriteGuardrail is carried by the hand-tuned phase prompts. It names
+// the two handle-based editors before edit_file on purpose: both let the model
+// name a target and supply only new text, while edit_file asks it to reproduce
+// existing bytes exactly. That reproduction is what small local models fail at —
+// a re-opened assessment phase spent twelve consecutive edit_file calls failing
+// ("old_string not found" ×10) and made no progress at all (qwen3:14b,
+// 2026-08-09). Keep this in sync with phase6IncrementalEditRule, which says the
+// same thing for the phase-6 loop.
+// hollowReentryEditGuardrail is the marker-free counterpart of
+// monolithicWriteGuardrail, for the P47.9 re-entry. A hollow resume has no
+// `<!-- PENDING -->` markers left, so it must not mention them or fill_marker —
+// naming a tool with nothing to target invites the model to go hunting for
+// markers that do not exist. It still leads with edit_section for the same
+// reason: the re-entry rewrites prose that already exists, which is exactly the
+// case edit_file's exact-text match fails at on a small local model.
+const hollowReentryEditGuardrail = "Use `edit_section` to rewrite or expand a section (select it by `heading`, and call it with only `path` first to list them), and `edit_section` with `mode:\"new\"` to add a section the file does not have yet — it needs no exact-text match. Use `edit_file` only for a surgical change to a single line or table row — one section or one row per edit. Never regenerate the whole file in one call and never `write_file` a suite file (a monolithic write is slow and truncates into a malformed tool call)."
+
+const monolithicWriteGuardrail = "Author the file incrementally, one section at a time. Use `fill_marker` to fill a `<!-- PENDING -->` placeholder (select it by `index` or `key`) and `edit_section` to rewrite or expand a section that already has content (select it by `heading`), or to create a section that does not exist yet (`mode:\"new\"` with the new `heading`); call either with only `path` first to list what it can target. Neither needs an exact-text match, so prefer them over `edit_file` — use `edit_file` only for a surgical change to a single line or table row. Never regenerate the whole file in one call and never `write_file` a suite file — on a small context window a monolithic write is slow and truncates mid-tool-call into a malformed edit (`invalid tool call arguments … unexpected end of JSON input`) that aborts the turn."
 
 // terseOutputInstruction suppresses narration prose — the single largest
 // non-artifact decode cost measured on an unattended drive. On the instrumented

@@ -830,12 +830,14 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			ContextWindow: win,
 			// A local model server caches the KV of each request's longest
 			// common prefix, so rewriting the middle of the conversation costs
-			// a full prefill recompute instead of nothing (P61.x) — make the
+			// a full prefill recompute instead of nothing — make the
 			// deterministic prune pre-pass headroom-gated rather than
 			// unconditional there. Same local/loopback test admission control
-			// uses; cloud providers are unaffected.
-			// compaction.preserve_prefix_cache overrides the detection, so the
-			// gate can be A/B'd and reverted without a rebuild (P62.2).
+			// uses; cloud providers are unaffected. Measured worth ~1.7x on wall
+			// clock once P62.4 fixed the estimate the trigger runs on; see
+			// config.CompactionConfig for why the first measurement said the
+			// opposite. compaction.preserve_prefix_cache overrides the
+			// detection, so the gate stays A/B-able without a rebuild.
 			PreservePrefixCache: cfg.Compaction.PreservePrefixCacheOr(
 				config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL)),
 		}

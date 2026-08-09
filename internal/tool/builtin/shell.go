@@ -52,14 +52,27 @@ func (t *shellTool) CapabilityFor(input json.RawMessage) tool.Capability {
 	}
 	return tool.CapExecute
 }
+
+// usesPowerShell reports whether this tool's commands actually reach
+// PowerShell. A Windows host normally means they do — but a container backend
+// runs them inside a Linux container, where /bin/sh and the Unix commands are
+// correct. The distinction was cosmetic while it only shaped the tool's
+// description; it stops being cosmetic once a POSIX command is refused.
+func (t *shellTool) usesPowerShell() bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	return t.sb == nil || !strings.HasPrefix(t.sb.Name(), "container:")
+}
+
 func (t *shellTool) Description() string {
-	if runtime.GOOS == "windows" {
+	if t.usesPowerShell() {
 		return "Run a PowerShell command in the workspace directory and return combined stdout/stderr. Commands execute via: powershell -NoProfile -NonInteractive -Command <command>. Use PowerShell syntax — Unix commands (ls, cat, grep, find, rm, chmod, etc.) are not available; use Get-ChildItem, Get-Content, Select-String, Remove-Item, etc."
 	}
 	return "Run a shell command in the workspace directory and return combined stdout/stderr. Commands execute via /bin/sh -c. Bounded by a configurable timeout."
 }
 func (t *shellTool) InputSchema() json.RawMessage {
-	if runtime.GOOS == "windows" {
+	if t.usesPowerShell() {
 		return schema(`{"type":"object","properties":{"command":{"type":"string","description":"PowerShell command to run. Use PowerShell syntax (Get-ChildItem, Get-Content, Select-String, Remove-Item, etc.) — Unix commands do not work in PowerShell."},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
 	}
 	return schema(`{"type":"object","properties":{"command":{"type":"string","description":"the shell command to run via /bin/sh -c"},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
@@ -80,6 +93,11 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	}
 	if strings.TrimSpace(args.Command) == "" {
 		return tool.Result{Content: "command is required", IsError: true}, nil
+	}
+	// Answer a POSIX-on-PowerShell mistake with the fix, before the shell
+	// answers it with a parse error only a PowerShell user could decode.
+	if hint := checkPosixOnWindows(args.Command, t.usesPowerShell()); hint != "" {
+		return tool.Result{Content: hint, IsError: true}, nil
 	}
 
 	const maxTimeoutSec = 600

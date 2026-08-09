@@ -23,15 +23,15 @@ const deepFillMarker = "<!-- PENDING -->"
 // small multi-section fill task, one marker at a time, rather than
 // describing or narrating it — mirroring the real threat-modeling skill's
 // stub-then-fill shape at a fraction of the size.
-const deepFillSystem = "You are a coding agent completing a document with several sections. Use the `edit_fill` tool to replace each PENDING marker with a short real sentence, one marker per call. Never claim the document is finished while any PENDING marker remains."
+const deepFillSystem = "You are a coding agent completing a document with several sections. Use the `fill_marker` tool to replace each PENDING marker with a short real sentence, one marker per call. Never claim the document is finished while any PENDING marker remains."
 
 const deepFillDocument = "## Section Alpha\n<!-- PENDING -->\n\n## Section Beta\n<!-- PENDING -->\n\n## Section Gamma\n<!-- PENDING -->\n"
 
-const deepFillPrompt = "The document below has 3 sections, each still marked `<!-- PENDING -->`. Fill each section's marker with a short real sentence relevant to its heading, one `edit_fill` call per section — never target more than one section's marker in a single call. Keep going until none remain.\n\n" + deepFillDocument
+const deepFillPrompt = "The document below has 3 sections, each still marked `<!-- PENDING -->`. Fill each section's marker with a short real sentence relevant to its heading, one `fill_marker` call per section (select the marker by its 1-based `index`; call `fill_marker` with no index to list them) — never target more than one section's marker in a single call. Keep going until none remain.\n\n" + deepFillDocument
 
 // deepFillContinuePrompt mirrors chat.go's continuePrompt (P38.2): a
 // non-interactive nudge naming the fact that work remains, not a new task.
-const deepFillContinuePrompt = "Continue — the document still has PENDING marker(s) remaining. Keep calling edit_fill, targeting one marker at a time, until none remain. This is a non-interactive check: do not stop to ask whether to proceed, and do not claim completion until every marker is gone."
+const deepFillContinuePrompt = "Continue — the document still has PENDING marker(s) remaining. Keep calling fill_marker, targeting one marker at a time, until none remain. This is a non-interactive check: do not stop to ask whether to proceed, and do not claim completion until every marker is gone."
 
 // deepFillMaxTurns bounds the whole probe (shape 3: non-convergence) — small
 // on purpose, this is a smoke-sized check, not a full skill run.
@@ -149,7 +149,20 @@ func (t *fillTool) Execute(_ context.Context, input json.RawMessage) (tool.Resul
 func RunDeepFill(ctx context.Context, adapter provider.Adapter, model string) (DeepResult, error) {
 	fx := newFillFixture()
 	reg := tool.NewRegistry()
+	// Both tools are registered, and the prompts name fill_marker. The probe
+	// must measure the path the drive actually takes: since P39.14 the phased
+	// drive fills through fill_marker, and a probe that only offered the
+	// exact-match edit_fill was failing models that complete real drives —
+	// qwen3:14b aborts the edit_fill probe on "old_string occurs 3 times" and
+	// then fills a whole threat-model suite through fill_marker without a single
+	// failure. edit_fill stays registered so the P38.7 clobber shape (blanket
+	// replace_all across identical markers) is still reachable and still
+	// reported; a model that reaches past the offered tool for it has told us
+	// something worth knowing.
 	if err := reg.Register(&fillTool{fx: fx}); err != nil {
+		return DeepResult{}, err
+	}
+	if err := reg.Register(&markerFillTool{fx: fx}); err != nil {
 		return DeepResult{}, err
 	}
 
@@ -222,4 +235,73 @@ func looksLikeCompletionClaim(text string) bool {
 		}
 	}
 	return false
+}
+
+// markerFillTool mirrors the real fill_marker tool (internal/tool/builtin/
+// fillmarker.go) against the probe's in-memory document: markers are selected
+// by 1-based index rather than by reproducing text, and a call with no index
+// lists what is available.
+//
+// It exists so the probe measures the mechanism the phased drive actually uses.
+// The exact-match edit_fill above reproduces the P38.7 footgun faithfully and
+// is still the right instrument for *that* shape, but it is no longer how a
+// drive fills a suite, so on its own it under-reports fitness.
+type markerFillTool struct{ fx *fillFixture }
+
+func (t *markerFillTool) Name() string { return "fill_marker" }
+func (t *markerFillTool) Description() string {
+	return "Replace one PENDING marker with real content, selected by its 1-based index. Call with no index to list the remaining markers. No exact-text match required."
+}
+func (t *markerFillTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"index":{"type":"integer","description":"1-based marker to fill; omit to list remaining markers"},"content":{"type":"string","description":"replacement text for the marker"}},"required":[]}`)
+}
+func (t *markerFillTool) Capability() tool.Capability { return tool.CapWrite }
+
+func (t *markerFillTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+	var args struct {
+		Index   *int    `json:"index"`
+		Content *string `json:"content"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return tool.Result{Content: "invalid arguments", IsError: true}, nil
+	}
+
+	t.fx.mu.Lock()
+	defer t.fx.mu.Unlock()
+
+	remaining := strings.Count(t.fx.content, deepFillMarker)
+	if args.Index == nil {
+		if remaining == 0 {
+			return tool.Result{Content: "no markers remain"}, nil
+		}
+		return tool.Result{Content: fmt.Sprintf("%d marker(s) remain, at index 1..%d", remaining, remaining)}, nil
+	}
+	if args.Content == nil {
+		return tool.Result{Content: "content is required when filling a marker", IsError: true}, nil
+	}
+	if remaining == 0 {
+		return tool.Result{Content: "no markers remain", IsError: true}, nil
+	}
+	i := *args.Index
+	if i < 1 || i > remaining {
+		return tool.Result{Content: fmt.Sprintf("index %d is out of range; %d marker(s) remain", i, remaining), IsError: true}, nil
+	}
+	// Replace the i-th occurrence, leaving the others alone.
+	pos := 0
+	for n := 0; n < i; n++ {
+		off := strings.Index(t.fx.content[pos:], deepFillMarker)
+		if off < 0 {
+			return tool.Result{Content: "marker not found", IsError: true}, nil
+		}
+		pos += off
+		if n < i-1 {
+			pos += len(deepFillMarker)
+		}
+	}
+	t.fx.content = t.fx.content[:pos] + *args.Content + t.fx.content[pos+len(deepFillMarker):]
+	left := strings.Count(t.fx.content, deepFillMarker)
+	if left == 0 {
+		return tool.Result{Content: "filled; no markers remain"}, nil
+	}
+	return tool.Result{Content: fmt.Sprintf("filled; %d marker(s) remain, indices have shifted", left)}, nil
 }

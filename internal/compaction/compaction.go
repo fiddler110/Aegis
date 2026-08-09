@@ -113,12 +113,15 @@ type Options struct {
 	// conversation is not free the way it is against a cloud API. When set, the
 	// deterministic pre-pass stops running unconditionally and only fires once
 	// the conversation is close enough to the window for the space it frees to
-	// be worth a prefill recompute (see shouldPrune). Off by default: for a
-	// per-token-billed cloud provider the pre-pass really is free and the
-	// existing unconditional behaviour is correct.
+	// be worth a prefill recompute (see shouldPrune).
 	//
-	// Callers set this from config.LocalBackend(provider, base URL). It is a
-	// plain bool rather than a config type on purpose — internal/compaction
+	// Callers set this from config.LocalBackend(provider, base URL), overridable
+	// via compaction.preserve_prefix_cache. Measured worth ~1.7x on wall clock —
+	// but only once P62.4 corrected the token estimate the compaction trigger
+	// runs on; measured against the uncorrected estimate it looked 2.2x worse.
+	// See shouldPrune for both numbers and why they differ.
+	//
+	// It is a plain bool rather than a config type on purpose — internal/compaction
 	// answers a question about the *transport's* cost model and has no other
 	// reason to know what a Config is.
 	PreservePrefixCache bool
@@ -259,6 +262,48 @@ func (s *Summarizer) shouldCompact(estimated int) bool {
 // landing at the same moment. That ordering matters — the same run did hit a
 // genuine context overflow later on, and the goal here is "prune when it buys
 // real headroom", not "stop pruning".
+//
+// # The measurement, which had to be taken twice
+//
+// Measured 2026-08-08 on a forced-compaction fixture
+// (TestLiveWorkflowCompactionPrefixCacheGate, qwen3:14b, 24,576-token window,
+// same workload both arms), the gate lost badly — 3m19s against 1m32s, with
+// every deferred turn costing ~23.7s. Both arms ran byte-identical to turn 10,
+// then gate-on sat at a prompt pinned near 23,758 paying a full reprocess every
+// turn.
+//
+// That reading was real and its conclusion was wrong, because the instrument was
+// broken. The engine's compaction trigger ran on an estimate that undercounted
+// the true prompt by 20-33% (P62.4: it never counted the tool schemas, which
+// ride every request and which the backend prices with the transcript). Firing
+// that late put *both* arms inside the window where Ollama context-shifts —
+// dropping the oldest tokens and reprocessing from scratch on every turn — and
+// in that regime the prefix cache is already gone, so the gate had nothing left
+// to protect and its deferral was pure cost.
+//
+// Re-measured after P62.4, same fixture and model, twice:
+//
+//	gate on:  1m16s / 1m27s wall, ~54,287ms prefill, 3 shrinking turns
+//	gate off: 2m7s  / 2m7s  wall, ~98,481ms prefill, 1 shrinking turn
+//
+// The gate wins ~1.7x on wall clock and ~1.8x on prefill, with no overflow in
+// either arm and no turn above 18,654 tokens. The per-turn trace shows the
+// mechanism directly: past the trigger, gate-off prunes on *every* turn for a
+// yield too small to drop back under it (message counts unchanged — 11->11,
+// 13->13, 15->15) and pays a ~9s full prefill each time, while gate-on stays
+// append-only at ~2.5s and takes that hit three times.
+//
+// Two things worth carrying forward. Deferring the prune is only cheap while the
+// conversation is genuinely below the window, which is exactly what a correct
+// estimate now guarantees — so this gate's value is *contingent* on P62.4 and
+// the two should not be reasoned about separately. And the thrash gate-off
+// exposes (compaction invoked every turn once past the trigger, pruning for
+// almost nothing) is a defect in its own right that this gate only rate-limits
+// by accident.
+//
+// One regime still unmeasured: above largeContextWindowThreshold the gate uses a
+// fixed 40k buffer instead of a ratio, so its deferral may end well short of
+// saturation. That needs a >200k-token window to test.
 //
 // A Summarizer with no known context window returns true (prune) even under
 // preservePrefixCache: with no window there is no headroom to measure, and

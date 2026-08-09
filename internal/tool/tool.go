@@ -177,6 +177,55 @@ func (r *Registry) SetExposed(name string, exposed bool) {
 	}
 }
 
+// ScopeExposed narrows the exposed set to allow (plus anything already hidden,
+// which stays hidden) and returns a function restoring the previous exposure.
+// An empty allow list is a no-op returning a no-op restore, so a caller with
+// nothing to narrow needs no special case.
+//
+// This is the enforcing counterpart to persona.Tools, which is advisory:
+// PersonaToolGate warns *after* a call, while the model still sees every
+// schema. Narrowing the schema array is what a small local model actually
+// responds to. Measured (P38.1 re-test, 2026-08-09): a 2.6B model offered 50+
+// tool schemas used 4 of them, and the one wrong choice — an unprompted
+// web_search — opened a phase and spent its context on the public web instead
+// of the repo. A tool that is not in the array cannot be chosen.
+//
+// Restore is idempotent and safe to defer.
+func (r *Registry) ScopeExposed(allow []string) (restore func()) {
+	if len(allow) == 0 {
+		return func() {}
+	}
+	keep := make(map[string]bool, len(allow))
+	for _, n := range allow {
+		keep[n] = true
+	}
+	r.mu.Lock()
+	prev := make(map[string]bool, len(r.exposed))
+	for name, was := range r.exposed {
+		prev[name] = was
+		// Only ever narrow: a tool already hidden stays hidden even if named.
+		if was && !keep[name] {
+			r.exposed[name] = false
+		}
+	}
+	r.schemaCache = nil
+	r.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			for name, was := range prev {
+				if _, still := r.tools[name]; still {
+					r.exposed[name] = was
+				}
+			}
+			r.schemaCache = nil
+		})
+	}
+}
+
 // RegisterDeferred adds a tool that is known to the harness but not exposed to
 // the model until loaded on demand (P4.6). Deferred tools appear only as a
 // name+description line in the system prompt; the tool_search meta-tool exposes

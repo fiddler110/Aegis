@@ -46,6 +46,7 @@ func newChatCmd() *cobra.Command {
 		skillName    string
 		maxTurns     int
 		renderFlag   string
+		skipFitCheck bool
 	)
 
 	cmd := &cobra.Command{
@@ -265,12 +266,14 @@ func newChatCmd() *cobra.Command {
 			compactor, ctxWin := driveCompaction(context.Background(), cfg, adapter, logger)
 
 			eng, err := engine.New(engine.Options{
-				Adapter:   adapter,
-				Tools:     reg,
-				Gate:      gate,
-				Compactor: compactor,
-				Cost:      tracker,
-				BudgetUSD: cfg.Cost.BudgetUSD,
+				Adapter:     adapter,
+				Tools:       reg,
+				Gate:        gate,
+				Compactor:   compactor,
+				Cost:        tracker,
+				Temperature: cfg.Provider.Temperature,
+				Seed:        cfg.Provider.Seed,
+				BudgetUSD:   cfg.Cost.BudgetUSD,
 				// P59.4: the generation budget rides the same path as the
 				// wall-clock one. MaxTokensPerRun is deliberately still not set
 				// here — this is the phased drive, whose whole design is a fresh
@@ -448,6 +451,9 @@ func newChatCmd() *cobra.Command {
 			// drive. Both branches set runErr and leave the tail logic below
 			// (the P38.6 floor check, cost trailer) unchanged.
 			if phases := drive.PlanFor(skillName, skillPhases); driveToCompletion && phases != nil && !drive.LinearForced() {
+				if err := preflightFillCheck(cmd.Context(), cfg, adapter, cmd.ErrOrStderr(), skipFitCheck); err != nil {
+					return err
+				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "\n[notice: driving %s in phased mode — one bounded fresh context per phase (%d content phases + verify), the in-harness form of P38.8]\n", skillName, len(phases))
 				logger.Info("chat: using phased skill drive (P38.8 in-harness)", "skill", skillName, "phases", len(phases))
 				// P47.5(b): let a phase escalate the serving window toward the
@@ -496,6 +502,11 @@ func newChatCmd() *cobra.Command {
 					RunDir:       drive.RunDirResolver(skillName, skillRunDir),
 					CheckBackend: checkBackend, Progress: &drive.Progress{},
 					IterToolCalls: &iterToolCalls, IterMutations: &iterMutations,
+					// Safe here specifically because the CLI drive owns this
+					// registry outright — narrowing is registry-wide, so a host
+					// sharing one registry across concurrent sessions must not
+					// wire this.
+					ScopeTools: reg.ScopeExposed,
 				}, phases)
 			} else {
 				noProgress := 0
@@ -670,6 +681,7 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().StringVar(&outputFormat, "output-format", "text", "output format: text, json (final result object), or stream-json (one event per line)")
 	cmd.Flags().StringVar(&skillName, "skill", "", "preload the named skill's full instructions into the prompt and drive the run to completion (auto-continue while `<!-- PENDING -->` markers remain under .aegis/) — for multi-phase skills like threat-modeling that a one-shot turn would leave half-finished")
 	cmd.Flags().IntVar(&maxTurns, "max-turns", 40, "with --skill, the maximum number of drive-to-completion turns before stopping with a resumable partial result")
+	cmd.Flags().BoolVar(&skipFitCheck, "skip-model-check", false, "with --skill, skip the pre-flight structured-fill probe that refuses to start a phased drive on a model which cannot reliably fill scaffolded documents")
 	cmd.Flags().StringVar(&renderFlag, "render", "auto", "markdown rendering of the text output format: auto (on when stdout is a terminal), on, or off (raw stream)")
 	return cmd
 }
@@ -720,7 +732,15 @@ func driveCompaction(ctx context.Context, cfg *config.Config, adapter provider.A
 		// pre-pass is gated on headroom rather than run unconditionally, since
 		// rewriting the middle of the conversation there costs a full prefill
 		// recompute. A phased drive is exactly the workload that measured it.
-		PreservePrefixCache: config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL),
+		//
+		// Resolved through PreservePrefixCacheOr rather than from
+		// config.LocalBackend directly, which is what this line used to do — and
+		// which meant compaction.preserve_prefix_cache was silently ignored on
+		// the CLI path. The escape hatch the daemon honoured did not exist on the
+		// path phased drives actually run on, i.e. the one the gate was measured
+		// against in the first place.
+		PreservePrefixCache: cfg.Compaction.PreservePrefixCacheOr(
+			config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL)),
 	}
 	// A local provider whose window is still unknown: skip auto-compaction
 	// rather than defaulting to the 120k cloud budget, which on a 4k-32k local

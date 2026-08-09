@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/checkpoint"
@@ -107,6 +108,20 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if err != nil {
 		return tool.Result{}, err
 	}
+	// Establish existence before anything infers from size. looksBinary reports
+	// (false, 0) for a file it cannot open, which the zero-size branch below
+	// then reported as "is empty (0 bytes)" — telling the model a missing file
+	// exists and is blank, which invites it to fill or overwrite something that
+	// was never there. A missing file must read as missing.
+	if st, statErr := os.Stat(abs); statErr != nil {
+		hint := ""
+		if notFound(statErr) {
+			hint = suggestPathHint(effectiveRoot(ctx, t.root), args.Path)
+		}
+		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v%s", args.Path, statErr, hint), IsError: true}, nil
+	} else if st.IsDir() {
+		return tool.Result{Content: fmt.Sprintf("%s is a directory, not a file — use ls or glob to list it", args.Path), IsError: true}, nil
+	}
 	binary, size := looksBinary(abs)
 	if binary {
 		return tool.Result{Content: fmt.Sprintf("%s appears to be a binary file (%d bytes); read_file returns UTF-8 text only. Use grep or a shell tool if you need to inspect it.", args.Path, size), IsError: true}, nil
@@ -121,7 +136,11 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	}
 	f, err := os.Open(abs)
 	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v", args.Path, err), IsError: true}, nil
+		hint := ""
+		if notFound(err) {
+			hint = suggestPathHint(effectiveRoot(ctx, t.root), args.Path)
+		}
+		return tool.Result{Content: fmt.Sprintf("cannot read %s: %v%s", args.Path, err, hint), IsError: true}, nil
 	}
 	defer f.Close()
 	start := 1
@@ -257,6 +276,9 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if strings.HasSuffix(args.Path, "/") || strings.HasSuffix(args.Path, `\`) {
 		return tool.Result{Content: fmt.Sprintf("%s is a directory path, not a file: write_file creates files (parent directories are created automatically) — give the full path including the file name", args.Path), IsError: true}, nil
 	}
+	if bad := invalidPathChar(args.Path); bad != "" {
+		return tool.Result{Content: fmt.Sprintf("%s cannot be a file name on this platform: it contains %s. If that came from a template placeholder like `2-<framework>-analysis.md`, substitute the real value first.", args.Path, bad), IsError: true}, nil
+	}
 	abs, err := resolveWrite(ctx, t.root, args.Path)
 	if err != nil {
 		return tool.Result{}, err
@@ -311,10 +333,16 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 // tool has no way to write back bytes it never read. Binary content is refused
 // for the same reason grep skips it: substring replacement over arbitrary bytes
 // is not a meaningful operation, and any write-back would mangle the file.
-func readTextForEdit(abs, display string) (string, string) {
+// root is used only to suggest a real location when display cannot be found —
+// pass "" to skip the suggestion.
+func readTextForEdit(abs, display, root string) (string, string) {
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", fmt.Sprintf("cannot read %s: %v", display, err)
+		hint := ""
+		if notFound(err) {
+			hint = suggestPathHint(root, display)
+		}
+		return "", fmt.Sprintf("cannot read %s: %v%s", display, err, hint)
 	}
 	if info.IsDir() {
 		return "", fmt.Sprintf("%s is a directory, not a file", display)
@@ -402,7 +430,7 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 			return tool.Result{Content: err.Error(), IsError: true}, nil
 		}
 	}
-	content, errMsg := readTextForEdit(abs, args.Path)
+	content, errMsg := readTextForEdit(abs, args.Path, effectiveRoot(ctx, t.root))
 	if errMsg != "" {
 		return tool.Result{Content: errMsg, IsError: true}, nil
 	}
@@ -419,4 +447,31 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		t.tracker.RecordAgentWrite(abs, content, updated)
 	}
 	return tool.Result{Content: fmt.Sprintf("edited %s (%d replacement(s))", args.Path, n)}, nil
+}
+
+// invalidPathChar returns a human description of the first character in p that
+// cannot appear in a file name on this platform, or "" when p is fine.
+//
+// Windows rejects < > : " | ? * outright, and the OS error for it names
+// neither the character nor the offending component ("The filename, directory
+// name, or volume label syntax is incorrect"). Observed live: a model copied
+// the literal placeholder from its own skill documentation and tried to write
+// `2-<framework>-analysis.md` instead of substituting `stride`, then retried
+// the identical call because nothing in the error told it what to change
+// (P38.1 re-test, 2026-08-09).
+//
+// The drive letter's colon is why only the path's base name is checked: an
+// absolute Windows path legitimately contains one.
+func invalidPathChar(p string) string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	base := filepath.Base(filepath.FromSlash(p))
+	for _, r := range base {
+		switch r {
+		case '<', '>', '"', '|', '?', '*', ':':
+			return fmt.Sprintf("%q, which Windows does not allow in a file name", r)
+		}
+	}
+	return ""
 }

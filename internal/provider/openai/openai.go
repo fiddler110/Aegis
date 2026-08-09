@@ -289,6 +289,7 @@ type wireRequest struct {
 	MaxTokens           int            `json:"max_tokens,omitempty"`
 	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
 	Temperature         *float64       `json:"temperature,omitempty"`
+	Seed                *int           `json:"seed,omitempty"` // best-effort determinism; ignored by backends that don't support it
 	Stream              bool           `json:"stream"`
 	StreamOptions       map[string]any `json:"stream_options,omitempty"`
 	Think               *bool          `json:"think,omitempty"`            // Ollama extended-thinking control
@@ -472,6 +473,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		Messages:        msgs,
 		Tools:           translateTools(req.Tools),
 		Temperature:     req.Temperature,
+		Seed:            req.Seed,
 		Stream:          true,
 		StreamOptions:   map[string]any{"include_usage": true},
 		Think:           a.think,

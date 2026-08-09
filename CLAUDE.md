@@ -193,12 +193,22 @@ AEGIS_EVAL_UPDATE=1 go test ./internal/eval/... -run TestScenario_ToolRoundTrip
 # Regenerate the security-scan regression golden file (same convention, P11.9)
 AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcrossRecordedOutputs
 
+# Every live tier below takes `-count=1`, and it is load-bearing rather than
+# habit. Go's test cache keys on the binary, the arguments and the environment —
+# none of which change when the thing under test is a model server's behaviour.
+# So a second invocation of an unchanged live test returns the *first* run's
+# verdict, instantly and marked `(cached)`. That is indistinguishable from a
+# genuine re-run that reproduced, which is exactly what one is usually reaching
+# for a re-run to establish: a P62.2 re-measurement "reproduced" byte-identical
+# wall-clock and prefill totals across both arms before the `(cached)` marker
+# gave it away.
+
 # Live-model eval tier: rubric-judged prompt/persona quality checks against a
 # real local model (not part of `go test ./...` — needs a reachable model
 # server). On-demand only — the CI workflow (.github/workflows/nightly-eval.yml)
 # is workflow_dispatch-only by decision, never scheduled. To run locally:
 ollama pull llama3.2
-go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v
+go test -tags live_eval -count=1 ./internal/eval/... -run TestLiveModelQuality -v
 
 # Live-probe tier: checks the tool-calling smoke probe (internal/toolcallprobe,
 # shared by `aegis doctor` and the daemon's P34.2 warning) against a real
@@ -210,7 +220,7 @@ go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v
 # tiers below. Override the default model/endpoint with
 # AEGIS_LIVE_PROBE_MODEL / AEGIS_LIVE_PROBE_URL.
 ollama pull qwen3:14b
-go test -tags live_probe ./internal/toolcallprobe/... -run TestLiveProbeReachesAVerdict -v
+go test -tags live_probe -count=1 ./internal/toolcallprobe/... -run TestLiveProbeReachesAVerdict -v
 
 # Live-workflow eval tier (P25.7): drives a real daemon over the same HTTP
 # API + SSE seam the TUI/web UI use — not a scripted adapter — against a
@@ -222,7 +232,7 @@ go test -tags live_probe ./internal/toolcallprobe/... -run TestLiveProbeReachesA
 # Needs a reachable Ollama server and python3/python on PATH. On-demand
 # only, same no-scheduled-CI-job policy as live_eval. To run locally:
 ollama pull qwen3.6:35b-a3b-deep   # or any tool-calling-capable local model
-go test -tags live_workflow ./internal/eval/... -run TestLiveWorkflow -v
+go test -tags live_workflow -count=1 ./internal/eval/... -run TestLiveWorkflow -v
 
 # Cross-harness control group (P60.4): the same task, environment and model,
 # run through Aegis AND a second CLI agent, so an Aegis failure can be
@@ -234,7 +244,7 @@ go test -tags live_workflow ./internal/eval/... -run TestLiveWorkflow -v
 # *outcome* is compared, while the SSE-shape assertions stay Aegis-only.
 # Point the other agent at the same model server.
 AEGIS_EVAL_BASELINE_HARNESS='claude -p {prompt}' \
-  go test -tags live_workflow ./internal/eval/... -run TestLiveWorkflowBaseline -v
+  go test -tags live_workflow -count=1 ./internal/eval/... -run TestLiveWorkflowBaseline -v
 ```
 
 ## Architecture

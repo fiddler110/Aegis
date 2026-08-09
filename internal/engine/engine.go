@@ -281,6 +281,7 @@ type Options struct {
 	Model               string
 	MaxTokens           int
 	Temperature         *float64
+	Seed                *int          // pins backend sampling RNG for reproducible runs; nil = backend default
 	MaxIterations       int           // safety cap on tool-call rounds; 0 -> default
 	LoopThreshold       int           // identical tool-call turns before aborting; 0 -> default, <0 disables
 	ContextWindowTokens int           // model context window size; >0 enables proactive per-turn compaction at 85% fill
@@ -366,6 +367,7 @@ type Engine struct {
 	model               string
 	maxTokens           int
 	temperature         *float64
+	seed                *int
 	maxIterations       int
 	loopThreshold       int
 	contextWindowTokens int
@@ -520,6 +522,7 @@ func New(opts Options) (*Engine, error) {
 		model:               opts.Model,
 		maxTokens:           maxTok,
 		temperature:         opts.Temperature,
+		seed:                opts.Seed,
 		maxIterations:       maxIter,
 		loopThreshold:       loopThreshold,
 		contextWindowTokens: opts.ContextWindowTokens,
@@ -1500,6 +1503,7 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		Messages:    conv.Messages,
 		MaxTokens:   e.maxTokens,
 		Temperature: e.temperature,
+		Seed:        e.seed,
 		// P59.8: non-empty only on a schema-guard corrective retry. Adapters
 		// that cannot constrain decoding ignore it, and the guard's own check
 		// still decides — so this never becomes a correctness dependency on a

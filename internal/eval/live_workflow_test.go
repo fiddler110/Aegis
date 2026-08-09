@@ -1035,3 +1035,155 @@ func countToolCalls(calls []string, name string) int {
 	}
 	return n
 }
+
+// forcedOverflowNumCtx is sized from the base prompt, not chosen for being
+// small — the same constraint writeCompactionFixture records above, and one that
+// is easy to get wrong in the opposite direction here.
+//
+// The condition being forced is a generation cut off *mid-tool-call* at the
+// context ceiling, which is the only shape of overflow a local Ollama server
+// surfaces as an error at all: an oversized *prompt* is silently
+// front-truncated instead, which is P62.4's whole finding. So the window has to
+// leave the prompt intact and starve only the generation.
+//
+// The base prompt — system prompt, tool schemas, repo map — measures 7,119
+// tokens on qwen3:14b before any work happens. Anything at or below that
+// truncates the prompt itself, and the model then fails for a reason that has
+// nothing to do with the tool call. 8192 clears the base with ~1,000 tokens of
+// generation headroom: far more than a normal reply needs, and far less than the
+// write below asks for.
+const forcedOverflowNumCtx = 8192
+
+// forcedOverflowPrompt asks for a single tool call whose arguments cannot fit
+// the remaining budget. It names a mechanical, unambiguous task on purpose:
+// the model must not be able to satisfy it briefly, summarize it, or decide it
+// is done early, or the fixture measures nothing.
+func forcedOverflowPrompt() string {
+	return "Use the write_file tool exactly once to create a file called numbers.txt whose content is " +
+		"the numbers from 1 to 4000, one per line, written out in full with no ranges, no ellipses and " +
+		"no abbreviation. Put the entire content in the single write_file call."
+}
+
+// TestLiveWorkflowForcedContextOverflow is the live half of P62.5.
+//
+// The ladder it exists to validate (OverflowEscalationDirective +
+// maxPhaseOverflowResets, P62.3) is driven end to end by
+// TestOverflowLadderClimbsThenStops in internal/drive, which asserts the
+// sequence of rungs a run is retried with. That test fakes exactly one link:
+// it hands the drive an error it has *declared* to be a context overflow. This
+// test covers that link against a real model — a real generation, cut off at a
+// real context ceiling, must come back classified as an overflow, because the
+// entire recovery path is gated on that classification and nothing else.
+//
+// It asserts a classification, not a recovery. Whether a given local model
+// truncates on a given turn is a property of that model's verbosity, so a hard
+// assertion that the overflow *occurred* would be flaky in a way no amount of
+// prompt tuning fixes. Instead: if the run failed, the failure must be the
+// actionable truncation error rather than the opaque "invalid tool call
+// arguments … unexpected end of JSON input" the server actually sends — which
+// is the whole point of P35.2 and the thing that would silently rot. If the run
+// did not overflow, the test says so and skips, rather than passing quietly.
+//
+// # Status: NOT YET OBSERVED TO FIRE — read this before trusting it
+//
+// Attempted 2026-08-09 against qwen3:14b at the window below and abandoned after
+// ~30 minutes without reaching a verdict. The model did not answer with one
+// oversized tool call. It appears to have answered in *text*, hit max_tokens,
+// and taken the "continue from where you left off" path — which regrows the
+// context and repeats, walking toward maxIterations instead of truncating a tool
+// call. That is a real path and arguably worth its own coverage, but it is not
+// the path this test exists to exercise, and it makes the test far too slow to
+// be useful as written.
+//
+// So this fixture is **unvalidated scaffolding**, kept because the seam it aims
+// at is real and the setup is most of the work, not because it has demonstrated
+// anything. Before relying on it, either force a tool call structurally (a tool
+// whose schema requires a large argument, rather than a prompt that asks for a
+// large file) or pick a model that reliably emits one. Do not read a skip from
+// this test as evidence that classification works.
+//
+// The mechanism P62.5 needed is covered deterministically and does not depend on
+// this: internal/drive's TestOverflowLadderClimbsThenStops drives the real loop
+// end to end. What stays uncovered live is only the classification link — that a
+// real Ollama truncation is recognised as an overflow rather than as a malformed
+// call.
+func TestLiveWorkflowForcedContextOverflow(t *testing.T) {
+	baseURL := os.Getenv("AEGIS_EVAL_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+	model := os.Getenv("AEGIS_EVAL_MODEL")
+	if model == "" {
+		model = "llama3.2"
+	}
+
+	dir, err := os.MkdirTemp("", "aegis-live-workflow-overflow-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("cleanup: could not remove overflow fixture dir %s: %v", dir, err)
+		}
+	})
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	// Same reason as every other window-pinning subtest here: a resident
+	// instance's window wins over config, so the pin only takes with nothing
+	// loaded (P63.11).
+	unloadOllamaModel(t, baseURL, model)
+	cl := newLiveWorkflowDaemonWithWindow(t, baseURL, model, "", forcedOverflowNumCtx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if win, src := servedContextWindow(t, cl); win != forcedOverflowNumCtx {
+		t.Logf("WARNING daemon resolved context window %d (from %s), not the pinned %d",
+			win, src, forcedOverflowNumCtx)
+	} else {
+		t.Logf("context window %d (from %s)", win, src)
+	}
+
+	guardOff := false
+	events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
+		Text:         forcedOverflowPrompt(),
+		GuardEnabled: &guardOff,
+	})
+	if err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	s := drainWorkflowEvents(t, events)
+
+	if s.errText == "" {
+		t.Skipf("the run completed without overflowing (%d turns, %d tool calls) — %s did not emit a "+
+			"tool call long enough to hit the %d-token ceiling; raise the requested line count or lower "+
+			"the window to force it", len(s.turns), len(s.toolCalls), model, forcedOverflowNumCtx)
+	}
+
+	t.Logf("=== P62.5: run failed after %d turns with: %s", len(s.turns), s.errText)
+
+	// The classification, which is the link under test. The drive's overflow
+	// recovery keys on IsContextOverflowError, which reads this message — so an
+	// error that reaches the user as the raw server text is one the drive will
+	// treat as fatal instead of resetting and resuming.
+	if !strings.Contains(s.errText, "response truncated at the context limit") {
+		t.Errorf("the run failed at a context ceiling but the error was not classified as a truncation: %q\n"+
+			"the phased drive's overflow ladder (P62.3) never fires on an error it cannot recognise, "+
+			"so this is the whole recovery path silently disabled", s.errText)
+	}
+	// P35.2's other half: the actionable cause must be named, not just the
+	// server's opaque parse failure.
+	if !strings.Contains(s.errText, "provider.context_window") {
+		t.Errorf("the truncation error does not name the lever that fixes it: %q", s.errText)
+	}
+}

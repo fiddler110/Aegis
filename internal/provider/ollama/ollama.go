@@ -387,6 +387,10 @@ type wireOptions struct {
 	NumCtx      int      `json:"num_ctx,omitempty"`
 	NumPredict  int      `json:"num_predict,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`
+	// Seed is a pointer and NOT omitempty-elided by value: seed 0 is a valid
+	// pin, and the zero value is exactly what a caller asking for determinism
+	// is most likely to write.
+	Seed *int `json:"seed,omitempty"`
 }
 
 type wireRequest struct {
@@ -778,6 +782,10 @@ func (a *Adapter) doChat(ctx context.Context, req provider.Request, think *bool)
 	}
 	if req.Temperature != nil {
 		opts.Temperature = req.Temperature
+		hasOpts = true
+	}
+	if req.Seed != nil {
+		opts.Seed = req.Seed
 		hasOpts = true
 	}
 	if hasOpts {

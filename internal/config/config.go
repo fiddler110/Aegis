@@ -562,7 +562,21 @@ type ProviderConfig struct {
 	// turn that plainly reads as actionable produces zero tool calls (a model
 	// dumping its reasoning as prose instead of calling a tool). 0 = harness
 	// default (1 retry); negative disables the nudge entirely.
-	ZeroToolNudge   int               `koanf:"zero_tool_nudge"`
+	ZeroToolNudge int `koanf:"zero_tool_nudge"`
+	// Temperature overrides the backend's sampling temperature. nil (unset)
+	// leaves it to the backend, which is rarely what an agentic run wants:
+	// Ollama's default is 0.8 unless a Modelfile says otherwise, so two runs
+	// of the same prompt against the same model take visibly different paths.
+	// Measured (P38.1 re-test, 2026-08-09): one run opened by writing a file,
+	// the next opened with an unprompted web search, same prompt and model.
+	// A tool-dispatching run is a decision process, not a creative one — set
+	// this to 0 when reproducibility matters more than variety.
+	Temperature *float64 `koanf:"temperature"`
+	// Seed pins the backend's RNG so a run at a fixed temperature is
+	// reproducible turn for turn. nil (unset) leaves the backend to pick.
+	// Only meaningful alongside Temperature: a seed at temperature 0.8 fixes
+	// which of many paths is taken, not that there is only one.
+	Seed            *int              `koanf:"seed"`
 	Headers         map[string]string `koanf:"headers"`          // extra HTTP headers sent with every request (e.g. gateway auth)
 	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
 	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
@@ -797,19 +811,43 @@ func (p ProviderConfig) ToolCallShimValid() bool {
 // CompactionConfig tunes context compaction. Everything here is an override of
 // an auto-detected default, not a switch that has to be set.
 type CompactionConfig struct {
-	// PreservePrefixCache overrides the P62.2 headroom gate on the
-	// deterministic prune pre-pass. Unset (nil) auto-detects: on a local
-	// backend the gate is on, because rewriting the middle of a conversation
-	// discards the llama.cpp/Ollama prefix KV cache and costs a full prefill
-	// recompute; against a cloud provider there is no such cache and the gate
-	// is off.
+	// PreservePrefixCache overrides the headroom gate on the deterministic prune
+	// pre-pass. Unset (nil) auto-detects: on a local backend the gate is on,
+	// because rewriting the middle of a conversation discards the
+	// llama.cpp/Ollama prefix KV cache and costs a full prefill recompute;
+	// against a cloud provider there is no such cache and the gate is off.
 	//
-	// It is settable at all because the gate is an *optimization* measured on
-	// one run's arithmetic, and P62.2 exists to decide whether it earns its
-	// keep. An optimization that cannot be switched off cannot be A/B'd, and
-	// cannot be reverted without a rebuild — which is the position P62.2 was
-	// stuck in: it shipped with unit tests proving the gate does what it says
-	// and no way to ask whether what it says is worth doing.
+	// It is settable at all because the gate is an *optimization*, and an
+	// optimization that cannot be switched off cannot be A/B'd or reverted
+	// without a rebuild — which is the position P62.2 was stuck in.
+	//
+	// # The measurement, and why it took two passes to read correctly
+	//
+	// Measured 2026-08-08, the gate lost badly: 3m19s against 1m32s on the same
+	// fixture, with the deferred turns costing ~23.7s each. That reading stood
+	// long enough to be acted on, and it was an artifact of a broken instrument.
+	// The engine's compaction trigger ran on an estimate that undercounted the
+	// real prompt by 20-33% (P62.4), so compaction fired so late that *both*
+	// arms were already inside the regime where Ollama context-shifts — where
+	// the prefix cache is gone regardless and the gate has nothing left to
+	// protect.
+	//
+	// Re-measured after P62.4 corrected the estimate, on the same fixture and
+	// model, twice:
+	//
+	//	gate on:  1m16s / 1m27s wall, ~54,287ms prefill
+	//	gate off: 2m7s  / 2m7s  wall, ~98,481ms prefill
+	//
+	// The gate now wins ~1.7x on wall clock with no overflows in either arm, and
+	// the per-turn trace shows why: once past the trigger, gate-off prunes on
+	// *every* turn for a small yield (message counts unchanged, 11->11, 13->13)
+	// and pays a full ~9s prefill each time, while gate-on stays append-only at
+	// ~2.5s and takes that hit three times.
+	//
+	// The durable lesson is about method rather than about caching: a
+	// measurement of an optimization is only as good as the instrument the
+	// system was running on, and this one was measured in a regime that existed
+	// only because a different component was broken.
 	PreservePrefixCache *bool `koanf:"preserve_prefix_cache"`
 }
 

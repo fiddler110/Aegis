@@ -1,12 +1,16 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-08 (eighteenth pass — **P63.9 closed: the fourth and last concern, guard
-retries, extracted from `Engine.Run`**, which is now 497 lines against the original 725, and
-**P63.12 filed and closed** by that pass, emptying Tier 3; seventeenth pass: P63.9's third concern, compaction, extracted;
+**Last updated:** 2026-08-09 (nineteenth pass — **P62.4, P62.2 and P62.5 closed, emptying Tier 2 of
+everything except the standing conformance umbrella**. The pass's result is not the three closures
+but what the first one did to the second: fixing the token estimate (P62.4) **reversed P62.2's
+already-acted-on verdict**, and the gate it had reverted is now restored on a re-measurement that runs
+1.7x the other way. Two items filed off the same work — **P62.7** (Tier 3) and **P62.8** (Tier 4);
+eighteenth pass: P63.9 closed, its fourth and last concern extracted from `Engine.Run`, which is now
+497 lines against the original 725, and **P63.12 filed and closed** by that pass, emptying Tier 3;
+seventeenth pass: P63.9's third concern, compaction, extracted;
 sixteenth pass: **P63.9's second concern, loop detection, extracted
 from `Engine.Run`**, and the full live tier ran green over it; fifteenth pass: **P63.11 shipped and
-the live tier now produces a real prompt-profile measurement**, so Tier 2 holds nothing buildable;
-fourteenth pass: P63.8 and P62.1
+the live tier now produces a real prompt-profile measurement**; fourteenth pass: P63.8 and P62.1
 shipped, and P63.9's first of four concerns extracted from `Engine.Run`; thirteenth pass: **the P63.x
 batch built**: P63.1-P63.7 shipped in one session, 3 new items filed off the work; twelfth pass:
 P63.x full-stack review, 7 items filed across Tiers 1-3; eleventh pass: Tier-4 assessment — P61.7's
@@ -22,33 +26,45 @@ so keep it when adding items.
 
 ## Status
 
-**10 open items**, recounted from the headings, and the shape of the list changed more than the
-count. **P63.9 closed 2026-08-08** with its fourth and last concern extracted from `Engine.Run`;
-**P63.12** was filed by that pass and **closed the same day**. Then P62.2's fixture was built and run,
-and **three items came out of running it** — **P62.4** (a live silent-truncation event), **P62.5**
-(the P62.3 ladder, which turns out never to have had a heading of its own), and **P62.6** (the base
-prompt costs 7,119 tokens before any work). None of the three came from a review; all three came from
-one measurement. P63.11, P63.8 and P62.1 also shipped that day. Before them, the P63.x review
-filed 7 on 2026-08-07 and **all 7 were built the same day** (P63.1-P63.7; the `Engine.Run` half of
-P63.7 was split out rather than built). Write-ups in [releases.md](releases.md).
+**9 open items**, recounted from the headings: three closed and two filed, against the last pass's
+ten. **P62.4, P62.2 and P62.5 closed 2026-08-09**; **P62.7** (Tier 3) and **P62.8** (Tier 4) were
+filed off that work, and P62.3's ladder finally got the validation it had been owed since it shipped —
+its *mechanism* driven end to end for the first time (no test had ever called `drive.Run`), with one
+residual named below rather than quietly folded in. Write-ups in [releases.md](releases.md).
 
-**Tier 1 is empty. Tier 2 holds four** — **P62.2** (now answered: the gate loses 2.2x, revert
-recommended pending a large-window check), **P38.1** (still the live conformance re-run), and two the
-fixture produced: **P62.4** and **P62.5**. Tier 2 has buildable work again for the first time in three
-passes. **Tier 3 holds one**, **P62.6**. Tier 4 is unchanged at five: **P61.7** (remainder),
-**P60.3**, **P52.14**, **P25.9**, **P63.10**.
+*The residual, stated so it is not mistaken for coverage:* P62.5 closes on a deterministic test that
+drives the real reset loop and asserts the sequence of rungs. It hands that loop an error it has
+*declared* to be a context overflow, so the one thing still uncovered live is the **classification**
+link — that a real Ollama truncation is recognised as an overflow rather than as a malformed call.
+That link has unit coverage over recorded real server text, and a live fixture
+(`TestLiveWorkflowForcedContextOverflow`) exists but **has not yet fired**: qwen3:14b answered the
+oversized-write prompt in text and walked the max-tokens continuation path instead of truncating a
+tool call. The fixture records what to try next. It is not evidence of anything today.
 
-**Every open item is now either a live-run measurement or a parked one.** There is no queued build
-work anywhere in the tiers, which has not been true at any earlier pass — and it puts the weight on
-the adversarial fixture that reliably crosses the compaction trigger. **P62.2** has been owed it
-since it was filed, and P63.9's compaction pass needs it too (its live run never fired compaction at
-all). Built 2026-08-08 as `TestLiveWorkflowCompactionPrefixCacheGate`.
+**Tier 1 is empty. Tier 2 holds one** — **P38.1**, the live conformance re-run, which is the only
+open item anywhere whose outcome produces new information rather than new code. **Tier 3 holds two**,
+**P62.6** and **P62.7**. Tier 4 is at six: **P62.8**, **P61.7** (remainder), **P60.3**, **P52.14**,
+**P25.9**, **P63.10**.
 
-*Correction, 2026-08-08:* an earlier version of this line claimed the same fixture also closes
-**P62.3**. It does not, and building it is what showed why. P62.3's ladder fires on a genuine
-**context overflow** inside the phased drive's findings phase; this fixture crosses the *compaction
-trigger*, which is a different threshold reached by a different route. Forcing an overflow is a
-separate construction and P62.3 stays owed. Two debts, not three.
+**The finding of this pass is a method one, and it cost a shipped decision to learn.** P62.2 had been
+measured, decided and acted on — the prefix-cache gate was reverted, on the item's own stated
+criterion, from a clean A/B showing it 2.2x slower. Then P62.4 fixed the token estimate that gate's
+trigger runs on, and re-running the *identical* fixture inverted the result: the gate now wins ~1.7x
+on wall clock, reproduced across two runs. The first measurement was not misrecorded and was not
+noisy. It was taken on a system whose compaction trigger fired 20-33% late, which put **both arms**
+inside the regime where Ollama silently context-shifts — and there the prefix cache is already gone,
+so the gate had nothing to protect and its deferral was pure cost. **Before measuring an
+optimization, check the instrument the rest of the system is running on.** Note that the item's own
+caution — "this is n=1 per arm, re-run before ripping code out" — would not have caught this: a second
+run reproduces a systematic error perfectly faithfully. The defence against this class of error is
+not repetition, it is asking what the measurement depends on.
+
+**A corollary worth keeping, found the same day.** The live tier was silently cacheable. A re-run of
+the A/B returned byte-identical wall-clock *and* prefill totals for both arms, which reads as
+flawless reproducibility and was Go replaying the first run's cached verdict — Go's test cache keys
+on the binary, arguments and environment, none of which change when the thing under test is a model
+server's behaviour. Every documented live command now carries `-count=1`. A tier that exists to catch
+what a green unit suite cannot is worth very little if its re-runs do not run.
 
 **What P63.9 taught across all four passes — the catalogue is the durable output, not the line
 count.** Each pass asked one question, *what state does this concern actually own*, and each got a
@@ -184,22 +200,27 @@ against `internal/provider`, `internal/ollamainfo`, `internal/repomap` or scanne
 several obvious-looking gaps there have already been checked and answered, and the point of writing
 them down was to stop the next review re-filing them.
 
-**What to do next: build the adversarial compaction fixture.** It is the single highest-leverage
-thing open, because it stopped being validation owed and became **an instrument three items are
-blocked on**: **P62.2** (the prefix-cache pruning gate, unmeasured since it shipped), **P62.3** (the
-overflow-escalation ladder, unvalidated because it never fired live), and now P63.9's compaction pass
-— whose live run turned out never to exercise compaction at all. Build it once, use it three times.
+**What to do next: P38.1's live conformance re-run.** It is the only open work anywhere whose outcome
+produces new information rather than new code, and it doubles as the validation **P57.1** is owed — a
+fix aimed at a failure observed exactly once. Every other tier holds either a parked item or a filed
+defect with a known mechanism.
 
-The pattern already exists in the tree: `writeBigRepoMapFixture`, reworked during P63.11, sizes
-itself in a dimension that scales, **grows until it actually clears its threshold, and asserts that it
-did**. That last assertion is the only reason the previous fixture's rot was caught. Two cautions
-carry over from P62.2's own write-up: restoring identical on-disk state does **not** reproduce a
-local-model failure, so the fixture must force the condition structurally; and read every result with
-`/api/ps` in view, since a resident model decides the window regardless of config.
+*The instrument that unblocked the last three items is now built and reusable.* The adversarial
+compaction fixture (`writeCompactionFixture` +
+`TestLiveWorkflowCompactionPrefixCacheGate`) was the thing three items were blocked on, and it paid
+for itself three times over: it settled P62.2, it *found* P62.4 and P62.7 while measuring something
+else, and P62.5's ladder validation was built on the technique it established. What made it work is
+worth reusing rather than rediscovering — it forces its condition **structurally** (a chained
+workspace makes one-read-per-turn a property of the fixture rather than a request the model may
+ignore), it is sized from a measured base prompt rather than from a round number, and it asserts that
+it actually crossed its threshold instead of assuming it did. That last assertion is the only reason
+two vacuous green runs were caught.
 
-One thing is owed rather than optional: **P38.1's live conformance re-run** is still the only open
-work whose outcome produces new information rather than new code, and it doubles as the validation
-**P57.1** is owed.
+Three cautions carry over for anything built on it. Restoring identical on-disk state does **not**
+reproduce a local-model failure, so force the condition rather than replaying a state that once
+triggered it. Read every result with `/api/ps` in view, since a resident model decides the window
+regardless of config. And pass `-count=1`: Go's test cache will otherwise return a previous run's
+verdict for an unchanged live test, which is indistinguishable from a re-run that reproduced.
 
 **P63.9's budget pass did go through the live tier, and the run is worth reading before the next
 pass** (2026-08-08, qwen3:14b on the 16GB-VRAM box — not the recommended qwen3.6:35b-a3b-deep, which
@@ -280,186 +301,25 @@ P55.x Tier-1 half. See [releases.md](releases.md) for the write-ups and for the 
 
 ## Open Work — Tier 2
 
-**Status: 2 open — P62.2 and P38.1**, below, and **neither is build work**: both are validation owed
-against already-shipped behavior, closeable only by a live run. **P63.11, P62.1 and P63.8 shipped
-2026-08-08**; P63.11 last, which is what makes the other two's live evidence trustworthy — the tier no
-longer reports a saturated measurement as a product regression. P63.3-P63.6 shipped 2026-08-07;
-before those, P61.4, P61.5 and P61.8 (2026-08-06). Write-ups for all of them are in
-[releases.md](releases.md).
+**Status: 1 open — P38.1**, below, and it is not build work: it is the live conformance re-run, the
+only open item anywhere whose outcome produces new information rather than new code. **The 2026-08-09
+re-test moved it materially without closing it:** a 14B local model built the complete six-file suite
+for the first time on this target, and the ten harness defects that run root-caused shipped as P39.16.
+It is still unmet — verification did not pass, and the confirming re-run hung (P39.17). **P62.4, P62.2
+and P62.5 all closed 2026-08-09** in one pass, and the order matters more than the count — P62.4 was
+the instrument the other two were being measured with. **P63.11, P62.1 and P63.8 shipped 2026-08-08**;
+P63.3-P63.6 on 2026-08-07; before those, P61.4, P61.5 and P61.8 (2026-08-06). Write-ups for all of
+them are in [releases.md](releases.md).
 
-*Correction, 2026-08-08:* the previous status line read "3 open — P62.1, P38.1 and P63.8" and the
-header count read 9. Both omitted **P62.2**, which has carried a `Priority: Tier 2` line in this
-section since it was filed on 2026-08-07. The counts below are recounted from the headings rather
-than carried forward.
-
-### P62.5 — Validate the P62.3 overflow-escalation ladder (it has never had a heading of its own)
-
-Filed 2026-08-08 because this debt was about to be lost, not because it is new. `P62.3`
-(`OverflowEscalationDirective` + `maxPhaseOverflowResets`, shipped alongside the prefix-cache gate)
-has never had a `### P<n>.<m>` heading — its only record is a paragraph inside **P62.2** saying "the
-same fixture validates it". That paragraph is now known to be wrong, and P62.2 is answered, so when
-P62.2 closes the ladder's validation would disappear with it.
-
-**Why the P62.2 fixture does not cover it.** Measured while building that fixture: it crosses the
-*compaction trigger*, which the ladder does not key on. The ladder fires on a genuine **context
-overflow** inside the phased drive's findings phase — a different threshold reached by a different
-route. Forcing an overflow is a separate construction.
-
-**What makes it buildable now.** Two things exist that did not when P62.3 shipped. The compaction
-fixture establishes the technique (force the condition structurally; a chained workspace makes turn
-count a property of the fixture rather than a request — see `writeCompactionFixture`). And **P62.4**
-means an overflow is currently *easy* to provoke: the estimate runs at 67-80% of the real prompt, so
-a run can be driven past the real window while the engine still believes it has headroom. Note the
-order dependency — if P62.4 is fixed first, overflows get harder to reach and this fixture has to
-force one deliberately rather than riding the estimate's error.
-
-**Trap, recorded by P62.2 and still applying:** restoring identical on-disk state does not reproduce
-a local-model failure. Run 2 of the original investigation replayed byte-identical within-run
-retries, which looks like determinism and is not — a fresh process ran the same state to a completely
-different, working strategy.
-
-Priority: Tier 2 — same standing P62.2 had: a shipped behavior riding on one run's arithmetic, with
-no live evidence it ever fires correctly. Cheap now that the technique and the harness exist.
-
-### P62.4 — Proactive compaction never fired while Ollama silently dropped tokens (measured)
-
-Found 2026-08-08 by P62.2's new fixture, which was built to measure something else. This is the
-failure P2.7's proactive compaction exists to prevent, observed with the guard armed and silent.
-
-**The measurement.** `TestLiveWorkflowCompactionPrefixCacheGate`, qwen3:14b, context window pinned to
-24,576 and confirmed resolved as such by the daemon (`context window 24576 (from config)` — so this
-is *not* a config-vs-served mismatch). The conversation grew one file-read per turn:
-
-| turn | prompt (provider-reported) | prefill |
-|---|---|---|
-| 0 | 7,119 | 5,980ms (cold) |
-| 1-9 | 8,925 → 23,733 | 1,859 → 3,493ms (prefix-cache hits) |
-| 10 | 23,637 — **shrinks** | **23,353ms** |
-| 11-14 | ~23,757 | ~23,700ms every turn |
-
-**Zero notices fired in the entire run** — no compaction, no fallback, and not the 95%-full warning
-either, at 96.7% of the window. Turn 10's shrink-with-10x-prefill is Ollama context-shifting: dropping
-the oldest tokens and reprocessing from scratch, every turn thereafter.
-
-**The mechanism.** The engine triggers on `conv.estimatedTokens()` (tokenest), not on what the
-provider reports, and the two are far apart.
-
-A second run with a lower trigger *did* fire compaction, and its notices quote the estimate as a
-percentage — which pins the gap directly. Gate-off compacted announcing **"context ~64% full"**
-(est ≈ 15,729) on a turn the provider reported at **23,637** tokens; gate-on announced
-**"~77% full"** (est ≈ 18,923) against ~23,760. **The estimate is running at 67-80% of the provider's
-count** — a 20-33% undercount, not the ≥12% lower bound the first run could establish.
-
-That is enough to matter at every window size, and it explains both symptoms: with the trigger set at
-85% of the window, a 33% undercount means the real prompt is at ~128% of the window before the
-estimate says 85%. The 95%-full notice is gated on the same estimate, which is why the one thing
-designed to speak up when compaction *cannot* help was also silent. Even in the run where compaction
-did fire, Ollama had already begun context-shifting a turn earlier.
-
-The content here is structured numeric records; P41.1 unified this estimator precisely because it
-undercounted CJK/non-ASCII, so code or other scripts may be worse.
-
-Note this is the same estimate that P53.6's shim-catalog addend and P59.1's completion reserve are
-corrections to — both of which exist because the estimate was known to be off in a *known direction*.
-This is the same class of error with no correction applied.
-
-**What to decide, and measure first.** Three candidate directions, in preference order: (a) calibrate
-tokenest against provider-reported `prompt_eval_count` — the daemon already receives that number every
-turn and could learn a per-model correction factor rather than guessing; (b) apply a safety margin to
-the trigger sized from the observed undercount; (c) treat a provider-reported count that exceeds the
-estimate as authoritative and re-trigger on it. (a) is the only one that fixes the 95% notice too.
-Do not build from this write-up without re-measuring — the undercount's size is a lower bound from one
-content type, and the tiering criteria's own lesson is that a filed item is usually wrong about scale.
-
-Priority: Tier 2 — a live, reproducible silent-truncation event on a local model, which is the exact
-class of failure P52.1/P2.7/P59.1 were built to close, and the fixture that reproduces it is now in
-the tree. Not Tier 1 only because it needs a small window to reach and the default local window is
-larger; the estimate error is proportional, so a big-window run should be measured before assuming it
-is safe.
-
-### P62.2 — MEASURED 2026-08-08: the gate loses 2.2x on wall clock; recommend revert
-
-**Result, and it reverses the item's premise.** `TestLiveWorkflowCompactionPrefixCacheGate`,
-qwen3:14b, window 24,576 (confirmed resolved), 14-file chained read, same fixture both arms:
-
-| | gate **off** | gate **on** |
-|---|---|---|
-| wall clock | **1m32s** | 3m19s |
-| total prefill | **64,958ms** | 128,005ms |
-| turns whose context shrank | 2 | 2 |
-| overflows | none | none |
-
-Both arms are byte-identical through turn 10. Then gate-off prunes (23,637 -> 14,977, one 9,286ms
-hit) and its next three turns cost 2.6-3.0s each. Gate-on defers, and its next three turns cost
-**~23,750ms each** at a prompt pinned to ~23,758 — before pruning at turn 14 anyway.
-
-**The mechanism is structural, not incidental.** The gate defers pruning until the conversation is
-near the window, which is exactly where Ollama begins context-shifting — so every turn in the
-deferral window is already a full reprocess. **The gate protects the prefix cache in the one regime
-where the prefix cache is already gone**, pays ~23.7s/turn to wait, and then pays the prune's cost
-regardless. Pruning early is what keeps the conversation small enough for the cache to survive at all.
-
-That argument does not depend on this workload: the gate's threshold (25% free) *by construction*
-places the prune next to the window, which is the saturation regime. Tightening the threshold means
-pruning earlier, which is what turning the gate off already does — so "tighten" and "revert" converge.
-
-**Recommendation: revert `PreservePrefixCache` to unconditional pruning**, per this item's own stated
-criterion ("if the gate does not clearly win on wall clock without adding overflows... revert it").
-Keep `compaction.preserve_prefix_cache` as the escape hatch and the A/B harness.
-
-**What would change the recommendation, and should be checked before ripping code out.** This is n=1
-per arm, one model, one workload, at a 24,576 window; the motivating measurement was a 40k+ window
-over a 142-minute drive with a very different shape. On a **large** window the gate uses a fixed 40k
-buffer rather than a ratio, so the deferral may end well short of saturation and the original
-arithmetic could still hold. Re-run the same fixture with the window raised past
-`largeContextWindowThreshold` before deciding. The harness now makes that one command.
-
-*Original filing follows, for the reasoning the measurement was testing.*
-
-**P62.2 as originally filed**, kept because it is the reasoning the measurement was testing:
-
-`compaction.Options.PreservePrefixCache` (shipped 2026-08-07) makes the deterministic prune pre-pass
-headroom-gated instead of unconditional on a local backend, because rewriting the middle of a
-conversation discards the llama.cpp/Ollama prefix KV cache. The **motivating** measurement is solid —
-on a 2026-08-07 drive against an external repo, 163 of 238 turns prefilled in under 3s, and the only two turns
-whose context *shrank* were also the two slowest prefills in the run:
-
-| turn | context | delta | prefill | implied |
-|---|---|---|---|---|
-| 119 | 60,471 → 57,518 | −2,953 | 186.4s | ~309 tok/s |
-| 171 | 82,577 → 79,751 | −2,826 | 312.2s | ~255 tok/s |
-
-8.3 minutes (~6% of a 142-minute run) to reclaim ~3.5% of a context with room to spare.
-
-**What is missing is the after measurement.** Two subsequent drives against that same repo never
-reproduced a prune-induced cache miss — run 2 aborted in the findings phase before reaching the
-turn range where run 1's two events occurred, and run 3 resumed mid-suite and finished in 10 turns.
-So the gate has unit tests (`internal/compaction/prefixcache_test.go`: off ⇒ byte-identical, on with
-headroom ⇒ skipped, on near the window ⇒ prunes, `force` ⇒ always prunes) and **zero live evidence
-either that it saves the 8.3 minutes or that it costs headroom**. The headroom risk is the real one:
-the gate deliberately lets more content sit in context, and the same run *did* hit a genuine overflow
-in its findings phase.
-
-Waiting for the condition to recur by chance is not a plan — three runs produced three different
-workloads, because the model's threat-consolidation strategy varies per invocation (31→19, 40→1:1,
-40→15). **Build an adversarial fixture instead**: a synthetic `2-*-analysis.md` with 60+ threats and
-a pre-scaffolded suite, driven through the findings phase, sized so the conversation reliably crosses
-the prune threshold. Measure with the gate on and off, same fixture, same seed: total wall clock,
-per-turn `prompt_eval_duration_ms`, the count of turns whose context shrank, and whether the on-run
-overflows more. If the gate does not clearly win on wall clock without adding overflows, tighten the
-threshold (currently 25% free / 40k on a large window) or revert it — it is an optimization, and an
-unmeasured optimization that can cost headroom is not worth keeping.
-
-The same fixture validates the **P62.3 overflow-escalation ladder** (`OverflowEscalationDirective` +
-`maxPhaseOverflowResets`, shipped alongside), which is unvalidated for exactly the same reason: it
-never fired live. Note the trap that wasted a validation attempt — restoring identical on-disk state
-does **not** reproduce a local-model failure. Run 2's *within-run* retries were byte-identical, which
-looks like determinism but is not: re-running the same state in a fresh process produced a completely
-different (working) strategy. The fixture has to force the condition structurally, not restore a state
-that once triggered it.
-
-Priority: Tier 2 — no user-visible breakage today, but two shipped behaviors are riding on one
-run's arithmetic, and one of them can plausibly make context overflow *more* likely.
+*What closing these three established, and it is a method point rather than a compaction point.*
+P62.2 had been measured, decided, and acted on — the gate was reverted on its own stated criterion.
+Then P62.4 fixed the token estimate that gate's trigger runs on, and re-running the identical fixture
+**inverted the result**, twice. The first measurement was not misrecorded: it was taken on a system
+whose compaction trigger fired 20-33% late, which put both arms into the regime where Ollama
+context-shifts and the prefix cache is gone regardless. The item's own "n=1, re-run before ripping
+code out" caution would not have caught it, because a second run reproduces a systematic error
+faithfully. **Before measuring an optimization, check the instrument the rest of the system is running
+on.**
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -510,9 +370,27 @@ entries govern what happens next:
   report handed over as ground truth, rather than ending the drive — which is exactly what the
   successful second manual invocation did by hand.
 
+- **2026-08-09, LFM2.5-2.6B then qwen3:14b vs AiGateway — conformance still unmet, ten harness
+  defects root-caused and shipped as P39.16.** The 2.6B produced **zero files in two runs** and is
+  below the floor; it is now refused by a pre-flight gate rather than allowed to burn 40 turns, and
+  its real value proved to be as an adversarial harness test — it found four defects in an afternoon
+  because it does every wrong thing quickly. The qwen3:14b arm then built the **complete suite** —
+  six files, ~35KB, all five content phases, every marker cleared — which is further than any prior
+  run on this target. Verification did **not** pass: `component-name-consistency` (11 components
+  missing from the analysis file), `count-consistency` (a required table deleted), and
+  `coverage-ledger-complete` remained after the bounded fix loop. Two of those three were then fixed
+  structurally (P39.16's routing and table guard); the third re-run hung before reaching the verdict.
+  **The organizing finding is that all ten defects were the same shape:** a tool that held the
+  information the model needed and returned an error without it. See P39.16 in
+  [releases.md](releases.md). Three items remain open below: **P39.17** (the hang), **P39.18** (typed
+  script tools), and the conformance verdict itself, which is this item.
+
 **Direction (user, 2026-07-24):** the strongest lever is making local models **piecemeal both their
 reads and their writes**, then finishing with a **quality-validation pass**; P39.12-P39.15 implement
-exactly that.
+exactly that. **P39.16 (2026-08-09) extends it one step further:** piecemeal writing still failed
+while it went through `edit_file`, because an anchored edit asks the model to *reproduce* text rather
+than only produce it. Handle-based tools (`fill_marker`, `edit_section`) remove the reproduction, and
+that is what finally made the fill loop reliable on a 14B model.
 
 **Reproduce:** `cd <fresh target copy>` (must be inside the target — the sandbox rejects reads
 outside the workspace root); run
@@ -535,7 +413,12 @@ tracking, not independent build work.
 
 ## Open Work — Tier 3
 
-**Status: 1 open — P62.6**, below, filed 2026-08-08 off P62.2's fixture. **P63.12 was filed and
+**Status: 4 open — P39.17, P39.18, P62.6 and P62.7**, below. P39.17 and P39.18 were filed
+2026-08-09 off the P39.16 validation run and are the two things standing between that batch and a
+confident P38.1 verdict: one makes unattended runs untrustworthy to *measure* (a turn can hang
+forever without tripping any progress guard), the other is the next failure class after tool
+selection (arguments, not tools). P62.6 and P62.7 were both filed off P62.2's fixture (2026-08-08 and
+2026-08-09 respectively). **P63.12 was filed and
 closed the same day** (2026-08-08) — filed by P63.9's
 last pass, then built once its premise was checked rather than assumed. That check is the part worth
 keeping: the item as written blamed "compaction rewrites the transcript" in general, and measuring
@@ -556,6 +439,61 @@ The fix deletes the flag and asks `hasNudge(conv, prefix)` instead, which is the
 compaction or prepare-step rewrite mid-run can't shift the bookkeeping"). Write-up in
 [releases.md](releases.md).
 
+### P39.17 — a phased drive can go silent indefinitely with no wall-clock floor
+
+**Filed 2026-08-09 from the P39.16 validation run.** The drive stopped producing output at 18:12:51
+and was still "running" 14 minutes later: `aegis.exe` had accumulated **0.5s of total CPU** since
+launch (startup and nothing since), the log had not grown by a byte, and the Ollama process was
+likewise idle. Nothing in the harness noticed. Every existing guard is *progress*-shaped — the
+no-progress nudge counts turns, the loop detector compares tool calls, the failure breaker counts
+failed rounds — and all of them require turns to keep completing. A turn that never returns advances
+no counter, so an unattended run can sit dead for hours and look exactly like a slow one.
+
+`cost.max_wall_clock_per_run` exists but is off by default and bounds the *whole run*, which is the
+wrong instrument: a legitimate threat-model drive runs for hours, so any value large enough to be
+safe is far too large to catch a hang. What is missing is a **per-turn** stall detector — no stream
+event and no tool call for N minutes — which is unambiguous in a way a whole-run budget can never be.
+
+Not Tier 2 because it costs an operator a wasted wait rather than a wrong artifact, and the on-disk
+suite always survives (the drive is resumable by design). But it silently invalidates unattended
+runs, which is precisely what P38.1 is trying to measure, so it blocks confident conformance testing.
+
+**Repro:** not yet isolated. Both processes idle with a live HTTP request outstanding suggests a
+request that never returns and never times out; the provider's own retry/timeout path is the first
+place to look. Capture: whether the adapter had an in-flight request, and whether any read deadline
+was set on it.
+
+**Closure condition:** a stalled turn is detected and either retried or reported, and a re-run of the
+P38.1 drive completes or fails loudly rather than hanging.
+
+Priority: Tier 3 — no data loss, but it makes long unattended runs untrustworthy to measure.
+
+### P39.18 — tool arguments are the next wall after tool selection
+
+**Filed 2026-08-09 from the P39.16 validation run.** With per-phase narrowing and handle-based
+editing in place, tool *selection* stopped failing on qwen3:14b — every remaining stumble in the run
+was a malformed **argument**: `scaffold.py --framework` with the value omitted, and
+`2-<framework>-analysis.md` with the placeholder never substituted. Both were caught by corrective
+errors P39.16 added, which is the recoverable outcome; but the model is still composing a command
+line as a *string*, which is the same class of failure `fill_marker` removed from editing.
+
+The fix has the same shape as the two that worked: stop asking the model to produce a format it has
+to get exactly right. Wrap the bundled skill scripts (`recon.py`, `scaffold.py`, `inventory.py`,
+`verify.py`, `normalize_ids.py`) as first-class tools with typed JSON schemas, so `--framework`
+becomes a required enum the harness renders rather than a token the model has to remember to
+follow with a value. That also removes the shell tool from the setup phase, which is currently the
+only reason it is exposed there.
+
+The weaker alternative is JSON-schema-constrained decoding via `Request.Format`, already present in
+the Ollama adapter and currently used only on schema-guard corrective retries. It constrains the
+symptom; typed tools remove the failure mode. Prefer the latter.
+
+**Closure condition:** the threat-model drive completes its setup phase without composing a shell
+command line, and an argument error for a bundled script becomes structurally impossible.
+
+Priority: Tier 3 — the errors are already corrective rather than silent, so this buys reliability and
+turn count, not correctness.
+
 **P63.9 closed 2026-08-08, all four concerns extracted.** `Engine.Run` went **725 → 497 lines**
 (-31%), max nesting 10 → 6 levels, and its `// Pxx` marker count 29 → 21 — the metric the item cared
 about most, since those markers were the evidence that behavior was being added to `Run` *because*
@@ -570,6 +508,48 @@ option wiring and closed P61.3 with no production code, so the "write each fix t
 copy" cost the item worried about was never paid. Before it: P59.9, P60.2, P60.4 and P57.1. See
 [releases.md](releases.md).
 
+
+### P62.7 — Compaction is invoked every turn past the trigger and prunes for almost nothing
+
+Found 2026-08-09 in the gate-off arm of `TestLiveWorkflowCompactionPrefixCacheGate`, once P62.4's fix
+made the trigger fire at the right time and the behaviour past it became visible for the first time.
+
+**The measurement.** qwen3:14b, 24,576-token window, `preserve_prefix_cache=false`. From turn 5
+onward the run emits a compaction notice on *every single turn*:
+
+| turn | prompt | prefill | notice |
+|---|---|---|---|
+| 4 | 14,463 | 2,483ms | — |
+| 5 | 14,519 | 8,540ms | context ~62% full — compacted 11→11 messages |
+| 6 | 14,575 | 8,603ms | context ~63% full — compacted 13→13 messages |
+| … | … | ~9,000ms | … 10 notices in total |
+| 14 | 15,143 | 9,396ms | context ~66% full — compacted 29→29 messages |
+
+Read the message counts: **unchanged every time**. The deterministic pre-pass finds *something* to
+strip each turn (`prunedChars > 0`, so `changed=true`) but never enough to bring the estimate back
+under the trigger — so the next turn crosses it again and prunes again. Each of those rewrites the
+middle of the conversation and costs a full ~9s prefill instead of ~2.5s, and the prompt still climbs
+(14,519 → 15,143) throughout.
+
+**Why it is separable from P62.2.** The prefix-cache gate rate-limits this thrash, which is part of
+why it now measures ~1.7x faster — but only *by accident*, as a side effect of a threshold chosen for
+a different reason. On a cloud backend the gate is off by design (there is no prefix cache to
+protect), so the same thrash runs there unmitigated; it is merely cheaper, since a cloud API re-reads
+the prompt anyway. The wasted work is real on both.
+
+**Candidate directions, in preference order.** (a) A minimum-yield check: if a prune frees less than
+some fraction of what stands between the conversation and the trigger, record that and do not re-run
+it until the conversation has grown by at least that much. (b) A cooldown in turns. (c) Let the
+pre-pass report *how much* it can still free, so the caller can tell "pruned a little" from "pruned
+all there is" — today `changed=true` conflates them, which is the root of the conflation.
+
+Prefer (a): it keys on the thing that actually matters and degrades gracefully as a conversation
+approaches genuinely-unprunable. Measure before building — the yield per prune is not recorded
+anywhere today, and this write-up infers it from message counts rather than from bytes.
+
+Priority: Tier 3 — real, repeatable wasted work with a clear mechanism, but no user-visible breakage
+(every run above completed correctly) and it sits behind a decision about what the pre-pass should
+report, which makes it larger than the one-line threshold change it first looks like.
 
 ### P62.6 — The base prompt is 7,119 tokens before any work, on the *trimmed* local profile
 
@@ -630,8 +610,9 @@ answer.
 
 ## Open Work — Tier 4
 
-**Status: 5 open**, all blocked or explicitly parked; none has a build trigger yet. P63.10 joined
-2026-08-07, filed off the P63.7 refactor rather than by a review.
+**Status: 6 open**, all blocked or explicitly parked; none has a build trigger yet. P62.8 joined
+2026-08-09 (blocked on hardware, not on a decision); P63.10 joined 2026-08-07, filed off the P63.7
+refactor rather than by a review.
 
 **How to use this tier.** Four items have now been measured and closed — P59.10 and P52.16
 (2026-08-05), P61.7's in-repo half and P49.3 (2026-08-06) — and every one taught the same lesson:
@@ -640,6 +621,39 @@ dependency that turned out to be our own code; P49.3's gate turned out to be unm
 it proposed. Building either from its write-up alone would have produced the wrong fix, or the wrong
 non-decision. Take the measurement first, then re-read the item — do not treat a Tier-4 write-up as a
 build plan. Details in [releases.md](releases.md).
+
+### P62.8 — The prefix-cache gate's large-window regime has never been measured
+
+Filed 2026-08-09 when P62.2 closed, to keep the one question that closure does not answer from
+disappearing with it.
+
+`compaction.shouldPrune` has two regimes. Below `largeContextWindowThreshold` (200,000) the gate
+fires at a **ratio** — 25% free — which by construction places the prune near the window. Above it the
+gate switches to a **fixed 40k buffer**, which on a large window is a much smaller fraction and so
+places the prune far earlier, in relative terms, than anything measured so far.
+
+Everything known about this gate comes from a 24,576-token window, i.e. entirely from the ratio
+branch, and P62.2's history is a specific warning against generalising from it: the same fixture gave
+opposite verdicts before and after P62.4, because what mattered was *where in the window* the prune
+landed relative to the backend's context-shifting point. The buffer branch changes exactly that
+relationship and has no measurement at all.
+
+**Why parked rather than queued.** It needs a backend serving a >200,000-token window. The models on
+hand top out at 40,960 (qwen3:14b) and 262,144 (gemma4:12b), and the second is unreachable in
+practice: a 200k+ KV cache on 16GB of VRAM plus 16GB of system RAM is swap-bound, which would measure
+the paging subsystem rather than the gate. This is a hardware block, not an open design question —
+nothing needs deciding, only running.
+
+**How to run it when hardware allows.** The harness already exists and needs no changes:
+`AEGIS_EVAL_MODEL=<model> go test -tags live_workflow -count=1 ./internal/eval/ -run
+TestLiveWorkflowCompactionPrefixCacheGate -v`, with `compactionNumCtx` raised past 200,000 and the
+per-file payload in `writeCompactionFixture` scaled up so the chain still crosses the trigger. Note
+`-count=1`: without it a re-run returns the previous verdict from Go's test cache.
+
+Priority: Tier 4 — no trigger, no user impact, and blocked on hardware rather than on any decision.
+Promote if a large-window local backend becomes available, or if a cloud provider's behaviour ever
+makes the buffer branch reachable in a way worth measuring.
+
 
 ### P61.7 — Retry/terminal classification over *backend-echoed* text (remainder)
 

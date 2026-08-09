@@ -99,7 +99,12 @@ type Request struct {
 	Tools       []ToolSchema
 	MaxTokens   int
 	Temperature *float64
-	Thinking    *ThinkingConfig // nil = disabled
+	// Seed pins the backend's sampling RNG, making a run reproducible turn for
+	// turn when paired with a fixed Temperature. nil leaves the backend to
+	// pick. Adapters whose backend exposes no seed ignore it — like Format,
+	// this is a reproducibility aid and never a correctness dependency.
+	Seed     *int
+	Thinking *ThinkingConfig // nil = disabled
 	// NumCtx is the serving context window (Ollama's options.num_ctx) this
 	// request asks the backend to allocate. It belongs on the request rather
 	// than on the adapter because the *model* is per-request (P52.4): one

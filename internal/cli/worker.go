@@ -199,6 +199,8 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Tools:           reg,
 		Gate:            gate,
 		Cost:            tracker,
+		Temperature:     cfg.Provider.Temperature,
+		Seed:            cfg.Provider.Seed,
 		BudgetUSD:       budgetUSD,
 		MaxTokensPerRun: maxTokensPerRun,
 		// P59.4: inherited whole, for the same reason the in-process backend
