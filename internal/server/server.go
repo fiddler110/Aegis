@@ -293,8 +293,20 @@ func (s *Server) activateSessionSkill(id, name string) {
 	extra = append(append([]string{}, extra...), name)
 	s.sessionSkills.Store(id, extra)
 
+	workdir := s.workdirFor(id)
 	enabled := append(append([]string{}, s.cfg.Skills.BuiltinEnabled...), extra...)
-	s.sessionToolRegistry(id).Upsert(builtin.NewSkillTool(s.workdirFor(id), s.cfg.DataDir, enabled))
+	s.sessionToolRegistry(id).Upsert(builtin.NewSkillTool(workdir, s.cfg.DataDir, enabled))
+
+	// P39.18: a skill that bundles scripts also brings typed tools for them, so
+	// its body can say "call threat_model_scaffold with framework=stride"
+	// instead of asking the model to compose a python command line. Registered
+	// with the activation, on the session's own clone, so the daemon-wide
+	// surface never grows for sessions that don't use the skill.
+	if sk, ok := skills.Load(workdir, s.cfg.DataDir, enabled, name); ok {
+		for _, t := range builtin.ThreatModelScriptTools(workdir, sk.Dir) {
+			s.sessionToolRegistry(id).Upsert(t)
+		}
+	}
 }
 
 // sessionEnabledSkills returns the persistent config-level enabled built-ins
@@ -1158,6 +1170,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			// time is not — teammates run concurrently, so "N minutes" means the
 			// same N minutes for each of them.
 			MaxWallClockPerRun: s.cfg.Cost.MaxWallClockPerRun(),
+			MaxTurnStall:       s.cfg.Cost.MaxTurnStall(),
 			Model:              model,
 			MaxTokens:          s.cfg.Provider.MaxTokens,
 			// Same model server as the parent session, so the same tool-calling

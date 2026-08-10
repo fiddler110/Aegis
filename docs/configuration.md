@@ -410,6 +410,25 @@ cost:
   # would defeat setting it.
   max_wall_clock_per_run: 0
 
+  # Seconds of complete silence — no streamed token, no tool call starting or
+  # finishing — before the current turn is declared hung and the run aborts
+  # with a named error. 0 disables it. Default 900 (15 minutes).
+  #
+  # This is the one time bound that ships ON, and the reason is that it does not
+  # require a judgement call. `max_wall_clock_per_run` above cannot tell a
+  # stalled run from a slow one, so it must stay opt-in; there is no legitimate
+  # work that produces literally nothing for fifteen minutes, so this one can
+  # carry a default.
+  #
+  # 15 minutes is a backstop, not a competitor: it deliberately sits above every
+  # narrower timeout (provider.stream_idle_timeout at 10 minutes, the shell
+  # tool's 600s per-call ceiling, cron's 10-minute job bound) so those report
+  # their own precise failure first. It is also the only bound that covers the
+  # tool-execution half of a turn at all. Like the wall-clock abort, a stall is
+  # fatal to the phased drive rather than a resumable reset — a fresh context
+  # would be handed straight back to whatever is wedged.
+  max_turn_stall: 900
+
   # 0 = unlimited. Refuses to start a new turn once a session's cumulative
   # (persisted) cost reaches this amount.
   session_cap_usd: 0.0
@@ -1479,6 +1498,31 @@ where a slow-but-progressing turn is not a failure. It earns its keep on
 unattended surfaces — spawned sub-agents and scripted `aegis chat` — which have
 no human watching and, unlike cron jobs (bounded separately at 10 minutes),
 nothing else bounding their duration.
+
+### Catch a hung turn (on by default)
+
+A wall-clock bound is the wrong instrument for a *hang*. A legitimate phased
+drive runs for hours, so any value large enough to be safe for it is far too
+large to notice a turn that stopped dead — and every other guard in the engine
+is progress-shaped (the no-progress nudge counts turns, the loop detector
+compares tool calls, the tool-failure breaker counts failed rounds), so all of
+them need turns to keep completing. A turn that never returns advances no
+counter and looks exactly like a slow one.
+
+`cost.max_turn_stall` measures silence instead of duration: no provider stream
+event and no tool call starting or finishing. It is on by default at 900
+seconds and needs no tuning for ordinary use. Raise it if you run a tool that
+legitimately blocks for more than fifteen minutes with no output; set it to 0
+to turn the check off:
+
+```yaml
+cost:
+  max_turn_stall: 0     # opt out entirely
+```
+
+The abort is reported as a distinct error ("no model output and no tool activity
+for …"), never as an interrupt or a backend transport failure, so an automated
+caller does not mistake a hang for something worth retrying.
 
 ### Route threat-model entries or borderline scan findings through a debate round (P12.5)
 

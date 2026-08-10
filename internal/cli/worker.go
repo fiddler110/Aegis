@@ -211,6 +211,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		// in-process backend does (server.go): elapsed time isn't divisible
 		// across siblings the way spend is.
 		MaxWallClockPerRun: cfg.Cost.MaxWallClockPerRun(),
+		MaxTurnStall:       cfg.Cost.MaxTurnStall(),
 		Model:              model,
 		MaxTokens:          cfg.Provider.MaxTokens,
 		// A subprocess teammate talks to the same model server as its parent, so

@@ -54,11 +54,11 @@ improvise one from a process description alone.
 
 | Reference file | Read when | Contains |
 |---|---|---|
-| `scaffold.py` (bundled script) | **Setup (§4.1 step 2), before filling any file** | Pre-writes all seven files from the skeletons — real structure (headings, table headers, fixed-value lists, DFD `flowchart LR` + `classDef`s) with a section-keyed `<!-- PENDING: <section> -->` per fillable section, so you fill sections rather than author structure |
-| `recon.py` (bundled script, not a reference doc) | **Start of the architecture phase, before any manual exploration (§2 step 1)** | Deterministic one-pass repo digest — run it, read its stdout; replaces reading source files raw. Includes a "Top-level directories" section (every immediate child directory, flagged excluded or scanned) that drives the Coverage Ledger (§2 step 6) |
-| `inventory.py` (bundled script) | **Phase 5**, to generate `inventory.yaml` from the finished markdown; **phase 6**, with `--check`, to verify it still agrees | `python inventory.py <run-dir>` writes the sidecar (IDs, derived tiers) deterministically; `--check` regenerates in-memory and diffs vs disk, exit non-zero on drift |
-| `normalize_ids.py` (bundled script) | **Phase 6**, before `verify.py` (the phased drive runs it automatically each round) | `python normalize_ids.py <run-dir>` — deterministically canonicalizes identifiers so you never renumber by hand: strips any invented `T<n>.<suffix>` threat ID back to the bare `T<n>` the analysis defines, strips zero-padding on any `T01`/`T004`-style reference back to bare `T1`/`T4`, renumbers `FIND-##` to a gapless sequence, and rewrites the coverage table + every `Related Threats` reference in lockstep. Idempotent; `--check` reports drift without writing. Use it (not a hand edit) whenever IDs need fixing |
-| `verify.py` (bundled script) | **Phase 6** review round, over the assembled suite | `python verify.py <run-dir>` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis, Coverage Ledger completeness, that **no scaffolded section was emptied**: deleting a `<!-- PENDING -->` marker without writing anything in its place fails `section-bodies-nonempty`, in any of the five files — and a **substance floor**: an Evidence cell that is a bare filename with nothing pinned inside it, a cell that is a literal `TBD`/`N/A`/`see code`, a table that is *nothing but* "none identified", or a narrative section shorter than one sentence) |
+| `scaffold.py`, via the **`threat_model_scaffold` tool** | **Setup (§4.1 step 2), before filling any file** | Pre-writes all seven files from the skeletons — real structure (headings, table headers, fixed-value lists, DFD `flowchart LR` + `classDef`s) with a section-keyed `<!-- PENDING: <section> -->` per fillable section, so you fill sections rather than author structure |
+| `recon.py`, via the **`threat_model_recon` tool** | **Start of the architecture phase, before any manual exploration (§2 step 1)** | Deterministic one-pass repo digest — call the tool, read its output; replaces reading source files raw. Includes a "Top-level directories" section (every immediate child directory, flagged excluded or scanned) that drives the Coverage Ledger (§2 step 6) |
+| `inventory.py`, via the **`threat_model_inventory` tool** | **Phase 5**, to generate `inventory.yaml` from the finished markdown; **phase 6**, with `check: true`, to verify it still agrees | `threat_model_inventory` with `run_dir` writes the sidecar (IDs, derived tiers) deterministically; `check: true` regenerates in-memory and diffs vs disk, failing on drift |
+| `normalize_ids.py`, via the **`threat_model_normalize_ids` tool** | **Phase 6**, before verification (the phased drive runs it automatically each round) | `threat_model_normalize_ids` with `run_dir` — deterministically canonicalizes identifiers so you never renumber by hand: strips any invented `T<n>.<suffix>` threat ID back to the bare `T<n>` the analysis defines, strips zero-padding on any `T01`/`T004`-style reference back to bare `T1`/`T4`, renumbers `FIND-##` to a gapless sequence, and rewrites the coverage table + every `Related Threats` reference in lockstep. Idempotent; `check: true` reports drift without writing. Use it (not a hand edit) whenever IDs need fixing |
+| `verify.py`, via the **`threat_model_verify` tool** | **Phase 6** review round, over the assembled suite | `threat_model_verify` with `run_dir` — mechanical cross-file self-check (leftover skeleton syntax, name consistency, dataflow refs, threat↔coverage bijection, finding-id sequence, tier/prerequisite, counts, forbidden coverage statuses, external-AV, deployment-classification agreement between architecture and analysis, Coverage Ledger completeness, that **no scaffolded section was emptied**: deleting a `<!-- PENDING -->` marker without writing anything in its place fails `section-bodies-nonempty`, in any of the five files — and a **substance floor**: an Evidence cell that is a bare filename with nothing pinned inside it, a cell that is a literal `TBD`/`N/A`/`see code`, a table that is *nothing but* "none identified", or a narrative section shorter than one sentence) |
 | `lint_dfd.py` (bundled script) | **Phase 6** review round, whenever the DFD changed | `python lint_dfd.py <run-dir>` — Mermaid DFD linter (LR flowchart, three-palette classDefs, no stray fences/keywords, subgraph balance, labeled edges, `.mmd`↔`.md` equality) |
 | `diff_inventory.py` (bundled script) | **Update workflow (§6)**, when refreshing a baseline model | `python diff_inventory.py <baseline-inventory.yaml> <current-inventory.yaml>` — classifies threats new/resolved/still-present/changed for the Changes Since Baseline section |
 | `references/stride.md` / `linddun.md` / `pasta.md` / `trike.md` / `vast.md` / `nist-800-154.md` | Framework chosen, before exploring the workspace | That framework's process/stages and category definitions |
@@ -94,9 +94,11 @@ it is not itself the evidence.
    manifests, bind/listen sites with a suggested deployment classification,
    entry points, config/env keys, security-infrastructure signals, external
    egress signals, and per-file declared symbols ranked security-relevant
-   first. Run it against the workspace root —
-   `python <path>/recon.py <workspace-root>` — and read its stdout digest
-   *instead of* reading dozens of source files yourself. The digest for a
+   first. Call the **`threat_model_recon` tool** (it needs no
+   arguments — it defaults to the workspace root) and read its output digest
+   *instead of* reading dozens of source files yourself. Never compose a
+   `python .../recon.py …` command line for it: the tool's typed arguments are
+   the supported way in. The digest for a
    500-file repo is a few KB; reading those files raw would be megabytes, and
    on a local model that peak context is exactly what kills the run. The
    script's output is deterministic (same repo → same digest), which is what
@@ -255,10 +257,12 @@ next, rather than re-reading everything.
 
 Do the cheap, decision-bearing setup first, then work the phases in order.
 
-1. Framework is already chosen (§1). Decide the `<target>` slug and the
-   `<YYYY-MM-DD-HHMM>` timestamp (local time, 24h, dash-separated — get it
-   from the `shell` `date` command, never guess it), and create the directory
-   `.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>/`.
+1. Framework is already chosen (§1). Decide the `<target>` slug — that is
+   the only decision left here. **You do not create the run directory and you
+   do not look up the date**: `threat_model_scaffold` (step 2) creates
+   `.aegis/security/threat-model/<framework>-<target>-<YYYY-MM-DD-HHMM>/` from
+   the host clock and reports the path it used. Pass its `run_dir` argument
+   only when resuming into a directory that already exists.
 
    The `<target>` slug is **mandatory, never omitted**: use the scoped
    feature/system name when the model covers one (`webui`, `auth-service`),
@@ -269,9 +273,11 @@ Do the cheap, decision-bearing setup first, then work the phases in order.
    colliding; a date alone isn't enough since a full run plus an update can
    both land on one day.
 
-2. **Run `scaffold.py` to pre-write all seven files with real structure** —
-   don't hand-write bare stubs. `python <path>/scaffold.py <run-dir>
-   --framework <name> [--target <slug>] [--date <YYYY-MM-DD>]` writes
+2. **Call `threat_model_scaffold` to pre-write all seven files with real
+   structure** — don't hand-write bare stubs. It takes a required `framework`
+   (one of `stride`, `stride-a`, `linddun`, `pasta`, `trike`, `vast`,
+   `nist-800-154`) plus an optional `target`, `date`, `force` and `run_dir`,
+   and writes
    `0-assessment.md`, `0.1-architecture.md`, `1.1-model.mmd`, `1-model.md`,
    `2-<framework>-analysis.md`, `3-findings.md`, and an `inventory.yaml`
    placeholder, each with its **fixed structure already in place** — every
@@ -288,7 +294,7 @@ Do the cheap, decision-bearing setup first, then work the phases in order.
    and keeps every file resumable and self-describing (§4.2 "Resume"). The
    script never clobbers a file whose `<!-- PENDING` markers are already
    gone (i.e. one you've started filling), so re-running it on an in-progress
-   directory is safe. Pass `--framework stride-a` for a STRIDE-A run.
+   directory is safe. Pass `framework: "stride-a"` for a STRIDE-A run.
 
 Never delete or overwrite a *prior dated run directory* — an update is a new
 directory, and the old one is the baseline it was diffed against (editing
@@ -310,20 +316,20 @@ The phases, in the dependency order of the file suite:
 
 | # | Phase | Reads (only this, plus prior files from disk) | Owns / fills | Note forward (stable identifiers only) |
 |---|---|---|---|---|
-| 1 | Architecture | runs `recon.py` (§2 step 1) then reads its digest; `output-formats.md`; targeted confirmation reads (§2 steps 2–5 + §3 evidence rules) | `0.1-architecture.md` | component names + types + anchors; deployment classification; each component's exposure floor; security-infra component names |
+| 1 | Architecture | runs `threat_model_recon` (§2 step 1) then reads its digest; `output-formats.md`; targeted confirmation reads (§2 steps 2–5 + §3 evidence rules) | `0.1-architecture.md` | component names + types + anchors; deployment classification; each component's exposure floor; security-infra component names |
 | 2 | Model / DFD | `diagram-conventions.md`; `0.1-architecture.md` | `1.1-model.mmd`, `1-model.md` | element names; `DF##` ids with source→target; trust-boundary names |
 | 3 | Framework analysis | `skeletons/skeleton-<framework>.md`, the framework reference (`stride.md`/etc.), `companion-techniques.md`; `0.1-architecture.md`, `1-model.md` | `2-<framework>-analysis.md` | every threat ID with (component, category, prerequisite, tier, severity, has-mitigation) |
 | 4 | Findings | `output-formats.md` (findings section); `2-<framework>-analysis.md`, `0.1-architecture.md`'s exposure table | `3-findings.md` | `FIND-##` ids with (threat IDs covered, tier, severity) |
-| 5 | Assessment + inventory | `output-formats.md` (assessment section), `skeletons/skeleton-inventory.md`; all prior files | `0-assessment.md`, then run `python inventory.py <run-dir>` to generate `inventory.yaml` | tier/threat/finding counts; confirmation both written |
-| 6 | Review round (§5) | the **complete** suite, fresh from disk; runs `verify.py`, `lint_dfd.py`, `inventory.py --check` | edits in place across all files | seams fixed; all three scripts' pass/fail |
+| 5 | Assessment + inventory | `output-formats.md` (assessment section), `skeletons/skeleton-inventory.md`; all prior files | `0-assessment.md`, then call `threat_model_inventory` with `run_dir` to generate `inventory.yaml` | tier/threat/finding counts; confirmation both written |
+| 6 | Review round (§5) | the **complete** suite, fresh from disk; runs `threat_model_verify`, `lint_dfd.py`, `threat_model_inventory` with `check: true` | edits in place across all files | seams fixed; all three scripts' pass/fail |
 
 Phase 3 must **copy the skeleton structure exactly** (same columns, same
 order, same fixed value lists) and run its inline `<!-- ⛔ POST-*-CHECK -->`
 comments right after writing each table, and **run the technology sweep** in
 `companion-techniques.md`. Phase 4 runs the Threat Coverage Verification loop.
 Phase 5 recounts from the finished files, never carrying a stale mid-analysis
-number, and generates `inventory.yaml` by running `python inventory.py
-<run-dir>` rather than hand-writing it — the script derives each threat's tier
+number, and generates `inventory.yaml` with `threat_model_inventory`
+rather than hand-writing it — the script derives each threat's tier
 from its prerequisite and emits stable, sorted, deterministic YAML, so the
 sidecar can't drift from the analysis or vary between runs. Phase 6 runs the
 three bundled check scripts (below) over the assembled suite before any debate.
@@ -422,7 +428,7 @@ running identifier note, so this is where seams show:
 Run the three bundled check scripts first — they mechanize this checklist so
 the manual read confirms rather than hunts:
 
-- `python verify.py <run-dir>` — cross-file consistency (leftover skeleton
+- `threat_model_verify` with `run_dir` — cross-file consistency (leftover skeleton
   syntax, component-name consistency, dataflow refs defined, threat↔coverage
   bijection, finding-id sequence, tier/prerequisite consistency, count
   agreement, forbidden coverage statuses, external-AV consistency, that
@@ -440,11 +446,11 @@ the manual read confirms rather than hunts:
   `prose-sections-substantive`.
 - `python lint_dfd.py <run-dir>` — the DFD's Mermaid conventions and
   `.mmd`↔`.md` equality.
-- `python inventory.py <run-dir> --check` — that `inventory.yaml` still
+- `threat_model_inventory` with `run_dir` and `check: true` — that `inventory.yaml` still
   regenerates identically from the current markdown (catches a threat added or
   a tier changed after the sidecar was written).
 
-Each exits non-zero and names the failing check. Fix what any script flags,
+Each fails loudly and names the failing check. Fix what any script flags,
 then re-run it until clean. Then do the manual read for the judgment calls no
 script can make (does a control actually contradict a data flow; is a
 prerequisite realistic). Fix what fails by editing the files in place — the

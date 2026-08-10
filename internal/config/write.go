@@ -429,6 +429,16 @@ type CostPatch struct {
 	// from the user's file — `aegis harden` does not set a wall-clock bound,
 	// but it must not erase one the user set.
 	MaxWallClockPerRunSec int
+	// MaxTurnStallSec (P39.17) is carried for the same reason, with one
+	// difference: it is written only when non-zero. Every other key here writes
+	// 0 as "unlimited", but this one ships ON, so a partially-populated patch
+	// emitting `max_turn_stall: 0` would silently disable a safety default that
+	// the caller never asked to touch. Omitting the key falls back to the
+	// default, which is the fail-safe direction; the cost is that an operator
+	// who deliberately disabled the detector has to disable it again after a
+	// `harden` rewrite — and harden itself carries the value through, so that
+	// only bites callers building a CostPatch by hand.
+	MaxTurnStallSec int
 }
 
 // PatchProjectCost replaces the cost: block in the project-level
@@ -466,6 +476,9 @@ func buildCostBlock(p CostPatch) string {
 	fmt.Fprintf(&b, "  budget_usd: %g\n", p.BudgetUSD)
 	fmt.Fprintf(&b, "  max_tokens_per_run: %d\n", p.MaxTokensPerRun)
 	fmt.Fprintf(&b, "  max_wall_clock_per_run: %d\n", p.MaxWallClockPerRunSec)
+	if p.MaxTurnStallSec > 0 {
+		fmt.Fprintf(&b, "  max_turn_stall: %d\n", p.MaxTurnStallSec)
+	}
 	fmt.Fprintf(&b, "  session_cap_usd: %g\n", p.SessionCapUSD)
 	fmt.Fprintf(&b, "  daily_cap_usd: %g\n", p.DailyCapUSD)
 	fmt.Fprintf(&b, "  session_token_cap: %d\n", p.SessionTokenCap)

@@ -446,6 +446,24 @@ type CostConfig struct {
 	// MaxWallClockPerRun(), never this field directly.
 	MaxWallClockPerRunSec int `koanf:"max_wall_clock_per_run"`
 
+	// MaxTurnStallSec aborts a run whose current turn has produced no provider
+	// stream event and no tool activity for this many seconds; 0 = disabled
+	// (P39.17). Default DefaultMaxTurnStallSec. Read via MaxTurnStall(), never
+	// this field directly.
+	//
+	// Unlike MaxWallClockPerRunSec above this one is ON by default, and the
+	// difference is not a change of mind about time bounds — it is that the two
+	// measure different things. A wall-clock cap cannot distinguish a stalled
+	// run from a slow one making real progress, so it must stay opt-in. This
+	// measures *silence*: no token streamed, no tool started or finished. There
+	// is no legitimate long-running work that looks like that, which is why it
+	// can carry a default at all.
+	//
+	// It is also the only bound covering the tool-execution half of a turn;
+	// provider.stream_idle_timeout covers the model half at the transport, and
+	// only for adapters that speak HTTP.
+	MaxTurnStallSec int `koanf:"max_turn_stall"`
+
 	// SessionCapUSD refuses to start a new turn once a session's cumulative
 	// (persisted) cost reaches this amount; 0 = unlimited (P9.5).
 	SessionCapUSD float64 `koanf:"session_cap_usd"`
@@ -474,6 +492,40 @@ func (c CostConfig) MaxWallClockPerRun() time.Duration {
 		return 0
 	}
 	return time.Duration(c.MaxWallClockPerRunSec) * time.Second
+}
+
+// DefaultMaxTurnStallSec is the shipped cost.max_turn_stall (P39.17): fifteen
+// minutes of complete silence before a turn is called hung.
+//
+// The number is chosen to be a *backstop*, not a competitor. Three
+// layer-specific timeouts already bound pieces of a turn, and the stall detector
+// must not fire before any of them has had its chance, or it would convert a
+// precise, locally-reported failure into a vague one:
+//
+//   - provider.stream_idle_timeout — 10 minutes (sse.DefaultStreamIdleTimeout),
+//     the gap between two streamed chunks.
+//   - the shell tool's per-call ceiling — 600s = 10 minutes, the longest a
+//     single tool call can legitimately block with no output.
+//   - the cron job timeout — 10 minutes.
+//
+// Fifteen minutes clears all three with margin. It is also far below the hours a
+// legitimate phased drive runs for, which is the gap P39.17 was filed about: the
+// 2026-08-09 hang had been silent 14 minutes when it was noticed by hand, and
+// nothing in the harness would ever have noticed it.
+const DefaultMaxTurnStallSec = 900
+
+// MaxTurnStall returns cost.max_turn_stall as a time.Duration, or 0 when set to
+// zero or negative — which the engine reads as "no stall detection" (P39.17).
+//
+// Note the asymmetry with MaxWallClockPerRun: there, 0 is the shipped state; here
+// 0 is an explicit opt-out, and the default is applied by the defaults layer
+// rather than here, so a user who writes `max_turn_stall: 0` genuinely gets it
+// off rather than silently getting the default back.
+func (c CostConfig) MaxTurnStall() time.Duration {
+	if c.MaxTurnStallSec <= 0 {
+		return 0
+	}
+	return time.Duration(c.MaxTurnStallSec) * time.Second
 }
 
 // LSPServerConfig configures one LSP language server.
@@ -1446,10 +1498,14 @@ func defaults() map[string]any {
 		"cost.session_token_cap":                 0,
 		"cost.daily_token_cap":                   0,
 		"cost.alert_threshold":                   0.8,
-		"swarm.backend":                          "in_process",
-		"sandbox.backend":                        "local",
-		"sandbox.image":                          "ubuntu:22.04",
-		"sandbox.network":                        false,
+		// P39.17: on by default, unlike every other cost bound. See
+		// DefaultMaxTurnStallSec for why fifteen minutes and why silence is the
+		// one time-shaped signal that needs no operator judgement.
+		"cost.max_turn_stall": DefaultMaxTurnStallSec,
+		"swarm.backend":       "in_process",
+		"sandbox.backend":     "local",
+		"sandbox.image":       "ubuntu:22.04",
+		"sandbox.network":     false,
 		// P60.1: conservative per-container caps. Sized to let ordinary
 		// build/test work through (a `go build`, an `npm ci`) while making a
 		// runaway inside the sandbox a failed command rather than a host-wide

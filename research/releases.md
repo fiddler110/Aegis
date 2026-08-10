@@ -8,11 +8,188 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-09 — **P62.4, P62.2 and P62.5 all closed in one pass, and the order they
-were built in is the whole story.** P62.4 (the token estimate ran 20-33% under the truth) turned out
-to be the instrument every other measurement in this area was taken with: fixing it **reversed
-P62.2's verdict**, which had already been acted on. Write-ups immediately below; the 2026-08-08
-P63.9/P63.12 entries follow them.
+**Last updated:** 2026-08-10 — **the Tier 3 batch: P39.17, P39.18 and P62.7 shipped, and P62.6
+measured and promoted to Tier 2 rather than built.** Four items worked in parallel, and the pass's
+finding is about *deferral* rather than about any of them: P62.6's composition split shows the tool
+inventory is **84.3%** of the base prompt, and that `<deferred_tools>` costs 2,953 tokens — 82% of
+what the actually-exposed schemas cost — to advertise 26 tools that are not loaded. The mechanism
+built to reduce prompt cost is itself most of the prompt cost. Write-ups immediately below; the
+2026-08-09 P62.4/P62.2/P62.5 entries follow them.
+
+**P62.6 — the base prompt is 84% tool inventory, and deferral is most of the waste (MEASURED 2026-08-10, promoted to Tier 2, not built).**
+
+The item was explicit that it was measure-first and that its fix was a design question, so this pass
+took the measurement and stopped, exactly as filed. `TestBasePromptComposition_localProfile`
+(`internal/server/server_test.go`) assembles the base prompt the way the daemon wires it — loopback
+`base_url` so the local profile auto-detects, plus the task manager, cron scheduler, todo list, team
+task list, knowledge store and memory store the daemon passes. Wiring it *without* those was the
+first wrong answer: it misses 10 tools and undercounts by ~1,360 tokens.
+
+| component | est. tokens | % |
+|---|---|---|
+| tool schemas (27 exposed) | 3,614 | 46.4% |
+| **`<deferred_tools>` (26 not loaded)** | **2,953** | **37.9%** |
+| completing-tasks / platform / tool-use blocks | 1,001 | 12.8% |
+| persona (`general`) | 222 | 2.8% |
+| skills, repo map, memory | 0 | 0% |
+| **total** | **7,790** | |
+
+The 7,119 live figure reproduces in shape at 7,790 estimated (~9% high — `tokenest` is a heuristic
+that prices JSON schema text at flat chars/4 where a real BPE compresses it better). Same order,
+same dominant component. On an empty workspace skills/repo-map/memory are genuinely zero, so **this
+is a floor, not a ceiling**.
+
+**The finding the item did not anticipate is that deferral is nearly as expensive as exposure.**
+`<deferred_tools>` spends ~114 tokens per tool on what should be a name-and-description line. The
+four security tools alone are 1,538 tokens — 19.7% of the entire base prompt — *while deferred*;
+P25.6 moved `security_scan` out of the schema block and it still costs 593 tokens in the
+advertisement. That reorders the candidate list the item proposed: progressive tool disclosure is
+the pattern already in use here, and it is the thing to fix before it is the thing to extend.
+
+Also worth recording for whoever takes the design question: the three P39.16 handle-based editing
+tools (`edit_section`, `multi_edit`, `fill_marker`) are 1,009 tokens, 13% of the base prompt, and are
+three of *five* editing tools exposed simultaneously alongside `edit_file` and `write_file`.
+
+Half two shipped regardless of the design question, because it does not depend on it:
+`TestEffectiveSystem_localProfileBudget` asserts a `localBasePromptCeilingTokens = 8200` ceiling in
+the **plain** suite (no build tags), so growth is caught by `go test ./...` rather than rediscovered
+by a live run. Its comment states it is a budget rather than a target — deliberate growth moves the
+number *with* a note saying what was added. The composition test also cross-checks its own component
+table against `effectiveSystem`'s assembled byte length, so a block added to one and not the other
+fails loudly instead of silently skewing every percentage.
+
+**Promoted to Tier 2 on the item's own stated trigger** ("promote if the composition split shows one
+component dominating"). It does.
+
+**P39.17 — a per-turn stall detector, because every other guard needs turns to keep completing (SHIPPED 2026-08-10).**
+
+Filed off the P39.16 validation run, where a drive stopped producing output and was still "running"
+14 minutes later with 0.5s of total CPU accumulated since launch. Every existing guard is
+*progress*-shaped — the no-progress nudge counts turns, the loop detector compares tool calls, the
+failure breaker counts failed rounds — and all require turns to keep completing, so a turn that never
+returns advances no counter and an unattended run sits dead looking exactly like a slow one.
+
+`internal/engine/stall.go` adds `stallWatch`: a cancellable context derived inside the run deadline,
+sampled at `limit/4`, beaten by every provider stream event and on **both edges** of `executeTool` in
+*both* the sequential and parallel tool paths. On firing it cancels (the P59.2 mechanism — a poll
+cannot fire inside a wedged call), then re-attributes whatever the cancelled call returned to an error
+wrapping `ErrTurnStalled` naming the idle time, the limit and the config key. Returned from `Run` and
+emitted as a `KindError` event. Ordering is `budget.override(stall.override(err))`: an explicit
+operator wall-clock bound outranks a stall diagnosis.
+
+**`cost.max_turn_stall`, 900 seconds, on by default** (`0` disables) — and both halves of that need
+justification. It *can* be on by default because it measures **silence, not duration**: a wall-clock
+cap cannot tell a stalled run from a slow one making real progress, which is why
+`cost.max_wall_clock_per_run` is off, but "no streamed token and no tool started or finished" needs no
+judgement call. And 900 rather than 600 because it is a **backstop** and must sit above every narrower
+timeout it backs up (`provider.stream_idle_timeout` at 10 min, the shell tool's 600s per-call ceiling,
+cron's 10-minute bound) so those still report their own, more precise failure first. A config test
+asserts the default exceeds 10 minutes, so the layering cannot silently invert.
+
+**Fatal to the drive, not resumable.** All three reset ladders (`recoverPhase6Overflow`,
+`recoverToolFailureStall`, `recoverReasoningLoop`) decline it, and the reasoning is worth keeping:
+their shared premise is that the *context* is the defect, and a stall makes no claim about the
+context — the backend, transport or tool is wedged, and a fresh conversation is handed straight back
+to it. Auto-retrying would also recreate precisely what this item was filed against, an unattended run
+burning hours while looking healthy. The on-disk suite survives, so re-running still resumes.
+
+*Mutation testing was the part that earned its keep.* Six mutations, **three initially escaped**:
+weakening the threshold to `limit*3` escaped because no test bounded *when* detection happened (fixed
+by a `< 2*limit` latency assertion); deleting the tool-phase beat escaped because every false-positive
+case happened to be beaten by stream events *between* rounds (fixed with a `CapWrite` slow tool, hence
+serialized by the exec lock, spanning 480ms with no provider event at all); and deleting the
+stream-loop beat escaped because the drip case finished *inside* the bound (fixed by raising the drip
+and asserting the case actually reached the detector). A fourth weakness surfaced on the way: the drip
+adapter returned silently on cancel, so a spurious stall truncated the turn into a valid empty final
+answer and `Run` returned `nil` — it now emits an `EventError` like a real adapter.
+
+**P39.18 — typed tools for the bundled skill scripts, so an argument error is structurally impossible (SHIPPED 2026-08-10).**
+
+With per-phase narrowing and handle-based editing in place, tool *selection* stopped failing on
+qwen3:14b and every remaining stumble was a malformed **argument** — `scaffold.py --framework` with
+the value omitted, `2-<framework>-analysis.md` with the placeholder never substituted. Same class
+`fill_marker` removed from editing: the model was composing a command line as a *string*.
+
+Five tools (`threat_model_recon`, `_scaffold`, `_inventory`, `_verify`, `_normalize_ids`), one per
+script, all `CapExecute` — the same gate the shell calls they replace already passed through, so no
+permission-posture change. **One tool per script rather than a generic runner** because a generic tool
+needs a free-form `args` blob to span five argument sets, which is string composition wearing a JSON
+hat and cannot express "`framework` is a required enum" — the entire point of the item.
+
+Schemas are derived from each file's real argparse, and `threat_model_scaffold`'s `framework` is a
+required enum of scaffold.py's actual `FRAMEWORKS` keys (minus its two aliases, so there is one
+canonical spelling per choice). **A test parses `scaffold.py` and fails if the schema and the script
+ever drift**, which is what stops the schema rotting away from the thing it describes.
+
+*Scoping matters more than the tools, given what P62.6 measured the same day.* These are **not** in
+`builtin.Register`. `builtin.ThreatModelScriptTools(root, skillDir)` constructs them and they are
+`Upsert`ed onto the **session registry clone** only when a run has loaded a skill that bundles the
+scripts — three wiring points (`cli/chat.go` after `--skill` resolves, `server/drive.go`'s
+`resolveDriveSpec`, and `server.go`'s `activateSessionSkill`), so the daemon-wide surface never grows
+and the default prompt pays nothing. Within a drive, the existing per-phase `ScopeTools`/`ScopeExposed`
+seam narrows further: only setup sees recon+scaffold, only assessment sees inventory. The constructor
+also stats each script and omits tools for scripts an older materialized skill build lacks.
+
+Both halves of the closure condition are met, and the second was verified rather than assumed: shell
+was in `setupPhaseTools` for exactly recon.py, `date` and scaffold.py, and in `assessmentPhaseTools`
+(per its own comment) solely for inventory.py — **no threat-model phase exposes shell now**. Two
+extras removed the remaining shell uses: with `run_dir` omitted, `threat_model_scaffold` derives and
+reports its own timestamped run directory from the host clock, killing both the `date` call and the
+hand-composed path that produced the unsubstituted-placeholder bug. Every path argument goes through
+`sandbox.ValidatePath`. Invalid arguments are rejected in the argv builder — **python is never
+spawned**, proven by a sentinel-file test — and each rejection enumerates the accepted values, the
+way a bad `fill_marker` index is answered with the markers that exist.
+
+**P62.7 — compaction stops re-pruning for almost nothing every turn (SHIPPED 2026-08-10).**
+
+The item inferred the defect from message counts; this pass measured it in bytes first, as the item
+asked. `TestPruneYieldPerTurnMeasurement` reproduces the live trace deterministically (24,576-token
+window, trigger 15,156, the real `Summarizer`):
+
+| turns | yield | ratio to the gap it must close |
+|---|---|---|
+| 5–15 | 180 chars / 45 tokens, *every turn* | **0.03 → 0.01×** — 11 notices in a row, counts unchanged |
+| 16 | 73,188 chars / 18,419 tokens | **3.99×** — the real summarization |
+
+The premise holds with a very large margin, and the two distributions are cleanly separated, which is
+what makes the threshold defensible rather than tuned. The test fails loudly if that separation ever
+stops being true, so the fix cannot silently become pointless.
+
+**The root cause is the conflation the item's option (c) named.** `(*Summarizer).compact` runs the
+deterministic pre-pass, sets `changedByPrune = prunedChars > 0`, then returns early from
+`!s.shouldCompact(...)` — so summarization never runs (hence unchanged message counts) but `changed`
+is `true` because the prune freed a handful of characters. In the engine that triggers
+`conv.invalidate()` plus a "compacted N→N messages" notice, and the invalidate is what costs the full
+~9s prefill recompute.
+
+So (c) was built as a **prerequisite** for the preferred (a), not as an alternative to it: the engine
+cannot apply a yield check to a bare bool. `YieldReportingCompactor` is an optional interface matching
+the existing `FallbackCompactor`/`CalibratedCompactor` pattern, so every other Compactor keeps
+compiling with today's behaviour. It returns plain values rather than a struct **because a shared
+struct type would close an import cycle** — engine's in-package tests import compaction, so compaction
+cannot import engine.
+
+`minPruneYieldFraction = 0.25` sits mid-void between the measured 0.01–0.03 and 3.99, mirrors
+`prunePrefixCacheRatio`, and stays well under 1.0 so a prune genuinely chipping at the excess is never
+suppressed. On a low-yield prune the guard records `retryEstimate = est + gap` — "grown by at least
+what stood between it and the trigger" — and since the gap doubles each time it fires, re-attempts
+back off geometrically. Option (b), a cooldown in turns, was rejected: a turn count is not the thing
+that matters. When suppressed, `beforeTurn` returns **before** calling Compact at all: no invalidate,
+no notice, no work. Net effect on the fixture: 12 applied compactions → **3**, with the real
+summarization still happening one turn later.
+
+`compactionSuppressCeiling(window, trigger) = trigger + (window-trigger)/2` keeps this a throughput
+change rather than a safety change — past it, suppression always yields. It **subsumes** the 95%
+context-full notice path, since `compactionTrigger` never exceeds 85% of the window, and that is
+proved across all window/max-token pairs rather than asserted for one case
+(`TestSuppressionCeilingIsBelowNinetyFivePercent`). P62.4 already burned someone by gating that
+notice on the wrong number; it was not going to be regressed on the way past.
+
+*Mutation testing repeated the P63.9 lesson exactly.* Eight mutations, and **`0.25 → 0.5` survived**
+the suite as it stood — a fixture cannot tell adjacent thresholds apart. Fixed by
+`TestMinimumYieldBoundary` (249 vs 250 tokens of a 1,000-token gap). The suppression test asserts the
+exact **sequence** `[5 10 16]` rather than a count, for the same reason. No golden transcript changed,
+and the reason was checked rather than observed: the eval scenarios never cross the trigger.
 
 **P39.16 — the small-model tool batch: handle-based editing, per-phase tool surfaces, and pinned sampling (SHIPPED 2026-08-09).**
 

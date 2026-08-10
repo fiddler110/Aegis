@@ -165,7 +165,7 @@ func TestPhasePromptsAreWired(t *testing.T) {
 	p := PhaseParams{task: "threat model this repo", skillDir: skillDir, cwd: "/ws", runDir: runDir}
 
 	arch := phasePromptArchitecture(p)
-	for _, want := range []string{"recon.py", "scaffold.py", "0.1-architecture.md", "output-formats.md", "threat model this repo", "STRIDE"} {
+	for _, want := range []string{"threat_model_recon", "threat_model_scaffold", "0.1-architecture.md", "output-formats.md", "threat model this repo", "stride"} {
 		if !strings.Contains(arch, want) {
 			t.Errorf("architecture prompt missing %q", want)
 		}
@@ -182,8 +182,8 @@ func TestPhasePromptsAreWired(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(phasePromptAssessment(p), "inventory.py") {
-		t.Error("assessment prompt must tell the model to run inventory.py to clear inventory.yaml's marker")
+	if !strings.Contains(phasePromptAssessment(p), "threat_model_inventory") {
+		t.Error("assessment prompt must tell the model to call threat_model_inventory to clear inventory.yaml's marker")
 	}
 	if !strings.Contains(phase6Preamble(runDir, skillDir), runDir) {
 		t.Error("phase-6 preamble must name the run directory")

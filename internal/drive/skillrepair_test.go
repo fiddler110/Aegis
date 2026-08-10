@@ -78,8 +78,15 @@ func TestScopeToolsPerPhase(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected one scope call, got %d", len(calls))
 	}
-	if !slices.Contains(calls[0], "shell") {
-		t.Error("the setup phase needs shell to run recon and scaffold")
+	// P39.18: the setup phase runs recon and scaffold through typed tools, not
+	// a composed shell command line, so shell is gone from this surface.
+	if slices.Contains(calls[0], "shell") {
+		t.Error("the setup phase no longer needs shell — recon and scaffold are typed tools")
+	}
+	for _, want := range []string{"threat_model_recon", "threat_model_scaffold"} {
+		if !slices.Contains(calls[0], want) {
+			t.Errorf("the setup phase needs %s", want)
+		}
 	}
 	restore()
 	if restored != 1 {
@@ -95,10 +102,15 @@ func TestScopeToolsPerPhase(t *testing.T) {
 	}
 	// The assessment phase is the exception: its completion condition includes
 	// inventory.yaml, whose marker is cleared by running the bundled
-	// inventory.py. Narrowing shell away there makes the phase impossible to
-	// finish, however well the model fills 0-assessment.md.
-	if !slices.Contains(assessmentPhaseTools, "shell") {
-		t.Error("the assessment phase needs shell to run inventory.py, or it can never complete")
+	// inventory.py. Narrowing that capability away there makes the phase
+	// impossible to finish, however well the model fills 0-assessment.md. Since
+	// P39.18 the capability is the typed threat_model_inventory tool rather than
+	// shell — the sidecar still gets generated, without a composed command line.
+	if !slices.Contains(assessmentPhaseTools, "threat_model_inventory") {
+		t.Error("the assessment phase needs threat_model_inventory, or it can never complete")
+	}
+	if slices.Contains(assessmentPhaseTools, "shell") {
+		t.Error("the assessment phase no longer needs shell — inventory.py is a typed tool")
 	}
 	// The tool that makes filling tractable for a weak model must be offered
 	// wherever filling happens.

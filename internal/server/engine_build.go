@@ -365,6 +365,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		MaxTokensPerRun:          s.cfg.Cost.MaxTokensPerRun,
 		MaxGeneratedTokensPerRun: s.cfg.Cost.MaxGeneratedTokensPerRun,
 		MaxWallClockPerRun:       s.cfg.Cost.MaxWallClockPerRun(),
+		MaxTurnStall:             s.cfg.Cost.MaxTurnStall(),
 		Model:                    model,
 		MaxTokens:                s.cfg.Provider.MaxTokens,
 		MaxIterations:            s.cfg.Provider.MaxIterations,

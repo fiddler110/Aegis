@@ -342,6 +342,23 @@ func EstimateTokens(system string, msgs []provider.Message) int {
 // every call unless Options.PreservePrefixCache is set, in which case it is
 // gated on headroom — see shouldPrune.
 func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider.Message) ([]provider.Message, bool, error) {
+	out, changed, _, _, err := s.compact(ctx, system, msgs, false)
+	return out, changed, err
+}
+
+// CompactYield is Compact plus the two facts `changed` cannot carry: whether
+// the LLM summarizer actually ran, and how many estimated tokens the call
+// freed. It implements engine.YieldReportingCompactor (P62.7).
+//
+// The distinction is the whole point. `changed=true` is returned both by a
+// summarization that removed half the conversation and by a pre-pass that
+// blanked one stale search dump — and the caller pays the same price for
+// either: a rewritten message list, a cache invalidation and a user-visible
+// notice. Measured on the P62.7 fixture, the second kind freed 45 estimated
+// tokens against a 1,462-4,332-token gap to the caller's trigger, every turn
+// for eleven turns, while the one real summarization freed 18,419. Only the
+// caller knows what its gap is, so this reports the yield and lets it decide.
+func (s *Summarizer) CompactYield(ctx context.Context, system string, msgs []provider.Message) (out []provider.Message, changed, summarized bool, freedTokens int, err error) {
 	return s.compact(ctx, system, msgs, false)
 }
 
@@ -351,10 +368,17 @@ func (s *Summarizer) Compact(ctx context.Context, system string, msgs []provider
 // of a tool-heavy stretch the user knows is coming, rather than the automatic
 // budget-driven path.
 func (s *Summarizer) ForceCompact(ctx context.Context, system string, msgs []provider.Message) ([]provider.Message, bool, error) {
-	return s.compact(ctx, system, msgs, true)
+	out, changed, _, _, err := s.compact(ctx, system, msgs, true)
+	return out, changed, err
 }
 
-func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider.Message, force bool) ([]provider.Message, bool, error) {
+// compact is the one implementation behind Compact/ForceCompact/CompactYield.
+// It reports, alongside the rewritten list: whether anything changed, whether
+// the change came from the LLM summarizer (as opposed to the deterministic
+// pre-pass alone), and how many estimated tokens the call freed. The two
+// public no-yield entry points drop the extra results, so there is exactly one
+// place where any of this is decided.
+func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider.Message, force bool) (out []provider.Message, changed, summarized bool, freedTokens int, err error) {
 	// Deterministic pre-pass — drop stale tool results (superseded file reads,
 	// old search dumps, already-committed write/edit payloads) ahead of the
 	// budget gate below, so a long tool-heavy run does not keep resending every
@@ -366,38 +390,54 @@ func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider
 	// measurements. A forced compaction always prunes: the caller has asked for
 	// space explicitly and is paying for a summarization call anyway.
 	//
-	// Note the ordering of the || — under the default (cloud) configuration the
-	// short-circuit means EstimateTokens is not computed here at all, exactly as
-	// before.
-	var changedByPrune bool
-	if force || !s.preservePrefixCache || s.shouldPrune(s.estimate(system, msgs)) {
+	// estBefore is measured once, up front, and serves three readers: the
+	// pre-pass gate, the budget gate below (when nothing was pruned), and the
+	// yield P62.7 reports. It costs one estimate the pre-P62.7 code did not pay
+	// on the *cloud* path when the pre-pass actually freed something — the
+	// short-circuited || used to skip it there — and that is the price of being
+	// able to say how much a prune freed rather than only that it freed
+	// something. Nothing else changed: with no prune the single estimate below
+	// is reused, exactly as before.
+	estBefore := s.estimate(system, msgs)
+	if force || !s.preservePrefixCache || s.shouldPrune(estBefore) {
 		var prunedChars int
 		msgs, prunedChars = pruneStaleToolResults(msgs, s.keepRecent)
-		changedByPrune = prunedChars > 0
+		changed = prunedChars > 0
 	}
 
-	if !force && !s.shouldCompact(s.estimate(system, msgs)) {
-		return msgs, changedByPrune, nil
+	est := estBefore
+	if changed {
+		est = s.estimate(system, msgs)
+		if freedTokens = estBefore - est; freedTokens < 0 {
+			freedTokens = 0
+		}
+	}
+
+	if !force && !s.shouldCompact(est) {
+		return msgs, changed, false, freedTokens, nil
 	}
 
 	boundary := s.boundary(msgs)
 	if boundary <= 0 {
-		return msgs, changedByPrune, nil // nothing more safe to compact
+		return msgs, changed, false, freedTokens, nil // nothing more safe to compact
 	}
 
 	prefix := msgs[:boundary]
 	summary, err := s.summarize(ctx, prefix)
 	if err != nil {
-		return msgs, changedByPrune, err
+		return msgs, changed, false, freedTokens, err
 	}
 
-	out := make([]provider.Message, 0, len(msgs)-boundary+1)
+	out = make([]provider.Message, 0, len(msgs)-boundary+1)
 	out = append(out, provider.Message{
 		Role:    provider.RoleUser,
 		Content: []provider.Block{provider.TextBlock{Text: "Summary of earlier conversation (older turns were compacted):\n\n" + summary}},
 	})
 	out = append(out, msgs[boundary:]...)
-	return out, true, nil
+	if freedTokens = estBefore - s.estimate(system, out); freedTokens < 0 {
+		freedTokens = 0
+	}
+	return out, true, true, freedTokens, nil
 }
 
 // FallbackCompact deterministically shortens the conversation without an LLM

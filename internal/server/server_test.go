@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"net/http"
@@ -17,13 +19,20 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/filetracker"
 	"github.com/fiddler110/aegis/internal/hooks"
+	"github.com/fiddler110/aegis/internal/knowledge"
+	"github.com/fiddler110/aegis/internal/longmem"
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/task"
+	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
@@ -866,6 +875,286 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 			t.Error("no-scope-creep rule missing from effectiveSystem output")
 		}
 	}
+}
+
+// localBasePromptCeilingTokens is the P62.6 budget: the estimated token cost of
+// everything a local-profile session sends before the first user message —
+// the assembled system prompt (persona + shared blocks + skills/repo-map/memory
+// when present) plus the always-exposed tool schemas the request carries.
+//
+// This is a BUDGET, NOT A TARGET. It exists because the number is invisible
+// otherwise: P62.6 measured a real local run at 7,119 provider-reported prompt
+// tokens on the *trimmed* profile, which on a 16GB-VRAM box (an 8k-16k served
+// window) is most of the window before any work happens, and nothing in the
+// default suite noticed. TestEffectiveSystem_localProfileTrimsPrompt asserts the
+// local profile is *smaller* than the default one; it says nothing about whether
+// it is small enough.
+//
+// Measured 2026-08-10 against an empty workspace (no repo map, no memory, no
+// skills enabled) on windows/amd64: 7,790 estimated tokens — 4,176 of assembled
+// system prompt (of which the <deferred_tools> inventory alone is 2,953) and
+// 3,614 of always-exposed tool schemas over 27 tools. That is the same shape as
+// P62.6's live 7,119 provider-reported figure; tokenest is a heuristic, not a
+// tokenizer, so the two are not expected to agree to the token.
+//
+// The ceiling is the measured value plus ~5% headroom, so ordinary prose edits
+// to a persona block or a tool description do not trip it but a new
+// always-exposed tool or a new injected block does. It is an upper bound across
+// platforms: PlatformBlock is largest on Windows (the PowerShell command table),
+// so linux/darwin measure a few hundred tokens lower and pass with more room.
+//
+// When it trips: run TestBasePromptComposition_localProfile with -v first. It
+// prints the per-component and per-tool-schema breakdown, which tells you
+// whether the growth is a block you meant to add or a tool schema that grew by
+// accident. If the growth is deliberate, move this number and say in the commit
+// what was added and what it bought — a silent bump turns the budget back into
+// the invisible number it was written to make visible.
+const localBasePromptCeilingTokens = 8200
+
+// TestEffectiveSystem_localProfileBudget is P62.6's regression assertion. See
+// localBasePromptCeilingTokens for what the number means and what to do when
+// this fails.
+func TestEffectiveSystem_localProfileBudget(t *testing.T) {
+	srv, reg := newLocalProfileServer(t)
+	system := srv.effectiveSystem(personaBaseSystem(t), "")
+	schemas := reg.Schemas()
+
+	systemTokens := tokenest.Estimate(system)
+	schemaTokens := tokenest.Tools(schemas)
+	total := systemTokens + schemaTokens
+
+	t.Logf("local-profile base prompt: system=%d tokens (%d bytes), tool schemas=%d tokens (%d tools), total=%d tokens (ceiling %d)",
+		systemTokens, len(system), schemaTokens, len(schemas), total, localBasePromptCeilingTokens)
+
+	if total > localBasePromptCeilingTokens {
+		t.Errorf("local-profile base prompt is %d estimated tokens, over the %d-token budget (system=%d, tool schemas=%d over %d tools).\n"+
+			"Run `go test ./internal/server/ -run TestBasePromptComposition_localProfile -v` for the per-component breakdown.\n"+
+			"If the growth is deliberate, raise localBasePromptCeilingTokens and note what was added.",
+			total, localBasePromptCeilingTokens, systemTokens, schemaTokens, len(schemas))
+	}
+}
+
+// TestBasePromptComposition_localProfile is P62.6's measurement harness: it
+// prints where the local-profile base prompt's tokens actually go, per assembled
+// block and per tool schema. It asserts only the things that would make the
+// table a lie — that the components sum to the assembled prompt, and that the
+// schema block is actually populated — because its job is to report a number,
+// not to pin one (TestEffectiveSystem_localProfileBudget does that).
+//
+// Run with -v to see the table.
+func TestBasePromptComposition_localProfile(t *testing.T) {
+	srv, reg := newLocalProfileServer(t)
+	base := personaBaseSystem(t)
+	system := srv.effectiveSystem(base, "")
+	schemas := reg.Schemas()
+
+	// Components, in effectiveSystem's assembly order. Recomputed from the same
+	// sources rather than parsed out of the joined string, then cross-checked
+	// against the assembled length below so the table cannot silently drift from
+	// what effectiveSystem actually emits.
+	workdir := srv.workdirFor("")
+	type component struct {
+		name string
+		text string
+	}
+	components := []component{
+		{"persona system prompt", base},
+		{"tool-use block", persona.ToolUseBlock()},
+		{"completing-tasks block", persona.CompletingTasksBlock()},
+		{"platform block", persona.PlatformBlock()},
+		{"memory: context files", srv.memory.LoadContext()},
+		{"memory: project/user", srv.memory.Load()},
+		{"<skills_available>", skills.BuildIndex(workdir, srv.cfg.DataDir, srv.sessionEnabledSkills(""))},
+		{"<repo_map>", srv.repoMapFor(workdir)},
+		{fmt.Sprintf("<deferred_tools> (%d tools)", len(reg.Deferred())), deferredToolsBlock(reg)},
+		{"debate block", debateIntegrationBlock(srv.cfg.Security.Debate)},
+	}
+
+	// Assembly cross-check: effectiveSystem joins the non-empty parts with a
+	// blank line. If this fails, a block was added to effectiveSystem and not to
+	// the table above, and every percentage below is wrong.
+	want, nonEmpty := 0, 0
+	for _, c := range components {
+		if c.text == "" {
+			continue
+		}
+		want += len(c.text)
+		nonEmpty++
+	}
+	if nonEmpty > 1 {
+		want += 2 * (nonEmpty - 1)
+	}
+	if want != len(system) {
+		t.Errorf("component table does not account for the assembled prompt: components=%d bytes, effectiveSystem=%d bytes — a block was added to effectiveSystem without being added here", want, len(system))
+	}
+
+	schemaBytes := 0
+	for _, s := range schemas {
+		schemaBytes += len(s.Name) + len(s.Description) + len(s.InputSchema) + len(s.OutputSchema)
+	}
+	if len(schemas) == 0 {
+		t.Fatal("no tool schemas exposed; the measurement would be meaningless")
+	}
+
+	systemTokens := tokenest.Estimate(system)
+	schemaTokens := tokenest.Tools(schemas)
+	totalTokens := systemTokens + schemaTokens
+	totalBytes := len(system) + schemaBytes
+
+	pct := func(n, of int) float64 {
+		if of == 0 {
+			return 0
+		}
+		return 100 * float64(n) / float64(of)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nP62.6 local-profile base prompt composition (empty workspace)\n\n")
+	fmt.Fprintf(&b, "%-28s %10s %10s %8s\n", "component", "bytes", "est.tokens", "%tokens")
+	for _, c := range components {
+		tk := tokenest.Estimate(c.text)
+		fmt.Fprintf(&b, "%-28s %10d %10d %7.1f%%\n", c.name, len(c.text), tk, pct(tk, totalTokens))
+	}
+	fmt.Fprintf(&b, "%-28s %10d %10d %7.1f%%\n", fmt.Sprintf("tool schemas (%d tools)", len(schemas)), schemaBytes, schemaTokens, pct(schemaTokens, totalTokens))
+	fmt.Fprintf(&b, "%-28s %10d %10d %7.1f%%\n", "TOTAL", totalBytes, totalTokens, 100.0)
+
+	// Per-tool cost, most expensive first: the schema block is the obvious
+	// suspect, and "which tools" is the question any fix has to answer.
+	type toolCost struct {
+		name   string
+		bytes  int
+		tokens int
+	}
+	costs := make([]toolCost, 0, len(schemas))
+	for _, s := range schemas {
+		costs = append(costs, toolCost{
+			name:   s.Name,
+			bytes:  len(s.Name) + len(s.Description) + len(s.InputSchema) + len(s.OutputSchema),
+			tokens: tokenest.Tools([]provider.ToolSchema{s}),
+		})
+	}
+	sort.Slice(costs, func(i, j int) bool {
+		if costs[i].tokens != costs[j].tokens {
+			return costs[i].tokens > costs[j].tokens
+		}
+		return costs[i].name < costs[j].name
+	})
+	// The deferred inventory is measured too, and separately: it is the price
+	// paid for *not* exposing a schema, and if it approaches what a schema costs
+	// then deferral has stopped being a saving. One line per deferred tool
+	// (name + full description) is not free.
+	deferredInfos := reg.Deferred()
+	sort.Slice(deferredInfos, func(i, j int) bool {
+		li, lj := len(deferredInfos[i].Description), len(deferredInfos[j].Description)
+		if li != lj {
+			return li > lj
+		}
+		return deferredInfos[i].Name < deferredInfos[j].Name
+	})
+	fmt.Fprintf(&b, "\nmost expensive <deferred_tools> lines\n\n")
+	fmt.Fprintf(&b, "%-4s %-24s %10s %10s\n", "#", "tool", "bytes", "est.tokens")
+	for i, d := range deferredInfos {
+		if i >= 10 {
+			break
+		}
+		line := "- " + d.Name + ": " + d.Description + "\n"
+		fmt.Fprintf(&b, "%-4d %-24s %10d %10d\n", i+1, d.Name, len(line), tokenest.Estimate(line))
+	}
+
+	fmt.Fprintf(&b, "\nmost expensive tool schemas\n\n")
+	fmt.Fprintf(&b, "%-4s %-24s %10s %10s %8s\n", "#", "tool", "bytes", "est.tokens", "%tokens")
+	for i, c := range costs {
+		if i >= 15 {
+			break
+		}
+		fmt.Fprintf(&b, "%-4d %-24s %10d %10d %7.1f%%\n", i+1, c.name, c.bytes, c.tokens, pct(c.tokens, totalTokens))
+	}
+	t.Log(b.String())
+}
+
+// newLocalProfileServer builds a Server wired the way a local-model session is:
+// a loopback base_url (which LocalPromptProfile auto-detects), the real builtin
+// tool registry registered with LocalProfile set, and an empty workspace so no
+// repo map, memory, or skills inflate the measurement.
+func newLocalProfileServer(t *testing.T) (*Server, *tool.Registry) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := session.Open(filepath.Join(root, "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", BaseURL: "http://localhost:11434"},
+		Permission: config.PermissionConfig{Mode: "build"},
+		DataDir:    filepath.Join(root, "data"),
+	}
+	if !cfg.Provider.LocalPromptProfile() {
+		t.Fatal("loopback base_url should auto-detect as the local prompt profile")
+	}
+	// The tool surface has to match what the daemon actually registers, or the
+	// measurement misses whole families of tools: New() passes a task manager,
+	// cron scheduler, todo list, team task list, knowledge store and long-term
+	// memory store, and each one contributes tools to the exposed set or to the
+	// deferred block. Everything below is wired the same way New() wires it,
+	// sharing the session DB. Only the sandbox, LSP manager and toolpath
+	// resolver are left nil — none of them changes a schema, and probing for a
+	// container runtime does not belong in the default suite.
+	taskStore, err := task.NewStore(store.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cronStore, err := cron.NewStore(store.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	teamTasks, err := swarm.NewTaskList(store.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeStore, err := knowledge.Open(root, cfg.KnowledgeDBPath(root), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { knowledgeStore.Close() })
+	longMemStore, err := longmem.Open(filepath.Base(root), cfg.LongMemDBPath(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { longMemStore.Close() })
+
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{
+		Root:         root,
+		DataDir:      cfg.DataDir,
+		Tasks:        task.NewManager(taskStore, slog.New(slog.NewTextHandler(io.Discard, nil))),
+		Cron:         cron.NewScheduler(cronStore, nil, slog.New(slog.NewTextHandler(io.Discard, nil))),
+		FileTracker:  filetracker.New(),
+		TodoList:     builtin.NewTodoList(),
+		TeamTasks:    teamTasks,
+		MailboxRoot:  swarm.MailboxRoot(cfg.DataDir),
+		Knowledge:    knowledgeStore,
+		LongMem:      longMemStore,
+		LocalProfile: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, reg)
+	srv.workspace = root
+	srv.memory = memory.Sources{ProjectRoot: root, DataDir: cfg.DataDir}
+	return srv, reg
+}
+
+// personaBaseSystem returns the system prompt a session gets by default — the
+// "general" built-in persona, which is what handleCreateSession falls back to.
+func personaBaseSystem(t *testing.T) string {
+	t.Helper()
+	p, ok := persona.Get("general")
+	if !ok {
+		t.Fatal(`built-in persona "general" not found`)
+	}
+	return p.System
 }
 
 // TestEffectiveSystem_ByteStable is P39.1: effectiveSystem's assembly (persona

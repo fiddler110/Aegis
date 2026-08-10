@@ -72,12 +72,16 @@ func ComputeHardenPlan(cfg *Config) HardenPlan {
 		// operator preference, not a security control), but rewriting the cost
 		// block would drop a user's setting if it weren't carried here.
 		MaxWallClockPerRunSec: cfg.Cost.MaxWallClockPerRunSec,
-		MaxTokensPerRun:       cfg.Cost.MaxTokensPerRun,
-		SessionCapUSD:         cfg.Cost.SessionCapUSD,
-		DailyCapUSD:           cfg.Cost.DailyCapUSD,
-		SessionTokenCap:       cfg.Cost.SessionTokenCap,
-		DailyTokenCap:         cfg.Cost.DailyTokenCap,
-		AlertThreshold:        cfg.Cost.AlertThreshold,
+		// Likewise passed through unchanged (P39.17): harden does not tune the
+		// stall detector, but the cost block is rewritten wholesale, so a value
+		// absent here would be dropped from the user's file.
+		MaxTurnStallSec: cfg.Cost.MaxTurnStallSec,
+		MaxTokensPerRun: cfg.Cost.MaxTokensPerRun,
+		SessionCapUSD:   cfg.Cost.SessionCapUSD,
+		DailyCapUSD:     cfg.Cost.DailyCapUSD,
+		SessionTokenCap: cfg.Cost.SessionTokenCap,
+		DailyTokenCap:   cfg.Cost.DailyTokenCap,
+		AlertThreshold:  cfg.Cost.AlertThreshold,
 	}
 	var costChanges []string
 	if costPatch.SessionCapUSD <= 0 {

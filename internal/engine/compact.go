@@ -18,6 +18,74 @@ import (
 // simply can't summarize and latching the LLM call off.
 const summarizerGiveUpThreshold = 4
 
+// minPruneYieldFraction is the share of the gap between the estimate and the
+// compaction trigger that a *prune-only* compaction has to free to be worth its
+// price (P62.7). Below it the guard records the estimate it happened at and
+// stops attempting compaction until the conversation has grown by at least that
+// gap again.
+//
+// The price is what makes this necessary: applying a compaction rewrites the
+// middle of the conversation, which invalidates the cached token total, forces
+// the caller to re-persist, discards a prefix-caching backend's KV for
+// everything after the edit (a measured ~2.5s prefill became ~9s), and emits a
+// user-visible notice. A pre-pass that freed a handful of characters pays all of
+// that and does not move the conversation back under the trigger, so the next
+// turn does it again.
+//
+// The fraction is 0.25 because the measured distributions are nowhere near each
+// other. On the P62.7 fixture (TestPruneYieldPerTurnMeasurement, a 24,576-token
+// window sized like the live run) eleven consecutive prune-only compactions each
+// freed 180 characters / 45 estimated tokens against a gap that grew from 1,462
+// to 4,332 — a yield of 0.03 down to 0.01 of the gap — while the one compaction
+// that reached the summarizer freed 18,419 tokens, 3.99x the gap. Any threshold
+// between about 0.05 and 3 separates them; a quarter sits in the middle of that
+// void and matches the shape of internal/compaction's own prunePrefixCacheRatio.
+// It is deliberately well under 1.0: a prune that frees a quarter of the excess
+// four turns running does bring the conversation back, and should not be
+// suppressed.
+const minPruneYieldFraction = 0.25
+
+// compactionSuppressCeiling is the estimate past which a low-yield prune may no
+// longer defer a compaction attempt: the midpoint between the trigger and the
+// window.
+//
+// Suppression trades headroom for prefill, and past this point there is no
+// longer headroom to trade — the trigger fires early precisely to leave room for
+// the completion (P59.1), and half of that reservation is as much as a
+// yield heuristic gets to spend. It also subsumes the 95%-context-full notice
+// path rather than competing with it: compactionTrigger never exceeds 85% of the
+// window, so 95% of the window is always above this ceiling, and a run at 95%
+// therefore always still attempts a compaction and still reaches the notice when
+// that attempt reports nothing to do.
+func compactionSuppressCeiling(window, trigger int) int {
+	return trigger + (window-trigger)/2
+}
+
+// YieldReportingCompactor is an optional capability of a Compactor: it reports
+// what a compaction actually achieved, not merely that it achieved something.
+//
+// It exists because `changed` conflates two outcomes with the same price and
+// wildly different value — a summarization that removed half the conversation,
+// and a deterministic pre-pass that blanked one stale search dump (P62.7). The
+// engine cannot apply a minimum-yield rule to a bool, so the seam is widened
+// here rather than in Compactor itself: an optional interface is how this file
+// already widens the compactor seam (FallbackCompactor, CalibratedCompactor),
+// and it keeps every other Compactor implementation — the test doubles, and any
+// caller-supplied one — compiling and behaving exactly as before, which is
+// precisely the pre-fix behaviour a guard with no yield information falls back
+// to.
+//
+// It is declared here rather than beside those two in engine.go because P63.9
+// made this file the home of the compaction concern, and this interface has no
+// reader anywhere else.
+//
+// The results are plain values rather than a struct because internal/compaction
+// must be able to implement this without importing internal/engine: engine's own
+// tests import compaction, so a shared struct type would close an import cycle.
+type YieldReportingCompactor interface {
+	CompactYield(ctx context.Context, system string, msgs []provider.Message) (out []provider.Message, changed, summarized bool, freedTokens int, err error)
+}
+
 // compactionGuard is the third concern lifted out of Engine.Run under P63.9:
 // proactive context compaction, the summarizer's failure/latch bookkeeping, and
 // the one context-nearly-full notice a run is allowed to emit.
@@ -130,6 +198,20 @@ type compactionGuard struct {
 	// fullWarned bounds the context-nearly-full notice to one per run rather
 	// than one per turn.
 	fullWarned bool
+
+	// retryEstimate is the estimate at which compaction may be attempted again
+	// after a prune whose yield did not justify its cost (P62.7); 0 means no
+	// suppression is in force. It is set to the estimate at which the low-yield
+	// prune happened *plus* the gap that prune failed to close, so the
+	// conversation has to grow by at least the amount that was standing between
+	// it and the trigger before the guard spends another rewrite on it. Because
+	// the gap doubles each time this fires, the re-attempts back off
+	// geometrically instead of on a fixed schedule — a turn count is not the
+	// thing that matters here, the distance to the trigger is.
+	//
+	// Per-run like every other field on this guard, and reset by any compaction
+	// that does justify itself.
+	retryEstimate int
 }
 
 // newCompactionGuard builds the guard for a run.
@@ -210,17 +292,71 @@ func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, em
 	// P59.1: the trigger reserves room for the *completion* as well as for
 	// prompt growth — on a shared prompt+completion budget (Ollama's num_ctx) a
 	// prompt that merely fits is not a prompt that can be answered.
-	if est <= compactionTrigger(win, g.maxTokens) {
+	trigger := compactionTrigger(win, g.maxTokens)
+	if est <= trigger {
+		return
+	}
+	// P62.7: a previous prune freed too little to be worth its cost and the
+	// conversation has not yet grown back to where re-trying could plausibly do
+	// better. Return before Compact is even called — the costs this item is about
+	// (conv.invalidate() and the "compacted N→N messages" notice) are all
+	// downstream of an *applied* compaction, so the only way not to pay them is
+	// not to take the attempt.
+	if g.suppressed(est, win, trigger) {
 		return
 	}
 	pct := est * 100 / win
-	if !g.compact(ctx, conv, emit, pct) && !g.fullWarned && pct >= 95 {
+	oc := g.compact(ctx, conv, emit, pct)
+	if !oc.applied && !g.fullWarned && pct >= 95 {
 		g.fullWarned = true
 		emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full and nothing left to compact — the model server may silently drop older turns; consider /compact or a fresh session", pct)})
 	}
+	g.recordYield(oc, est, trigger)
 	if !toolsSuppressed {
 		g.lastRaw = conv.estimatedTokens()
 	}
+}
+
+// suppressed reports whether the P62.7 minimum-yield rule is currently holding
+// compaction off for a conversation already over the trigger.
+//
+// Two conditions have to hold, and the ceiling is the one that keeps this a
+// throughput optimization rather than a safety change: however little the last
+// prune yielded, a conversation past compactionSuppressCeiling attempts
+// compaction anyway. That is also why the 95%-context-full notice is untouched —
+// see compactionSuppressCeiling.
+func (g *compactionGuard) suppressed(est, win, trigger int) bool {
+	if g.retryEstimate <= 0 || est >= g.retryEstimate {
+		return false
+	}
+	if est >= compactionSuppressCeiling(win, trigger) {
+		return false
+	}
+	g.logger.Debug("proactive compaction suppressed: last prune yielded too little",
+		"estimate", est, "retry_at", g.retryEstimate, "trigger", trigger)
+	return true
+}
+
+// recordYield applies the P62.7 minimum-yield rule to the compaction that just
+// ran: a prune-only pass that freed less than minPruneYieldFraction of the gap
+// it was supposed to close buys the guard a rest, anything better clears one.
+//
+// A compaction whose yield is unknown (a Compactor that does not implement
+// YieldReportingCompactor) never suppresses and never clears — that guard keeps
+// its pre-P62.7 behavior exactly, which is the promise the optional interface
+// makes.
+func (g *compactionGuard) recordYield(oc compactOutcome, est, trigger int) {
+	if !oc.applied || !oc.yieldKnown {
+		return
+	}
+	gap := est - trigger
+	if oc.summarized || gap <= 0 || float64(oc.freedTokens) >= minPruneYieldFraction*float64(gap) {
+		g.retryEstimate = 0
+		return
+	}
+	g.retryEstimate = est + gap
+	g.logger.Info("proactive compaction: prune yield below the minimum, deferring further attempts",
+		"freed_tokens", oc.freedTokens, "gap", gap, "estimate", est, "retry_at", g.retryEstimate)
 }
 
 // estimate is the engine's best guess at the prompt size the backend is about
@@ -289,12 +425,25 @@ func (g *compactionGuard) afterTurn(usage *provider.Usage, win int) {
 	}
 }
 
+// compactOutcome is what one compaction attempt achieved. applied is the old
+// bool return — the conversation was rewritten, so the caller paid an
+// invalidation and emitted a notice. The rest is the P62.7 widening: whether the
+// LLM summarizer ran (a summarization is worth its price by construction and is
+// never suppressed), how many estimated tokens were freed, and whether the
+// compactor was able to say so at all.
+type compactOutcome struct {
+	applied     bool
+	yieldKnown  bool
+	summarized  bool
+	freedTokens int
+}
+
 // compact performs one compaction attempt for a turn already known to be over
-// the trigger, and reports whether the conversation actually shrank. pct is
-// carried in only so the notices can quote the headroom that provoked them.
-func (g *compactionGuard) compact(ctx context.Context, conv *Conversation, emit EmitFunc, pct int) bool {
+// the trigger, and reports what it achieved. pct is carried in only so the
+// notices can quote the headroom that provoked them.
+func (g *compactionGuard) compact(ctx context.Context, conv *Conversation, emit EmitFunc, pct int) compactOutcome {
 	if g.compactor == nil {
-		return false
+		return compactOutcome{}
 	}
 
 	// P39.8: once the LLM summarizer has proven unreliable this run, stop
@@ -304,35 +453,51 @@ func (g *compactionGuard) compact(ctx context.Context, conv *Conversation, emit 
 	if g.latchedOff {
 		out, changed := g.fallback(conv)
 		if !changed {
-			return false
+			return compactOutcome{}
 		}
 		g.logger.Info("proactive compaction: summarizer latched off, using deterministic fallback",
 			"before", len(conv.Messages), "after", len(out))
 		emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — compacted %d→%d messages (deterministic; summarizer disabled for this run)", pct, len(conv.Messages), len(out))})
 		conv.Messages = out
 		conv.invalidate()
-		return true
+		// A deterministic fallback drops whole messages, so it is never the
+		// low-yield case this file's minimum-yield rule is about — reported as a
+		// summarization for that purpose.
+		return compactOutcome{applied: true, yieldKnown: true, summarized: true}
 	}
 
-	out, changed, err := g.compactor.Compact(ctx, conv.System, conv.Messages)
+	var (
+		out        []provider.Message
+		changed    bool
+		summarized bool
+		freed      int
+		err        error
+		yieldKnown bool
+	)
+	if yc, ok := g.compactor.(YieldReportingCompactor); ok {
+		out, changed, summarized, freed, err = yc.CompactYield(ctx, conv.System, conv.Messages)
+		yieldKnown = true
+	} else {
+		out, changed, err = g.compactor.Compact(ctx, conv.System, conv.Messages)
+	}
 	if err != nil {
 		return g.summarizerFailed(err, conv, emit, pct)
 	}
 	if !changed {
-		return false
+		return compactOutcome{}
 	}
 	g.logger.Info("proactive compaction", "before", len(conv.Messages), "after", len(out))
 	emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full — compacted %d→%d messages", pct, len(conv.Messages), len(out))})
 	conv.Messages = out
 	conv.invalidate()
 	g.failures = 0
-	return true
+	return compactOutcome{applied: true, yieldKnown: yieldKnown, summarized: summarized, freedTokens: freed}
 }
 
 // summarizerFailed records one LLM-summarizer failure and applies the P28.4
 // deterministic fallback if this was the second consecutive one. It reports
 // whether the fallback actually shrank the conversation.
-func (g *compactionGuard) summarizerFailed(err error, conv *Conversation, emit EmitFunc, pct int) bool {
+func (g *compactionGuard) summarizerFailed(err error, conv *Conversation, emit EmitFunc, pct int) compactOutcome {
 	g.logger.Warn("proactive compaction failed", "err", err)
 	g.failures++
 	g.llmFailuresTotal++
@@ -351,11 +516,11 @@ func (g *compactionGuard) summarizerFailed(err error, conv *Conversation, emit E
 	// a deterministic, non-LLM shortening pass instead, if the configured
 	// Compactor supports one.
 	if g.failures < 2 {
-		return false
+		return compactOutcome{}
 	}
 	out, changed := g.fallback(conv)
 	if !changed {
-		return false
+		return compactOutcome{}
 	}
 	g.logger.Warn("proactive compaction: summarizer failed twice in a row, applied deterministic fallback",
 		"before", len(conv.Messages), "after", len(out))
@@ -363,7 +528,9 @@ func (g *compactionGuard) summarizerFailed(err error, conv *Conversation, emit E
 	conv.Messages = out
 	conv.invalidate()
 	g.failures = 0
-	return true
+	// Whole messages dropped, as in the latched-off path above: never the
+	// low-yield case.
+	return compactOutcome{applied: true, yieldKnown: true, summarized: true}
 }
 
 // fallback runs the Compactor's deterministic pass, or reports no change when

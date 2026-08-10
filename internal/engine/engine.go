@@ -277,7 +277,16 @@ type Options struct {
 	// guillotine legitimate long work — the same regression shape the P52.3
 	// reconcile caught when the tool-failure breaker met the phased drive.
 	// Opt-in only, via cost.max_wall_clock_per_run.
-	MaxWallClockPerRun  time.Duration
+	MaxWallClockPerRun time.Duration
+	// MaxTurnStall (P39.17) aborts a run whose current turn has produced no
+	// provider stream event and no tool activity for this long. 0 disables it.
+	//
+	// Unlike MaxWallClockPerRun this one is safe to leave on, which is the whole
+	// reason it is a separate knob: a wall-clock cap cannot tell a stalled run
+	// from a slow one, but "nothing at all has happened since" is not a
+	// judgement call. See stall.go for what counts as activity and why the
+	// default sits above every layer-specific timeout rather than racing them.
+	MaxTurnStall        time.Duration
 	Model               string
 	MaxTokens           int
 	Temperature         *float64
@@ -354,6 +363,7 @@ type Engine struct {
 	maxTokensPerRun  int
 	maxGenTokens     int // P59.4: cumulative output-token cap; 0 = unbounded
 	maxWallClock     time.Duration
+	maxTurnStall     time.Duration // P39.17: per-turn silence bound; 0 = disabled
 	// now supplies the clock the wall-clock budget reads, defaulting to
 	// time.Now. Unexported and injected only by same-package tests, because the
 	// alternative is a test that depends on the host's monotonic-clock
@@ -402,6 +412,25 @@ var ErrInterrupted = errors.New("engine: interrupted")
 // wall-clock limit says the operator asked for a hard time bound, and silently
 // resetting and continuing past it would defeat the point of setting one.
 var ErrWallClockLimit = errors.New("engine: wall-clock budget reached")
+
+// ErrTurnStalled is wrapped by the P39.17 per-turn stall abort so a caller can
+// tell "this turn stopped producing anything at all" from "this run ran out of
+// its time budget" (ErrWallClockLimit), out of iterations, or out of money. The
+// two time-shaped errors must stay distinguishable because they mean opposite
+// things: a wall-clock abort is the operator's bound being honoured on a run
+// that was working, while a stall is a hang — nobody asked for it and no work
+// was in flight.
+//
+// Like ErrWallClockLimit and unlike ErrToolFailureLimit/ErrLoopDetected, the
+// phased drive treats this as fatal rather than as a resumable phase reset. The
+// resumable resets exist because a fresh context genuinely clears the condition
+// — a model reasoning from its own failures, or from its own wrong theory. A
+// stall is not a property of the context at all: the backend, the transport or a
+// tool is wedged, and a fresh conversation would be handed straight back to it.
+// Auto-retrying would also re-create exactly what P39.17 was filed to stop, an
+// unattended run that burns hours while looking healthy. Fatal and loud lets the
+// operator see it; the on-disk suite survives, so re-running still resumes.
+var ErrTurnStalled = errors.New("engine: turn stalled")
 
 // ErrLoopDetected is wrapped by every loop-guard abort below so a caller driving
 // the engine can classify the stop without matching on the message text — the
@@ -519,6 +548,7 @@ func New(opts Options) (*Engine, error) {
 		maxTokensPerRun:     opts.MaxTokensPerRun,
 		maxGenTokens:        opts.MaxGeneratedTokensPerRun,
 		maxWallClock:        opts.MaxWallClockPerRun,
+		maxTurnStall:        opts.MaxTurnStall,
 		model:               opts.Model,
 		maxTokens:           maxTok,
 		temperature:         opts.Temperature,
@@ -550,6 +580,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	budget := e.newRunBudget()
 	ctx, cancelBudget := budget.deadline(ctx)
 	defer cancelBudget()
+
+	// P39.17: the per-turn stall detector. Layered *inside* the run deadline so
+	// a run that is both out of time and hung reports the operator's own bound
+	// first (see the override order at each abort site below). See stall.go.
+	stall := e.newStallWatch()
+	ctx, stopStall := stall.watch(ctx)
+	defer stopStall()
 
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the
@@ -625,7 +662,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	for iter := 0; iter < e.maxIterations; iter++ {
 		select {
 		case <-ctx.Done():
-			return budget.override(ErrInterrupted)
+			return budget.override(stall.override(ErrInterrupted))
 		default:
 		}
 
@@ -693,7 +730,12 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			// deliberate budget abort into a retry loop. Re-derive the real
 			// reason first so the wall-clock error (fatal by design, unlike a
 			// context overflow or a tool-failure trip) is what propagates.
-			err = budget.override(err)
+			//
+			// P39.17: the stall detector cancels the same ctx for the same
+			// reason, so it needs the same re-attribution. Wall clock is checked
+			// outermost — a run past an explicit operator bound reports that
+			// bound even if it also happens to be silent.
+			err = budget.override(stall.override(err))
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -933,8 +975,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		results, toolTraces, err := e.runTools(ctx, toolUses, emit)
 		if err != nil {
 			// P59.2: the run deadline cancels tool execution too, so the same
-			// re-attribution the model turn needs applies here.
-			err = budget.override(err)
+			// re-attribution the model turn needs applies here — and P39.17's
+			// stall detector likewise, since a wedged tool is one of the two
+			// places a turn can go silent.
+			err = budget.override(stall.override(err))
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -1541,6 +1585,11 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		stopReason provider.StopReason
 	)
 	for ev := range stream {
+		// P39.17: every event, not only the ones that emit. A turn streaming
+		// nothing but thinking deltas, or a native adapter assembling one long
+		// tool call, is still demonstrably alive — and the stall detector's
+		// whole claim is that *nothing* arrived.
+		beat(ctx)
 		switch ev.Type {
 		case provider.EventTextDelta:
 			text = append(text, ev.Text...)
@@ -1753,8 +1802,13 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 			}
 
 			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
+			// P39.17: same both-edges beat as the sequential path. The
+			// detector's state is mutex-guarded precisely so it can be beaten
+			// from these goroutines.
+			beat(ctx)
 			start := time.Now()
 			content, isErr := e.executeTool(ctx, tu)
+			beat(ctx)
 			traces[i] = trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr}
 			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
 			results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: isErr}
@@ -1803,8 +1857,13 @@ func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.Too
 		}
 
 		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
+		// P39.17: both edges of the call. The start edge says the round is
+		// under way; the finish edge is what keeps a long round of many
+		// short tools from ever looking silent.
+		beat(ctx)
 		start := time.Now()
 		content, isErr := e.executeTool(ctx, tu)
+		beat(ctx)
 		traces = append(traces, trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr})
 		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
 

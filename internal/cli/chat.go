@@ -281,6 +281,7 @@ func newChatCmd() *cobra.Command {
 				// instrument for it.
 				MaxGeneratedTokensPerRun: cfg.Cost.MaxGeneratedTokensPerRun,
 				MaxWallClockPerRun:       cfg.Cost.MaxWallClockPerRun(),
+				MaxTurnStall:             cfg.Cost.MaxTurnStall(),
 				Model:                    cfg.Provider.Model,
 				MaxTokens:                cfg.Provider.MaxTokens,
 				ContextWindowTokens:      ctxWin,
@@ -328,6 +329,15 @@ func newChatCmd() *cobra.Command {
 				} else {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n[warning: --skill %q not found or empty; running without preloaded skill body]\n", skillName)
 				}
+			}
+
+			// P39.18: expose the skill's bundled scripts as typed tools, and only
+			// while such a skill is actually loaded. They are not part of
+			// builtin.Register's always-on surface precisely so they cost nothing
+			// on the ~50 tools every other run pays schema tokens for; within the
+			// phased drive the per-phase lists narrow them further still.
+			for _, t := range builtin.ThreatModelScriptTools(cwd, skillDir) {
+				reg.Upsert(t)
 			}
 
 			// P39.9: a --skill drive on the legacy OpenAI-compat (/v1) Ollama

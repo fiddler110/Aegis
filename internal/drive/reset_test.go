@@ -52,7 +52,7 @@ func TestFreshPhaseConv_ReseedChoice(t *testing.T) {
 	setup := ThreatModelPhases[0]
 	conv := st.freshPhaseConv(setup, "", setup.pending(""), "")
 	seed := convSeedText(t, conv)
-	if !strings.Contains(seed, "recon.py") || !strings.Contains(seed, "ARCHITECTURE phase") {
+	if !strings.Contains(seed, "threat_model_recon") || !strings.Contains(seed, "ARCHITECTURE phase") {
 		t.Errorf("setup-phase reset with no run dir must reseed from the full phase prompt; got:\n%s", seed)
 	}
 	if strings.Contains(seed, "still contain") {

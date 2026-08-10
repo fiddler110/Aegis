@@ -12,6 +12,7 @@ import (
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
 
 // mutatingDriveTools are the tools whose successful use counts as "this turn
@@ -160,6 +161,15 @@ func (s *Server) resolveDriveSpec(sessionID string, req api.DriveRequest) (*driv
 	maxTurns := req.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = defaultDriveMaxTurns
+	}
+	// P39.18: a skill that bundles scripts gets them as typed tools for this
+	// session, rather than asking the model to compose `python …/scaffold.py
+	// --framework <name>` as a string through the shell. Session-scoped for the
+	// same reason on-demand skill activation is (activateSessionSkill): the
+	// daemon-wide surface must not grow five schemas for every session that
+	// never drives this skill.
+	for _, t := range builtin.ThreatModelScriptTools(workdir, sk.Dir) {
+		s.sessionToolRegistry(sessionID).Upsert(t)
 	}
 	return &driveSpec{
 		skillName: sk.Name,

@@ -1,6 +1,12 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-09 (nineteenth pass — **P62.4, P62.2 and P62.5 closed, emptying Tier 2 of
+**Last updated:** 2026-08-10 (twentieth pass — **the Tier 3 batch: P39.17, P39.18 and P62.7 shipped,
+P62.6 measured and promoted to Tier 2, emptying Tier 3**. The pass's finding belongs to none of the
+four items individually: P62.6's composition split shows the tool inventory is **84.3%** of the base
+prompt and that **`<deferred_tools>` costs 82% of what the exposed schemas cost, to advertise 26 tools
+that are not loaded**. The mechanism built to reduce prompt cost is most of the prompt cost, which
+inverts P62.6's own recommendation to apply that mechanism more widely; nineteenth pass: **P62.4,
+P62.2 and P62.5 closed, emptying Tier 2 of
 everything except the standing conformance umbrella**. The pass's result is not the three closures
 but what the first one did to the second: fixing the token estimate (P62.4) **reversed P62.2's
 already-acted-on verdict**, and the gate it had reverted is now restored on a re-measurement that runs
@@ -26,11 +32,17 @@ so keep it when adding items.
 
 ## Status
 
-**9 open items**, recounted from the headings: three closed and two filed, against the last pass's
-ten. **P62.4, P62.2 and P62.5 closed 2026-08-09**; **P62.7** (Tier 3) and **P62.8** (Tier 4) were
-filed off that work, and P62.3's ladder finally got the validation it had been owed since it shipped —
-its *mechanism* driven end to end for the first time (no test had ever called `drive.Run`), with one
-residual named below rather than quietly folded in. Write-ups in [releases.md](releases.md).
+**8 open items**, recounted from the headings: three closed and none filed, against the previous
+pass's eleven. **P39.17, P39.18 and P62.7 closed 2026-08-10**, and **P62.6 was measured and promoted
+from Tier 3 to Tier 2** rather than built — its stated trigger fired. Write-ups in
+[releases.md](releases.md).
+
+*A correction to the last pass's own bookkeeping, since this document's counts are supposed to be
+recounted from the headings rather than carried forward.* The nineteenth pass recorded "9 open items"
+and "Tier 3 holds two", but P39.17 and P39.18 had been filed into Tier 3 on the same day and the
+Status block was never updated to match — the Tier 3 section header said 4 while the summary said 2,
+and the true total was 11. Both are corrected here. **When a pass files items into a tier it is not
+otherwise touching, re-derive the summary rather than editing the tier.**
 
 *The residual, stated so it is not mistaken for coverage:* P62.5 closes on a deterministic test that
 drives the real reset loop and asserts the sequence of rungs. It hands that loop an error it has
@@ -41,10 +53,19 @@ That link has unit coverage over recorded real server text, and a live fixture
 oversized-write prompt in text and walked the max-tokens continuation path instead of truncating a
 tool call. The fixture records what to try next. It is not evidence of anything today.
 
-**Tier 1 is empty. Tier 2 holds one** — **P38.1**, the live conformance re-run, which is the only
-open item anywhere whose outcome produces new information rather than new code. **Tier 3 holds two**,
-**P62.6** and **P62.7**. Tier 4 is at six: **P62.8**, **P61.7** (remainder), **P60.3**, **P52.14**,
-**P25.9**, **P63.10**.
+**Tier 1 and Tier 3 are both empty. Tier 2 holds two** — **P62.6**, promoted this pass with a
+measurement behind it, and **P38.1**, the live conformance re-run, still the only open item anywhere
+whose outcome produces new information rather than new code. Tier 4 is at six: **P62.8**, **P61.7**
+(remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
+
+**Two of this pass's three builds shipped a defence against their own tests, and both were needed.**
+Mutation-checking caught thresholds no fixture could distinguish from its neighbours:
+`minPruneYieldFraction` 0.25→0.5 survived P62.7's suite until a boundary test was added at 249-vs-250
+tokens of a 1,000-token gap, and three of P39.17's six mutations initially escaped — including a stall
+threshold weakened 3x, which escaped because no test bounded *when* detection happened, only that it
+did. This is P63.9's finding recurring for the third pass running: a short fixture cannot tell adjacent
+thresholds apart, and a count assertion cannot tell *when* something fired. It is now cheap enough to
+treat as standard practice on any pass that introduces a numeric threshold.
 
 **The finding of this pass is a method one, and it cost a shipped decision to learn.** P62.2 had been
 measured, decided and acted on — the prefix-cache gate was reverted, on the item's own stated
@@ -189,7 +210,10 @@ review: **P63.10 only** (P63.8 and P63.11 shipped 2026-08-08; P63.9 closed the s
 passes, and the P63.12 it filed on its way out was built the same day). P61.x
 (cross-adapter drift, 8 filed) → P61.7 only. P60.x (sandbox and eval, 4) → P60.3 only. P59.x (local
 execution, 10 + the P59.11 follow-on) → 0. P55.x (container-only scanning, 9 filed / 8 built) → 0.
-P52.x (the previous full-stack review, 17) → P52.14 only. P53.x, P57.1, P58.x, P54.2 → 0. Dates,
+P52.x (the previous full-stack review, 17) → P52.14 only. **P39.x (the small-model batch) → 0**:
+P39.16's own validation run filed P39.17 and P39.18, and both shipped 2026-08-10. P62.x (filed off
+P62.2's compaction fixture) → **P62.6 and P62.8**, the first now in Tier 2 with a measurement behind
+it and the second hardware-blocked. P53.x, P57.1, P58.x, P54.2 → 0. Dates,
 per-item rationale and every write-up are in [releases.md](releases.md).
 
 **Where the history went.** Batch origins (what each review actually read, and what it judged already
@@ -200,10 +224,15 @@ against `internal/provider`, `internal/ollamainfo`, `internal/repomap` or scanne
 several obvious-looking gaps there have already been checked and answered, and the point of writing
 them down was to stop the next review re-filing them.
 
-**What to do next: P38.1's live conformance re-run.** It is the only open work anywhere whose outcome
-produces new information rather than new code, and it doubles as the validation **P57.1** is owed — a
-fix aimed at a failure observed exactly once. Every other tier holds either a parked item or a filed
-defect with a known mechanism.
+**What to do next: P38.1's live conformance re-run, and it is better instrumented than it has ever
+been.** It is the only open work anywhere whose outcome produces new information rather than new code,
+and it doubles as the validation **P57.1** is owed — a fix aimed at a failure observed exactly once.
+**The two harness obstacles in front of it closed on 2026-08-10:** P39.17 means a hung turn now fails
+loudly instead of looking like a slow one, which is the difference between an unattended run producing
+a verdict and producing nothing; P39.18 means a bundled-script argument error is structurally
+impossible, removing the last observed failure class from the setup phase. Run it before building
+P62.6 — the re-run's tool-call trace is also the best available evidence for which tools a local drive
+actually needs, which is the open half of P62.6's design question.
 
 *The instrument that unblocked the last three items is now built and reusable.* The adversarial
 compaction fixture (`writeCompactionFixture` +
@@ -273,9 +302,10 @@ and every pass mutation-checked the tests over the code it moved. That second ha
 its keep — passes 3 and 4 each found surviving mutations against *pre-existing* tests, five in total,
 including two thresholds the tests were named for.
 
-**What to do next that is not a tier item, unchanged:** re-run P38.1's live conformance test. It is
-still the only open work whose outcome produces new information rather than new code, and it doubles
-as the validation **P57.1** is owed — a fix aimed at a failure observed exactly once.
+**What to do next that is not a tier item:** re-run P38.1's live conformance test. It is still the only
+open work whose outcome produces new information rather than new code, it doubles as the validation
+**P57.1** is owed, and as of 2026-08-10 it is also the validation P39.17 and P39.18 are owed — both
+were filed off a P38.1 run and neither has yet been exercised against a live model.
 
 ---
 
@@ -301,8 +331,13 @@ P55.x Tier-1 half. See [releases.md](releases.md) for the write-ups and for the 
 
 ## Open Work — Tier 2
 
-**Status: 1 open — P38.1**, below, and it is not build work: it is the live conformance re-run, the
-only open item anywhere whose outcome produces new information rather than new code. **The 2026-08-09
+**Status: 2 open — P62.6 and P38.1**, below. **P62.6 was promoted here from Tier 3 on 2026-08-10**
+once its composition split was actually taken and showed one component dominating (tool inventory,
+84.3% of the base prompt) — it is the only build work in this tier. **P38.1** is not build work: it is
+the live conformance re-run, the only open item anywhere whose outcome produces new information rather
+than new code, and **P39.17 and P39.18 shipping on 2026-08-10 removed the two harness obstacles
+standing in front of a confident verdict** — a turn can no longer hang forever without tripping a
+guard, and a bundled-script argument error is now structurally impossible. **The 2026-08-09
 re-test moved it materially without closing it:** a 14B local model built the complete six-file suite
 for the first time on this target, and the ten harness defects that run root-caused shipped as P39.16.
 It is still unmet — verification did not pass, and the confirming re-run hung (P39.17). **P62.4, P62.2
@@ -320,6 +355,60 @@ context-shifts and the prefix cache is gone regardless. The item's own "n=1, re-
 code out" caution would not have caught it, because a second run reproduces a systematic error
 faithfully. **Before measuring an optimization, check the instrument the rest of the system is running
 on.**
+
+### P62.6 — The base prompt is 84% tool inventory, and deferral is most of the waste
+
+**Measured 2026-08-10 and promoted here from Tier 3 on this item's own trigger** ("promote to Tier 2
+if the composition split shows one component dominating"). It does. The measurement is shipped as
+`TestBasePromptComposition_localProfile` (`internal/server/server_test.go`); the numbers below are
+reproducible with `-v` and are **not** a one-off live observation any more.
+
+| component | est. tokens | % |
+|---|---|---|
+| tool schemas (27 exposed) | 3,614 | 46.4% |
+| **`<deferred_tools>` (26 not loaded)** | **2,953** | **37.9%** |
+| completing-tasks / platform / tool-use blocks | 1,001 | 12.8% |
+| persona (`general`) | 222 | 2.8% |
+| skills, repo map, memory | 0 | 0% |
+| **total** | **7,790** | |
+
+The original 7,119 live figure reproduces in shape at 7,790 estimated (~9% high; `tokenest` prices
+JSON schema text at flat chars/4 where a real BPE compresses it better). Skills, repo map and memory
+are zero only because the fixture uses an empty workspace — **this is a floor, not a ceiling**, and a
+real repo adds a `<repo_map>` on top of it.
+
+**The finding that reorders this item's own candidate list.** The original write-up proposed
+progressive tool disclosure "the pattern `internal/skills` already uses for skills, applied to tool
+schemas". That pattern is *already applied* to tool schemas — and it is the second-largest line in the
+table. `<deferred_tools>` spends **~114 tokens per tool** to advertise a tool that is not loaded, which
+is 82% of what the actually-exposed schemas cost. The four security tools alone are 1,538 tokens, 19.7%
+of the entire base prompt, **while deferred**; P25.6 moved `security_scan` out of the schema block and
+it still costs 593 tokens in the advertisement. So the first question is not "what else should we
+defer" but "why does deferral cost nearly as much as exposure" — a deferred tool's advertisement
+should be a name and one line, and at 114 tokens it plainly is not.
+
+Two further observations for whoever takes the design question, both from the same table. The three
+P39.16 handle-based editing tools (`edit_section`, `multi_edit`, `fill_marker`) are 1,009 tokens, 13%
+of the base prompt, and are three of **five** editing tools exposed at once alongside `edit_file` and
+`write_file` — worth asking whether a run ever needs all five. And measuring this correctly requires
+wiring the registry the way the daemon does (task manager, cron scheduler, todo list, team task list,
+knowledge store, memory store); without them the measurement misses 10 tools and undercounts by
+~1,360 tokens, which is how a smaller wrong number is easy to get.
+
+**Already shipped, so not part of the remaining work:** `TestEffectiveSystem_localProfileBudget`
+asserts a `localBasePromptCeilingTokens = 8200` ceiling in the **plain** suite, so growth is now a
+`go test ./...` failure rather than something a live run rediscovers. It is a budget, not a target —
+deliberate growth moves the number with a note saying what was added.
+
+**Closure condition:** the base prompt's tool-inventory share is materially reduced on the local
+profile — with the deferral advertisement's per-tool cost addressed first — without the agent losing
+access to tools it needs, and the ceiling above lowered to match.
+
+Priority: Tier 2 — promoted on this item's own trigger. It is squarely on the primary use case (at an
+8,192-token served window the base prompt is ~87-95% of the context before the first tool call), the
+dominant component is now identified rather than suspected, and the deferral half looks like a defect
+with a known repair rather than an open design question. The broader "which tools should a local
+profile expose at all" question is still a design call and can follow separately.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -413,12 +502,30 @@ tracking, not independent build work.
 
 ## Open Work — Tier 3
 
-**Status: 4 open — P39.17, P39.18, P62.6 and P62.7**, below. P39.17 and P39.18 were filed
-2026-08-09 off the P39.16 validation run and are the two things standing between that batch and a
-confident P38.1 verdict: one makes unattended runs untrustworthy to *measure* (a turn can hang
-forever without tripping any progress guard), the other is the next failure class after tool
-selection (arguments, not tools). P62.6 and P62.7 were both filed off P62.2's fixture (2026-08-08 and
-2026-08-09 respectively). **P63.12 was filed and
+**Status: none open.** **P39.17, P39.18 and P62.7 shipped 2026-08-10**, and **P62.6 was measured the
+same day and promoted to Tier 2** on its own stated trigger rather than built — the composition split
+it demanded showed one component dominating. Write-ups in [releases.md](releases.md).
+
+*The pass's finding is about deferral, and it belongs to no one item.* P62.6's split shows the tool
+inventory is **84.3%** of the base prompt, and that `<deferred_tools>` costs **2,953 tokens — 82% of
+what the actually-exposed schemas cost — to advertise 26 tools that are not loaded**, at ~114 tokens
+per tool for what should be a name-and-description line. The mechanism built to reduce prompt cost is
+most of the prompt cost. That reorders P62.6's own candidate list: progressive tool disclosure is the
+pattern already in use, so it is the thing to *fix* before it is the thing to extend. P39.18 was built
+consistently with that on the same day — its five typed tools are registered onto the session registry
+clone only when the skill that bundles them is loaded, so they add **nothing** to the default surface.
+
+*Two method notes worth carrying, both re-runs of lessons this document already records.* P62.7's
+measure-first step was not ceremony: the item inferred its defect from message counts, and measuring
+in bytes both confirmed it (prune yield 0.01–0.03× the gap it must close, against 3.99× for the one
+compaction that matters) and showed the two distributions were cleanly separated, which is what makes
+the threshold defensible rather than tuned. And **mutation testing caught two thresholds the tests
+could not tell from their neighbours** — `minPruneYieldFraction` 0.25→0.5 survived P62.7's suite, and
+three of P39.17's six mutations initially escaped, including a stall threshold weakened 3x that no
+test bounded the *timing* of. Both are P63.9's finding recurring: a short fixture cannot tell adjacent
+thresholds apart, and a count assertion cannot tell *when* something fired.
+
+**P63.12 was filed and
 closed the same day** (2026-08-08) — filed by P63.9's
 last pass, then built once its premise was checked rather than assumed. That check is the part worth
 keeping: the item as written blamed "compaction rewrites the transcript" in general, and measuring
@@ -439,61 +546,6 @@ The fix deletes the flag and asks `hasNudge(conv, prefix)` instead, which is the
 compaction or prepare-step rewrite mid-run can't shift the bookkeeping"). Write-up in
 [releases.md](releases.md).
 
-### P39.17 — a phased drive can go silent indefinitely with no wall-clock floor
-
-**Filed 2026-08-09 from the P39.16 validation run.** The drive stopped producing output at 18:12:51
-and was still "running" 14 minutes later: `aegis.exe` had accumulated **0.5s of total CPU** since
-launch (startup and nothing since), the log had not grown by a byte, and the Ollama process was
-likewise idle. Nothing in the harness noticed. Every existing guard is *progress*-shaped — the
-no-progress nudge counts turns, the loop detector compares tool calls, the failure breaker counts
-failed rounds — and all of them require turns to keep completing. A turn that never returns advances
-no counter, so an unattended run can sit dead for hours and look exactly like a slow one.
-
-`cost.max_wall_clock_per_run` exists but is off by default and bounds the *whole run*, which is the
-wrong instrument: a legitimate threat-model drive runs for hours, so any value large enough to be
-safe is far too large to catch a hang. What is missing is a **per-turn** stall detector — no stream
-event and no tool call for N minutes — which is unambiguous in a way a whole-run budget can never be.
-
-Not Tier 2 because it costs an operator a wasted wait rather than a wrong artifact, and the on-disk
-suite always survives (the drive is resumable by design). But it silently invalidates unattended
-runs, which is precisely what P38.1 is trying to measure, so it blocks confident conformance testing.
-
-**Repro:** not yet isolated. Both processes idle with a live HTTP request outstanding suggests a
-request that never returns and never times out; the provider's own retry/timeout path is the first
-place to look. Capture: whether the adapter had an in-flight request, and whether any read deadline
-was set on it.
-
-**Closure condition:** a stalled turn is detected and either retried or reported, and a re-run of the
-P38.1 drive completes or fails loudly rather than hanging.
-
-Priority: Tier 3 — no data loss, but it makes long unattended runs untrustworthy to measure.
-
-### P39.18 — tool arguments are the next wall after tool selection
-
-**Filed 2026-08-09 from the P39.16 validation run.** With per-phase narrowing and handle-based
-editing in place, tool *selection* stopped failing on qwen3:14b — every remaining stumble in the run
-was a malformed **argument**: `scaffold.py --framework` with the value omitted, and
-`2-<framework>-analysis.md` with the placeholder never substituted. Both were caught by corrective
-errors P39.16 added, which is the recoverable outcome; but the model is still composing a command
-line as a *string*, which is the same class of failure `fill_marker` removed from editing.
-
-The fix has the same shape as the two that worked: stop asking the model to produce a format it has
-to get exactly right. Wrap the bundled skill scripts (`recon.py`, `scaffold.py`, `inventory.py`,
-`verify.py`, `normalize_ids.py`) as first-class tools with typed JSON schemas, so `--framework`
-becomes a required enum the harness renders rather than a token the model has to remember to
-follow with a value. That also removes the shell tool from the setup phase, which is currently the
-only reason it is exposed there.
-
-The weaker alternative is JSON-schema-constrained decoding via `Request.Format`, already present in
-the Ollama adapter and currently used only on schema-guard corrective retries. It constrains the
-symptom; typed tools remove the failure mode. Prefer the latter.
-
-**Closure condition:** the threat-model drive completes its setup phase without composing a shell
-command line, and an argument error for a bundled script becomes structurally impossible.
-
-Priority: Tier 3 — the errors are already corrective rather than silent, so this buys reliability and
-turn count, not correctness.
-
 **P63.9 closed 2026-08-08, all four concerns extracted.** `Engine.Run` went **725 → 497 lines**
 (-31%), max nesting 10 → 6 levels, and its `// Pxx` marker count 29 → 21 — the metric the item cared
 about most, since those markers were the evidence that behavior was being added to `Run` *because*
@@ -508,79 +560,6 @@ option wiring and closed P61.3 with no production code, so the "write each fix t
 copy" cost the item worried about was never paid. Before it: P59.9, P60.2, P60.4 and P57.1. See
 [releases.md](releases.md).
 
-
-### P62.7 — Compaction is invoked every turn past the trigger and prunes for almost nothing
-
-Found 2026-08-09 in the gate-off arm of `TestLiveWorkflowCompactionPrefixCacheGate`, once P62.4's fix
-made the trigger fire at the right time and the behaviour past it became visible for the first time.
-
-**The measurement.** qwen3:14b, 24,576-token window, `preserve_prefix_cache=false`. From turn 5
-onward the run emits a compaction notice on *every single turn*:
-
-| turn | prompt | prefill | notice |
-|---|---|---|---|
-| 4 | 14,463 | 2,483ms | — |
-| 5 | 14,519 | 8,540ms | context ~62% full — compacted 11→11 messages |
-| 6 | 14,575 | 8,603ms | context ~63% full — compacted 13→13 messages |
-| … | … | ~9,000ms | … 10 notices in total |
-| 14 | 15,143 | 9,396ms | context ~66% full — compacted 29→29 messages |
-
-Read the message counts: **unchanged every time**. The deterministic pre-pass finds *something* to
-strip each turn (`prunedChars > 0`, so `changed=true`) but never enough to bring the estimate back
-under the trigger — so the next turn crosses it again and prunes again. Each of those rewrites the
-middle of the conversation and costs a full ~9s prefill instead of ~2.5s, and the prompt still climbs
-(14,519 → 15,143) throughout.
-
-**Why it is separable from P62.2.** The prefix-cache gate rate-limits this thrash, which is part of
-why it now measures ~1.7x faster — but only *by accident*, as a side effect of a threshold chosen for
-a different reason. On a cloud backend the gate is off by design (there is no prefix cache to
-protect), so the same thrash runs there unmitigated; it is merely cheaper, since a cloud API re-reads
-the prompt anyway. The wasted work is real on both.
-
-**Candidate directions, in preference order.** (a) A minimum-yield check: if a prune frees less than
-some fraction of what stands between the conversation and the trigger, record that and do not re-run
-it until the conversation has grown by at least that much. (b) A cooldown in turns. (c) Let the
-pre-pass report *how much* it can still free, so the caller can tell "pruned a little" from "pruned
-all there is" — today `changed=true` conflates them, which is the root of the conflation.
-
-Prefer (a): it keys on the thing that actually matters and degrades gracefully as a conversation
-approaches genuinely-unprunable. Measure before building — the yield per prune is not recorded
-anywhere today, and this write-up infers it from message counts rather than from bytes.
-
-Priority: Tier 3 — real, repeatable wasted work with a clear mechanism, but no user-visible breakage
-(every run above completed correctly) and it sits behind a decision about what the pre-pass should
-report, which makes it larger than the one-line threshold change it first looks like.
-
-### P62.6 — The base prompt is 7,119 tokens before any work, on the *trimmed* local profile
-
-Measured 2026-08-08 while sizing P62.2's fixture, and the number is larger than anything in the tree
-assumes. On qwen3:14b against a temp workspace of 14 `.txt` files — no repo to map, no memory, no
-skills enabled — the first turn's provider-reported prompt was **7,119 tokens**.
-
-**That is the trimmed profile, not the default one.** The fixture passes `PromptProfile: ""` against
-`http://localhost:11434`, and `LocalPromptProfile()` auto-detects loopback as local — so P25.6's
-reduced system prompt and deferred network/security tool schemas were already applied. 7,119 is what
-is left after the trimming.
-
-**Why it matters here specifically.** Aegis's stated target is local models on consumer hardware, and
-the recorded constraint for this machine is 16GB VRAM — which in practice means an 8k-16k served
-window. At 8,192 the base prompt is **87% of the window before the first tool call**, which is not a
-tuning problem but a "the agent cannot do multi-turn work" problem. It is also what made P62.2's
-fixture fail twice: the model got four reads in and ran out of room.
-
-**Measure before building, and measure the composition first.** The single number does not say where
-it goes. Split it — system prompt, tool schemas (50+ builtins, and the schema block is the obvious
-suspect), `<skills_available>`, `<repo_map>`, memory — before proposing anything. Candidate
-directions only after that: progressive tool disclosure (the pattern `internal/skills` already uses
-for skills, applied to tool schemas), a smaller default exposure under the local profile, or a
-tool-schema budget analogous to `repomap.max_bytes`. `TestEffectiveSystem_localProfileTrimsPrompt`
-already asserts the local profile is *smaller*; nothing asserts it is small enough, and a byte
-assertion on the assembled prompt would make this a default-suite regression rather than a thing
-rediscovered by a live run.
-
-Priority: Tier 3 — real, measured and squarely on the primary use case, but the fix is a design
-question (what does the agent stop being able to do?) rather than a defect with a known repair, and
-no user has reported it. Promote to Tier 2 if the composition split shows one component dominating.
 
 **Three leads sit here unfiled, each with a stated promotion trigger.** None is a `### P<n>.<m>` item
 yet, deliberately — filing one before its trigger fires would commit to a design question that has no
