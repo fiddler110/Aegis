@@ -1,6 +1,14 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-10 (twentieth pass — **the Tier 3 batch: P39.17, P39.18 and P62.7 shipped,
+**Last updated:** 2026-08-14 (twenty-first pass — **P62.6 built and closed**, taking the local-profile
+base prompt from 7,790 to **4,907** estimated tokens, a 37% cut with no exposed schema touched and no
+tool made unreachable. The pass's finding is the ordering, not the total: **339 of those tokens were
+never real** — `tokenest.Tools` priced `OutputSchema`, which no adapter puts on the wire — and fixing
+that instrument *first* is what made the other two measurements trustworthy, which is the previous
+pass's own lesson applied on purpose rather than learned again. The bulk (2,279) came from
+`<deferred_tools>` printing each unloaded tool's full manual; shortening it is free because
+`SearchDeferred` matches the full text out of the registry, where it costs nothing. One item filed off
+the work — **P62.9** (Tier 3), the exposed-schema half; twentieth pass — **the Tier 3 batch: P39.17, P39.18 and P62.7 shipped,
 P62.6 measured and promoted to Tier 2, emptying Tier 3**. The pass's finding belongs to none of the
 four items individually: P62.6's composition split shows the tool inventory is **84.3%** of the base
 prompt and that **`<deferred_tools>` costs 82% of what the exposed schemas cost, to advertise 26 tools
@@ -32,10 +40,9 @@ so keep it when adding items.
 
 ## Status
 
-**8 open items**, recounted from the headings: three closed and none filed, against the previous
-pass's eleven. **P39.17, P39.18 and P62.7 closed 2026-08-10**, and **P62.6 was measured and promoted
-from Tier 3 to Tier 2** rather than built — its stated trigger fired. Write-ups in
-[releases.md](releases.md).
+**8 open items**, recounted from the headings: one closed and one filed, against the previous pass's
+eight. **P62.6 closed 2026-08-14** — built, not deferred — and **P62.9** filed into Tier 3 off the
+same work. Write-up in [releases.md](releases.md).
 
 *A correction to the last pass's own bookkeeping, since this document's counts are supposed to be
 recounted from the headings rather than carried forward.* The nineteenth pass recorded "9 open items"
@@ -53,10 +60,27 @@ That link has unit coverage over recorded real server text, and a live fixture
 oversized-write prompt in text and walked the max-tokens continuation path instead of truncating a
 tool call. The fixture records what to try next. It is not evidence of anything today.
 
-**Tier 1 and Tier 3 are both empty. Tier 2 holds two** — **P62.6**, promoted this pass with a
-measurement behind it, and **P38.1**, the live conformance re-run, still the only open item anywhere
-whose outcome produces new information rather than new code. Tier 4 is at six: **P62.8**, **P61.7**
-(remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
+**Tier 1 is empty. Tier 2 holds one** — **P38.1**, the live conformance re-run, still the only open
+item anywhere whose outcome produces new information rather than new code. **Tier 3 holds one**,
+**P62.9**, filed this pass and parked behind P38.1 because both its halves need the same live tier.
+Tier 4 is at six: **P62.8**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
+
+**What building P62.6 taught, and it is the previous pass's lesson used rather than relearned.** The
+item's own table said tool schemas were 46.4% of the base prompt. 339 of those tokens did not exist:
+`tokenest.Tools` priced `ToolSchema.OutputSchema`, which the Anthropic adapter omits from its
+`wireTool`, the OpenAI adapter omits from `Function.Parameters`, and `toolshim.Prompt` omits from its
+rendered block — it is a P3.6 affordance for clients and validators, never for a model. That is 4.4%
+of the measured prompt, and the estimator's one production caller is the compaction guard's
+`requestOverhead`, so every session had been spending phantom tokens of headroom. Nineteenth pass:
+*before measuring an optimization, check the instrument the rest of the system is running on.*
+Twenty-first pass: the way to act on that is to make the instrument fix the **first commit of the
+batch**, not a footnote after the numbers are already quoted.
+
+**A second, narrower one: a mechanism can be the cost it was built to avoid, and the tell is a ratio,
+not a total.** Deferral existed to keep tool schemas out of the prompt, and it was doing so at ~114
+tokens per *unloaded* tool — 82% of what exposure cost. Nothing about the total flagged that; the
+comparison did. Where a saving mechanism has a per-item price, measure it against the thing it
+replaces before extending it.
 
 **Two of this pass's three builds shipped a defence against their own tests, and both were needed.**
 Mutation-checking caught thresholds no fixture could distinguish from its neighbours:
@@ -331,9 +355,11 @@ P55.x Tier-1 half. See [releases.md](releases.md) for the write-ups and for the 
 
 ## Open Work — Tier 2
 
-**Status: 2 open — P62.6 and P38.1**, below. **P62.6 was promoted here from Tier 3 on 2026-08-10**
-once its composition split was actually taken and showed one component dominating (tool inventory,
-84.3% of the base prompt) — it is the only build work in this tier. **P38.1** is not build work: it is
+**Status: 1 open — P38.1**, below. **P62.6 closed 2026-08-14**, built in the order its own evidence
+implied: the instrument first (`tokenest.Tools` had been pricing an output schema no adapter sends),
+then the deferral advertisement (full manuals → `tool.Summarize`'s one line, 2,953 → 674 tokens), then
+the three tool families the local profile has no use for. 7,790 → 4,907, ceiling lowered 8,200 →
+5,200, and the exposed-schema remainder re-filed as **P62.9** in Tier 3. **P38.1** is not build work: it is
 the live conformance re-run, the only open item anywhere whose outcome produces new information rather
 than new code, and **P39.17 and P39.18 shipping on 2026-08-10 removed the two harness obstacles
 standing in front of a confident verdict** — a turn can no longer hang forever without tripping a
@@ -355,60 +381,6 @@ context-shifts and the prefix cache is gone regardless. The item's own "n=1, re-
 code out" caution would not have caught it, because a second run reproduces a systematic error
 faithfully. **Before measuring an optimization, check the instrument the rest of the system is running
 on.**
-
-### P62.6 — The base prompt is 84% tool inventory, and deferral is most of the waste
-
-**Measured 2026-08-10 and promoted here from Tier 3 on this item's own trigger** ("promote to Tier 2
-if the composition split shows one component dominating"). It does. The measurement is shipped as
-`TestBasePromptComposition_localProfile` (`internal/server/server_test.go`); the numbers below are
-reproducible with `-v` and are **not** a one-off live observation any more.
-
-| component | est. tokens | % |
-|---|---|---|
-| tool schemas (27 exposed) | 3,614 | 46.4% |
-| **`<deferred_tools>` (26 not loaded)** | **2,953** | **37.9%** |
-| completing-tasks / platform / tool-use blocks | 1,001 | 12.8% |
-| persona (`general`) | 222 | 2.8% |
-| skills, repo map, memory | 0 | 0% |
-| **total** | **7,790** | |
-
-The original 7,119 live figure reproduces in shape at 7,790 estimated (~9% high; `tokenest` prices
-JSON schema text at flat chars/4 where a real BPE compresses it better). Skills, repo map and memory
-are zero only because the fixture uses an empty workspace — **this is a floor, not a ceiling**, and a
-real repo adds a `<repo_map>` on top of it.
-
-**The finding that reorders this item's own candidate list.** The original write-up proposed
-progressive tool disclosure "the pattern `internal/skills` already uses for skills, applied to tool
-schemas". That pattern is *already applied* to tool schemas — and it is the second-largest line in the
-table. `<deferred_tools>` spends **~114 tokens per tool** to advertise a tool that is not loaded, which
-is 82% of what the actually-exposed schemas cost. The four security tools alone are 1,538 tokens, 19.7%
-of the entire base prompt, **while deferred**; P25.6 moved `security_scan` out of the schema block and
-it still costs 593 tokens in the advertisement. So the first question is not "what else should we
-defer" but "why does deferral cost nearly as much as exposure" — a deferred tool's advertisement
-should be a name and one line, and at 114 tokens it plainly is not.
-
-Two further observations for whoever takes the design question, both from the same table. The three
-P39.16 handle-based editing tools (`edit_section`, `multi_edit`, `fill_marker`) are 1,009 tokens, 13%
-of the base prompt, and are three of **five** editing tools exposed at once alongside `edit_file` and
-`write_file` — worth asking whether a run ever needs all five. And measuring this correctly requires
-wiring the registry the way the daemon does (task manager, cron scheduler, todo list, team task list,
-knowledge store, memory store); without them the measurement misses 10 tools and undercounts by
-~1,360 tokens, which is how a smaller wrong number is easy to get.
-
-**Already shipped, so not part of the remaining work:** `TestEffectiveSystem_localProfileBudget`
-asserts a `localBasePromptCeilingTokens = 8200` ceiling in the **plain** suite, so growth is now a
-`go test ./...` failure rather than something a live run rediscovers. It is a budget, not a target —
-deliberate growth moves the number with a note saying what was added.
-
-**Closure condition:** the base prompt's tool-inventory share is materially reduced on the local
-profile — with the deferral advertisement's per-tool cost addressed first — without the agent losing
-access to tools it needs, and the ceiling above lowered to match.
-
-Priority: Tier 2 — promoted on this item's own trigger. It is squarely on the primary use case (at an
-8,192-token served window the base prompt is ~87-95% of the context before the first tool call), the
-dominant component is now identified rather than suspected, and the deferral half looks like a defect
-with a known repair rather than an open design question. The broader "which tools should a local
-profile expose at all" question is still a design call and can follow separately.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -502,9 +474,12 @@ tracking, not independent build work.
 
 ## Open Work — Tier 3
 
-**Status: none open.** **P39.17, P39.18 and P62.7 shipped 2026-08-10**, and **P62.6 was measured the
-same day and promoted to Tier 2** on its own stated trigger rather than built — the composition split
-it demanded showed one component dominating. Write-ups in [releases.md](releases.md).
+**Status: 1 open — P62.9**, filed 2026-08-14 off P62.6's build: the exposed-schema half of the base
+prompt, which that item deliberately left alone. It is here rather than in Tier 2 because both its
+candidates are behaviour changes whose evidence has to come from the live tier, and that tier is owed
+to P38.1 first. Before it, **P39.17, P39.18 and P62.7 shipped 2026-08-10**, and **P62.6 was measured
+the same day and promoted to Tier 2** on its own stated trigger — then built and closed on 2026-08-14.
+Write-ups in [releases.md](releases.md).
 
 *The pass's finding is about deferral, and it belongs to no one item.* P62.6's split shows the tool
 inventory is **84.3%** of the base prompt, and that `<deferred_tools>` costs **2,953 tokens — 82% of
@@ -584,6 +559,46 @@ answer.
   parsed-and-declined, targeting models that *do* speak the protocol but truncate or malform arguments
   (the P35.2 failure class). None of the six harnesses reviewed in P53.x does it. Needs its own
   `### P<n>.<m>` heading if pursued.
+
+---
+
+### P62.9 — The exposed-schema half of the base prompt: five editing tools and three prose blocks
+
+Filed 2026-08-14 off P62.6's build, which closed the deferral half and moved the local-profile base
+prompt from **7,790 to 4,907** estimated tokens. What P62.6 deliberately did not touch is now the
+whole remainder: **tool schemas are 3,275 of the 4,907 (66.7%)**, and the prose blocks are 1,001
+(20.4%). The measurement harness is unchanged (`TestBasePromptComposition_localProfile -v`).
+
+Two candidates, in the order their evidence is strongest.
+
+**The editing surface, 1,299 tokens over five tools.** `edit_section` 407, `multi_edit` 276,
+`fill_marker` 226, `edit_file` 185, `write_file` 105 — 26.5% of what is left, all exposed at once.
+The mechanism to narrow it already exists and is already used: `drive.State.ScopeTools`
+(`internal/drive/drive.go:842`) narrows a phase's tool surface, and `fillPhaseTools` picks three of
+the five. Ordinary sessions have no equivalent. The obvious move points the *wrong* way — deferring
+`multi_edit`/`fill_marker` would save ~500 but P39.16 shipped the handle-based tools precisely because
+small models fail `edit_file`'s byte-exact match, measured at 12 consecutive `edit_file` failures
+becoming 7 clean `edit_section` calls. So the direction to test is the inverse: under the local
+profile, expose the handle-based three and defer `edit_file`. That is a behaviour change against the
+thing P38.1 measures, so it needs `TestLiveWorkflow`, not a unit test.
+
+**The prose blocks, 1,001 tokens.** `completing-tasks` 464, `platform` 284, `tool-use` 253, and no
+local-profile variant of any of them. Cheapest remaining structural cut and the least evidenced: what
+a small model loses when a rule is removed is exactly what the live tier exists to answer.
+
+**A caveat that bounds any wall-clock claim made from this item.** `effectiveSystem` recomputes the
+deferred block per request, so the first `tool_search` rewrites the system prompt *and* the tool array
+mid-session, invalidating the KV prefix. Deferral's saving is per-turn prefill, paid back once at load
+time. Given P62.2's history, measure against that fixture rather than inferring from the token count.
+
+**Closure condition:** either candidate lands with a live-tier measurement behind it showing the
+agent's behaviour is not worse, and `localBasePromptCeilingTokens` moves down to match; or the
+measurement says the tokens are buying something and the item closes as refuted, with the numbers
+recorded.
+
+Priority: Tier 3 — real value, but unlike its parent both halves are design calls whose evidence has
+to come from a live run, and the live tier is currently owed to P38.1 first. The parent's cheap,
+defect-shaped half is done; what is left is the part P62.6 said "can follow separately".
 
 ---
 

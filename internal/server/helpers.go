@@ -109,6 +109,18 @@ func toExecSpecs(cfgHooks []config.HookConfig) []hooks.ExecSpec {
 
 // deferredToolsBlock advertises tools that are registered but not exposed by
 // default (P4.6). The model loads them on demand with the tool_search tool.
+//
+// One line per tool, and that line is the tool's Summary rather than its full
+// Description (P62.6). Printing the manuals made this block 2,953 tokens — 38%
+// of the local profile's entire base prompt, spent on 26 tools that are *not
+// loaded*, against 3,614 for the 27 that are. Deferral had stopped being a
+// saving.
+//
+// Nothing is lost to discovery by shortening it, which is what makes this
+// cheap: tool_search matches its query against the full Name+Description via
+// Registry.SearchDeferred, and that text lives in the registry, not in the
+// prompt. A scanner name or a synonym that no longer appears here still finds
+// its tool, and the full description comes back with the schema on load.
 func deferredToolsBlock(reg *tool.Registry) string {
 	if reg == nil {
 		return ""
@@ -121,7 +133,7 @@ func deferredToolsBlock(reg *tool.Registry) string {
 	sb.WriteString("<deferred_tools>\n")
 	sb.WriteString("These tools are not loaded yet. When a task needs one, call `tool_search` with keywords to load it before use.\n")
 	for _, d := range deferred {
-		fmt.Fprintf(&sb, "- %s: %s\n", d.Name, d.Description)
+		fmt.Fprintf(&sb, "- %s: %s\n", d.Name, d.Summary)
 	}
 	sb.WriteString("</deferred_tools>")
 	return sb.String()

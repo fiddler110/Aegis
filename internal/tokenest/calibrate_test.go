@@ -193,3 +193,34 @@ func TestToolsCountsSchemas(t *testing.T) {
 		t.Errorf("Tools(50 copies) = %d, want %d", gotMany, 50*got)
 	}
 }
+
+// TestToolsIgnoresOutputSchema is P62.6's instrument fix, and it is a claim
+// about the adapters rather than about arithmetic: OutputSchema is a P3.6
+// affordance for clients and validators, and no adapter serializes it, so a
+// request never carries those bytes. Counting them charged the local profile's
+// 27 exposed tools ~339 tokens that do not exist, and the one production caller
+// of this estimator — engine's compactionGuard.requestOverhead — spends the
+// result as real context headroom.
+//
+// The guard rail this test is really placing: if an adapter ever *does* start
+// sending output schemas, the omission flips from an overcount to an undercount,
+// which is the dangerous direction for a compaction trigger. This failing is the
+// signal to re-add the term, not to delete the test. See the wire builders in
+// provider/anthropic (wireTool) and provider/openai (Function.Parameters).
+func TestToolsIgnoresOutputSchema(t *testing.T) {
+	base := provider.ToolSchema{
+		Name:        "read_file",
+		Description: "Read a file from the workspace and return its contents.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	}
+	withOutput := base
+	withOutput.OutputSchema = json.RawMessage(`{"type":"object","properties":{"content":{"type":"string"},"path":{"type":"string"},"bytes":{"type":"integer"}},"required":["content","path"]}`)
+
+	if len(withOutput.OutputSchema) < 100 {
+		t.Fatalf("fixture output schema is only %d bytes — too small for this test to distinguish counted from uncounted", len(withOutput.OutputSchema))
+	}
+	got, want := Tools([]provider.ToolSchema{withOutput}), Tools([]provider.ToolSchema{base})
+	if got != want {
+		t.Errorf("Tools() with an output schema = %d, without = %d: the output schema is being priced, but no adapter sends it", got, want)
+	}
+}

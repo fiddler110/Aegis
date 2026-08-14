@@ -36,6 +36,11 @@ func (t *scopeTool) Description() string {
 		"and \"src/*\" both cover \"src/a/b.go\"). Actions: \"set\" (with paths) replaces the current scope; " +
 		"\"clear\" removes it; \"show\" reports the active scope. Reads are never restricted."
 }
+
+// ShortDescription is the deferred-tools advertisement (P62.6).
+func (t *scopeTool) ShortDescription() string {
+	return "Declare or clear an allowlist of path globs that all file writes must stay within for the rest of the task."
+}
 func (t *scopeTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"action":{"type":"string","enum":["set","clear","show"],"description":"set replaces the scope with paths; clear removes it; show reports the current scope"},"paths":{"type":"array","items":{"type":"string"},"description":"workspace-relative path globs the task may write (action: set)"}},"required":["action"]}`)
 }

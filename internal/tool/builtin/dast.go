@@ -28,6 +28,15 @@ func (t *dastScanTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *dastScanTool) Description() string {
 	return "Dynamic Application Security Testing (DAST) via OWASP ZAP: crawls (and, in active/api mode, actively attacks) a *running* application to find real, exploitable vulnerabilities — XSS, injection, auth issues, missing security headers. Runs containerized (security.tools.zap.image, digest-pinned; no host-binary path). The target must be loopback/private (default-allowed) or explicitly declared in security.dast.allowed_targets — anything else is rejected before ZAP ever runs, regardless of permission mode. \"baseline\" mode (default) is passive-only (spider + passive scan, no attack traffic). \"active\" and \"api\" modes send real attack payloads and are disabled unless security.dast.allow_active: true is set, in addition to this call needing normal execute-tool approval. \"api\" mode requires api_definition (an OpenAPI spec URL)."
 }
+
+// ShortDescription is the deferred-tools advertisement (P62.6). It says
+// "running application" because that is the distinction the model has to make
+// against security_scan, which reads source; the authorization gate and mode
+// rules stay in Description, where they are enforced regardless of what the
+// model read.
+func (t *dastScanTool) ShortDescription() string {
+	return "Attack a running application over HTTP with OWASP ZAP (passive baseline by default) to find exploitable vulnerabilities."
+}
 func (t *dastScanTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"target":{"type":"string","description":"http(s) URL of the running application to scan"},"mode":{"type":"string","enum":["baseline","active","api"],"description":"baseline (default): passive spider + passive scan only. active: + real attack payloads. api: OpenAPI-defined endpoints + active scan."},"api_definition":{"type":"string","description":"OpenAPI spec URL or path; required when mode is \"api\""}},"required":["target"]}`)
 }

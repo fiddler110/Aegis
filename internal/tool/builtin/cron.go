@@ -183,6 +183,13 @@ func (t *cronHistoryTool) Description() string {
 		"first. Optionally filter to a single job id and/or cap the number of rows returned " +
 		"(default 20)."
 }
+
+// ShortDescription is the deferred-tools advertisement (P62.6): the derived
+// fallback cuts mid-clause, because this Description's first sentence spends
+// most of itself enumerating columns.
+func (t *cronHistoryTool) ShortDescription() string {
+	return "List a cron job's fire-attempt history: time, exit status, and an output snippet."
+}
 func (t *cronHistoryTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"id":{"type":"string","description":"optional cron job id to filter history to"},"limit":{"type":"integer","description":"optional max number of run records to return (default 20)"}}}`)
 }

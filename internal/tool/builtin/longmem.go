@@ -33,6 +33,11 @@ func (t *entityRememberTool) Capability() tool.Capability { return tool.CapWrite
 func (t *entityRememberTool) Description() string {
 	return "Persist facts about a named entity (system, file, API, person, decision) to the long-term entity store so they are available in future sessions. Use for important discoveries about the target system or codebase."
 }
+
+// ShortDescription is the deferred-tools advertisement (P62.6).
+func (t *entityRememberTool) ShortDescription() string {
+	return "Persist facts about a named entity (system, file, API, person, decision) to long-term memory for future sessions."
+}
 func (t *entityRememberTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"entity_type":{"type":"string","description":"category of the entity (e.g. 'system', 'api', 'file', 'person', 'decision')"},"entity_name":{"type":"string","description":"unique identifier for the entity"},"facts":{"type":"string","description":"concise facts to store about this entity"}},"required":["entity_type","entity_name","facts"]}`)
 }

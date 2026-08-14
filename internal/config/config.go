@@ -77,6 +77,7 @@ type Config struct {
 	Notify     NotifyConfig      `koanf:"notify"`
 	Embeddings EmbeddingsConfig  `koanf:"embeddings"`
 	Workspace  WorkspaceConfig   `koanf:"workspace"`
+	Tools      ToolsConfig       `koanf:"tools"`
 
 	// WorkspaceTrust reports the P27.1 workspace-trust gate's outcome for
 	// this load. It is never read from a config file (computed by Load()
@@ -242,6 +243,26 @@ type CleanupConfig struct {
 // SwarmConfig configures multi-agent sub-agent execution.
 type SwarmConfig struct {
 	Backend string `koanf:"backend"` // "in_process" (default) or "subprocess"
+}
+
+// ToolsConfig tunes which optional built-in tool families are registered.
+type ToolsConfig struct {
+	// Families names deferred tool families to register that the active
+	// prompt profile would otherwise omit (P62.6). Additive, and empty by
+	// default, so an unset key is unambiguous — the same shape as
+	// skills.builtin_enabled, and for the same reason.
+	//
+	// It exists because the local prompt profile drops the coordination,
+	// scheduling and long-term-memory families ("team", "cron", "entity"):
+	// thirteen of the twenty-six deferred tools, advertised on every turn of
+	// every session, for capabilities a small-model file-scoped task does not
+	// reach for. The default profile registers everything and ignores this
+	// key. Naming a family here puts it back — a local model driving a swarm
+	// is a real configuration, just not the one the profile is tuned for.
+	//
+	// See builtin.ToolFamilies for the recognized names; an unknown name is a
+	// no-op rather than an error, since a family can be retired.
+	Families []string `koanf:"families"`
 }
 
 // WorkspaceConfig widens what the session's workspace-confined tools can

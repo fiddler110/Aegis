@@ -28,6 +28,12 @@ func (t *reconScanTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *reconScanTool) Description() string {
 	return "Network/host reconnaissance for attack-surface mapping: nmap discovers live hosts, open ports, and service/version banners across a target host list or CIDR range; nuclei then matches ProjectDiscovery's community templates (CVEs, misconfigurations, exposed panels) against what's alive. Findings are normalized and aggregated the same way security_scan aggregates its scanners. The target(s) must be loopback/private (default-allowed) or explicitly declared in security.dast.allowed_targets — the same shared gate dast_scan uses — anything else is rejected before either scanner runs, regardless of permission mode. Baseline mode (default) runs nmap's top-100-port version scan and nuclei with dos/fuzz/intrusive templates excluded; set security.dast.allow_active: true to unlock nmap's OS detection/full-port-range/default-script mode and nuclei's full template set — the same flag dast_scan's active mode uses. nuclei additionally requires security.tools.nuclei.templates_version (a pinned nuclei-templates release tag). Host-binary only for both scanners in this version — no container fallback (a network-isolated scanner container can't reach LAN targets)."
 }
+
+// ShortDescription is the deferred-tools advertisement (P62.6). See dast.go's
+// note on why the authorization gate is not restated here.
+func (t *reconScanTool) ShortDescription() string {
+	return "Network reconnaissance against an authorized host or CIDR: nmap port/service discovery plus nuclei template matching."
+}
 func (t *reconScanTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"targets":{"type":"array","items":{"type":"string"},"description":"bare hosts, IPs, or CIDR ranges to scan (e.g. \"192.168.1.0/24\", \"10.0.0.5\", \"db.lan\") — no http(s):// scheme"}},"required":["targets"]}`)
 }

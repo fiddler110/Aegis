@@ -8,6 +8,80 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-08-14 — **P62.6 built and closed.** The local-profile base prompt goes from
+**7,790 to 4,907** estimated tokens (37%), with **no exposed tool schema touched and no tool made
+unreachable**. Write-up immediately below; the 2026-08-10 Tier 3 batch follows it.
+
+**P62.6 — the base prompt is 84% tool inventory, and deferral is most of the waste (SHIPPED 2026-08-14).**
+
+Three fixes, and the order was the point rather than an implementation detail. The item was promoted
+on a measurement; that measurement turned out to be taken with an instrument that was itself 4.4%
+wrong, which is the nineteenth pass's lesson arriving one item later than it should have.
+
+| | before | after |
+|---|---|---|
+| tool schemas (27 exposed) | 3,614 | 3,275 |
+| `<deferred_tools>` | 2,953 (26 tools) | **409** (13 tools) |
+| prose blocks + persona | 1,223 | 1,223 |
+| **total** | **7,790** | **4,907** |
+
+**1. The instrument, first (339 tokens that were never real).** `tokenest.Tools` priced
+`ToolSchema.OutputSchema`. No adapter sends it: `provider/anthropic` builds its `wireTool` from
+name/description/input schema, `provider/openai` sets only `Function.Parameters`, and
+`toolshim.Prompt` renders only the input schema. It is a P3.6 affordance for clients and validators,
+never for a model. This matters twice — it over-attributed 4.4% of the measured prompt to schemas,
+and the estimator's one production caller is `compactionGuard.requestOverhead`, so every session had
+been spending phantom tokens of headroom and compacting that much early.
+`TestToolsIgnoresOutputSchema` pins the omission *against the adapters' wire shape* and says in its
+comment that the day an adapter starts sending output schemas, this failing is the signal to re-add
+the term rather than to delete the test — the omission flips from a harmless overcount to an
+undercount, which is the dangerous direction for a compaction trigger.
+
+**2. The deferral advertisement (2,279 tokens).** `deferredToolsBlock` printed each unloaded tool's
+full `Description()` — an operator's manual, 2,374 bytes for `security_scan`, 593 tokens to advertise
+a tool that is *not loaded*. It now prints `tool.Summarize(t)`: a `ShortDescription()` if the tool
+declares one (new optional interface, same idiom as `OutputSchemer`/`PollExempter`), else the first
+sentence capped at 140 chars, with parenthesis depth tracked so the `(opengrep, trivy, e.g. …)`
+lists these descriptions open with do not end the sentence three words in. 2,953 → 674 at 26 tools.
+
+**This costs nothing in discovery, and that is what made it cheap rather than a trade-off.**
+`Registry.SearchDeferred` matches a query against the **full** name+description, which lives in the
+registry and not in the prompt, and `tool_search` returns the full description with the schema on
+load. A scanner name trimmed out of a summary is still findable. `tool.Info` carries both fields for
+exactly that reason, and a test asserts a term present only in the dropped half still resolves.
+
+Seven tools declare a hand-written summary, chosen because the derived one reads badly rather than to
+save bytes: the four security tools (whose first sentences are long parenthetical inventories, and
+one of which opened with "Security engagement assistant (P13.4):", leaking a roadmap id into the
+system prompt), `scope`, `entity_remember`, `cron_history`.
+
+**3. Tool families the local profile has no use for (265 tokens, 13 of 26 deferred tools).** The
+daemon wires the team task list, cron scheduler and long-term memory store unconditionally, so every
+local session advertised `team_send`/`team_inbox`/`team_task_*` to teammates it does not have, plus
+`cron_*` and `entity_*`. Under `LocalProfile` those three families are no longer registered. This is
+a **profile default with an additive override** (`tools.families`, the same shape and rationale as
+`skills.builtin_enabled`) rather than a deletion, because none of the three is genuinely *unusable*
+on a local model — a local model driving a swarm is a real configuration, just not the one the
+profile is tuned for. The gate is deliberately narrow: security/latex/diagram stay, both because a
+local run reaches for them and because P34.3's persona preload depends on the security tools being
+registered-and-deferred rather than absent.
+
+**Closure.** `localBasePromptCeilingTokens` 8,200 → 5,200 against the measured 4,907, with the
+comment recording where each of the 2,883 tokens went so a future reader can tell a deliberate move
+from a silent one. Nine mutations were run over the new code — both edges of `summaryMaxChars`, the
+`ShortDescriber` dispatch, the parenthesis-depth check, `Info.Summary` reverting to the full
+description, the block printing `Description` again, both directions of `familyEnabled`, and
+`tokenest` counting `OutputSchema` again — and all nine were killed. The `summaryMaxChars` band test
+uses **literal** numbers rather than the constant, because every other test in that file references
+the constant symbolically and would survive any mutation of it; that is this repo's third-consecutive-
+pass finding applied on purpose.
+
+**What was deliberately not done, and is now P62.9.** The exposed-schema half: five editing tools at
+1,299 tokens (26.5% of what remains) and 1,001 tokens of prose blocks with no local-profile variant.
+Both are behaviour changes needing the live tier, not unit tests — and the obvious editing-tool move
+points the wrong way, since P39.16 shipped the handle-based tools precisely because small models fail
+`edit_file`'s byte-exact match.
+
 **Last updated:** 2026-08-10 — **the Tier 3 batch: P39.17, P39.18 and P62.7 shipped, and P62.6
 measured and promoted to Tier 2 rather than built.** Four items worked in parallel, and the pass's
 finding is about *deferral* rather than about any of them: P62.6's composition split shows the tool

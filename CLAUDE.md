@@ -313,6 +313,16 @@ All message types (TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock) are 
 
 Every tool declares a `Capability` (`read`, `write`, `execute`, `network`, `spawn`). The permission gate consults this before execution. In `engine.runTools`, read/network tools run concurrently while write/execute tools are serialized via `sync.RWMutex`.
 
+### What a tool costs the prompt
+
+A registered tool is either **exposed** (its schema rides every request) or **deferred** (one line in `<deferred_tools>`, loaded on demand by `tool_search`). P62.6 measured the local profile and found the deferral mechanism had become most of the cost it was built to avoid: the block printed each unloaded tool's *full* `Description()`, so an unloaded `security_scan` cost 593 tokens and the 26-tool block cost 2,953 — 38% of the base prompt, against 3,614 for the 27 schemas actually exposed. Three things follow, and each is load-bearing when adding or editing a tool:
+
+- **`<deferred_tools>` prints `tool.Summarize(t)`, not `Description()`** — a `ShortDescription()` if the tool declares one, else the first sentence capped at `summaryMaxChars`. This costs nothing in discovery because `Registry.SearchDeferred` matches the query against the **full** name+description, which lives in the registry and not in the prompt: a scanner name trimmed out of a summary is still findable, and the full text comes back with the schema on load. Declare `ShortDescription()` when the derived first sentence reads badly (it cuts mid-clause, or leaks a roadmap id) — not to save bytes.
+- **`ToolSchema.OutputSchema` is never sent to any model.** Both adapters build their wire tool from name/description/input schema only, and `toolshim.Prompt` renders only the input schema; it exists for clients and validators (P3.6). `tokenest.Tools` therefore does not price it — it used to, which charged the compaction guard 339 phantom tokens of overhead on every request.
+- **Optional families are profile-gated.** Under the local profile, `team`/`cron`/`entity` (13 of 26 deferred tools) are not registered at all; `tools.families` names any to put back. See `builtin.localOmittedFamilies` for why those three and not the security/latex/diagram ones.
+
+`TestBasePromptComposition_localProfile` prints the whole breakdown with `-v`, and `TestEffectiveSystem_localProfileBudget` fails `go test ./...` when the total crosses `localBasePromptCeilingTokens` (5,200; measured 4,907). Raising that number is allowed — silently raising it is not.
+
 ### Run budgets
 
 `engine.Options` carries four independent stop conditions, all checked at the same two gates (before each model turn and before each tool round): `BudgetUSD` (a no-op for unpriced local usage), `MaxTokensPerRun` (0 = unbounded), `MaxIterations` (defaults to 40 steps), and `MaxWallClockPerRun` (`cost.max_wall_clock_per_run`, seconds — **off by default**, since a wall-clock cap can't tell a stalled run from a slow one making real progress). A wall-clock abort is fatal to the drive rather than resumable, unlike a context-overflow or tool-failure-breaker reset; sub-agents inherit the parent's bound whole rather than a divided share, since elapsed time isn't additive across concurrent teammates the way spend is.

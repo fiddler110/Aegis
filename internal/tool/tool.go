@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -137,9 +138,92 @@ func NewRegistry() *Registry {
 
 // Info is a lightweight name+description pair used to advertise deferred tools
 // in the system prompt without shipping their full schema.
+//
+// Summary is what the prompt should actually print (P62.6). Description is the
+// tool's full prompt-facing manual and is kept here for callers that need the
+// real text — SearchDeferred matches against it, and tool_search hands it back
+// on load — but printing it was costing 114 tokens per *unloaded* tool, 82% of
+// what exposing the schema costs.
 type Info struct {
 	Name        string
 	Description string
+	Summary     string
+}
+
+// ShortDescriber is an optional Tool extension supplying the one-line
+// advertisement used in the deferred-tools block, for a tool whose Description
+// does not open with a sentence that works on its own (P62.6). Mirrors
+// OutputSchemer / PollExempter / CapabilityOverrider: the narrowest honest
+// answer belongs at the type, with a mechanical fallback for the majority that
+// do not answer.
+//
+// Implement this when Summarize's derivation reads badly, not to squeeze bytes:
+// the summary's job is to let the model recognize that this tool is the one the
+// task needs. It is not a discovery index — tool_search matches keywords against
+// the *full* Description, which lives in the registry and costs no prompt
+// tokens, so a term dropped from the summary is still findable.
+type ShortDescriber interface {
+	ShortDescription() string
+}
+
+// summaryMaxChars bounds a derived summary. Sized so a line survives as a
+// recognizable sentence — the ten most expensive deferred descriptions all open
+// with a clause longer than a tweet — while holding the whole 26-tool block to
+// roughly a quarter of what printing the manuals cost.
+const summaryMaxChars = 140
+
+// Summarize returns the one-line advertisement for t: its ShortDescription if
+// it declares one, else the first sentence of its Description, capped.
+func Summarize(t Tool) string {
+	if s, ok := t.(ShortDescriber); ok {
+		if short := strings.TrimSpace(s.ShortDescription()); short != "" {
+			return short
+		}
+	}
+	return firstSentence(t.Description(), summaryMaxChars)
+}
+
+// firstSentence cuts s at its first sentence boundary and caps the result.
+//
+// Parenthesis depth is tracked because the descriptions this exists to shorten
+// are dense with parenthetical tool lists — "(opengrep, trivy, gitleaks, …)" —
+// and abbreviations inside them ("e.g. ") would otherwise end the sentence three
+// words in. A period only closes the sentence at depth zero.
+func firstSentence(s string, maxChars int) string {
+	s = strings.TrimSpace(s)
+	depth := 0
+scan:
+	for i := 0; i+1 < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case '.':
+			if depth == 0 && (s[i+1] == ' ' || s[i+1] == '\n') {
+				s = s[:i+1]
+				break scan
+			}
+		}
+	}
+	if len(s) <= maxChars {
+		return s
+	}
+	// Cut on a word boundary, but only if one is near enough that the result is
+	// still most of the budget; otherwise a single long token would collapse the
+	// line to almost nothing. The hard fallback walks back to a rune boundary —
+	// these descriptions carry em dashes and arrows, and a cut through one emits
+	// a replacement character into the system prompt.
+	cut := strings.LastIndexAny(s[:maxChars], " \t\n")
+	if cut < maxChars/2 {
+		cut = maxChars
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+	}
+	return strings.TrimSpace(s[:cut]) + "…"
 }
 
 // Register adds a tool. By default a newly registered tool is exposed.
@@ -252,7 +336,7 @@ func (r *Registry) Deferred() []Info {
 	var out []Info
 	for name, t := range r.tools {
 		if r.deferred[name] && !r.exposed[name] {
-			out = append(out, Info{Name: t.Name(), Description: t.Description()})
+			out = append(out, Info{Name: t.Name(), Description: t.Description(), Summary: Summarize(t)})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

@@ -1175,6 +1175,27 @@ skills:
   builtin_enabled: []   # e.g. ["security-audit", "architecture-diagram"]
 
 
+# ── Optional tool families ────────────────────────────────────────────────────
+# Deferred tool families the *local prompt profile* omits, additive and empty by
+# default. The default profile registers every family and ignores this key.
+#
+# Under the local profile (provider.prompt_profile: local, or a local backend),
+# three families are dropped: "team" (team_send/team_inbox/team_task_*, swarm
+# coordination), "cron" (cron_create/list/toggle/delete/history, background
+# scheduling) and "entity" (entity_remember/entity_recall, long-term memory).
+# Between them they were thirteen of the twenty-six tools listed in
+# <deferred_tools> and ~570 tokens of every turn's prompt — advertised on a
+# profile tuned for small local models doing file-scoped work, which do not
+# reach for them.
+#
+# None of the three is unusable on a local model, which is why this is a knob
+# rather than a deletion: a local model driving a swarm is a real setup, just
+# not the one the profile is tuned for. Name a family here to put it back.
+# An unrecognized name is ignored rather than failing startup.
+tools:
+  families: []   # e.g. ["team"] or ["cron", "entity"]
+
+
 # ── LSP servers ───────────────────────────────────────────────────────────────
 # Language servers give the agent IDE-level code intelligence (diagnostics,
 # references). Multiple servers can be listed; each handles its file extensions.
@@ -1579,6 +1600,15 @@ skills:
 ```
 
 Or from the CLI: `aegis skills enable security-audit` (add `--global` for the user-wide default instead), or `/skills enable security-audit` in the TUI.
+
+### Get the team/cron/entity tools back on a local model
+
+```yaml
+tools:
+  families: ["team"]   # or ["team", "cron", "entity"]
+```
+
+The local prompt profile omits those three families to keep `<deferred_tools>` small (see *Optional tool families* above). Name the ones you actually use; the default profile is unaffected either way.
 
 ### Spend more of a large context window on the repo map
 

@@ -897,6 +897,24 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 // P62.6's live 7,119 provider-reported figure; tokenest is a heuristic, not a
 // tokenizer, so the two are not expected to agree to the token.
 //
+// Re-measured 2026-08-14 at 4,907 after P62.6's first three fixes, and the
+// ceiling lowered from 8,200 to match. Where the 2,883 went, in the order they
+// were applied:
+//
+//   - 339 were never real. tokenest.Tools priced OutputSchema, which no adapter
+//     puts on the wire. Fixing the instrument before measuring the optimization
+//     is P62.4's lesson, applied here.
+//   - 2,279 came out of <deferred_tools>, which had been printing each unloaded
+//     tool's full manual. It now prints tool.Summarize's one line: 2,953 → 674
+//     at 26 tools.
+//   - 265 more came out of the same block when the local profile stopped
+//     registering the team/cron/entity families (26 deferred tools → 13).
+//
+// No exposed tool schema was touched, and no tool became unreachable: the
+// omitted families come back via tools.families, and every summarized tool is
+// still found by tool_search, which matches the full description held in the
+// registry.
+//
 // The ceiling is the measured value plus ~5% headroom, so ordinary prose edits
 // to a persona block or a tool description do not trip it but a new
 // always-exposed tool or a new injected block does. It is an upper bound across
@@ -909,7 +927,7 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 // accident. If the growth is deliberate, move this number and say in the commit
 // what was added and what it bought — a silent bump turns the budget back into
 // the invisible number it was written to make visible.
-const localBasePromptCeilingTokens = 8200
+const localBasePromptCeilingTokens = 5200
 
 // TestEffectiveSystem_localProfileBudget is P62.6's regression assertion. See
 // localBasePromptCeilingTokens for what the number means and what to do when
@@ -988,9 +1006,13 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 		t.Errorf("component table does not account for the assembled prompt: components=%d bytes, effectiveSystem=%d bytes — a block was added to effectiveSystem without being added here", want, len(system))
 	}
 
+	// OutputSchema is excluded from the byte column for the same reason
+	// tokenest.Tools excludes it from the token column (P62.6): no adapter puts
+	// it on the wire, so counting it would make the bytes and the tokens
+	// disagree about what a request actually carries.
 	schemaBytes := 0
 	for _, s := range schemas {
-		schemaBytes += len(s.Name) + len(s.Description) + len(s.InputSchema) + len(s.OutputSchema)
+		schemaBytes += len(s.Name) + len(s.Description) + len(s.InputSchema)
 	}
 	if len(schemas) == 0 {
 		t.Fatal("no tool schemas exposed; the measurement would be meaningless")
@@ -1029,7 +1051,7 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 	for _, s := range schemas {
 		costs = append(costs, toolCost{
 			name:   s.Name,
-			bytes:  len(s.Name) + len(s.Description) + len(s.InputSchema) + len(s.OutputSchema),
+			bytes:  len(s.Name) + len(s.Description) + len(s.InputSchema),
 			tokens: tokenest.Tools([]provider.ToolSchema{s}),
 		})
 	}
@@ -1041,24 +1063,29 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 	})
 	// The deferred inventory is measured too, and separately: it is the price
 	// paid for *not* exposing a schema, and if it approaches what a schema costs
-	// then deferral has stopped being a saving. One line per deferred tool
-	// (name + full description) is not free.
+	// then deferral has stopped being a saving — which is the state P62.6 found
+	// it in. The line is measured as deferredToolsBlock actually emits it (name
+	// + Summary), and the tool's full Description is shown alongside so a
+	// summary that has drifted into uselessness is visible here rather than only
+	// in a live run. Sorted by what the prompt pays, not by what the manual
+	// weighs.
 	deferredInfos := reg.Deferred()
+	deferredLine := func(d tool.Info) string { return "- " + d.Name + ": " + d.Summary + "\n" }
 	sort.Slice(deferredInfos, func(i, j int) bool {
-		li, lj := len(deferredInfos[i].Description), len(deferredInfos[j].Description)
+		li, lj := len(deferredLine(deferredInfos[i])), len(deferredLine(deferredInfos[j]))
 		if li != lj {
 			return li > lj
 		}
 		return deferredInfos[i].Name < deferredInfos[j].Name
 	})
 	fmt.Fprintf(&b, "\nmost expensive <deferred_tools> lines\n\n")
-	fmt.Fprintf(&b, "%-4s %-24s %10s %10s\n", "#", "tool", "bytes", "est.tokens")
+	fmt.Fprintf(&b, "%-4s %-24s %10s %10s %10s\n", "#", "tool", "bytes", "est.tokens", "full.desc")
 	for i, d := range deferredInfos {
 		if i >= 10 {
 			break
 		}
-		line := "- " + d.Name + ": " + d.Description + "\n"
-		fmt.Fprintf(&b, "%-4d %-24s %10d %10d\n", i+1, d.Name, len(line), tokenest.Estimate(line))
+		line := deferredLine(d)
+		fmt.Fprintf(&b, "%-4d %-24s %10d %10d %10d\n", i+1, d.Name, len(line), tokenest.Estimate(line), len(d.Description))
 	}
 
 	fmt.Fprintf(&b, "\nmost expensive tool schemas\n\n")

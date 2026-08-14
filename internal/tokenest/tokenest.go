@@ -90,11 +90,23 @@ const toolSchemaEnvelope = 8
 // the engine measured toolshim.Prompt separately on top. The native path had no
 // equivalent — which is why the gap only showed up on a backend using native
 // tool calls.
+//
+// OutputSchema is deliberately *not* counted (P62.6), and the reason is that no
+// adapter puts it on the wire: the Anthropic adapter builds its wireTool from
+// Name/Description/InputSchema only, the OpenAI adapter sets nothing but
+// Function.Parameters, and toolshim.Prompt renders only the input schema.
+// ToolSchema.OutputSchema exists for clients and validators (P3.6), not for the
+// model. Counting it added ~339 phantom tokens on the local profile's 27
+// exposed tools — 4.4% of that base prompt — which this estimator's one
+// production caller (engine's compactionGuard.requestOverhead) spent as real
+// headroom, firing compaction that much early. TestToolsIgnoresOutputSchema
+// pins the omission against the adapters' actual wire shape, because the day an
+// adapter starts sending it this becomes an undercount instead.
 func Tools(schemas []provider.ToolSchema) int {
 	n := 0
 	for _, s := range schemas {
 		n += Estimate(s.Name) + Estimate(s.Description)
-		n += Estimate(string(s.InputSchema)) + Estimate(string(s.OutputSchema))
+		n += Estimate(string(s.InputSchema))
 		n += toolSchemaEnvelope
 	}
 	return n

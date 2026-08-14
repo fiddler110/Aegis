@@ -109,6 +109,59 @@ type Options struct {
 	// GitPreCommitTestTimeout bounds GitPreCommitTestCommand; 0 uses
 	// config.DefaultPreCommitTestTimeoutSec.
 	GitPreCommitTestTimeout time.Duration
+	// ToolFamilies re-enables deferred tool families LocalProfile would
+	// otherwise omit (P62.6, config.ToolsConfig.Families). Ignored under the
+	// default profile, which registers every family. See ToolFamilies for the
+	// names and localOmittedFamilies for what the profile drops.
+	ToolFamilies []string
+}
+
+// ToolFamilies are the optional deferred tool families the local prompt profile
+// can omit, and the names config.ToolsConfig.Families accepts.
+var ToolFamilies = []string{familyTeam, familyCron, familyEntity}
+
+const (
+	familyTeam   = "team"   // team_send/team_inbox/team_task_* — swarm coordination
+	familyCron   = "cron"   // cron_create/list/toggle/delete/history — background scheduling
+	familyEntity = "entity" // entity_remember/entity_recall — long-term memory
+)
+
+// localOmittedFamilies are the families the local prompt profile drops (P62.6).
+//
+// Between them they are thirteen of the local profile's twenty-six deferred
+// tools and ~570 tokens of every turn's prompt, spent advertising three
+// capabilities a small-model, file-scoped task does not reach for: coordinating
+// with teammates that a solo session does not have, scheduling background jobs,
+// and writing to a cross-session entity store. None of the three is *unusable*
+// in a local session, which is why this is a profile default with an additive
+// override rather than a deletion — see config.ToolsConfig.Families.
+//
+// Deliberately not extended to latex/security/lsp: those are the families a
+// local run genuinely does reach for, and the P34.3 preload path already
+// depends on a persona being able to name a deferred security tool.
+var localOmittedFamilies = []string{familyTeam, familyCron, familyEntity}
+
+// familyEnabled reports whether family should be registered under opts.
+func (o Options) familyEnabled(family string) bool {
+	if !o.LocalProfile {
+		return true
+	}
+	omitted := false
+	for _, f := range localOmittedFamilies {
+		if f == family {
+			omitted = true
+			break
+		}
+	}
+	if !omitted {
+		return true
+	}
+	for _, f := range o.ToolFamilies {
+		if strings.EqualFold(strings.TrimSpace(f), family) {
+			return true
+		}
+	}
+	return false
 }
 
 // SearchOptions configures the web_search tool's provider.
@@ -195,7 +248,7 @@ func Register(reg *tool.Registry, opts Options) error {
 	if opts.Tasks != nil {
 		tools = append(tools, TaskTools(opts.Tasks, root, opts.ShellTimeoutSec, opts.Sandbox)...)
 	}
-	if opts.Cron != nil {
+	if opts.Cron != nil && opts.familyEnabled(familyCron) {
 		deferred = append(deferred, CronTools(opts.Cron)...)
 	}
 	if opts.LSP != nil {
@@ -210,10 +263,10 @@ func Register(reg *tool.Registry, opts Options) error {
 	if opts.Knowledge != nil {
 		tools = append(tools, KnowledgeTools(opts.Knowledge, opts.KnowledgeProvider, root)...)
 	}
-	if opts.LongMem != nil {
+	if opts.LongMem != nil && opts.familyEnabled(familyEntity) {
 		deferred = append(deferred, LongMemTools(opts.LongMem, root)...)
 	}
-	if opts.TeamTasks != nil && opts.MailboxRoot != "" {
+	if opts.TeamTasks != nil && opts.MailboxRoot != "" && opts.familyEnabled(familyTeam) {
 		deferred = append(deferred, TeamTools(opts.TeamTasks, opts.MailboxRoot)...)
 	}
 	for _, t := range tools {
