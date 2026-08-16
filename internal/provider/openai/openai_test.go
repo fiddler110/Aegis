@@ -200,8 +200,11 @@ func TestStreamToolUseStartAnnouncedOnceWhenIDArrivesLate(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("got %d tool_use_start events, want exactly one: %+v", len(starts), starts)
 	}
-	if starts[0].Name != "search" || starts[0].ID != "" {
-		t.Errorf("start = %+v, want name \"search\" and no id yet", starts[0])
+	// The start fires before the ID is known, so it carries the index-derived
+	// ID synthesized for every ID-less call (LLM-05); the real ID replaces it
+	// on the assembled call once the wire supplies one.
+	if starts[0].Name != "search" || starts[0].ID != "tu_0" {
+		t.Errorf("start = %+v, want name \"search\" and the synthesized id", starts[0])
 	}
 	if tu == nil || tu.ID != "call_1" || string(tu.Input) != `{"q":"cats"}` {
 		t.Errorf("assembled call = %+v, want the late-arriving id and full arguments", tu)
@@ -234,6 +237,164 @@ data: [DONE]
 	if len(names) != 2 || names[0] != "read_file" || names[1] != "grep" {
 		t.Errorf("start events = %v, want one per call in index order", names)
 	}
+}
+
+// TestStreamToolCallIndexingAndIDSynthesis is the P66.16 guard over the two
+// ways an OpenAI-compatible backend can differ from the reference server
+// without being wrong:
+//
+//   - LLM-04: tool-call stream indices need not be 0-based or contiguous. The
+//     accumulator is a map keyed by the wire index, and Finish used to walk a
+//     synthetic 0..len-1 range over it, so a lone call at index 1 emitted
+//     nothing and {0,2} dropped the second — after EventToolUseStart had
+//     already fired for the dropped call, leaving the engine with a started
+//     call that never completes under a "tool_calls" stop.
+//   - LLM-05: a backend that omits "id" left every call's ID as "", so two
+//     ID-less calls in one turn collide on one key in tool_result correlation
+//     and replay as two tool messages both claiming tool_call_id "".
+//
+// Emission order must also be by wire index, not map order.
+func TestStreamToolCallIndexingAndIDSynthesis(t *testing.T) {
+	type want struct{ id, name, input string }
+	cases := []struct {
+		name  string
+		body  string
+		calls []want
+	}{{
+		// The whole of LLM-04 in one case: len(tools) == 1, so the old
+		// 0..len-1 walk read tools[0], found nil, and emitted no call at all.
+		name: "one-based single index",
+		body: toolCallStream(
+			`{"index":1,"id":"call_a","function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}`,
+		),
+		calls: []want{{"call_a", "grep", `{"pattern":"x"}`}},
+	}, {
+		// {0,2}: the old walk covered 0 and 1, dropping index 2.
+		name: "gapped indices",
+		body: toolCallStream(
+			`{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}`,
+			`{"index":2,"id":"call_c","function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}`,
+		),
+		calls: []want{
+			{"call_a", "read_file", `{"path":"a.go"}`},
+			{"call_c", "grep", `{"pattern":"x"}`},
+		},
+	}, {
+		// Arrival order must not decide emission order — wire index does.
+		name: "out of order arrival",
+		body: toolCallStream(
+			`{"index":3,"id":"call_d","function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}`,
+			`{"index":1,"id":"call_b","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}`,
+			`{"index":2,"id":"call_c","function":{"name":"list_dir","arguments":"{}"}}`,
+		),
+		calls: []want{
+			{"call_b", "read_file", `{"path":"a.go"}`},
+			{"call_c", "list_dir", `{}`},
+			{"call_d", "grep", `{"pattern":"x"}`},
+		},
+	}, {
+		name: "missing id",
+		body: toolCallStream(
+			`{"index":0,"function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}`,
+		),
+		calls: []want{{"tu_0", "grep", `{"pattern":"x"}`}},
+	}, {
+		// Two ID-less calls: without synthesis both carry "" and collide.
+		name: "duplicate empty ids across calls",
+		body: toolCallStream(
+			`{"index":0,"function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}`,
+			`{"index":1,"function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}`,
+		),
+		calls: []want{
+			{"tu_0", "read_file", `{"path":"a.go"}`},
+			{"tu_1", "grep", `{"pattern":"x"}`},
+		},
+	}, {
+		// Both defects at once, plus a mixed stream where one call is IDed and
+		// the other is not: the synthesized ID must not collide with the real
+		// one, and must follow the wire index rather than an emission counter.
+		name: "one-based ids missing and mixed",
+		body: toolCallStream(
+			`{"index":1,"function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}`,
+			`{"index":2,"id":"call_c","function":{"name":"list_dir","arguments":"{}"}}`,
+			`{"index":4,"function":{"name":"grep","arguments":"{\"pattern\":\"x\"}"}}`,
+		),
+		calls: []want{
+			{"tu_1", "read_file", `{"path":"a.go"}`},
+			{"call_c", "list_dir", `{}`},
+			{"tu_4", "grep", `{"pattern":"x"}`},
+		},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []want
+			var startIDs []string
+			var stop provider.StopReason
+			for _, ev := range streamEvents(t, tc.body) {
+				switch ev.Type {
+				case provider.EventError:
+					t.Fatalf("error event: %v", ev.Err)
+				case provider.EventToolUseStart:
+					startIDs = append(startIDs, ev.ToolUse.ID)
+				case provider.EventToolUse:
+					got = append(got, want{ev.ToolUse.ID, ev.ToolUse.Name, string(ev.ToolUse.Input)})
+				case provider.EventDone:
+					stop = ev.Stop
+				}
+			}
+			if stop != provider.StopToolUse {
+				t.Errorf("stop = %v, want StopToolUse", stop)
+			}
+			if len(got) != len(tc.calls) {
+				t.Fatalf("emitted %d tool calls, want %d: %+v", len(got), len(tc.calls), got)
+			}
+			for i, w := range tc.calls {
+				if got[i] != w {
+					t.Errorf("call %d = %+v, want %+v", i, got[i], w)
+				}
+			}
+			// Every announced call must resolve, and under the same ID: the
+			// start event is what a UI opens a card on and what the engine
+			// reports as KindToolCallStart.
+			if len(startIDs) != len(tc.calls) {
+				t.Fatalf("got %d start events for %d calls: %v", len(startIDs), len(tc.calls), startIDs)
+			}
+			// Starts fire in arrival order, completions in wire-index order,
+			// so compare them as sets.
+			started := map[string]bool{}
+			for _, id := range startIDs {
+				started[id] = true
+			}
+			for _, w := range tc.calls {
+				if !started[w.id] {
+					t.Errorf("no start event carried id %q; starts were %v — start and completion must agree", w.id, startIDs)
+				}
+			}
+			seen := map[string]bool{}
+			for _, c := range got {
+				if c.id == "" {
+					t.Errorf("call %+v carries no id; tool_result correlation keys on it", c)
+				}
+				if seen[c.id] {
+					t.Errorf("duplicate tool-call id %q across calls in one turn", c.id)
+				}
+				seen[c.id] = true
+			}
+		})
+	}
+}
+
+// toolCallStream builds an SSE body that streams each tool_calls delta as its
+// own chunk, then terminates with finish_reason "tool_calls".
+func toolCallStream(deltas ...string) string {
+	var b strings.Builder
+	for _, d := range deltas {
+		b.WriteString(`data: {"choices":[{"delta":{"tool_calls":[` + d + `]}}]}` + "\n\n")
+	}
+	b.WriteString(`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n")
+	b.WriteString("data: [DONE]\n\n")
+	return b.String()
 }
 
 func TestCustomHeaders(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -537,6 +538,22 @@ type toolAccum struct {
 	announced bool
 }
 
+// callID is the tool-call ID this accumulator reports, synthesizing one from
+// the wire index when the backend omitted the field (LLM-05). `acc.id` is the
+// zero value on any server that streams tool calls without an "id" — the ID
+// flows on to ToolResultBlock.ToolUseID, to the orphan-repair map keyed by it,
+// and back to the wire as tool_call_id, so two ID-less calls in one turn
+// otherwise collide on "" and the round is rejected or mis-correlated. Deriving
+// it from the wire index (as the native Ollama adapter does) makes it unique
+// within the stream and makes the EventToolUseStart and EventToolUse for one
+// call agree without either having to remember what the other chose.
+func (a *toolAccum) callID(index int) string {
+	if a.id != "" {
+		return a.id
+	}
+	return "tu_" + strconv.Itoa(index)
+}
+
 // errorMessage extracts the human-readable message from the "error" field of
 // a streamed chunk, which servers spell two ways: Ollama emits a bare string
 // ({"error":"model runner has unexpectedly stopped"}) mid-stream when a
@@ -697,7 +714,7 @@ func (d *chunkDecoder) Line(line string, emit func(provider.Event) bool) sse.Sta
 			if acc.name != "" && !acc.announced {
 				acc.announced = true
 				if !emit(provider.Event{Type: provider.EventToolUseStart, ToolUse: &provider.ToolUseBlock{
-					ID: acc.id, Name: acc.name,
+					ID: acc.callID(tc.Index), Name: acc.name,
 				}}) {
 					return sse.StatusAbort
 				}
@@ -744,8 +761,20 @@ func (d *chunkDecoder) Line(line string, emit func(provider.Event) bool) sse.Sta
 // half-received arguments were whole.
 func (d *chunkDecoder) Finish(emit func(provider.Event) bool) (provider.StopReason, *provider.Usage, bool) {
 	tools := d.tools
-	// Emit accumulated tool calls in index order.
-	for i := 0; i < len(tools); i++ {
+	// Emit accumulated tool calls in wire-index order. The map is keyed by the
+	// wire's tc.Index, which is not required to be 0-based or contiguous
+	// (LLM-04): iterating a synthetic 0..len-1 range dropped every call whose
+	// index fell outside it — a lone call at index 1 emitted nothing at all,
+	// under a finish_reason of "tool_calls" and after its EventToolUseStart had
+	// already fired, so the engine saw a started call that never completed.
+	// Sorting the map's actual keys covers gapped and 1-based indices and keeps
+	// emission order deterministic regardless of map iteration order.
+	indices := make([]int, 0, len(tools))
+	for i := range tools {
+		indices = append(indices, i)
+	}
+	sort.Ints(indices)
+	for _, i := range indices {
 		acc := tools[i]
 		if acc == nil {
 			continue
@@ -777,7 +806,7 @@ func (d *chunkDecoder) Finish(emit func(provider.Event) bool) (provider.StopReas
 			return d.stop, d.usage, false
 		}
 		if !emit(provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
-			ID: acc.id, Name: acc.name, Input: json.RawMessage(args),
+			ID: acc.callID(i), Name: acc.name, Input: json.RawMessage(args),
 		}}) {
 			return d.stop, d.usage, false
 		}
