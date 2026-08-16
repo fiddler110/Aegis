@@ -67,34 +67,39 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 - **Verification:** 6 — **P66.22**, **P38.1**, **P62.9**, **P65.2** (prompt half), **P65.3**
   (local half), **P62.8**.
 
-**What to do next.** Rows 1-5 of the "Up next" ten shipped on 2026-08-16 (see
-[Up next](#up-next--the-ten-items-to-take-in-order) for the table as it now stands). What that
-leaves:
+**What to do next.** Rows 1-5 of the previous "Up next" ten shipped on 2026-08-16 and the list was
+re-read the same day against the full open set, P67 included. See
+[Up next](#up-next--the-ten-items-to-take-in-order) for the table as it now stands. The re-read
+changed the shape of the list rather than just its remainder, for one reason:
 
-**Tier 1 is empty and there is no forced order left in the batch.** One sequencing fact survives:
-**P66.14 gates P66.22**, the live-tier run. P66.7 was the other gate and has now shipped, so P66.14
-is the only thing still standing between the batch and the measurement — it changes numbers P66.22
-would otherwise measure wrong, and measuring first answers a question nobody will have afterwards.
+**The live-tier sitting is now the centre of the plan, and two items lead into it.** Five of the six
+verification items close on one harness — a local model driving `aegis chat --skill threat-modeling`
+/ `TestLiveWorkflow` — so one setup answers P66.22, P38.1, P62.9, P65.2's prompt half and P65.3's
+local half together. That sitting is the only open work anywhere whose outcome produces *new
+information* rather than new code, which makes what it is measured with worth building first:
 
-**The two refiled sub-items are not equivalent in urgency.** **P66.25** (SEC-07, content-bound trust
-grants) is real work with a real gap behind it — a `git pull` that adds a `hooks:` block still
-re-prompts nothing — and P66.5 built its prerequisite, the well-defined security-relevant subset.
-**P66.26** (PERF-02) is Tier 4 and should stay there: it is a Low-severity durability trade on the
-one database that holds checkpoints, the cost ledger and traces.
+- **P66.14 gates it.** It changes three of the five numbers P66.22 would otherwise measure wrong, and
+  measuring the pre-fix state answers a question nobody will have afterwards. P66.7 was the other
+  gate and has shipped.
+- **P66.11 instruments it.** `TurnTrace` already discards stop reason, compaction event, guard
+  verdict and retry record one line after they are computed — and *those are the observations the
+  sitting is trying to make*. LLM-02's closure condition is literally "the turn at which compaction
+  actually fires"; ARCH-04's is whether a fan-out trips `MaxTurnStall`. This document's own method
+  note says to check the instrument before measuring, and it has twice recorded a fixed instrument
+  inverting an already-acted-on verdict. That argument moves P66.11 from the bottom of the previous
+  ten to just ahead of the run.
 
-**Among verification items**, P38.1's live conformance re-run stays the highest-value one: it is the
-only open item anywhere whose outcome produces new information rather than new code, and three of the
-other verification items (P38.1 itself, P62.9's remaining live-tier evidence, P65.2's prompt half)
-all close on the *same* harness — a local model driving `aegis chat --skill threat-modeling`. One
-live-tier setup answers all three:
+**The rest of Tier 2 has no forced order** and is ranked by size-to-value alone. The one internal
+constraint is that **P67.3** builds the purpose-tag seam **P67.6** (Tier 3) needs, and **P67.4**
+settles a cancellation policy **P67.7** would otherwise have to settle mid-refactor — so both sit on
+the ten partly to make later Tier 3 work cheaper.
 
-- **P38.1** — the conformance verdict itself (see its entry for the closure condition and reproduce
-  steps).
-- **P62.9** — needs n≥10 per arm on the deferred-`edit_file` surface, plus a default-prose control
-  that has not yet been run (first n=3 evidence is in its entry).
-- **P65.2**'s prompt half — does a local model fill the compaction-summary skeleton without losing
-  what the old terse-bullet prompt kept? The summarizer fires mid-drive, so P38.1's run is this
-  question's fixture too.
+**The two refiled sub-items are still not equivalent in urgency.** **P66.25** (SEC-07, content-bound
+trust grants) is real work with a real gap behind it — a `git pull` that adds a `hooks:` block still
+re-prompts nothing — and P66.5 built its prerequisite, the well-defined security-relevant subset. It
+is the only security item left in the open set and it earns a place on the ten. **P66.26** (PERF-02)
+is Tier 4 and should stay there: it is a Low-severity durability trade on the one database that holds
+checkpoints, the cost ledger and traces, and P66.9 already removed most of the pressure behind it.
 
 No Tier 4 build item currently has a fired trigger (re-verified 2026-08-15: `sandbox.backend` still
 defaults to `"local"`, `lsp.Manager` is still one shared daemon singleton, both TUI asymmetries in
@@ -127,58 +132,62 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next — the ten items to take in order
 
-**Written 2026-08-16**, after the P66 day plan closed. This is a *reading* of the tiers, not a
-second ranking: every row's tier and size come from the item's own `Priority:` line, and the order
-is what those tiers say once the two real sequencing constraints are honored. Each row's "why now"
-is the one-sentence case; the item's own entry below carries the evidence and closure condition.
+**Rewritten 2026-08-16**, after the previous ten's rows 1-5 shipped (build records in
+[releases.md](releases.md); the retired table is preserved there rather than carried here as
+strikethrough). This is a *reading* of the tiers, not a second ranking: every row's tier and size
+come from the item's own `Priority:` line, and the order is what those tiers say once the real
+sequencing constraints are honored. Each row's "why now" is the one-sentence case; the item's own
+entry below carries the evidence and closure condition.
 
-**Rows 1-5 shipped later the same day** — one commit each, each independently green, build records in
-[releases.md](releases.md). They are struck through rather than deleted, because three of them
-correct the finding they were built from and the row is where a reader looks first. **Rows 6-10 are
-the live list**, and nothing about their ordering changed: they had no dependency on rows 1-5 except
-#10's, which is now half-satisfied.
+**This is the first ten that ranks P66 and P67 against each other.** The previous list predated the
+P67 batch and said so; four P67 items enter here on their own merits, and two of them (#7, #9) are
+on the list partly because they make later Tier 3 work cheaper.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | ~~**P66.5** — invert the config freeze list~~ **SHIPPED** `0352112` | T1 · M | All of Tier 1. Last of the six exploitable-today findings: `commands:` unfrozen means an untrusted repo gets arbitrary binary exec through `grep` — a `CapRead` tool, so **plan mode allows it silently**. Inverted to a `configTrustPolicy` table that defaults to frozen. `security.*` landed as `frozenUntilTrusted`, not baseline-only — that would have broken `PatchProjectSecurity`'s six call sites. SEC-07 refiled as **P66.25**. |
-| 2 | ~~**P66.7** — cap context-file injection (LLM-01 remainder)~~ **SHIPPED** `9482c87` | T2 · S | `CLAUDE.md` injected uncapped. **The 11,611-token figure was stale** — 10,257 bytes / 2,560 tokens when measured at build time — so the 8,000-byte cap was derived from the served window instead. The budget test now runs over a realistic `CLAUDE.md` fixture and fails if the cap is lifted. Ungates #10. |
-| 3 | ~~**P66.16** — OpenAI adapter drops tool calls~~ **SHIPPED** `444516e` | T2 · S | **Worse than filed:** `Finish` iterating `0..len` over a map keyed by wire index doesn't drop trailing calls on a 1-based backend, it emits **zero** — `len == 1` reads `tools[0]`, finds nil, continues. Fixed by sorting the map's real keys; IDs synthesized as `tu_<index>`. |
-| 4 | ~~**P66.10** — bounded security remainder~~ **SHIPPED** `fd4f49b` | T2 · S-M | All three landed; SSRF list deduplicated into `internal/netblock`. **VULN-03's suggested `::ffff:0:0/96` was rejected**: `Contains` reduces it via `To4()` to `0.0.0.0/0`, blocking the whole public internet. Pinned by an over-blocking guard test. |
-| 5 | ~~**P66.9** — bound `bg_events`~~ **SHIPPED** `d4fb209` | T2 · S | `DefaultBGEventRetention = 2000`, deliberately not a config key — the defect *was* a pruner gated on an unset one. The interval alone is not a bound: a session appending <128 events per daemon lifetime accumulates across restarts, so a process's first append always sweeps. PERF-02 refiled as **P66.26**. |
-| 6 | **P66.21** — doc corrections the review disproved | T2 · S | Three left (P66.8 closed the first). The `view.go` one is actively harmful: it asserts the pre-P35.13 `prompt_eval_count` claim and proposes remediation that must not be done. |
-| 7 | **P66.14** — reconcile the two compaction thresholds | T3 · M | The engine triggers at 2,048 on a 4,096 window; the summarizer refuses until 3,277 — so compaction lands with 819 tokens left for the completion. And the P62.4 calibration is inert on the documented `openai` + `:11434/v1` path, so **every user following the documented configuration runs the whole session on a 20-33% undercount**. Also gates #10. |
-| 8 | **P66.12** — staticcheck cleanup | T2 · S | 28 findings, no new defects — a good result worth banking. Closure is deleting `continue-on-error` from CI; until then the step is advisory and the next 28 accumulate the same way. |
-| 9 | **P66.11** — redaction + turn trace | T2 · M | `internal/share` redacts nothing at all. The `TurnTrace` half is the higher-leverage piece: stop reason, compaction event, guard verdict and retry record are all computed and discarded one line later, and every live-tier item in this document would be easier to close with them. |
-| 10 | **P66.22** — the live-tier run | Verification | Converts five estimated LLM-tier findings into measurements in one `TestLiveWorkflow` pass. **#2 has shipped, so only #7 still gates it.** Shares its harness with P38.1, P62.9 and P65.2's prompt half — schedule all four in one sitting. |
+| 1 | **P66.14** — reconcile the two compaction thresholds | T3 · M | The engine triggers at 2,048 on a 4,096 window; the summarizer refuses until 3,277 — so compaction lands with 819 tokens left for the completion. And the P62.4 calibration is inert on the documented `openai` + `:11434/v1` path, so **every user following the documented configuration runs the whole session on a 20-33% undercount**. The last gate on #3. Read **P67.6** before starting, so the two compaction triggers are designed as one decision. |
+| 2 | **P66.11** — redaction + turn trace | T2 · M | Promoted from #9 on the previous ten. The `TurnTrace` half is the instrument #3 reads: stop reason, compaction event, guard verdict and retry record are all computed and discarded one line later, and LLM-02/ARCH-04's closure conditions are stated in exactly those terms. Build the instrument before taking the measurement. The redaction half (`internal/share` redacts nothing at all) rides along. |
+| 3 | **P66.22 + the live-tier sitting** | Verification | One `TestLiveWorkflow` setup answers **five** items: P66.22's five estimated LLM-tier findings, **P38.1**'s conformance verdict, **P62.9**'s n≥10 arms plus the unrun default-prose control, **P65.2**'s prompt half and **P65.3**'s local half. The only open work anywhere that produces new information rather than new code. Sequenced behind #1 and instrumented by #2; use `-count=1`. |
+| 4 | **P67.1** — per-round tool-result cap | T2 · S | The smallest item in either batch. Every cap in `truncate.go` is per *call*, written when a round was one result at a time; `runTools` now dispatches `maxParallelTools` concurrently, so N read tools land N× the intended context bite in one message with nothing bounding the aggregate. Reuses the existing spill path unchanged. |
+| 5 | **P66.21** — doc corrections the review disproved | T2 · S | Three left (P66.8 closed the first). The `view.go` one is actively harmful: it asserts the pre-P35.13 `prompt_eval_count` claim and proposes remediation that must not be done — and it sits in the same accounting path #1 is fixing, so take it in that neighbourhood. |
+| 6 | **P66.12** — staticcheck cleanup | T2 · S | 28 findings, no new defects — a good result worth banking. Closure is deleting `continue-on-error` from CI; until then the step is advisory and the next 28 accumulate the same way. Cheapest permanent narrowing of the defect surface on the list. |
+| 7 | **P67.3** — call-purpose tag on provider requests | T2 · S-M | One retry policy currently serves the user's turn, compaction, the guard, debate roles, swarm sub-agents, the probe and cron alike — so background work amplifies load during exactly the window the backend is struggling. Small on its own, and the enabling seam **P67.6** cannot be gated correctly without. Keep the `Retry-After` clamp at `MaxDelay` exactly as it is. |
+| 8 | **P66.25** — content-bound trust grants (SEC-07) | T2 · M | The only security item left in the open set. A grant says "this path is trusted", never "this content is trusted", so a `git pull` adding a `hooks:` block re-prompts nothing. P66.5 shipped its prerequisite. **Decide the `.env` question explicitly** — P66.1 resolves `.env` before any project-controlled file by design, so either invert that or document the partial fingerprint; an undocumented partial is worse than either. |
+| 9 | **P67.4** — cancel siblings when a parallel call fails | T2 · S | A round of four builds where the first fails still pays wall-clock for the other three and appends results to a conversation about to be redirected. Also shortens the aggregate wait `MaxTurnStall` backstops. On the list ahead of its size because it settles the cancellation policy **P67.7** would otherwise have to settle mid-refactor. |
+| 10 | **P67.5** — recall dedupe, freshness and gotcha bias | T2 · S | A top-scoring memory is re-injected every turn it keeps winning, spending the entry budget on context the model already has; `FormatEntries` renders no age though the mtime is already read to key the cache. Cheap, self-contained, and it improves the same local-model path everything above is measured on. |
 
-**Two notes on the ordering.** **P66.13** (T3, M-L) is deliberately below the cut even though
-`aegis chat` bypassing the whole permission stack is the more serious defect: it needs `newChatCmd` —
-683 lines wrapping a 615-line closure — split before either bug is testable, and that enabling
-refactor does not belong in a batch of small fixes. **P38.1** is the highest-value *verification*
-item and is available whenever a local model is up; #10 is listed instead because P38.1's own run is
-cheaper to schedule as part of that same sitting.
+**Notes on the ordering, and on what did not make it.**
 
-Rows 2-9 have no dependencies on each other and can be reordered freely — only #1 (Tier 1) and #10
-(sequenced behind #2 and #7) are fixed. **As of the rows 1-5 sitting, the live remainder is #6, #7,
-#8, #9 in any order, then #10 behind #7.**
+**#3 is a sitting, not a task.** It is one row because it is one setup; the five items it closes have
+their own entries under [Verification Work](#verification-work) with their own closure conditions,
+and running the harness without recording all five wastes the setup.
 
-**This reading predates the P67 batch** and is left as written rather than re-ranked — it is the
-record of what the tiers said on the morning of 2026-08-16. Three P67 items would enter the ten on a
-re-read, and one interacts with a row already on it:
+**P66.13** (T3, M-L) is again deliberately below the cut even though `aegis chat` bypassing the whole
+permission stack is the most serious *defect* in the open set. It needs `newChatCmd` — 683 lines
+wrapping a 615-line closure — split before either bug is testable, and that enabling refactor does
+not belong in a batch of small fixes. It is the strongest candidate for the next ten, and the first
+thing to promote if a user is actually running `aegis chat` with `permission.rules` set.
 
-- **P67.1** (per-round tool-result cap) would sit around #4. It is the smallest item in either batch,
-  it closes a hole that parallelism opened in an otherwise fully-argued file, and it reuses the spill
-  path unchanged.
-- **P67.3** (call-purpose tag on provider requests) would sit just behind it — small on its own, and
-  the enabling seam for **P67.6**, which cannot be gated correctly without it.
-- **P67.6** (time-based micro-compaction) **touches the same question as row #7, P66.14**. P66.14
-  reconciles *when* compaction fires against context pressure; P67.6 adds a second, orthogonal
-  trigger based on cache temperature. Doing P66.14 first is right — reconcile the thresholds that
-  disagree before adding a third path into the same machinery — but whoever takes P66.14 should read
-  P67.6 first so the two triggers are designed as one decision rather than bolted together.
+**Two more sit just below.** **P67.2** (prompt stability invariant) is the nearest miss: it is the
+same shape as the existing prompt-size ceiling on the axis that costs more per turn, and it composes
+with the shipped P66.7 — it drops off only because nothing has been observed breaking the cache yet.
+**P66.15** (sweep `internal/tui` and `internal/security`, 26% of production Go that nobody read) is
+the highest-expected-value item with no fired trigger; the one hour eventually spent in
+`approval.go` during arbitration produced a Medium security finding, which is the case for it.
 
-The remaining P67 Tier-3 items (**P67.7**, **P67.8**, **P67.9**) are each larger than anything on the
-current ten and belong to a later sitting.
+**This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
+order, which is priority order only *within* a track — it cannot see a cross-tier ranking, so it will
+suggest the first unblocked Tier 2 entry (currently P66.11) rather than #1. Use it for repo state and
+for the parse; use this table for what to take.
+
+**What is fixed and what is free.** Only three orderings are real: **#1 before #3**, **#2 before #3**
+(by argument, not by mechanism — #3 is runnable without #2, just less legible), and **#7 before
+P67.6** on a later ten. Rows #4, #5, #6, #8, #9 and #10 have no dependencies on each other or on
+anything above them and can be reordered freely to suit whatever file is already open.
+
+The remaining P67 Tier-3 items (**P67.6**, **P67.7**, **P67.8**, **P67.9**) are each larger than
+anything on the current ten and belong to a later sitting. **P67.7** in particular is the largest
+engine change in either batch and wants #9 landed first.
 
 ---
 
@@ -1162,8 +1171,10 @@ measurement, and this document has twice recorded a fixed instrument *inverting*
 verdict.
 
 One `TestLiveWorkflow` run against `qwen3:14b-32k` answers all of them, and it is the same harness
-P38.1, P62.9 and P65.2's prompt half already need — so this costs no additional setup if scheduled
-with them.
+P38.1, P62.9, P65.2's prompt half and P65.3's local half already need — so this costs no additional
+setup if scheduled with them. That bundle is row #3 of the current [Up next](#up-next--the-ten-items-to-take-in-order)
+ten, and it is one row precisely because running the harness without recording all five wastes the
+setup.
 
 **Closure conditions**, each a number this review could only estimate:
 
@@ -1179,10 +1190,15 @@ with them.
 - **ARCH-04** — whether a fan-out or debate call trips `MaxTurnStall` before its own timeout.
 
 Run it **after** P66.7 and P66.14 ship, not before: those change three of the five numbers, and
-measuring the pre-fix state answers a question nobody will have afterwards. Use `-count=1` — a
-re-run without it replays Go's cached verdict, which this document has been caught by before.
+measuring the pre-fix state answers a question nobody will have afterwards. **P66.7 shipped
+2026-08-16, so P66.14 is the only gate left.** Use `-count=1` — a re-run without it replays Go's
+cached verdict, which this document has been caught by before.
 
-Priority: Verification — one run, five answers. Sequence after the Tier 2/3 items it measures.
+**Take P66.11 first if it is available.** Its `TurnTrace` half records stop reason, compaction event,
+guard verdict and retry record — which is LLM-02's and ARCH-04's closure conditions restated as a
+struct. The run is possible without it; it is much easier to read with it.
+
+Priority: Verification — one run, five answers. Sequence after P66.14.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 

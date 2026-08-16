@@ -17,6 +17,24 @@ dropping *all* tool calls on a 1-based backend rather than trailing ones, and P6
 measurement was already stale. Two sub-items deliberately did not land and are now open on their own
 terms: SEC-07 (content-bound trust grants) and PERF-02 (`synchronous=NORMAL`).
 
+**The ten as it stood that morning** is retired below. [roadmap.md](roadmap.md) now carries a
+rewritten ten — the first that ranks P66 and P67 against each other — so this table is kept here as
+the record of what the tiers said before those five landed, not as a live list. Rows 6-10 were all
+carried forward into the new ten; only their order changed.
+
+| # | Item | Tier / size | Outcome |
+|---|------|-------------|---------|
+| 1 | **P66.5** — invert the config freeze list | T1 · M | **SHIPPED** `0352112`. All of Tier 1. `commands:` unfrozen meant an untrusted repo got arbitrary binary exec through `grep` — a `CapRead` tool, so plan mode allowed it silently. Inverted to a `configTrustPolicy` table defaulting to frozen; `security.*` landed as `frozenUntilTrusted`, not baseline-only, which would have broken `PatchProjectSecurity`'s six call sites. SEC-07 refiled as P66.25. |
+| 2 | **P66.7** — cap context-file injection (LLM-01 remainder) | T2 · S | **SHIPPED** `9482c87`. The 11,611-token figure was stale — 10,257 bytes / 2,560 tokens at build time — so the 8,000-byte cap was derived from the served window instead. |
+| 3 | **P66.16** — OpenAI adapter drops tool calls | T2 · S | **SHIPPED** `444516e`. Worse than filed: `Finish` iterating `0..len` over a map keyed by wire index emitted **zero** calls on a 1-based backend, not merely trailing ones. |
+| 4 | **P66.10** — bounded security remainder | T2 · S-M | **SHIPPED** `fd4f49b`. SSRF list deduplicated into `internal/netblock`. VULN-03's suggested `::ffff:0:0/96` was rejected — `Contains` reduces it via `To4()` to `0.0.0.0/0`. |
+| 5 | **P66.9** — bound `bg_events` | T2 · S | **SHIPPED** `d4fb209`. `DefaultBGEventRetention = 2000`, deliberately not a config key — the defect *was* a pruner gated on an unset one. PERF-02 refiled as P66.26. |
+| 6 | **P66.21** — doc corrections | T2 · S | Open; #5 on the new ten. |
+| 7 | **P66.14** — reconcile the compaction thresholds | T3 · M | Open; promoted to **#1** on the new ten — it gates the live-tier sitting. |
+| 8 | **P66.12** — staticcheck cleanup | T2 · S | Open; #6 on the new ten. |
+| 9 | **P66.11** — redaction + turn trace | T2 · M | Open; promoted to **#2** — `TurnTrace` is the instrument the live sitting reads. |
+| 10 | **P66.22** — the live-tier run | Verification | Open; **#3**, and now framed as a five-item sitting rather than a single run. |
+
 **Previously, 2026-08-16 — the P66 day plan is finished.** Written 2026-08-15 to be executed
 2026-08-16, it was ordered by dependency and blast radius rather than by severity, and all four
 blocks are done: P66.2 (toolchain, shipped 2026-08-15 — its own entry is below), then the two
