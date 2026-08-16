@@ -10,7 +10,7 @@ adding items.
 
 ## Status
 
-**33 open items: 27 build (Tier 1-4) + 6 verification-only.**
+**31 open items: 25 build (Tier 1-4) + 6 verification-only.**
 
 **2026-08-15: the P66 batch is a full-stack code review**, not a feature line. Six specialist
 reviewers, an adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass
@@ -27,10 +27,11 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 "go run a test" and "go design and build a feature" as the same kind of next action. See
 [Verification Work](#verification-work) below.
 
-- **Tier 1:** 2 — **P66.5**, **P66.6**. (**P66.2** shipped 2026-08-15; **P66.1** and **P66.4**, the
-  two Criticals, and **P66.3**, the read-only tier, shipped 2026-08-16.)
-- **Tier 2:** 8 — **P66.7**, **P66.8**, **P66.9**, **P66.10**, **P66.11**, **P66.12**, **P66.16**,
-  **P66.21**. (**P66.24** was filed and fixed on 2026-08-16.)
+- **Tier 1:** 1 — **P66.5**. (**P66.2** shipped 2026-08-15; **P66.1** and **P66.4**, the
+  two Criticals, **P66.3**, the read-only tier, and **P66.6**, the approval dialog, shipped
+  2026-08-16.)
+- **Tier 2:** 7 — **P66.7** (LLM-01 remainder only), **P66.9**, **P66.10**, **P66.11**, **P66.12**,
+  **P66.16**, **P66.21**. (**P66.8** shipped and **P66.24** was filed and fixed, both 2026-08-16.)
 - **Tier 3:** 3 — **P66.13**, **P66.14**, **P66.15**.
 - **Tier 4:** 14 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, plus the nine pre-existing:
   **P65.4**, **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**,
@@ -38,15 +39,22 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 - **Verification:** 6 — **P66.22**, **P38.1**, **P62.9**, **P65.2** (prompt half), **P65.3**
   (local half), **P62.8**.
 
-**What to do next.** **Tier 1, in the order listed** — see [Execution plan for the P66
-batch](#execution-plan-for-the-p66-batch) below for the sequenced day plan, which is the thing to
-work from. Blocks 1-3 are done (P66.2, the two Criticals P66.1 and P66.4, then P66.3);
-**Block 4 — P66.6, P66.7's LLM-16 half, and P66.8 — is next.** Tier 1 has one item left that the
-day plan does not cover: **P66.5**, which the plan deliberately deferred (see [Explicitly not
-tomorrow](#explicitly-not-tomorrow)) and which is now unblocked, since P66.1 has had a day to settle.
-The P38.1 guidance below is unchanged and
-still correct, but it is no longer the highest-value next action: it was written when every tier was
-empty, and a Critical clone-and-open host-execution path outranks a measurement.
+**What to do next.** **The day plan is finished** — all four blocks are done (P66.2; the two
+Criticals P66.1 and P66.4; P66.3; then P66.6, P66.7's LLM-16 half and P66.8). What the plan never
+covered is now the whole of Tier 1: **P66.5**, inverting the config freeze list, which the plan
+deliberately deferred (see [Explicitly not tomorrow](#explicitly-not-tomorrow)) and which is
+unblocked — P66.1 has had a day to settle and P66.5 touches the same file.
+
+After P66.5, Tier 1 is empty and the batch has no forced order left. Two things are worth naming
+anyway. **P66.7's LLM-01 remainder** is the natural follow-on to what just shipped: the startup
+notice now makes the uncapped context-file injection *visible* on any run that hits it, so the cap
+can be designed against an observed number rather than a measured-once one. It also still gates
+**P66.22**, the live-tier run: the warning half changed nothing about prompt content, so the cap and
+P66.14 are both still ahead of the three numbers P66.22 measures.
+
+The P38.1 guidance below is unchanged and still correct, but it is not the highest-value next
+action: it was written when every tier was empty, and P66.5 is the last of the six findings that
+were exploitable the day the review landed.
 
 **What to do next (pre-P66, retained).** P38.1's live conformance re-run is the single
 highest-value next action *among verification items*: it is
@@ -209,19 +217,73 @@ the git tool is statically `CapRead` and is always reached, so it must refuse in
 
 Closed VULN-01 (+SEC-05), VULN-02, VULN-11, SEC-04, SEC-10.
 
-#### Block 4 — Cheap, high-value, low-risk, ~2 hours
+#### Block 4 — Cheap, high-value, low-risk, ~2 hours — **DONE 2026-08-16**
 
-**P66.6** (`internal/tui/stream.go:250-257`). Strip at ingestion. *Done when:* a `write_file` carrying
-`\x1b[2J\x1b[H` produces no ESC byte anywhere in the approval dialog's rendered output.
+**P66.6.** Shipped as `f72e116`. Sanitized at ingestion (`stream.go`'s `KindApprovalRequest`), with
+`StripControlSeqs` rather than `StripDangerousSeqs` — the dialog applies its own lipgloss styling
+*after* ingestion, verified by reading the render path, so model-supplied SGR can only fight the
+TUI's own colours.
 
-**P66.7**, LLM-16 half only — the startup notice when `tokenest(system) > 0.5 x window`. A handful of
-lines, no policy decision, and it makes the next item's problem visible rather than theoretical. Leave
-the `localContextFilesMaxBytes` cap for a later sitting if time is short; the warning is the part that
-changes what you know.
+*Two things the item's own description would have missed.* The suggested **"allow always" rule
+pattern** carried the escape too, so even the one covered path (`shell`, patched under P28.1) leaked —
+via `suggestRulePattern`, which `renderShellCall`'s stripping never saw. And a single strip over
+`string(ev.ToolInput)` is **not sufficient**: a real provider delivers the payload as the
+six-character JSON escape for ESC, which is plain ASCII on the wire and only becomes a control byte
+when `renderWriteDiff` unmarshals `content`. Raw ESC bytes are the *other* shape, and they make the
+JSON unparseable — which drops the preview into `renderApprovalPreview`'s generic excerpt branch that
+prints the bytes verbatim. `sanitizeToolInputJSON` does both passes.
 
-**P66.8** (`internal/engine/stall.go:178`, `internal/tool/builtin/agent.go:350,505`). Bring fan-out and
-debate under the stall bound, add the enumerating test mirroring
-`TestResultCapsCanBindBeforeTheContextWindow`, and fix the CLAUDE.md sentence in the same commit.
+Checked before shipping: `approvalState.input` is render-only (the approval response carries just the
+id), so sanitizing cannot alter the call that actually runs.
+
+The closure condition needed one honest amendment. A literal `ContainsRune(out, 0x1b) == false` can
+never pass, because the dialog's own chrome *is* ESC bytes — lipgloss emits truecolor SGR for the
+frame and option list even under `NO_COLOR`. `TestApprovalDialogStripsControlSequencesFromToolInput`
+removes SGR only (`\x1b\[[0-9;]*m`, the sole form the TUI emits) and asserts no ESC survives that, so
+anything left is by construction an escape the event smuggled in. Eight carriers across both render
+paths, all eight confirmed failing against the unfixed tree.
+
+**P66.7, LLM-16 half.** Shipped as `5ed832d`. One `KindNotice` at run construction when
+`tokenest(system) + requestOverhead` crosses `oversizedSystemPercent` of the served window, naming
+both numbers and taking its remedy clause verbatim from `ollamainfo.Result.Describe()` so `/status`
+and this read as one voice. Silent when the window is unknown — that is "not known yet", not "tiny".
+
+**The threshold is 50%, not the review's ~60%,** and the disagreement was resolved rather than split:
+`compactionTrigger` is floored at `window/2`, so `window/2` is the lowest estimate at which proactive
+compaction can fire at all. A fixed prompt at that point puts every turn over the trigger from its
+first message — the state actually worth naming — and 60% leaves a band of runs sitting in it
+unwarned. `TestOversizedSystemPromptThresholdMutation` hardcodes 49%/51% so it discriminates: the
+constant at 60 fails the "just above" case and at 40 fails the "just below" case (both run).
+
+Nothing about prompt *content* changed. The `localContextFilesMaxBytes` cap and the realistic-`CLAUDE.md`
+budget fixture (LLM-01) stay open under P66.7.
+
+**P66.8.** Shipped as `35e8f95`, and it was two defects, not one. The timeouts were the reported half;
+the beat could not have arrived anyway, because `withStallBeat` was a bare `context.WithValue` and a
+sub-agent's engine installed its watch over the same key.
+
+`internal/heartbeat` (new) carries the beat chain. It is a **leaf package** because the three parties
+sit on opposite sides of the import graph — `internal/tool` already imports `internal/provider`, so no
+home inside any of the three is reachable from the other two. `agent.go` now bounds each *individual*
+wait at `maxAgentDuration` and beats on every completion (per teammate, per debate role); the
+aggregate batch/debate contexts stay as the outer cap and are admissible **precisely because** they
+decompose into sub-900s waits with observable activity between them. The per-wait bound is what fixes
+sequential and loop mode, where one teammate could previously spend the whole batch budget on a single
+silent wait. `admissionAdapter` beats every 30s while queued — the one wait in the codebase *known* to
+be alive while producing nothing, which is what licenses a blind ticker there and nowhere else.
+
+The docs were corrected rather than deleted: the true relation is "above every **per-call** bound",
+and an aggregate above 900s is admissible only if it decomposes. That sentence now appears in
+`config.go`, `docs/configuration.md` and CLAUDE.md, which also closes P66.21's first bullet.
+
+`TestToolTimeoutsStayUnderTheStallBound` mirrors `TestResultCapsCanBindBeforeTheContextWindow`, and
+its **grep-the-source half** counts the `context.WithTimeout` sites in the package and requires the
+tables to name all 13 — so a new timeout cannot be added without a decision, which is exactly how the
+two agent bounds drifted 40 and 80 minutes above a limit the docs claimed they were under. Mutation
+checks run, not asserted: the pre-P66.8 per-teammate wait fails at 40m0s; `stallBound` at 5 minutes
+fails all six 10-minute entries and neither latex entry.
+`TestChildStallWatchDoesNotHideItsParent` pins the chain in both directions and reproduces the
+shadowing verbatim against a reverted `withStallBeat`.
 
 #### If the day is short
 
@@ -239,17 +301,22 @@ and its own test pass, not the tail end of a long day.
 is fixable, and that refactor should not be started in the same session as five security fixes.
 
 **P66.22** (the live-tier run) must wait for P66.7 and P66.14, which change three of the five numbers
-it measures.
+it measures. *Still true after Block 4:* P66.7's LLM-16 half added a notice and changed no prompt
+content, so the cap half is still ahead of it.
+
+**All four blocks are now done.** This plan is retained as the record of what was built and what was
+found while building it — several of the notes above correct the item they were written from — not as
+outstanding work.
 
 ---
 
 ## Open Work — Tier 1
 
-**Status: 2 open**, both from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1 and P66.4, the
-two Criticals, and P66.3, the read-only tier, shipped 2026-08-16** — see the Block 2 and Block 3
-notes in the execution plan above, and [releases.md](releases.md) for the rationale). Every item here
-is exploitable or daemon-fatal today with no dependency on anything else in this document. Evidence
-for each is in [CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
+**Status: 1 open**, from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1 and P66.4, the two
+Criticals, P66.3, the read-only tier, and P66.6, the approval dialog, shipped 2026-08-16** — see the
+Block 2, 3 and 4 notes in the execution plan above, and [releases.md](releases.md) for the
+rationale). It is exploitable today with no dependency on anything else in this document. Evidence is
+in [CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
 
 ### P66.5 — Invert the config freeze list
 
@@ -279,31 +346,15 @@ of having a well-defined subset, which is what this item builds.
 
 Closes SEC-02, SEC-03, SEC-06, SEC-07. Priority: Tier 1 — M. Sequence after P66.1 (same file).
 
-### P66.6 — The approval dialog renders model-controlled text unsanitized
-
-Found during arbitration, in a file no reviewer had opened — the dialog the entire threat model rests
-on ("escalation to execute requires a human yes on one approval dialog"). `termsafe.StripDangerousSeqs`
-is called at exactly **three sites** in `internal/tui`, and only `shell` is covered. Every other
-`Ask`-gated tool — MCP, plugins, `web_fetch`, `latex_build` — and every diff preview renders
-model-controlled text into the dialog with no stripping. A tool call whose arguments carry
-`\x1b[2J\x1b[H` can redraw or blank the prompt the human is answering: a confused deputy at the last
-line of defence.
-
-Fix at ingestion rather than per renderer — strip `ev.Tool` and `ev.ToolInput` in
-`internal/tui/stream.go:250-257` — so a new preview branch cannot reintroduce the gap. Test: a
-`write_file` whose content carries an escape sequence must produce no ESC byte anywhere in the
-approval dialog's rendered output.
-
-Closes SEC-14. Priority: Tier 1 — S.
-
 ---
 
 ## Open Work — Tier 2
 
-**Status: 8 open**, all from the P66 review batch. Each is self-contained and independently
-shippable; none blocks or is blocked by another.
+**Status: 7 open**, all from the P66 review batch (**P66.8** shipped 2026-08-16; **P66.7** is reduced
+to its LLM-01 half). Each is self-contained and independently shippable; none blocks or is blocked by
+another.
 
-### P66.7 — Context files are injected uncapped, and the budget test cannot see them
+### P66.7 — Context files are injected uncapped, and the budget test cannot see them (LLM-01 remainder)
 
 The local prompt budget is one of the most carefully disciplined things in the codebase — four
 shrinking mechanisms, a 4,550-token ceiling enforced by `TestEffectiveSystem_localProfileBudget`, a
@@ -316,32 +367,19 @@ documents the budget.
 The ceiling test is structurally blind to it because it runs over a bare fixture where every
 project-varying component is empty.
 
-Take **LLM-16 first**: a startup notice when `tokenest(system) > 0.5 x window` is a handful of lines,
-needs no policy decision about *what* to truncate, and would have surfaced this years-equivalent
-earlier. Then apply a `localContextFilesMaxBytes` cap symmetric with `localRepoMapMaxBytes`
-(`internal/server/helpers.go:37`), which sits three lines away and caps a *smaller* block. Extend the
-budget test to run over a fixture carrying a realistic `CLAUDE.md`, or it keeps measuring only the
-components that never grow.
+**LLM-16 shipped 2026-08-16** as `5ed832d` (see the Block 4 note above) — a run-start notice now
+fires when the uncompactable part of the request crosses 50% of the served window, so this item's
+condition is *visible* on any run that hits it rather than inferred from a one-off measurement. That
+was deliberately the cheap half: it needed no policy decision about what to truncate.
 
-Closes LLM-01, LLM-16. Priority: Tier 2 — S. Highest-value item in this tier for the local path.
+**What remains is the cap and the test.** Apply a `localContextFilesMaxBytes` symmetric with
+`localRepoMapMaxBytes` (`internal/server/helpers.go:37`), which sits three lines away and caps a
+*smaller* block. Extend the budget test to run over a fixture carrying a realistic `CLAUDE.md`, or it
+keeps measuring only the components that never grow. Design the cap against a number the new notice
+actually reports, not against the 11,611-token figure alone — that one is scoped to *this*
+repository.
 
-### P66.8 — The stall bound does not sit above the timeouts it backstops
-
-CLAUDE.md states the 900s `MaxTurnStall` "sits deliberately *above* every narrower timeout it
-backstops." It does not. `internal/tool/builtin/agent.go:350` allows 40 minutes for parallel fan-out
-and `:505` allows 80 minutes for debate, neither emitting a beat; admission queueing
-(`internal/provider/admission.go:145`) is likewise invisible. A queued or fanned-out run therefore
-dies as a fatal `ErrTurnStalled` — and `ErrTurnStalled` is one of the two errors every drive reset
-ladder declines, on the reasoning that it means "wedged backend, not a model reasoning badly." A
-long-but-healthy fan-out is diagnosed as the one thing a reset cannot fix.
-
-Fix: bring the fan-out and debate timeouts under `MaxTurnStall` or make the bound scale with them,
-and stop a child watch shadowing the parent's under the same context key
-(`internal/engine/stall.go:178`). Ship the enumerating test — it mirrors
-`TestResultCapsCanBindBeforeTheContextWindow`, which the repo already has — and correct the CLAUDE.md
-sentence in the same change.
-
-Closes ARCH-04. Priority: Tier 2 — S.
+Closes LLM-01 (LLM-16 closed). Priority: Tier 2 — S. Highest-value item in this tier for the local path.
 
 ### P66.9 — Detached-run event writes are per-event, and `bg_events` is never bounded
 
@@ -453,8 +491,11 @@ Four documented claims that the code contradicts. Grouped because doc work shoul
 remediation effort, and because a wrong doc in this repo is load-bearing — CLAUDE.md is the primary
 knowledge store (QUAL-14) and these sentences are why a maintainer would *not* look.
 
-- CLAUDE.md: the 900s stall bound "sits deliberately above every narrower timeout it backstops" —
-  false, see P66.8.
+- ~~CLAUDE.md: the 900s stall bound "sits deliberately above every narrower timeout it backstops" —
+  false, see P66.8.~~ **Done 2026-08-16** with P66.8. The claim lived in `internal/config/config.go`'s
+  `DefaultMaxTurnStallSec` comment and `docs/configuration.md` as well as CLAUDE.md; all three now
+  state the true relation ("above every *per-call* bound") and the condition under which a larger
+  aggregate is admissible.
 - CLAUDE.md: write/execute tools serialize via `sync.RWMutex` — it is a plain `sync.Mutex`, and the
   guarantee is narrower than the doc implies (ARCH-13).
 - `buildChatSystem`'s doc comment claims equivalence with the daemon's `effectiveSystem` — false, see
@@ -464,7 +505,7 @@ knowledge store (QUAL-14) and these sentences are why a maintainer would *not* l
   direction, telling a maintainer the context meter "understates how full the context window is" when
   on native Ollama it is accurate — and proposing remediation that should not be done (LLM-09).
 
-Closes ARCH-13, LLM-09, and the doc half of P66.8/P66.13. Priority: Tier 2 — S.
+Closes ARCH-13, LLM-09, and the doc half of P66.13 (P66.8's doc half is closed). Priority: Tier 2 — S.
 
 ---
 
