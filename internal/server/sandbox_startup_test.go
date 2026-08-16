@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/permission"
 )
 
 // TestNewRefusesAutoApproveExecWithLocalSandbox is the P25.2 regression test
@@ -159,5 +160,44 @@ func TestUnsandboxedAutoExecError(t *testing.T) {
 	)
 	if err != nil {
 		t.Errorf("expected no error when allow_unsandboxed_auto_exec is set, got %v", err)
+	}
+}
+
+// TestUnsandboxedAutoExecErrorCoversAutoMode is the P66.1/SEC-09 regression.
+// `permission.mode: auto` makes permission.Policy.Decide return Allow for
+// CapExecute with no prompt — the same unattended host execution
+// auto_approve_exec buys — but the startup refusal was keyed on
+// auto_approve_exec alone, leaving auto mode as a WARN. That was the step that
+// let SEC-01's payload be config alone with no second flag needed, so it
+// closes with SEC-01 rather than after it.
+func TestUnsandboxedAutoExecErrorCoversAutoMode(t *testing.T) {
+	err := unsandboxedAutoExecError(
+		config.PermissionConfig{Mode: string(permission.ModeAuto)},
+		"local", false, "",
+	)
+	if err == nil {
+		t.Fatal("permission.mode auto on the local backend must refuse startup, not warn")
+	}
+	if !strings.Contains(err.Error(), "auto") {
+		t.Errorf("error %q should name the setting that triggered it", err.Error())
+	}
+
+	// The same opt-out governs both spellings — an operator who has already
+	// acknowledged unsandboxed auto-exec is not asked twice.
+	if err := unsandboxedAutoExecError(
+		config.PermissionConfig{Mode: string(permission.ModeAuto), AllowUnsandboxedAutoExec: true},
+		"local", false, "",
+	); err != nil {
+		t.Errorf("expected no error when allow_unsandboxed_auto_exec is set, got %v", err)
+	}
+
+	// Build and plan mode are untouched: they still prompt, so there is
+	// nothing here to refuse.
+	for _, mode := range []permission.Mode{permission.ModeBuild, permission.ModePlan} {
+		if err := unsandboxedAutoExecError(
+			config.PermissionConfig{Mode: string(mode)}, "local", false, "",
+		); err != nil {
+			t.Errorf("mode %q must not refuse startup: %v", mode, err)
+		}
 	}
 }

@@ -687,11 +687,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			// which had no startup signal at all before this.
 			logger.Warn("sandbox backend is 'local' (unconfined): approved shell/execute tool calls run directly on the host with no filesystem/network isolation; consider sandbox.backend: os (macOS/Linux, no container runtime needed) or container for real isolation")
 		}
-		if cfg.Permission.Mode == string(permission.ModeAuto) && !cfg.Permission.AutoApproveExec {
-			logger.Warn("permission mode 'auto' with the local sandbox runs model-issued shell commands directly on the host with no approval; use the container sandbox backend or 'build' mode for untrusted work")
-		}
-		if cfg.Permission.AutoApproveExec {
-			// auto_approve_exec + an unsandboxed backend means every
+		if cfg.Permission.Mode == string(permission.ModeAuto) || cfg.Permission.AutoApproveExec {
+			// auto mode / auto_approve_exec + an unsandboxed backend means every
 			// model-issued shell command runs on the host with no approval
 			// and no isolation whatsoever — unattended RCE by design. A WARN
 			// line alone (the pre-P25.2 behavior) is too easy to miss,
@@ -710,7 +707,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 				store.Close()
 				return nil, err
 			}
-			logger.Warn("auto_approve_exec is enabled with the local sandbox: every shell command runs on the host without prompting (permission.allow_unsandboxed_auto_exec is set, so this is not blocking startup)")
+			logger.Warn("auto-approved execution is enabled with the local sandbox: every shell command runs on the host without prompting (permission.allow_unsandboxed_auto_exec is set, so this is not blocking startup)",
+				"mode", cfg.Permission.Mode, "auto_approve_exec", cfg.Permission.AutoApproveExec)
 		}
 	}
 	if cfg.Security.EgressThenWrite || len(cfg.Security.NetworkAllowList) > 0 {
@@ -1034,6 +1032,21 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 // it's a plain function of config rather than needing a sandbox.Backend,
 // which keeps it unit-testable without spinning up a real backend.
 func unsandboxedAutoExecError(perm config.PermissionConfig, configuredBackend string, sandboxFallback bool, sandboxFallbackReason string) error {
+	// P66.1/SEC-09: `permission.mode: auto` reaches the same place
+	// auto_approve_exec does — permission.Policy.Decide returns Allow for
+	// CapExecute with no prompt — so keying the refusal on auto_approve_exec
+	// alone left an equivalent unattended-RCE configuration behind a WARN.
+	// That gap was the payload step of SEC-01's chain: it is what let a
+	// project-supplied `mode: auto` be enough on its own.
+	var setting string
+	switch {
+	case perm.AutoApproveExec:
+		setting = "permission.auto_approve_exec is enabled"
+	case perm.Mode == string(permission.ModeAuto):
+		setting = "permission.mode is \"auto\""
+	default:
+		return nil
+	}
 	if perm.AllowUnsandboxedAutoExec {
 		return nil
 	}
@@ -1042,9 +1055,9 @@ func unsandboxedAutoExecError(perm config.PermissionConfig, configuredBackend st
 		why = sandboxFallbackReason
 	}
 	return fmt.Errorf(
-		"refusing to start: permission.auto_approve_exec is enabled but the effective sandbox backend is unsandboxed local execution (%s) — every model-issued shell command would run on the host with no approval and no isolation. "+
+		"refusing to start: %s but the effective sandbox backend is unsandboxed local execution (%s) — every model-issued shell command would run on the host with no approval and no isolation. "+
 			"Configure a real sandbox (sandbox.backend: container or os), or set permission.allow_unsandboxed_auto_exec: true if this is intentional",
-		why,
+		setting, why,
 	)
 }
 

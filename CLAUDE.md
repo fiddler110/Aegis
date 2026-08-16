@@ -107,7 +107,9 @@ none is reachable.
 ### Configuration layers
 
 defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` → `AEGIS_*` env.
-Secrets come only from the environment (or `.aegis/.env`).
+Secrets come only from the environment (or `.aegis/.env`, which is read only in
+a **trusted** workspace and may not set `AEGIS_*` — it is a secrets file, not a
+config layer).
 `workspace.additional_roots` is frozen from project config and still needs a
 trust grant per root. See [docs/configuration.md](docs/configuration.md).
 

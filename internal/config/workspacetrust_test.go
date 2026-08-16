@@ -188,21 +188,39 @@ permission:
 	}
 }
 
-// TestWorkspaceTrustNoProjectConfigIsTrusted confirms a directory with no
-// .aegis/config.yaml at all is trivially "trusted" (nothing to gate).
-func TestWorkspaceTrustNoProjectConfigIsTrusted(t *testing.T) {
+// TestWorkspaceTrustNoProjectConfigFreezesNothing confirms a directory with no
+// .aegis/config.yaml has nothing to freeze — while asserting the P66.1/SEC-01
+// correction that it is *not* thereby "trusted". The absence of a config file
+// is not a trust decision: Trusted answers the trust store and nothing else,
+// because other project-controlled inputs (.aegis/.env above all, but also
+// personas and skills) are gated on the same field. Before P66.1 this reported
+// true, which is what made a repo carrying only .aegis/.env — and no
+// config.yaml at all — the cleanest-looking version of the SEC-01 payload.
+func TestWorkspaceTrustNoProjectConfigFreezesNothing(t *testing.T) {
 	redirectConfigDir(t)
-	chdirTemp(t)
+	dir := chdirTemp(t)
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !cfg.WorkspaceTrust.Trusted {
-		t.Error("directory with no project config should be trusted trivially")
+	if cfg.WorkspaceTrust.Trusted {
+		t.Error("a directory absent from the trust store must not report Trusted just because it has no project config")
 	}
 	if cfg.WorkspaceTrust.Frozen {
 		t.Error("nothing should be frozen with no project config")
+	}
+
+	store := workspacetrust.Open(WorkspaceTrustStorePath())
+	if err := store.Trust(dir); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load after trust: %v", err)
+	}
+	if !cfg.WorkspaceTrust.Trusted {
+		t.Error("a trusted directory should report Trusted with or without a project config")
 	}
 }
 

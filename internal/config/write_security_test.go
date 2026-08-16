@@ -6,7 +6,11 @@ import (
 	"testing"
 )
 
-func chdirTemp(t *testing.T) {
+// chdirTemp switches to a fresh temp directory for the test and returns it as
+// the working directory sees it — resolved via os.Getwd rather than the
+// t.TempDir string, since on macOS and Windows the two differ by a symlink and
+// the workspace-trust store keys on the resolved form.
+func chdirTemp(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	oldWd, err := os.Getwd()
@@ -17,6 +21,11 @@ func chdirTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chdir(oldWd) })
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cwd
 }
 
 // TestPatchSecurityRoundTripsCarriedFields is a regression test for fields

@@ -4,11 +4,14 @@ Aegis uses a layered configuration system. Values are resolved in this order (hi
 
 ```
 environment variables
-  > .aegis/.env
-    > project config (.aegis/config.yaml)
-      > global config (~/.config/aegis/config.yaml)
-        > built-in defaults
+  > project config (.aegis/config.yaml)
+    > global config (~/.config/aegis/config.yaml)
+      > built-in defaults
 ```
+
+`.aegis/.env` is not a config layer. It supplies *secrets* to the process
+environment (trusted workspaces only) and cannot set `AEGIS_*` — see
+[The `.aegis/.env` File](#the-aegisenv-file).
 
 **API keys are always read from environment variables** — never from config files.
 
@@ -21,7 +24,7 @@ environment variables
 | `~/.config/aegis/config.yaml` (macOS/Linux) | Global config — applies to all projects |
 | `%AppData%\aegis\config.yaml` (Windows) | Global config on Windows |
 | `.aegis/config.yaml` | Project-level overrides (safe to commit) |
-| `.aegis/.env` | Local secrets — add to `.gitignore` |
+| `.aegis/.env` | Local secrets — add to `.gitignore`; read only in a trusted workspace |
 
 Generate files with:
 
@@ -1357,6 +1360,20 @@ SOME_INTERNAL_API_KEY=another-secret
 
 - Values are loaded before config parsing, so they can be referenced as `$VAR` in supported YAML fields (currently `mcp[].auth`)
 - Real environment variables always override `.env` values
+- **The file is read only in a trusted workspace.** It sets variables into the
+  Aegis process and every child it spawns (`LD_PRELOAD`, `GIT_SSH_COMMAND`,
+  `NODE_OPTIONS`, `PATH`, …), which is host execution handed to whoever wrote
+  the repository — so it is gated on the same `aegis trust` decision as
+  `.aegis/config.yaml`. In an untrusted directory it is not read at all, and
+  nothing warns about it beyond the usual untrusted-workspace notice. Run
+  `aegis trust` in your own projects. (P66.1/SEC-01)
+- **`AEGIS_*` keys are ignored here, trusted or not**, and logged when dropped.
+  This file is for *secrets*; settings belong in `.aegis/config.yaml`, where
+  they are reviewable and diffable and the trust gate can show you what
+  changed. `AEGIS_*` is the highest-precedence config layer, so honoring it
+  from `.env` would have been a way to configure Aegis that no review step ever
+  displays. Export the variable in your shell if you want a process-level
+  override.
 - The file is never written by Aegis — manage it manually
 - On Windows, after Aegis successfully reads this file it best-effort applies
   the same owner-only ACL hardening described below for `sessions.db` and

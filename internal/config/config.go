@@ -1689,6 +1689,18 @@ func loadDotEnv(path string) error {
 		if k == "" {
 			continue
 		}
+		// P66.1/SEC-01: a .env file is documented for *secrets*. Letting it
+		// set AEGIS_* would let it write the highest-precedence config layer —
+		// an undeclared capability, and the one that made a two-line project
+		// file enough to reach unprompted host execution. Drop and log those
+		// keys unconditionally, trusted directory or not: `aegis trust` is a
+		// decision about .aegis/config.yaml, which is reviewable and diffable,
+		// not a blanket grant to configure Aegis through the secrets file.
+		if strings.HasPrefix(k, EnvPrefix) {
+			slog.Default().Warn("ignoring config override in .env file: use .aegis/config.yaml for settings",
+				"path", path, "key", k)
+			continue
+		}
 		// Real env vars take precedence; only inject missing keys.
 		if _, exists := os.LookupEnv(k); !exists {
 			if err := os.Setenv(k, v); err != nil {
@@ -1731,13 +1743,39 @@ func envKeyCallback(s string) string {
 	return s
 }
 
+// environSnapshot captures the AEGIS_* portion of the process environment as
+// koanf-dotted keys, so a layer can be built over the environment *as it was
+// at a chosen moment* rather than as it is now.
+//
+// P66.1/SEC-01: the baseline layer is the value the workspace-trust freeze
+// restores *from*. Building it over `env.Provider` reads the live environment,
+// which `loadDotEnv` has by then already written to — so a project-supplied
+// value appeared identically in both sides of the diff, `securityRelevantDiff`
+// returned empty, and the gate never fired. Taking the snapshot before any
+// project-controlled input is read makes the diff honest by construction,
+// independently of the .env key filter in loadDotEnv.
+func environSnapshot() map[string]any {
+	out := map[string]any{}
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(k, EnvPrefix) {
+			continue
+		}
+		out[envKeyCallback(k)] = v
+	}
+	return out
+}
+
 // loadLayers builds a koanf instance from defaults -> global config file ->
 // (optionally) project config file -> AEGIS_* env, in precedence order.
 // includeProject is false to build the "baseline" layer used by the P27.1
 // workspace-trust gate: what the effective config would be with the
 // project's .aegis/config.yaml ignored entirely (only user/global settings
 // and this process's own environment).
-func loadLayers(includeProject bool) (*koanf.Koanf, error) {
+//
+// envSnapshot, when non-nil, supplies the top env layer instead of the live
+// process environment (see environSnapshot).
+func loadLayers(includeProject bool, envSnapshot map[string]any) (*koanf.Koanf, error) {
 	k := koanf.New(".")
 	if err := k.Load(confmap.Provider(defaults(), "."), nil); err != nil {
 		return nil, fmt.Errorf("load defaults: %w", err)
@@ -1756,6 +1794,12 @@ func loadLayers(includeProject bool) (*koanf.Koanf, error) {
 		}
 	}
 
+	if envSnapshot != nil {
+		if err := k.Load(confmap.Provider(envSnapshot, "."), nil); err != nil {
+			return nil, fmt.Errorf("load env snapshot: %w", err)
+		}
+		return k, nil
+	}
 	if err := k.Load(env.Provider(EnvPrefix, ".", envKeyCallback), nil); err != nil {
 		return nil, fmt.Errorf("load env: %w", err)
 	}
@@ -1764,14 +1808,38 @@ func loadLayers(includeProject bool) (*koanf.Koanf, error) {
 
 // Load resolves configuration from all layers and returns the result.
 func Load() (*Config, error) {
+	// P66.1/SEC-01: resolve workspace trust FIRST, before any file the project
+	// directory controls is read. The trust store needs nothing that config
+	// provides — only the fixed user-level data dir and the cwd — so there is
+	// no chicken-and-egg here, and deciding trust ahead of the loaders is what
+	// lets .aegis/.env be gated the same way .aegis/config.yaml already is.
+	dir, err := os.Getwd()
+	if err != nil {
+		dir = "."
+	}
+	trusted := workspacetrust.Open(WorkspaceTrustStorePath()).IsTrusted(dir)
+
+	// Snapshot the environment before .aegis/.env can add to it; the baseline
+	// layer is built over this rather than over the live environment.
+	baseEnv := environSnapshot()
+
 	// Load .aegis/.env before other layers so secrets (MCP tokens, API keys)
 	// can be set there without living in version-controlled config files.
 	// Real environment variables always override values in the .env file.
-	if err := loadDotEnv(filepath.Join(".aegis", ".env")); err != nil {
-		return nil, fmt.Errorf("load .aegis/.env: %w", err)
+	//
+	// Only for a trusted directory: the file sets variables into this process
+	// and every child it spawns (LD_PRELOAD, GIT_SSH_COMMAND, NODE_OPTIONS,
+	// *_BASE_URL, PATH ...), which is a host-execution primitive handed to
+	// whoever wrote the repo. There is no safe enumeration of the dangerous
+	// names — the escaping-variable families are open-ended — so the gate is
+	// the trust decision, not a denylist.
+	if trusted {
+		if err := loadDotEnv(filepath.Join(".aegis", ".env")); err != nil {
+			return nil, fmt.Errorf("load .aegis/.env: %w", err)
+		}
 	}
 
-	full, err := loadLayers(true)
+	full, err := loadLayers(true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1783,7 +1851,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	baseline, err := loadLayers(false)
+	baseline, err := loadLayers(false, baseEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -1820,7 +1888,7 @@ func Load() (*Config, error) {
 	cfg.Search.APIKey = os.ExpandEnv(cfg.Search.APIKey)
 	cfg.Notify.Webhook = os.ExpandEnv(cfg.Notify.Webhook)
 
-	applyWorkspaceTrust(&cfg, &baseCfg)
+	applyWorkspaceTrust(&cfg, &baseCfg, dir, trusted)
 
 	return &cfg, nil
 }
@@ -1891,23 +1959,25 @@ func securityRelevantDiff(full, base *Config) []string {
 // are frozen to their user/global values — cfg (already unmarshalled with
 // the project layer applied) is mutated in place to fall back to baseline
 // (project layer excluded) for exactly those keys.
-func applyWorkspaceTrust(cfg, baseline *Config) {
-	dir, err := os.Getwd()
-	if err != nil {
-		dir = "."
-	}
-	cfg.WorkspaceTrust = WorkspaceTrustStatus{Dir: dir}
+// dir and trusted are resolved by Load before any project-controlled file is
+// read (P66.1), and passed in rather than recomputed here so that one trust
+// decision governs both the .env load and this freeze.
+func applyWorkspaceTrust(cfg, baseline *Config, dir string, trusted bool) {
+	// P66.1/SEC-01: Trusted reports what the trust store says, and nothing
+	// else. It used to be forced true whenever .aegis/config.yaml was absent —
+	// "no project config, nothing to gate" — but absence of a file is not a
+	// trust decision, and other project-controlled inputs (.aegis/.env,
+	// personas, skills) are gated on this same answer. The persona loader had
+	// already worked around it by querying the store directly
+	// (server.go:787); this makes the field itself honest so the next such
+	// caller does not need the same workaround.
+	cfg.WorkspaceTrust = WorkspaceTrustStatus{Dir: dir, Trusted: trusted}
 
-	// Nothing to gate if there's no project config file — the diff would be
-	// empty anyway, but skip the trust-store lookup/allocation entirely.
+	// Nothing to freeze if there's no project config file — the diff would be
+	// empty anyway, so skip building it.
 	if _, err := os.Stat(ProjectConfigPath()); err != nil {
-		cfg.WorkspaceTrust.Trusted = true
 		return
 	}
-
-	store := workspacetrust.Open(WorkspaceTrustStorePath())
-	trusted := store.IsTrusted(dir)
-	cfg.WorkspaceTrust.Trusted = trusted
 
 	diffs := securityRelevantDiff(cfg, baseline)
 	if trusted || len(diffs) == 0 {

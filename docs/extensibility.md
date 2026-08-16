@@ -128,6 +128,10 @@ DATABASE_URL=postgres://user:pass@localhost/db
 
 These are available as `$VAR` in supported YAML fields (`mcp[].auth`, `mcp[].env` values).
 
+The file is read only in a workspace you have trusted with `aegis trust`, and
+`AEGIS_*` keys in it are ignored — see
+[The `.aegis/.env` File](configuration.md#the-aegisenv-file).
+
 ### Useful MCP servers
 
 | Server | Package | What it adds |

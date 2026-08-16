@@ -356,20 +356,24 @@ func TestProviderAPIKeyGroqOpenRouterFallback(t *testing.T) {
 // regression where the hardening call errors out and (incorrectly) fails
 // the whole load; on Windows it also confirms the file remains readable
 // and its variables still get applied after the ACL is tightened.
+//
+// The sample key is deliberately un-prefixed: since P66.1, AEGIS_* keys in a
+// .env file are dropped rather than applied (see dotenv_trust_test.go), so an
+// AEGIS_-prefixed one would make this test pass or fail for the wrong reason.
 func TestLoadDotEnvAppliesPermissionHardening(t *testing.T) {
-	clearEnv(t, "AEGIS_TEST_DOTENV_VAR")
+	clearEnv(t, "TEST_DOTENV_VAR")
 
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
-	if err := os.WriteFile(envPath, []byte("AEGIS_TEST_DOTENV_VAR=hardened\n"), 0o600); err != nil {
+	if err := os.WriteFile(envPath, []byte("TEST_DOTENV_VAR=hardened\n"), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
 
 	if err := loadDotEnv(envPath); err != nil {
 		t.Fatalf("loadDotEnv: %v", err)
 	}
-	if got := os.Getenv("AEGIS_TEST_DOTENV_VAR"); got != "hardened" {
-		t.Errorf("AEGIS_TEST_DOTENV_VAR = %q, want %q", got, "hardened")
+	if got := os.Getenv("TEST_DOTENV_VAR"); got != "hardened" {
+		t.Errorf("TEST_DOTENV_VAR = %q, want %q", got, "hardened")
 	}
 }
 
