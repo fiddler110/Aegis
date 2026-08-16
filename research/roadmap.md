@@ -10,7 +10,7 @@ adding items.
 
 ## Status
 
-**36 open items: 30 build (Tier 1-4) + 6 verification-only.**
+**35 open items: 29 build (Tier 1-4) + 6 verification-only.**
 
 **2026-08-15: the P66 batch is a full-stack code review**, not a feature line. Six specialist
 reviewers, an adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass
@@ -27,10 +27,10 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 "go run a test" and "go design and build a feature" as the same kind of next action. See
 [Verification Work](#verification-work) below.
 
-- **Tier 1:** 5 — **P66.1**, **P66.3**, **P66.4**, **P66.5**, **P66.6**. (**P66.2** shipped
-  2026-08-15.)
-- **Tier 2:** 8 — **P66.7**, **P66.8**, **P66.9**, **P66.10**, **P66.11**, **P66.12**, **P66.16**,
-  **P66.21**.
+- **Tier 1:** 3 — **P66.3**, **P66.5**, **P66.6**. (**P66.2** shipped 2026-08-15; **P66.1** and
+  **P66.4**, the two Criticals, shipped 2026-08-16.)
+- **Tier 2:** 9 — **P66.7**, **P66.8**, **P66.9**, **P66.10**, **P66.11**, **P66.12**, **P66.16**,
+  **P66.21**, **P66.24**.
 - **Tier 3:** 3 — **P66.13**, **P66.14**, **P66.15**.
 - **Tier 4:** 14 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, plus the nine pre-existing:
   **P65.4**, **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**,
@@ -40,8 +40,8 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 
 **What to do next.** **Tier 1, in the order listed** — see [Execution plan for the P66
 batch](#execution-plan-for-the-p66-batch) below for the sequenced day plan, which is the thing to
-work from. Block 1 (P66.2, the toolchain bump) is done; **P66.1 and P66.4, the two Criticals, are
-next.** The P38.1 guidance below is unchanged and
+work from. Blocks 1 and 2 are done (P66.2, then the two Criticals P66.1 and P66.4);
+**Block 3 — P66.3, the read-only tier — is next.** The P38.1 guidance below is unchanged and
 still correct, but it is no longer the highest-value next action: it was written when every tier was
 empty, and a Critical clone-and-open host-execution path outranks a measurement.
 
@@ -114,26 +114,42 @@ staticcheck that analyzes the tree (28 findings) instead of 21 compile errors.
 `staticcheck` is `continue-on-error: true` for now, because those 28 findings are **P66.12's** work
 and this item is not licensed to fix them. Deleting that line is part of P66.12.
 
-#### Block 2 — The two Criticals, ~3 hours
+#### Block 2 — The two Criticals, ~3 hours — **DONE 2026-08-16**
 
-Do these before anything else touches `internal/config` or `internal/tool`.
+**P66.1.** Shipped as `92f72be`. All four parts landed: trust is resolved before any
+project-controlled file is read (so `.aegis/.env` is skipped entirely for an untrusted directory),
+`AEGIS_*` keys are dropped and logged from `.env` even when trusted, the baseline layer is built over
+an `environSnapshot()` taken before `loadDotEnv`, and `applyWorkspaceTrust` no longer forges
+`Trusted = true` from a missing `config.yaml`. SEC-09 folded in: `unsandboxedAutoExecError` now covers
+`ModeAuto` as well as `AutoApproveExec` under the same `allow_unsandboxed_auto_exec` opt-out.
 
-**P66.1** (`internal/config/config.go`). The environment snapshot, the `.env` key filter, the
-trust-resolution reorder, and the `:1903` early-return fix. Then the one-line SEC-09 refusal at
-`internal/server/server.go:690`.
+Both named tests exist in `internal/config/dotenv_trust_test.go`, plus the non-`AEGIS_` loader-variable
+half and a blast-radius guard that a genuine operator-set `AEGIS_*` still applies and does not read as
+a project change. Every one was confirmed failing against the unfixed tree before the fix landed.
+`TestWorkspaceTrustNoProjectConfigIsTrusted` asserted the behaviour this item reverses and was
+rewritten as `TestWorkspaceTrustNoProjectConfigFreezesNothing`. No loader-variable denylist, per the
+arbitration.
 
-*Done when:* a test plants `.aegis/.env` containing `AEGIS_PERMISSION_MODE=auto` in an untrusted
-temp workspace and asserts the resulting config is **not** in auto mode — and a second test does the
-same with **no** `.aegis/config.yaml` present, which is the variant the arbitration found and the one
-that makes the payload a single file.
+**P66.4.** Shipped as `46dde08`. `tools` moved into a `toolTable` carrying its own mutex (lock order:
+`Registry.mu` before `toolTable.mu`); a clone's own `Register`/`Upsert` now writes a clone-local
+overlay shadowing the shared table, which is the fix for the deterministic cross-session leak.
+`subAgentToolRegistry` hands each spawn a clone of its parent session's registry — `SpawnConfig`
+already carried `ParentSessionID`, so no new plumbing — and `debate.go:102` had the identical
+one-line defect and was fixed with it. Lazy clone at `sessionToolRegistry` (ARCH-11). ARCH-08's
+residual closed as a side effect exactly as predicted.
 
-**P66.4** (`internal/tool/tool.go:471-487`). The shared table type with its own mutex; then the lazy
-clone at `server.go:324-327` and the session clone for sub-agents at `server.go:1141`.
+`TestConcurrentSkillActivationAcrossSessions` reproduced the reported race verbatim under `-race`
+before the fix (two clones' `Upsert` on one map, from `activateSessionSkill`), and also fails on the
+deterministic leak without `-race`. `TestCloneUpsertStaysLocal` pins the overlay contract in both
+directions including clone-of-clone; `TestSubAgentToolSearchDoesNotWidenTheDaemon` guards ARCH-02 on
+identity as well as effect.
 
-*Done when:* a new test starts two sessions, calls `activateSessionSkill` on both concurrently, and
-passes under `-race`. **Write that test first and watch it fail** — deterministically for the
-cross-session tool leak, probabilistically for the crash. A green run before the fix means the test
-does not reproduce the bug and the fix is unverified.
+*Found in passing, not fixed:* `internal/mcp`'s `TestSamplingHandler` (`mcp_test.go:239`) starts
+`go io.Copy(io.Discard, serverReader)` **and** a `json.Decoder` on that same pipe. The two readers
+compete, and when the drain goroutine wins the initialize request the fake server never replies —
+`c.initialize(context.Background())` has no deadline, so the package hangs until the 10-minute test
+timeout kills the whole suite. Hit once during this block, not reproducible in 6 isolated re-runs.
+Filed as **P66.24**.
 
 #### Block 3 — The read-only tier, ~3 hours
 
@@ -188,67 +204,11 @@ it measures.
 
 ## Open Work — Tier 1
 
-**Status: 5 open**, all from the P66 review batch (P66.2 shipped 2026-08-15). Every item here is exploitable or daemon-fatal
+**Status: 3 open**, all from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1 and P66.4, the
+two Criticals, shipped 2026-08-16** — see the Block 2 notes in the execution plan above, and
+[releases.md](releases.md) for the rationale). Every item here is exploitable or daemon-fatal
 today with no dependency on anything else in this document. Evidence for each is in
 [CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
-
-### P66.1 — `.aegis/.env` bypasses the workspace-trust gate entirely
-
-`config.Load()` calls `loadDotEnv(".aegis/.env")` (`internal/config/config.go:1770`) with **no key
-filter**, before both `loadLayers(true)` and `loadLayers(false)`. `AEGIS_*` is the highest-precedence
-layer in both, so an attacker-planted `.env` poisons the baseline the freeze restores *from*:
-`securityRelevantDiff` returns empty, `Frozen` is never set, and `aegis doctor` and `aegis trust`
-both report clean. A two-line file (`AEGIS_PERMISSION_MODE=auto` +
-`AEGIS_PERMISSION_ALLOW_UNSANDBOXED_AUTO_EXEC=true`) yields unprompted host shell on clone-and-open.
-The same primitive sets `LD_PRELOAD`, `GIT_SSH_COMMAND`, `NODE_OPTIONS` and `*_BASE_URL` into every
-child process.
-
-**Worse than first reported, and the arbitration verified it:** `config.go:1903-1906` marks a
-workspace `Trusted = true` and skips the gate outright when no `.aegis/config.yaml` exists. The
-optimal payload is therefore a *single* file, and a repository carrying it looks cleaner than a
-legitimate one.
-
-The fix: snapshot `os.Environ()` **before** `loadDotEnv` and build the baseline over that snapshot;
-drop and log any `.env` key carrying `EnvPrefix`; resolve trust before any config load
-(`workspacetrust.Open(WorkspaceTrustStorePath()).IsTrusted(cwd)` needs only the fixed data dir and
-`os.Getwd()`) and skip `loadDotEnv` for an untrusted directory; and fix the `:1903` early return so
-the absence of a config file cannot imply trust. Fold in SEC-09 while here — `internal/server/server.go:690`
-should apply `unsandboxedAutoExecError` when `ModeAuto || AutoApproveExec` and the effective backend
-is `*sandbox.LocalBackend`, which today is a `logger.Warn` and is a step in this chain.
-
-**Do not** answer this with a denylist of loader-variable families (`LD_*`, `GIT_*`, `NODE_OPTIONS`).
-The arbitrator struck that recommendation: answering an incomplete-enumeration bug with a new
-enumeration reproduces the defect inside its own fix.
-
-Closes SEC-01 (Critical), SEC-09. Priority: Tier 1 — S. The highest-severity item in the batch.
-
-### P66.4 — `Registry.Clone()` shares the tool map across independent mutexes
-
-`internal/tool/tool.go:471-487` copies the registry struct but shares the `tools` map **by reference**
-while giving the clone a **fresh mutex**. Two concurrent `activateSessionSkill` calls
-(`internal/server/server.go:298,307`, each operating on a clone from `sessionToolRegistry`) therefore
-write one map under two different locks. Go's runtime answer to that is `fatal error: concurrent map
-writes`, which kills the daemon and every session on it. A third writer, `internal/mcp/tool.go:320`'s
-`tools/list_changed` callback, Upserts on the parent registry from its own goroutine.
-
-The non-racing half is deterministic and needs no scheduler luck: an Upsert on a clone writes into
-the global map, so session B's `skill` tool becomes session A's instance carrying A's
-`builtinEnabled` list — the "dormant by default" guarantee broken across sessions.
-
-**Why `go test -race` is green and stays green:** `t.Parallel()` appears **zero times** in the tree,
-the clone writers are HTTP handlers, and within one session a clone shares one mutex — so the bug
-exists only *across* registries and no existing test constructs the interleaving.
-
-Fix: give the shared tool table its own type carrying its own mutex, held by every clone, so `tools`,
-`exposed` and `deferred` can no longer be protected by different locks. Then build the clone lazily
-at `server.go:324-327` (ARCH-11), and hand sub-agents a session clone rather than `s.tools` at
-`server.go:1141` (ARCH-02, which currently lets a sub-agent's `tool_search` permanently mutate global
-exposure — exactly what P9's clone exists to prevent). ARCH-08's residual closes as a side effect.
-
-**The test that must ship with it:** two sessions, concurrent `activateSessionSkill`, under `-race`.
-It fails today — deterministically for the cross-session leak, probabilistically for the crash.
-
-Closes ARCH-01 (Critical), ARCH-02, ARCH-08, ARCH-11. Priority: Tier 1 — S-M.
 
 ### P66.3 — One argv path-confinement function for the read-only tier
 
@@ -498,6 +458,28 @@ knowledge store (QUAL-14) and these sentences are why a maintainer would *not* l
   on native Ollama it is accurate — and proposing remediation that should not be done (LLM-09).
 
 Closes ARCH-13, LLM-09, and the doc half of P66.8/P66.13. Priority: Tier 2 — S.
+
+### P66.24 — `TestSamplingHandler` can hang the whole suite for ten minutes
+
+Found while running the suite for P66.4, not by review. `internal/mcp/mcp_test.go:239` starts
+`go io.Copy(io.Discard, serverReader)` to drain client→server traffic, and then reads the initialize
+request from **that same pipe** with a `json.Decoder`. The two readers race. When the drain goroutine
+wins, the fake server's `dec.Decode` blocks forever and never sends the initialize response — and the
+client side calls `c.initialize(context.Background())`, which has no deadline, so the test hangs
+until Go's 10-minute package timeout panics and takes the entire `go test ./...` run with it.
+
+Observed once; not reproducible in six isolated re-runs of the package (~1s each), which is exactly
+the profile of a test that will fire on a loaded CI box and be dismissed as infrastructure.
+
+Fix: give the fake server one reader (decode the initialize request, then drain), and put a deadline
+on the test's `initialize` context so the failure mode is a named test failure in seconds rather than
+a suite-wide timeout. Check `TestSamplingHandlerNil` and the other pipe-based fakes in that file for
+the same shape while there.
+
+This matters more than a normal flake because the batch's own working rule is "run `go test ./...`
+before every commit": a suite that can hang for ten minutes at random is a rule people stop following.
+
+Priority: Tier 2 — S.
 
 ---
 
