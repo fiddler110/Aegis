@@ -1,355 +1,163 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository. Keep this file short — deep
+rationale belongs in `docs/`, not here.
 
 ## Build & Run
 
 ```bash
-# Build and install the binary (macOS; build-linux.sh / build-windows.ps1 mirror it)
-./build-macos.sh
-
-# Build manually (outputs ./aegis, then installs)
-go build -o ./aegis ./cmd/aegis
-
-# Run directly from source
+go build -o ./aegis ./cmd/aegis    # or ./build-macos.sh / build-linux.sh / build-windows.ps1
 go run ./cmd/aegis
-
-# First-time setup
-aegis --first-init
-export OPENAI_API_KEY="ollama"   # or ANTHROPIC_API_KEY for cloud
+aegis --first-init                 # first-time setup
+export OPENAI_API_KEY="ollama"     # or ANTHROPIC_API_KEY for cloud
 ```
 
-The three build scripts present **four** actions ([1] binary, [2] `aegis-config` shell
-helper, [3] container scanner images, [4] host scanner binaries); `all` still means 1+2,
-and 3/4 are opt-in **alternatives**. [3] is the recommended path and runs `build-image` →
-`update-db` → optional `--netscanner`; [4] is the fallback for a machine with no container
-runtime, plus `dockle`, which no image can carry. If you change what the images contain or
-how they're built, these scripts and `docs/installation.md` are part of the change — the
-container path was documented everywhere *except* the install path for two releases, so
-operators kept installing fifteen host binaries.
+`go build` needs no container runtime or Node.js. The web UI's `dist/` and the
+scanner container context are committed and `go:embed`-ed.
 
-The multiscanner container image (`internal/security/multiscanner/Containerfile`
-+ `fetch.sh`) bundles every filesystem scanner into one locally-built image, so
-container-method scanning needs one image instead of a digest-pinned image per
-tool. It's embedded via `go:embed` and built by `aegis security build-image`,
-which records the resulting image ID into config; that ID is re-verified via
-`image inspect` before every container run (a locally-built image has no
-registry digest to pin — see `internal/security/multiscanner.go`). `go build`
-needs no container runtime; only `build-image` does.
-
-Alongside the image ID, `build-image` records a **source fingerprint** (P55.1)
-— a hash over the embedded Containerfile/`fetch.sh`/`update-db.sh` — so an
-image built from older source is reported as drifted rather than silently
-trusted. It then runs `verify-image` (P55.3), which probes each tool's version
-**and** scans an embedded fixture with planted findings, asserting a *non-zero
-finding count*. That assertion is the point: a `--version` probe cannot catch a
-tool that exits clean and reports zero because it never loaded its data, which
-is how grype (absent from the image) and gitleaks (silently writing its report
-onto a replaced `/dev/stdout` symlink) both shipped broken. The pin is written
-**machine-wide** to the user config by default (P55.5) — the image and the DB
-volume are machine-wide, so the config was the odd one out; `--project` pins
-per-repo.
-
-```bash
-aegis security build-image --profile core    # static scanners only
-aegis security build-image                   # full: + Python/Ruby/Go/network, ~2.1GB
-aegis security verify-image                  # prove each tool still finds things
-aegis security update-db                     # fill the DB cache volume (needs network)
-aegis security build-image --netscanner      # the second image (P55.7), ~570MB
-aegis security verify-image --netscanner     # needs network — that is what it verifies
-```
-
-A **second image** (`aegis-netscanner`, P55.7) exists, built from the same embedded
-context via `--target netscanner`, and the split between them is **mount posture**, not
-tool category. nmap, nuclei, `trivy image` and `grype <ref>` all need network egress and
-none of them needs the workspace, because each scans a *remote* target. So that image runs
-with network **on** and **no workspace mount, ever** — enforced structurally rather than by
-convention: `runNetscannerImage` has no directory parameter to pass, while the
-multiscanner's `runScannerImage` keeps its `dir` and its `--network none`. They resolve
-through separate resolvers (`ResolveNetwork` vs `Resolve`) so "container" never means two
-postures at one call site. Two carve-outs stay host-only: zap (already solved via the
-official zaproxy image) and dockle (needs the engine socket — effectively host root, a
-third privilege axis that deserves its own decision).
-
-**gosec** (P55.8) is no longer excluded from the multiscanner, but it is the one scanner
-run in **two phases**, using the same split as `update-db`: a networked `go mod download`
-with the workspace mounted **read-only**, then the analysis itself under `--network none`.
-A failed warm phase **aborts the tool** rather than falling through, and the measured
-reason is sharper than the "reports zero" story that motivated the original exclusion
-(host 244, no toolchain 0, cold cache **258**, warm cache **283**): with a toolchain but no
-modules, `go list` leaves type errors, gosec skips SSA analysis and every type-aware rule
-silently stops firing (G115/G118/G124/G702 to zero) while the total still looks healthy. A
-confident 258 is harder to notice than a 0, which is exactly why phase 1 must fail loudly.
-Modules and any `GOTOOLCHAIN=auto` download land in `aegis-scanner-gocache`; the full
-profile carries a pinned Go toolchain.
-
-Vulnerability databases are **not** in the image — they live in a container
-volume (`aegis-scanner-cache`), populated by `aegis security update-db`. That's
-both a size decision (baked in they were ~3.7GB of a 5.8GB image) and a
-necessity: scanner containers run `--rm`, so without a persistent cache every
-scan would re-download trivy's ~1.2GB DB. `update-db` is the **only** container
-run given network access, and it mounts no workspace; scans keep
-`--network none` and read the volume. Each database refreshes independently
-(P55.2) — one failing no longer aborts the rest — and `aegis security status`
-reports how old each one is (P55.6), because a stale SCA database under-reports
-rather than failing.
-
-Under `method: auto`, a tool the multiscanner covers now prefers the
-**container** over a host binary (P55.4): host binaries are unpinned and
-unconfined, so two machines can silently scan with different rule sets. A
-refused container falls back to host rather than failing the tool, and says so.
-
-Two traps when changing this:
-- The Containerfile and its scripts are `go:embed`-ed — **rebuild the binary**
-  or `build-image` silently uses the old copy. Every file the Containerfile
-  COPYs must be in the embed pattern (a test enforces this).
-- Anything a scanner fetches on first use must be baked in **and** the tool
-  told to use the local copy. Opengrep's "pinned" rule packs are still an HTTP
-  fetch; osv-scanner calls api.osv.dev per run. See `multiscannerExcludedTools`
-  for what no profile will ever carry, and why.
-
-## Search backends
-
-`glob` and `grep` have two interchangeable backends — ripgrep when
-`internal/toolpath` resolves it, otherwise a pure-Go `WalkDir`. They are
-required to return the **same answer**, and a regression test asserts it, because
-"is ripgrep installed" is not something a query's results should depend on. Three
-things enforce that parity, each of which was once broken:
-
-- `rgArgsCommon` passes `--no-ignore-vcs` plus an explicit `-g !dir/` per
-  `skipDirNames` entry. ripgrep honors `.gitignore` and the walker does not, so a
-  committed-but-conventionally-ignored tree (this repo's `internal/server/webui/dist`)
-  was searched by one backend only. The excludes are generated from the same
-  slice the walker uses, so the sets cannot drift.
-- Every invocation sets `cmd.Dir` to the workspace root and searches `.`. It used
-  to inherit the daemon's cwd while being handed an absolute root, and ripgrep
-  matches `-g` globs against the path as walked — so `internal/**/*_test.go`
-  returned **0 files** under ripgrep against 348 via the walker, whenever the
-  daemon's cwd was not the workspace root (i.e. normally).
-- Output is parsed on `--null`'s NUL separator, not `":"`. Splitting on a colon
-  cannot tell the path from the match, and on Windows `D:\repo\f.go:12:text`
-  splits at the drive letter, so every result came back absolute and unmodified.
-
-Two behaviours are deliberate rather than accidental. A capped result set (500
-grep matches, 1000 glob paths) ends with a notice saying so — silently returning
-a truncated list let a model reason from the first 500 matches as though they
-were all of them. And the capped subset is *unordered*: ripgrep's parallel walk
-visits files in a different order from the walker, and `--sort path` costs ~4x
-(220ms → 900ms measured), more than ripgrep's entire advantage — so the notice
-says the set is partial instead of paying for an ordering nobody asked for.
-
-The grep path streams ripgrep's stdout and cancels the process once the cap is
-reached. ripgrep has no *global* match limit (`--max-count` is per file), so a
-common pattern made it walk a whole tree to produce output thrown away at 500
-matches: 964ms on a 40k-file tree against the walker's 43ms. Streaming brings
-that to 46ms while keeping ripgrep's win where it matters (no-match over the
-same tree: 879ms vs 3326ms). See [docs/host-tools.md](docs/host-tools.md).
-
-The embedded web UI (`aegis ui`, served at `/ui`) is built from
-`internal/server/webui/frontend` (Vite + Preact + TypeScript); its output
-(`internal/server/webui/dist/`) is committed to git and embedded via
-`go:embed`, so `go build`/`go run ./cmd/aegis` need no Node.js. Only rebuild
-it when editing frontend source:
+Rebuild the web UI only when editing frontend source (commit the result):
 
 ```bash
 npm --prefix internal/server/webui/frontend ci
-npm --prefix internal/server/webui/frontend run build   # regenerates dist/ — commit the result
+npm --prefix internal/server/webui/frontend run build
 ```
 
-Assistant text in the transcript is **markdown**, rendered via `src/markdown.ts`
-(`marked` → **DOMPurify** → an `.md` container). The sanitize call is the
-security boundary, not marked's escaping: marked passes raw HTML through by
-design and model output can carry anything a prompt-injection vector put there.
-Two traps if you touch it — `.md p` must override the transcript's
-`white-space:pre-wrap` (it is what kept *unrendered* text legible and would
-double every blank line once the parser decides the breaks), and the render is
-memo-cached because `Transcript` re-renders every item on every state change
-while text streams in token by token.
+Scanner images (see [docs/security_scan.md](docs/security_scan.md), [docs/installation.md](docs/installation.md)):
 
-The plain CLI (`aegis chat`) renders the same markdown through glamour
-(`internal/cli/chat_render.go`), buffering to *block* boundaries chosen so a
-fenced block or a loose list is never severed (see `safeSplit`). It is on only
-when stdout is a terminal: piped output stays byte-identical, which a test
-enforces, because scripts and other agents consume it that way.
+```bash
+aegis security build-image [--profile core] [--netscanner]
+aegis security verify-image [--netscanner]
+aegis security update-db
+```
 
 ## Testing
 
 ```bash
-# Run all tests
 go test ./...
-
-# Run a specific package
-go test ./internal/engine/...
-
-# Run a single test
 go test ./internal/engine/... -run TestBudget
-
-# Run with race detector
 go test -race ./...
 
-# Regenerate an eval golden transcript after an intentional behavior change
 AEGIS_EVAL_UPDATE=1 go test ./internal/eval/... -run TestScenario_ToolRoundTrip
-
-# Regenerate the security-scan regression golden file (same convention, P11.9)
 AEGIS_EVAL_UPDATE=1 go test ./internal/security/... -run TestScanRegressionAcrossRecordedOutputs
-
-# Every live tier below takes `-count=1`, and it is load-bearing rather than
-# habit. Go's test cache keys on the binary, the arguments and the environment —
-# none of which change when the thing under test is a model server's behaviour.
-# So a second invocation of an unchanged live test returns the *first* run's
-# verdict, instantly and marked `(cached)`. That is indistinguishable from a
-# genuine re-run that reproduced, which is exactly what one is usually reaching
-# for a re-run to establish: a P62.2 re-measurement "reproduced" byte-identical
-# wall-clock and prefill totals across both arms before the `(cached)` marker
-# gave it away.
-
-# Live-model eval tier: rubric-judged prompt/persona quality checks against a
-# real local model (not part of `go test ./...` — needs a reachable model
-# server). On-demand only — the CI workflow (.github/workflows/nightly-eval.yml)
-# is workflow_dispatch-only by decision, never scheduled. To run locally:
-ollama pull llama3.2
-go test -tags live_eval -count=1 ./internal/eval/... -run TestLiveModelQuality -v
-
-# Live-probe tier: checks the tool-calling smoke probe (internal/toolcallprobe,
-# shared by `aegis doctor` and the daemon's P34.2 warning) against a real
-# model. It exists because the probe's correctness is a claim about real model
-# behavior that no unit test can hold — the P34.2 false positive (a reasoning
-# model thinking past the token cap, reported as "can't call tools") lived
-# through a fully green suite. Run it when changing SmokeMaxTokens, the smoke
-# prompt, or the verdict rules. Same on-demand, no-scheduled-CI policy as the
-# tiers below. Override the default model/endpoint with
-# AEGIS_LIVE_PROBE_MODEL / AEGIS_LIVE_PROBE_URL.
-ollama pull qwen3:14b
-go test -tags live_probe -count=1 ./internal/toolcallprobe/... -run TestLiveProbeReachesAVerdict -v
-
-# Live-workflow eval tier (P25.7): drives a real daemon over the same HTTP
-# API + SSE seam the TUI/web UI use — not a scripted adapter — against a
-# real local model, running a seeded-bug fix/verify task and asserting
-# workflow-shape invariants (tool-call count, no web-search/`find /`
-# detours, non-zero token usage, no guard meta-text leakage, no unrequested
-# files). This is what actually caught the P25.1-P25.6 regressions; the
-# live_eval tier above never touches the daemon/sandbox/guard integration.
-# Needs a reachable Ollama server and python3/python on PATH. On-demand
-# only, same no-scheduled-CI-job policy as live_eval. To run locally:
-ollama pull qwen3.6:35b-a3b-deep   # or any tool-calling-capable local model
-go test -tags live_workflow -count=1 ./internal/eval/... -run TestLiveWorkflow -v
-
-# Cross-harness control group (P60.4): the same task, environment and model,
-# run through Aegis AND a second CLI agent, so an Aegis failure can be
-# attributed. A task both harnesses fail is the model; a task only Aegis fails
-# is our scaffolding — the distinction TestLiveWorkflow alone cannot make,
-# because it measures Aegis and the model fused together. The task definition
-# (fixture + prompt + outcome check) lives in internal/eval/workflowtask.go,
-# harness-independent and unit-tested by plain `go test ./...`; only the
-# *outcome* is compared, while the SSE-shape assertions stay Aegis-only.
-# Point the other agent at the same model server.
-AEGIS_EVAL_BASELINE_HARNESS='claude -p {prompt}' \
-  go test -tags live_workflow -count=1 ./internal/eval/... -run TestLiveWorkflowBaseline -v
 ```
+
+Live tiers need a real model server, are on-demand only (no scheduled CI), and
+**must** use `-count=1` — Go's test cache can't see that the model server changed,
+so a cached pass looks exactly like a reproduced one.
+
+```bash
+go test -tags live_eval -count=1 ./internal/eval/... -run TestLiveModelQuality -v
+go test -tags live_probe -count=1 ./internal/toolcallprobe/... -run TestLiveProbeReachesAVerdict -v
+AEGIS_EVAL_MODEL=qwen3:14b-32k go test -tags live_workflow -count=1 ./internal/eval/... -run TestLiveWorkflow -v
+AEGIS_EVAL_BASELINE_HARNESS='claude -p {prompt}' go test -tags live_workflow -count=1 ./internal/eval/... -run TestLiveWorkflowBaseline -v
+```
+
+`live_workflow` needs the model's context window pinned in a Modelfile
+(`PARAMETER num_ctx 32768`) — `OLLAMA_CONTEXT_LENGTH` isn't visible to Aegis
+before a model loads, so the tier otherwise plans against 4096 and skips.
 
 ## Architecture
 
-Aegis is a **daemon + client** architecture. The single `aegis` binary can act as either:
-- A **daemon** (`aegis serve`) — owns sessions, the model adapter, tool registry, and runs the agent engine over a local HTTP API with SSE streaming
-- A **TUI client** (`aegis`) — auto-starts an embedded daemon in-process if none is reachable, then connects a Bubbletea terminal UI to it
-
-### Request flow
+Single binary, daemon + client:
 
 ```
-TUI (internal/tui) → HTTP client (internal/client) → daemon HTTP server (internal/server)
+TUI (internal/tui) → client (internal/client) → daemon (internal/server)
   → engine.Run (internal/engine) → provider.Adapter.Stream (internal/provider/*)
-    ↕ tools executed via tool.Registry (internal/tool/builtin/*)
+    ↕ tools via tool.Registry (internal/tool/builtin/*)
 ```
+
+`aegis serve` is the daemon; bare `aegis` starts an embedded one in-process if
+none is reachable.
 
 ### Key packages
 
 | Package | Role |
 |---------|------|
-| `internal/engine` | Core agent loop: calls the model, dispatches tool calls, handles compaction, output guard, loop detection, budget enforcement |
+| `internal/engine` | Agent loop: model turns, tool dispatch, compaction, guard, loop detection, budgets |
 | `internal/server` | HTTP daemon; wires sessions, tools, permissions, personas, swarm, MCP, cron, checkpoints |
-| `internal/provider` | Normalized `Adapter` interface (stream-based) + message types; adapters in `provider/anthropic` and `provider/openai`. Decorators compose around it — retry, failover, `num_ctx`, and admission control (`provider.max_concurrent_requests`, P59.9: local backends default to one in-flight request, since a local server is one GPU and every request is built believing it owns the full `num_ctx`) |
-| `internal/session` | SQLite-backed session store (conversations, turn traces, cost) |
-| `internal/tool` | `Tool` interface + `Registry` (register/expose separation lets permission modes gate capability without unregistering) |
-| `internal/tool/builtin` | All 50+ built-in tools (file ops, git, shell, web, memory, LSP, security scan, security engagement/CVE lookup, diagram, cron, agent spawning, etc.) |
-| `internal/permission` | Three modes: `plan` (read-only), `build` (read+write, execute gated), `auto` (all allowed); text-based allow/deny rules; `PersonaToolGate` advisory (never-enforcing) check on a persona's declared `Tools` |
-| `internal/persona` | 22 built-in named system prompts (general, security, developer, SRE, red-team, security-critic/security-arbiter and generic critic/arbiter debate roles, etc.); custom personas are `.md` files with YAML frontmatter, hot-reloaded via a signature-cached `Refresh` |
-| `internal/skills` | Progressive-disclosure skills: project/user `.md`/bundled-directory skill files, plus skills embedded in the binary (`go:embed`) that stay dormant until named in config/CLI/TUI |
-| `internal/drive` | The phased skill drive: runs a multi-phase skill build (e.g. threat-modeling) as a sequence of fresh, context-reset `engine.Run`s instead of one ever-growing conversation, so local-model context limits don't stall a long unattended build. Lifted out of the CLI (`internal/cli/chat_phased.go`) into its own package so the daemon, TUI, and web UI all reach it, not just `aegis chat --skill` |
-| `internal/swarm` | Multi-agent coordination: spawns sub-agents as goroutines (`in_process`) or subprocesses; file-based mailbox for inter-agent messaging |
-| `internal/debate` | Multi-agent-debate (MAD) primitive (P12): propose/critique/rebut/arbitrate over a claim via a caller-supplied `RunFunc`, decoupled from swarm/engine the same way swarm is decoupled from engine; evidence-citation check (P12.3) and shared-tracker budget bound (P12.6) live here; `Config.Domain` (`security`/`generic`) selects the default persona trio and `WithFiles` grounds the claim in specific files, so the same primitive covers security findings and non-security document/plan review (see [docs/debate.md](docs/debate.md)) |
-| `internal/compaction` | Context compaction — summarizes old turns when the conversation approaches the model's context window |
+| `internal/provider` | `Adapter` seam (`Stream`) + message types; `anthropic`/`openai` adapters, plus retry/failover/`num_ctx`/admission-control decorators |
+| `internal/session` | SQLite session store (conversations, traces, cost) |
+| `internal/tool` | `Tool` interface + `Registry` (register/expose separation) |
+| `internal/tool/builtin` | 50+ built-in tools |
+| `internal/permission` | Modes `plan`/`build`/`auto`, allow/deny rules, advisory persona tool gate |
+| `internal/persona` | 22 built-in system prompts + user/project `.md` personas |
+| `internal/skills` | Progressive-disclosure skills (project/user files + embedded built-ins) |
+| `internal/drive` | Phased skill drive: multi-phase builds as fresh context-reset runs |
+| `internal/swarm` | Sub-agents (goroutine or subprocess) + file mailbox |
+| `internal/debate` | Propose/critique/rebut/arbitrate primitive ([docs/debate.md](docs/debate.md)) |
+| `internal/compaction` | Summarizes old turns near the context window |
 | `internal/checkpoint` | Per-turn restore points for `/rewind` |
-| `internal/memory` | Project-level and user-level persistent memory; relevance scoring for context injection |
-| `internal/knowledge` | Project-level knowledge base (distinct from `internal/memory`'s relevance-scored recall) surfaced to personas/skills as grounding context |
-| `internal/repomap` | Builds a compact structural overview of the repo — files, top-level symbols, import edges — injected as `<repo_map>`; regex-based extraction (no tree-sitter/CGo), capped to a byte budget (`repomap.max_bytes`), mtime-cached. On any repo large enough to truncate, **what gets cut matters more than what gets extracted**: the full render of this repo is ~58× the default 8000-byte budget, so the map is a ranked selection, not a listing. Files are ordered production-before-test, then by package import in-degree, then by symbol count (P62.1) — it used to be plain alphabetical, which delivered 10 of 672 files and hid every package in the table above. Each file contributes at most `repomap.max_symbols_per_file` symbols with a `… +N more` marker when cut, because a silently shortened symbol list reads to the model as "this symbol does not exist". Both knobs are mixed into the cache fingerprint, or changing them would have no effect until a source file happened to change |
-| `internal/lsp` | Minimal LSP client managing language-server subprocesses over stdio JSON-RPC, for diagnostics and reference resolution (`LSP` tool, `aegis doctor`) |
-| `internal/cost` | Tracks token spend per run/session and converts it to an estimated USD cost; backs the budget knobs (`cost.*` config: USD, token, wall-clock, iteration limits) enforced in `internal/engine` |
-| `internal/tui` | Bubbletea TUI: timeline, streaming, dialog, persona/session pickers, slash commands, cost display |
-| `internal/termsafe` | The one home for ANSI/OSC control-sequence stripping — `StripControlSeqs` for model prose (strips everything, including SGR) and `StripDangerousSeqs` for raw tool output (keeps SGR colour, drops cursor/OSC/DCS). Lifted out of `internal/tui` when the CLI renderer needed the same two policies; the TUI keeps thin aliases |
-| `internal/config` | Layered config (defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` → `AEGIS_*` env vars) |
-| `internal/toolpath` | Resolves optional external host binaries (ripgrep, git, gh, mmdc, plantuml) through the `commands:` config before falling back to a PATH lookup. Replaces scattered `exec.LookPath` calls — notably a package-level `var rgPath, _ = exec.LookPath("rg")` resolved at process init, which was unconfigurable, invisible, and impossible to force off. A value may be a path, a bare name, or a disable keyword; a *configured* binary that is missing fails loudly, while an uninstalled one only warns, since every tool has a fallback. Shell aliases are deliberately never consulted — Aegis execs binaries directly, so the config key is the supported way to point at a binary that isn't on PATH under its usual name. `aegis doctor` renders one row per tool. Container runtimes and security scanners stay out: their resolution (`internal/sandbox`, `internal/security`) carries OS-specific and security-relevant rules this must not override |
-| `internal/mcp` | MCP client (stdio + HTTP/SSE) — Aegis calling *out* to external MCP servers; registered tools appear alongside builtins |
-| `internal/mcpserver` | MCP server (`aegis mcp-serve`) — the reverse direction: exposes Aegis sessions as MCP tools (`aegis_prompt`, `aegis_new_session`, `aegis_list_sessions`) to other MCP-speaking harnesses |
-| `internal/acp` | ACP JSON-RPC server for editor integrations (Zed, Neovim) |
-| `internal/sandbox` | Pluggable execution sandbox: local, Docker, Podman, WSL containers, Apple Containers. The container backend keeps **one long-lived container per workspace directory** (`sandbox.persistent`, on by default on docker/podman — P60.2) and runs each command with `exec`, so state survives a tool call; containers are labelled, TTL-bounded and reaped, and carry the same hardening/limits a per-command run would. Auto-detect order is OS-specific (`candidateRuntimes`); on Windows it is **podman → docker → wslc**, with `wslc` deliberately last — its Docker-shaped CLI carries neither the hardening flags nor the persistent-container surface, and cannot build the scanner images, so preferring it surfaced as broken scanners rather than as a runtime choice |
-| `internal/workspacetrust` | Per-directory trust decisions (`aegis trust --dir`) gating which roots a session may touch — including `workspace.additional_roots` entries, which need their own trust grant even when frozen from project config |
-| `internal/cron` | Cron scheduler for background tasks; shelled commands run under a fixed `cronJobTimeout` (10 min, `internal/server/helpers.go`) |
-| `internal/guard` | Output validation — calls a second model pass against a rubric or JSON schema |
-| `internal/toolcallprobe` | Tool-calling smoke probe shared by `aegis doctor` and the daemon's model-switch warning — checks a model can actually emit tool calls before a session relies on it |
-| `internal/modelcaps` | Persisted per-model capability cache (`<data_dir>/model_caps.json`): the `think`-rejection latch, the tool-calling probe verdict + conformance rate, and the manifest's native-tool claim. Records are keyed to the model's **content digest** (a mutable Ollama tag can't inherit the old weights' verdicts) and are a cache only — deleting the file costs a re-probe, never correctness. Precedence: `provider.model_capabilities` declarations > persisted-discovered > live discovery |
-| `internal/eval` | Scenario-based agent-behavior regression harness: scripted multi-turn conversations run against a real engine (deterministic adapter, no live model) with tool-call/text/error assertions and golden transcripts |
-
-### Provider model
-
-`provider.Adapter` is the single seam between the engine and any LLM backend. It exposes one method:
-
-```go
-Stream(ctx context.Context, req Request) (<-chan Event, error)
-```
-
-All message types (TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock) are defined in `internal/provider/provider.go`. The Anthropic adapter maps these natively; the OpenAI adapter translates to/from chat-completions format.
-
-### Tool capability model
-
-Every tool declares a `Capability` (`read`, `write`, `execute`, `network`, `spawn`). The permission gate consults this before execution. In `engine.runTools`, read/network tools run concurrently while write/execute tools are serialized via `sync.RWMutex`.
-
-### What a tool costs the prompt
-
-A registered tool is either **exposed** (its schema rides every request) or **deferred** (one line in `<deferred_tools>`, loaded on demand by `tool_search`). P62.6 measured the local profile and found the deferral mechanism had become most of the cost it was built to avoid: the block printed each unloaded tool's *full* `Description()`, so an unloaded `security_scan` cost 593 tokens and the 26-tool block cost 2,953 — 38% of the base prompt, against 3,614 for the 27 schemas actually exposed. Three things follow, and each is load-bearing when adding or editing a tool:
-
-- **`<deferred_tools>` prints `tool.Summarize(t)`, not `Description()`** — a `ShortDescription()` if the tool declares one, else the first sentence capped at `summaryMaxChars`. This costs nothing in discovery because `Registry.SearchDeferred` matches the query against the **full** name+description, which lives in the registry and not in the prompt: a scanner name trimmed out of a summary is still findable, and the full text comes back with the schema on load. Declare `ShortDescription()` when the derived first sentence reads badly (it cuts mid-clause, or leaks a roadmap id) — not to save bytes.
-- **`ToolSchema.OutputSchema` is never sent to any model.** Both adapters build their wire tool from name/description/input schema only, and `toolshim.Prompt` renders only the input schema; it exists for clients and validators (P3.6). `tokenest.Tools` therefore does not price it — it used to, which charged the compaction guard 339 phantom tokens of overhead on every request.
-- **Optional families are profile-gated.** Under the local profile, `team`/`cron`/`entity` (13 of 26 deferred tools) are not registered at all; `tools.families` names any to put back. See `builtin.localOmittedFamilies` for why those three and not the security/latex/diagram ones.
-
-`TestBasePromptComposition_localProfile` prints the whole breakdown with `-v`, and `TestEffectiveSystem_localProfileBudget` fails `go test ./...` when the total crosses `localBasePromptCeilingTokens` (5,200; measured 4,907). Raising that number is allowed — silently raising it is not.
-
-### Run budgets
-
-`engine.Options` carries four independent stop conditions, all checked at the same two gates (before each model turn and before each tool round): `BudgetUSD` (a no-op for unpriced local usage), `MaxTokensPerRun` (0 = unbounded), `MaxIterations` (defaults to 40 steps), and `MaxWallClockPerRun` (`cost.max_wall_clock_per_run`, seconds — **off by default**, since a wall-clock cap can't tell a stalled run from a slow one making real progress). A wall-clock abort is fatal to the drive rather than resumable, unlike a context-overflow or tool-failure-breaker reset; sub-agents inherit the parent's bound whole rather than a divided share, since elapsed time isn't additive across concurrent teammates the way spend is.
-
-A fifth condition is not a budget at all: `MaxTurnStall` (`cost.max_turn_stall`, seconds — **on by default at 900**, P39.17) ends a turn that has produced no provider stream event and no tool activity for that long. Every other guard in the engine is *progress*-shaped and needs turns to keep completing, so a turn that never returns advances no counter and reads as a slow one. This is the only bound covering the tool-execution phase, and it can carry a default precisely because the wall clock cannot: "this run has been going a while" is a judgement call, "nothing has happened since" is not. The 900s sits deliberately *above* every narrower timeout it backstops (`provider.stream_idle_timeout`, the shell tool's 600s ceiling, cron's 10-minute bound) so those report their own precise failure first. It cancels the run context (the P59.2 mechanism) and re-attributes the resulting error to `ErrTurnStalled`, which — like `ErrWallClockLimit` and unlike `ErrToolFailureLimit`/`ErrLoopDetected` — every drive reset ladder declines: a fresh context clears a model reasoning badly, not a wedged backend.
+| `internal/memory`, `internal/knowledge` | Persistent recall; project knowledge base |
+| `internal/repomap` | Ranked `<repo_map>` overview, byte-budgeted and mtime-cached |
+| `internal/lsp` | Minimal LSP client for diagnostics/references |
+| `internal/cost` | Token/USD tracking backing the `cost.*` budget knobs |
+| `internal/tui` | Bubbletea UI |
+| `internal/termsafe` | ANSI/OSC stripping (`StripControlSeqs`, `StripDangerousSeqs`) |
+| `internal/config` | Layered config |
+| `internal/toolpath` | Resolves optional host binaries (rg, git, gh, mmdc, plantuml) via `commands:` config |
+| `internal/mcp`, `internal/mcpserver` | MCP client (out) and server (`aegis mcp-serve`, in) |
+| `internal/acp` | ACP JSON-RPC for Zed/Neovim |
+| `internal/sandbox` | Local/Docker/Podman/WSL/Apple execution sandboxes; persistent per-workspace container |
+| `internal/workspacetrust` | Per-directory trust grants (`aegis trust --dir`) |
+| `internal/cron` | Background job scheduler |
+| `internal/guard` | Second-pass output validation against a rubric/schema |
+| `internal/toolcallprobe`, `internal/modelcaps` | Tool-calling smoke probe + persisted per-model capability cache |
+| `internal/eval` | Scenario-based behavior regression harness (deterministic adapter) |
 
 ### Configuration layers
 
-Precedence (lowest → highest): built-in defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` (project-level) → `AEGIS_*` env vars. Secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) come only from the environment. `.aegis/.env` is supported for local secrets without environment pollution. `workspace.additional_roots` widens sandbox confinement beyond the primary workspace root for cross-repo workflows; it's frozen from untrusted project config (only `~/.config`-level or env can set it) and each root still needs its own `aegis trust --dir` grant.
+defaults → `~/.config/aegis/config.yaml` → `.aegis/config.yaml` → `AEGIS_*` env.
+Secrets come only from the environment (or `.aegis/.env`).
+`workspace.additional_roots` is frozen from project config and still needs a
+trust grant per root. See [docs/configuration.md](docs/configuration.md).
 
-### Persona system
+## Invariants worth knowing before you edit
 
-Personas are `.md` files whose YAML frontmatter (`description`, `model`, `mode`, `tools`, `rules`, `output_guard`) carries overrides; the name is the filename stem. Built-ins live in `internal/persona/builtin/*.md`, embedded via `go:embed` and parsed at package init (`internal/persona/builtin.go`) into the same `Persona` struct as user/project personas — only `Loaded` (false for built-ins) and `Path` differ. Custom personas are `.md` files under project `.aegis/personas/` or user `~/.aegis/personas/`, parsed by `internal/persona/load.go`. A persona can pin a model, declare an advisory tool list, merge permission rules, and override the output guard rubric. The daemon hot-reloads on-disk persona files (`persona.Refresh`, called from persona-touching handlers) — no restart needed; built-ins only change on rebuild. Switching persona mid-session (`PATCH /sessions/{id}` with `persona`) applies the full profile, not just the system prompt. `aegis persona list|show|new|use` manages persona files and the project's `default_persona` (config key; falls back to `general`) from the CLI.
+- **Prompt budget.** `TestEffectiveSystem_localProfileBudget` fails the suite when
+  the local base prompt crosses `localBasePromptCeilingTokens`. Raising it is
+  allowed; raising it silently is not. `<deferred_tools>` prints `tool.Summarize`,
+  not `Description()`; `OutputSchema` is never sent to a model. Under the local
+  profile `edit_file` is deferred and the handle-based editors are not — a test
+  pins that direction. A tool's `Description()` or error must never name a tool
+  the active profile defers.
+- **Tool result size.** Caps live in `internal/tool/builtin/truncate.go`, which
+  carries the posture table (which end survives, what happens to the remainder).
+  Notice bytes are reserved *out of* the cap; remainders spill to
+  `<workspace>/.aegis/spill/` (reachable by `read_file`, **not** by grep).
+- **Search backends.** ripgrep and the pure-Go walker must return identical
+  results; a regression test asserts it. Watch `--no-ignore-vcs` + generated
+  `-g !dir/` excludes, `cmd.Dir` at the workspace root, and NUL-separated parsing.
+  See [docs/host-tools.md](docs/host-tools.md).
+- **Run budgets.** `BudgetUSD`, `MaxTokensPerRun`, `MaxIterations` (40),
+  `MaxWallClockPerRun` (off by default), plus `MaxTurnStall` (900s, on) which is
+  the only bound covering tool execution. Stall and wall-clock aborts are fatal
+  to a drive; loop/tool-failure aborts are resettable.
+- **Loop detection.** `PollExempter` hides a call entirely (polls only);
+  `SignatureTransparent` hides only its arguments (bookkeeping only, never a
+  model-chosen search query). Tests keep both sets narrow and disjoint.
+- **Compaction.** The summary uses a fixed section skeleton, and the
+  `<read-files>`/`<modified-files>` tags are a wire format between successive
+  summaries — renaming them breaks accumulation with single-compaction tests
+  still green. `FallbackCompact` must carry them too.
+- **Interrupted tool calls.** `repairOrphanedToolUses` reports a started call as
+  *possibly* completed (tracked in `Engine.startedTools`), never as not run.
+- **Embedded assets.** Containerfile, scanner scripts, built-in skills, personas
+  and web UI `dist/` are `go:embed`-ed — rebuild the binary or you ship the old copy.
+- **Scanner containers.** Multiscanner runs `--network none` with the workspace
+  mounted; `aegis-netscanner` runs with network and **never** a workspace mount;
+  `update-db` is the only networked run of the former. gosec is the one two-phase
+  tool, and a failed warm phase aborts it rather than reporting a confident wrong count.
 
-Each built-in persona's `Tools` field is **advisory, never enforced**: `permission.PersonaToolGate` (second-outermost in `Server.buildGate`'s stack, inside the per-task scope gate) logs a call outside the list and routes it through the same `Approver` used for capability decisions — warn-and-allow under a non-interactive approver, a confirmation prompt under the TUI's — but the real security boundary (mode, rules, contextual gates) is untouched and always still applies. `general` deliberately leaves `Tools` empty (no restriction at all).
+## Personas and skills
 
-### Skills system
+Personas are `.md` files with YAML frontmatter (`description`, `model`, `mode`,
+`tools`, `rules`, `output_guard`); built-ins are embedded, user/project ones live
+in `~/.aegis/personas/` or `.aegis/personas/` and hot-reload. A persona's `tools`
+list is **advisory** — it prompts/warns, never enforces. See [docs/personas.md](docs/personas.md).
 
-Skills (`internal/skills`) are progressive-disclosure playbooks: at session start only a `name — description` line is injected per skill into `<skills_available>`; the model loads the full body on demand via the `skill` tool. A skill is a `.md` file (or a directory bundling a `SKILL.md` manifest with companion assets like templates/scripts, referenced via a generated `<skill_assets>` manifest) under project `.aegis/skills/` or user `~/.aegis/skills/`. Skills without a frontmatter `description:` fall back to eager injection for backward compatibility.
-
-Aegis also ships several skills **embedded in the binary** (`internal/skills/builtin/`, extracted via `go:embed` and materialized to `<data_dir>/builtin-skills/` at daemon startup by `skills.MaterializeBuiltins`) — content-review, html-report, security-audit, architecture-diagram, debug-investigation, redteam-engagement, threat-modeling, latex-report, deep-research, structured-build, documentation-as-code, document-codebase. These stay **dormant by default** (zero system-prompt cost) until named in the `skills.builtin_enabled` config list, via `aegis skills enable <name> [--global]`, or the `/skills enable <name> [global]` TUI command; disable the same way. Precedence when a name collides: project skill file > user skill file > embedded built-in.
-
-Three of those built-ins have confusably similar remits, and picking the wrong one produces a
-correctly-built document of the wrong kind: **`document-codebase`** maintains documentation that
-lives in *this* repo and will be edited again (README, ARCHITECTURE, module/API docs) — its bias is
-toward surviving change and never restating the code; **`html-report`**/**`latex-report`** produce a
-standalone deliverable about a moment in time for a reader who is not in the repo;
-**`documentation-as-code`** only applies when an *external* Documentation-as-Code repo
-(`docforge.py` + `_templates/`) supplies an organization's own branded template families, and it
-explicitly defers to `latex-report` when no such repo is present.
+Skills inject only `name — description` until loaded via the `skill` tool.
+Embedded built-ins stay dormant until enabled (`aegis skills enable <name>`).
+Precedence: project > user > embedded. Picking between the document-shaped ones:
+`document-codebase` for docs that live in this repo, `html-report`/`latex-report`
+for a standalone deliverable, `documentation-as-code` only with an external
+DaC template repo. See [docs/skills.md](docs/skills.md).
