@@ -84,3 +84,45 @@ jobs:
       # no external C toolchain required on any of the three OSes.
       - name: Test (race)
         run: go test -race ./...
+
+      # Both analyses below are OS-independent, so one leg is enough (same
+      # reasoning as the gofmt and frontend-drift checks above).
+      #
+      # THE TOOLCHAIN TRAP (P66.12) — read before changing either install.
+      # A tool module can pin an *older* toolchain in its own go.mod, and under
+      # the default GOTOOLCHAIN=auto `go install` honours that directive: the
+      # resulting binary is built with the older Go and then cannot analyze
+      # this go1.26 module. honnef.co/go/tools@v0.7.0 does exactly this — it
+      # carries `toolchain go1.25.13`, so an unpinned install of the *latest*
+      # staticcheck reports 21 packages failing with
+      #   package requires newer Go version go1.26 (application built with go1.25)
+      # which reads like a broken codebase and is not. Upgrading the tool does
+      # not fix it; pinning the toolchain does. GOTOOLCHAIN=<version> overrides
+      # the tool module's directive, and we take that version from `go env
+      # GOVERSION` — the toolchain setup-go resolved from go.mod's own
+      # `toolchain` line — so this never drifts from the pin the project builds
+      # against.
+      - name: Install analysis tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          GOTOOLCHAIN="$(go env GOVERSION)" go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOTOOLCHAIN="$(go env GOVERSION)" go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      # A project that ships a vulnerability scanner and runs `aegis security
+      # update-db` to keep the *user's* CVE data fresh had never scanned its own
+      # toolchain: at go1.26.5 this reported seven stdlib CVEs, six with traced
+      # call paths from this codebase (VULN-12 / P66.2). Blocking, and it is
+      # blocking on purpose — the pinned toolchain is one line in go.mod and the
+      # fix for every finding it has produced so far is to bump it.
+      - name: govulncheck
+        if: matrix.os == 'ubuntu-latest'
+        run: govulncheck ./...
+
+      # Advisory for now: staticcheck reports 28 pre-existing issues at the
+      # commit that added this step (no new correctness or security defect among
+      # them — QUAL-15). P66.12 clears them; when it lands, delete the
+      # continue-on-error line so this gates like every other check here.
+      - name: staticcheck (advisory until P66.12 clears the backlog)
+        if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        run: staticcheck ./...
