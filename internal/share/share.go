@@ -54,16 +54,44 @@ func ParseFormat(s string) (Format, error) {
 	}
 }
 
-// Render produces the transcript bytes for the given format.
-func Render(sess *session.Session, format Format) ([]byte, error) {
+// Render produces the transcript bytes for the given format, and reports how many
+// credential-shaped substrings it redacted on the way (P66.11/SEC-08).
+//
+// The count is returned as well as stated inside the artifact because the two
+// readers are different: the exported document tells whoever receives it what was
+// filtered, and the return value lets the command that produced it tell the user
+// at the moment they decide whether to send it. Zero is a real answer — see
+// redact.go on why a silent pass is the failure this closes.
+func Render(sess *session.Session, format Format) ([]byte, int, error) {
+	sess, redactions := redactSession(sess)
 	switch format {
 	case FormatJSON:
-		return json.MarshalIndent(sess, "", "  ")
+		// An embedded pointer promotes the session's own fields inline, so this
+		// stays the same object it always was plus one additive key. A wrapper
+		// object would have broken every consumer of the JSON export.
+		b, err := json.MarshalIndent(struct {
+			*session.Session
+			Redactions int `json:"redactions"`
+		}{Session: sess, Redactions: redactions}, "", "  ")
+		return b, redactions, err
 	case FormatMarkdown:
-		return []byte(renderMarkdown(sess)), nil
+		return []byte(renderMarkdown(sess, redactions)), redactions, nil
 	default:
-		return []byte(renderHTML(sess)), nil
+		return []byte(renderHTML(sess, redactions)), redactions, nil
 	}
+}
+
+// redactionNote is the sentence both document formats carry. It states the count
+// unconditionally, including zero, and states what the filter is — a pattern set,
+// not a guarantee — so a reader does not read "0 redacted" as "verified clean".
+func redactionNote(n int) string {
+	if n == 0 {
+		return "No credential-shaped content matched the redaction filter (a small pattern set, not a guarantee)."
+	}
+	if n == 1 {
+		return "1 credential-shaped value was redacted from this transcript (pattern-based; not a guarantee that none remain)."
+	}
+	return fmt.Sprintf("%d credential-shaped values were redacted from this transcript (pattern-based; not a guarantee that none remain).", n)
 }
 
 func title(sess *session.Session) string {
@@ -97,11 +125,12 @@ func truncate(s string) (string, bool) {
 
 // --- Markdown ---
 
-func renderMarkdown(sess *session.Session) string {
+func renderMarkdown(sess *session.Session, redactions int) string {
 	names := toolNameIndex(sess)
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", title(sess))
 	fmt.Fprintf(&b, "_Mode: %s · Exported %s_\n\n", sess.Mode, time.Now().Format("2006-01-02 15:04"))
+	fmt.Fprintf(&b, "_%s_\n\n", redactionNote(redactions))
 
 	for _, m := range sess.Messages {
 		switch m.Role {
@@ -188,7 +217,7 @@ func renderMarkdownAssistant(b *strings.Builder, m provider.Message) {
 
 // --- HTML ---
 
-func renderHTML(sess *session.Session) string {
+func renderHTML(sess *session.Session, redactions int) string {
 	names := toolNameIndex(sess)
 	var b strings.Builder
 	b.WriteString("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
@@ -196,8 +225,9 @@ func renderHTML(sess *session.Session) string {
 	fmt.Fprintf(&b, "<title>%s</title>\n", html.EscapeString(title(sess)))
 	b.WriteString("<style>\n" + shareCSS + "</style>\n</head>\n<body>\n")
 	b.WriteString("<main>\n")
-	fmt.Fprintf(&b, "<header><h1>%s</h1><p class=\"meta\">Mode: %s · Exported %s</p></header>\n",
-		html.EscapeString(title(sess)), html.EscapeString(sess.Mode), time.Now().Format("2006-01-02 15:04"))
+	fmt.Fprintf(&b, "<header><h1>%s</h1><p class=\"meta\">Mode: %s · Exported %s</p><p class=\"meta\">%s</p></header>\n",
+		html.EscapeString(title(sess)), html.EscapeString(sess.Mode), time.Now().Format("2006-01-02 15:04"),
+		html.EscapeString(redactionNote(redactions)))
 
 	for _, m := range sess.Messages {
 		switch m.Role {

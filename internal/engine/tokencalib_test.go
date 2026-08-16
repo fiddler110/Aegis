@@ -50,9 +50,11 @@ func (d *denseBackendAdapter) Stream(_ context.Context, req provider.Request) (<
 			ev.Usage = &provider.Usage{
 				InputTokens:  real,
 				OutputTokens: 5,
-				// The native-Ollama marker afterTurn keys on. Without it the turn
-				// is not evidence at all, which TestCalibrationIgnores... below
-				// pins separately.
+				// Native-Ollama telemetry, kept because a real Ollama turn
+				// carries it — but no longer what admits the sample. Since
+				// P66.14/LLM-03 that is Options.SharedContextWindow, a positive
+				// identification of the backend rather than one adapter's
+				// telemetry; TestCalibrationIgnores... below pins it.
 				PromptEvalDurationMS: 40,
 			}
 		}
@@ -60,25 +62,6 @@ func (d *denseBackendAdapter) Stream(_ context.Context, req provider.Request) (<
 	}
 	close(ch)
 	return ch, nil
-}
-
-// bulkTool returns a large fixed payload, to grow a conversation by a known
-// amount in one tool round.
-type bulkTool struct{ chars int }
-
-func (b *bulkTool) Name() string                 { return "bulk" }
-func (b *bulkTool) Description() string          { return "return a large payload" }
-func (b *bulkTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
-func (b *bulkTool) Capability() tool.Capability  { return tool.CapRead }
-func (b *bulkTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
-	return tool.Result{Content: strings.Repeat("payload text ", b.chars/13)}, nil
-}
-
-func toolCallTurn(id string) []provider.Event {
-	return []provider.Event{
-		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: id, Name: "bulk", Input: json.RawMessage(`{}`)}},
-		{Type: provider.EventDone, Stop: provider.StopToolUse},
-	}
 }
 
 func endTurn() []provider.Event {
@@ -135,7 +118,7 @@ func TestCalibrationConvergesOnTheBackendsRatio(t *testing.T) {
 	}
 	adapter := &denseBackendAdapter{ratio: 1.5, turns: [][]provider.Event{endTurn()}}
 	eng, err := New(Options{Adapter: adapter, Tools: reg, Model: "test",
-		MaxTokens: 100, ContextWindowTokens: 1_000_000})
+		MaxTokens: 100, ContextWindowTokens: 1_000_000, SharedContextWindow: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +132,7 @@ func TestCalibrationConvergesOnTheBackendsRatio(t *testing.T) {
 	// assistant reply landed after, so drop it.
 	sent := &Conversation{System: conv.System, Messages: conv.Messages[:len(conv.Messages)-1]}
 	g := eng.newCompactionGuard()
-	g.calib.Observe(sent.estimatedTokens(), g.requestOverhead, adapter.lastReported, 1_000_000)
+	g.calib.Observe(sent.estimatedTokens(), g.overhead(), adapter.lastReported, 1_000_000)
 
 	got := g.estimate(sent)
 	if diff := got - adapter.lastReported; diff < -2 || diff > 2 {
@@ -158,41 +141,64 @@ func TestCalibrationConvergesOnTheBackendsRatio(t *testing.T) {
 	}
 	// And the uncorrected estimate must genuinely have been wrong, or the test
 	// proves nothing about the correction.
-	if raw := sent.estimatedTokens() + g.requestOverhead; raw >= adapter.lastReported {
+	if raw := sent.estimatedTokens() + g.overhead(); raw >= adapter.lastReported {
 		t.Errorf("raw estimate %d was not below the reported %d — the fixture is not exercising an undercount",
 			raw, adapter.lastReported)
 	}
 }
 
-// TestCalibrationIgnoresNonOllamaUsage: a provider that reports no prefill
-// duration is not on the path where InputTokens is documented to be the full
-// prompt every turn, and is also not a backend that truncates in silence.
-// Learning from it would apply a correction derived from a different meaning of
-// the same field.
-func TestCalibrationIgnoresNonOllamaUsage(t *testing.T) {
-	eng, err := New(Options{Adapter: endTurnAdapter(), Tools: tool.NewRegistry(), Model: "test",
-		MaxTokens: 100, ContextWindowTokens: 10_000})
-	if err != nil {
-		t.Fatal(err)
+// TestCalibrationAdmissibility pins what makes a turn a calibration sample.
+//
+// The gate used to be `PromptEvalDurationMS > 0` — a *telemetry* field only the
+// native Ollama adapter populates — which meant the correction was inert on the
+// OpenAI-compat path, i.e. on the `provider.default: openai` + `:11434/v1`
+// configuration docs/providers.md recommends (P66.14/LLM-03). The subject of the
+// gate is the backend, so the test's subject is the identification: an
+// unidentified backend is not evidence however rich its usage block, and an
+// identified one is evidence with no prefill duration at all — which is exactly
+// the compat-path turn that used to be discarded.
+func TestCalibrationAdmissibility(t *testing.T) {
+	guardFor := func(t *testing.T, shared bool) *compactionGuard {
+		t.Helper()
+		eng, err := New(Options{Adapter: endTurnAdapter(), Tools: tool.NewRegistry(), Model: "test",
+			MaxTokens: 100, ContextWindowTokens: 10_000, SharedContextWindow: shared})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return eng.newCompactionGuard()
 	}
-	g := eng.newCompactionGuard()
-	g.lastRaw = 1000
 
 	for _, tc := range []struct {
-		name  string
-		usage provider.Usage
+		name   string
+		shared bool
+		usage  provider.Usage
+		want   int // expected sample count
 	}{
-		{"no prefill duration", provider.Usage{InputTokens: 5000}},
-		{"estimated usage", provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10, IsEstimated: true}},
-		{"cache accounting present", provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10, CacheReadTokens: 400}},
-		{"cache creation present", provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10, CacheCreationTokens: 400}},
+		// The LLM-03 regression, stated as the case that must now be learned
+		// from: an identified backend reporting a plain prompt count and no
+		// native telemetry. This is the compat path.
+		{"identified backend without prefill telemetry", true,
+			provider.Usage{InputTokens: 5000}, 1},
+		{"identified backend with native telemetry", true,
+			provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10}, 1},
+		// And the cases that must still be refused. The first is the one the old
+		// gate got right by accident: a cloud provider is not identified.
+		{"unidentified backend", false,
+			provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10}, 0},
+		{"estimated usage", true,
+			provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10, IsEstimated: true}, 0},
+		{"cache accounting present", true,
+			provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10, CacheReadTokens: 400}, 0},
+		{"cache creation present", true,
+			provider.Usage{InputTokens: 5000, PromptEvalDurationMS: 10, CacheCreationTokens: 400}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			g := guardFor(t, tc.shared)
 			g.lastRaw = 1000
 			u := tc.usage
 			g.afterTurn(&u, 10_000)
-			if _, samples := g.calib.Scale(); samples != 0 {
-				t.Errorf("learned from %s usage (samples=%d), want it ignored", tc.name, samples)
+			if _, samples := g.calib.Scale(); samples != tc.want {
+				t.Errorf("samples = %d, want %d", samples, tc.want)
 			}
 		})
 	}
@@ -208,7 +214,7 @@ func TestCalibrationSkipsToolSuppressedTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 	eng, err := New(Options{Adapter: endTurnAdapter(), Tools: reg, Model: "test",
-		MaxTokens: 100, ContextWindowTokens: 10_000})
+		MaxTokens: 100, ContextWindowTokens: 10_000, SharedContextWindow: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,47 +241,97 @@ func TestCalibrationSkipsToolSuppressedTurns(t *testing.T) {
 	}
 }
 
-// recordingCalibratedCompactor is a Compactor that also records the corrections
-// pushed to it.
-type recordingCalibratedCompactor struct {
+// recordingBudgetedCompactor is a Compactor that also records the token budgets
+// decorated onto the calls it receives.
+//
+// It records at WithTokenBudget rather than inside Compact deliberately: the
+// engine's half of the seam is the decoration, and a double that only inspected
+// the context inside Compact could not tell a budget that was never pushed from
+// one pushed onto a context the compaction never used.
+type recordingBudgetedCompactor struct {
 	noticeCompactor
 	overheads []int
 	scales    []float64
+	triggers  []int
 }
 
-func (r *recordingCalibratedCompactor) SetEstimateCorrection(overhead int, scale float64) {
+func (r *recordingBudgetedCompactor) WithTokenBudget(ctx context.Context, overhead int, scale float64, trigger int) context.Context {
 	r.overheads = append(r.overheads, overhead)
 	r.scales = append(r.scales, scale)
+	r.triggers = append(r.triggers, trigger)
+	return compaction.WithTokenBudget(ctx, overhead, scale, trigger)
 }
 
 // TestCalibrationReachesTheCompactor: the engine and the Compactor run two gates
 // over the same messages, so a correction the engine keeps to itself re-creates
 // P41.1 — the engine asks for compaction the summarizer then declines, and the
-// engine reads that as "nothing left to compact".
+// engine reads that as "nothing left to compact". Since P66.14 the trigger rides
+// the same seam, for the same reason.
 func TestCalibrationReachesTheCompactor(t *testing.T) {
 	reg := tool.NewRegistry()
 	if err := reg.Register(&echoTool{}); err != nil {
 		t.Fatal(err)
 	}
-	comp := &recordingCalibratedCompactor{}
-	adapter := &denseBackendAdapter{ratio: 1.5, turns: [][]provider.Event{endTurn()}}
+	comp := &recordingBudgetedCompactor{}
+	// Two model turns, because the budget travels *into* a call: the first turn's
+	// beforeTurn runs before anything has been learned, and the correction reaches
+	// the compactor on the next call rather than being stored on it. That is the
+	// same turn's-worth of delay the setter had — afterTurn pushed after the turn
+	// it learned from, so a compaction could only ever read it on a later one —
+	// but it has to be driven to be observed.
+	adapter := &denseBackendAdapter{ratio: 1.5, turns: [][]provider.Event{
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "t1", Name: "echo", Input: json.RawMessage(`{"msg":"x"}`)}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse},
+		},
+		endTurn(),
+	}}
+	// The window and the fixture size are chosen together so the run actually
+	// reaches a compaction on its second turn, which is what makes the push
+	// observable. The budget rides the *call*, so a run that never compacts
+	// pushes nothing — that is the seam working, not a gap to assert around.
+	//
+	// Sized as: the corrected estimate (1.5 x raw) must land above the trigger and
+	// below the window, or the calibrator discards the sample as a truncated
+	// prompt. At a 6,000-token window the trigger is 5,100, so ~3,600 raw tokens
+	// reports ~5,400 and sits in that band.
+	const window = 6_000
 	eng, err := New(Options{Adapter: adapter, Tools: reg, Compactor: comp, Model: "test",
-		MaxTokens: 100, ContextWindowTokens: 1_000_000})
+		MaxTokens: 100, ContextWindowTokens: window, SharedContextWindow: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Run(context.Background(), bigConversation(), func(Event) {}); err != nil {
+	conv := &Conversation{System: "sys"}
+	for i := 0; i < 20; i++ {
+		role := provider.RoleUser
+		if i%2 == 1 {
+			role = provider.RoleAssistant
+		}
+		conv.Append(provider.Message{Role: role, Content: []provider.Block{
+			provider.TextBlock{Text: strings.Repeat("filler words here ", 40)},
+		}})
+	}
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if len(comp.scales) < 2 {
+		t.Fatalf("only %d budget push(es) — the fixture never reached a second compaction, "+
+			"so nothing here observes a *learned* correction", len(comp.scales))
 	}
 
 	if len(comp.scales) == 0 {
-		t.Fatal("no correction was pushed to the compactor")
+		t.Fatal("no token budget was pushed to the compactor")
 	}
 	if got := comp.scales[len(comp.scales)-1]; got < 1.4 || got > 1.6 {
 		t.Errorf("pushed scale = %v, want ~1.5 (the backend's ratio)", got)
 	}
 	if got := comp.overheads[len(comp.overheads)-1]; got != tokenest.Tools(reg.Schemas()) {
 		t.Errorf("pushed overhead = %d, want %d (the tool schemas)", got, tokenest.Tools(reg.Schemas()))
+	}
+	// The trigger is the P66.14 half: whatever number the engine gated on is the
+	// number the compactor is told to gate on, so the two cannot drift.
+	if got, want := comp.triggers[len(comp.triggers)-1], compactionTrigger(window, 100); got != want {
+		t.Errorf("pushed trigger = %d, want %d (the engine's own)", got, want)
 	}
 }
 
@@ -299,13 +355,23 @@ func (summaryAdapter) Stream(context.Context, provider.Request) (<-chan provider
 // estimate has been corrected, and a conversation sitting in the band where the
 // two gates disagree unless the correction is shared.
 //
-// The band is real, not contrived. The engine fires at 85% of the window and the
-// summarizer at 80%, so uncorrected the engine is the stricter of the two and
-// they never disagree — which is exactly why applying a correction to only one
-// of them is an easy mistake to make and a quiet one to ship.
+// The band is real, not contrived. Before P66.14 the engine fired at its
+// completion-sized trigger and the summarizer at a flat 80% of the window, so
+// uncorrected the engine was the stricter of the two and they never disagreed —
+// which is exactly why applying a correction to only one of them is an easy
+// mistake to make and a quiet one to ship.
+//
+// Since P66.14 there are two ways to re-open the gap and this fixture catches
+// both: withholding the correction (P62.4), or letting the summarizer compute a
+// threshold of its own instead of taking the engine's (LLM-02). The fixture is
+// sized against the *old* flat rule on purpose, because that is the behaviour a
+// regression would revert to.
 func TestCalibratedEngineAndRealSummarizerAgree(t *testing.T) {
-	const window = 20_000
-	const scale = 1.5
+	const (
+		window    = 20_000
+		maxTokens = 100
+		scale     = 1.5
+	)
 
 	reg := tool.NewRegistry()
 	if err := reg.Register(&echoTool{}); err != nil {
@@ -313,17 +379,19 @@ func TestCalibratedEngineAndRealSummarizerAgree(t *testing.T) {
 	}
 	summarizer := compaction.New(compaction.Options{
 		Adapter: summaryAdapter{}, Model: "test", ContextWindow: window, KeepRecent: 2,
+		MaxTokens: maxTokens,
 	})
 	eng, err := New(Options{Adapter: endTurnAdapter(), Tools: reg, Compactor: summarizer,
-		Model: "test", MaxTokens: 100, ContextWindowTokens: window})
+		Model: "test", MaxTokens: maxTokens, ContextWindowTokens: window,
+		SharedContextWindow: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	g := eng.newCompactionGuard()
 
 	// A conversation whose raw estimate lands between the summarizer's
-	// uncorrected gate (80% of 20,000 = 16,000) and the engine's corrected one
-	// (85% / 1.5 = ~11,333 raw). ~13,000 raw sits inside it.
+	// pre-P66.14 gate (a flat 80% of 20,000 = 16,000) and the engine's corrected
+	// one (the shared trigger / 1.5 = ~11,333 raw). ~13,000 raw sits inside it.
 	// Roles alternate because the summarizer only ever cuts before an assistant
 	// message (it will not split a tool_use/tool_result pair). A transcript of
 	// nothing but user turns has no legal boundary, so it reports "nothing to
@@ -339,25 +407,25 @@ func TestCalibratedEngineAndRealSummarizerAgree(t *testing.T) {
 		}})
 	}
 	raw := conv.estimatedTokens()
-	engineGate := float64(window*85/100) / scale // raw tokens the engine fires at, once corrected
-	summarizerGate := window * 80 / 100          // raw tokens the summarizer fires at, uncorrected
+	engineGate := float64(compactionTrigger(window, maxTokens)) / scale // raw tokens the engine fires at, once corrected
+	summarizerGate := window * 80 / 100                                // raw tokens the pre-P66.14 flat rule fired at
 	if float64(raw) <= engineGate || raw >= summarizerGate {
 		t.Fatalf("fixture conversation is %d raw tokens, outside the disagreement band "+
 			"(%.0f..%d) — adjust the filler", raw, engineGate, summarizerGate)
 	}
 
-	// Teach the guard the backend's ratio, exactly as afterTurn would.
-	g.calib.Observe(raw, g.requestOverhead, int(float64(raw+g.requestOverhead)*scale), window)
-	if cc, ok := g.compactor.(CalibratedCompactor); ok {
-		s, _ := g.calib.Scale()
-		cc.SetEstimateCorrection(g.requestOverhead, s)
-	} else {
-		t.Fatal("compaction.Summarizer no longer implements CalibratedCompactor")
+	if _, ok := g.compactor.(BudgetedCompactor); !ok {
+		t.Fatal("compaction.Summarizer no longer implements BudgetedCompactor — the engine's " +
+			"correction and trigger cannot reach it, so the two gates are free to disagree")
 	}
+	// Teach the guard the backend's ratio, exactly as afterTurn would. Nothing is
+	// pushed to the compactor here: beforeTurn decorates the call below, which is
+	// the whole point of the seam being per-call.
+	g.calib.Observe(raw, g.overhead(), int(float64(raw+g.overhead())*scale), window)
 
-	if est := g.estimate(conv); est <= compactionTrigger(window, 100) {
+	if est := g.estimate(conv); est <= compactionTrigger(window, maxTokens) {
 		t.Fatalf("corrected estimate %d did not cross the engine's trigger %d — fixture is not in the band",
-			est, compactionTrigger(window, 100))
+			est, compactionTrigger(window, maxTokens))
 	}
 
 	before := len(conv.Messages)

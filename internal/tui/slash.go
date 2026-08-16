@@ -1854,7 +1854,7 @@ func (d *SlashDispatcher) cmdShare(args []string) SlashResult {
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Failed to load session: %v", err), IsError: true}
 	}
-	data, err := share.Render(sess, format)
+	data, redactions, err := share.Render(sess, format)
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("Export failed: %v", err), IsError: true}
 	}
@@ -1868,7 +1868,10 @@ func (d *SlashDispatcher) cmdShare(args []string) SlashResult {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return SlashResult{Output: fmt.Sprintf("Write failed: %v", err), IsError: true}
 	}
-	return SlashResult{Output: fmt.Sprintf("Exported session → %s", path)}
+	// P66.11: the count is stated at the moment the user decides whether to send
+	// the file, not only inside it. A zero is reported too — "nothing matched" and
+	// "the filter never ran" have to look different from here.
+	return SlashResult{Output: fmt.Sprintf("Exported session → %s (%d credential-shaped value(s) redacted)", path, redactions)}
 }
 
 func (d *SlashDispatcher) cmdConfig(_ []string) SlashResult {

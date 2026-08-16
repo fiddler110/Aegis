@@ -9,6 +9,7 @@ import (
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/trace"
 )
 
 // guardCorrectivePrefix opens every guard corrective message; besides framing
@@ -88,6 +89,13 @@ type guardGate struct {
 	// cannot leak onto an unrelated later turn, and emptied by takeFormat rather
 	// than by the caller remembering to.
 	pending json.RawMessage
+
+	// verdict is the last review's outcome, for the turn trace (P66.11/GAP-01).
+	// The same three values already ride a KindGuard event, which nothing
+	// persists — so "did the guard pass, fail, or fail open" was unanswerable
+	// after the fact, on the one turn of a run where it matters most. Cleared by
+	// review so it always describes the turn being traced.
+	verdict *trace.Guard
 }
 
 // newGuardGate builds the gate for a run, or returns nil when no output guard
@@ -144,6 +152,7 @@ func (g *guardGate) review(ctx context.Context, conv *Conversation, emit EmitFun
 		return false
 	}
 
+	g.verdict = nil
 	ok, reason, status := g.validate(ctx, guard.Input{Text: final, Files: g.collectFiles(ctx)})
 	g.logger.Debug("output guard result", "passed", ok, "guard_status", string(status))
 
@@ -153,12 +162,14 @@ func (g *guardGate) review(ctx context.Context, conv *Conversation, emit EmitFun
 		// validated and passed" and "the guard silently never ran" were
 		// byte-for-byte indistinguishable (FIND-16).
 		emit(Event{Kind: KindGuard, GuardPassed: true, GuardStatus: string(status)})
+		g.verdict = &trace.Guard{Status: string(status), Passed: true}
 		return false
 	}
 
 	if retriesSpent < g.maxRetries {
 		g.pending = g.schema
 		emit(Event{Kind: KindGuard, GuardPassed: false, GuardReason: reason, GuardStatus: string(status), GuardRetrying: true})
+		g.verdict = &trace.Guard{Status: string(status), Retrying: true, Reason: boundReason(reason)}
 		conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 			provider.TextBlock{Text: correctiveText(reason, toolRoundsCompleted > 0)},
 		}})
@@ -191,6 +202,31 @@ func (g *guardGate) surfaceFailure(ctx context.Context, emit EmitFunc, reason st
 	}
 	emit(Event{Kind: KindGuard, GuardPassed: false, GuardStatus: string(status),
 		GuardReason: finalReason, GuardFilesRestored: restored})
+	g.verdict = &trace.Guard{Status: string(status), Reason: boundReason(finalReason)}
+}
+
+// lastVerdict reports the guard's verdict on the turn just reviewed, for the
+// trace. Nil on a run with no guard, and on a turn the guard did not judge — an
+// empty final answer is not something a rubric can rule on, and recording a
+// verdict for it would invent one.
+func (g *guardGate) lastVerdict() *trace.Guard {
+	if g == nil {
+		return nil
+	}
+	return g.verdict
+}
+
+// maxTraceReason bounds the verdict text kept in a trace. A rubric's explanation
+// can quote the answer it judged, and a trace is a per-turn record rather than a
+// second copy of the transcript; 500 bytes carries the reason without carrying the
+// answer.
+const maxTraceReason = 500
+
+func boundReason(s string) string {
+	if len(s) <= maxTraceReason {
+		return s
+	}
+	return s[:maxTraceReason] + "…"
 }
 
 // correctiveText builds the retry prompt. wroteFiles adds the clause telling the

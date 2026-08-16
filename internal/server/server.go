@@ -863,6 +863,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			Adapter:       provider.WithNumCtx(adapter, win),
 			Model:         compModel,
 			ContextWindow: win,
+			// P66.14: the trigger reserves room for the completion, so the
+			// summarizer needs the same max_tokens the engine's gate uses —
+			// otherwise the two gate on different numbers, which is LLM-02.
+			MaxTokens: s.cfg.Provider.MaxTokens,
 			// A local model server caches the KV of each request's longest
 			// common prefix, so rewriting the middle of the conversation costs
 			// a full prefill recompute instead of nothing — make the
@@ -1199,6 +1203,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			// proactive protection (and the same nothing-left-to-compact notice)
 			// a top-level run has.
 			ContextWindowTokens: spawnWin,
+			RoundResultCap:      roundCapFor(cfg.Workdir), // P67.1
 			Hooks:               engineHooks,
 			Cost:                tracker,
 			BudgetUSD:           budgetUSD,

@@ -28,7 +28,7 @@ func runProjectInit(overwrite bool) error {
 func writeConfigTemplate(path, template, label string, overwrite bool) error {
 	if existing, err := os.ReadFile(path); err == nil {
 		if !overwrite {
-			return fmt.Errorf("%s config already exists at %s\nEdit it directly, re-run with --overwrite to regenerate from the latest template (a backup is kept), or use `aegis config update` to merge in new fields without discarding customizations.", label, path)
+			return fmt.Errorf("%s config already exists at %s\nEdit it directly, re-run with --overwrite to regenerate from the latest template (a backup is kept), or use `aegis config update` to merge in new fields without discarding customizations", label, path)
 		}
 		backup := fmt.Sprintf("%s.bak-%d", path, time.Now().Unix())
 		if err := os.WriteFile(backup, existing, 0o600); err != nil {

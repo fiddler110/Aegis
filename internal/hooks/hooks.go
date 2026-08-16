@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/redact"
 )
 
 // Multi runs several hooks in order. PreToolUse stops at the first veto.
@@ -106,16 +108,65 @@ func (a *Audit) PolicyDecision(toolName, cap, rule, decision, reason string) {
 	})
 }
 
-// maxAuditInput is the maximum number of bytes recorded for a tool input in
-// the audit log. Inputs larger than this are replaced with a size annotation
-// to avoid logging bulk data or credentials embedded in long commands.
-const maxAuditInput = 1024
+// Audit-trail input fidelity (P66.11 / SEC-11's redact-don't-truncate half).
+//
+// Every tool input over 1 KiB used to be replaced outright with
+// "[N bytes, truncated]" — so a write_file with a 2 KiB payload, or any long
+// shell pipeline, was **not recorded at all**. The audit trail lost exactly the
+// calls whose content matters most for reconstructing an incident, and the stated
+// reason for dropping them ("avoid logging bulk data or credentials embedded in
+// long commands") is an argument for redacting the credential, not for discarding
+// the record.
+//
+// So: redact, then record. Credential-shaped substrings are replaced with a class
+// placeholder (internal/redact — the same set the MCP outbound boundary flags on),
+// and the input is kept. The size bound stays, because "bulk data" is a real
+// concern that redaction does not answer — a 4 MiB base64 blob is not evidence
+// worth an audit line — but it is now an order of magnitude larger and, when it
+// bites, it keeps the *head* of the input with a notice rather than substituting
+// the length for the content. A truncated command still names the command.
+const (
+	// maxAuditInput bounds what one record holds. 16 KiB covers essentially every
+	// real tool input (the largest inline tool *result* cap in the tree is 32 KiB,
+	// and inputs are far smaller) while still refusing an embedded blob.
+	maxAuditInput = 16 << 10
+	// auditTruncNote marks a record whose input hit the bound, so a reader can
+	// tell a complete record from a shortened one. Without it a shortened input
+	// reads as the whole call, which is the same defect as dropping it, quieter.
+	auditTruncNote = "…[audit: input truncated to %d of %d bytes]"
+)
 
+// auditInput redacts and, only if still oversized, shortens a tool input for the
+// audit record. It returns a valid JSON value in every case: json.RawMessage is
+// marshalled verbatim, so an invalid one here would corrupt the whole record
+// rather than one field.
 func auditInput(input json.RawMessage) json.RawMessage {
-	if len(input) <= maxAuditInput {
+	if len(input) == 0 {
 		return input
 	}
-	b, _ := json.Marshal(fmt.Sprintf("[%d bytes, truncated]", len(input)))
+	red, n := redact.Text(string(input))
+	if n > 0 && !json.Valid([]byte(red)) {
+		// A redaction can consume a delimiter (the assignment pattern can match
+		// across `"key":"value"`), which would leave this field invalid JSON. Fall
+		// back to recording it as a JSON string: the record stays parseable and
+		// still shows what the call was, minus the credential.
+		if b, err := json.Marshal(red); err == nil {
+			red = string(b)
+		} else {
+			red = `"[redacted]"`
+		}
+	}
+	if len(red) <= maxAuditInput {
+		return json.RawMessage(red)
+	}
+	// Over the bound even after redaction: keep the head, as a JSON string so the
+	// notice can ride along and the value stays well-formed regardless of where
+	// the cut landed.
+	head := red[:maxAuditInput]
+	b, err := json.Marshal(head + fmt.Sprintf(auditTruncNote, maxAuditInput, len(red)))
+	if err != nil {
+		b, _ = json.Marshal(fmt.Sprintf("[%d bytes, unrecordable]", len(red)))
+	}
 	return json.RawMessage(b)
 }
 

@@ -88,14 +88,6 @@ func runWith(t *testing.T, opts Options) []Event {
 	return got
 }
 
-func kinds(evs []Event) []EventKind {
-	var k []EventKind
-	for _, e := range evs {
-		k = append(k, e.Kind)
-	}
-	return k
-}
-
 // TestGuardPassEmitsGuardEvent is the FIND-16 regression: a genuine pass must
 // now be observable, not silent. Before this fix, nothing was emitted on the
 // success path at all, so a real PASS and a fail-open skip (guard never

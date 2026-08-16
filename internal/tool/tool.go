@@ -223,6 +223,39 @@ type Registry struct {
 	exposed     map[string]bool
 	deferred    map[string]bool       // tool is known but loaded on demand via tool_search
 	schemaCache []provider.ToolSchema // nil means dirty; rebuilt on next Schemas call
+
+	// schemaVersion counts invalidations of schemaCache, i.e. every change to
+	// the exposed set or to a registration behind it. It exists so a caller that
+	// derives something *expensive* from Schemas() can cache that derivation and
+	// still notice a mid-run change: internal/engine prices the exposed schemas
+	// into its compaction trigger, and before P66.14 it measured them once per
+	// run and therefore never saw tool_search load a deferred tool (PERF-03).
+	//
+	// Cheaper than comparing schema slices and honest about what it promises: it
+	// changes when this registry's own view is invalidated, so it is a
+	// same-registry signal, not a global one. A clone whose *parent* registers a
+	// tool later does not see a version bump — but it does not see the tool in
+	// Schemas() either, since a clone caches its own slice, so the version stays
+	// exactly as accurate as the cache it tracks.
+	schemaVersion uint64
+}
+
+// invalidateSchemasLocked drops the cached schema slice and records that the
+// exposed set moved. r.mu must be held for writing. Every write path that used
+// to assign schemaCache = nil goes through here, so the version can never fall
+// behind the cache.
+func (r *Registry) invalidateSchemasLocked() {
+	r.schemaCache = nil
+	r.schemaVersion++
+}
+
+// SchemaVersion reports a counter that changes whenever Schemas() would return
+// something different for this registry. See the field comment for what it does
+// and does not cover.
+func (r *Registry) SchemaVersion() uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.schemaVersion
 }
 
 // NewRegistry creates an empty registry.
@@ -383,7 +416,7 @@ func (r *Registry) Register(t Tool) error {
 	}
 	r.putLocked(name, t)
 	r.exposed[name] = true
-	r.schemaCache = nil
+	r.invalidateSchemasLocked()
 	return nil
 }
 
@@ -399,7 +432,7 @@ func (r *Registry) Upsert(t Tool) {
 	name := t.Name()
 	r.putLocked(name, t)
 	r.exposed[name] = true
-	r.schemaCache = nil
+	r.invalidateSchemasLocked()
 }
 
 // SetExposed toggles whether a registered tool is offered to the model.
@@ -408,7 +441,7 @@ func (r *Registry) SetExposed(name string, exposed bool) {
 	defer r.mu.Unlock()
 	if _, ok := r.lookupLocked(name); ok {
 		r.exposed[name] = exposed
-		r.schemaCache = nil
+		r.invalidateSchemasLocked()
 	}
 }
 
@@ -459,7 +492,7 @@ func (r *Registry) ScopeExposed(allow []string) (restore func()) {
 			r.exposed[name] = true
 		}
 	}
-	r.schemaCache = nil
+	r.invalidateSchemasLocked()
 	r.mu.Unlock()
 
 	var once sync.Once
@@ -472,7 +505,7 @@ func (r *Registry) ScopeExposed(allow []string) (restore func()) {
 					r.exposed[name] = was
 				}
 			}
-			r.schemaCache = nil
+			r.invalidateSchemasLocked()
 		})
 	}
 }
@@ -491,7 +524,7 @@ func (r *Registry) RegisterDeferred(t Tool) error {
 	r.putLocked(name, t)
 	r.exposed[name] = false
 	r.deferred[name] = true
-	r.schemaCache = nil
+	r.invalidateSchemasLocked()
 	return nil
 }
 
@@ -524,7 +557,7 @@ func (r *Registry) Load(names ...string) []Tool {
 		}
 		if !r.exposed[n] {
 			r.exposed[n] = true
-			r.schemaCache = nil
+			r.invalidateSchemasLocked()
 		}
 		loaded = append(loaded, t)
 	}

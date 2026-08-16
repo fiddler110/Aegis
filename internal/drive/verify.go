@@ -245,7 +245,7 @@ func regenerateInventorySidecar(skillDir, runDir, py string) (ran bool, err erro
 		return true, fmt.Errorf("FAIL regenerating inventory.yaml from the documents: %v\n%s\n"+
 			"inventory.yaml is DERIVED from the markdown and is rebuilt automatically before every check — "+
 			"do not hand-write or edit it. This failure means the documents themselves could not be parsed: "+
-			"fix the malformed table or section named above with `edit_file`.",
+			"fix the malformed table or section named above with `edit_file`",
 			e, strings.TrimSpace(string(out)))
 	}
 	return true, nil

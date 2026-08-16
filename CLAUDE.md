@@ -128,10 +128,19 @@ trust grant per root. See [docs/configuration.md](docs/configuration.md).
   clone-local overlay instead, so session-scoped tools stay session-scoped.
   Both directions are pinned by tests. Never give a sub-agent, debate role or
   session `s.tools` itself; hand it a clone.
+- **Parallel tool rounds.** In `engine.runTools`, write/execute calls take one
+  plain exclusive `sync.Mutex` (`execLock`) so they never run concurrently with
+  each other. Reads/network calls take no lock — they are *not* held off by a
+  concurrent write (P8.6). The only read-vs-write ordering is the same-`path`
+  dependency graph, keyed on the literal `"path"` input field, so a `shell` call
+  and a `read_file` are never ordered.
 - **Tool result size.** Caps live in `internal/tool/builtin/truncate.go`, which
   carries the posture table (which end survives, what happens to the remainder).
   Notice bytes are reserved *out of* the cap; remainders spill to
   `<workspace>/.aegis/spill/` (reachable by `read_file`, **not** by grep).
+  Those caps are per *call*; `roundcap.go` bounds a whole parallel round on top
+  (`engine.Options.RoundResultCap`, wired to `builtin.CapRound` — a new engine
+  construction site must wire it or the round is unbounded again).
 - **Search backends.** ripgrep and the pure-Go walker must return identical
   results; a regression test asserts it. Watch `--no-ignore-vcs` + generated
   `-g !dir/` excludes, `cmd.Dir` at the workspace root, and NUL-separated parsing.
@@ -154,6 +163,14 @@ trust grant per root. See [docs/configuration.md](docs/configuration.md).
   `<read-files>`/`<modified-files>` tags are a wire format between successive
   summaries — renaming them breaks accumulation with single-compaction tests
   still green. `FallbackCompact` must carry them too.
+- **One compaction trigger.** `tokenest.CompactionTrigger(window, maxTokens)` is
+  the only threshold; the engine *and* `compaction.Summarizer` read it, and the
+  engine also passes the number it used down per call
+  (`engine.BudgetedCompactor` → `compaction.WithTokenBudget`). Never give either
+  side a rule of its own — P66.14 closed a 1,229-token disagreement that made the
+  summarizer refuse compactions the engine had asked for. Anything per-*run*
+  reaching the Summarizer travels on the context, never a setter: it is built once
+  per server and shared by every session.
 - **Interrupted tool calls.** `repairOrphanedToolUses` reports a started call as
   *possibly* completed (tracked in `Engine.startedTools`), never as not run.
 - **Embedded assets.** Containerfile, scanner scripts, built-in skills, personas

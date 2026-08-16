@@ -118,11 +118,16 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: govulncheck ./...
 
-      # Advisory for now: staticcheck reports 28 pre-existing issues at the
-      # commit that added this step (no new correctness or security defect among
-      # them — QUAL-15). P66.12 clears them; when it lands, delete the
-      # continue-on-error line so this gates like every other check here.
-      - name: staticcheck (advisory until P66.12 clears the backlog)
+      # Blocking as of P66.12, which cleared the 28 pre-existing issues this
+      # step reported when it was added (QUAL-15 — none of them a correctness or
+      # security defect). It ran `continue-on-error: true` only while that
+      # backlog was open; clearing it without making the step gate would have let
+      # the next 28 accumulate exactly the same way.
+      #
+      # Note the untagged run only sees the default build. A symbol used solely
+      # by a build-tagged test (live_eval, live_workflow, live_probe) reads as
+      # U1000 dead here — annotate it with `//lint:ignore U1000`, do not delete
+      # it.
+      - name: staticcheck
         if: matrix.os == 'ubuntu-latest'
-        continue-on-error: true
         run: staticcheck ./...

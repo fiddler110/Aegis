@@ -89,6 +89,10 @@ func (s *Server) windowLocked(model string) (ctxWinEntry, bool) {
 func (s *Server) setWindowLocked(model string, e ctxWinEntry) {
 	if s.summarizer != nil && s.compModel != "" && model == s.compModel {
 		s.summarizer.SetContextWindow(e.win)
+		// Retuned alongside the window (P66.14): the trigger is a function of
+		// both, and a window that moved without its completion budget would
+		// re-open the disagreement LLM-02 closed.
+		s.summarizer.SetMaxTokens(s.cfg.Provider.MaxTokens)
 	}
 	if s.isGlobalModel(model) {
 		s.ctxWin, s.ctxWinSrc, s.ctxWinFinal = e.win, e.src, e.final

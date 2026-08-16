@@ -609,12 +609,6 @@ func doctorDetectModelMax(ctx context.Context, p config.ProviderConfig) int {
 	return res.ModelMax
 }
 
-// doctorToolCallSmokePrompt is the obviously-actionable prompt sent to the
-// model for the P28.2 tool-calling smoke test. The probe itself lives in
-// internal/toolcallprobe so this check and the daemon's run-start gate (P34.2)
-// share one definition; this alias is kept for the tests that assert on it.
-const doctorToolCallSmokePrompt = toolcallprobe.SmokePrompt
-
 // doctorToolCallCheck (P28.2, extended to a conformance rate by P53.4) does a
 // live round-trip smoke test against the configured model: send an
 // obviously-actionable prompt with one trivial tool schema and check whether

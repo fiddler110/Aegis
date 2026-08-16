@@ -36,30 +36,47 @@ func runThrashTurns(t *testing.T, g *compactionGuard, f *thrashFixture, turns in
 	return applied
 }
 
-// TestLowYieldPruneStopsRecompactingEveryTurn is the P62.7 regression, on the
-// same fixture the measurement runs — the only difference is that this guard
-// talks to the compactor through the yield-reporting seam instead of through a
-// wrapper that hides it.
+// TestSharedTriggerLeavesNoPruneThrashBand is what P62.7's regression test
+// became under P66.14, and the change is a finding rather than a fixture edit.
 //
-// Pre-fix that fixture applied a compaction on eleven consecutive turns (5..15),
-// each freeing 45 estimated tokens against a gap that grew from 1,462 to 4,332,
-// before the twelfth finally reached the summarizer and did real work. The
-// assertion is the exact sequence rather than the count: the whole item is about
-// *when* compaction runs.
-func TestLowYieldPruneStopsRecompactingEveryTurn(t *testing.T) {
+// This is the same fixture the P62.7 measurement ran on: a real
+// compaction.Summarizer, a conversation warmed to just under the engine's
+// trigger, growing by one tool-heavy agent turn per step. Before P66.14 it
+// applied a compaction on eleven consecutive turns (5..15), each freeing 45
+// estimated tokens against a gap that grew from 1,462 to 4,332, before the
+// twelfth finally reached the summarizer and did real work — and the
+// minimum-yield rule cut that to turns 5, 10 and 16.
+//
+// **Those prunes existed because the two gates disagreed.** The engine asked for
+// compaction at 15,156 estimated tokens while the summarizer's flat 20%-free rule
+// refused until 19,660, so every turn in that 4,500-token band called Compact,
+// got the deterministic pre-pass and nothing else, and paid a rewrite for ~45
+// tokens. With one shared trigger (LLM-02) the band does not exist: the first
+// turn over the trigger summarizes 91 messages into 9, and the next nineteen
+// turns of the same growth need nothing at all.
+//
+// So the assertion is now the absence of the band. The minimum-yield rule itself
+// is still live and still tested — by the stub-driven cases below, which
+// construct a low-yield prune directly instead of relying on a threshold gap to
+// produce one.
+func TestSharedTriggerLeavesNoPruneThrashBand(t *testing.T) {
 	g := newGuardFor(t, realSummarizer())
 	f := newThrashFixture(compactionTrigger(thrashWindow, thrashMaxTokens))
 
+	before := len(f.conv.Messages)
 	applied := runThrashTurns(t, g, f, 20)
 
-	want := []int{5, 10, 16}
+	want := []int{1}
 	if fmt.Sprint(applied) != fmt.Sprint(want) {
-		t.Errorf("compactions applied on turns %v, want %v", applied, want)
+		t.Errorf("compactions applied on turns %v, want %v — a run of consecutive "+
+			"compactions here means the summarizer is gating on a threshold of its own again", applied, want)
 	}
-	// The last of them has to be the real thing: suppression may delay a
-	// summarization but must never prevent one.
-	if len(f.conv.Messages) > 20 {
-		t.Errorf("conversation still %d messages — the summarizer never ran, so suppression is not degrading gracefully", len(f.conv.Messages))
+	// And the one compaction has to be a real summarization, not another prune:
+	// the fixture grows by two messages a turn, so 20 turns from a 91-message
+	// start would exceed 100 if nothing collapsed the prefix.
+	if len(f.conv.Messages) >= before {
+		t.Errorf("conversation is %d messages after 20 turns from %d — the summarizer never ran",
+			len(f.conv.Messages), before)
 	}
 }
 

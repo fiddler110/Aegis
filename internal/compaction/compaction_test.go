@@ -3,6 +3,7 @@ package compaction
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -95,6 +96,12 @@ func TestForceCompactIgnoresBudget(t *testing.T) {
 	out, changed, err := s.Compact(context.Background(), "", msgs)
 	if err != nil || changed {
 		t.Fatalf("Compact: expected no-op under budget, changed=%v err=%v", changed, err)
+	}
+	// A no-op has to hand the conversation back untouched: changed=false with a
+	// rewritten list would be the worse of the two bugs, since the caller has no
+	// reason to look.
+	if !reflect.DeepEqual(out, msgs) {
+		t.Fatalf("Compact: under-budget no-op must return the input unchanged, got %d messages (want %d): %+v", len(out), len(msgs), out)
 	}
 
 	// ForceCompact summarizes it anyway.

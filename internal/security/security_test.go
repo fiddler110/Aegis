@@ -295,13 +295,6 @@ type fakeImageScanner struct {
 	name     string
 	method   Method
 	findings []Finding
-
-	// Recorded so a test can prove ScanImage forwards the resolution rather
-	// than re-deriving it — the netscanner image reference reaches the scanner
-	// only through this hand-off (P55.7).
-	sawMethod  Method
-	sawRuntime sandbox.ContainerRuntime
-	sawImage   string
 }
 
 func (f fakeImageScanner) Name() string { return f.name }
@@ -311,8 +304,12 @@ func (f fakeImageScanner) Resolve(context.Context, Options) (Method, sandbox.Con
 	}
 	return f.method, "", "", ""
 }
-func (f fakeImageScanner) ScanImage(_ context.Context, _ string, method Method, rt sandbox.ContainerRuntime, scannerImage string) ([]Finding, error) {
-	f.sawMethod, f.sawRuntime, f.sawImage = method, rt, scannerImage
+
+// ScanImage ignores the resolution it is handed. fakeImageScanner has a value
+// receiver, so it cannot record anything a caller could read back; the P55.7
+// assertion that ScanImage forwards the resolution rather than re-deriving it
+// runs through recordingImageScanner's pointer instead.
+func (f fakeImageScanner) ScanImage(context.Context, string, Method, sandbox.ContainerRuntime, string) ([]Finding, error) {
 	return f.findings, nil
 }
 
@@ -357,23 +354,32 @@ func TestScanImageRunsContainerResolvedScanners(t *testing.T) {
 // Resolve and is used by nothing else, so dropping it here would send every
 // container image scan to an empty image reference.
 func TestScanImageForwardsTheResolvedImage(t *testing.T) {
-	var got fakeImageScanner
+	var got imageScanCall
 	sc := recordingImageScanner{inner: fakeImageScanner{name: "trivy", method: MethodContainer,
 		findings: []Finding{{Tool: "trivy", Severity: SevHigh}}}, out: &got}
 	rep := ScanImage(context.Background(), "alpine:3.20", []ImageScanner{sc}, Options{})
 	if len(rep.Findings) != 1 {
 		t.Fatalf("scanner did not run: %+v", rep.Skipped)
 	}
-	if got.sawMethod != MethodContainer || got.sawImage != "localhost/aegis-netscanner:v1" {
-		t.Errorf("forwarded method/image = %q/%q, want container/localhost/aegis-netscanner:v1", got.sawMethod, got.sawImage)
+	if got.method != MethodContainer || got.image != "localhost/aegis-netscanner:v1" {
+		t.Errorf("forwarded method/image = %q/%q, want container/localhost/aegis-netscanner:v1", got.method, got.image)
 	}
+}
+
+// imageScanCall is the resolution ScanImage handed to a scanner. It lives apart
+// from fakeImageScanner because only a pointer can carry a record back out, and
+// fakeImageScanner is used by value.
+type imageScanCall struct {
+	method  Method
+	runtime sandbox.ContainerRuntime
+	image   string
 }
 
 // recordingImageScanner resolves to a fixed netscanner reference and captures
 // what ScanImage was handed.
 type recordingImageScanner struct {
 	inner fakeImageScanner
-	out   *fakeImageScanner
+	out   *imageScanCall
 }
 
 func (r recordingImageScanner) Name() string { return r.inner.name }
@@ -381,7 +387,7 @@ func (r recordingImageScanner) Resolve(context.Context, Options) (Method, sandbo
 	return MethodContainer, sandbox.RuntimePodman, "localhost/aegis-netscanner:v1", ""
 }
 func (r recordingImageScanner) ScanImage(_ context.Context, _ string, method Method, rt sandbox.ContainerRuntime, scannerImage string) ([]Finding, error) {
-	r.out.sawMethod, r.out.sawRuntime, r.out.sawImage = method, rt, scannerImage
+	r.out.method, r.out.runtime, r.out.image = method, rt, scannerImage
 	return r.inner.findings, nil
 }
 

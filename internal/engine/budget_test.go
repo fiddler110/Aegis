@@ -205,7 +205,7 @@ func TestMaxGeneratedTokensPerRunCountsOutputOnly(t *testing.T) {
 		}
 	}
 
-	run := func(t *testing.T, genCap int) (error, int) {
+	run := func(t *testing.T, genCap int) (int, error) {
 		t.Helper()
 		adapter := &scriptedAdapter{turns: [][]provider.Event{turn(500), turn(500), {
 			{Type: provider.EventTextDelta, Text: "done"},
@@ -233,13 +233,13 @@ func TestMaxGeneratedTokensPerRunCountsOutputOnly(t *testing.T) {
 				gotErr = ev.Err
 			}
 		})
-		return gotErr, adapter.calls
+		return adapter.calls, gotErr
 	}
 
 	// 800k input tokens accumulate across two turns and must not trip a
 	// 1000-token generation cap — only the 1000 generated tokens do, which
 	// happens exactly at the third gate check.
-	gotErr, calls := run(t, 1_000)
+	calls, gotErr := run(t, 1_000)
 	if gotErr == nil || !strings.Contains(gotErr.Error(), "generation budget") {
 		t.Errorf("expected a generation budget error after 1000 generated tokens, got %v", gotErr)
 	}
@@ -248,7 +248,7 @@ func TestMaxGeneratedTokensPerRunCountsOutputOnly(t *testing.T) {
 	}
 
 	// With headroom, the same 800k of input must not abort anything.
-	gotErr, calls = run(t, 100_000)
+	calls, gotErr = run(t, 100_000)
 	if gotErr != nil {
 		t.Errorf("input tokens must not count toward the generation budget, got %v", gotErr)
 	}

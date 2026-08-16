@@ -13,8 +13,23 @@ import (
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
+
+// roundCapFor builds the P67.1 aggregate round bound for an engine rooted at
+// workdir.
+//
+// The root is bound here rather than read off the context inside builtin.CapRound
+// because the engine's own toolCtx supplies it in the ordinary case and this is
+// the fallback for the paths that do not set one — the same two-source rule every
+// workspace-confined tool follows (effectiveRoot).
+func roundCapFor(workdir string) engine.RoundCapFunc {
+	return func(ctx context.Context, results []string) []string {
+		return builtin.CapRound(ctx, workdir, results)
+	}
+}
 
 func (s *Server) approver() permission.Approver {
 	if s.cfg.Permission.AutoApproveExec {
@@ -378,10 +393,19 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		OutputGuardFormat:        guardFormat,
 		ZeroToolNudgeMaxRetries:  s.cfg.Provider.ZeroToolNudge,
 		ToolCallShim:             s.cfg.Provider.ToolCallShimEnabled(),
-		RedactSecrets:            s.cfg.Security.RedactSecrets,
-		Logger:                   s.logger,
-		Workdir:                  workdir,
-		ExtraRoots:               s.workspaceRootsFor(workdir),
+		// P67.1: the per-call caps in truncate.go are per *call*; this bounds
+		// what a parallel round contributes in aggregate.
+		RoundResultCap: roundCapFor(workdir),
+		// P66.14/LLM-03: the token-estimate calibration is admissible only
+		// against a backend positively identified as reporting the full prompt
+		// each turn and truncating in silence. Previously gated on a native-only
+		// telemetry field, so it was inert on the documented openai + :11434/v1
+		// configuration.
+		SharedContextWindow: providerfactory.CertainlyOllama(s.cfg.Provider),
+		RedactSecrets:       s.cfg.Security.RedactSecrets,
+		Logger:              s.logger,
+		Workdir:             workdir,
+		ExtraRoots:          s.workspaceRootsFor(workdir),
 	})
 	if err != nil {
 		return nil, "", err

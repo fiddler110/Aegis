@@ -151,7 +151,9 @@ The daemon writes a single, global JSONL audit trail shared by every session —
 
 Each line is a JSON object, and the fields present depend on the record's `phase`:
 
-- **`pre`** — logged for every tool call before it runs: `time`, `phase`, `tool`, `input` (the raw tool input, replaced with a `"[N bytes, truncated]"` string if larger than 1024 bytes).
+- **`pre`** — logged for every tool call before it runs: `time`, `phase`, `tool`, `input` (the tool input, with credential-shaped substrings replaced by a `[redacted: <class>]` placeholder).
+  - **Redact, then record (P66.11).** Any input over 1 KiB used to be replaced wholesale with `"[N bytes, truncated]"`, so a `write_file` with a 2 KiB payload or any long shell pipeline was not recorded at all — the trail lost exactly the calls that matter for reconstructing an incident. The stated reason ("avoid logging credentials embedded in long commands") is an argument for redacting the credential, not for discarding the record. The pattern set is `internal/redact`, the same one the MCP outbound boundary flags on.
+  - A size bound still applies, because "don't put a 4 MiB blob in the audit log" is a real concern redaction does not answer: inputs over 16 KiB keep their **head** and carry an `…[audit: input truncated to N of M bytes]` marker, so a shortened record still names the call and never reads as a complete one. Note that a head-keeping bound over JSON means a very large field ordered before the identifying one can crowd it out.
 - **`post`** — logged for every tool call after it runs: `time`, `phase`, `tool`, `is_error`.
 - **`policy_decision`** — logged when a contextual security policy (`egress_then_write`, `network_allowlist`), a text-based permission rule, the per-task file-write scope (`task_scope`), or the persona-tool advisory gate makes a decision: `time`, `phase`, `tool`, `cap` (the tool's capability), `rule`, `decision`, `reason`.
 - **`subagent_stop`** — logged when a spawned sub-agent finishes: `time`, `phase`, `agent_id`, `status`, `summary`, `is_error`.

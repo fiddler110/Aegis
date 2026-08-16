@@ -15,6 +15,12 @@ import "fmt"
 // prompt (system prompt + full tool schemas + an oversized repo map, a few
 // thousand tokens) with room to spare, while staying inside what a 16GB-VRAM
 // box can serve for the small models this tier runs on.
+//
+// It is read only from live_workflow_test.go, which sits behind the
+// live_workflow build tag and is therefore invisible to an untagged
+// staticcheck run — hence the ignore directive rather than a deletion.
+//
+//lint:ignore U1000 used only under the live_workflow build tag
 const promptProfileNumCtx = 16384
 
 // workflowMinContextWindow is the smallest served context window in which the

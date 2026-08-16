@@ -7,7 +7,9 @@ import (
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/tokenest"
+	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/toolshim"
+	"github.com/fiddler110/aegis/internal/trace"
 )
 
 // summarizerGiveUpThreshold is the cumulative number of LLM-summarizer failures
@@ -87,7 +89,7 @@ func compactionSuppressCeiling(window, trigger int) int {
 // and a deterministic pre-pass that blanked one stale search dump (P62.7). The
 // engine cannot apply a minimum-yield rule to a bool, so the seam is widened
 // here rather than in Compactor itself: an optional interface is how this file
-// already widens the compactor seam (FallbackCompactor, CalibratedCompactor),
+// already widens the compactor seam (FallbackCompactor, BudgetedCompactor),
 // and it keeps every other Compactor implementation — the test doubles, and any
 // caller-supplied one — compiling and behaving exactly as before, which is
 // precisely the pre-fix behaviour a guard with no yield information falls back
@@ -115,7 +117,10 @@ type YieldReportingCompactor interface {
 //   - A setter (`SetFiles`) cannot work. A Summarizer is built once per server
 //     and shared by every session, so two sessions would overwrite each other's
 //     paths — a cross-session leak, not merely a stale list. The calibration seam
-//     above can be a setter precisely because a calibration *is* process-wide.
+//     was a setter on the argument that a calibration is process-wide; P66.14
+//     (ARCH-07) found the argument false — it carried this run's tool-schema
+//     overhead too — and made BudgetedCompactor a context decorator like this
+//     one.
 //   - A Compact variant would have to be written twice, since the guard calls
 //     CompactYield when it can and Compact when it cannot, and every future
 //     widening of the seam would double again.
@@ -181,14 +186,19 @@ type compactionGuard struct {
 	// for compaction it no longer needs.
 	window    func() int
 	maxTokens int
-	logger    *slog.Logger
+	// sharedContextWindow marks a backend positively identified as spending one
+	// budget on prompt and completion — an Ollama server on either adapter — and
+	// is what makes this run's provider-reported prompt counts admissible as
+	// calibration samples. See afterTurn for what it replaced and why.
+	sharedContextWindow bool
+	logger              *slog.Logger
 
 	// touchedFiles reports the paths this run has read and modified, for a
 	// FileContextCompactor to carry forward (P65.2). Never nil.
 	touchedFiles func() (read, modified []string)
 
-	// requestOverhead is what every request carries that conv.System and
-	// conv.Messages do not, measured once per run.
+	// requestOverhead reports what every request carries that conv.System and
+	// conv.Messages do not, re-measured whenever the exposed tool set changes.
 	//
 	// It lives here rather than in Run because the headroom check is its only
 	// consumer: this content rides every request but is attached in turn(),
@@ -209,10 +219,21 @@ type compactionGuard struct {
 	// builtin tools that is thousands of tokens missing from every request on
 	// the path local models actually use.
 	//
-	// Estimated once rather than per turn: rendering the schemas just to measure
-	// them every turn would cost more than the precision is worth, and a mid-run
-	// exposure change moves it by less than the estimate's own error.
-	requestOverhead int
+	// It used to be measured once in the constructor, on the argument that a
+	// mid-run exposure change moves it by less than the estimate's own error.
+	// That argument was wrong by an order of magnitude and P66.14 (PERF-03)
+	// retired it: `tool_search`'s reg.Load exposes a previously-deferred tool
+	// mid-run, and a single deferred schema is up to 593 estimated tokens
+	// against a 4,550-token budget on a small window — 13% of it, where the
+	// calibrated estimate's residual error is a few percent. A snapshot taken
+	// before the load undercounts the trigger for the rest of the run, in the
+	// one direction this whole check exists to avoid.
+	//
+	// So it is a function, memoized on the registry's schema version: a turn
+	// whose exposed set has not changed pays a version read, and one whose set
+	// has changed pays the re-render it needs. nil for a run with no registry,
+	// where the overhead is 0 by construction — call overhead(), never this.
+	requestOverhead func() int
 
 	// calib learns the residual multiplicative error of the estimate from the
 	// prompt token counts the provider reports (P62.4). It corrects the
@@ -224,6 +245,12 @@ type compactionGuard struct {
 	// count that request came back with. Zero means this turn must not be learned
 	// from — see afterTurn.
 	lastRaw int
+	// lastOverhead is the request overhead as it stood for that same request.
+	// Recorded rather than re-read because the exposed tool set can now move
+	// mid-run (P66.14/PERF-03): a turn that loaded a deferred tool would
+	// otherwise be calibrated against the *next* turn's schemas, which is a
+	// sample nothing sent.
+	lastOverhead int
 
 	// failures counts *consecutive* proactive-compaction failures (P28.4), reset
 	// to 0 on any successful compaction — LLM-summarized or deterministic
@@ -253,6 +280,18 @@ type compactionGuard struct {
 	// noise.
 	systemWarned bool
 
+	// lastEvent records what this concern did on the current turn, for the turn
+	// trace to pick up (P66.11/GAP-01). It is a *record* rather than an event
+	// stream because the trace wants one answer per turn and this guard runs once
+	// per turn; beforeTurn clears it, so a turn under the trigger reports nothing
+	// rather than repeating the last turn's compaction.
+	//
+	// It exists because every number in it was already computed here and dropped:
+	// LLM-02's closure condition is literally "the turn at which compaction
+	// actually fires", and reading it out of Info logs is how that question was
+	// answered before.
+	lastEvent *trace.Compaction
+
 	// retryEstimate is the estimate at which compaction may be attempted again
 	// after a prune whose yield did not justify its cost (P62.7); 0 means no
 	// suppression is in force. It is set to the estimate at which the low-yield
@@ -274,27 +313,63 @@ type compactionGuard struct {
 // still this concern's business.
 func (e *Engine) newCompactionGuard() *compactionGuard {
 	g := &compactionGuard{
-		compactor: e.compactor,
-		window:    e.effectiveContextWindow,
-		maxTokens: e.maxTokens,
-		logger:    e.logger,
+		compactor:           e.compactor,
+		window:              e.effectiveContextWindow,
+		maxTokens:           e.maxTokens,
+		sharedContextWindow: e.sharedContextWindow,
+		logger:              e.logger,
 		// P65.2: read at compaction time, not captured now — the whole point is
 		// the set of files touched *before* the compaction, and a compaction
 		// happens many turns into a run.
 		touchedFiles: e.touchedFiles,
 	}
 	if e.tools != nil {
-		// Mirrors turn(): under the shim the schemas are rendered into the
-		// system prompt, otherwise they ride Request.Tools. Either way they are
-		// in the prompt the backend counts, and either way conv does not hold
-		// them.
-		if e.toolShim {
-			g.requestOverhead = tokenest.Estimate(toolshim.Prompt(e.tools.Schemas()))
-		} else {
-			g.requestOverhead = tokenest.Tools(e.tools.Schemas())
-		}
+		g.requestOverhead = memoizedOverhead(e.tools, e.toolShim)
 	}
 	return g
+}
+
+// memoizedOverhead builds the guard's requestOverhead function: the estimate
+// over whatever the exposed tool schemas contribute to a request, recomputed
+// only when the registry says the exposed set has changed (P66.14/PERF-03).
+//
+// It mirrors turn(): under the shim the schemas are rendered into the system
+// prompt, otherwise they ride Request.Tools. Either way they are in the prompt
+// the backend counts, and either way conv does not hold them.
+//
+// The memo is not concurrency-safe and does not need to be — the guard is
+// per-run and every caller of it (beforeTurn, afterTurn, noticeOversizedSystem)
+// runs on the run's own goroutine, between turns rather than inside a parallel
+// tool round.
+func memoizedOverhead(reg *tool.Registry, shim bool) func() int {
+	var (
+		haveVersion bool
+		version     uint64
+		cached      int
+	)
+	return func() int {
+		v := reg.SchemaVersion()
+		if haveVersion && v == version {
+			return cached
+		}
+		schemas := reg.Schemas()
+		if shim {
+			cached = tokenest.Estimate(toolshim.Prompt(schemas))
+		} else {
+			cached = tokenest.Tools(schemas)
+		}
+		haveVersion, version = true, v
+		return cached
+	}
+}
+
+// overhead is requestOverhead with the no-registry case folded in: a run with no
+// tools attaches nothing to its requests beyond conv, so the overhead is 0.
+func (g *compactionGuard) overhead() int {
+	if g.requestOverhead == nil {
+		return 0
+	}
+	return g.requestOverhead()
 }
 
 // withFileContext hands the compactor the paths this run has touched, when it
@@ -326,7 +401,12 @@ func (g *compactionGuard) compactOnEntry(ctx context.Context, conv *Conversation
 	if g.compactor == nil {
 		return
 	}
-	out, changed, err := g.compactor.Compact(g.withFileContext(ctx), conv.System, conv.Messages)
+	// The entry pass carries the same budget every later turn does (P66.14): a
+	// conversation resumed from a previous session is exactly the case where the
+	// two gates disagreeing is most visible, since it can already be over the
+	// window before the first turn.
+	ctx = g.withTokenBudget(g.withFileContext(ctx), compactionTrigger(g.window(), g.maxTokens))
+	out, changed, err := g.compactor.Compact(ctx, conv.System, conv.Messages)
 	if err != nil {
 		g.logger.Warn("context compaction failed", "err", err)
 		return
@@ -365,7 +445,7 @@ func (g *compactionGuard) noticeOversizedSystem(conv *Conversation, emit EmitFun
 	// Uncalibrated on purpose: calib has no samples at run construction, and the
 	// figure quoted to the user should be the same estimate for the same prompt
 	// on every run.
-	fixed := tokenest.Estimate(conv.System) + g.requestOverhead
+	fixed := tokenest.Estimate(conv.System) + g.overhead()
 	if fixed*100 <= oversizedSystemPercent*win {
 		return
 	}
@@ -388,11 +468,12 @@ func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, em
 	// the provider's count is the conversation as *sent*, not as it looked on
 	// entry. A turn whose schemas were suppressed carries no requestOverhead and
 	// must not be learned from at all (see afterTurn), which lastRaw = 0 marks.
-	g.lastRaw = 0
+	g.lastRaw, g.lastOverhead = 0, 0
 	if !toolsSuppressed {
-		g.lastRaw = conv.estimatedTokens()
+		g.lastRaw, g.lastOverhead = conv.estimatedTokens(), g.overhead()
 	}
 
+	g.lastEvent = nil
 	win := g.window()
 	if win <= 0 {
 		return
@@ -412,18 +493,66 @@ func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, em
 	// downstream of an *applied* compaction, so the only way not to pay them is
 	// not to take the attempt.
 	if g.suppressed(est, win, trigger) {
+		g.lastEvent = &trace.Compaction{Suppressed: true, Estimate: est, Trigger: trigger}
 		return
 	}
 	pct := est * 100 / win
-	oc := g.compact(ctx, conv, emit, pct)
+	before := len(conv.Messages)
+	// P66.14/LLM-02: the Compactor gates on the same threshold rather than on a
+	// flat rule of its own, so hand it the number this turn actually used — see
+	// BudgetedCompactor.
+	oc := g.compact(g.withTokenBudget(ctx, trigger), conv, emit, pct)
+	g.lastEvent = &trace.Compaction{
+		Applied:        oc.applied,
+		Summarized:     oc.summarized,
+		FreedTokens:    oc.freedTokens,
+		MessagesBefore: before,
+		MessagesAfter:  len(conv.Messages),
+		Estimate:       est,
+		Trigger:        trigger,
+	}
 	if !oc.applied && !g.fullWarned && pct >= 95 {
 		g.fullWarned = true
 		emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context ~%d%% full and nothing left to compact — the model server may silently drop older turns; consider /compact or a fresh session", pct)})
 	}
 	g.recordYield(oc, est, trigger)
 	if !toolsSuppressed {
-		g.lastRaw = conv.estimatedTokens()
+		g.lastRaw, g.lastOverhead = conv.estimatedTokens(), g.overhead()
 	}
+}
+
+// withTokenBudget hands the compactor this run's view of the token budget — the
+// learned estimate correction and the trigger the guard just gated on — when it
+// can accept them (P66.14). A compactor that does not implement
+// BudgetedCompactor gets the context unchanged and prices the conversation for
+// itself, exactly as it did before P62.4.
+//
+// Pushed on every call rather than on change only, for the reason the old setter
+// pushed every sample: the compactor may have been swapped or retuned (the
+// daemon re-tunes it on a model switch, P52.1), and re-stating a value it
+// already holds costs one context value.
+func (g *compactionGuard) withTokenBudget(ctx context.Context, trigger int) context.Context {
+	bc, ok := g.compactor.(BudgetedCompactor)
+	if !ok {
+		return ctx
+	}
+	scale, samples := g.calib.Scale()
+	if samples == 0 {
+		// No evidence yet: pass the overhead and the trigger, but leave the
+		// scale unset rather than asserting the calibrator's uninitialised
+		// default as a measurement.
+		scale = 0
+	}
+	return bc.WithTokenBudget(ctx, g.overhead(), scale, trigger)
+}
+
+// event reports what this concern did on the current turn, for the trace. Nil on
+// a turn that stayed under the trigger, and on a nil guard.
+func (g *compactionGuard) event() *trace.Compaction {
+	if g == nil {
+		return nil
+	}
+	return g.lastEvent
 }
 
 // suppressed reports whether the P62.7 minimum-yield rule is currently holding
@@ -478,34 +607,49 @@ func (g *compactionGuard) recordYield(oc compactOutcome, est, trigger int) {
 // warning designed to fire when compaction *cannot* help was gated on the same
 // undercounting number as compaction itself.
 func (g *compactionGuard) estimate(conv *Conversation) int {
-	return g.calib.Apply(conv.estimatedTokens() + g.requestOverhead)
+	return g.calib.Apply(conv.estimatedTokens() + g.overhead())
 }
 
 // afterTurn folds the turn's provider-reported prompt size into the calibration
 // (P62.4). win is passed in rather than re-read so the sample is checked against
 // the window the request was actually served under.
 //
-// Two conditions decide whether a turn is evidence at all, and both are about
-// what the reported number *means* rather than how large it is:
+// Three conditions decide whether a turn is evidence at all, and all of them are
+// about what the reported number *means* rather than how large it is:
 //
-//   - PromptEvalDurationMS > 0 identifies the native-Ollama path, the only one
-//     where InputTokens is documented to be the full prompt every turn rather
-//     than a delta or a cache-adjusted figure (see provider.Usage). It is also
-//     the only backend where this correction matters: a cloud API rejects an
-//     oversized prompt loudly, while a local server truncates in silence.
+//   - The backend must be positively identified as one whose InputTokens is the
+//     full prompt every turn rather than a delta or a cache-adjusted figure, and
+//     whose response to an oversized prompt is to truncate in silence rather than
+//     to reject it. That is sharedContextWindow, set from
+//     providerfactory.CertainlyOllama.
+//
+//     It used to be `PromptEvalDurationMS > 0`, which is a *telemetry* field only
+//     the native adapter populates — so the correction was inert on the
+//     OpenAI-compat path, i.e. on `provider.default: openai` with a `:11434/v1`
+//     base_url, which is the configuration docs/providers.md recommends. Every
+//     user following the documented setup ran the whole session on the
+//     uncorrected 20-33% undercount, with no signal that the calibrator had
+//     never taken a sample (P66.14/LLM-03). An adapter's telemetry is not a
+//     backend identity, and this gate needed the latter.
+//
 //   - Cache accounting must be absent. A provider reporting CacheRead or
 //     CacheCreation tokens is describing a prompt split across billing
 //     categories, and InputTokens there is not comparable to an estimate over
 //     the whole conversation.
 //
-// An estimated usage (IsEstimated) is the engine's own heuristic handed back to
-// it — calibrating against it would be a closed loop that always reports perfect
-// accuracy.
+//   - An estimated usage (IsEstimated) is the engine's own heuristic handed back
+//     to it — calibrating against it would be a closed loop that always reports
+//     perfect accuracy.
+//
+// A run with no backend identification calibrates nothing, which is the
+// pre-P62.4 behaviour and the right default: a cloud API rejects an oversized
+// prompt loudly, so the correction buys it nothing worth the risk of learning
+// from a number that means something else.
 func (g *compactionGuard) afterTurn(usage *provider.Usage, win int) {
 	if usage == nil || g.lastRaw <= 0 {
 		return
 	}
-	if usage.IsEstimated || usage.PromptEvalDurationMS <= 0 {
+	if usage.IsEstimated || !g.sharedContextWindow {
 		return
 	}
 	if usage.CacheReadTokens > 0 || usage.CacheCreationTokens > 0 {
@@ -513,25 +657,19 @@ func (g *compactionGuard) afterTurn(usage *provider.Usage, win int) {
 	}
 
 	before, _ := g.calib.Scale()
-	g.calib.Observe(g.lastRaw, g.requestOverhead, usage.InputTokens, win)
+	g.calib.Observe(g.lastRaw, g.lastOverhead, usage.InputTokens, win)
 	after, samples := g.calib.Scale()
 	if after != before {
 		g.logger.Debug("token estimate recalibrated",
-			"estimate", g.lastRaw+g.requestOverhead,
+			"estimate", g.lastRaw+g.lastOverhead,
 			"reported", usage.InputTokens,
 			"scale", after,
 			"samples", samples)
 	}
-	g.lastRaw = 0
-
-	// Hand the correction to the Compactor so its own gate prices the
-	// conversation the same way this one does. Pushed every sample rather than
-	// on change only: the compactor may have been swapped or retuned (the daemon
-	// re-tunes it on a model switch, P52.1), and re-stating a value it already
-	// holds costs two atomic stores.
-	if cc, ok := g.compactor.(CalibratedCompactor); ok && samples > 0 {
-		cc.SetEstimateCorrection(g.requestOverhead, after)
-	}
+	g.lastRaw, g.lastOverhead = 0, 0
+	// The Compactor is told about the correction on the next call rather than
+	// here — see withTokenBudget, and BudgetedCompactor for why it is no longer
+	// a setter (P66.14/ARCH-07).
 }
 
 // compactOutcome is what one compaction attempt achieved. applied is the old

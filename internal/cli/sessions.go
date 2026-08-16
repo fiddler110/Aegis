@@ -11,6 +11,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/share"
 	"github.com/fiddler110/aegis/internal/trace"
 	"github.com/spf13/cobra"
@@ -118,7 +119,7 @@ func newSessionsExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			data, err := share.Render(sess, f)
+			data, redactions, err := share.Render(sess, f)
 			if err != nil {
 				return err
 			}
@@ -133,7 +134,11 @@ func newSessionsExportCmd() *cobra.Command {
 				return err
 			}
 			abs, _ := filepath.Abs(out)
-			fmt.Fprintf(cmd.OutOrStdout(), "exported %s → %s\n", sess.ID, abs)
+			// P66.11: the redaction count is reported here as well as inside the
+			// artifact, because this is where the user decides whether to send it.
+			// A stdout export ("-") returns above without this line rather than
+			// corrupting the document with it.
+			fmt.Fprintf(cmd.OutOrStdout(), "exported %s → %s (%d credential-shaped value(s) redacted)\n", sess.ID, abs, redactions)
 			return nil
 		},
 	}
@@ -164,7 +169,13 @@ func newSessionsTraceCmd() *cobra.Command {
 			}
 
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "TURN\tMODEL\tIN\tOUT\tCOST\tWALL\tTOOLS")
+			// P66.11/GAP-01 widened the record; this column is what makes it
+			// readable without a JSON export. WHY holds the three things that
+			// explain a turn nobody asked for — the stop reason, whether compaction
+			// fired, and which corrective the engine injected — because they are
+			// read together or not at all: "why did this run take 40 turns" is
+			// answered by max_tokens and a continuation appearing on every row.
+			fmt.Fprintln(tw, "TURN\tMODEL\tIN\tOUT\tCOST\tWALL\tTOOLS\tWHY")
 			var (
 				totIn, totOut int
 				totCost       float64
@@ -177,12 +188,12 @@ func newSessionsTraceCmd() *cobra.Command {
 				if t.Estimated {
 					model += " (est)"
 				}
-				fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t$%.4f\t%s\t%s\n",
+				fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t$%.4f\t%s\t%s\t%s\n",
 					i+1, model, t.InputTokens, t.OutputTokens, t.CostUSD,
-					formatMS(t.WallMS), formatTools(t.ToolCalls))
+					formatMS(t.WallMS), formatTools(t.ToolCalls), formatWhy(t))
 			}
-			fmt.Fprintf(tw, "\t\t\t\t\t\t\n")
-			fmt.Fprintf(tw, "TOTAL\t%d turns\t%d\t%d\t$%.4f\t\t\n", len(sess.Traces), totIn, totOut, totCost)
+			fmt.Fprintf(tw, "\t\t\t\t\t\t\t\n")
+			fmt.Fprintf(tw, "TOTAL\t%d turns\t%d\t%d\t$%.4f\t\t\t\n", len(sess.Traces), totIn, totOut, totCost)
 			return tw.Flush()
 		},
 	}
@@ -194,6 +205,52 @@ func formatMS(ms int64) string {
 		return fmt.Sprintf("%dms", ms)
 	}
 	return fmt.Sprintf("%.1fs", float64(ms)/1000)
+}
+
+// formatWhy renders the P66.11 fields that explain a turn: its stop reason, the
+// compaction event, the guard verdict, and the correctives the engine injected.
+//
+// Compact rather than complete, because this is one column of a per-turn row and
+// the full record is a field away in the JSON export. The selection is the part
+// worth arguing about: end_turn and tool_use are the normal stop reasons and print
+// as nothing, while max_tokens is the one that explains a long run — so only the
+// values that tell you something earn the width.
+func formatWhy(t trace.TurnTrace) string {
+	var parts []string
+	if t.StopReason != "" && t.StopReason != string(provider.StopEndTurn) && t.StopReason != string(provider.StopToolUse) {
+		parts = append(parts, t.StopReason)
+	}
+	if c := t.Compaction; c != nil {
+		switch {
+		case c.Applied && c.Summarized:
+			parts = append(parts, fmt.Sprintf("compacted %d→%d msgs", c.MessagesBefore, c.MessagesAfter))
+		case c.Applied:
+			parts = append(parts, fmt.Sprintf("pruned -%d tok", c.FreedTokens))
+		case c.Suppressed:
+			parts = append(parts, "compaction deferred")
+		default:
+			// Over the trigger and the compactor had nothing to give: the case the
+			// context-full notice exists for, worth naming here too.
+			parts = append(parts, "compaction no-op")
+		}
+	}
+	if g := t.Guard; g != nil {
+		switch {
+		case g.Passed:
+			parts = append(parts, "guard ok")
+		case g.Retrying:
+			parts = append(parts, "guard fail→retry")
+		default:
+			parts = append(parts, "guard fail")
+		}
+	}
+	if len(t.Correctives) > 0 {
+		parts = append(parts, strings.Join(t.Correctives, "+"))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatTools summarizes a turn's tool calls as "name(820ms), name(1.2s)".

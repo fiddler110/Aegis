@@ -78,6 +78,15 @@ import (
 //     file — because defaultReadLines bounds lines and nothing bounded bytes.
 //     See maxDefaultReadBytes in file.go.
 //
+// # The round bound above all of this (P67.1)
+//
+// Every cap in the table is per *call*. Engine.runTools dispatches up to 8 calls
+// concurrently, so N results can each land at their own cap in one message —
+// which nothing bounded until roundcap.go added a budget over the round. That
+// bound layers on top and changes nothing here: each tool still chooses its own
+// end and spills its own remainder, and the round bound only decides how much of
+// a round's worth of already-capped results the conversation can afford at once.
+//
 // # Notice budget
 //
 // Every helper here reserves the notice's own bytes *out of* the limit, so the

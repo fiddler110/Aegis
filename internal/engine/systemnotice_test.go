@@ -44,7 +44,7 @@ func windowForSharePercent(t *testing.T, reg *tool.Registry, system string, shar
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixed := tokenest.Estimate(system) + probe.newCompactionGuard().requestOverhead
+	fixed := tokenest.Estimate(system) + probe.newCompactionGuard().overhead()
 	if fixed <= 0 {
 		t.Fatalf("fixture system prompt estimated at %d tokens", fixed)
 	}

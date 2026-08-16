@@ -32,7 +32,7 @@ func TestCompactYieldReportsPruneYield(t *testing.T) {
 	s := New(Options{Adapter: a, Model: "m", MaxBudget: 1_000_000, KeepRecent: 4})
 	msgs := yieldFixture(strings.Repeat("package main // a line of file content\n", 40))
 
-	before := s.estimate("", msgs)
+	before := s.estimate(budget{}, "", msgs)
 	out, changed, summarized, freed, err := s.CompactYield(context.Background(), "", msgs)
 	if err != nil {
 		t.Fatalf("CompactYield: %v", err)
@@ -46,7 +46,7 @@ func TestCompactYieldReportsPruneYield(t *testing.T) {
 	if a.called != 0 {
 		t.Errorf("summarizer called %d times on a prune-only compaction", a.called)
 	}
-	if want := before - s.estimate("", out); freed != want {
+	if want := before - s.estimate(budget{}, "", out); freed != want {
 		t.Errorf("freedTokens = %d, want %d (the estimate actually dropped by that much)", freed, want)
 	}
 	if freed <= 0 {
@@ -81,7 +81,7 @@ func TestCompactYieldMarksSummarization(t *testing.T) {
 	s := New(Options{Adapter: a, Model: "m", MaxBudget: 5, KeepRecent: 2})
 	msgs := yieldFixture(strings.Repeat("package main // a line of file content\n", 40))
 
-	before := s.estimate("", msgs)
+	before := s.estimate(budget{}, "", msgs)
 	out, changed, summarized, freed, err := s.CompactYield(context.Background(), "", msgs)
 	if err != nil {
 		t.Fatalf("CompactYield: %v", err)
@@ -89,7 +89,7 @@ func TestCompactYieldMarksSummarization(t *testing.T) {
 	if !changed || !summarized {
 		t.Fatalf("changed=%v summarized=%v, want both true", changed, summarized)
 	}
-	if want := before - s.estimate("", out); freed != want {
+	if want := before - s.estimate(budget{}, "", out); freed != want {
 		t.Errorf("freedTokens = %d, want %d", freed, want)
 	}
 	if freed < 100 {
@@ -124,7 +124,7 @@ func TestCompactMatchesCompactYield(t *testing.T) {
 			if changedA != changedB || len(outA) != len(outB) {
 				t.Fatalf("Compact -> (%v, %d msgs), CompactYield -> (%v, %d msgs)", changedA, len(outA), changedB, len(outB))
 			}
-			if plain.estimate("", outA) != rich.estimate("", outB) {
+			if plain.estimate(budget{}, "", outA) != rich.estimate(budget{}, "", outB) {
 				t.Errorf("the two entry points produced differently-sized conversations")
 			}
 		})

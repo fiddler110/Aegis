@@ -283,7 +283,10 @@ func TestLoopDetectorResetClearsWindow(t *testing.T) {
 		t.Fatal("third identical signature should trip")
 	}
 	d.reset()
-	if d.record("a") || d.record("a") {
+	// Both records must actually happen — they are what refills the window, so
+	// this cannot be written as a short-circuiting `||` expression.
+	first, second := d.record("a"), d.record("a")
+	if first || second {
 		t.Fatal("after a reset the window must refill before tripping again")
 	}
 	if !d.record("a") {

@@ -6,7 +6,6 @@ package compaction
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"sync/atomic"
 
@@ -16,14 +15,12 @@ import (
 
 const (
 	// largeContextWindowThreshold is the token count above which a context window
-	// is considered "large" and uses an absolute buffer instead of a ratio.
-	largeContextWindowThreshold = 200_000
-	// largeContextWindowBuffer is the minimum remaining tokens before compaction
-	// triggers for large context windows.
-	largeContextWindowBuffer = 20_000
-	// smallContextWindowRatio is the fraction of the context window that must
-	// remain free before compaction triggers for small context windows.
-	smallContextWindowRatio = 0.20
+	// is considered "large" and uses an absolute buffer instead of a ratio. The
+	// compaction *trigger* no longer reads it — that rule moved to
+	// tokenest.CompactionTrigger under P66.14, where the engine can share it —
+	// but the summarization-request fit check below still has its own two
+	// regimes.
+	largeContextWindowThreshold = tokenest.LargeContextWindow
 
 	// summarizeReserveBuffer / summarizeReserveRatio size the safety reserve
 	// held back when checking that the summarization request itself fits the
@@ -78,17 +75,6 @@ const (
 	// toolResultRuneLimit is the long-standing per-tool-result cap applied when
 	// rendering a transcript, independent of any fit-driven shrinking.
 	toolResultRuneLimit = 800
-
-	// prunePrefixCacheBuffer / prunePrefixCacheRatio gate the pre-pass when
-	// PreservePrefixCache is set. They deliberately mirror the compaction
-	// trigger constants above but one step earlier — an absolute 40k floor for
-	// large windows, a 25%-free ratio for small ones, against compaction's 20k
-	// and 20% — so the pre-pass still gets its chance to bring the conversation
-	// back under budget *before* the LLM summarizer is reached, which is the
-	// whole point of running it as a pre-pass. See shouldPrune for why the gate
-	// exists at all.
-	prunePrefixCacheBuffer = 2 * largeContextWindowBuffer
-	prunePrefixCacheRatio  = 0.25
 )
 
 // blockTruncationLadder is the descending ladder of per-block rune caps tried,
@@ -111,14 +97,13 @@ type Summarizer struct {
 	// instead of unconditional; see shouldPrune.
 	preservePrefixCache bool
 
-	// estimateOverhead and estimateScale carry the engine's learned correction
-	// for the shared token estimate (P62.4). Atomic for the same reason
-	// contextWindow is: they are updated turn by turn while Compact may be
-	// running. estimateScale is a float64 held as its IEEE-754 bits, since
-	// sync/atomic has no float type; zero means "never set" and leaves the raw
-	// estimate untouched, which is this package's pre-P62.4 behaviour.
-	estimateOverhead atomic.Int64
-	estimateScale    atomic.Uint64
+	// maxTokens is the completion budget the compaction trigger has to reserve
+	// room for (P66.14/LLM-02). Atomic for the same reason contextWindow is: the
+	// daemon retunes both on a model switch (P52.1) while Compact may be running.
+	// 0 means unknown, and yields the flat 85% ceiling — a caller that has a
+	// maxTokens should either configure it or pass its own trigger, since the two
+	// gates disagreeing is the whole defect this closes.
+	maxTokens atomic.Int64
 }
 
 // Options configures a Summarizer.
@@ -128,6 +113,17 @@ type Options struct {
 	// ContextWindow is the model's context window in tokens. When > 0 it drives
 	// smart compaction thresholds. When 0, MaxBudget is used as a fixed fallback.
 	ContextWindow int
+	// MaxTokens is the per-request completion budget the caller configures on
+	// the provider (provider.max_tokens). The compaction trigger reserves room
+	// for it, because on a local backend num_ctx covers prompt and completion out
+	// of one budget — a prompt that merely fits is not a prompt that can be
+	// answered (P59.1, unified with the engine's gate by P66.14).
+	//
+	// Callers should set it whenever they know it. Left at 0 the trigger falls
+	// back to a flat 85% of the window, which is later than the engine's own gate
+	// on a small window — and the two gates disagreeing is exactly what P66.14
+	// closed.
+	MaxTokens int
 	// MaxBudget is a fixed token budget. Used only when ContextWindow == 0.
 	// A value of 0 means skip auto-compaction entirely (e.g. for local models
 	// whose context size is not known). Defaults to 120 000 when ContextWindow
@@ -176,6 +172,7 @@ func New(opts Options) *Summarizer {
 		preservePrefixCache: opts.PreservePrefixCache,
 	}
 	s.contextWindow.Store(int64(opts.ContextWindow))
+	s.maxTokens.Store(int64(opts.MaxTokens))
 	return s
 }
 
@@ -187,6 +184,17 @@ func (s *Summarizer) SetContextWindow(tokens int) {
 	s.contextWindow.Store(int64(tokens))
 }
 
+// SetMaxTokens updates the completion budget the compaction trigger reserves
+// room for. Safe to call while Compact is running, and for the same reason
+// SetContextWindow is: the daemon retunes the summarizer on a model switch
+// (P52.1), and max_tokens is resolved per model alongside the window.
+func (s *Summarizer) SetMaxTokens(tokens int) {
+	if tokens < 0 {
+		tokens = 0
+	}
+	s.maxTokens.Store(int64(tokens))
+}
+
 // ContextWindow reports the window currently driving compaction thresholds (0
 // when none is known and the fixed MaxBudget applies instead). It exists so a
 // caller that retunes the summarizer can assert which model's window it ended
@@ -196,41 +204,20 @@ func (s *Summarizer) ContextWindow() int {
 	return int(s.contextWindow.Load())
 }
 
-// SetEstimateCorrection applies the caller's learned correction for this
-// package's token estimate: an additive overhead for prompt content the
-// transcript does not contain (the tool schemas, which ride the request
-// alongside it) and a multiplicative scale for the heuristic's residual error.
-// Safe to call while Compact is running.
-//
-// It implements engine.CalibratedCompactor, and the reason that interface
-// exists is worth keeping next to the setter: the engine and this package run
-// two separate gates over the same messages, so a correction applied to only
-// one of them puts them back into the disagreement P41.1 unified them to end.
-// A scale <= 0 clears the correction rather than being stored, so a caller
-// cannot accidentally zero out every estimate.
-func (s *Summarizer) SetEstimateCorrection(overhead int, scale float64) {
-	if overhead < 0 {
-		overhead = 0
-	}
-	s.estimateOverhead.Store(int64(overhead))
-	if scale <= 0 {
-		s.estimateScale.Store(0)
-		return
-	}
-	s.estimateScale.Store(math.Float64bits(scale))
-}
-
 // estimate prices system+msgs the way the backend will: the raw heuristic, plus
-// the request overhead, times the learned scale. With no correction set it is
-// exactly EstimateTokens, so every caller below reads the same number it always
-// did until the engine has evidence to the contrary.
-func (s *Summarizer) estimate(system string, msgs []provider.Message) int {
-	n := EstimateTokens(system, msgs) + int(s.estimateOverhead.Load())
-	bits := s.estimateScale.Load()
-	if bits == 0 {
+// the request overhead the transcript cannot see, times the learned scale. With
+// no budget attached to the call it is exactly EstimateTokens, so a caller that
+// supplies none reads the same number this package always did.
+//
+// The correction arrives per call rather than through a setter — see budget.go
+// for why (P66.14/ARCH-07): the overhead is the *calling run's* tool schemas, and
+// a Summarizer is shared by every session on the server.
+func (s *Summarizer) estimate(b budget, system string, msgs []provider.Message) int {
+	n := EstimateTokens(system, msgs) + b.overhead
+	if b.scale <= 0 {
 		return n
 	}
-	scaled := float64(n) * math.Float64frombits(bits)
+	scaled := float64(n) * b.scale
 	out := int(scaled)
 	if float64(out) < scaled {
 		out++ // round up; see tokenest.Calibrator.Apply
@@ -240,13 +227,16 @@ func (s *Summarizer) estimate(system string, msgs []provider.Message) int {
 
 // shouldCompact reports whether the current estimated token count warrants
 // compaction given the configured context window or fixed budget.
-func (s *Summarizer) shouldCompact(estimated int) bool {
+//
+// The window path gates on the *shared* trigger (P66.14/LLM-02): the caller's
+// own number when it supplied one, otherwise tokenest.CompactionTrigger over the
+// window and completion budget this Summarizer was configured with. It used to
+// apply a flat 20%-free rule that never saw maxTokens, which is how the engine
+// came to ask for a compaction 1,229 tokens before this package was willing to
+// perform one on a stock 4,096-token window. See budget.go.
+func (s *Summarizer) shouldCompact(b budget, estimated int) bool {
 	if win := int(s.contextWindow.Load()); win > 0 {
-		remaining := win - estimated
-		if win > largeContextWindowThreshold {
-			return remaining < largeContextWindowBuffer
-		}
-		return remaining < int(float64(win)*smallContextWindowRatio)
+		return estimated > b.triggerOr(win, int(s.maxTokens.Load()))
 	}
 	if s.maxBudget <= 0 {
 		return false
@@ -337,7 +327,7 @@ func (s *Summarizer) shouldCompact(estimated int) bool {
 // preservePrefixCache: with no window there is no headroom to measure, and
 // guessing wrong in that direction only costs a prefill, while guessing wrong
 // in the other costs an overflow.
-func (s *Summarizer) shouldPrune(estimated int) bool {
+func (s *Summarizer) shouldPrune(b budget, estimated int) bool {
 	if !s.preservePrefixCache {
 		return true
 	}
@@ -345,11 +335,7 @@ func (s *Summarizer) shouldPrune(estimated int) bool {
 	if win <= 0 {
 		return true
 	}
-	remaining := win - estimated
-	if win > largeContextWindowThreshold {
-		return remaining < prunePrefixCacheBuffer
-	}
-	return remaining < int(float64(win)*prunePrefixCacheRatio)
+	return estimated > b.pruneTriggerOr(win, int(s.maxTokens.Load()))
 }
 
 // EstimateTokens approximates token count using the shared script-aware
@@ -426,8 +412,9 @@ func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider
 	// able to say how much a prune freed rather than only that it freed
 	// something. Nothing else changed: with no prune the single estimate below
 	// is reused, exactly as before.
-	estBefore := s.estimate(system, msgs)
-	if force || !s.preservePrefixCache || s.shouldPrune(estBefore) {
+	b := budgetFrom(ctx)
+	estBefore := s.estimate(b, system, msgs)
+	if force || !s.preservePrefixCache || s.shouldPrune(b, estBefore) {
 		var prunedChars int
 		msgs, prunedChars = pruneStaleToolResults(msgs, s.keepRecent)
 		changed = prunedChars > 0
@@ -435,13 +422,13 @@ func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider
 
 	est := estBefore
 	if changed {
-		est = s.estimate(system, msgs)
+		est = s.estimate(b, system, msgs)
 		if freedTokens = estBefore - est; freedTokens < 0 {
 			freedTokens = 0
 		}
 	}
 
-	if !force && !s.shouldCompact(est) {
+	if !force && !s.shouldCompact(b, est) {
 		return msgs, changed, false, freedTokens, nil
 	}
 
@@ -462,7 +449,7 @@ func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider
 		Content: []provider.Block{provider.TextBlock{Text: "Summary of earlier conversation (older turns were compacted):\n\n" + summary}},
 	})
 	out = append(out, msgs[boundary:]...)
-	if freedTokens = estBefore - s.estimate(system, out); freedTokens < 0 {
+	if freedTokens = estBefore - s.estimate(b, system, out); freedTokens < 0 {
 		freedTokens = 0
 	}
 	return out, true, true, freedTokens, nil

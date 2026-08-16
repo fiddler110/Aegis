@@ -5,6 +5,8 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -178,26 +180,46 @@ type FallbackCompactor interface {
 	FallbackCompact(msgs []provider.Message) (out []provider.Message, changed bool)
 }
 
-// CalibratedCompactor is an optional capability of a Compactor: it accepts the
-// correction the engine has learned for the shared token estimate (P62.4), as
-// an additive overhead plus a multiplicative scale.
+// BudgetedCompactor is an optional capability of a Compactor: it accepts the
+// run's view of the token budget — the correction the engine has learned for the
+// shared estimate (P62.4), and the trigger the engine itself gated on — as a
+// per-call context decoration.
 //
 // It exists because the engine and the Compactor run *two* gates against the
-// same conversation, and a correction applied to only one of them re-creates
-// P41.1 in a new form. Before that fix the engine estimated script-aware while
-// compaction estimated chars/4, so a conversation the engine had decided to
-// compact could be silently no-op'd by the cruder gate; they were unified on
-// tokenest to close it. A calibration the engine applied alone would split them
-// again — the engine would call Compact() believing the conversation is over
-// budget, the summarizer would price the same messages uncorrected, decide it
-// is not, and return changed=false. The engine would read that as "nothing left
-// to compact" and emit the context-full notice, which is precisely the symptom
-// P62.4 was filed about.
+// same conversation, and a difference in either half re-creates P41.1 in a new
+// form. Before that fix the engine estimated script-aware while compaction
+// estimated chars/4, so a conversation the engine had decided to compact could
+// be silently no-op'd by the cruder gate; they were unified on tokenest to close
+// it. A calibration the engine applied alone split them again — the engine would
+// call Compact() believing the conversation is over budget, the summarizer would
+// price the same messages uncorrected, decide it is not, and return
+// changed=false. The engine would read that as "nothing left to compact" and
+// emit the context-full notice, which is precisely the symptom P62.4 was filed
+// about. The *trigger* was the third such split, and the longest-lived: it took
+// P66.14 to notice that the two gates were also comparing against different
+// numbers (LLM-02).
+//
+// It is a context decorator rather than a setter (P66.14/ARCH-07). The previous
+// SetEstimateCorrection pushed `overhead` — the tool schemas of *this run* —
+// onto a Summarizer built once per server and shared by every session, which is
+// the same cross-session leak FileContextCompactor's own doc comment argues a
+// setter cannot avoid. Two sessions with different exposed tool sets overwrote
+// each other's overhead, and after P66.14 made the overhead re-measurable
+// mid-run (PERF-03) they would have done so every turn. Request-scoped data
+// about the caller travels on the context.
+//
+// The arguments are plain values rather than a struct for the same reason
+// YieldReportingCompactor's results are: internal/compaction must be able to
+// implement this without importing internal/engine, and a shared struct type
+// would close an import cycle. A trigger of 0 means "you decide" — the
+// Compactor falls back to tokenest.CompactionTrigger over the window and
+// maxTokens it was configured with, which is the same function the engine's
+// number came from.
 //
 // The engine type-asserts for this, so a Compactor that only implements Compact
 // keeps its uncorrected estimate and today's behavior.
-type CalibratedCompactor interface {
-	SetEstimateCorrection(overhead int, scale float64)
+type BudgetedCompactor interface {
+	WithTokenBudget(ctx context.Context, overhead int, scale float64, trigger int) context.Context
 }
 
 // Hooks observe and can veto tool calls. PreToolUse runs after the permission
@@ -208,6 +230,14 @@ type Hooks interface {
 	PreToolUse(ctx context.Context, toolName string, input json.RawMessage) error
 	PostToolUse(ctx context.Context, toolName string, input json.RawMessage, result string, isError bool)
 }
+
+// RoundCapFunc bounds one tool round's combined result size, returning the
+// results to append in the order it was given them. See Options.RoundResultCap.
+//
+// It takes and returns plain strings rather than provider.Blocks so the policy
+// can live in the package that owns the per-call caps without importing the
+// engine or the provider's block types.
+type RoundCapFunc func(ctx context.Context, results []string) []string
 
 // PrepareStepFunc is called before each model turn. It receives the current
 // message list and may return a modified copy (e.g. to inject dynamic context
@@ -344,6 +374,33 @@ type Options struct {
 	// check, hooks, and workspace confinement all apply unchanged — there is
 	// deliberately no separate dispatch path for them.
 	ToolCallShim bool
+	// RoundResultCap, when set, bounds what one tool round's results may
+	// contribute to the conversation *in aggregate* (P67.1). It is handed the
+	// round's results in order and returns what to append, having spilled
+	// whatever it removed somewhere the model can read it back.
+	//
+	// The engine owns the round and nothing else does, which is why the hook is
+	// here; the policy is not here, because the per-call caps it layers over live
+	// in internal/tool/builtin's posture table and a second home for the same
+	// decision is how the two would drift. Callers wire it to builtin.CapRound.
+	//
+	// Nil — every embedder and test that does not ask for it — leaves the
+	// pre-P67.1 behaviour: each result bounded by its own cap and nothing bounding
+	// the sum.
+	RoundResultCap RoundCapFunc
+	// SharedContextWindow declares that the backend behind Adapter spends one
+	// budget on prompt *and* completion — an Ollama server, on either the native
+	// or the OpenAI-compat adapter — so the prompt token count it reports is the
+	// whole prompt every turn, and an oversized prompt is truncated in silence
+	// rather than rejected.
+	//
+	// It is what admits this run's reported counts as samples for the token-
+	// estimate calibration (P62.4, regated by P66.14/LLM-03). Callers set it from
+	// providerfactory.CertainlyOllama: it is a positive identification of the
+	// backend, not a guess, and unset — the zero value every embedder and test
+	// gets — calibrates nothing, which is the correct behaviour for a cloud API
+	// that rejects an oversized prompt loudly.
+	SharedContextWindow bool
 }
 
 // Engine runs the agent loop.
@@ -388,6 +445,8 @@ type Engine struct {
 	workdir             string
 	extraRoots          []sandbox.Root
 	toolShim            bool
+	sharedContextWindow bool
+	roundResultCap      RoundCapFunc
 
 	// writtenFiles tracks workspace-relative paths touched by a successful
 	// write-capability tool call during the current Run, so the output guard
@@ -474,44 +533,15 @@ var ErrTurnStalled = errors.New("engine: turn stalled")
 var ErrLoopDetected = errors.New("engine: aborting suspected loop")
 
 // compactionTrigger returns the estimated prompt size at which proactive
-// compaction fires (P59.1).
+// compaction fires (P59.1) — the shared threshold, not a second opinion on it.
 //
-// It used to be a flat 85% of the window. That number reserves headroom for
-// *prompt growth* and was never sized against generation — but on Ollama
-// num_ctx covers prompt and completion out of one budget, so the completion has
-// to fit in whatever the prompt leaves. At a 4096 window (Ollama's own server
-// default, and a routinely detected one) a flat 85% leaves ~614 tokens for a
-// max_tokens configured at 32768, and the run then hits the ceiling mid-answer,
-// takes the "continue from where you left off" path, and grows the context
-// again on every retry until it burns to maxIterations.
-//
-// So the trigger is sized against the generation the request may actually ask
-// for: window - min(maxTokens, window/2) - a small margin, floored at half the
-// window and capped at the old 85%. The min() is what keeps a large max_tokens
-// from reserving the entire window and compacting on an empty conversation —
-// past the halfway point, reserving more space for output than for the
-// conversation is never the right trade. The 85% cap means a generous window
-// with a modest max_tokens (a cloud model, say) behaves exactly as before.
+// The formula and the reasoning behind it live in tokenest.CompactionTrigger,
+// because the Compactor gates on the same number and the two used to disagree
+// (P66.14/LLM-02). This wrapper stays because every reader in this package asks
+// the question in terms of "window, maxTokens" and because the engine's own
+// tests pin the values; it must never grow logic of its own.
 func compactionTrigger(window, maxTokens int) int {
-	if window <= 0 {
-		return 0
-	}
-	trigger := window * 85 / 100
-	if maxTokens > 0 {
-		reserve := maxTokens
-		if half := window / 2; reserve > half {
-			reserve = half
-		}
-		// A margin over the reservation itself: the prompt figure this is
-		// compared against is an estimate, not a token count.
-		if sized := window - reserve - window/20; sized < trigger {
-			trigger = sized
-		}
-	}
-	if floor := window / 2; trigger < floor {
-		trigger = floor
-	}
-	return trigger
+	return tokenest.CompactionTrigger(window, maxTokens)
 }
 
 // effectiveContextWindow is the window the proactive-compaction trigger
@@ -592,6 +622,8 @@ func New(opts Options) (*Engine, error) {
 		workdir:             opts.Workdir,
 		extraRoots:          opts.ExtraRoots,
 		toolShim:            opts.ToolCallShim,
+		sharedContextWindow: opts.SharedContextWindow,
+		roundResultCap:      opts.RoundResultCap,
 	}, nil
 }
 
@@ -602,6 +634,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	if emit == nil {
 		emit = func(Event) {}
 	}
+
+	// runID ties this run's turn traces together (P66.11/GAP-01). A session
+	// accumulates the traces of many runs — one per request — so without it a
+	// per-turn record cannot be attributed to the request that produced it, which
+	// is the first thing anyone reconstructing a bad session needs. Generated per
+	// Run rather than per Engine because an Engine can be run more than once.
+	runID := newRunID()
 
 	// P63.9: the four run budgets — cost, context tokens, generated tokens,
 	// wall clock — and the run-start instant they share. See budget.go for why
@@ -821,8 +860,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		// Assemble a structured trace for this turn. Tool calls (if any) are
-		// filled in after they run below; for a final turn it is emitted now.
+		// filled in after they run below; for a final turn it is emitted at the
+		// end of the branch, once the guard has ruled.
 		tr := e.newTrace(iter, usage, turnStart)
+		tr.RunID = runID
+		tr.StopReason = string(stopReason)
+		// P66.11/GAP-01: what compaction did at the top of *this* turn, which the
+		// guard computed and dropped. Nil unless something happened.
+		tr.Compaction = compact.event()
 
 		// P2.6: If we suppressed tools but the model hallucinated tool calls,
 		// discard them so the turn is treated as a final text answer.
@@ -916,14 +961,26 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		if len(toolUses) == 0 {
-			tr.WallMS = time.Since(turnStart).Milliseconds()
-			emit(Event{Kind: KindTrace, Trace: &tr})
+			// P66.11/GAP-01: the trace for a final-answer turn is emitted at the
+			// *end* of this branch rather than the top, because the two things
+			// worth recording about such a turn — which corrective it provoked,
+			// and what the output guard made of it — are both decided below.
+			// Every exit from here goes through emitTrace exactly once; a path
+			// that returns or continues without it loses the turn from the record
+			// entirely, which is why the correctives append and the emit are kept
+			// adjacent at each site.
+			emitTrace := func() {
+				tr.WallMS = time.Since(turnStart).Milliseconds()
+				emit(Event{Kind: KindTrace, Trace: &tr})
+			}
 			// If the model was cut off by the token limit, inject a continuation
 			// prompt and loop rather than silently returning a truncated response.
 			if stopReason == provider.StopMaxTokens {
 				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 					provider.TextBlock{Text: "[Your response was cut off at the token limit. Continue from where you left off, completing any remaining task steps.]"},
 				}})
+				tr.Correctives = append(tr.Correctives, "max_tokens_continuation")
+				emitTrace()
 				continue
 			}
 			// P53.6: the model tried to call a tool under the shim and got the
@@ -938,6 +995,8 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 						provider.TextBlock{Text: shimFormatNudgeText(shimParseErr)},
 					}})
+					tr.Correctives = append(tr.Correctives, "shim_format")
+					emitTrace()
 					continue
 				}
 				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model never produced a parsable tool call — answering from its text instead"})
@@ -957,6 +1016,8 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 					provider.TextBlock{Text: zeroToolNudgeText},
 				}})
+				tr.Correctives = append(tr.Correctives, "zero_tool")
+				emitTrace()
 				continue
 			}
 			// P34.1: the model ended its turn without error but produced no
@@ -973,6 +1034,8 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 					conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 						provider.TextBlock{Text: emptyAnswerNudgeText},
 					}})
+					tr.Correctives = append(tr.Correctives, "empty_answer")
+					emitTrace()
 					continue
 				}
 				emit(Event{Kind: KindNotice, Text: "model produced no text even after being asked for a plain-text answer — the reply is empty"})
@@ -984,10 +1047,15 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			// left, append a corrective and arm the next turn's schema. The
 			// retry count stays here in nudgeState — retractAll reads it — and is
 			// passed in rather than duplicated. See guardretry.go.
-			if guardRetry.review(ctx, conv, emit, assistantText(assistant), toolRoundsCompleted, nudges.guardRetries) {
+			retrying := guardRetry.review(ctx, conv, emit, assistantText(assistant), toolRoundsCompleted, nudges.guardRetries)
+			tr.Guard = guardRetry.lastVerdict()
+			if retrying {
 				nudges.guardRetries++
+				tr.Correctives = append(tr.Correctives, "guard")
+				emitTrace()
 				continue
 			}
+			emitTrace()
 			nudges.retractAll(conv)
 			doneEv := Event{Kind: KindDone}
 			if runUsageSeen {
@@ -1054,9 +1122,24 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// the measurement.
 		nudges.retractSpentZeroTool(conv)
 
-		tr.ToolCalls = toolTraces
-		tr.WallMS = time.Since(turnStart).Milliseconds()
-		emit(Event{Kind: KindTrace, Trace: &tr})
+		// P66.11/GAP-01: a tool-round turn's correctives — the recoverable-loop
+		// nudge, the mixed-dialect correction, the tool-failure nudge — are all
+		// decided *below* this point, so the trace is emitted at the end of the
+		// round rather than here. The closure is idempotent because the round has
+		// two exits: the ordinary end of the loop body, and the tool-failure
+		// abort, which used to emit a trace before returning and must keep doing
+		// so — a turn that ends a run is the last turn anyone will want a record
+		// of.
+		roundTraceEmitted := false
+		emitRoundTrace := func() {
+			if roundTraceEmitted {
+				return
+			}
+			roundTraceEmitted = true
+			tr.ToolCalls = toolTraces
+			tr.WallMS = time.Since(turnStart).Milliseconds()
+			emit(Event{Kind: KindTrace, Trace: &tr})
+		}
 
 		// P53.2(b): the loop gate records a turn *before* its tools run, so the
 		// outcome that classifies a cycle as recoverable or fatal is only knowable
@@ -1069,6 +1152,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 				provider.TextBlock{Text: loopV.nudge},
 			}})
+			tr.Correctives = append(tr.Correctives, "loop")
 		}
 		// P59.6: the same injection point, for the mixed-round correction. The
 		// native calls of this turn have just run and been answered; now tell
@@ -1083,6 +1167,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 					provider.TextBlock{Text: shimMixedNudgeText()},
 				}})
+				tr.Correctives = append(tr.Correctives, "shim_mixed")
 			} else {
 				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model is still printing tool calls in its prose — those did not run"})
 			}
@@ -1098,6 +1183,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		toolFailures.record(toolUses, results)
 		if toolFailures.shouldAbort() {
 			err := toolFailures.abortError()
+			emitRoundTrace()
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}
@@ -1126,6 +1212,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
 				provider.TextBlock{Text: toolFailures.nudgeText()},
 			}})
+			tr.Correctives = append(tr.Correctives, "tool_failure")
 		}
 
 		// Drain one pending steer message (if any) between tool rounds, injecting
@@ -1143,6 +1230,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			default:
 			}
 		}
+		emitRoundTrace()
 	}
 
 	err := fmt.Errorf("engine: exceeded max iterations (%d)", e.maxIterations)
@@ -1754,6 +1842,26 @@ func (e *Engine) newTrace(index int, usage *provider.Usage, startedAt time.Time)
 	return tr
 }
 
+// newRunID returns the identifier every turn trace of one Run carries
+// (P66.11/GAP-01).
+//
+// Random rather than a counter, and not derived from the session: a daemon serves
+// many sessions and an Engine is rebuilt per request, so nothing in process is
+// positioned to hand out sequential numbers without becoming shared state. 8
+// random bytes is far more than enough to tell apart the runs of one session,
+// which is the only comparison anyone makes with it.
+//
+// A failure of crypto/rand leaves the field empty rather than aborting the run: a
+// trace with no run id is worse than one with, and a run that cannot start
+// because of it is worse than both.
+func newRunID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // maxParallelTools bounds how many tool calls run concurrently in one round.
 const maxParallelTools = 8
 
@@ -1884,7 +1992,54 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 	if ctx.Err() != nil {
 		return nil, nil, ErrInterrupted
 	}
+	e.capRound(ctx, results)
 	return results, traces, nil
+}
+
+// capRound applies the P67.1 aggregate bound to a completed round, rewriting the
+// result blocks in place.
+//
+// It runs after every result has been emitted, which is the point: the user has
+// already seen each tool's full (per-call-capped) output in the UI and the trace
+// records what ran, so what this trims is only the *model's* copy — the one whose
+// size is the problem. Trimming before emission would hide output from the human
+// to save the model's context, which is the wrong trade in both directions.
+//
+// A hook that returns the wrong number of results is ignored rather than trusted:
+// the alternative is pairing a tool_result with the wrong tool_use id, which
+// every provider rejects and which would be a much worse failure than an
+// unbounded round.
+func (e *Engine) capRound(ctx context.Context, results []provider.Block) {
+	if e.roundResultCap == nil || len(results) <= 1 {
+		return
+	}
+	texts := make([]string, len(results))
+	for i, blk := range results {
+		tr, ok := blk.(provider.ToolResultBlock)
+		if !ok {
+			// An interrupted round leaves nil blocks behind; nothing to bound.
+			return
+		}
+		texts[i] = tr.Content
+	}
+	// Through toolCtx for the same reason collectWrittenFiles is (P66.10/ARCH-03):
+	// the spill lands in a workspace, and on a session with a custom workdir the
+	// bare run context would put it in the daemon's instead — where read_file
+	// cannot reach it, which turns the locator into a dead end.
+	capped := e.roundResultCap(e.toolCtx(ctx), texts)
+	if len(capped) != len(results) {
+		e.logger.Warn("round result cap returned the wrong number of results; ignoring",
+			"want", len(results), "got", len(capped))
+		return
+	}
+	for i, blk := range results {
+		tr := blk.(provider.ToolResultBlock)
+		if capped[i] == tr.Content {
+			continue
+		}
+		tr.Content = capped[i]
+		results[i] = tr
+	}
 }
 
 // toolTargetPath extracts a tool call's filesystem target from its JSON input,

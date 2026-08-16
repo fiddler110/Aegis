@@ -3,8 +3,9 @@ package mcp
 import (
 	"encoding/json"
 	"log/slog"
-	"regexp"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/redact"
 )
 
 // Outbound tool-call argument inspection (P24.14, FIND-12).
@@ -25,45 +26,19 @@ import (
 // false positive must not break a legitimate tool call, and the operator
 // (not this heuristic) decides what to do about a flagged server.
 //
-// No reusable in-process secret pattern set exists elsewhere in the
-// codebase — internal/security's secret detection shells out to gitleaks/
-// trufflehog binaries, and internal/trust's patterns target injection
-// phrasing, not credentials — so this set is defined here and kept
-// deliberately small and low-false-positive.
-var secretPatterns = []struct {
-	class string
-	re    *regexp.Regexp
-}{
-	{"PEM private key", regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)},
-	{"AWS access key ID", regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{"sk- API key (OpenAI/Anthropic style)", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)},
-	{"GitHub token", regexp.MustCompile(`\b(?:gh[poursa]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`)},
-	{"Slack token", regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
-	{"JWT", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)},
-	{"bearer token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}`)},
-	{"api_key/secret/password assignment", regexp.MustCompile(`(?i)\b(?:api[_-]?key|secret|password|passwd|access[_-]?token)\b["']?\s*[:=]\s*["']?[^\s"']{12,}`)},
-}
-
-// scanArgsForSecrets runs secretPatterns over the serialized tool-call
-// arguments and returns the class name of every pattern that matched. A nil
-// result means nothing matched — not that the arguments are verified clean.
-func scanArgsForSecrets(args json.RawMessage) []string {
-	s := string(args)
-	var classes []string
-	for _, p := range secretPatterns {
-		if p.re.MatchString(s) {
-			classes = append(classes, p.class)
-		}
-	}
-	return classes
-}
+// The pattern set itself lives in internal/redact (P66.11), which is where it
+// moved when the exported transcript became its second consumer: internal/share
+// has to filter the same shapes, and two copies of a credential list is how the
+// artifact a user hands to someone else comes to be filtered by the older one.
+// The scan here is unchanged — flag-only, never blocking, never logging the
+// matched text.
 
 // warnOutboundSecrets scans args and, on any hit, logs a Warn identifying
 // the target server, the tool being called, and the matched pattern classes.
 // It never blocks, drops, or rewrites the call — flag-only, symmetric with
 // the inbound scan_output behavior — and never logs the matched text itself.
 func warnOutboundSecrets(logger *slog.Logger, server, toolName string, args json.RawMessage) {
-	classes := scanArgsForSecrets(args)
+	classes := redact.Classes(string(args))
 	if len(classes) == 0 {
 		return
 	}

@@ -203,14 +203,18 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	}
 	tracker := cost.NewTracker()
 	eng, err := engine.New(engine.Options{
-		Adapter:         adapter,
-		Tools:           reg,
-		Gate:            gate,
-		Cost:            tracker,
-		Temperature:     cfg.Provider.Temperature,
-		Seed:            cfg.Provider.Seed,
-		BudgetUSD:       budgetUSD,
-		MaxTokensPerRun: maxTokensPerRun,
+		Adapter:        adapter,
+		Tools:          reg,
+		Gate:           gate,
+		Cost:           tracker,
+		RoundResultCap: roundCapFor(cwd), // P67.1
+		// A subprocess teammate talks to the same model server as its parent, so
+		// it inherits the same backend identification (P66.14/LLM-03).
+		SharedContextWindow: providerfactory.CertainlyOllama(cfg.Provider),
+		Temperature:         cfg.Provider.Temperature,
+		Seed:                cfg.Provider.Seed,
+		BudgetUSD:           budgetUSD,
+		MaxTokensPerRun:     maxTokensPerRun,
 		// P59.4: inherited whole, for the same reason the in-process backend
 		// does (server.go) — the WorkerSpec's remaining-allowance computation
 		// carries two dimensions, and widening it is a separate change.

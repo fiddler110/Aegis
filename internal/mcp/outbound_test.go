@@ -9,44 +9,10 @@ import (
 	"testing"
 )
 
-// TestScanArgsForSecrets exercises the credential-shaped pattern set
-// directly: each synthetic secret class must be flagged with its class name,
-// and plausible clean arguments (including ones that merely *talk about*
-// secrets) must not be.
-func TestScanArgsForSecrets(t *testing.T) {
-	cases := []struct {
-		name string
-		args string
-		want string // expected pattern class substring; "" = no hit at all
-	}{
-		{"pem private key", `{"data":"-----BEGIN RSA PRIVATE KEY-----\nMIIE..."}`, "PEM private key"},
-		{"openssh pem header", `{"data":"-----BEGIN OPENSSH PRIVATE KEY-----"}`, "PEM private key"},
-		{"aws access key id", `{"query":"AKIAIOSFODNN7EXAMPLE"}`, "AWS access key ID"},
-		{"sk-style api key", `{"key":"sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345"}`, "sk- API key"},
-		{"github token", `{"token":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}`, "GitHub token"},
-		{"slack token", `{"auth":"xoxb-1234567890-abcdefghij"}`, "Slack token"},
-		{"jwt", `{"session":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM"}`, "JWT"},
-		{"bearer token", `{"header":"Bearer abcdefghijklmnopqrstuvwxyz123456"}`, "bearer token"},
-		{"api key assignment", `{"config":"api_key=0123456789abcdef0123"}`, "api_key/secret/password assignment"},
-		{"clean query", `{"query":"weather in Paris tomorrow"}`, ""},
-		{"clean file path", `{"path":"/home/user/project/main.go","line":42}`, ""},
-		{"mentions secrets without leaking one", `{"text":"the password policy requires quarterly rotation of every api key"}`, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := scanArgsForSecrets(json.RawMessage(tc.args))
-			if tc.want == "" {
-				if len(got) != 0 {
-					t.Errorf("scanArgsForSecrets(%s) = %v, want no hits", tc.args, got)
-				}
-				return
-			}
-			if !strings.Contains(strings.Join(got, "; "), tc.want) {
-				t.Errorf("scanArgsForSecrets(%s) = %v, want a hit containing %q", tc.args, got, tc.want)
-			}
-		})
-	}
-}
+// The credential pattern set's own table test moved to internal/redact with the
+// patterns (P66.11). What stays here is the *boundary* behaviour — that the scan
+// is opt-in per server, warns without blocking, and names the class rather than
+// the match — which is this package's concern and not the pattern set's.
 
 // TestMCPToolOutboundArgumentScan is the FIND-12 regression, table-driven
 // over the three behaviors that matter: scan off = secret passes with no

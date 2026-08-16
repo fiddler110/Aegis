@@ -8,7 +8,228 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-16 (later the same day) — **the first five rows of the "Up next" ten are
+**Last updated:** 2026-08-16 (third sitting the same day) — **five more of the "Up next" ten
+shipped**: **P66.14**, **P66.11**, **P67.1**, **P66.21** and **P66.12**. Tier 2 is down to five items,
+one of them the only remaining P66 entry. Every change is `go build ./...` + `go test ./...` +
+`staticcheck ./...` green — and `staticcheck` is now a **blocking** CI step, which is P66.12's actual
+closure condition rather than the 28 findings themselves.
+
+**Row 3 of that ten did not run.** The live-tier sitting (P66.22 plus four verification items) needs a
+reachable model server and nothing was listening on `:11434`; it is a measurement, so there is no
+partial credit and nothing to substitute for it. It is now row #1 of the ten with **both of its gates
+closed**, which is a more useful outcome than a fifth build item would have been.
+
+**Three of these records correct or retire something already in the tree**, which is the part worth
+reading:
+
+| # | Item | Outcome |
+|---|------|---------|
+| 1 | **P66.14** — reconcile the two compaction thresholds | **SHIPPED.** One shared trigger in `internal/tokenest`, passed *per call* to the compactor so the two gates cannot drift. Closes LLM-02, LLM-03, ARCH-07, PERF-03. **It also deleted the phenomenon P62.7 was built to rate-limit** — see below. |
+| 2 | **P66.11** — redaction + turn trace | **SHIPPED.** `internal/redact` is the new home of the credential pattern set (three consumers now); `TurnTrace` carries stop reason, compaction event, guard verdict, correctives and a run id, readable in a new `WHY` column. |
+| 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
+| 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
+| 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### P66.14 — one compaction trigger, and a calibration that reaches the documented path
+
+Closes **LLM-02**, **LLM-03**, **ARCH-07** and **PERF-03** — four findings in the token-accounting
+path, grouped because they share one seam.
+
+**LLM-02 — the two thresholds.** `engine.compactionTrigger` sized its trigger against the completion
+the request may ask for (P59.1); `compaction.Summarizer.shouldCompact` applied a flat 20%-free rule
+that never saw `maxTokens`. At a 4,096-token window the engine asked for a compaction at 2,048
+estimated tokens and the summarizer refused until 3,277. The formula now lives in
+`tokenest.CompactionTrigger(window, maxTokens)` — tokenest, because both packages already import it and
+neither may import the other (engine's own tests import compaction, so that dependency would close a
+cycle) — and the engine additionally passes **the number it actually used** down per call, so the two
+cannot differ even if their configuration does. `shouldPrune` moved with it: the pre-pass gate is
+expressed as a *lead* over the shared trigger (5% of the window, or 20k on a large one), which is
+exactly the relation the old pair of constants encoded.
+
+Direction, stated because unifying means one side moves: on any window small enough for the completion
+reservation to bind, the shared trigger is *earlier* than the summarizer's old 80% — that is the LLM-02
+case. Above ~133k tokens it is the 85% ceiling, marginally *later* than 80%. The engine's gate is the
+one sized against the completion, so it wins in both directions.
+
+**The finding this produced, which is the most useful thing in this record.** P62.7 shipped a
+minimum-yield rule against a measured phenomenon: eleven consecutive prune-only compactions, each
+freeing ~45 estimated tokens against a gap that grew from 1,462 to 4,332. **That band was the threshold
+disagreement.** Every turn between the engine's trigger (15,156 on the P62.7 fixture) and the
+summarizer's refusal (19,660) called `Compact`, got the deterministic pre-pass and nothing else, and
+paid a rewrite for almost nothing. With one trigger the fixture's first over-trigger turn summarizes 91
+messages into 9 and the following nineteen turns need nothing at all — the applied-on sequence went
+from `[5 10 16]` to `[1]`. `TestLowYieldPruneStopsRecompactingEveryTurn` was rewritten as
+`TestSharedTriggerLeavesNoPruneThrashBand`, asserting the absence of the band; the minimum-yield rule
+itself is untouched and still tested by the stub-driven cases, which construct a low-yield prune
+directly instead of relying on a threshold gap to produce one. This is the third time this project has
+recorded a fixed instrument changing a verdict that had already been acted on.
+
+**LLM-03 — the calibration was inert on the documented path.** `afterTurn` gated on
+`PromptEvalDurationMS > 0`, which is *telemetry only the native adapter populates* — so P62.4's
+correction never fired on `provider.default: openai` with an `:11434/v1` base_url, the configuration
+`docs/providers.md` itself recommends. Every session on that setup ran the whole way on the uncorrected
+20-33% undercount, with no signal that the calibrator had never taken a sample. The gate is now
+`Options.SharedContextWindow`, set from a new `providerfactory.CertainlyOllama` (the native adapter, or
+the compat adapter on an `:11434` base_url) — a positive identification of the *backend*, which is what
+that gate was reaching for. Deliberately narrower than `config.LocalBackend`, which also matches LM
+Studio and any loopback proxy: those report prompt tokens on their own terms.
+
+**ARCH-07 — per-run data on a per-server object.** `SetEstimateCorrection` pushed `overhead` — the
+estimate of the *calling run's* exposed tool schemas — onto a `Summarizer` built once per server and
+shared by every session, which `filecontext.go`'s own comment argues a setter cannot do safely. The old
+comment claimed the exemption on the grounds that "a calibration is process-wide"; the overhead
+travelling with it is what makes that false. Replaced by `compaction.WithTokenBudget(ctx, overhead,
+scale, trigger)` and `engine.BudgetedCompactor`, a context decorator in the same shape as
+`FileContextCompactor` — and the same seam carries the trigger, which is what closes LLM-02
+structurally rather than by convention. `CalibratedCompactor` is gone.
+
+**PERF-03 — a snapshot that could not see `tool_search`.** `compactionGuard.requestOverhead` was
+measured once in the constructor, on the argument that a mid-run exposure change moves it by less than
+the estimate's own error. That is wrong by an order of magnitude: a single deferred schema is up to 593
+estimated tokens against a 4,550 budget — 13% — where the calibrated estimate's residual error is a few
+percent. It is now a function memoized on a new `tool.Registry.SchemaVersion()`, which increments
+wherever `schemaCache` is invalidated, so an unchanged exposed set costs a counter read and a changed
+one pays the re-render it needs. `afterTurn` now calibrates against the overhead recorded *at request
+time* (`lastOverhead`) rather than re-reading it, since a turn that loaded a deferred tool would
+otherwise be paired with the next turn's schemas.
+
+Tests: `internal/tokenest/trigger_test.go` (the moved value table, the never-later-than-85% guard, and
+the prune gate's order relative to the trigger asserted in both directions);
+`internal/compaction/budget_test.go` (the shared trigger at the shipped default pair, a caller-supplied
+trigger overriding the Summarizer's own, the zero-budget degradation, and that the scale is applied
+*after* the overhead — the other order leaves the schemas uncorrected);
+`internal/engine/overhead_test.go` (overhead follows a `reg.Load`, is memoized, and every exposure path
+moves the schema version, including a scope's *restore*); and
+`internal/engine/tokencalib_test.go` rewritten around admissibility — an identified backend with no
+prefill telemetry is now a sample, which is the LLM-03 regression stated as the case that must pass.
+
+### P66.11 — a redaction pass, and a turn trace worth reading
+
+Closes **SEC-08**, **SEC-11**'s redact-don't-truncate half, and **GAP-01**. Two halves of one item:
+what leaves the process, and what is kept about a run.
+
+**The pattern set moved before it was reused.** `internal/mcp/outbound.go` held the only in-process
+credential pattern set and said so in a comment. With two more consumers it moved to `internal/redact`
+— `Classes` for the flag-only form MCP uses, `Text` for the replacing form — because two copies of a
+credential list is how the artifact a user hands to someone else comes to be filtered by the older one.
+The table test moved with the patterns; what stayed in `internal/mcp` is the *boundary* behaviour
+(opt-in per server, warns without blocking, names the class and never the match).
+
+**SEC-08 — `internal/share` redacted nothing at all.** An export is the one artifact in this system
+built to leave the machine and it carried the transcript verbatim: every tool result, every shell
+command's output, anything a `cat .env` put in context. The pass runs over the *session* ahead of
+rendering rather than inside each renderer — one filter instead of three, and the JSON format, which
+marshals the session directly and is the one most likely to be fed to another program, was the easiest
+of the three to forget. `Render` now returns the count as well as the bytes, both document formats state
+it in their header, JSON carries it as an additive `redactions` key (an embedded pointer keeps every
+existing consumer working), and both call sites print it — because a redaction pass that silently finds
+nothing is indistinguishable from one that was never wired up, which is exactly the state this package
+was in. Zero is reported explicitly.
+
+One implementation hazard, pinned by a test: the assignment pattern can match across the quote and
+colon of an object like `{"api_key":"..."}`, and `json.RawMessage` is marshalled verbatim — so a
+redaction that ate a delimiter would fail the *whole* export with "json: error calling MarshalJSON"
+rather than mangling one field. Invalid results are re-encoded as a JSON string: the arguments then
+render as one redacted line instead of an object, which is a visible degradation of a call whose
+arguments contained a credential, and the honest trade against shipping invalid JSON.
+
+**SEC-11 — redact, then record.** `maxAuditInput` replaced any tool input over 1 KiB with
+`"[N bytes, truncated]"`, so a `write_file` with a 2 KiB payload or any long shell pipeline was **not
+recorded at all** — the trail lost exactly the calls that matter for reconstructing an incident, and the
+stated reason ("avoid logging credentials embedded in long commands") argues for redaction, not for
+discarding the record. Now: redact through `internal/redact`, keep the record, and keep a size bound at
+16 KiB for genuine bulk data — which, when it bites, keeps the **head** with an explicit
+`...[audit: input truncated to N of M bytes]` marker instead of substituting the length for the content.
+A truncated command still names the command. The one limitation, recorded in the test rather than
+engineered around: a head-keeping bound over JSON means a huge field ordered before the identifying one
+crowds it out.
+
+**GAP-01 — the turn trace.** `TurnTrace` carried tokens, cost, tool calls and wall time — enough to
+answer "what did this cost" and nothing about *why the turn ended the way it did*. It now also carries
+the provider's stop reason, a `Compaction` record (applied / summarized / suppressed, tokens freed,
+messages before and after, and the estimate and trigger the decision was made on), a `Guard` verdict
+(status as well as passed, so a fail-open skip is distinguishable — the FIND-16 distinction), the
+`Correctives` the engine injected this turn, and a `RunID`. Every one of those was already computed and
+discarded one line later.
+
+Two structural notes. The final-answer branch now emits its trace at the **end** rather than the top,
+because the two things worth recording about such a turn — which corrective it provoked and what the
+guard made of it — are both decided below; each of the five exits appends its corrective and emits,
+which is why the two are kept adjacent at every site. The tool-round path emits at the end of the round
+for the same reason, through an idempotent closure, because that path has two exits and the
+tool-failure abort must keep emitting the trace of the turn that ended the run. The OTel/Prometheus half
+was skipped as the item directed. `aegis sessions trace` gained a `WHY` column so the record is readable
+without a JSON export.
+
+### P67.1 — a round-level bound over the per-call result caps
+
+`internal/tool/builtin/truncate.go` carries the posture table for every tool result and **every cap in
+it is per call**, written when a round was one result at a time. `Engine.runTools` dispatches up to
+`maxParallelTools` concurrently — and that constant is **8**, larger than the item implied — so a round
+of read tools could each land at its own 32 KiB cap and put 256 KiB (~65,000 estimated tokens) into a
+single user message with nothing bounding the aggregate.
+
+`builtin.CapRound` is a budget layered above the existing caps: 48 KiB per round, sized from the cap
+table rather than picked (it admits the largest single inline cap plus a second substantial result
+without spilling anything), selecting the **largest** results and spilling them through the existing
+`SpillHead` path until the round fits, with a 2 KiB floor so a spilled result still shows what the call
+returned. Both details the item asked to be pinned with a test are: notice bytes are reserved out of
+each result's own budget by `truncate.go`'s existing rule, so they are counted; and a round of one huge
+result and four small ones spills the one.
+
+Three decisions worth stating. **The head survives**, even though the tools disagree about which end
+matters — each result string already *begins* with whatever end its own posture kept, so a shell
+result's tail is the head of the string handed over, and applying a posture here would undo theirs.
+**Each round is evaluated independently**, so a large result this round and another next round are both
+fine. **A round of one is exempt**: it is already bounded by its own cap, and the one thing that can
+exceed the budget alone is an explicit `read_file` window the posture table deliberately honors
+verbatim.
+
+The engine reaches it through `Options.RoundResultCap`, a function seam wired at every engine
+construction site, rather than by importing `internal/tool/builtin` — which would give the engine a
+dependency on every builtin tool and a plausible future cycle (`engine` to `builtin` to `swarm` back to
+`engine`, the moment sub-agents move in-process). The cap runs **after** every result is emitted: the
+human has already seen the full output and the trace records what ran, so what this trims is only the
+model's copy — trimming before emission would hide output from the user to save the model's context. A
+hook returning the wrong number of results is ignored rather than trusted, since applying it would pair
+a `tool_result` with the wrong `tool_use`.
+
+### P66.21 — three doc corrections, and one that had already been deleted
+
+**ARCH-13 contradicted the item.** CLAUDE.md's claim that write/execute tools serialize via
+`sync.RWMutex` was not there to fix: `git log -S RWMutex` shows it was removed by the commit that cut
+CLAUDE.md by 73%, which left the guarantee *undocumented* rather than wrong. Re-added accurately —
+write/exec take one plain exclusive `sync.Mutex`, reads take no lock and are not held off by a
+concurrent write (P8.6), and the only read-vs-write ordering is the same-`path` dependency graph, so a
+`shell` call and a `read_file` are never ordered.
+
+`buildChatSystem`'s doc comment claimed equivalence with the daemon's `effectiveSystem`; it now states
+the four divergences verified by diffing the two — no deferred-tools block (so the model is never told
+to reach deferred tools through `tool_search`), no debate-integration block, no local-profile caps on
+context files or the repo map, and a repo map that comes only from the on-disk `aegis index` cache while
+it is fresh. That list is the map P66.13's refactor needs, which is part of why P66.13 moved up the ten.
+
+`internal/tui/view.go` still asserted the pre-P35.13 claim that Ollama's `prompt_eval_count` is a
+cache-hit delta, and — worse than being stale — proposed a remediation that must not be applied. It now
+states that the count is the full prompt every turn, that the meter is therefore accurate on a cache-hit
+turn, and that the fix P35.10 proposed (feeding the bar an estimate instead) would replace a correct
+number with an estimate.
+
+### P66.12 — staticcheck, and the CI step that now gates
+
+The 28 findings are cleared and **`continue-on-error: true` is deleted from the staticcheck step**,
+which is this item's actual closure condition — clearing the backlog without making the step gate would
+have let the next 28 accumulate the same way. Two of the findings were false positives and were
+reworded rather than silenced: the deliberately side-effecting double `d.record` is now two explicit
+evaluations (a rewrite that short-circuits away the second call would delete the point of the test), and
+the doc comment beginning with an embed directive was rephrased so it is not parsed as one — in the one
+file whose subject is embed patterns silently omitting files.
+
+One thing learned is recorded beside the CI step: the untagged run only sees the default build, so a
+symbol used solely by a build-tagged test (`live_eval`, `live_workflow`, `live_probe`) reads as U1000
+dead. Annotate it with a lint-ignore directive; do not delete it.
+
+**Previously, 2026-08-16 (second sitting) — the first five rows of the "Up next" ten as it then stood
 shipped**: P66.5, P66.7's LLM-01 remainder, P66.16, P66.10 and P66.9, one commit each, every commit
 independently `go build ./...` + `go test ./...` green rather than only the final tree. That empties
 Tier 1. Their records are below, and three of them **correct the finding they were built from** —

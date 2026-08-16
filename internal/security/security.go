@@ -40,22 +40,6 @@ func (s Severity) rank() int {
 	}
 }
 
-// normalizeSeverity maps tool-specific severities onto the normalized scale.
-func normalizeSeverity(s string) Severity {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
-	case "CRITICAL":
-		return SevCritical
-	case "HIGH", "ERROR":
-		return SevHigh
-	case "MEDIUM", "MODERATE", "WARNING":
-		return SevMedium
-	case "LOW":
-		return SevLow
-	default:
-		return SevInfo
-	}
-}
-
 // Reachability classifies whether a vulnerable dependency's flagged code is
 // actually invoked by the project, for the handful of tools that can tell
 // (currently: osv-scanner's --call-analysis, govulncheck-backed for Go and

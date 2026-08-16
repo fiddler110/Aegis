@@ -16,7 +16,7 @@ func (p paletteItem) Description() string { return p.desc }
 func paletteItemsFrom(entries []cmdEntry) []list.Item {
 	items := make([]list.Item, len(entries))
 	for i, e := range entries {
-		items[i] = paletteItem{name: e.name, desc: e.desc}
+		items[i] = paletteItem(e)
 	}
 	return items
 }

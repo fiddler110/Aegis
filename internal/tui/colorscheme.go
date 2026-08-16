@@ -191,10 +191,9 @@ var (
 	colFgMost color.Color
 
 	// --- Background / surface tiers (base → most visible) ---
-	colBgBase  color.Color
-	colBgLeast color.Color
-	colBgLess  color.Color
-	colBgMost  color.Color
+	colBgBase color.Color
+	colBgLess color.Color
+	colBgMost color.Color
 
 	colSeparator color.Color
 	colOnPrimary color.Color
@@ -204,11 +203,7 @@ var (
 	colError       color.Color
 	colWarn        color.Color
 	colWarnSubtle  color.Color
-	colDenied      color.Color
-	colBusy        color.Color
 	colInfo        color.Color
-	colInfoMore    color.Color
-	colInfoMost    color.Color
 	colSuccessRole color.Color
 	colSuccessMore color.Color
 	colSuccessMost color.Color
@@ -230,7 +225,6 @@ var (
 
 	colBrandBg  color.Color // brand chip background
 	colBrandFg  color.Color // brand chip text
-	colShield   color.Color // shield / logo art
 	colCwd      color.Color // working directory
 	colInputSep color.Color // input border separator
 
@@ -301,13 +295,12 @@ func applyTheme(name, workDir string) string {
 func applyScheme(s colorScheme) {
 	colPrimary, colSecondary, colAccentAlt, colKeyword = s.primary, s.secondary, s.accentAlt, s.keyword
 	colFgBase, colFgSub, colFgMore, colFgMost = s.fgBase, s.fgSub, s.fgMore, s.fgMost
-	colBgBase, colBgLeast, colBgLess, colBgMost = s.bgBase, s.bgLeast, s.bgLess, s.bgMost
+	colBgBase, colBgLess, colBgMost = s.bgBase, s.bgLess, s.bgMost
 	colSeparator, colOnPrimary = s.separator, s.onPrimary
 
 	colDestructive, colError = s.destructive, s.errorC
 	colWarn, colWarnSubtle = s.warn, s.warnSubtle
-	colDenied, colBusy = s.denied, s.busy
-	colInfo, colInfoMore, colInfoMost = s.info, s.infoMore, s.infoMost
+	colInfo = s.info
 	colSuccessRole, colSuccessMore, colSuccessMost = s.successRole, s.successMore, s.successMost
 
 	colSurface = colBgBase
@@ -326,7 +319,6 @@ func applyScheme(s colorScheme) {
 
 	colBrandBg = colPrimary
 	colBrandFg = colOnPrimary
-	colShield = s.shield
 	colCwd = colInfo
 	colInputSep = colSeparator
 

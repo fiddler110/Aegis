@@ -778,9 +778,9 @@ func TestSelectScannersKeepsDefaultMethod(t *testing.T) {
 
 // TestMultiscannerContextCarriesEveryCopiedFile guards a mistake that only
 // surfaces minutes into a build: the build context is materialized from the
-// go:embed FS, so a file the Containerfile COPYs but the embed pattern omits
-// fails with "no such file or directory" pointing at the context, not at the
-// embed. Cheaper to catch here.
+// embedded filesystem, so a file the Containerfile COPYs but the embed
+// pattern omits fails with "no such file or directory" pointing at the
+// context, not at the embed. Cheaper to catch here.
 func TestMultiscannerContextCarriesEveryCopiedFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := MaterializeMultiscannerContext(dir); err != nil {

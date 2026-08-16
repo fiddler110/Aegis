@@ -290,14 +290,22 @@ func newChatCmd() *cobra.Command {
 			compactor, ctxWin := driveCompaction(context.Background(), cfg, adapter, logger)
 
 			eng, err := engine.New(engine.Options{
-				Adapter:     adapter,
-				Tools:       reg,
-				Gate:        gate,
-				Compactor:   compactor,
-				Cost:        tracker,
-				Temperature: cfg.Provider.Temperature,
-				Seed:        cfg.Provider.Seed,
-				BudgetUSD:   cfg.Cost.BudgetUSD,
+				Adapter:   adapter,
+				Tools:     reg,
+				Gate:      gate,
+				Compactor: compactor,
+				// P67.1: the per-call caps in truncate.go bound one result; this
+				// bounds what a parallel round contributes in aggregate.
+				RoundResultCap: roundCapFor(cwd),
+				// P66.14/LLM-03: admits this backend's reported prompt counts as
+				// calibration samples. The compat adapter on an :11434 base_url
+				// is the documented Ollama configuration and had never been
+				// admitted.
+				SharedContextWindow: providerfactory.CertainlyOllama(cfg.Provider),
+				Cost:                tracker,
+				Temperature:         cfg.Provider.Temperature,
+				Seed:                cfg.Provider.Seed,
+				BudgetUSD:           cfg.Cost.BudgetUSD,
 				// P59.4: the generation budget rides the same path as the
 				// wall-clock one. MaxTokensPerRun is deliberately still not set
 				// here — this is the phased drive, whose whole design is a fresh
@@ -762,6 +770,11 @@ func driveCompaction(ctx context.Context, cfg *config.Config, adapter provider.A
 		Adapter:       adapter,
 		Model:         compModel,
 		ContextWindow: ctxWin,
+		// P66.14: the trigger reserves room for the completion, so it needs the
+		// same max_tokens the engine's own gate uses. Without it the summarizer
+		// gates at a flat 85% while the engine gates at half the window, and a
+		// drive's compactions land too late to leave room for an answer.
+		MaxTokens: cfg.Provider.MaxTokens,
 		// Mirrors the daemon: on a prefix-caching local backend the prune
 		// pre-pass is gated on headroom rather than run unconditionally, since
 		// rewriting the middle of the conversation there costs a full prefill
@@ -861,13 +874,32 @@ func watchSignal(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os
 	}
 }
 
-// buildChatSystem assembles the one-shot chat system prompt so the CLI path is
-// equivalent to the daemon's effectiveSystem (internal/server/helpers.go):
-// persona base + shared blocks + memory/context + the <skills_available> index
-// + the cached repo map. Extracted from the command closure so the assembly —
-// in particular that skills are advertised, without which the registered
-// `skill` tool is undiscoverable — is unit-testable. explicit --system wins,
-// then --persona, then general.
+// buildChatSystem assembles the one-shot chat system prompt: persona base +
+// shared blocks + memory/context + the <skills_available> index + the cached
+// repo map. Extracted from the command closure so the assembly — in particular
+// that skills are advertised, without which the registered `skill` tool is
+// undiscoverable — is unit-testable. explicit --system wins, then --persona,
+// then general.
+//
+// This is a partial re-derivation of the daemon's effectiveSystem
+// (internal/server/helpers.go), NOT an equivalent of it (QUAL-02/P66.13). The
+// blocks it assembles are the same and in the same order, but `aegis chat`
+// diverges in four known ways:
+//
+//   - No <deferred_tools> block. Deferred tools are therefore not advertised on
+//     this path, so the model is never told to reach them via `tool_search` —
+//     a discovery loss, not a registry difference.
+//   - No debate-integration block, so `security.debate.*` is inert here.
+//   - No local-profile caps: the daemon truncates context files to
+//     localContextFilesMaxBytes and drops an over-cap repo map
+//     (localRepoMapMaxBytes) under the local prompt profile; this path applies
+//     neither.
+//   - Repo map comes only from the on-disk cache written by `aegis index`, and
+//     only while fresh, where the daemon builds/refreshes it per workspace. It
+//     also has no session-scoped skill activation to layer on.
+//
+// Keep this list current when either side changes; P66.13 tracks closing the
+// divergence by extraction rather than by patching each site.
 func buildChatSystem(cfg *config.Config, cwd string, enabledBuiltins []string, system, personaName string) string {
 	resolvedSystem := system
 	if resolvedSystem == "" {
@@ -1309,4 +1341,14 @@ func skillPhaseSpecs(cfg *config.Config, skillName string) []skills.PhaseSpec {
 		return nil
 	}
 	return sk.Phases
+}
+
+// roundCapFor builds the P67.1 aggregate round bound for an engine rooted at
+// root. The CLI paths set no engine Workdir — their tools are rooted at the
+// process cwd by construction (builtin.Options.Root) — so the root is bound here
+// and the spill lands in the workspace the run is actually reading.
+func roundCapFor(root string) engine.RoundCapFunc {
+	return func(ctx context.Context, results []string) []string {
+		return builtin.CapRound(ctx, root, results)
+	}
 }

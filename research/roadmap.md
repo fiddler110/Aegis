@@ -10,7 +10,7 @@ adding items.
 
 ## Status
 
-**42 open items: 36 build (Tier 1-4) + 6 verification-only. Tier 1 is empty.**
+**37 open items: 31 build (Tier 1-4) + 6 verification-only. Tier 1 is empty.**
 
 **The P67 batch is a comparative reading of an external agent implementation**, not a review of this
 codebase. On 2026-08-16 the leaked Claude Code CLI source (`paperwave/claude-code-cli-leaked` @
@@ -35,10 +35,11 @@ already parked. Three constraints apply to every P67 entry and are not repeated 
 adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass produced 70 findings
 against HEAD `3c2b57b`, recorded in [CodeReview.md](../CodeReview.md) with per-finding evidence. The
 items filed below (**P66.11**-**P66.26**) carry every finding worth acting on; each names the finding
-IDs it closes, so the review document is the rationale and this document is the work. **Thirteen of
+IDs it closes, so the review document is the rationale and this document is the work. **Seventeen of
 the batch shipped on 2026-08-15/16** — P66.2, P66.1, P66.4, P66.3, P66.6, P66.7 (both halves), P66.8,
-the P66.24 flake found while building P66.4, and then P66.5, P66.16, P66.10 and P66.9 — including
-both Criticals and **all six** of the findings that were exploitable the day the review landed. Their
+the P66.24 flake found while building P66.4, then P66.5, P66.16, P66.10 and P66.9, and finally
+P66.14, P66.11, P66.21 and P66.12 — including both Criticals and **all six** of the findings that
+were exploitable the day the review landed. Their
 build records, and the corrections several of them make to the item they were written from, are in
 [releases.md](releases.md).
 
@@ -57,37 +58,37 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 [Verification Work](#verification-work) below.
 
 - **Tier 1:** 0 — empty. **P66.5** shipped 2026-08-16, closing the last exploitable-today finding.
-- **Tier 2:** 9 — **P66.11**, **P66.12**, **P66.21**, **P66.25** (SEC-07, refiled), plus five from
-  P67: **P67.1**, **P67.2**, **P67.3**, **P67.4**, **P67.5**.
-- **Tier 3:** 7 — **P66.13**, **P66.14**, **P66.15**, plus four from P67: **P67.6**, **P67.7**,
-  **P67.8**, **P67.9**.
+- **Tier 2:** 5 — **P66.25** (SEC-07, refiled), plus four from P67: **P67.2**, **P67.3**, **P67.4**,
+  **P67.5**. (**P66.11**, **P66.12**, **P66.21** and **P67.1** shipped 2026-08-16.)
+- **Tier 3:** 6 — **P66.13**, **P66.15**, plus four from P67: **P67.6**, **P67.7**, **P67.8**,
+  **P67.9**. (**P66.14** shipped 2026-08-16.)
 - **Tier 4:** 20 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26** (PERF-02,
   refiled), the five from P67 (**P67.10**-**P67.14**), plus the nine pre-existing: **P65.4**,
   **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
 - **Verification:** 6 — **P66.22**, **P38.1**, **P62.9**, **P65.2** (prompt half), **P65.3**
   (local half), **P62.8**.
 
-**What to do next.** Rows 1-5 of the previous "Up next" ten shipped on 2026-08-16 and the list was
-re-read the same day against the full open set, P67 included. See
-[Up next](#up-next--the-ten-items-to-take-in-order) for the table as it now stands. The re-read
-changed the shape of the list rather than just its remainder, for one reason:
+**What to do next.** The rewritten ten's rows 1, 2, 4, 5 and 6 shipped on 2026-08-16 (P66.14,
+P66.11, P67.1, P66.21, P66.12) — build records in [releases.md](releases.md). **Row 3, the live-tier
+sitting, did not run: no model server was reachable on the machine**, and it is the one row on the
+list that cannot be substituted for, because its product is a measurement rather than code. It is now
+row #1 and is the next thing to do the moment Ollama is up.
 
-**The live-tier sitting is now the centre of the plan, and two items lead into it.** Five of the six
-verification items close on one harness — a local model driving `aegis chat --skill threat-modeling`
-/ `TestLiveWorkflow` — so one setup answers P66.22, P38.1, P62.9, P65.2's prompt half and P65.3's
-local half together. That sitting is the only open work anywhere whose outcome produces *new
-information* rather than new code, which makes what it is measured with worth building first:
+Both of its gates are closed. **P66.14** landed the single shared compaction trigger, so the five
+numbers the sitting measures are no longer measured against two disagreeing thresholds, and the P62.4
+calibration now fires on the documented `openai` + `:11434/v1` path. **P66.11** landed the
+instrument: `TurnTrace` now carries the stop reason, the compaction event (applied / summarized /
+suppressed, tokens freed, and the estimate and trigger it decided on), the guard verdict, the
+correctives the engine injected, and a run id — which is LLM-02's and ARCH-04's closure conditions
+restated as a struct, readable with `aegis sessions trace <id>`.
 
-- **P66.14 gates it.** It changes three of the five numbers P66.22 would otherwise measure wrong, and
-  measuring the pre-fix state answers a question nobody will have afterwards. P66.7 was the other
-  gate and has shipped.
-- **P66.11 instruments it.** `TurnTrace` already discards stop reason, compaction event, guard
-  verdict and retry record one line after they are computed — and *those are the observations the
-  sitting is trying to make*. LLM-02's closure condition is literally "the turn at which compaction
-  actually fires"; ARCH-04's is whether a fan-out trips `MaxTurnStall`. This document's own method
-  note says to check the instrument before measuring, and it has twice recorded a fixed instrument
-  inverting an already-acted-on verdict. That argument moves P66.11 from the bottom of the previous
-  ten to just ahead of the run.
+**One finding from that work changes what the sitting should expect.** Fixing LLM-02 removed the band
+that P62.7's prune-thrash lived in: on the P62.7 fixture, the pre-fix engine asked for compaction at
+15,156 estimated tokens while the summarizer refused until 19,660, so every turn in that ~4,500-token
+gap paid a rewrite that freed ~45 tokens. With one trigger the first over-trigger turn summarizes 91
+messages into 9 and the next nineteen turns need nothing. The minimum-yield rule is still live and
+still tested, but a live run that was expected to show prune thrash should no longer show it — see
+`TestSharedTriggerLeavesNoPruneThrashBand`.
 
 **The rest of Tier 2 has no forced order** and is ranked by size-to-value alone. The one internal
 constraint is that **P67.3** builds the purpose-tag seam **P67.6** (Tier 3) needs, and **P67.4**
@@ -97,7 +98,7 @@ the ten partly to make later Tier 3 work cheaper.
 **The two refiled sub-items are still not equivalent in urgency.** **P66.25** (SEC-07, content-bound
 trust grants) is real work with a real gap behind it — a `git pull` that adds a `hooks:` block still
 re-prompts nothing — and P66.5 built its prerequisite, the well-defined security-relevant subset. It
-is the only security item left in the open set and it earns a place on the ten. **P66.26** (PERF-02)
+is the only security item left in the open set and it holds its place on the ten. **P66.26** (PERF-02)
 is Tier 4 and should stay there: it is a Low-severity durability trade on the one database that holds
 checkpoints, the cost ledger and traces, and P66.9 already removed most of the pressure behind it.
 
@@ -108,12 +109,13 @@ P63.10 are still present as described) — see each entry's **Promote when** for
 **Method notes worth re-reading before filing or building anything new** (full detail in
 releases.md's pass history): before measuring an optimization, check the instrument the rest of the
 system is running on — this document has twice recorded a fixed instrument *inverting* an
-already-acted-on verdict. Every documented live-tier command needs `-count=1`, or a re-run silently
-replays Go's cached verdict instead of reproducing. Mutation-test any new numeric threshold — a short
-fixture cannot tell adjacent thresholds apart, and a count assertion cannot tell *when* something
-fired. And **read the refutation records in releases.md before filing anything** against
-`internal/provider`, `internal/ollamainfo`, `internal/repomap`, or scanner method resolution — several
-obvious-looking gaps there have already been checked and answered.
+already-acted-on verdict, and P66.14 is now a third case, where fixing the threshold deleted the
+phenomenon a shipped heuristic was built to rate-limit. Every documented live-tier command needs
+`-count=1`, or a re-run silently replays Go's cached verdict instead of reproducing. Mutation-test any
+new numeric threshold — a short fixture cannot tell adjacent thresholds apart, and a count assertion
+cannot tell *when* something fired. And **read the refutation records in releases.md before filing
+anything** against `internal/provider`, `internal/ollamainfo`, `internal/repomap`, or scanner method
+resolution — several obvious-looking gaps there have already been checked and answered.
 
 ---
 
@@ -132,62 +134,49 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next — the ten items to take in order
 
-**Rewritten 2026-08-16**, after the previous ten's rows 1-5 shipped (build records in
-[releases.md](releases.md); the retired table is preserved there rather than carried here as
-strikethrough). This is a *reading* of the tiers, not a second ranking: every row's tier and size
-come from the item's own `Priority:` line, and the order is what those tiers say once the real
-sequencing constraints are honored. Each row's "why now" is the one-sentence case; the item's own
-entry below carries the evidence and closure condition.
+**Rewritten 2026-08-16 (second time that day)**, after five of the previous ten shipped: P66.14,
+P66.11, P67.1, P66.21 and P66.12, one commit each. Build records in [releases.md](releases.md); the
+retired table is preserved there rather than carried here as strikethrough. This is a *reading* of the
+tiers, not a second ranking: every row's tier and size come from the item's own `Priority:` line, and
+the order is what those tiers say once the real sequencing constraints are honored.
 
-**This is the first ten that ranks P66 and P67 against each other.** The previous list predated the
-P67 batch and said so; four P67 items enter here on their own merits, and two of them (#7, #9) are
-on the list partly because they make later Tier 3 work cheaper.
+**Row #1 is the row that did not run last time.** The live-tier sitting was #3 and was blocked on a
+reachable model server, not on code — and unlike a build item it cannot be swapped for something else,
+because what it produces is information nobody has. Both of its gates (P66.14, P66.11) are now closed,
+which is the strongest reason to take it first: the instrument is built and the thresholds it reads are
+no longer inconsistent.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **P66.14** — reconcile the two compaction thresholds | T3 · M | The engine triggers at 2,048 on a 4,096 window; the summarizer refuses until 3,277 — so compaction lands with 819 tokens left for the completion. And the P62.4 calibration is inert on the documented `openai` + `:11434/v1` path, so **every user following the documented configuration runs the whole session on a 20-33% undercount**. The last gate on #3. Read **P67.6** before starting, so the two compaction triggers are designed as one decision. |
-| 2 | **P66.11** — redaction + turn trace | T2 · M | Promoted from #9 on the previous ten. The `TurnTrace` half is the instrument #3 reads: stop reason, compaction event, guard verdict and retry record are all computed and discarded one line later, and LLM-02/ARCH-04's closure conditions are stated in exactly those terms. Build the instrument before taking the measurement. The redaction half (`internal/share` redacts nothing at all) rides along. |
-| 3 | **P66.22 + the live-tier sitting** | Verification | One `TestLiveWorkflow` setup answers **five** items: P66.22's five estimated LLM-tier findings, **P38.1**'s conformance verdict, **P62.9**'s n≥10 arms plus the unrun default-prose control, **P65.2**'s prompt half and **P65.3**'s local half. The only open work anywhere that produces new information rather than new code. Sequenced behind #1 and instrumented by #2; use `-count=1`. |
-| 4 | **P67.1** — per-round tool-result cap | T2 · S | The smallest item in either batch. Every cap in `truncate.go` is per *call*, written when a round was one result at a time; `runTools` now dispatches `maxParallelTools` concurrently, so N read tools land N× the intended context bite in one message with nothing bounding the aggregate. Reuses the existing spill path unchanged. |
-| 5 | **P66.21** — doc corrections the review disproved | T2 · S | Three left (P66.8 closed the first). The `view.go` one is actively harmful: it asserts the pre-P35.13 `prompt_eval_count` claim and proposes remediation that must not be done — and it sits in the same accounting path #1 is fixing, so take it in that neighbourhood. |
-| 6 | **P66.12** — staticcheck cleanup | T2 · S | 28 findings, no new defects — a good result worth banking. Closure is deleting `continue-on-error` from CI; until then the step is advisory and the next 28 accumulate the same way. Cheapest permanent narrowing of the defect surface on the list. |
-| 7 | **P67.3** — call-purpose tag on provider requests | T2 · S-M | One retry policy currently serves the user's turn, compaction, the guard, debate roles, swarm sub-agents, the probe and cron alike — so background work amplifies load during exactly the window the backend is struggling. Small on its own, and the enabling seam **P67.6** cannot be gated correctly without. Keep the `Retry-After` clamp at `MaxDelay` exactly as it is. |
-| 8 | **P66.25** — content-bound trust grants (SEC-07) | T2 · M | The only security item left in the open set. A grant says "this path is trusted", never "this content is trusted", so a `git pull` adding a `hooks:` block re-prompts nothing. P66.5 shipped its prerequisite. **Decide the `.env` question explicitly** — P66.1 resolves `.env` before any project-controlled file by design, so either invert that or document the partial fingerprint; an undocumented partial is worse than either. |
-| 9 | **P67.4** — cancel siblings when a parallel call fails | T2 · S | A round of four builds where the first fails still pays wall-clock for the other three and appends results to a conversation about to be redirected. Also shortens the aggregate wait `MaxTurnStall` backstops. On the list ahead of its size because it settles the cancellation policy **P67.7** would otherwise have to settle mid-refactor. |
-| 10 | **P67.5** — recall dedupe, freshness and gotcha bias | T2 · S | A top-scoring memory is re-injected every turn it keeps winning, spending the entry budget on context the model already has; `FormatEntries` renders no age though the mtime is already read to key the cache. Cheap, self-contained, and it improves the same local-model path everything above is measured on. |
+| 1 | **P66.22 + the live-tier sitting** | Verification | One `TestLiveWorkflow` setup answers **five** items: P66.22's five estimated LLM-tier findings, **P38.1**'s conformance verdict, **P62.9**'s n≥10 arms plus the unrun default-prose control, **P65.2**'s prompt half and **P65.3**'s local half. Still the only open work anywhere that produces new information rather than new code. Both gates shipped; needs a model server and `-count=1`. Read the P66.14 record first — the prune-thrash band it was expected to observe no longer exists. |
+| 2 | **P67.3** — call-purpose tag on provider requests | T2 · S-M | One retry policy currently serves the user's turn, compaction, the guard, debate roles, swarm sub-agents, the probe and cron alike — so background work amplifies load during exactly the window the backend is struggling. Small on its own, and the enabling seam **P67.6** cannot be gated correctly without it. Keep the `Retry-After` clamp at `MaxDelay` exactly as it is. |
+| 3 | **P66.25** — content-bound trust grants (SEC-07) | T2 · M | The only security item left in the open set. A grant says "this path is trusted", never "this content is trusted", so a `git pull` adding a `hooks:` block re-prompts nothing. P66.5 shipped its prerequisite. **Decide the `.env` question explicitly** — P66.1 resolves `.env` before any project-controlled file by design, so either invert that or document the partial fingerprint; an undocumented partial is worse than either. |
+| 4 | **P67.4** — cancel siblings when a parallel call fails | T2 · S | A round of four builds where the first fails still pays wall-clock for the other three and appends results to a conversation about to be redirected. Also shortens the aggregate wait `MaxTurnStall` backstops. On the list ahead of its size because it settles the cancellation policy **P67.7** would otherwise have to settle mid-refactor. |
+| 5 | **P67.5** — recall dedupe, freshness and gotcha bias | T2 · S | A top-scoring memory is re-injected every turn it keeps winning, spending the entry budget on context the model already has; `FormatEntries` renders no age though the mtime is already read to key the cache. Cheap, self-contained, and it improves the same local-model path #1 is measured on. |
+| 6 | **P67.2** — prompt stability invariant | T2 · S | Promoted from the nearest miss. It is the same shape as the existing prompt-size ceiling on the axis that costs more per turn, and it composes with the shipped P66.7. It rises because P66.11's `TurnTrace` now records enough per turn to *see* a cache break when one happens — the reason it dropped off last time was that nothing had been observed breaking the cache, and the observation is now cheaper than it was. |
+| 7 | **P66.13** — `aegis chat` bypasses the permission stack | T3 · M-L | Promoted from "deliberately below the cut", and still the most serious *defect* in the open set: `aegis chat` builds a bare permission gate. It needs `newChatCmd` — 683 lines wrapping a 615-line closure — split before either bug is testable. It rises because the small-fix batch that kept displacing it is now empty of Tier 2 items cheaper than it, and P66.21 has just corrected `buildChatSystem`'s doc comment to say what actually diverges, which is the map that refactor needs. |
+| 8 | **P66.15** — sweep `internal/tui` and `internal/security` | T3 · M | 26% of production Go that nobody read. The highest-expected-value item with no fired trigger; the one hour eventually spent in `approval.go` during arbitration produced a Medium security finding, which is the case for it. |
+| 9 | **P67.6** — gate compaction and background work on the purpose tag | T3 · M | Sequenced directly behind #2, which builds its seam. Read P66.14's record before starting: the compaction trigger is now one shared function with the caller's own number passed per call, so this item's gating decision has one place to live rather than two. |
+| 10 | **P67.7** — restructure the parallel tool round | T3 · L | The largest engine change in either batch, and it wants #4 landed first so the cancellation policy is settled before the refactor rather than during it. Also read P67.1's record: `runTools` now has a round-level result bound layered above the per-call caps, and that hook has to survive the restructure. |
 
 **Notes on the ordering, and on what did not make it.**
 
-**#3 is a sitting, not a task.** It is one row because it is one setup; the five items it closes have
+**#1 is a sitting, not a task.** It is one row because it is one setup; the five items it closes have
 their own entries under [Verification Work](#verification-work) with their own closure conditions,
 and running the harness without recording all five wastes the setup.
 
-**P66.13** (T3, M-L) is again deliberately below the cut even though `aegis chat` bypassing the whole
-permission stack is the most serious *defect* in the open set. It needs `newChatCmd` — 683 lines
-wrapping a 615-line closure — split before either bug is testable, and that enabling refactor does
-not belong in a batch of small fixes. It is the strongest candidate for the next ten, and the first
-thing to promote if a user is actually running `aegis chat` with `permission.rules` set.
-
-**Two more sit just below.** **P67.2** (prompt stability invariant) is the nearest miss: it is the
-same shape as the existing prompt-size ceiling on the axis that costs more per turn, and it composes
-with the shipped P66.7 — it drops off only because nothing has been observed breaking the cache yet.
-**P66.15** (sweep `internal/tui` and `internal/security`, 26% of production Go that nobody read) is
-the highest-expected-value item with no fired trigger; the one hour eventually spent in
-`approval.go` during arbitration produced a Medium security finding, which is the case for it.
+**What is fixed and what is free.** Only two orderings are real: **#2 before #9** (the purpose tag is
+that item's seam) and **#4 before #10**. Rows #3, #5, #6, #7 and #8 have no dependencies on each other
+or on anything above them and can be reordered freely to suit whatever file is already open. #1 depends
+on nothing in the codebase at all — only on a reachable model server.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
 order, which is priority order only *within* a track — it cannot see a cross-tier ranking, so it will
-suggest the first unblocked Tier 2 entry (currently P66.11) rather than #1. Use it for repo state and
-for the parse; use this table for what to take.
+suggest the first unblocked Tier 2 entry rather than #1. Use it for repo state and for the parse; use
+this table for what to take.
 
-**What is fixed and what is free.** Only three orderings are real: **#1 before #3**, **#2 before #3**
-(by argument, not by mechanism — #3 is runnable without #2, just less legible), and **#7 before
-P67.6** on a later ten. Rows #4, #5, #6, #8, #9 and #10 have no dependencies on each other or on
-anything above them and can be reordered freely to suit whatever file is already open.
-
-The remaining P67 Tier-3 items (**P67.6**, **P67.7**, **P67.8**, **P67.9**) are each larger than
-anything on the current ten and belong to a later sitting. **P67.7** in particular is the largest
-engine change in either batch and wants #9 landed first.
+The remaining P67 Tier-3 items (**P67.8**, **P67.9**) sit just below the cut and belong to a later
+sitting.
 
 ---
 
@@ -207,77 +196,12 @@ a fired trigger on a Tier 4 entry, not from re-reading the existing findings.
 
 ## Open Work — Tier 2
 
-**Status: 9 open** — four from the P66 review batch and five from the P67 external-source reading.
-**P66.7, P66.9, P66.10 and P66.16 shipped 2026-08-16** (P66.8 earlier the same day), leaving P66.11,
-P66.12, P66.21 and the newly refiled **P66.25**. Each is self-contained and independently shippable;
-the one ordering constraint inside the tier is that **P67.3** builds the seam **P67.6** (Tier 3)
-needs, so taking P67.3 early costs nothing and unblocks later work.
-
-### P66.11 — Nothing redacts, and the turn trace is too thin to debug a bad run
-
-Two halves of one gap: what leaves the process, and what is kept about a run.
-
-`internal/share` performs **no redaction at all** (SEC-08) — a shared session carries whatever the
-transcript holds, including anything a `.env` or `ps` call put there. Add a redaction pass reusing
-`internal/mcp/outbound.go`'s existing credential patterns, emit a redaction count so a silent miss is
-visible, and apply it to the audit trail too (SEC-11's redact-don't-truncate half).
-
-`TurnTrace` carries no stop reason, no compaction event, no guard verdict, no retry record and no run
-id (GAP-01) — **all of which are already computed and discarded one line after they are produced**.
-For a project whose entire method is measurement-driven, that is the gap most at odds with how the
-project works: every live-tier item in this document would be easier to close with it. Widen the
-struct; **skip the OTel/Prometheus half**, which is a dependency decision this item does not need to
-make.
-
-Closes SEC-08, SEC-11, GAP-01. Priority: Tier 2 — M.
-
-### P66.12 — staticcheck cleanup
-
-`staticcheck` (2026.1) now runs clean across the tree and reports **28 issues in 173k lines** — no new
-correctness or security defect, which is a good result worth recording. What is left is housekeeping:
-17 U1000 unused symbols (including `doctorToolCallSmokePrompt` at `internal/cli/doctor.go:616`, a
-leftover from before the probe moved to `internal/toolcallprobe` and an invitation to edit the wrong
-copy); three vestigial `SA4005` fields on `fakeImageScanner` (`internal/security/security_test.go:315`)
-that are positioned and commented exactly like a working P55.7 assertion but are dead — the real
-assertion runs through `recordingImageScanner`'s pointer; one genuine `SA4006` test gap at
-`internal/compaction/compaction_test.go:95`, where the under-budget path never inspects `out`; and
-style hits.
-
-Two are **false positives** worth rewording anyway: the deliberate side-effecting
-`d.record("a") || d.record("a")` at `internal/engine/loopdetect_test.go:286`, and prose beginning
-`go:embed` in a doc comment at `internal/security/multiscanner_test.go:781` — in the one file whose
-subject is embed patterns silently omitting files.
-
-`staticcheck` is **already in CI** as of P66.2, with the toolchain pin and its rationale documented
-beside the install step (`honnef.co/go/tools` carries `toolchain go1.25.13` in its own `go.mod`, so
-`GOTOOLCHAIN=auto go install` produces a binary that cannot analyze this go1.26 module and reports 21
-compile errors instead of analysis). It runs `continue-on-error: true` precisely because these 28
-findings are still open. **Deleting that line is this item's closure condition** — clearing the
-backlog without making the step gate leaves the next 28 to accumulate the same way.
-
-Closes QUAL-15. Priority: Tier 2 — S.
-
-### P66.21 — Documentation corrections the review proved wrong
-
-Four documented claims that the code contradicts. Grouped because doc work should not be counted as
-remediation effort, and because a wrong doc in this repo is load-bearing — CLAUDE.md is the primary
-knowledge store (QUAL-14) and these sentences are why a maintainer would *not* look.
-
-- ~~CLAUDE.md: the 900s stall bound "sits deliberately above every narrower timeout it backstops" —
-  false, see P66.8.~~ **Done 2026-08-16** with P66.8. The claim lived in `internal/config/config.go`'s
-  `DefaultMaxTurnStallSec` comment and `docs/configuration.md` as well as CLAUDE.md; all three now
-  state the true relation ("above every *per-call* bound") and the condition under which a larger
-  aggregate is admissible.
-- CLAUDE.md: write/execute tools serialize via `sync.RWMutex` — it is a plain `sync.Mutex`, and the
-  guarantee is narrower than the doc implies (ARCH-13).
-- `buildChatSystem`'s doc comment claims equivalence with the daemon's `effectiveSystem` — false, see
-  P66.13.
-- `internal/tui/view.go:305-312` still asserts the pre-P35.13 claim that `prompt_eval_count` is a
-  cache-hit delta. P35.13 corrected the code; this comment survived and is now wrong in the *opposite*
-  direction, telling a maintainer the context meter "understates how full the context window is" when
-  on native Ollama it is accurate — and proposing remediation that should not be done (LLM-09).
-
-Closes ARCH-13, LLM-09, and the doc half of P66.13 (P66.8's doc half is closed). Priority: Tier 2 — S.
+**Status: 5 open** — one from the P66 review batch and four from the P67 external-source reading.
+**P66.11, P66.12, P66.21 and P67.1 shipped 2026-08-16** (after P66.7, P66.9, P66.10 and P66.16
+earlier the same day), leaving only the refiled **P66.25** from P66. Each remaining item is
+self-contained and independently shippable; the one ordering constraint inside the tier is that
+**P67.3** builds the seam **P67.6** (Tier 3) needs, so taking P67.3 early costs nothing and unblocks
+later work.
 
 ### P66.25 — Trust grants are permanent and content-blind (SEC-07, refiled from P66.5)
 
@@ -305,28 +229,6 @@ not an edit.
 
 Closes SEC-07. Priority: Tier 2 — M. Sequence after P66.5 (shipped); read P66.1's record in
 [releases.md](releases.md) first, because the `.env` ordering is the whole difficulty.
-
-### P67.1 — Tool-result caps are per-call, and a parallel round multiplies them
-
-`internal/tool/builtin/truncate.go` carries the posture table for every tool result — which end
-survives, what happens to the remainder, how many notice bytes are reserved out of the cap — and
-every cap in it is **per call**. The table was written when a round was one result at a time. It no
-longer is: `Engine.runTools` (`internal/engine/engine.go:1769`) dispatches up to `maxParallelTools`
-concurrently, so a round of N read tools can each land at its own cap and produce N× the intended
-context bite inside a single user message. Nothing anywhere bounds the aggregate.
-
-The fix is a round-level budget layered *above* the existing caps, not a change to them: after the
-round's results are collected and before they are appended, if the combined size exceeds the budget,
-spill the largest results to `<workspace>/.aegis/spill/` — the mechanism already exists and already
-hands back a `read_file`-reachable path — until the total fits. Evaluate each round independently; a
-large result in this round and another in the next are both fine and neither should be touched.
-
-Two details worth pinning with the test rather than discovering later: notice bytes are reserved out
-of the cap, so a spilled result's replacement notice must be counted against the round budget too;
-and the spill must select by size, so a round of one huge result and four small ones spills the one,
-not all five.
-
-Priority: Tier 2 — S. No dependency. The smallest item in either open batch.
 
 ### P67.2 — The prompt has a size invariant and no stability invariant
 
@@ -422,8 +324,11 @@ Priority: Tier 2 — S. No dependency.
 
 ## Open Work — Tier 3
 
-**Status: 7 filed items** — three from the P66 review batch and four from the P67 external-source
-reading, each larger or sequence-dependent rather than urgent. P62.9, P65.2's prompt half and P65.3's
+**Status: 6 filed items** — two from the P66 review batch and four from the P67 external-source
+reading, each larger or sequence-dependent rather than urgent. **P66.14 shipped 2026-08-16**, closing
+LLM-02, LLM-03, ARCH-07 and PERF-03 — see [releases.md](releases.md), and read its record before
+touching the compaction path, because the shared trigger it introduced changed which numbers two
+already-shipped heuristics see. P62.9, P65.2's prompt half and P65.3's
 local half all moved to
 [Verification Work](#verification-work) — in each case the code is already shipped and what remains
 is a live-run result, not a design or implementation task.
@@ -461,34 +366,6 @@ stacks the full gate or states in a comment why it does not — the same grep-th
 actually responds to.
 
 Closes QUAL-01, QUAL-02, QUAL-03, QUAL-06, ARCH-05, ARCH-06. Priority: Tier 3 — M-L, sequence-dependent.
-
-### P66.14 — Two compaction thresholds that disagree, and a calibrator that never fires
-
-Four findings in the token-accounting path, grouped because they share one seam and fixing them
-separately would mean touching it three times:
-
-- **LLM-02** — P59.1's completion-sized compaction trigger is discarded one layer down.
-  `engine.compactionTrigger` (`engine.go:495`) reserves room for the completion;
-  `compaction.Summarizer.shouldCompact` (`compaction.go:243`) uses a flat 20%-free rule and never sees
-  `maxTokens`. At a 4,096 window the engine triggers at 2,048 and the summarizer refuses until 3,277 —
-  so summarization finally happens with 819 tokens left for a completion the request asked 32,768 for.
-  `SetEstimateCorrection` exists precisely because these two gates must not disagree; the argument was
-  never applied to the trigger itself. Fix with one shared trigger function taking `(window,
-  maxTokens)` used by both.
-- **LLM-03** — the P62.4 calibration is inert on the OpenAI-compat path. `afterTurn`
-  (`engine/compact.go:446`) gates on `PromptEvalDurationMS > 0`, which only the native Ollama adapter
-  sets — while `docs/providers.md` recommends `provider.default: openai` + `:11434/v1` for Ollama.
-  **Every user following the documented configuration runs the whole session on the uncorrected
-  20-33% undercount.** Gate on a positive backend identification instead; `sharedContextWindow` is
-  already one.
-- **ARCH-07** — `SetEstimateCorrection` pushes a per-run overhead into a Summarizer built once per
-  *server* and shared by every session, which that type's own doc comment argues per-session data
-  cannot live on.
-- **PERF-03** — `compactionGuard.requestOverhead` is snapshotted once in the constructor
-  (`compact.go:260`), but `tool_search`'s `reg.Load` mutates the exposed set mid-run, silently
-  undercounting the compaction trigger by up to 593 tokens for a single tool against a 4,550 budget.
-
-Closes LLM-02, LLM-03, ARCH-07, PERF-03. Priority: Tier 3 — M.
 
 ### P66.15 — Sweep the two packages this review did not read
 
@@ -1172,9 +1049,13 @@ verdict.
 
 One `TestLiveWorkflow` run against `qwen3:14b-32k` answers all of them, and it is the same harness
 P38.1, P62.9, P65.2's prompt half and P65.3's local half already need — so this costs no additional
-setup if scheduled with them. That bundle is row #3 of the current [Up next](#up-next--the-ten-items-to-take-in-order)
+setup if scheduled with them. That bundle is row **#1** of the current [Up next](#up-next--the-ten-items-to-take-in-order)
 ten, and it is one row precisely because running the harness without recording all five wastes the
 setup.
+
+**It was scheduled on 2026-08-16 and did not run: no model server was reachable** (nothing listening
+on `:11434`). Nothing about the item changed — it is a measurement, so there is no partial credit and
+nothing to substitute for it. Both of its gates shipped that day instead.
 
 **Closure conditions**, each a number this review could only estimate:
 
@@ -1189,16 +1070,32 @@ setup.
 - **LLM-10** — whether a model reload occurs between the tool-call probe and the first real turn.
 - **ARCH-04** — whether a fan-out or debate call trips `MaxTurnStall` before its own timeout.
 
-Run it **after** P66.7 and P66.14 ship, not before: those change three of the five numbers, and
-measuring the pre-fix state answers a question nobody will have afterwards. **P66.7 shipped
-2026-08-16, so P66.14 is the only gate left.** Use `-count=1` — a re-run without it replays Go's
-cached verdict, which this document has been caught by before.
+**Both gates are now closed.** P66.7 and P66.14 both shipped 2026-08-16 — the reason to sequence
+behind them was that they change three of the five numbers, and measuring the pre-fix state answers a
+question nobody will have afterwards. Use `-count=1` — a re-run without it replays Go's cached verdict,
+which this document has been caught by before.
 
-**Take P66.11 first if it is available.** Its `TurnTrace` half records stop reason, compaction event,
-guard verdict and retry record — which is LLM-02's and ARCH-04's closure conditions restated as a
-struct. The run is possible without it; it is much easier to read with it.
+**P66.11 shipped too, so the instrument is in place.** `TurnTrace` now carries the stop reason, the
+compaction event (applied / summarized / suppressed, tokens freed, and the estimate and trigger the
+decision was made on), the guard verdict, the correctives the engine injected, and a run id — LLM-02's
+and ARCH-04's closure conditions restated as a struct. Read it with `aegis sessions trace <id>`, whose
+`WHY` column renders exactly these, or from the JSON export for the full record.
 
-Priority: Verification — one run, five answers. Sequence after P66.14.
+**Two of the five expectations above have already moved, and the item's own text is now the pre-fix
+statement rather than the prediction:**
+
+- **LLM-02** is fixed rather than merely measurable: one shared trigger means the two gates cannot
+  differ, so what a live run now measures is *whether the shared number is the right one*, not whether
+  the two agree. The 2,048-vs-3,277 disagreement it describes no longer exists.
+- **LLM-03** is fixed: the calibration gate is now a positive backend identification, so it fires on
+  the `openai` + `:11434/v1` path. The run should confirm a non-zero sample count rather than
+  discovering there is none.
+- A **third expectation is retired by a side effect**: the prune-thrash the P62.7 minimum-yield rule
+  rate-limits was a *consequence* of the LLM-02 disagreement, and on the P62.7 fixture it disappears
+  entirely once the trigger is shared. A run that was expected to observe it should not.
+
+Priority: Verification — one run, five answers. Both gates shipped 2026-08-16; needs only a reachable
+model server.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 

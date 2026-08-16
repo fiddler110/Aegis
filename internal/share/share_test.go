@@ -44,7 +44,7 @@ func TestParseFormat(t *testing.T) {
 }
 
 func TestRenderHTML(t *testing.T) {
-	data, err := Render(sampleSession(), FormatHTML)
+	data, _, err := Render(sampleSession(), FormatHTML)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestRenderHTMLEscapes(t *testing.T) {
 			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "<script>alert(1)</script>"}}},
 		},
 	}
-	data, _ := Render(sess, FormatHTML)
+	data, _, _ := Render(sess, FormatHTML)
 	if strings.Contains(string(data), "<script>alert(1)</script>") {
 		t.Error("user text was not HTML-escaped")
 	}
@@ -74,7 +74,7 @@ func TestRenderHTMLEscapes(t *testing.T) {
 }
 
 func TestRenderMarkdownAndJSON(t *testing.T) {
-	md, err := Render(sampleSession(), FormatMarkdown)
+	md, _, err := Render(sampleSession(), FormatMarkdown)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRenderMarkdownAndJSON(t *testing.T) {
 		t.Errorf("markdown missing expected content:\n%s", md)
 	}
 
-	js, err := Render(sampleSession(), FormatJSON)
+	js, _, err := Render(sampleSession(), FormatJSON)
 	if err != nil {
 		t.Fatal(err)
 	}

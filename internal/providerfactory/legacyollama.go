@@ -63,6 +63,32 @@ func isCertainOllama(p config.ProviderConfig) bool {
 	return IsOllamaPortBaseURL(p.BaseURL)
 }
 
+// CertainlyOllama reports whether p names a backend positively identified as
+// Ollama, on either adapter: the native one (provider.default: ollama), or the
+// OpenAI-compat one pointed at an :11434 base_url.
+//
+// It is the same standard IsOllamaPortBaseURL sets and for the same reason — a
+// caller uses this where being wrong is not merely bad advice. P66.14 (LLM-03)
+// is the second such caller: the engine's token-estimate calibration was gated
+// on `PromptEvalDurationMS > 0`, a field only the native adapter sets, so every
+// user following docs/providers.md's own recommendation (`provider.default:
+// openai` with a `:11434/v1` base_url) ran the whole session on the uncorrected
+// 20-33% undercount. What that gate was reaching for was "this backend reports
+// the full prompt every turn, and truncates in silence when it is exceeded",
+// which is a property of the *server*, not of one adapter's telemetry.
+//
+// Deliberately narrower than config.LocalBackend, which answers "one GPU, not a
+// fleet" and includes LM Studio, llama.cpp and any loopback proxy. Those report
+// prompt tokens on their own terms; missing one here costs a correction, while
+// wrongly including a cloud gateway would calibrate against a cache-adjusted
+// number.
+func CertainlyOllama(p config.ProviderConfig) bool {
+	if strings.EqualFold(strings.TrimSpace(p.Default), "ollama") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(p.Default), "openai") && IsOllamaPortBaseURL(p.BaseURL)
+}
+
 // LegacyOllamaCompatDetail describes what the config is costing, or "" when
 // IsLegacyOllamaCompat doesn't fire. Shared by `aegis doctor` and the daemon's
 // startup warning so both say the same thing.

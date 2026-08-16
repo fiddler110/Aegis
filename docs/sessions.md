@@ -191,6 +191,10 @@ Inside the TUI:
 
 Tool results are truncated past ~8k characters to keep exported files manageable.
 
+**Exports are redacted (P66.11 / SEC-08).** An export is the one artifact in this system built to leave the machine, and it used to carry the transcript verbatim — every tool result, every shell command's output, anything a `cat .env` or an `env` dump put in context. Credential-shaped substrings are now replaced with a `[redacted: <class>]` placeholder before rendering, in all three formats (the pass runs over the session, not per renderer, so none of them can be the one that forgot), and **the count is stated**: in the document header for `html`/`md`, as a `redactions` key for `json`, and on the command line when the export is written. Zero is reported explicitly, because "nothing matched" and "the filter never ran" must not look the same.
+
+It is a filter over a small, low-false-positive pattern set, not detection: a secret in a shape it does not recognize still leaves in the export. Use `aegis security scan` if the question is whether a workspace contains secrets.
+
 ---
 
 ## Per-Turn Traces
@@ -214,6 +218,10 @@ Total                  16135   1447    9100   $0.034                            
 ```
 
 Useful for auditing run costs, profiling slow turns, and verifying cache behavior.
+
+**The `WHY` column (P66.11 / GAP-01).** A trace used to record what a turn *cost* and nothing about why it happened, so a run that took 40 turns looked the same as one that took 8. Each record now also carries the provider's stop reason, the compaction event (whether it fired, whether the summarizer ran, how many tokens it freed, and the estimate/trigger it decided on), the output guard's verdict, the correctives the engine injected, and a run id tying one request's turns together. `WHY` renders the interesting ones — `max_tokens`, `compacted 91→9 msgs`, `guard fail→retry`, `zero_tool` — and the full record is in the JSON export.
+
+The run id matters because a session accumulates the traces of every request made in it; without it, a turn cannot be attributed to the request that produced it.
 
 ---
 
