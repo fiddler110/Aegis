@@ -45,6 +45,24 @@ const summarizerGiveUpThreshold = 4
 // suppressed.
 const minPruneYieldFraction = 0.25
 
+// oversizedSystemPercent is the share of the served context window that the
+// *uncompactable* part of a request — the system prompt plus the tool schemas
+// that ride with it — may occupy before the run emits a one-off notice (P66.7,
+// review finding LLM-16).
+//
+// The two sources this was written from disagreed: the review recommended "~60%"
+// and the roadmap wrote it as `tokenest(system) > 0.5 x window`. 50% wins, and
+// not as a compromise — it is the only one of the two that names a real
+// boundary. compactionTrigger is floored at window/2 (see engine.go), so
+// window/2 is the *lowest* estimate at which proactive compaction can ever fire.
+// A fixed prompt at or past that point means every turn of the run is over the
+// trigger from its first message, and compaction cannot help because it may not
+// touch conv.System: the guard then spends a summarizer call per turn to free
+// nothing. That is exactly the condition worth naming, and 60% would let a band
+// of runs sit in it unwarned. Being slightly early costs one notice on a run
+// with a genuinely tight-but-workable window, which is the cheaper error.
+const oversizedSystemPercent = 50
+
 // compactionSuppressCeiling is the estimate past which a low-yield prune may no
 // longer defer a compaction attempt: the midpoint between the trigger and the
 // window.
@@ -227,6 +245,14 @@ type compactionGuard struct {
 	// than one per turn.
 	fullWarned bool
 
+	// systemWarned latches the P66.7 oversized-system-prompt notice to one per
+	// run. Its call site (noticeOversizedSystem, from Run's construction block)
+	// already fires once, so this is belt-and-braces against a future caller
+	// moving it into the turn loop the way beforeTurn is — the condition it
+	// reports is constant for the whole run, so a per-turn repeat would be pure
+	// noise.
+	systemWarned bool
+
 	// retryEstimate is the estimate at which compaction may be attempted again
 	// after a prune whose yield did not justify its cost (P62.7); 0 means no
 	// suppression is in force. It is set to the estimate at which the low-yield
@@ -311,6 +337,42 @@ func (g *compactionGuard) compactOnEntry(ctx context.Context, conv *Conversation
 	g.logger.Info("compacted conversation", "before", len(conv.Messages), "after", len(out))
 	conv.Messages = out
 	conv.invalidate()
+}
+
+// noticeOversizedSystem emits the P66.7 (finding LLM-16) run-start notice when
+// the part of the request no compaction can ever shrink — the system prompt plus
+// the tool schemas measured into requestOverhead — already fills
+// oversizedSystemPercent of the served window.
+//
+// It exists because the only pre-existing signal for this was the
+// 95%-context-full notice in beforeTurn: after the fact, after a wasted
+// summarizer call, and describing a condition that was already true before the
+// user's first message. `internal/eval` refuses to run at all under an 8k window
+// (insufficientWindowReason); the daemon cannot refuse, so it says so instead.
+//
+// The remedy named here is the model server's, not Aegis's — hence the wording
+// borrowed from ollamainfo.Result.Describe(), so /status and this notice read as
+// one voice. A window of zero is "not known yet", not "tiny": warning on missing
+// data would fire on every backend that reports its window late.
+func (g *compactionGuard) noticeOversizedSystem(conv *Conversation, emit EmitFunc) {
+	if g.systemWarned || conv == nil {
+		return
+	}
+	win := g.window()
+	if win <= 0 {
+		return
+	}
+	// Uncalibrated on purpose: calib has no samples at run construction, and the
+	// figure quoted to the user should be the same estimate for the same prompt
+	// on every run.
+	fixed := tokenest.Estimate(conv.System) + g.requestOverhead
+	if fixed*100 <= oversizedSystemPercent*win {
+		return
+	}
+	g.systemWarned = true
+	emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
+		"system prompt and tool schemas are ~%d tokens of a %d-token context window — compaction can never shrink them, so little of the window is left for the conversation; set OLLAMA_CONTEXT_LENGTH or a modelfile num_ctx to raise it",
+		fixed, win)})
 }
 
 // beforeTurn is the P2.7 proactive per-turn check: measure token headroom before

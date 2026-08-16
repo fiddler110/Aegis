@@ -639,6 +639,10 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// cost, and the one context-full notice a run may emit. Never nil — the
 	// no-compactor case is still its business. See compact.go.
 	compact := e.newCompactionGuard()
+	// P66.7: say so once, up front, when the system prompt alone crowds the
+	// served window — compaction runs below can never touch it, so the per-turn
+	// path would otherwise discover this over and over and report it only at 95%.
+	compact.noticeOversizedSystem(conv, emit)
 	compact.compactOnEntry(ctx, conv)
 
 	// guardRetry is the output guard's verdict handling and its bounded
