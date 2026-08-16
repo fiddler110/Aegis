@@ -29,7 +29,6 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"grep", "grep -n foo file.txt", true},
 		{"which", "which python3", true},
 		{"whoami", "whoami", true},
-		{"ps", "ps aux", true},
 		{"du", "du -sh .", true},
 		{"df", "df -h", true},
 		{"git show", "git show HEAD", true},
@@ -76,6 +75,23 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"env", "env", false},
 		{"printenv", "printenv", false},
 		{"printenv single key", "printenv ANTHROPIC_API_KEY", false},
+		// P66.3/SEC-04: ps prints the daemon environment (the provider API
+		// keys) — the env/printenv leak above reached by another binary — and
+		// less/more are pagers that shell out.
+		{"ps", "ps aux", false},
+		{"ps env dump", "ps auxwwe", false},
+		{"less", "less file.txt", false},
+		{"more", "more file.txt", false},
+		// P66.3/VULN-02: every argv0 with a documented file-writing form is
+		// off the allowlist, in-root destination or not.
+		{"sort", "sort file.txt", false},
+		{"sort output flag", "sort -o out.txt file.txt", false},
+		{"tree", "tree", false},
+		{"uniq", "uniq file.txt", false},
+		// ...but grep's -o is --only-matching, and dropping the write-capable
+		// binaries must not cost it.
+		{"grep only-matching", "grep -o foo file.txt", true},
+		{"grep only-matching attached", "grep -ofoo file.txt", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

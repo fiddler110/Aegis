@@ -51,27 +51,11 @@ var readGitSubcommands = map[string]bool{
 	"stash":     true, // only "stash list" is permitted (checked below)
 }
 
-// deniedGitArgPrefixes are option tokens that can escape the workspace, write
-// files, or invoke external programs even from otherwise read-only
-// subcommands. They are rejected wherever they appear in the argument list.
-var deniedGitArgPrefixes = []string{
-	"-c", "-C", "--exec-path", "--git-dir", "--work-tree",
-	"--output", "-o", "--upload-pack", "--ext-diff", "--open-files-in-pager",
-}
-
-func validateGitArgs(args []string) error {
-	if len(args) > maxGitArgs {
-		return fmt.Errorf("too many arguments (%d, max %d)", len(args), maxGitArgs)
-	}
-	for _, a := range args {
-		for _, bad := range deniedGitArgPrefixes {
-			if a == bad || strings.HasPrefix(a, bad+"=") {
-				return fmt.Errorf("argument %q is not allowed", a)
-			}
-		}
-	}
-	return nil
-}
+// The option denylist this tool used to carry of its own
+// (deniedGitArgPrefixes) is now deniedGitFlags in argv_confine.go, shared with
+// the shell tool's read-only classifier — see the P66.3 note there. Argument
+// validation happens in Execute, where the effective root is known: this tool
+// used to path-validate nothing at all (VULN-01).
 
 // runGit executes git with an argument vector (never a shell string, so model
 // input cannot be interpreted as shell) in the workspace directory.
@@ -122,7 +106,9 @@ func (t *gitTool) Execute(ctx context.Context, input json.RawMessage) (tool.Resu
 	if !readGitSubcommands[sub] {
 		return tool.Result{Content: fmt.Sprintf("subcommand %q is not allowed here. Allowed: status, diff, log, show, branch, remote, blame, ls-files, shortlog, tag, describe, rev-parse, stash list.", sub), IsError: true}, nil
 	}
-	if err := validateGitArgs(args.Args); err != nil {
+	root := effectiveRoot(ctx, t.root)
+	argv := append([]string{sub}, args.Args...)
+	if err := validateReadOnlyGitArgv(root, argv); err != nil {
 		return tool.Result{Content: err.Error(), IsError: true}, nil
 	}
 	// Guard the mutating shapes of otherwise-allowed subcommands.
@@ -130,7 +116,7 @@ func (t *gitTool) Execute(ctx context.Context, input json.RawMessage) (tool.Resu
 		return tool.Result{Content: reason, IsError: true}, nil
 	}
 
-	out, err := runGit(ctx, effectiveRoot(ctx, t.root), append([]string{sub}, args.Args...)...)
+	out, err := runGit(ctx, root, argv...)
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("git %s failed: %v\n%s", sub, err, out), IsError: true}, nil
 	}

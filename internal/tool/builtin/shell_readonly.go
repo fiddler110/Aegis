@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/permission"
-	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // readOnlyShellArgv0 is the allowlist of binaries whose invocation classifies
@@ -17,9 +16,23 @@ var readOnlyShellArgv0 = map[string]bool{
 	"pwd": true, "stat": true, "file": true,
 	"grep": true, "which": true, "whoami": true,
 	"date": true, "uname": true, "hostname": true, "id": true,
-	"du": true, "df": true, "ps": true, "sort": true, "uniq": true,
-	"cut": true, "tr": true, "nl": true, "less": true, "more": true,
-	"type": true, "tree": true,
+	"du": true, "df": true,
+	"cut": true, "tr": true, "nl": true,
+	"type": true,
+	// Deliberately NOT here (P66.3/SEC-04): ps, less, more. `ps auxwwe` prints
+	// the daemon's own process environment — the provider API keys — which is
+	// the exact leak env/printenv are excluded for below, reached by a
+	// different binary. `less` and `more` are pagers that shell out (!command,
+	// v to open an editor), so they are program launchers wearing a reader's
+	// name.
+	//
+	// Deliberately NOT here (P66.3/VULN-02): sort, tree, uniq. Each has a
+	// documented file-*writing* form — `sort -o FILE`, `tree -o FILE`,
+	// `uniq INPUT OUTPUT` — so no argument parsing makes them read-only. The
+	// attached-value confinement in argv_confine.go stops those forms from
+	// escaping the workspace, but a write inside the workspace is still a
+	// write, and plan mode allows CapRead silently.
+	//
 	// Deliberately NOT here (P40.1): env/printenv. They are read-only in the
 	// filesystem sense but dump the daemon's process environment, which holds
 	// the provider API keys (config.loadDotEnv os.Setenv's .aegis/.env into the
@@ -45,16 +58,6 @@ var readOnlyGitSubcommands = map[string]bool{
 	"status": true, "log": true, "diff": true, "show": true, "blame": true,
 	"rev-parse": true, "describe": true, "ls-files": true, "cat-file": true,
 	"shortlog": true,
-}
-
-// gitConfigOverrideFlags can redirect git's behavior through an arbitrary
-// external program (a pager, a diff/merge driver, a credential helper,
-// upload-pack), turning a nominally read-only subcommand into code
-// execution — so their presence anywhere in a git invocation disqualifies it
-// regardless of subcommand ("git -c core.pager=sh log").
-var gitConfigOverrideFlags = []string{
-	"-c", "--config", "-p", "--paginate", "--exec", "--exec-path",
-	"--upload-pack", "--receive-pack",
 }
 
 // readOnlyShellCommand reports whether command is safe to gate as
@@ -83,45 +86,25 @@ func readOnlyShellCommand(root, command string) bool {
 	if !readOnlyShellArgv0[bin] {
 		return false
 	}
-	return shellArgsStayInRoot(root, fields[1:])
+	// argvStaysInRoot (argv_confine.go) confines operands *and* attached flag
+	// values; the old local helper skipped every token starting with "-",
+	// which is what VULN-02 rode in on. A path outside root disqualifies the
+	// command from the CapRead downgrade — it still runs, just under the
+	// normal CapExecute approval flow instead of being silently auto-allowed
+	// under plan mode's read gate.
+	return argvStaysInRoot(root, fields[1:])
 }
 
 // readOnlyGitCommand reports whether a git invocation's arguments (fields
-// after "git") are a read-only status/log/diff call with no config-override
-// flag anywhere in the argument list and no path argument (e.g. a "--"
-// pathspec) that resolves outside root.
+// after "git") are a read-only status/log/diff call. Past the subcommand
+// allowlist it defers entirely to validateReadOnlyGitArgv, which is the same
+// check the dedicated git tool runs on the same argv — the two used to carry
+// divergent denylists and only one of them confined paths (P66.3).
 func readOnlyGitCommand(root string, args []string) bool {
 	if len(args) == 0 || !readOnlyGitSubcommands[strings.ToLower(args[0])] {
 		return false
 	}
-	for _, a := range args {
-		for _, f := range gitConfigOverrideFlags {
-			if a == f || strings.HasPrefix(a, f+"=") {
-				return false
-			}
-		}
-	}
-	return shellArgsStayInRoot(root, args[1:])
-}
-
-// shellArgsStayInRoot reports whether every non-flag argument in args
-// resolves (via sandbox.ValidatePath) within root. Flags (tokens starting
-// with "-") and the bare "--" separator are skipped since they are never
-// paths; every other token is validated the same way read_file/grep/glob
-// confine their path arguments, so an absolute path or a "../" traversal
-// disqualifies the whole command from the CapRead downgrade (it still runs,
-// just under the normal CapExecute approval flow instead of being silently
-// auto-allowed under plan mode's read gate).
-func shellArgsStayInRoot(root string, args []string) bool {
-	for _, a := range args {
-		if a == "--" || strings.HasPrefix(a, "-") {
-			continue
-		}
-		if _, err := sandbox.ValidatePath(root, a); err != nil {
-			return false
-		}
-	}
-	return true
+	return validateReadOnlyGitArgv(root, args) == nil
 }
 
 // baseBinaryName strips a path prefix and, on Windows, a .exe/.cmd/.bat

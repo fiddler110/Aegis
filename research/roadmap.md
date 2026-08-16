@@ -10,7 +10,7 @@ adding items.
 
 ## Status
 
-**34 open items: 28 build (Tier 1-4) + 6 verification-only.**
+**33 open items: 27 build (Tier 1-4) + 6 verification-only.**
 
 **2026-08-15: the P66 batch is a full-stack code review**, not a feature line. Six specialist
 reviewers, an adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass
@@ -27,8 +27,8 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 "go run a test" and "go design and build a feature" as the same kind of next action. See
 [Verification Work](#verification-work) below.
 
-- **Tier 1:** 3 — **P66.3**, **P66.5**, **P66.6**. (**P66.2** shipped 2026-08-15; **P66.1** and
-  **P66.4**, the two Criticals, shipped 2026-08-16.)
+- **Tier 1:** 2 — **P66.5**, **P66.6**. (**P66.2** shipped 2026-08-15; **P66.1** and **P66.4**, the
+  two Criticals, and **P66.3**, the read-only tier, shipped 2026-08-16.)
 - **Tier 2:** 8 — **P66.7**, **P66.8**, **P66.9**, **P66.10**, **P66.11**, **P66.12**, **P66.16**,
   **P66.21**. (**P66.24** was filed and fixed on 2026-08-16.)
 - **Tier 3:** 3 — **P66.13**, **P66.14**, **P66.15**.
@@ -40,8 +40,11 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 
 **What to do next.** **Tier 1, in the order listed** — see [Execution plan for the P66
 batch](#execution-plan-for-the-p66-batch) below for the sequenced day plan, which is the thing to
-work from. Blocks 1 and 2 are done (P66.2, then the two Criticals P66.1 and P66.4);
-**Block 3 — P66.3, the read-only tier — is next.** The P38.1 guidance below is unchanged and
+work from. Blocks 1-3 are done (P66.2, the two Criticals P66.1 and P66.4, then P66.3);
+**Block 4 — P66.6, P66.7's LLM-16 half, and P66.8 — is next.** Tier 1 has one item left that the
+day plan does not cover: **P66.5**, which the plan deliberately deferred (see [Explicitly not
+tomorrow](#explicitly-not-tomorrow)) and which is now unblocked, since P66.1 has had a day to settle.
+The P38.1 guidance below is unchanged and
 still correct, but it is no longer the highest-value next action: it was written when every tier was
 empty, and a Critical clone-and-open host-execution path outranks a measurement.
 
@@ -158,22 +161,53 @@ a suite-wide timeout. Verified by stress rather than by re-running: `-race -coun
 tests hangs to the 241s timeout on the old code, with `io.Copy` at `mcp_test.go:238` in the panic
 stack, and finishes in 2.6s on the fixed code.
 
-#### Block 3 — The read-only tier, ~3 hours
+#### Block 3 — The read-only tier, ~3 hours — **DONE 2026-08-16**
 
-**P66.3.** Build the shared argv helper, point `git.go` and `shell_readonly.go` at it, merge the two
-git-flag denylists (including `--no-index`), validate operands in `gitTool.Execute`, and drop `ps`,
-`less`, `more` from `readOnlyShellArgv0`.
+**P66.3.** Shipped. Everything the two read-only argv paths must agree on now lives in
+`internal/tool/builtin/argv_confine.go`: one union git-flag denylist (`deniedGitFlags`, including
+`--no-index`), one attached-value-aware flag matcher, one path-candidate extractor, and
+`validateReadOnlyGitArgv`, which both `gitTool.Execute` and `readOnlyGitCommand` now call on the
+same argv. `git.go`'s `deniedGitArgPrefixes`/`validateGitArgs` and `shell_readonly.go`'s
+`gitConfigOverrideFlags`/`shellArgsStayInRoot` are gone. The budget note's three spellings all
+landed; the item did not overrun.
 
-*Done when:* the `{git-tool argv, equivalent shell string}` table test passes with all three known
-escapes in it — `git diff --no-index -- /dev/null <abs path>`, `git diff --output=<abs path>`, and
-`sort --output=<abs path>` — each asserted to be **refused in plan mode on both paths**. Add
-`git diff --output` under a POSIX-and-Windows case; it is the cross-platform one.
+*Three deviations from the plan worth knowing.*
 
-*Budget note:* this is the item most likely to overrun, because the helper has to handle
-`--flag=value`, `-ovalue` and `-o value` spellings. If the day is running short, ship the denylist
-merge and the operand validation (which close VULN-01 and SEC-04) and carry the attached-value
-parsing to the next session — but do **not** ship the helper without the table test, since the test
-is the deliverable that keeps the two paths from diverging again.
+**`-p` came off the denylist rather than onto it.** The union of the two lists would have denied it,
+but `-p` is the pager alias — an external program — only in the *pre-subcommand* position, and
+neither call path can reach that position: the git tool takes the subcommand as its own field and
+prepends it, and the shell classifier requires the first token after `git` to be an allowlisted
+subcommand. Post-subcommand `-p` is `--patch` and is read-only, so denying it (as the shell path did)
+cost `git log -p` for nothing. `--paginate` stays denied — it has no post-subcommand meaning to lose.
+
+**Three more argv0 drops than the plan named, and they close VULN-02 at its root.** Beyond `ps`,
+`less` and `more` (SEC-04), `sort`, `tree` and `uniq` came off `readOnlyShellArgv0` as well: each has
+a documented file-*writing* form (`sort -o FILE`, `tree -o FILE`, `uniq INPUT OUTPUT`), so no
+argument parsing makes them read-only. Confinement stops those forms escaping the workspace, but a
+write *inside* the workspace is still a write and plan mode allows `CapRead` silently. The review's
+own VULN-02 fix section reached the same conclusion for `sort`; `tree` and `uniq` are the same
+criterion applied consistently, which is the whole argument of this item. A regression case pins that
+this did not cost `grep -o` (`--only-matching`), the one allowlisted `-o` that is a read.
+
+**The separated `-o <path>` spelling needed no case of its own** — its value is a bare operand, and
+operand confinement was already being added. The helper handles `--flag=value` and `-ovalue`; the
+third spelling falls out.
+
+*Verified against the unfixed tree, not just green afterwards.* A worktree at `184497d` accepted all
+eight escapes: the six shell classifications (`git diff --output=`, `sort --output=`, `sort -o`
+attached, `ps auxwwe`, `less`, `more`) all returned `CapRead`, and the git tool ran both
+`--no-index` and the escaping pathspec without a refusal. VULN-01 reproduced verbatim on Windows —
+`git diff --no-index -- NUL <abs path>` through the `CapRead` git tool returned the full contents of
+a file outside the workspace.
+
+The deliverable is `TestReadOnlyGitArgvAgreesAcrossBothPaths` (`argv_confine_test.go`), a table of 19
+argvs asserting the two paths reach the same verdict, with the shell string *derived* from the argv
+so equivalence is guaranteed by construction rather than by proofreading.
+`TestReadOnlyTierRefusesEscapesInPlanMode` states the property in plan-mode terms and records the one
+real asymmetry between the paths: the shell tool refuses by declining the `CapRead` downgrade, while
+the git tool is statically `CapRead` and is always reached, so it must refuse inside `Execute`.
+
+Closed VULN-01 (+SEC-05), VULN-02, VULN-11, SEC-04, SEC-10.
 
 #### Block 4 — Cheap, high-value, low-risk, ~2 hours
 
@@ -211,45 +245,11 @@ it measures.
 
 ## Open Work — Tier 1
 
-**Status: 3 open**, all from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1 and P66.4, the
-two Criticals, shipped 2026-08-16** — see the Block 2 notes in the execution plan above, and
-[releases.md](releases.md) for the rationale). Every item here is exploitable or daemon-fatal
-today with no dependency on anything else in this document. Evidence for each is in
-[CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
-
-### P66.3 — One argv path-confinement function for the read-only tier
-
-Plan mode is the mode an operator picks *because* they do not trust what the model will do, and it is
-not read-only. `permission.Policy.Decide` allows `CapRead` **silently in every mode**, so any tool
-mislabelled `CapRead` is an unprompted capability. Three confirmed escapes, two of them verified by
-execution during the review and one during arbitration:
-
-- **VULN-01** — `validateGitArgs` (`internal/tool/builtin/git.go:57-74,113-141`) checks a flag
-  denylist and an argument count but never path-validates any argument, and `--no-index` is not on the
-  denylist. `git diff --no-index -- /dev/null C:/Windows/win.ini` returns full file contents, exit 0.
-  The payload for `daemon.token`, `~/.ssh/id_rsa` or another repo's `.aegis/.env` is one tool call.
-- **VULN-11** *(found by the debate)* — `shellArgsStayInRoot` (`shell_readonly.go:107-125`) skips
-  every token starting with `-` unexamined, and `gitConfigOverrideFlags` omits `--output` (a flag the
-  git tool's own `deniedGitArgPrefixes` **does** deny). `shell("git diff --output=<abs path>")`
-  classifies `CapRead`, wrote 18,982 bytes outside the workspace and then destroyed an existing file.
-  It needs no path operands, so classification is unconditional; it is cross-platform; and it skips
-  `captureShellWrites`, so the damage is un-rewindable.
-- **VULN-02** — same flag-skipping rule, `sort -o<path>` / `sort --output=<path>`. POSIX-only
-  (Windows aliases `sort` to `Sort-Object`), which is why VULN-11 matters: the defect is the rule,
-  not any allowlist entry.
-
-Fix as one shared helper used by both `git.go` and `shell_readonly.go`: split `--flag=value` at the
-`=` and validate the value through `sandbox.ValidatePathIn` when it looks like a path; replace the two
-divergent git-flag denylists with one union including `--no-index`; and validate every non-flag operand
-in `gitTool.Execute` (`git.go:113`), which today validates none. Drop `ps`, `less` and `more` from
-`readOnlyShellArgv0` in the same pass — `ps auxwwe` dumps the daemon environment including API keys,
-defeating the deliberate exclusion of `env`/`printenv` (SEC-04).
-
-**The actual deliverable is the test**, not the patch: a table of `{git-tool argv, equivalent shell
-string}` pairs asserting both paths reach the same verdict for the same argv. That is what would have
-caught `--no-index` and `--output` on the day each was omitted.
-
-Closes VULN-01 (+SEC-05), VULN-02, VULN-11, SEC-04, SEC-10. Priority: Tier 1 — M.
+**Status: 2 open**, both from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1 and P66.4, the
+two Criticals, and P66.3, the read-only tier, shipped 2026-08-16** — see the Block 2 and Block 3
+notes in the execution plan above, and [releases.md](releases.md) for the rationale). Every item here
+is exploitable or daemon-fatal today with no dependency on anything else in this document. Evidence
+for each is in [CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
 
 ### P66.5 — Invert the config freeze list
 
